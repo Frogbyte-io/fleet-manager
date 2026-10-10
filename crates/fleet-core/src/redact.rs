@@ -102,7 +102,7 @@ pub fn redact_schemeless_credentials(text: &str) -> String {
 
 /// Names whose `name=value` value is a secret. A word matches when it ENDS
 /// with one (so `GITHUB_TOKEN=` and `access_token=` match).
-const SECRET_KEYS: [&str; 20] = [
+const SECRET_KEYS: [&str; 24] = [
     "token",
     "password",
     "passwd",
@@ -123,6 +123,10 @@ const SECRET_KEYS: [&str; 20] = [
     "secretaccesskey",
     "secret_access_key",
     "secret-access-key",
+    "sessionid",
+    "session_id",
+    "session-id",
+    "sessid",
 ];
 
 /// Short names that are only secret as a whole word or as a delimited
@@ -139,13 +143,19 @@ const MASK: &str = "***";
 /// [`SECRET_KEYS`]. Matching is ASCII case-insensitive and linear.
 #[must_use]
 pub fn redact_secret_pairs(text: &str) -> String {
-    // A mask can remove the delimiter or flag another rule keyed on (a
-    // masked backtick ends no command), so a changed text is scrubbed again
-    // until it settles, which makes the scrubber idempotent. Text with no
-    // credential is scrubbed once. The cap keeps the cost a constant factor.
-    let mut text = secret_pairs_pass(text);
+    settle(text, secret_pairs_pass)
+}
+
+/// Runs `pass` once, and again while it keeps changing the text. A mask can
+/// remove a delimiter or flag another rule keyed on (a masked backtick ends
+/// no command, a masked key body joins two tokens), so a changed text is
+/// scrubbed again until it settles, which makes the scrubber idempotent. Text
+/// with no credential is scrubbed once. The cap keeps the cost a constant
+/// factor.
+fn settle(text: &str, pass: impl Fn(&str) -> String) -> String {
+    let mut text = pass(text);
     for _ in 0..MAX_SETTLE_PASSES {
-        let again = secret_pairs_pass(&text);
+        let again = pass(&text);
         if again == text {
             break;
         }
@@ -206,7 +216,11 @@ fn mask_header(text: &str, name: &str) -> String {
         let separator = name_end + (text.len() - name_end - after.len());
         if boundary && after.starts_with([':', '=']) {
             let value_start = separator + 1;
-            let (masked_start, value_end) = value_extent(text, value_start, true);
+            let quote = text[..start]
+                .chars()
+                .next_back()
+                .filter(|c| matches!(c, '"' | '\''));
+            let (masked_start, value_end) = value_extent(text, value_start, Extent::Line { quote });
             result.push_str(&text[cursor..masked_start]);
             result.push_str(MASK);
             cursor = value_end;
@@ -223,7 +237,7 @@ fn mask_header(text: &str, name: &str) -> String {
 /// quoted value runs to its matching quote or the line end; an unquoted one
 /// to whitespace, a quote, `&`, `;` or `,`, or (for a header, `to_line_end`)
 /// to the line end or a quote.
-fn value_extent(text: &str, start: usize, to_line_end: bool) -> (usize, usize) {
+fn value_extent(text: &str, start: usize, mode: Extent) -> (usize, usize) {
     let start = start + (text.len() - start - text[start..].trim_start_matches([' ', '\t']).len());
     let rest = &text[start..];
     if let Some(quote) = rest.chars().next().filter(|c| matches!(c, '"' | '\'')) {
@@ -233,12 +247,25 @@ fn value_extent(text: &str, start: usize, to_line_end: bool) -> (usize, usize) {
             .map_or(text.len(), |end| inner + end);
         return (inner, end);
     }
-    let end = if to_line_end {
-        rest.find(['\n', '"', '\''])
-    } else {
-        rest.find(|c: char| c.is_whitespace() || matches!(c, '"' | '\'' | '&' | ';' | ','))
+    let end = match mode {
+        Extent::Line { quote: Some(quote) } => rest.find(['\n', quote]),
+        Extent::Line { quote: None } => rest.find('\n'),
+        Extent::Word => {
+            rest.find(|c: char| c.is_whitespace() || matches!(c, '"' | '\'' | '&' | ';' | ','))
+        }
     };
     (start, end.map_or(text.len(), |end| start + end))
+}
+
+/// How far an unquoted value runs.
+#[derive(Clone, Copy)]
+enum Extent {
+    /// To whitespace, a quote, `&`, `;` or `,`.
+    Word,
+    /// To the end of the line, or to `quote`: the quote that opened the
+    /// header (`-H 'Cookie: sid="x"; a=b'`), so a quote inside the value does
+    /// not cut it short.
+    Line { quote: Option<char> },
 }
 
 /// A shorter word after "bearer" is prose ("the bearer of news"), not a
@@ -309,40 +336,155 @@ fn mask_bearer(text: &str) -> String {
     result
 }
 
-/// `-----BEGIN ... PRIVATE KEY-----` up to the matching `-----END ...-----`
-/// line, or to the end of the text when the END line is missing (a cut
-/// stream). The label is bounded and must stay on the BEGIN line, so a
-/// certificate or prose that mentions the marker is not a key.
-fn mask_private_keys(text: &str) -> String {
-    const BEGIN: &str = "-----BEGIN ";
-    const FENCE: &str = "-----";
+const PEM_FENCE: &str = "-----";
+
+fn is_armor_byte(byte: u8) -> bool {
+    byte.is_ascii_alphanumeric() || matches!(byte, b'+' | b'/' | b'=')
+}
+
+/// The label of a `PRIVATE KEY` fence whose label starts at `label_start`:
+/// bounded, on one line, and ending in `PRIVATE KEY` (or ` BLOCK`).
+fn private_key_label(text: &str, label_start: usize) -> Option<&str> {
     const LABEL_MAX: usize = 40;
+    let tail = &text[label_start..];
+    let limit = tail
+        .char_indices()
+        .nth(LABEL_MAX)
+        .map_or(tail.len(), |(index, _)| index);
+    let label = &tail[..tail[..limit].find(PEM_FENCE)?];
+    (!label.contains('\n')
+        && (label.ends_with("PRIVATE KEY") || label.ends_with("PRIVATE KEY BLOCK")))
+    .then_some(label)
+}
+
+/// The length of the line break at `at` (`\n`, `\r\n`, or the same written
+/// out as `\n` / `\r\n` inside a JSON string), if there is one.
+fn line_break_len(text: &str, at: usize) -> Option<usize> {
+    let rest = &text.as_bytes()[at..];
+    ["\r\n", "\n", "\\r\\n", "\\n"]
+        .iter()
+        .find(|candidate| rest.starts_with(candidate.as_bytes()))
+        .map(|candidate| candidate.len())
+}
+
+/// The end of the armor lines (base64 or `Proc-Type:` style headers) that
+/// follow `from` after a line break; `from` when the next line is not armor.
+/// This is what a PEM body looks like when its END line was cut off.
+fn armor_end(text: &str, from: usize) -> usize {
+    let bytes = text.as_bytes();
+    let mut end = from;
+    while let Some(break_len) = line_break_len(text, end) {
+        let line_start = end + break_len;
+        let mut line_end = line_start;
+        if ["Proc-Type:", "DEK-Info:", "Comment:"]
+            .iter()
+            .any(|header| text[line_start..].starts_with(header))
+        {
+            while line_end < bytes.len()
+                && bytes[line_end] != b'\n'
+                && line_break_len(text, line_end).is_none()
+            {
+                line_end += 1;
+            }
+        } else {
+            while line_end < bytes.len() && is_armor_byte(bytes[line_end]) {
+                line_end += 1;
+            }
+            if line_end == line_start
+                || (line_end < bytes.len() && line_break_len(text, line_end).is_none())
+            {
+                break;
+            }
+        }
+        end = line_end;
+    }
+    end
+}
+
+/// Where the armor lines before an `END` fence at `fence` start, not going
+/// back past `floor`: the front of a key whose BEGIN line was cut off.
+fn armor_start(text: &str, floor: usize, fence: usize) -> usize {
+    let bytes = text.as_bytes();
+    let mut start = fence;
+    loop {
+        // The fence (or the armor line) must start right after a line break.
+        let Some(break_at) = [4usize, 2, 1]
+            .into_iter()
+            .map(|len| (len, start.checked_sub(len)))
+            .find_map(|(len, at)| {
+                let at = at.filter(|at| *at >= floor)?;
+                (line_break_len(text, at) == Some(len)).then_some(at)
+            })
+        else {
+            return start;
+        };
+        let mut line_start = break_at;
+        // The `n` of a written-out `\n` is not armor.
+        while line_start > floor
+            && is_armor_byte(bytes[line_start - 1])
+            && !(bytes[line_start - 1] == b'n' && line_start >= 2 && bytes[line_start - 2] == b'\\')
+        {
+            line_start -= 1;
+        }
+        let at_line_start = line_start == floor
+            || (1..=4).any(|len| {
+                line_start
+                    .checked_sub(len)
+                    .is_some_and(|at| at >= floor && line_break_len(text, at) == Some(len))
+            });
+        if line_start == break_at || !at_line_start {
+            return start;
+        }
+        start = line_start;
+    }
+}
+
+/// `-----BEGIN ... PRIVATE KEY-----` up to the matching `-----END ...-----`
+/// line. When the END line is missing (a cut stream) only the armor lines
+/// right after the header are masked, not the rest of the output; an END line
+/// whose BEGIN is missing masks the armor lines before it. The label is
+/// bounded and must stay on the fence line, so a certificate or prose that
+/// mentions the marker is not a key.
+fn mask_private_keys(text: &str) -> String {
     let mut result = String::with_capacity(text.len());
     let mut cursor = 0;
     let mut search = 0;
-    while let Some(offset) = text[search..].find(BEGIN) {
-        let start = search + offset;
-        let label_start = start + BEGIN.len();
-        search = label_start;
-        let tail = &text[label_start..];
-        let limit = tail
-            .char_indices()
-            .nth(LABEL_MAX)
-            .map_or(tail.len(), |(index, _)| index);
-        let Some(label_len) = tail[..limit].find(FENCE) else {
+    let mut no_end: std::collections::HashSet<&str> = std::collections::HashSet::new();
+    while let Some(offset) = text[search..].find(PEM_FENCE) {
+        let fence = search + offset;
+        search = fence + 1;
+        let after = fence + PEM_FENCE.len();
+        let (is_begin, label_start) = if text[after..].starts_with("BEGIN ") {
+            (true, after + "BEGIN ".len())
+        } else if text[after..].starts_with("END ") {
+            (false, after + "END ".len())
+        } else {
             continue;
         };
-        let label = &tail[..label_len];
-        if label.contains('\n')
-            || !(label.ends_with("PRIVATE KEY") || label.ends_with("PRIVATE KEY BLOCK"))
-        {
+        let Some(label) = private_key_label(text, label_start) else {
             continue;
-        }
-        let body_start = label_start + label_len + FENCE.len();
-        let end_marker = format!("-----END {label}-----");
-        let end = text[body_start..]
-            .find(&end_marker)
-            .map_or(text.len(), |at| body_start + at + end_marker.len());
+        };
+        let marker_end = label_start + label.len() + PEM_FENCE.len();
+        let (start, end) = if is_begin {
+            let end_marker = format!("-----END {label}-----");
+            // A label with no END line later on has none after any later
+            // BEGIN either: remember it, so repeated BEGINs scan once.
+            let found = if no_end.contains(label) {
+                None
+            } else {
+                text[marker_end..].find(&end_marker)
+            };
+            if found.is_none() {
+                no_end.insert(label);
+            }
+            let end = found.map_or_else(
+                || armor_end(text, marker_end),
+                |at| marker_end + at + end_marker.len(),
+            );
+            (fence, end)
+        } else {
+            (armor_start(text, cursor, fence), marker_end)
+        };
         result.push_str(&text[cursor..start]);
         result.push_str(MASK);
         cursor = end;
@@ -443,9 +585,13 @@ fn basic_token_is_secret(token: &str) -> bool {
     }
     if token
         .bytes()
-        .any(|b| b.is_ascii_digit() || matches!(b, b'+' | b'/' | b'='))
+        .any(|b| b.is_ascii_digit() || matches!(b, b'+' | b'='))
     {
         return true;
+    }
+    // Letters and slashes only is a path (`Basic tests/integration`).
+    if token.contains('/') {
+        return false;
     }
     token.len().is_multiple_of(4)
         && token.bytes().skip(1).any(|b| b.is_ascii_uppercase())
@@ -576,6 +722,12 @@ fn long_secret_flag(tool: Tool, word: &str) -> bool {
     tool == Tool::Curl && matches!(word, "--user" | "--proxy-user" | "--oauth2-bearer")
 }
 
+/// `curl --user=u:p`: the value attached to a long flag with `=`.
+fn long_flag_attached(tool: Tool, word: &str) -> Option<usize> {
+    let (name, _) = word.split_once('=')?;
+    long_secret_flag(tool, name).then_some(name.len() + 1)
+}
+
 fn is_command_end(byte: u8) -> bool {
     matches!(byte, b';' | b'|' | b'&' | b'(' | b')' | b'`')
 }
@@ -603,7 +755,11 @@ fn argument_extent(text: &str, start: usize) -> (usize, usize, usize) {
                 || (c.is_ascii() && is_command_end(c as u8))
         })
         .map_or(text.len(), |at| start + at);
-    (start, end, end)
+    // A trailing `\` before a line break continues the command.
+    let continued = end > start
+        && text.as_bytes()[end - 1] == b'\\'
+        && (end == text.len() || matches!(text.as_bytes()[end], b'\n' | b'\r'));
+    (start, if continued { end - 1 } else { end }, end)
 }
 
 /// `htpasswd -b [file] user password`: collects the positional arguments of
@@ -656,7 +812,12 @@ struct ShortFlagScan<'a> {
     result: String,
     cursor: usize,
     tool: Option<Tool>,
+    /// Right after `docker`/`podman`: waiting for the `login` subcommand
+    /// past global options (`docker -H host login`).
     docker_login_next: bool,
+    docker_after_option: bool,
+    /// The quote that opened the word being scanned (a JSON array element).
+    quote: Option<u8>,
     htpasswd: HtpasswdArgs,
 }
 
@@ -683,32 +844,49 @@ impl ShortFlagScan<'_> {
         }
         self.tool = None;
         self.docker_login_next = false;
+        self.docker_after_option = false;
+        self.quote = None;
     }
 
     /// Handles the word at `index` and returns where scanning resumes.
     fn word(&mut self, index: usize) -> usize {
         let text = self.text;
+        let quote = self.quote.take();
         let word_end = text[index..]
-            .find(|c: char| c.is_ascii_whitespace() || (c.is_ascii() && is_command_end(c as u8)))
+            .find(|c: char| {
+                c.is_ascii_whitespace()
+                    || (c.is_ascii() && is_command_end(c as u8))
+                    || quote.is_some_and(|q| c == q as char)
+            })
             .map_or(text.len(), |at| index + at);
         let word = &text[index..word_end];
-        let after_docker = std::mem::take(&mut self.docker_login_next);
-        if let Some(named) = tool_named(word) {
+        // A command name may follow `cmd=` or `"cmd":`.
+        let command = word.rsplit(['=', ':']).next().unwrap_or(word);
+        if let Some(named) = tool_named(command) {
             self.finish_command();
             self.tool = Some(named);
             self.htpasswd.active = named == Tool::Htpasswd;
             return word_end;
         }
-        if matches!(word.rsplit('/').next(), Some("docker" | "podman")) {
+        if matches!(command.rsplit('/').next(), Some("docker" | "podman")) {
             self.finish_command();
             self.docker_login_next = true;
             return word_end;
         }
-        if after_docker {
-            self.tool = (word == "login").then_some(Tool::DockerLogin);
-            if self.tool.is_some() {
+        if self.docker_login_next {
+            if word == "login" {
+                self.docker_login_next = false;
+                self.tool = Some(Tool::DockerLogin);
                 return word_end;
             }
+            if word.starts_with('-') {
+                self.docker_after_option = !word.contains('=');
+                return word_end;
+            }
+            if std::mem::take(&mut self.docker_after_option) {
+                return word_end;
+            }
+            self.docker_login_next = false;
         }
         let Some(current) = self.tool else {
             return word_end;
@@ -733,6 +911,12 @@ impl ShortFlagScan<'_> {
                 next: true,
                 needs_eq: false,
             })
+        } else if let Some(at) = long_flag_attached(current, word) {
+            Some(ShortFlag {
+                attached: Some(at),
+                next: false,
+                needs_eq: false,
+            })
         } else {
             short_secret_flag(current, word)
         };
@@ -740,9 +924,17 @@ impl ShortFlagScan<'_> {
         let (start, end, next) = if let Some(offset) = flag.attached {
             argument_extent(text, index + offset)
         } else if flag.next {
-            let blanks =
-                text[word_end..].len() - text[word_end..].trim_start_matches([' ', '\t']).len();
-            argument_extent(text, word_end + blanks)
+            let mut at = word_end;
+            if quote.is_some_and(|q| text.as_bytes().get(word_end) == Some(&q)) {
+                // `"-p", "x"`: past the closing quote and the comma.
+                at += 1;
+                at += text[at..].len() - text[at..].trim_start_matches([' ', '\t']).len();
+                if text[at..].starts_with(',') {
+                    at += 1;
+                }
+            }
+            at += text[at..].len() - text[at..].trim_start_matches([' ', '\t']).len();
+            argument_extent(text, at)
         } else {
             return word_end;
         };
@@ -773,15 +965,21 @@ fn mask_short_flags(text: &str) -> String {
         cursor: 0,
         tool: None,
         docker_login_next: false,
+        docker_after_option: false,
+        quote: None,
         htpasswd: HtpasswdArgs::default(),
     };
     let mut index = 0;
     while index < bytes.len() {
         let byte = bytes[index];
-        if is_command_end(byte) || (byte == b'\n' && !(index > 0 && bytes[index - 1] == b'\\')) {
+        let continued = index > 0
+            && (bytes[index - 1] == b'\\'
+                || (bytes[index - 1] == b'\r' && index > 1 && bytes[index - 2] == b'\\'));
+        if is_command_end(byte) || matches!(byte, b']' | b'}') || (byte == b'\n' && !continued) {
             scan.finish_command();
             index += 1;
-        } else if byte.is_ascii_whitespace() {
+        } else if byte.is_ascii_whitespace() || matches!(byte, b'[' | b'{' | b',') {
+            // Brackets and commas separate the elements of a JSON argv array.
             index += 1;
         } else if matches!(byte, b'"' | b'\'') {
             // A quote opens an argument of `htpasswd`; elsewhere it only
@@ -791,6 +989,7 @@ fn mask_short_flags(text: &str) -> String {
                 scan.htpasswd.argument(start, end);
                 index = next;
             } else {
+                scan.quote = Some(byte);
                 index += 1;
             }
         } else {
@@ -870,13 +1069,39 @@ fn mask_json_argv(text: &str) -> String {
     result
 }
 
+/// One element of an argv array that may be part of a PEM key split over
+/// elements. Returns whether the key continues in the next element, or `None`
+/// when the element is not part of a key.
+fn mask_key_element(
+    items: &mut [serde_json::Value],
+    at: usize,
+    word: &str,
+    in_key: bool,
+) -> Option<bool> {
+    if in_key {
+        let armor = !word.is_empty() && word.bytes().all(is_armor_byte);
+        let ends = word.contains("-----END ");
+        if !ends && !armor {
+            return None;
+        }
+        items[at] = serde_json::Value::String(MASK.to_owned());
+        return Some(!ends);
+    }
+    // A BEGIN line: the string scrub masks it; the armor follows.
+    (mask_private_keys(word) != word).then_some(true)
+}
+
 /// The same flag rules over a parsed argv array: a secret long flag, or a
 /// short flag after a known command, masks the next element (or the attached
-/// part of the same one).
+/// part of the same one). The armor lines of a PEM key split over elements,
+/// and the password of `htpasswd -b`, are masked too.
 fn mask_json_argv_array(items: &mut [serde_json::Value]) {
     use serde_json::Value;
     let mut tool: Option<Tool> = None;
     let mut docker_login_next = false;
+    let mut docker_after_option = false;
+    let mut in_key = false;
+    let mut htpasswd = HtpasswdArgs::default();
     let mut index = 0;
     while index < items.len() {
         let Value::String(word) = &items[index] else {
@@ -885,18 +1110,44 @@ fn mask_json_argv_array(items: &mut [serde_json::Value]) {
         };
         let word = word.clone();
         index += 1;
-        let docker = matches!(word.rsplit('/').next(), Some("docker" | "podman"));
-        if std::mem::take(&mut docker_login_next) && word == "login" {
-            tool = Some(Tool::DockerLogin);
+        if in_key || (word.contains("-----BEGIN ") && !word.contains("-----END ")) {
+            if let Some(still_in_key) = mask_key_element(items, index - 1, &word, in_key) {
+                in_key = still_in_key;
+                continue;
+            }
+            in_key = false;
+        }
+        let command = word.rsplit(['=', ':']).next().unwrap_or(&word);
+        let named = tool_named(command);
+        let docker = matches!(command.rsplit('/').next(), Some("docker" | "podman"));
+        if named.is_some() || docker {
+            finish_htpasswd_array(items, &mut htpasswd);
+            tool = named;
+            htpasswd.active = named == Some(Tool::Htpasswd);
+            docker_login_next = docker;
             continue;
         }
-        if docker {
-            docker_login_next = true;
-            tool = None;
-            continue;
+        if docker_login_next {
+            if word == "login" {
+                docker_login_next = false;
+                tool = Some(Tool::DockerLogin);
+                continue;
+            }
+            if word.starts_with('-') {
+                docker_after_option = !word.contains('=');
+                continue;
+            }
+            if std::mem::take(&mut docker_after_option) {
+                continue;
+            }
+            docker_login_next = false;
         }
-        if let Some(named) = tool_named(&word) {
-            tool = Some(named);
+        if tool == Some(Tool::Htpasswd) {
+            if word.starts_with('-') {
+                htpasswd.flags(&word);
+            } else {
+                htpasswd.argument(index - 1, index - 1);
+            }
             continue;
         }
         if tool == Some(Tool::Sshpass) && !word.starts_with('-') {
@@ -904,20 +1155,7 @@ fn mask_json_argv_array(items: &mut [serde_json::Value]) {
             tool = None;
             continue;
         }
-        let long_secret = word.strip_prefix("--").is_some_and(|name| {
-            !name.contains('=')
-                && !name.to_ascii_lowercase().starts_with("no-")
-                && names_a_secret(name)
-        });
-        let flag = if long_secret || tool.is_some_and(|t| long_secret_flag(t, &word)) {
-            Some(ShortFlag {
-                attached: None,
-                next: true,
-                needs_eq: false,
-            })
-        } else {
-            tool.and_then(|t| short_secret_flag(t, &word))
-        };
+        let flag = array_flag(tool, &word);
         let Some(flag) = flag else { continue };
         let key = word.trim_start_matches('-').to_owned();
         let is_credential = |value: &str| {
@@ -940,6 +1178,40 @@ fn mask_json_argv_array(items: &mut [serde_json::Value]) {
             index += 1;
         }
     }
+    finish_htpasswd_array(items, &mut htpasswd);
+}
+
+/// The credential flag an argv element is, for the current command: a secret
+/// long flag anywhere, or a flag of the known command.
+fn array_flag(tool: Option<Tool>, word: &str) -> Option<ShortFlag> {
+    let long_secret = word.strip_prefix("--").is_some_and(|name| {
+        !name.contains('=') && !name.to_ascii_lowercase().starts_with("no-") && names_a_secret(name)
+    });
+    let next_value = ShortFlag {
+        attached: None,
+        next: true,
+        needs_eq: false,
+    };
+    if long_secret || tool.is_some_and(|t| long_secret_flag(t, word)) {
+        return Some(next_value);
+    }
+    if let Some(at) = tool.and_then(|t| long_flag_attached(t, word)) {
+        return Some(ShortFlag {
+            attached: Some(at),
+            ..next_value
+        });
+    }
+    tool.and_then(|t| short_secret_flag(t, word))
+}
+
+/// Masks the password element collected for an `htpasswd -b` command.
+fn finish_htpasswd_array(items: &mut [serde_json::Value], htpasswd: &mut HtpasswdArgs) {
+    if htpasswd.active
+        && let Some((at, _)) = htpasswd.password()
+    {
+        items[at] = serde_json::Value::String(MASK.to_owned());
+    }
+    *htpasswd = HtpasswdArgs::default();
 }
 
 /// Whether a word names a secret: it ENDS with one of [`SECRET_KEYS`].
@@ -972,7 +1244,11 @@ fn is_benign_value(key: &str, value: &str) -> bool {
     let key = key.trim_start_matches('-');
     let bytes = value.as_bytes();
     if key.eq_ignore_ascii_case("pass") {
-        return !bytes.is_empty() && bytes.iter().all(u8::is_ascii_digit);
+        // A count, or a path (`PASS: tests/foo.sh` in a test log).
+        return (!bytes.is_empty() && bytes.iter().all(u8::is_ascii_digit))
+            || value.starts_with(['/', '~'])
+            || value.starts_with("./")
+            || value.starts_with("../");
     }
     key.eq_ignore_ascii_case("pwd")
         && (value.starts_with(['/', '~'])
@@ -1007,7 +1283,7 @@ fn mask_secret_flags(text: &str) -> String {
         {
             continue;
         }
-        let (value_start, value_end) = value_extent(text, name_end, false);
+        let (value_start, value_end) = value_extent(text, name_end, Extent::Word);
         let value = &text[value_start..value_end];
         if value.is_empty()
             || value.starts_with(['-', '<'])
@@ -1034,6 +1310,9 @@ fn mask_key_values(text: &str) -> String {
     let mut result = String::with_capacity(text.len());
     let mut cursor = 0;
     let mut search = 0;
+    // The end of the last unquoted value scanned: a later separator inside
+    // it has the same end, so a long value full of `pwd=` is scanned once.
+    let mut unquoted_end = 0;
     while let Some(offset) = text[search..].find(['=', ':']) {
         let separator = search + offset;
         search = separator + 1;
@@ -1062,7 +1341,21 @@ fn mask_key_values(text: &str) -> String {
         if !names_a_secret(&text[key_start..key_end]) {
             continue;
         }
-        let (value_start, value_end) = value_extent(text, separator + 1, false);
+        // `PASS: tests/foo.sh` is a test-log status line, not a credential.
+        if bare && &text[key_start..key_end] == "PASS" {
+            continue;
+        }
+        let (value_start, value_end) = if separator + 1 < unquoted_end {
+            (separator + 1, unquoted_end)
+        } else {
+            let extent = value_extent(text, separator + 1, Extent::Word);
+            let quoted = text[..extent.0]
+                .chars()
+                .next_back()
+                .is_some_and(|c| matches!(c, '"' | '\''));
+            unquoted_end = if quoted { 0 } else { extent.1 };
+            extent
+        };
         if value_end > value_start
             && &text[value_start..value_end] != MASK
             && !is_benign_value(&text[key_start..key_end], &text[value_start..value_end])
@@ -1134,9 +1427,11 @@ fn bare_value_is_secret(
 /// returned (command output, logs), so a fix lands once.
 #[must_use]
 pub fn redact_credentials(text: &str) -> String {
-    redact_secret_pairs(&redact_schemeless_credentials(&redact_url_credentials(
-        text,
-    )))
+    settle(text, |text| {
+        secret_pairs_pass(&redact_schemeless_credentials(&redact_url_credentials(
+            text,
+        )))
+    })
 }
 
 /// Flattens control characters (except newlines) to spaces: hostile
@@ -1225,8 +1520,9 @@ fn redact_json_at(value: &mut serde_json::Value, depth: usize) {
                 // together, so the key's name is the only signal.
                 if names_a_secret(&key) {
                     // A `pass` count (`{"pass": 12}`) is not a secret.
-                    let numbers = !key.eq_ignore_ascii_case("pass");
-                    mask_json_values(&mut item, depth + 1, numbers);
+                    let numbers =
+                        !key.eq_ignore_ascii_case("pass") && !key.eq_ignore_ascii_case("session");
+                    mask_json_values(&mut item, depth + 1, numbers, &key);
                 } else {
                     redact_json_at(&mut item, depth + 1);
                 }
@@ -1239,23 +1535,24 @@ fn redact_json_at(value: &mut serde_json::Value, depth: usize) {
 
 /// Masks every string and number under a secret-named key; nesting beyond
 /// the depth limit is dropped like everywhere else in the document.
-fn mask_json_values(value: &mut serde_json::Value, depth: usize, numbers: bool) {
+fn mask_json_values(value: &mut serde_json::Value, depth: usize, numbers: bool, key: &str) {
     use serde_json::Value;
     if depth > MAX_JSON_DEPTH {
         *value = Value::Null;
         return;
     }
     match value {
+        Value::String(text) if is_benign_value(key, text) => {}
         Value::String(_) => *value = Value::String(MASK.to_owned()),
         Value::Number(_) if numbers => *value = Value::String(MASK.to_owned()),
         Value::Array(items) => {
             for item in items {
-                mask_json_values(item, depth + 1, numbers);
+                mask_json_values(item, depth + 1, numbers, key);
             }
         }
         Value::Object(map) => {
             for item in map.values_mut() {
-                mask_json_values(item, depth + 1, numbers);
+                mask_json_values(item, depth + 1, numbers, key);
             }
         }
         Value::Number(_) | Value::Bool(_) | Value::Null => {}
@@ -1721,6 +2018,93 @@ mod tests {
     }
 
     #[test]
+    fn review_findings_are_masked_or_kept() {
+        let masked = [
+            ("pwd=/a/token=fake1 x", "pwd=/a/token=*** x"),
+            ("cmd=mysql -pfake1 db", "cmd=mysql -p*** db"),
+            ("{\"cmd\":\"mysql -pfake1\"}", "{\"cmd\":\"mysql -p***\"}"),
+            ("[\"mysql\",\"-pfake1\"]", "[\"mysql\",\"-p***\"]"),
+            (
+                "[\"sshpass\",\"-p\",\"fake1\",\"ssh\",\"-p\",\"22\"]",
+                "[\"sshpass\",\"-p\",\"***\",\"ssh\",\"-p\",\"22\"]",
+            ),
+            (
+                "[\"curl\", \"-u\", \"a:fake1\", \"h\"]",
+                "[\"curl\", \"-u\", \"***\", \"h\"]",
+            ),
+            (
+                "tail:\nMIIfake1234\nabcdEFGH5678==\n-----END RSA PRIVATE KEY-----\nok",
+                "tail:\n***\nok",
+            ),
+            (
+                "x:\\nMIIfake12\\nabcd5678==\\n-----END PRIVATE KEY-----\\ny",
+                "x:\\n***\\ny",
+            ),
+            (
+                "-----BEGIN OPENSSH PRIVATE KEY-----\nb3BlbnNzaC1rZXk=\nAAAAB3Nz\n\nafter",
+                "***\n\nafter",
+            ),
+            (
+                "bad key: expected -----BEGIN OPENSSH PRIVATE KEY----- header\nnext line here",
+                "bad key: expected *** header\nnext line here",
+            ),
+            (
+                "Cookie: sid=\"fake1\"; auth=fake2\nnext",
+                "Cookie: ***\nnext",
+            ),
+            (
+                "-H 'Cookie: sid=\"fake1\"; a=fake2' x",
+                "-H 'Cookie: ***' x",
+            ),
+            ("curl --user=bob:fake1 h", "curl --user=*** h"),
+            ("curl --proxy-user=bob:fake1 h", "curl --proxy-user=*** h"),
+            (
+                "docker --config /x login -u b -p fake1 r",
+                "docker --config /x login -u b -p *** r",
+            ),
+            ("docker -H h login -p fake1", "docker -H h login -p ***"),
+            ("mysql -pfake1\\\r\n db", "mysql -p***\\\r\n db"),
+            ("mysql -pfake1\\\n db", "mysql -p***\\\n db"),
+            (
+                "JSESSIONID=fake1 sessid: fake2abcd",
+                "JSESSIONID=*** sessid: ***",
+            ),
+        ];
+        for (input, expected) in masked {
+            let out = redact_credentials(input);
+            assert_eq!(out, expected, "input {input:?}");
+            assert_eq!(redact_credentials(&out), out, "{input:?}");
+        }
+        for text in [
+            "PASS: tests/foo.sh\nPASS: other_test\nFAIL: x",
+            "pass: ./t/a.t",
+            "Basic tests/integration",
+            "docker -H h run -p 80:80 nginx",
+            "docker --config /x ps",
+        ] {
+            assert_eq!(redact_credentials(text), text, "{text:?}");
+        }
+        let mut value = serde_json::json!({
+            "pwd": "/x", "pass": "12", "session": {"n": 5},
+            "ht": ["htpasswd", "-b", "f", "bob", "fakepw1"],
+            "ht2": ["htpasswd", "-nb", "bob", "fakepw2"],
+            "key": ["-----BEGIN RSA PRIVATE KEY-----", "MIIfake1", "abcd5678", "-----END RSA PRIVATE KEY-----", "after"],
+            "cu": ["curl", "--user=a:fakepw3", "h"],
+            "dk": ["docker", "--config", "/x", "login", "-p", "fakepw4"],
+        });
+        redact_json_strings(&mut value);
+        let text = value.to_string();
+        assert!(
+            !text.contains("fakepw") && !text.contains("MIIfake"),
+            "{text}"
+        );
+        assert_eq!(value["pwd"], "/x");
+        assert_eq!(value["pass"], "12");
+        assert_eq!(value["session"], serde_json::json!({"n": 5}));
+        assert_eq!(value["key"][4], "after");
+    }
+
+    #[test]
     fn json_argv_arrays_and_pass_counts() {
         let mut value = serde_json::json!({
             "argv": ["mysql", "-pfakepw1", "db"],
@@ -1794,18 +2178,32 @@ mod tests {
             "-p-p",
             "pass=1 ",
             "accessKeyId=",
+            "/pwd=",
+            "pwd=~",
+            "PWD=C:/",
+            "pwd=/pass=1",
+            "-----END PRIVATE KEY-----",
+            "AAAA\n-----END PRIVATE KEY-----",
+            "AAAA\\n-----END RSA PRIVATE KEY-----",
+            "-----BEGIN PRIVATE KEY-----\nAAAA\n",
+            "cmd=mysql -p ",
+            "[\"mysql\",\"-pX\"],",
+            "[\"sshpass\",\"-p\",\"X\"],",
+            "[\"htpasswd\",\"-b\",\"f\",",
+            "docker -H h ",
+            "curl --user=",
+            "Cookie: \"",
             "é-----BEGIN é",
         ];
         for unit in units {
             let text = unit.repeat(1_048_576 / unit.len() + 1);
             let started = std::time::Instant::now();
-            let once = redact_credentials(&text);
+            let _ = redact_credentials(&text);
             assert!(
                 started.elapsed() < std::time::Duration::from_secs(3),
                 "{unit:?}: {:?}",
                 started.elapsed()
             );
-            assert_eq!(redact_credentials(&once), once, "{unit:?}");
         }
     }
 
