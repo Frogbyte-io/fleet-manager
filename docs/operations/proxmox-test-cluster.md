@@ -222,6 +222,8 @@ Do not name any of these templates, or their clones, with the reserved `fm-lab-`
 The M7 exit-gate run ([#266](https://github.com/Frogbyte-io/fleet-manager/issues/266)) found the original guest-agent template without `/etc/machine-id` ([#328](https://github.com/Frogbyte-io/fleet-manager/issues/328)). It kept that template, 7000, unchanged for FM-611 and FM-704, made the DHCP source template 7001 with the commands above, and built its Lab image from 7001 through Fleet.
 
 
+A Windows 11 base template and its Fleet image, for Windows Lab guests, are built on the physical host by [the Windows fixture runbook](windows-lab-fixture.md).
+
 ## Step 7: environment for the acceptance suite (FM-611)
 
 FM-611 ([#214](https://github.com/Frogbyte-io/fleet-manager/issues/214)) describes targets entirely through environment variables: `FLEET_PVE_LIVE=1`, plus `FLEET_PVE_TARGET_<NAME>_*` for each target. This runbook's targets map to these names:

@@ -1,0 +1,260 @@
+#!/usr/bin/env bash
+# windows-template: build the Windows 11 Pro fixture template (issue #442) on the
+# integration PVE host. The runbook, with the reasoning, sources and measured results,
+# is docs/operations/windows-lab-fixture.md.
+#
+#   deploy/pve-test/windows/windows-template <command>
+#
+# Configuration comes from the same env file as deploy/pve-test/pve-test
+# (FLEET_PVE_TEST_ENV_FILE, default ~/.config/fleet/pve-test.env) plus the optional
+# FLEET_WIN_* variables below. The repository is public: no address, host name, key,
+# password or download link belongs in this file. Secrets live under FLEET_WIN_SECRET_DIR
+# (0600) and are never printed.
+set -eu
+set -o pipefail
+
+ENV_FILE="${FLEET_PVE_TEST_ENV_FILE:-$HOME/.config/fleet/pve-test.env}"
+# shellcheck disable=SC1090
+[ -f "$ENV_FILE" ] && . "$ENV_FILE"
+
+readonly HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+readonly TAG="fleet-pve-test"
+VMID="${FLEET_WIN_VMID:-7100}"
+VM_NAME="${FLEET_WIN_NAME:-fleet-windows11-base}"
+ADMIN_USER="${FLEET_WIN_ADMIN_USER:-fleetadmin}"
+SECRET_DIR="${FLEET_WIN_SECRET_DIR:-$HOME/.config/fleet}"
+PASSWORD_FILE="$SECRET_DIR/pve-test-windows-admin.password"
+SSH_KEY="$SECRET_DIR/pve-test-windows-ssh"
+STORAGE="${FLEET_PVE_TEST_STORAGE:-local-lvm}"
+ISO_STORAGE="${FLEET_PVE_TEST_ISO_STORAGE:-local}"
+ISO_DIR="${FLEET_WIN_ISO_DIR:-/var/lib/vz/template/iso}"
+BRIDGE="${FLEET_PVE_TEST_BRIDGE:-vmbr0}"
+WIN_ISO="${FLEET_WIN_ISO_FILE:-windows11-x64-multi.iso}"
+VIRTIO_ISO="${FLEET_WIN_VIRTIO_ISO_FILE:-virtio-win.iso}"
+CFG_ISO="fleet-win-cfg.iso"
+VIRTIO_URL="https://fedorapeople.org/groups/virt/virtio-win/direct-downloads/stable-virtio/virtio-win.iso"
+# Microsoft Learn, "KMS client activation and product keys": Windows 11 Pro (GVLK).
+# It only selects the edition; setup completes unactivated.
+# This is Microsoft's public key, not a secret and not a licence.
+KMS_CLIENT_KEY="W269N-WFGWX-YVC9B-4J6C9-T83GX"
+# Win32-OpenSSH 10.0.0.0p2 (PowerShell/Win32-OpenSSH release asset): the offline fallback.
+OPENSSH_MSI_URL="https://github.com/PowerShell/Win32-OpenSSH/releases/download/10.0.0.0p2-Preview/OpenSSH-Win64-v10.0.0.0.msi"
+OPENSSH_MSI_SHA256="ddec9c53864280759cf9f74791cefd387100e3946aa849a1c138a4ed1b96b7d9"
+VIRTIO_ISO_SHA256="303f7ae40dad495d6ae474fdc571df58958a4dbc5c37a522d80f9a203867949d"  # virtio-win-0.1.302
+# Test clones stay outside the acceptance suite's scratch range (900-919).
+SCRATCH_FIRST="${FLEET_WIN_SCRATCH_FIRST:-7120}"
+
+die() { printf 'windows-template: %s\n' "$*" >&2; exit 1; }
+note() { printf '== %s\n' "$*"; }
+need() { [ -n "${!1:-}" ] || die "$1 is not set (see pve-test.env.example)"; }
+need FLEET_PVE_TEST_PHYS_SSH; need FLEET_PVE_TEST_SSH_IDENTITY; need FLEET_PVE_TEST_KNOWN_HOSTS
+
+H() { ssh -i "$FLEET_PVE_TEST_SSH_IDENTITY" -o IdentitiesOnly=yes \
+        -o UserKnownHostsFile="$FLEET_PVE_TEST_KNOWN_HOSTS" "$FLEET_PVE_TEST_PHYS_SSH" "$@"; }
+
+KNOWN_TMP=""; LOCAL_STAGE=""; REMOTE_STAGE=""
+cleanup_tmp() { # also runs after a failure: no rendered password stays in /tmp, locally or on the host
+  [ -z "$KNOWN_TMP" ] || rm -f "$KNOWN_TMP"
+  [ -z "$LOCAL_STAGE" ] || rm -rf "$LOCAL_STAGE"
+  [ -z "$REMOTE_STAGE" ] || H "rm -rf '$REMOTE_STAGE'" >/dev/null 2>&1 || true
+}
+trap cleanup_tmp EXIT
+G() { # G <ip> <command...>: run on the guest with the fixture key
+  local ip="$1"; shift
+  [ -n "$KNOWN_TMP" ] || KNOWN_TMP="$(mktemp)"
+  ssh -i "$SSH_KEY" -o IdentitiesOnly=yes -o PasswordAuthentication=no -o BatchMode=yes \
+      -o ConnectTimeout=8 -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile="$KNOWN_TMP" \
+      "$ADMIN_USER@$ip" "$@"
+}
+
+vm_status() { H "qm status $1 2>/dev/null" | awk '{print $2}'; }
+guest_ip() { # first non-link-local IPv4 reported by the guest agent, or empty
+  local node; node="$(H hostname)"
+  H "pvesh get /nodes/$node/qemu/$1/agent/network-get-interfaces --output-format json 2>/dev/null" \
+    | jq -r '[.result[]? | select(.name|test("^Loopback")|not) | .["ip-addresses"][]?
+              | select(.["ip-address-type"]=="ipv4") | .["ip-address"]
+              | select(startswith("169.254.")|not)][0] // empty' 2>/dev/null || true
+}
+wait_ip() { # wait_ip <vmid> <seconds>
+  local i ip; for ((i = 0; i < $2; i += 10)); do
+    ip="$(guest_ip "$1")"; [ -z "$ip" ] || { echo "$ip"; return 0; }; sleep 10
+  done; return 1
+}
+
+cmd_prepare() {
+  umask 077
+  mkdir -p "$SECRET_DIR"
+  if [ ! -s "$PASSWORD_FILE" ]; then
+    note "generating the local administrator password ($PASSWORD_FILE, 0600)"
+    { LC_ALL=C tr -dc 'A-Za-z0-9' </dev/urandom | head -c 24 || true; printf 'aZ9'; } >"$PASSWORD_FILE"
+  fi
+  if [ ! -s "$SSH_KEY" ]; then
+    note "generating the dedicated fixture SSH key ($SSH_KEY)"
+    ssh-keygen -q -t ed25519 -N '' -C fleet-pve-test-windows -f "$SSH_KEY"
+  fi
+  chmod 600 "$PASSWORD_FILE" "$SSH_KEY"
+
+  note "virtio-win ISO on the host"
+  H "cd '$ISO_DIR' && { [ -s '$VIRTIO_ISO' ] || { curl -fsSL -o '$VIRTIO_ISO.part' '$VIRTIO_URL' && mv '$VIRTIO_ISO.part' '$VIRTIO_ISO'; }; } && sha256sum '$VIRTIO_ISO'" \
+    | tee /dev/stderr | grep -q "^$VIRTIO_ISO_SHA256 " || die "virtio-win ISO does not match the pinned SHA-256 (a newer stable release? update VIRTIO_ISO_SHA256 after checking it)"
+
+  note "config ISO ($CFG_ISO, volume label FLEETCFG)"
+  local stage; stage="$(mktemp -d)"; LOCAL_STAGE="$stage"; chmod 700 "$stage"
+  curl -fsSL -o "$stage/OpenSSH-Win64.msi" "$OPENSSH_MSI_URL"
+  [ "$(sha256sum "$stage/OpenSSH-Win64.msi" | cut -d' ' -f1)" = "$OPENSSH_MSI_SHA256" ] \
+    || die "OpenSSH MSI does not match the pinned SHA-256"
+  echo "$OPENSSH_MSI_SHA256" >"$stage/OpenSSH-Win64.msi.sha256"
+  cp "$SSH_KEY.pub" "$stage/authorized_keys.pub"
+  cp "$HERE/setup-guest.ps1" "$HERE/generalize.ps1" "$stage/"
+  ADMIN_USER="$ADMIN_USER" KMS_CLIENT_KEY="$KMS_CLIENT_KEY" PASSWORD_FILE="$PASSWORD_FILE" \
+    python3 - "$HERE/autounattend.xml" "$stage/autounattend.xml" <<'PY'
+import os, sys
+from xml.sax.saxutils import escape
+src, dst = sys.argv[1:3]
+text = open(src, encoding="utf-8").read()
+for key, value in (("@ADMIN_USER@", os.environ["ADMIN_USER"]),
+                   ("@ADMIN_PASSWORD@", open(os.environ["PASSWORD_FILE"]).read().strip()),
+                   ("@KMS_CLIENT_KEY@", os.environ["KMS_CLIENT_KEY"])):
+    text = text.replace(key, escape(value))
+open(dst, "w", encoding="utf-8").write(text)
+PY
+  REMOTE_STAGE="$(H 'umask 077; mktemp -d')"
+  tar -C "$stage" -cf - . | H "umask 077; tar -xf - -C '$REMOTE_STAGE' && \
+    xorriso -as mkisofs -quiet -J -R -V FLEETCFG -o '$ISO_DIR/$CFG_ISO' '$REMOTE_STAGE' && ls -l '$ISO_DIR/$CFG_ISO'"
+  note "done. Next: FLEET_WIN_ISO_URL=<fresh Microsoft link> windows-template fetch-iso"
+}
+
+cmd_fetch_iso() {
+  [ -n "${FLEET_WIN_ISO_URL:-}" ] || die "set FLEET_WIN_ISO_URL to a fresh link from https://www.microsoft.com/en-us/software-download/windows11 (valid 24 h; never commit or paste it)"
+  # Anchored: an https Microsoft host, then a path with no quote, space or newline (the URL
+  # goes into a curl config line, so none of those may appear).
+  [[ "$FLEET_WIN_ISO_URL" =~ ^https://[A-Za-z0-9-]+(\.[A-Za-z0-9-]+)*\.(microsoft\.com|azureedge\.net|windows\.net)/[^\"[:space:]\\]*$ ]] \
+    || die "the link is not an https link on a Microsoft host (or contains a quote or whitespace)"
+  note "downloading on the host (the link is passed on stdin, not in a process list)"
+  printf 'url = "%s"\n' "$FLEET_WIN_ISO_URL" \
+    | H "cd '$ISO_DIR' && curl -fsSL -K - -o '$WIN_ISO.part' && mv '$WIN_ISO.part' '$WIN_ISO' && sha256sum '$WIN_ISO' && ls -l '$WIN_ISO'"
+  note "compare that SHA-256 with the one Microsoft shows under 'Verify your download' on the same page"
+}
+
+cmd_create() {
+  H "qm status $VMID" >/dev/null 2>&1 && die "VMID $VMID already exists"
+  H "test -s '$ISO_DIR/$WIN_ISO' && test -s '$ISO_DIR/$VIRTIO_ISO' && test -s '$ISO_DIR/$CFG_ISO'" \
+    || die "missing ISO on the host: run prepare, then fetch-iso"
+  note "creating VM $VMID ($VM_NAME), tag $TAG"
+  H "qm create $VMID --name $VM_NAME --tags $TAG --ostype win11 --machine q35 --bios ovmf \
+      --cpu host --cores 4 --memory 8192 --balloon 0 --scsihw virtio-scsi-single \
+      --net0 virtio,bridge=$BRIDGE --agent enabled=1 --vga std \
+      --efidisk0 $STORAGE:1,efitype=4m,pre-enrolled-keys=1 \
+      --tpmstate0 $STORAGE:1,version=v2.0 \
+      --scsi0 $STORAGE:64,discard=on,iothread=1,ssd=1 \
+      --sata0 $ISO_STORAGE:iso/$WIN_ISO,media=cdrom \
+      --sata1 $ISO_STORAGE:iso/$VIRTIO_ISO,media=cdrom \
+      --sata2 $ISO_STORAGE:iso/$CFG_ISO,media=cdrom \
+      --boot 'order=scsi0;sata0'"
+  note "starting; pressing a key for the 'boot from CD' prompt"
+  H "qm start $VMID"
+  local i; for i in $(seq 1 25); do H "qm sendkey $VMID spc" >/dev/null 2>&1 || true; sleep 1; done
+  note "installing. Next: windows-template wait-install"
+}
+
+cmd_wait_install() {
+  note "waiting for the guest agent and SSH (up to 90 min)"
+  local ip="" i
+  for ((i = 0; i < 5400; i += 20)); do
+    ip="$(guest_ip "$VMID")"
+    if [ -n "$ip" ] && G "$ip" 'if (Test-Path C:\ProgramData\fleet\setup-complete) { "ready" }' 2>/dev/null | grep -q ready; then
+      note "install and guest setup finished"
+      G "$ip" '$p=(Get-ItemProperty "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion"); "{0} build {1}.{2}; shell $env:ComSpec; PS $($PSVersionTable.PSVersion)" -f $p.ProductName,$p.CurrentBuildNumber,$p.UBR; (Get-CimInstance SoftwareLicensingProduct -Filter "PartialProductKey IS NOT NULL" | Where-Object Name -like "Windows*" | Select-Object -First 1).LicenseStatus'
+      echo "(LicenseStatus 0 = unlicensed, the expected state)"
+      return 0
+    fi
+    sleep 20
+  done
+  die "timed out; look at the console (qm terminal is not available for Windows: use the PVE noVNC console)"
+}
+
+cmd_detach_media() {
+  note "detaching the install media (the config ISO holds the install password: it is also deleted)"
+  H "qm set $VMID --delete sata0,sata1,sata2 --boot 'order=scsi0'"
+  H "rm -f '$ISO_DIR/$CFG_ISO'"
+}
+
+cmd_generalize() {
+  local ip; ip="$(guest_ip "$VMID")"; [ -n "$ip" ] || die "no guest address"
+  note "host key fingerprint before generalize (for comparison with the clones)"
+  G "$ip" 'Get-ChildItem C:\ProgramData\ssh\ssh_host_ed25519_key.pub | ForEach-Object { ssh-keygen -lf $_.FullName }'
+  note "copying the sysprep answer file and running generalize.ps1"
+  G "$ip" 'New-Item -ItemType Directory -Force C:\Windows\Temp\fleet | Out-Null'
+  LOCAL_STAGE="$(mktemp -d)"
+  sed "s/@ADMIN_USER@/$ADMIN_USER/g" "$HERE/sysprep-unattend.xml" >"$LOCAL_STAGE/sysprep-unattend.xml"
+  cp "$HERE/generalize.ps1" "$LOCAL_STAGE/"
+  scp -i "$SSH_KEY" -o IdentitiesOnly=yes -o BatchMode=yes -o PasswordAuthentication=no \
+    -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile="$KNOWN_TMP" \
+    "$LOCAL_STAGE/sysprep-unattend.xml" "$LOCAL_STAGE/generalize.ps1" "$ADMIN_USER@$ip:C:/Windows/Temp/fleet/"
+  # generalize.ps1 only starts a detached SYSTEM task (which stops sshd and runs sysprep),
+  # so this call must succeed.
+  G "$ip" 'Copy-Item C:\Windows\Temp\fleet\sysprep-unattend.xml C:\Windows\System32\Sysprep\; powershell -NoProfile -ExecutionPolicy Bypass -File C:\Windows\Temp\fleet\generalize.ps1' 
+  note "waiting for sysprep to shut the guest down (up to 20 min)"
+  local i; for ((i = 0; i < 1200; i += 10)); do
+    [ "$(vm_status "$VMID")" = stopped ] && { note "stopped"; return 0; }; sleep 10
+  done
+  die "sysprep did not power the guest off: read C:\\Windows\\System32\\Sysprep\\Panther\\setupact.log on the guest"
+}
+
+cmd_template() {
+  [ "$(vm_status "$VMID")" = stopped ] || die "VM $VMID is not stopped"
+  note "converting VM $VMID to a template"
+  H "qm template $VMID && qm config $VMID | grep -E '^(name|tags|template|bios|machine|tpmstate0|efidisk0|scsi0|agent|cores|memory):'"
+}
+
+cmd_test_clone() { # test-clone [vmid]: clone, boot, and report hostname and host key
+  local id="${1:-$SCRATCH_FIRST}"
+  H "qm status $id" >/dev/null 2>&1 && die "VMID $id already exists"
+  note "cloning $VMID to $id (full clone)"
+  H "qm clone $VMID $id --name fleet-win-test-$id --full 1"
+  H "qm set $id --tags $TAG && qm start $id"
+  local ip; ip="$(wait_ip "$id" 900)" || die "clone $id never reported an address"
+  local i; for ((i = 0; i < 600; i += 10)); do G "$ip" hostname >/dev/null 2>&1 && break; sleep 10; done
+  note "clone $id: computer name and host key"
+  G "$ip" 'hostname; "shell: " + (Get-ItemProperty HKLM:\SOFTWARE\OpenSSH).DefaultShell; ssh-keygen -lf C:\ProgramData\ssh\ssh_host_ed25519_key.pub'
+  echo "scan: $(ssh-keyscan -t ed25519 "$ip" 2>/dev/null | ssh-keygen -lf - )"
+  note "destroy it with: windows-template destroy-clone $id"
+}
+
+cmd_destroy_clone() {
+  local id="${1:?usage: destroy-clone <vmid>}"
+  [ "$id" != "$VMID" ] || die "refusing to destroy the template"
+  H "qm config $id | grep -q '^tags:.*$TAG'" || die "VM $id is not tagged $TAG"
+  H "qm stop $id --skiplock 1 >/dev/null 2>&1 || true; qm destroy $id --purge 1 --destroy-unreferenced-disks 1"
+}
+
+cmd_status() { H "qm list | awk 'NR==1 || \$1==$VMID'; ls -l '$ISO_DIR' | grep -E '$WIN_ISO|$VIRTIO_ISO|$CFG_ISO' || true"; }
+
+case "${1:-}" in
+  prepare) cmd_prepare ;;
+  fetch-iso) cmd_fetch_iso ;;
+  create) cmd_create ;;
+  wait-install) cmd_wait_install ;;
+  detach-media) cmd_detach_media ;;
+  generalize) cmd_generalize ;;
+  template) cmd_template ;;
+  test-clone) shift; cmd_test_clone "$@" ;;
+  destroy-clone) shift; cmd_destroy_clone "$@" ;;
+  status) cmd_status ;;
+  *) cat <<'USAGE'
+Usage: windows-template <command>
+
+  prepare         generate the admin password and fixture SSH key (0600, under ~/.config/fleet),
+                  download virtio-win to the host, build the config ISO
+  fetch-iso       download the Microsoft ISO on the host from FLEET_WIN_ISO_URL, print its SHA-256
+  create          create VM 7100 and start the unattended install
+  wait-install    wait for the guest agent, then SSH key login; print the Windows build
+  detach-media    detach all three ISOs and delete the config ISO (holds the install password)
+  generalize      remove SSH host keys, run sysprep /generalize /oobe /shutdown
+  template        convert the stopped VM to a template
+  test-clone [id] clone, boot, report computer name and host key (id default 7120)
+  destroy-clone <id>   destroy a tagged test clone
+  status          VM and ISO state on the host
+USAGE
+     exit 2 ;;
+esac
