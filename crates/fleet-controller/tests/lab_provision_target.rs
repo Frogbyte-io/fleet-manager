@@ -1694,6 +1694,7 @@ impl fleet_application::lab::LabReadinessPort for ReadyPorts {
         _parent_id: &str,
         _record: &ProvisionRecord,
         command: &str,
+        _guest_os: fleet_core::GuestOs,
         _remaining: std::time::Duration,
     ) -> Result<bool, String> {
         self.calls.lock().unwrap().push("ssh");
@@ -2121,6 +2122,7 @@ async fn production_child_watchdog_survives_the_callers_timeout() {
                 &parent.id,
                 &record,
                 "true",
+                fleet_core::GuestOs::Linux,
                 std::time::Duration::from_millis(250)
             )
         )

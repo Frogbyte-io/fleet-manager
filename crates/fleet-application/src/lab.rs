@@ -318,6 +318,7 @@ pub trait LabReadinessPort: fmt::Debug + Send + Sync {
         _parent_id: &str,
         record: &ProvisionRecord,
         command: &str,
+        guest_os: fleet_core::GuestOs,
         remaining: std::time::Duration,
     ) -> Result<bool, String>;
     /// Creates or re-finds a durable M3 child with a provision-scoped key.
@@ -463,8 +464,14 @@ impl LabBootstrap<'_> {
                 .filter(|value| !value.trim().is_empty())
                 .ok_or_else(|| failure("ssh_exec"))?;
             self.poll(operations, operation_id, &record, "ssh_exec", |remaining| {
-                self.readiness
-                    .ssh_probe(operations, operation_id, &record, command, remaining)
+                self.readiness.ssh_probe(
+                    operations,
+                    operation_id,
+                    &record,
+                    command,
+                    content.guest_os,
+                    remaining,
+                )
             })
             .await?;
         }
@@ -1602,6 +1609,7 @@ impl Lab {
                 detail: "the lease's guest has no registered Lab machine to run on".to_owned(),
             });
         }
+        let guest_os = self.guest_os_of(&lease).await?;
         self.audit_event(
             principal,
             Permission::LabExec,
@@ -1621,11 +1629,25 @@ impl Lab {
                     "leaseId": id,
                     "script": script,
                     "timeoutSeconds": timeout_seconds,
+                    "guestOs": guest_os.id(),
                 })
                 .to_string(),
             ),
             review_token: None,
         })
+    }
+
+    /// The guest OS of a lease's template version: it selects the guest
+    /// shell and the path rules, and the version is immutable.
+    async fn guest_os_of(&self, lease: &Lease) -> Result<fleet_core::GuestOs, LabUseCaseError> {
+        self.templates
+            .get_version(&lease.template_version_id)
+            .await
+            .map(|version| version.content.guest_os)
+            .map_err(|detail| LabUseCaseError::Backend {
+                context: "templates",
+                detail,
+            })
     }
 
     /// Releases a lease: transitions it into `releasing` and records the

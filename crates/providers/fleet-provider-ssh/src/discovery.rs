@@ -127,6 +127,11 @@ pub fn discover(
     endpoint: &SshConnectionSpec,
     deadline: Duration,
 ) -> Result<Vec<DiscoveredCheckout>, SshProviderError> {
+    if crate::shell::GuestShell::for_os(endpoint.guest_os)? != crate::shell::GuestShell::Posix {
+        return Err(SshProviderError::Setup {
+            detail: "checkout discovery is not supported on this guest OS".to_owned(),
+        });
+    }
     let result = execute_script(
         provider,
         limiter,

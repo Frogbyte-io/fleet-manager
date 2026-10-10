@@ -193,6 +193,24 @@ A template with a bootstrap project (`bootstrapProjectId`, with any probe) also 
 
 Lab bootstrap does not use Frogenv. Its readiness workflow is `clone → verify`: it installs no tools, deploys no skills, and never probes or sets up Frogenv, so the image does not need the Frogenv CLI. A stock Debian image with the packages above is enough.
 
+### Windows guests
+
+A template with `guestOs: windows` ([ADR 0015](../adr/0015-windows-lab-guest-transport.md), #441) is driven over OpenSSH Server in the image, through the same `fleet-provider-ssh` provider, host-key pinning, authorization and audit as a Linux guest. The image must have OpenSSH Server running, the controller key installed (`administrators_authorized_keys` with the ACL the ADR gives), and **Windows PowerShell 5.1 as `DefaultShell`** (`HKLM:\SOFTWARE\OpenSSH`, `DefaultShell` = `C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe`; Windows OpenSSH runs `powershell.exe -c <command>` for each session).
+
+What the controller sends, so you can reason about it:
+
+- The command string is one fixed bootstrap that contains **no caller data** (no command, path, environment value or argument; not even an encoded copy). It uses only characters no layer between sshd and PowerShell treats specially. Everything the caller controls goes on stdin as two ASCII lines (a base64 metadata blob, then the script as base64 of UTF-8), read as raw bytes with `[Console]::OpenStandardInput()`, so the guest's console code page never touches it.
+- The bootstrap sets the working directory, environment variables and arguments (`$args`), runs your script as a script block, and sets UTF-8 as the console output encoding. Output is whatever PowerShell writes: objects are formatted by PowerShell's own host. A script's `exit N` is the exit code. Otherwise the exit code is 0 when the script's last statement succeeded; else the last native command's exit code; else 1. Progress output is turned off (`$ProgressPreference`), because a redirected PowerShell would otherwise write it as CLIXML to stderr.
+- An empty environment value removes the variable on Windows, and an empty argument is dropped (as on Linux). Environment names must be `[A-Za-z_][A-Za-z0-9_]*` and no field may contain a NUL byte; both are refused before a session starts, on Linux and Windows alike. The working directory must be an existing local directory (UNC paths and non-filesystem locations are refused with exit 90, as is a truncated or malformed header; nothing from the caller is echoed).
+- A native command's exit code whose low byte is 0 (256, 512, ...) is reported as 1, because `ssh` truncates the remote status to 8 bits and a failure must not read as success. A script that itself runs `exit 256` cannot be intercepted and reads as 0: use codes 1-255.
+- `Write-Warning`, `-Verbose`, `Write-Host` and information output go to stdout, errors to stderr (PowerShell's own routing).
+- Windows OpenSSH passes only `-c <command>` (no `-NoProfile`, no `-NonInteractive`). A PowerShell profile that prints, or that reads stdin, would corrupt the output of `lab collect` and the framing. Keep the Fleet account free of profiles; the Windows client default execution policy (`Restricted`) already prevents them from loading, and Server's `RemoteSigned` does not, so set the policy or remove the profile in the image. Constrained Language Mode (WDAC/AppLocker) blocks the bootstrap and is not supported. PowerShell script block logging, when enabled on the guest, records the scripts Fleet runs in the guest's event log: keep secrets out of `lab exec` scripts.
+- Cancelling or timing out kills the local `ssh`; sshd then closes the session and its job object, which ends the script's process tree. The result still says the remote fate is unknown.
+- The inventory probe uses CIM and .NET instead of `uname` and `/proc`; its tool set is reported `unknown` (not probed on Windows). Checkout discovery is not supported on Windows guests.
+- Readiness commands (`ssh_exec`) are PowerShell.
+
+Guest paths for `lab collect` and `lab put` follow the Windows rules (drive-absolute only; see the path rules in the ADR); `lab put`, `lab collect` and detached exec on Windows guests are documented as they land.
+
 ## First run
 
 The walkthrough builds a linked clone of an existing cloud-image template, promotes it, and leases a guest from it. Every command uses `--output json`, the machine-readable form agents use too. It prints the resource itself (so `jq -r .id`), or a page with `items` for a list. Set the two account IDs first:

@@ -41,6 +41,9 @@ pub mod inventory;
 pub mod put;
 pub mod shell;
 
+#[cfg(test)]
+mod pwsh_support;
+
 pub use discovery::{
     DISCOVERY_DEADLINE, DISCOVERY_SOURCE, DiscoveredCheckout, MAX_CHECKOUTS, discover,
     discovery_script, parse_discovery_output,

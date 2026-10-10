@@ -1917,6 +1917,8 @@ async fn exec_runs_only_on_a_ready_unexpired_lease_with_a_lab_machine() {
         serde_json::from_str(new.payload_json.as_deref().unwrap()).unwrap();
     assert_eq!(payload["leaseId"], lease.id.as_str());
     assert_eq!(payload["timeoutSeconds"], 120);
+    // The guest OS comes from the lease's template version.
+    assert_eq!(payload["guestOs"], "linux");
     let audited = format!("{:?}", audit.intents.lock().unwrap());
     assert!(audited.contains("lab_exec_requested"));
     assert!(!audited.contains("secret-ish-value"));

@@ -15,8 +15,8 @@ use std::io::{Read, Write};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
-use crate::exec::{ExecutionLimiter, ScriptMetadata};
-use crate::shell::spawn_script_session;
+use crate::exec::ExecutionLimiter;
+use crate::shell::{arguments_only, spawn_script_session};
 use crate::{SshConnectionSpec, SshProvider, SshProviderError};
 
 /// Why the guest refused a file, or how a copy ended without one.
@@ -279,13 +279,4 @@ pub(crate) fn drain_stderr<R: Read>(pipe: Option<R>) -> Vec<u8> {
         }
     }
     kept
-}
-
-/// Metadata that carries only positional arguments.
-pub(crate) fn arguments_only(arguments: Vec<String>) -> ScriptMetadata {
-    ScriptMetadata {
-        working_directory: String::new(),
-        environment: Vec::new(),
-        arguments,
-    }
 }
