@@ -178,7 +178,7 @@ pub fn start_script(command: &str) -> String {
 /// pre-create `fleet-lab` or a junction to plant the `run.ps1` the supervisor
 /// runs). Even there, the base directories and the handle directory are only
 /// used when each is a real directory (not a reparse point), owned by SYSTEM,
-/// the SSH user or (for an administrator) Administrators, and grants
+/// Administrators or the SSH user, and grants
 /// write-class access to nobody else. They are created with a protected ACL in
 /// the same call (the creator is the owner; nothing sets it), then checked
 /// again: a directory someone else created first fails the check.
