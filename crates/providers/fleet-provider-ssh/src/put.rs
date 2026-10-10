@@ -198,7 +198,7 @@ try {
     $fleetFs.Dispose()
     $fleetFs = $null
     # The published file is not hidden or temporary, and a replaced file keeps
-    # its own other attributes (it was not read-only) but not the old file's
+    # its own other attributes except Hidden (it was not read-only) but not the old file's
     # Zone.Identifier stream.
     try {
       $fleetAttr = [IO.FileAttributes]::Normal

@@ -1028,7 +1028,8 @@ async fn the_executor_trusts_the_lease_not_the_payload_about_the_guest_os() {
         .await;
     // Claiming Linux, the Windows path is not even a valid payload.
     assert_eq!(done.state, "failed", "{done:?}");
-    // A path that is valid for both rule sets reaches the OS check itself.
+    // A Linux-valid path with no `guestOs` (claimed Linux) passes payload
+    // validation and reaches the lease OS check itself.
     let done = windows
         .put_with_payload("C:\\opt\\a.bin", b"x", |payload| {
             let object = payload.as_object_mut().unwrap();
