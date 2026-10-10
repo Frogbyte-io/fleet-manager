@@ -237,6 +237,20 @@ async fn lab_exec_runs_on_the_lease_machine_and_refuses_an_expired_lease() {
     assert_eq!(payload["auth"]["type"], "agent");
     assert_eq!(payload["script"], "uname -s");
     assert_eq!(payload["timeoutSeconds"], 30);
+    // An operation queued before `guestOs` existed is a Linux guest.
+    assert_eq!(payload["guestOs"], "linux");
+
+    // The guest OS chosen when the command was queued reaches the SSH
+    // payload, where it selects the guest shell.
+    let mut windows = queue("Get-Date");
+    windows.payload_json = Some(
+        serde_json::json!({
+            "leaseId": lease.id, "script": "Get-Date", "timeoutSeconds": 30, "guestOs": "windows"
+        })
+        .to_string(),
+    );
+    assert_eq!(run(windows).await.state, "succeeded");
+    assert_eq!(ssh.0.lock().unwrap()[1].2["guestOs"], "windows");
 
     // Expired by the time it runs: refused, nothing reaches SSH.
     let mut expired = leases.get(&lease.id).await.unwrap();
@@ -250,7 +264,7 @@ async fn lab_exec_runs_on_the_lease_machine_and_refuses_an_expired_lease() {
             .unwrap_or_default()
             .contains("lease_not_ready")
     );
-    assert_eq!(ssh.0.lock().unwrap().len(), 1);
+    assert_eq!(ssh.0.lock().unwrap().len(), 2);
 
     // The generic surface refuses the kind outright.
     assert!(

@@ -375,6 +375,7 @@ impl fleet_application::lab::LabReadinessPort for Readiness {
         _parent_id: &str,
         _record: &fleet_application::lab::ProvisionRecord,
         command: &str,
+        _guest_os: fleet_core::GuestOs,
         _remaining: std::time::Duration,
     ) -> Result<bool, String> {
         assert_eq!(command, "test -f /tmp/ready");

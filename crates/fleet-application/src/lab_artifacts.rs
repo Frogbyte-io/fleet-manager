@@ -18,6 +18,7 @@ use std::fmt;
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use fleet_core::GuestOs;
 
 use crate::authz::{AccessRequest, ActingPrincipal, Authorizer, Decision, Permission, authorize};
 use crate::lab::{LabUseCaseError, LeasePort, ProvisionPort, lease_exec_ready};
@@ -363,35 +364,85 @@ pub const RETENTION_BATCH: u32 = 500;
 /// Validates a collection's guest paths: 1 to [`MAX_COLLECT_PATHS`]
 /// distinct absolute paths, each at most [`MAX_COLLECT_PATH_BYTES`] bytes,
 /// with no `.` or `..` component, no empty component other than the root,
-/// and no control character.
+/// and no control character. This is the Linux rule set; see
+/// [`validate_collect_paths_for`].
 ///
 /// # Errors
 ///
 /// Answers which rule a path broke.
 pub fn validate_collect_paths(paths: &[String]) -> Result<(), String> {
+    validate_collect_paths_for(GuestOs::Linux, paths)
+}
+
+/// [`validate_collect_paths`] for a guest OS. On Windows two paths that name
+/// the same file under case-insensitive, separator-insensitive comparison
+/// count as one path named twice.
+///
+/// # Errors
+///
+/// Answers which rule a path broke.
+pub fn validate_collect_paths_for(os: GuestOs, paths: &[String]) -> Result<(), String> {
     if paths.is_empty() || paths.len() > MAX_COLLECT_PATHS {
         return Err(format!(
             "a collection names 1 to {MAX_COLLECT_PATHS} guest paths"
         ));
     }
     for (index, path) in paths.iter().enumerate() {
-        validate_guest_path(path).map_err(|detail| format!("guest path {index}: {detail}"))?;
-        if paths[..index].contains(path) {
+        validate_guest_path_for(os, path)
+            .map_err(|detail| format!("guest path {index}: {detail}"))?;
+        let key = dedup_key(os, path);
+        if paths[..index]
+            .iter()
+            .any(|earlier| dedup_key(os, earlier) == key)
+        {
             return Err(format!("guest path {path:?} is named twice"));
         }
     }
     Ok(())
 }
 
-/// Validates one guest file path: absolute, at most
+/// The key under which two guest paths are the same file: the path itself on
+/// Linux, the lowercased path with `\` separators on Windows.
+fn dedup_key(os: GuestOs, path: &str) -> String {
+    match os {
+        GuestOs::Linux => path.to_owned(),
+        GuestOs::Windows => path.replace('/', "\\").to_lowercase(),
+    }
+}
+
+/// Validates one Linux guest file path: absolute, at most
 /// [`MAX_COLLECT_PATH_BYTES`] bytes, no `.` or `..` component, no empty
 /// component other than the root, and no control character. Shared by
-/// `lab.collect` and `lab.put`.
+/// `lab.collect` and `lab.put`; see [`validate_guest_path_for`].
 ///
 /// # Errors
 ///
 /// Answers which rule the path broke.
 pub fn validate_guest_path(path: &str) -> Result<(), String> {
+    validate_guest_path_for(GuestOs::Linux, path)
+}
+
+/// Validates one guest file path under the rules of the guest's OS.
+///
+/// Linux: see [`validate_guest_path`]. Windows (ADR 0015): a drive-absolute
+/// path (`C:\...` or `C:/...`), no UNC or device prefix (`\\server`,
+/// `\\?\`, `\\.\`), no `.`, `..` or empty component, no control
+/// character, none of `<>:"|?*` (so no alternate data stream), no trailing
+/// dot or space in a component, no reserved device name (`CON`, `NUL`,
+/// `COM1`, ... with or without an extension), and components of at most 255
+/// UTF-16 units. The path must name something under the drive root.
+///
+/// # Errors
+///
+/// Answers which rule the path broke.
+pub fn validate_guest_path_for(os: GuestOs, path: &str) -> Result<(), String> {
+    match os {
+        GuestOs::Linux => validate_posix_path(path),
+        GuestOs::Windows => validate_windows_path(path),
+    }
+}
+
+fn validate_posix_path(path: &str) -> Result<(), String> {
     if path.len() > MAX_COLLECT_PATH_BYTES {
         return Err(format!(
             "the path is longer than {MAX_COLLECT_PATH_BYTES} bytes"
@@ -408,6 +459,77 @@ pub fn validate_guest_path(path: &str) -> Result<(), String> {
         .any(|component| component.is_empty() || component == "." || component == "..")
     {
         return Err("the path must not contain empty, `.`, or `..` components".to_owned());
+    }
+    Ok(())
+}
+
+/// Device names Windows reserves in every directory, with or without an
+/// extension and in any case.
+const WINDOWS_RESERVED_STEMS: [&str; 6] = ["con", "prn", "aux", "nul", "conin$", "conout$"];
+
+fn is_windows_reserved_stem(stem: &str) -> bool {
+    // `NUL.txt` and `nul .txt` are the device too: the name up to the first
+    // dot, without trailing spaces, is what counts.
+    let stem = stem
+        .split('.')
+        .next()
+        .unwrap_or_default()
+        .trim_end_matches(' ')
+        .to_lowercase();
+    if WINDOWS_RESERVED_STEMS.contains(&stem.as_str()) {
+        return true;
+    }
+    // COM0-9 and LPT0-9, including the superscript digits Windows also
+    // reserves.
+    let mut chars = stem.chars();
+    let prefix: String = chars.by_ref().take(3).collect();
+    matches!(prefix.as_str(), "com" | "lpt")
+        && matches!(
+            chars.next(),
+            Some('0'..='9' | '\u{b9}' | '\u{b2}' | '\u{b3}')
+        )
+        && chars.next().is_none()
+}
+
+fn validate_windows_path(path: &str) -> Result<(), String> {
+    if path.len() > MAX_COLLECT_PATH_BYTES {
+        return Err(format!(
+            "the path is longer than {MAX_COLLECT_PATH_BYTES} bytes"
+        ));
+    }
+    if path.chars().any(char::is_control) {
+        return Err("the path contains a control character".to_owned());
+    }
+    let bytes = path.as_bytes();
+    if bytes.len() < 4
+        || !bytes[0].is_ascii_alphabetic()
+        || bytes[1] != b':'
+        || !matches!(bytes[2], b'\\' | b'/')
+    {
+        return Err(
+            "the path must be an absolute drive path such as C:\\dir\\file (UNC and device paths are refused)"
+                .to_owned(),
+        );
+    }
+    for component in path[3..].split(['\\', '/']) {
+        if component.is_empty() || component == "." || component == ".." {
+            return Err("the path must not contain empty, `.`, or `..` components".to_owned());
+        }
+        if component.chars().any(|c| "<>:\"|?*".contains(c)) {
+            return Err(
+                "a path component contains a character Windows reserves (one of <>:\"|?*; alternate data streams are refused)"
+                    .to_owned(),
+            );
+        }
+        if component.ends_with('.') || component.ends_with(' ') {
+            return Err("a path component must not end with a dot or a space".to_owned());
+        }
+        if component.encode_utf16().count() > 255 {
+            return Err("a path component is longer than 255 characters".to_owned());
+        }
+        if is_windows_reserved_stem(component) {
+            return Err("a path component is a reserved Windows device name".to_owned());
+        }
     }
     Ok(())
 }
@@ -1181,7 +1303,10 @@ fn blob_refused(error: BlobError) -> LabUseCaseError {
 
 #[cfg(test)]
 mod tests {
-    use super::{exec_log_text, is_sha256_hex, validate_collect_paths};
+    use super::{
+        GuestOs, exec_log_text, is_sha256_hex, validate_collect_paths, validate_collect_paths_for,
+        validate_guest_path_for,
+    };
 
     fn paths(items: &[&str]) -> Vec<String> {
         items.iter().map(|item| (*item).to_owned()).collect()
@@ -1209,6 +1334,106 @@ mod tests {
                 "{bad:?} was accepted"
             );
         }
+    }
+
+    fn windows(path: &str) -> Result<(), String> {
+        validate_guest_path_for(GuestOs::Windows, path)
+    }
+
+    #[test]
+    fn windows_paths_are_drive_absolute_and_plain() {
+        for good in [
+            r"C:\Users\tester\app.exe",
+            "C:/Users/tester/app.exe",
+            r"d:\a b\c.d.e",
+            r"C:\Program Files (x86)\x\y.msi",
+            "C:\\Users\\caf\u{e9}\\\u{4e2d}.txt",
+            r"C:\x\console.txt",
+            r"C:\x\com10.txt",
+            r"C:\x\.hidden",
+            r"C:\x\a b",
+        ] {
+            assert!(windows(good).is_ok(), "{good:?}: {:?}", windows(good));
+        }
+        for bad in [
+            "",
+            "C:",
+            r"C:\",
+            "C:/",
+            r"C:foo",
+            r"C:foo\bar",
+            "relative\\file",
+            "/unix/path",
+            r"\\server\share\file",
+            "//server/share/file",
+            r"\\?\C:\file",
+            r"\\.\C:\file",
+            r"\\.\pipe\x",
+            r"\Users\x",
+            r"C:\a\..\b",
+            r"C:\a\.\b",
+            r"C:\a\\b",
+            r"C:\a//b",
+            r"C:\a\b\",
+            r"C:\file.txt:stream",
+            r"C:\file.txt::$DATA",
+            r"C:\a\C:\b",
+            r"C:\a\b.",
+            r"C:\a\b ",
+            r"C:\a \b",
+            r"C:\a.\b",
+            r"C:\a\b<c",
+            r"C:\a\b>c",
+            "C:\\a\\b\"c",
+            r"C:\a\b|c",
+            r"C:\a\b?c",
+            r"C:\a\b*c",
+            "C:\\a\\b\nc",
+            "C:\\a\\b\0",
+            "C:\\a\\b\u{7f}",
+            r"C:\x\CON",
+            r"C:\x\con.txt",
+            r"C:\x\NUL",
+            r"C:\x\nul.tar.gz",
+            r"C:\x\Prn",
+            r"C:\x\AUX.log",
+            r"C:\x\COM1",
+            r"C:\x\com9.txt",
+            r"C:\x\LPT1",
+            r"C:\x\lpt0.dat",
+            "C:\\x\\COM\u{b9}",
+            "C:\\x\\lpt\u{b2}.txt",
+            r"C:\x\CONIN$",
+            r"C:\x\conout$",
+            r"C:\x\nul .txt",
+            r"C:\CON\file",
+            r"C:\x\NUL\file",
+        ] {
+            assert!(windows(bad).is_err(), "{bad:?} was accepted");
+        }
+        // Bounds: overall bytes and one component.
+        assert!(windows(&format!("C:\\{}", "a".repeat(1024))).is_err());
+        assert!(windows(&format!("C:\\{}", "a".repeat(256))).is_err());
+        assert!(windows(&format!("C:\\{}", "a".repeat(255))).is_ok());
+    }
+
+    #[test]
+    fn windows_collections_deduplicate_case_and_separator_insensitively() {
+        let check = |items: &[&str]| validate_collect_paths_for(GuestOs::Windows, &paths(items));
+        assert!(check(&[r"C:\a\b.txt", r"C:\a\c.txt", r"D:\a\b.txt"]).is_ok());
+        for twice in [
+            vec![r"C:\a\b.txt", r"C:\a\b.txt"],
+            vec![r"C:\a\b.txt", r"c:\A\B.TXT"],
+            vec![r"C:\a\b.txt", "C:/a/b.txt"],
+            vec!["C:/Users/X/f", r"c:\users\x\F"],
+        ] {
+            assert!(check(&twice).is_err(), "{twice:?}");
+        }
+        // Linux stays case-sensitive and separator-exact.
+        assert!(validate_collect_paths(&paths(&["/tmp/a", "/tmp/A"])).is_ok());
+        // A Windows path is not a Linux path and the reverse.
+        assert!(validate_collect_paths(&paths(&[r"C:\a\b"])).is_err());
+        assert!(check(&["/tmp/a"]).is_err());
     }
 
     #[test]

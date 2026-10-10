@@ -1757,6 +1757,7 @@ impl fleet_application::lab::LabReadinessPort for ProvisionReadiness {
         parent_id: &str,
         record: &fleet_application::lab::ProvisionRecord,
         command: &str,
+        guest_os: fleet_core::GuestOs,
         remaining: Duration,
     ) -> Result<bool, String> {
         let child = operations.create(&fleet_auth::LanAllowAllAuthorizer, fleet_auth::LAN_PRINCIPAL_ID,
@@ -1766,6 +1767,7 @@ impl fleet_application::lab::LabReadinessPort for ProvisionReadiness {
                 payload_json: Some(serde_json::json!({
                     "machineId": record.machine_id, "endpointId": record.endpoint_id,
                     "auth": {"type": "agent"}, "script": command,
+                    "guestOs": guest_os.id(),
                     "labParentOperationId": parent_id,
                     "timeoutSeconds": remaining.as_secs().clamp(1, crate::exec::MAX_SCRIPT_TIMEOUT),
                 }).to_string()),
@@ -4460,6 +4462,8 @@ impl LabDispatch {
                 "endpointId": endpoint_id,
                 "auth": {"type": "agent"},
                 "script": payload["script"],
+                // An operation queued before the field existed is Linux.
+                "guestOs": payload["guestOs"].as_str().unwrap_or("linux"),
                 "timeoutSeconds": payload["timeoutSeconds"]
                     .as_u64()
                     .unwrap_or(60)

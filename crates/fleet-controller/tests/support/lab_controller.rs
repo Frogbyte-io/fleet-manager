@@ -438,6 +438,7 @@ impl LabReadinessPort for Readiness {
         _parent_id: &str,
         _record: &ProvisionRecord,
         _command: &str,
+        _guest_os: fleet_core::GuestOs,
         _remaining: std::time::Duration,
     ) -> Result<bool, String> {
         Ok(true)

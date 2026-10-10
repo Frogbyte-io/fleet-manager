@@ -49,6 +49,10 @@ struct SshExecPayload {
     auth: SshExecAuth,
     /// The deadline, in seconds. Bounded hard.
     timeout_seconds: u64,
+    /// The guest's OS, which selects the guest shell. Absent means Linux:
+    /// every non-Lab machine, and operations queued before the field existed.
+    #[serde(default)]
+    guest_os: fleet_core::GuestOs,
 }
 
 /// How the endpoint authenticates.
@@ -116,6 +120,9 @@ struct InventoryPayload {
     auth: SshExecAuth,
     /// The deadline, in seconds. Bounded hard.
     timeout_seconds: u64,
+    /// The guest's OS; absent means Linux.
+    #[serde(default)]
+    guest_os: fleet_core::GuestOs,
 }
 
 impl ScriptExecutor {
@@ -290,6 +297,7 @@ impl ScriptExecutor {
                 }
             },
             timeout_seconds: payload.timeout_seconds,
+            guest_os: payload.guest_os,
         })
         .await
     }
@@ -437,13 +445,14 @@ impl ScriptExecutor {
             SshExecAuth::Agent => SshAuth::Agent,
             SshExecAuth::IdentityFile { path } => SshAuth::IdentityFile { path: path.clone() },
         };
-        let (spec, verified, host) = resolve_ssh_endpoint(
+        let (mut spec, verified, host) = resolve_ssh_endpoint(
             self.machines.as_ref(),
             &payload.machine_id,
             &payload.endpoint_id,
             auth,
         )
         .await?;
+        spec.guest_os = payload.guest_os;
         Ok((spec, verified, host))
     }
 }
