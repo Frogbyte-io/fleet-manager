@@ -1028,6 +1028,16 @@ async fn the_executor_trusts_the_lease_not_the_payload_about_the_guest_os() {
         .await;
     // Claiming Linux, the Windows path is not even a valid payload.
     assert_eq!(done.state, "failed", "{done:?}");
+    // A path that is valid for both rule sets reaches the OS check itself.
+    let done = windows
+        .put_with_payload("C:\\opt\\a.bin", b"x", |payload| {
+            let object = payload.as_object_mut().unwrap();
+            object.remove("guestOs");
+            object.insert("guestPath".to_owned(), "/opt/a.bin".into());
+        })
+        .await;
+    assert_eq!(done.state, "failed", "{done:?}");
+    assert_eq!(error_of(&done)["reason"], "guest_os_mismatch");
     assert!(windows.guest.requests.lock().unwrap().is_empty());
 
     // The reverse claim is refused too.

@@ -132,25 +132,35 @@ $fleetTmp = $null
 $fleetFs = $null
 try {
   do {
-    # Partial files a killed copy left behind: older than an hour, ours by name.
-    try {
-      foreach ($fleetOld in [IO.Directory]::GetFiles($fleetDir, '.fleet-put.*')) {
-        if (([DateTime]::UtcNow - [IO.File]::GetLastWriteTimeUtc($fleetOld)).TotalHours -gt 1) { try { [IO.File]::Delete($fleetOld) } catch { } }
-      }
-    } catch { }
     if ([IO.File]::Exists($fleetFull) -or [IO.Directory]::Exists($fleetFull)) {
       if ($fleetOver -ne '1') { $fleetCode = 73; break }
       $fleetItem = Get-Item -LiteralPath $fleetFull -Force
       if ($fleetItem.PSIsContainer -or ($fleetItem.Attributes -band [IO.FileAttributes]::ReparsePoint)) { $fleetCode = 65; break }
       if ($fleetItem.Attributes -band [IO.FileAttributes]::ReadOnly) { $fleetCode = 74; break }
     }
+    # Partial files a killed copy left behind, ours by name. The threshold is
+    # longer than the longest put deadline (6 hours) plus a margin, so a
+    # stalled concurrent put never loses its live temporary file. It runs only
+    # after the refusals above, so a refused put touches nothing.
+    try {
+      foreach ($fleetOld in [IO.Directory]::GetFiles($fleetDir, '.fleet-put.*')) {
+        if (([DateTime]::UtcNow - [IO.File]::GetLastWriteTimeUtc($fleetOld)).TotalHours -gt 7) { try { [IO.File]::Delete($fleetOld) } catch { } }
+      }
+    } catch { }
+    # The temporary name adds 44 characters to the directory; keep the whole
+    # path inside MAX_PATH instead of failing later as a copy error.
+    if ($fleetWindows -and ($fleetDir.Length + 44) -gt 259) { $fleetCode = 64; break }
     $fleetTmp = [IO.Path]::Combine($fleetDir, '.fleet-put.' + [Guid]::NewGuid().ToString('N'))
     try {
-      # Delete sharing only: nothing else can read or write the temporary file
-      # while it is written, hashed and renamed (the handle stays open across
-      # the rename, so the bytes that were hashed are the bytes published).
-      $fleetFs = New-Object IO.FileStream($fleetTmp, [IO.FileMode]::CreateNew, [IO.FileAccess]::Write, [IO.FileShare]::Delete, 65536)
+      # Read and Delete sharing, no writer: nobody can change the bytes while
+      # they are written, hashed and renamed (the handle stays open across the
+      # rename, so the bytes that were hashed are the bytes published). File.Replace
+      # opens the replacement for read and delete, so it needs both. A
+      # same-privilege process could still swap the file through Delete
+      # sharing; the directory's ACL is the boundary.
+      $fleetFs = New-Object IO.FileStream($fleetTmp, [IO.FileMode]::CreateNew, [IO.FileAccess]::Write, [IO.FileShare]'Read,Delete', 65536)
     } catch [UnauthorizedAccessException] { $fleetTmp = $null; $fleetCode = 71; break
+    } catch [IO.PathTooLongException] { $fleetTmp = $null; $fleetCode = 64; break
     } catch { $fleetTmp = $null; $fleetCode = 79; break }
     try { [IO.File]::SetAttributes($fleetTmp, [IO.FileAttributes]'Hidden,Temporary') } catch { }
     $fleetHasher = [Security.Cryptography.SHA256]::Create()
@@ -176,6 +186,7 @@ try {
       $fleetItem = Get-Item -LiteralPath $fleetFull -Force
       if ($fleetItem.Attributes -band [IO.FileAttributes]::ReparsePoint) { $fleetCode = 65; break }
       if ($fleetItem.Attributes -band [IO.FileAttributes]::ReadOnly) { $fleetCode = 74; break }
+      $fleetOldAttr = $fleetItem.Attributes
       try { [IO.File]::Replace($fleetTmp, $fleetFull, [NullString]::Value) } catch { $fleetCode = 77; break }
       $fleetReplaced = $true
     } else {
@@ -186,9 +197,15 @@ try {
     }
     $fleetFs.Dispose()
     $fleetFs = $null
-    # The published file is an ordinary file: not hidden or temporary, and a
-    # replaced file does not keep the old file's Zone.Identifier stream.
-    try { [IO.File]::SetAttributes($fleetFull, [IO.FileAttributes]::Normal) } catch { }
+    # The published file is not hidden or temporary, and a replaced file keeps
+    # its own other attributes (it was not read-only) but not the old file's
+    # Zone.Identifier stream.
+    try {
+      $fleetAttr = [IO.FileAttributes]::Normal
+      if ($fleetReplaced) { $fleetAttr = $fleetOldAttr -band (-bnot [IO.FileAttributes]'Hidden,Temporary,ReadOnly') }
+      if ($fleetAttr -eq 0) { $fleetAttr = [IO.FileAttributes]::Normal }
+      [IO.File]::SetAttributes($fleetFull, $fleetAttr)
+    } catch { [Console]::Error.WriteLine('fleet: the published file kept its temporary attributes') }
     if ($fleetReplaced -and $fleetWindows) { try { Remove-Item -LiteralPath $fleetFull -Stream Zone.Identifier -ErrorAction Stop } catch { } }
     $fleetCode = 0
   } while ($false)
@@ -676,7 +693,7 @@ mod tests {
             let fresh = dir.path().join(".fleet-put.fresh");
             std::fs::write(&stale, b"x").unwrap();
             std::fs::write(&fresh, b"x").unwrap();
-            let old = std::time::SystemTime::now() - std::time::Duration::from_hours(2);
+            let old = std::time::SystemTime::now() - std::time::Duration::from_hours(8);
             std::fs::File::options()
                 .write(true)
                 .open(&stale)
