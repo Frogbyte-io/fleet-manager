@@ -1446,6 +1446,8 @@ fn mask_json_argv_array(items: &mut [serde_json::Value]) {
         if tool == Some(Tool::Htpasswd) {
             if word.starts_with('-') {
                 htpasswd.flags(&word);
+            } else if word == "\\" {
+                // A line continuation is not an argument.
             } else {
                 htpasswd.argument(index - 1, index - 1);
             }
@@ -1577,8 +1579,12 @@ fn is_test_log_value(key: &str, value: &str) -> bool {
             .and_then(|name| name.rsplit_once('.'))
             .is_some_and(|(stem, extension)| {
                 !stem.is_empty()
-                    && (1..=5).contains(&extension.len())
-                    && extension.chars().all(|c| c.is_ascii_alphanumeric())
+                    && [
+                        "sh", "js", "ts", "py", "rs", "go", "rb", "t", "bats", "php", "java", "c",
+                        "cc", "cpp", "h", "test", "exp",
+                    ]
+                    .iter()
+                    .any(|known| extension.eq_ignore_ascii_case(known))
             });
     let suite = head.split_once("::").is_some_and(|(left, right)| {
         !left.is_empty()
@@ -1810,12 +1816,17 @@ fn credentials_pass(text: &str) -> String {
 /// One forward pass; nothing is re-read.
 #[must_use]
 pub fn strip_terminal_escapes(text: &str) -> String {
+    strip_escapes(text, true)
+}
+
+/// [`strip_terminal_escapes`], with or without the written-out forms.
+fn strip_escapes(text: &str, literal: bool) -> String {
     let bytes = text.as_bytes();
     let mut result = String::with_capacity(text.len());
     let mut copied = 0;
     let mut at = 0;
     while at < bytes.len() {
-        if let Some(len) = escape_len(bytes, at) {
+        if let Some(len) = escape_len(bytes, at, literal) {
             result.push_str(&text[copied..at]);
             at += len;
             copied = at;
@@ -1828,11 +1839,11 @@ pub fn strip_terminal_escapes(text: &str) -> String {
 }
 
 /// The length of the terminal escape sequence that starts at `at`, if one does.
-fn escape_len(bytes: &[u8], at: usize) -> Option<usize> {
+fn escape_len(bytes: &[u8], at: usize, literal: bool) -> Option<usize> {
     let rest = &bytes[at..];
     match rest[0] {
         0x1b => Some(1 + escape_body_len(bytes, at + 1, false)?),
-        b'\\' => {
+        b'\\' if literal => {
             // `\u001b`, `\x1b` or `\033` followed by `[` or `]`: an escape
             // written out in JSON or a debug dump.
             let literal = ["\\u001b", "\\u001B", "\\x1b", "\\x1B", "\\033"]
@@ -1925,14 +1936,41 @@ enum Soft {
 /// and a lone `\r` made a space: the form every rule scans. `\n` always
 /// stays; `\t` and `\r\n` stay unless `whitespace` flattens them too.
 fn normalize(text: &str, soft: Soft, whitespace: bool) -> String {
-    let stripped = strip_terminal_escapes(text);
+    normalize_with(text, soft, whitespace, true)
+}
+
+/// How many times stripping and flattening repeat: removing one sequence can
+/// join the pieces of another (`\u001b\u001b[0m[0m`). The cap keeps the cost
+/// a constant factor.
+const MAX_NORMALIZE_PASSES: usize = 4;
+
+fn normalize_with(text: &str, soft: Soft, whitespace: bool, literal: bool) -> String {
+    let mut current = normalize_once(text, soft, whitespace, literal);
+    for _ in 0..MAX_NORMALIZE_PASSES {
+        let next = normalize_once(&current, soft, whitespace, literal);
+        if next == current {
+            break;
+        }
+        current = next;
+    }
+    current
+}
+
+fn normalize_once(text: &str, soft: Soft, whitespace: bool, literal: bool) -> String {
+    let stripped = strip_escapes(text, literal);
     let mut result = String::with_capacity(stripped.len());
     let mut chars = stripped.chars().peekable();
     while let Some(c) = chars.next() {
         match c {
             '\n' => result.push('\n'),
             '\t' if !whitespace => result.push('\t'),
-            '\r' if !whitespace && chars.peek() == Some(&'\n') => result.push('\r'),
+            '\r' if chars.peek() == Some(&'\n') => {
+                // CRLF: stored text drops the `\r`, so `\` + CRLF stays a
+                // line continuation.
+                if !whitespace {
+                    result.push('\r');
+                }
+            }
             '\t' | '\r' | '\u{b}' | '\u{c}' | '\u{85}' => result.push(' '),
             c if c.is_control() => {
                 if soft == Soft::Space {
@@ -1954,7 +1992,7 @@ fn has_noise(text: &str) -> bool {
 /// Whether `text` has a terminal escape sequence, written out ones included.
 fn has_escape(text: &str) -> bool {
     let bytes = text.as_bytes();
-    (0..bytes.len()).any(|at| escape_len(bytes, at).is_some())
+    (0..bytes.len()).any(|at| escape_len(bytes, at, true).is_some())
 }
 
 /// Whether `text` has a control character whose treatment is a choice.
@@ -1978,7 +2016,11 @@ fn scrub_normalized(text: &str, whitespace: bool, pass: impl Fn(&str) -> String 
         return spaced;
     }
     let deleted = settle(&normalize(text, Soft::Delete, whitespace), pass);
-    if deleted.len() < spaced.len() {
+    // The variant that masks more wins (a deleted separator joins words and
+    // hides a flag); on a tie the shorter one, which has the split value
+    // joined back.
+    let masks = |text: &str| text.matches(MASK).count();
+    if (masks(&deleted), spaced.len()) > (masks(&spaced), deleted.len()) {
         deleted
     } else {
         spaced
@@ -1989,7 +2031,7 @@ fn scrub_normalized(text: &str, whitespace: bool, pass: impl Fn(&str) -> String 
 /// newlines) to spaces: hostile terminal output stays data.
 #[must_use]
 pub fn flatten_control_characters(text: &str) -> String {
-    normalize(text, Soft::Space, true)
+    normalize_with(text, Soft::Space, true, false)
 }
 
 /// The bound for stored result and failure text; output is trimmed to fit.
@@ -2064,12 +2106,7 @@ fn redact_json_at(value: &mut serde_json::Value, depth: usize) {
             // string scrub does.
             for _ in 0..=MAX_SETTLE_PASSES {
                 let before = items.clone();
-                for item in items.iter_mut() {
-                    if let Value::String(text) = item {
-                        *text = flatten_control_characters(text);
-                    }
-                }
-                mask_json_argv_array(items);
+                mask_flattened_array(items);
                 for item in items.iter_mut() {
                     if let Value::String(text) = item {
                         *text = scrub_failure_detail(text);
@@ -2090,7 +2127,13 @@ fn redact_json_at(value: &mut serde_json::Value, depth: usize) {
                 // masked whole: the string scrubber never sees key and value
                 // together, so the key's name is the only signal. Control
                 // characters do not hide the name.
-                let key = flatten_control_characters(&key);
+                let deleted = normalize(&key, Soft::Delete, true);
+                let key = normalize(&key, Soft::Space, true);
+                let key = if !names_a_secret(&key) && names_a_secret(&deleted) {
+                    deleted
+                } else {
+                    key
+                };
                 if names_a_secret(&key) {
                     // A `pass` count (`{"pass": 12}`) is not a secret.
                     let numbers =
@@ -2104,6 +2147,41 @@ fn redact_json_at(value: &mut serde_json::Value, depth: usize) {
         }
         _ => {}
     }
+}
+
+/// The array pass over strings with their control characters flattened. A
+/// soft control may separate or split words, so the pass runs both ways and
+/// the result with more masks is kept.
+fn mask_flattened_array(items: &mut [serde_json::Value]) {
+    use serde_json::Value;
+    let flattened = |soft: Soft| -> Vec<Value> {
+        items
+            .iter()
+            .map(|item| match item {
+                Value::String(text) => Value::String(normalize(text, soft, true)),
+                other => other.clone(),
+            })
+            .collect()
+    };
+    let mut spaced = flattened(Soft::Space);
+    mask_json_argv_array(&mut spaced);
+    let has_soft = items
+        .iter()
+        .any(|item| matches!(item, Value::String(text) if has_soft_controls(text)));
+    if has_soft {
+        let mut deleted = flattened(Soft::Delete);
+        mask_json_argv_array(&mut deleted);
+        let masks = |items: &[Value]| {
+            items
+                .iter()
+                .filter(|item| matches!(item, Value::String(text) if text.contains(MASK)))
+                .count()
+        };
+        if masks(&deleted) > masks(&spaced) {
+            spaced = deleted;
+        }
+    }
+    items.clone_from_slice(&spaced);
 }
 
 /// Masks every string and number under a secret-named key; nesting beyond
@@ -2595,6 +2673,7 @@ mod tests {
 
     /// Findings of the Opus audit of #447. Fake values only.
     #[test]
+    #[allow(clippy::too_many_lines)]
     fn audit_findings_are_masked_or_kept() {
         let cases = [
             // A control character inside a value, or as a separator.
@@ -2653,6 +2732,26 @@ mod tests {
                 "argv=[\"mysql\",\"-pfakepw1\"]",
                 "argv=[\"mysql\",\"-p***\"]",
             ),
+            // Second audit: NUL-separated argv keeps its masks.
+            (
+                "mysql\0--password\0fakepw1\0--host\0db\0",
+                "mysql --password *** --host db ",
+            ),
+            (
+                "sshpass\0-p\0fakepw1\0ssh\0host\0",
+                "sshpass -p *** ssh host ",
+            ),
+            ("\u{7f}\u{7f}\u{7f}\u{7f}mysql -pfakepw1", "mysql -p***"),
+            // Removing one escape can join the pieces of another.
+            (r"token\u001b\u001b[0m[0m=fakepw1", "token=***"),
+            ("token\\u001b\0[0m=fakepw1", "token=***"),
+            // CRLF continuation.
+            (
+                "htpasswd -b /etc/f \\\r\n  bob fakepw1",
+                "htpasswd -b /etc/f \\\r\n  bob ***",
+            ),
+            // Test-log paths need a known extension.
+            ("pass: aB3/xY9.qZ", "pass: ***"),
         ];
         for (input, expected) in cases {
             let out = redact_credentials(input);
@@ -2673,6 +2772,18 @@ mod tests {
             (
                 serde_json::json!({"pass": "Test1234!"}),
                 serde_json::json!({"pass": "***"}),
+            ),
+            (
+                serde_json::json!({"pass\u{7}word": "fakepw1", "to\u{7f}ken": "fakepw1"}),
+                serde_json::json!({"password": "***", "token": "***"}),
+            ),
+            (
+                serde_json::json!(["--password\u{0}", "fakepw1"]),
+                serde_json::json!(["--password", "***"]),
+            ),
+            (
+                serde_json::json!(["htpasswd", "-b", "f", "\\", "bob", "fakepw1"]),
+                serde_json::json!(["htpasswd", "-b", "f", "\\", "bob", "***"]),
             ),
         ] {
             let mut value = input.clone();
@@ -3147,6 +3258,10 @@ mod tests {
             "a\u{7}b ",
             "password=a\u{7}",
             "--password\0",
+            "\\u001b\\u001b[0m[0m",
+            "\\u001b\u{7f}[",
+            "token\u{1b}\0[0m=",
+            "\r\n",
             "\r",
             "[\\\"--password\\\", \\\"",
             "{\\\"password\\\":",
