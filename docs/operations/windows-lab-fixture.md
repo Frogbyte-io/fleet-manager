@@ -170,7 +170,9 @@ Read from `crates/fleet-controller/src/lab_pool.rs`, `docs/architecture/lab.md` 
 
 The current pool flow does not prevent any of this, so no code change is required. The Proxmox token needs `VM.Audit`, `VM.Snapshot.Rollback` and `VM.PowerMgmt` on `/vms/<member-vmid>`; the fixture token has them through `PVEVMAdmin`. Two things to say in `lab.md`, not code: that a Windows member must be booted past specialize before its baseline, and that the retail key is entered in the member, not in the image or recipe. This runbook is the place until a Windows guide exists. A possible later convenience is `lab pool member-create` (clone from the image and register), which stays out of scope here because Fleet deliberately never creates a member's guest.
 
-Not verified yet: a snapshot and rollback of a guest with a `tpmstate0` volume on `local-lvm` (PVE supports snapshots with vTPM state on snapshot-capable storage; it must be confirmed on the first Windows member), and that Windows keeps its activation across Fleet's rollback. Both are checked when the first member exists.
+**Activation is optional.** An unactivated Windows 11 runs OpenSSH, PowerShell, updates and applications normally; it only shows a watermark and locks personalization, which no Lab check depends on. The first member (below) was built unactivated: skip step 2 and check in step 3 only that `sshd` is running. A retail key activates one machine at a time, so a pool larger than one needs a key per member.
+
+The snapshot and rollback of a member with a `tpmstate0` volume on `local-lvm` is verified (see Evidence, pool member). That Windows keeps an activation across Fleet's rollback is still not verified, because the first member is unactivated; the activation would be inside the same snapshot as the TPM state and the disk.
 
 ## Evidence
 
@@ -188,7 +190,19 @@ Run on 2026-10-10 against `dev` at `987c22f` (controller built from the same com
 | Lab templates | `windows11` (`--guest-os windows --cleanup revert --probe guest_agent`) and `windows11-fleetadmin`, the same plus `sshUser: fleetadmin` through `POST /api/v1/lab/templates`. The CLI has no SSH user flag and defaults to `root`, which does not exist on this image, so a lease needs the second template |
 | Ids | recorded in the PR and the issue (they belong to the temporary controller's database, so they are not repeated in Git) |
 
-Not verified: the machine SID of clones, a lease on these templates (stream J, #441), TPM snapshot and rollback of a pool member, activation (the operator's), a Packer build that re-generalizes the image.
+### Pool member
+
+Run on 2026-10-13 against the same temporary controller (a superset of `dev` with the #441 fixes), template `windows11-fleetadmin` (cleanup `revert`).
+
+| Item | Result |
+|---|---|
+| Member | VMID 7140 `win-pool-1`, `qm clone 7100 7140 --full 1`, booted past specialize, **not activated** (`SoftwareLicensingProduct.LicenseStatus` 5), TPM ready, BitLocker off, `sshd` running |
+| Baseline | `Stop-Computer`, then `qm snapshot 7140 baseline`: LVM-thin snapshots of `scsi0`, `efidisk0` **and `tpmstate0`** |
+| Pool | `lab pool create --size 1 --baseline baseline`, `lab pool fill --vmid 7140 --wait`: succeeded, member `available` |
+| Lease 1 | `lab create ... --wait` ready in 14 s (a clone lease takes about 20 min). `lab exec` as `fleetadmin`: TPM ready, wrote `C:\fleet-marker.txt`. `lab destroy` released it in 4 s and the member returned to `available` |
+| Lease 2 | ready on the same VMID; the marker is gone, TPM still ready after the rollback, a fresh boot, and the **same SSH host key** (SHA-256 of `ssh_host_ed25519_key.pub` identical to lease 1) |
+
+Not verified: the machine SID of clones, activation across a rollback (the member is unactivated), a Packer build that re-generalizes the image.
 
 ## Host changes
 
@@ -198,6 +212,7 @@ Not verified: the machine SID of clones, a lease on these templates (stream J, #
 | `fleet-win-cfg.iso` (0600) | host ISO storage `local` | deleted by `detach-media` (done) |
 | `windows11-x64-multi.iso` (9 GB) | host ISO storage `local` | `rm` the file; kept for rebuilds |
 | VM 7100 template and 7110 (the Fleet image's template) | `local-lvm`, tag `fleet-pve-test` | `qm destroy <id> --purge 1` |
+| VM 7140 `win-pool-1` (revert-pool member) with snapshot `baseline` | `local-lvm` | `lab pool drain`, `lab pool delete`, then `qm destroy 7140 --purge 1` |
 | Throwaway VM 7199 created to validate the VM definition, then destroyed | | already removed |
 | ACLs | none | the fixture token's `/vms` grant already covers these VMIDs |
 
