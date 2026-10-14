@@ -252,6 +252,7 @@ if ($fleetUser) {
     # Reads of the run's files go through a handle opened without following
     # a reparse point and checked on that same handle (no reparse point, not
     # a directory, one link).
+    try {
     Add-Type -TypeDefinition @'
 using System;
 using System.IO;
@@ -264,6 +265,12 @@ public static class FleetFile {
   static extern SafeFileHandle CreateFileW(string name, uint access, uint share, IntPtr sa, uint disp, uint flags, IntPtr tmpl);
   [DllImport("kernel32.dll", SetLastError = true)]
   static extern bool GetFileInformationByHandle(SafeFileHandle h, out BY_HANDLE_FILE_INFORMATION info);
+  public static FileStream CreateNew(string path) {
+    // CREATE_NEW | FILE_FLAG_OPEN_REPARSE_POINT: never follows a link, fails if anything is there.
+    SafeFileHandle h = CreateFileW(path, 0x40000000 | 0x00040000, 0, IntPtr.Zero, 1, 0x00200000, IntPtr.Zero);
+    if (h.IsInvalid) throw new IOException("create failed " + Marshal.GetLastWin32Error());
+    return new FileStream(h, FileAccess.Write, 4096, false);
+  }
   public static FileStream Open(string path) {
     SafeFileHandle h = CreateFileW(path, 0x80000000, 7, IntPtr.Zero, 3, 0x00200000, IntPtr.Zero);
     if (h.IsInvalid) return null;
@@ -273,6 +280,7 @@ public static class FleetFile {
   }
 }
 '@
+    } catch { [Console]::Error.WriteLine('fleet: the file helper could not be compiled on this guest'); exit 79 }
     $fleetLeafSid = $fleetISid
   }
 }
@@ -302,6 +310,18 @@ function fleetWriteFile($path, [byte[]]$bytes) {
   } else {
     [IO.File]::WriteAllBytes($path, $bytes)
   }
+}
+function fleetCreateNew($path) {
+  if ($fleetWindows -and $fleetLeafSid) {
+    $sec = New-Object Security.AccessControl.FileSecurity
+    $sec.SetAccessRuleProtection($true, $false)
+    foreach ($sid in $fleetTrusted) { $sec.AddAccessRule((New-Object Security.AccessControl.FileSystemAccessRule($sid, 'FullControl', 'None', 'None', 'Allow'))) }
+    $sec.AddAccessRule((New-Object Security.AccessControl.FileSystemAccessRule($fleetLeafSid, 'ReadAndExecute', 'None', 'None', 'Allow')))
+    $fs = [FleetFile]::CreateNew($path)
+    try { $fs.SetAccessControl($sec) } catch { $fs.Dispose(); throw }
+    return $fs
+  }
+  return (New-Object IO.FileStream($path, [IO.FileMode]::CreateNew, [IO.FileAccess]::Write, [IO.FileShare]::None))
 }
 function fleetGrantUser($path) {
   # Only now, with the sentinel and the scripts in place, may the user write
@@ -518,11 +538,11 @@ if ($fleetLeafSid -and -not (fleetSecure $fleetDir $true)) { exit 71 }
 function fleetGiveUp {
   $won = $false
   try {
-    $g = New-Object IO.FileStream([IO.Path]::Combine($fleetDir, 'gate'), [IO.FileMode]::CreateNew, [IO.FileAccess]::Write, [IO.FileShare]::None)
+    $g = fleetCreateNew ([IO.Path]::Combine($fleetDir, 'gate'))
     $g.Dispose()
     $won = $true
   } catch { }
-  if ($won) { try { (New-Object IO.FileStream([IO.Path]::Combine($fleetDir, 'abandoned'), [IO.FileMode]::CreateNew, [IO.FileAccess]::Write, [IO.FileShare]::None)).Dispose() } catch { } }
+  if ($won) { try { (fleetCreateNew ([IO.Path]::Combine($fleetDir, 'abandoned'))).Dispose() } catch { } }
   return $won
 }
 $fleetRun = [IO.Path]::Combine($fleetDir, 'run.ps1')
@@ -630,7 +650,7 @@ if (-not $fleetWait) {
 /// that exists but is not Active. `WTSEnumerateSessions` and
 /// `WTSQuerySessionInformation` (user and domain) need no elevation; `quser`
 /// output is localized and `Get-Process -IncludeUserName` needs elevation.
-const WINDOWS_SESSION_FIND: &str = r#"Add-Type -TypeDefinition @'
+const WINDOWS_SESSION_FIND: &str = r#"try { Add-Type -TypeDefinition @'
 using System;
 using System.Collections.Generic;
 using System.Runtime.InteropServices;
@@ -664,6 +684,7 @@ public static class FleetSessions {
   }
 }
 '@
+} catch { [Console]::Error.WriteLine('fleet: the session helper could not be compiled on this guest'); exit 79 }
 $fleetSessionId = -1
 $fleetSessionState = ''
 foreach ($fleetEntry in [FleetSessions]::Sessions($env:COMPUTERNAME, $fleetUser)) {
@@ -792,10 +813,18 @@ if (-not [IO.Directory]::Exists($fleetDir)) {
   [Console]::Out.Write("state=absent`n")
   exit 0
 }
-if (-not (fleetSecure $fleetDir ($fleetDir -eq $fleetIDir))) { exit 71 }
+$fleetHalf = $false
+if (-not (fleetSecure $fleetDir ($fleetDir -eq $fleetIDir))) {
+  # A directory the administrator created but did not finish (crashed between
+  # the create and the grant) has a trusted-only ACL and no user grant: it
+  # never started anything.
+  if ($fleetDir -eq $fleetIDir -and (fleetSecure $fleetDir)) { $fleetHalf = $true } else { exit 71 }
+}
 $fleetState = ''
 $fleetReason = ''
-if (fleetReg $fleetExit) {
+if ($fleetHalf) {
+  if (([DateTime]::UtcNow - (New-Object IO.DirectoryInfo $fleetDir).CreationTimeUtc).TotalSeconds -lt 60) { $fleetState = 'starting' } else { $fleetState = 'lost'; $fleetReason = 'never_started' }
+} elseif (fleetReg $fleetExit) {
   $fleetState = 'exited'
 } elseif (fleetReg $fleetPid) {
   # A boot counter that is unknown on either side is not evidence of a
@@ -1654,7 +1683,7 @@ mod tests {
         fn the_session_helper_compiles() {
             let Some(pwsh) = require_pwsh() else { return };
             let find = WINDOWS_SESSION_FIND;
-            let end = find.find("\n'@\n").unwrap() + 4;
+            let end = find.find("exit 79 }\n").unwrap() + "exit 79 }\n".len();
             let snippet = format!(
                 "{}\n[Console]::Out.Write([FleetSessions].FullName)\n",
                 &find[..end]

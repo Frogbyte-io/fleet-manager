@@ -242,7 +242,7 @@ Release QA needs a packaged desktop app to run in a real user session, not the n
 
 Image requirements for the test user: no `SeCreateSymbolicLinkPrivilege` (the Windows default is Administrators only) and Developer Mode off. The run's files live under `%ProgramData%\fleet-lab\interactive\<handle>`, which the administrator owns; the user can add files there but cannot delete the administrator's (see the ADR amendment).
 
-Errors you can see in the result's stderr (`fleet:` prefix, never the command): exit 71 the handle directory is not trusted (wrong owner or ACL), 72 the command could not be written, exit 77 no Active session for the user (names the user and the WTS state), 78 the account or profile is missing, 75/76 the task never started or the start is unconfirmed, 70 the run reported no exit status in time. Linux guests answer `unsupported`.
+Errors you can see in the result's stderr (`fleet:` prefix, never the command): exit 71 the handle directory is not trusted (wrong owner or ACL), 72 the command could not be written, exit 77 no Active session for the user (names the user and the WTS state), 78 the account or profile is missing, 79 a guest helper could not be compiled, 75/76 the task never started or the start is unconfirmed, 70 the run reported no exit status in time. Linux guests answer `unsupported`.
 
 ### Live verification (Windows 11 Pro 26300, Windows PowerShell 5.1.26100, in-box OpenSSH 9.5.6.2)
 
