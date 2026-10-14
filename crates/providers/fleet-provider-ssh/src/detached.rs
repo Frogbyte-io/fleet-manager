@@ -1531,6 +1531,20 @@ mod tests {
         }
 
         #[test]
+        fn the_session_helper_compiles() {
+            let Some(pwsh) = require_pwsh() else { return };
+            let find = WINDOWS_SESSION_FIND;
+            let end = find.find("\n'@\n").unwrap() + 4;
+            let snippet = format!(
+                "{}\n[Console]::Out.Write([FleetSessions].FullName)\n",
+                &find[..end]
+            );
+            let out = run_ps(&pwsh, &snippet, &ScriptMetadata::default(), b"", None);
+            assert_eq!(out.status.code(), Some(0), "{out:?}");
+            assert!(String::from_utf8_lossy(&out.stdout).contains("FleetSessions"));
+        }
+
+        #[test]
         fn interactive_scripts_parse_and_refuse_bad_user_names_before_doing_anything() {
             let Some(pwsh) = require_pwsh() else { return };
             for script in [
@@ -1907,7 +1921,9 @@ mod tests {
             // test executes (it calls kernel32). It must at least compile, so
             // a typo does not wait for a Windows guest to be found.
             let start = start_script_for(GuestShell::PowerShell, "exit 0");
-            let from = start.find("Add-Type -TypeDefinition @'\n").unwrap();
+            let from = start
+                .find("Add-Type -TypeDefinition @'\nusing System;\nusing System.Runtime.InteropServices;\npublic static class FleetLaunch")
+                .unwrap();
             let end = from + start[from..].find("\n'@\n").unwrap() + 4;
             let snippet = format!(
                 "{}\n[Console]::Out.Write([FleetLaunch]::Start.GetType().Name + ' ' + [FleetLaunch].FullName)\n",
