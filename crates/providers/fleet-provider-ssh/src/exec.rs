@@ -251,7 +251,7 @@ fn execute_script_inner(
     let started = Instant::now();
     // The script rides stdin; nothing else is written after it.
     let mut child =
-        crate::shell::spawn_script_session(provider, endpoint, metadata, script, deadline)?;
+        crate::shell::spawn_exec_session(provider, endpoint, metadata, script, deadline)?;
     drop(child.stdin.take());
 
     // Reader threads drain the pipes so a silent remote session cannot wedge

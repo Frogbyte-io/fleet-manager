@@ -67,6 +67,42 @@ impl GuestShell {
         }
     }
 
+    /// The command string for a synchronous exec: the same as
+    /// [`Self::command_line`] on Linux, and [`POWERSHELL_EXEC_BOOTSTRAP`]
+    /// (which runs the script under a guest-side watchdog) on Windows.
+    pub(crate) fn exec_command_line(self, metadata: &ScriptMetadata) -> String {
+        match self {
+            Self::Posix => self.command_line(metadata),
+            Self::PowerShell => POWERSHELL_EXEC_BOOTSTRAP.to_owned(),
+        }
+    }
+
+    /// The session input for a synchronous exec: unchanged on Linux; on
+    /// Windows the usual two lines, then the watchdog and the guest-side
+    /// limit in seconds for `deadline`.
+    pub(crate) fn exec_session_input(
+        self,
+        script: &str,
+        metadata: &ScriptMetadata,
+        deadline: Duration,
+    ) -> Vec<u8> {
+        match self {
+            Self::Posix => self.session_input(script, metadata),
+            Self::PowerShell => {
+                let mut input = self.session_input(script, metadata);
+                input.extend_from_slice(
+                    format!(
+                        "{}\n{}\n",
+                        watchdog_base64(),
+                        guest_deadline_seconds(deadline)
+                    )
+                    .as_bytes(),
+                );
+                input
+            }
+        }
+    }
+
     /// The bytes written to the session's stdin before any payload: the
     /// prologue and the script.
     pub(crate) fn session_input(self, script: &str, metadata: &ScriptMetadata) -> Vec<u8> {
@@ -94,7 +130,9 @@ impl GuestShell {
 /// directory that is not an existing local directory, or an environment
 /// entry that cannot be applied exits 90 without echoing any caller text.
 /// Syntax is Windows PowerShell 5.1.
-pub const POWERSHELL_BOOTSTRAP: &str = concat!(
+macro_rules! powershell_bootstrap {
+    ($read:expr, $start:expr, $stop:expr) => {
+        concat!(
     "$ErrorActionPreference='Stop';",
     "$ProgressPreference='SilentlyContinue';",
     "try{[Console]::OutputEncoding=New-Object System.Text.UTF8Encoding($false)}catch{};",
@@ -107,6 +145,7 @@ pub const POWERSHELL_BOOTSTRAP: &str = concat!(
     "try{",
     "$fleetMeta=[System.Text.Encoding]::UTF8.GetString([Convert]::FromBase64String((fleetLine))).Split([char]0);",
     "$fleetText=[System.Text.Encoding]::UTF8.GetString([Convert]::FromBase64String((fleetLine)));",
+    $read,
     "$i=1;$fleetEnv=@();",
     "while($i -lt $fleetMeta.Length -and $fleetMeta[$i] -ne ''){$fleetEnv+=$fleetMeta[$i];$i++};",
     "$i++;$fleetArgs=@();",
@@ -120,14 +159,111 @@ pub const POWERSHELL_BOOTSTRAP: &str = concat!(
     "foreach($e in $fleetEnv){$k=$e.IndexOf('=');",
     "[Environment]::SetEnvironmentVariable($e.Substring(0,$k),$e.Substring($k+1),'Process')}",
     "}catch{[Console]::Error.WriteLine('fleet: the session header, working directory or environment cannot be applied');exit 90};",
+    $start,
     "$fleetBlock=[scriptblock]::Create($fleetText+[Environment]::NewLine+[Environment]::NewLine+'$global:fleetOk=$?');",
     "Remove-Variable i,d,e,k,m,b,fleetMeta,fleetEnv,fleetText -ErrorAction SilentlyContinue;",
     "$ErrorActionPreference='Continue';$global:fleetOk=$null;$global:LASTEXITCODE=$null;",
     "Invoke-Command -ScriptBlock $fleetBlock -ArgumentList $fleetArgs;",
+    $stop,
     "if($global:fleetOk -eq $false){$fleetC=1;",
     "if($global:LASTEXITCODE){$fleetC=[int]$global:LASTEXITCODE;if(($fleetC -band 255) -eq 0){$fleetC=1}};",
     "exit $fleetC}else{exit 0}"
+)
+    };
+}
+
+/// The bootstrap for everything except a synchronous exec; see the macro.
+pub const POWERSHELL_BOOTSTRAP: &str = powershell_bootstrap!("", "", "");
+
+/// The bootstrap for a synchronous `exec` (see [`WATCHDOG_SCRIPT`]): the
+/// same as [`POWERSHELL_BOOTSTRAP`], plus two more stdin lines after the
+/// script (the watchdog, and the limit in seconds) and a guest-side
+/// watchdog started before the script runs. The limit must be 1 to 5 ASCII
+/// digits with a value of 1 to 86400, and the watchdog text must be base64;
+/// anything else exits 90 without running the script, as does a watchdog that
+/// cannot be started. After the script ends the watchdog is stopped.
+pub const POWERSHELL_EXEC_BOOTSTRAP: &str = powershell_bootstrap!(
+    concat!(
+        "$fleetWdText=[Convert]::ToBase64String([Convert]::FromBase64String((fleetLine)));",
+        "$fleetLimitText=fleetLine;",
+        "if($fleetLimitText.Length -lt 1 -or $fleetLimitText.Length -gt 5){throw 'limit'};",
+        "foreach($c in $fleetLimitText.ToCharArray()){if([int]$c -lt 48 -or [int]$c -gt 57){throw 'limit'}};",
+        "$fleetLimit=[int]::Parse($fleetLimitText,[Globalization.CultureInfo]::InvariantCulture);",
+        "if($fleetLimit -lt 1 -or $fleetLimit -gt 86400){throw 'limit'};",
+    ),
+    concat!(
+        "try{",
+        "$fleetPsi=New-Object System.Diagnostics.ProcessStartInfo;",
+        "$fleetPsi.FileName=[System.Diagnostics.Process]::GetCurrentProcess().MainModule.FileName;",
+        "$fleetPsi.Arguments='-NoProfile -NonInteractive -EncodedCommand '+$fleetWdText;",
+        "$fleetPsi.UseShellExecute=$false;$fleetPsi.CreateNoWindow=$true;",
+        "$fleetPsi.RedirectStandardInput=$true;$fleetPsi.RedirectStandardOutput=$true;$fleetPsi.RedirectStandardError=$true;",
+        "$fleetPsi.EnvironmentVariables['FLEET_WD_PID']=[string]$PID;",
+        "$fleetPsi.EnvironmentVariables['FLEET_WD_SECONDS']=[string]$fleetLimit;",
+        "$fleetWd=[System.Diagnostics.Process]::Start($fleetPsi);",
+        "$fleetWd.StandardInput.Close()",
+        "}catch{[Console]::Error.WriteLine('fleet: the deadline watchdog cannot be started');exit 90};",
+    ),
+    "try{$fleetWd.Kill()}catch{};"
 );
+
+/// The watchdog the exec bootstrap starts as a separate PowerShell process
+/// (fixed text, sent as base64 of its UTF-16 bytes for `-EncodedCommand`; no
+/// caller data is in it). It reads the session PowerShell's pid and the limit
+/// from `FLEET_WD_PID` and `FLEET_WD_SECONDS`, both integers the bootstrap
+/// wrote itself. It waits for that process to end; if it is still running
+/// when the limit is up, counted from the watchdog's own start so its
+/// startup is not added, it stops the parent and then the parent's child
+/// process trees with `taskkill /F /T`. It runs on its own thread of
+/// control, so it works when the script is blocked reading stdin or sleeping.
+pub const WATCHDOG_SCRIPT: &str = "$ErrorActionPreference = 'SilentlyContinue'
+$ProgressPreference = 'SilentlyContinue'
+try {
+  $fleetParentId = [int]$env:FLEET_WD_PID
+  $fleetSeconds = [int]$env:FLEET_WD_SECONDS
+  $fleetParent = [System.Diagnostics.Process]::GetProcessById($fleetParentId)
+  $fleetMe = [System.Diagnostics.Process]::GetCurrentProcess()
+  $fleetUsed = [int64]([DateTime]::Now - $fleetMe.StartTime).TotalMilliseconds
+  $fleetWait = [int64]$fleetSeconds * 1000 - $fleetUsed
+  if ($fleetWait -lt 0) { $fleetWait = 0 }
+  if ($fleetWait -gt 2000000000) { $fleetWait = 2000000000 }
+  if ($fleetParent.WaitForExit([int]$fleetWait)) { exit 0 }
+  $fleetKids = @(Get-CimInstance -ClassName Win32_Process -Filter ('ParentProcessId=' + $fleetParentId) | Where-Object { $_.ProcessId -ne $fleetMe.Id })
+  try { $fleetParent.Kill() } catch { }
+  $fleetTaskkill = [System.IO.Path]::Combine($env:SystemRoot, 'System32', 'taskkill.exe')
+  foreach ($fleetKid in $fleetKids) {
+    $fleetPsi = New-Object System.Diagnostics.ProcessStartInfo
+    $fleetPsi.FileName = $fleetTaskkill
+    $fleetPsi.Arguments = '/F /T /PID ' + [string][int]$fleetKid.ProcessId
+    $fleetPsi.UseShellExecute = $false
+    $fleetPsi.CreateNoWindow = $true
+    $fleetK = [System.Diagnostics.Process]::Start($fleetPsi)
+    [void]$fleetK.WaitForExit(10000)
+  }
+} catch { }
+";
+
+/// The limit the exec bootstrap accepts, in seconds.
+pub const MAX_GUEST_DEADLINE_SECS: u64 = 86_400;
+
+/// The guest-side limit for a controller deadline: whole seconds, rounded
+/// up (the guest never gives up before the controller), at least 1 and at
+/// most [`MAX_GUEST_DEADLINE_SECS`].
+#[must_use]
+pub fn guest_deadline_seconds(deadline: Duration) -> u64 {
+    let whole = deadline
+        .as_secs()
+        .saturating_add(u64::from(deadline.subsec_nanos() > 0));
+    whole.clamp(1, MAX_GUEST_DEADLINE_SECS)
+}
+
+fn watchdog_base64() -> String {
+    let utf16: Vec<u8> = WATCHDOG_SCRIPT
+        .encode_utf16()
+        .flat_map(u16::to_le_bytes)
+        .collect();
+    base64::engine::general_purpose::STANDARD.encode(utf16)
+}
 
 /// Refuses metadata the framing cannot carry faithfully. A NUL byte is the
 /// framing's field separator, so one inside a field would shift every field
@@ -178,6 +314,30 @@ pub(crate) fn spawn_script_session(
     script: &str,
     deadline: Duration,
 ) -> Result<std::process::Child, SshProviderError> {
+    spawn_session(provider, endpoint, metadata, script, deadline, false)
+}
+
+/// Like [`spawn_script_session`] for a synchronous exec: on a Windows guest
+/// the script runs under the guest-side watchdog, so its process tree ends
+/// at `deadline` even though killing the local `ssh` does not end it.
+pub(crate) fn spawn_exec_session(
+    provider: &SshProvider,
+    endpoint: &SshConnectionSpec,
+    metadata: &ScriptMetadata,
+    script: &str,
+    deadline: Duration,
+) -> Result<std::process::Child, SshProviderError> {
+    spawn_session(provider, endpoint, metadata, script, deadline, true)
+}
+
+fn spawn_session(
+    provider: &SshProvider,
+    endpoint: &SshConnectionSpec,
+    metadata: &ScriptMetadata,
+    script: &str,
+    deadline: Duration,
+    watched: bool,
+) -> Result<std::process::Child, SshProviderError> {
     let shell = GuestShell::for_os(endpoint.guest_os)?;
     validate_metadata(metadata)?;
     let config_path = provider.write_config(&endpoint.auth)?;
@@ -196,7 +356,11 @@ pub(crate) fn spawn_script_session(
     }
     crate::add_ssh_destination(&mut command, endpoint);
     command
-        .arg(shell.command_line(metadata))
+        .arg(if watched {
+            shell.exec_command_line(metadata)
+        } else {
+            shell.command_line(metadata)
+        })
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped());
@@ -208,7 +372,12 @@ pub(crate) fn spawn_script_session(
         tool: "ssh",
         detail: "the ssh process has no stdin".to_owned(),
     })?;
-    if let Err(error) = stdin.write_all(&shell.session_input(script, metadata)) {
+    let input = if watched {
+        shell.exec_session_input(script, metadata, deadline)
+    } else {
+        shell.session_input(script, metadata)
+    };
+    if let Err(error) = stdin.write_all(&input) {
         let _ = child.kill();
         let _ = child.wait();
         return Err(SshProviderError::Tool {
@@ -231,7 +400,7 @@ pub(crate) fn arguments_only(arguments: Vec<String>) -> ScriptMetadata {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::pwsh_support::{require_pwsh, run_ps, run_ps_raw, text};
+    use crate::pwsh_support::{require_pwsh, run_ps, run_ps_exec, run_ps_raw, text};
 
     #[test]
     fn the_posix_framing_is_the_bash_framing() {
@@ -503,6 +672,147 @@ mod tests {
             None,
         );
         assert_eq!(text(&out.stdout), "True");
+    }
+
+    #[test]
+    fn the_exec_bootstrap_is_fixed_text_in_the_same_safe_alphabet() {
+        let shell = GuestShell::for_os(GuestOs::Windows).unwrap();
+        let hostile = ScriptMetadata {
+            working_directory: "C:\\x\" & calc".to_owned(),
+            environment: vec![("K".to_owned(), "\"; rm".to_owned())],
+            arguments: vec!["'\"%PATH%\"".to_owned()],
+        };
+        assert_eq!(shell.exec_command_line(&hostile), POWERSHELL_EXEC_BOOTSTRAP);
+        assert_eq!(
+            shell.exec_command_line(&ScriptMetadata::default()),
+            POWERSHELL_EXEC_BOOTSTRAP
+        );
+        let forbidden = [
+            '"', '\\', '`', '%', '^', '&', '|', '<', '>', '\n', '\r', '\0',
+        ];
+        assert!(
+            POWERSHELL_EXEC_BOOTSTRAP
+                .chars()
+                .all(|c| c.is_ascii() && !forbidden.contains(&c)),
+            "{POWERSHELL_EXEC_BOOTSTRAP}"
+        );
+        assert!(POWERSHELL_EXEC_BOOTSTRAP.len() < 4096);
+        // Other transfers keep the bootstrap without a watchdog.
+        assert!(!POWERSHELL_BOOTSTRAP.contains("fleetWd"));
+        assert!(POWERSHELL_EXEC_BOOTSTRAP.contains("fleetWd"));
+        // Linux is untouched.
+        let posix = GuestShell::for_os(GuestOs::Linux).unwrap();
+        let limit = Duration::from_secs(5);
+        assert_eq!(
+            posix.exec_command_line(&hostile),
+            posix.command_line(&hostile)
+        );
+        assert_eq!(
+            posix.exec_session_input("echo\n", &hostile, limit),
+            posix.session_input("echo\n", &hostile)
+        );
+    }
+
+    #[test]
+    fn the_exec_session_input_adds_the_watchdog_and_a_validated_integer_limit() {
+        let shell = GuestShell::for_os(GuestOs::Windows).unwrap();
+        let metadata = ScriptMetadata::default();
+        let input = String::from_utf8(shell.exec_session_input(
+            "Write-Output hi\n",
+            &metadata,
+            Duration::from_millis(1500),
+        ))
+        .unwrap();
+        let lines: Vec<&str> = input.split('\n').collect();
+        assert_eq!(lines.len(), 5, "{input:?}");
+        assert!(lines[4].is_empty());
+        let plain = String::from_utf8(shell.session_input("Write-Output hi\n", &metadata)).unwrap();
+        assert!(input.starts_with(&plain));
+        let watchdog = base64::engine::general_purpose::STANDARD
+            .decode(lines[2])
+            .unwrap();
+        let units: Vec<u16> = watchdog
+            .chunks(2)
+            .map(|pair| u16::from_le_bytes([pair[0], pair[1]]))
+            .collect();
+        assert_eq!(String::from_utf16(&units).unwrap(), WATCHDOG_SCRIPT);
+        assert_eq!(lines[3], "2", "1.5 s rounds up to 2");
+        // The fixed watchdog carries no caller data and uses taskkill's tree kill.
+        assert!(WATCHDOG_SCRIPT.contains("taskkill.exe"));
+        assert!(WATCHDOG_SCRIPT.contains("/F /T /PID"));
+    }
+
+    #[test]
+    fn the_guest_limit_is_whole_seconds_rounded_up_and_clamped() {
+        let secs = |ms: u64| guest_deadline_seconds(Duration::from_millis(ms));
+        assert_eq!(secs(0), 1);
+        assert_eq!(secs(1), 1);
+        assert_eq!(secs(1000), 1);
+        assert_eq!(secs(1001), 2);
+        assert_eq!(secs(900_000), 900);
+        assert_eq!(secs(u64::MAX / 2), MAX_GUEST_DEADLINE_SECS);
+        assert_eq!(
+            guest_deadline_seconds(Duration::MAX),
+            MAX_GUEST_DEADLINE_SECS
+        );
+    }
+
+    #[test]
+    fn powershell_exec_runs_under_the_watchdog_and_keeps_its_exit_codes() {
+        let Some(pwsh) = require_pwsh() else { return };
+        let limit = Duration::from_secs(60);
+        let out = run_ps_exec(
+            &pwsh,
+            "Write-Output 'out-line'\n[Console]::Error.WriteLine('err-line')\n",
+            limit,
+            None,
+        );
+        assert_eq!(out.status.code(), Some(0), "{out:?}");
+        assert_eq!(text(&out.stdout), "out-line\n");
+        assert_eq!(text(&out.stderr), "err-line\n");
+        for (script, want) in [
+            ("exit 7\n", 7),
+            ("& /bin/sh -c 'exit 3'\n", 3),
+            ("throw 'x'\n", 1),
+        ] {
+            let out = run_ps_exec(&pwsh, script, limit, None);
+            assert_eq!(out.status.code(), Some(want), "{script}: {out:?}");
+        }
+    }
+
+    #[test]
+    fn powershell_exec_refuses_a_bad_limit_or_watchdog_with_90_and_runs_nothing() {
+        let Some(pwsh) = require_pwsh() else { return };
+        let good = watchdog_base64();
+        let limit = Duration::from_secs(60);
+        for (watchdog, line) in [
+            (good.as_str(), ""),
+            (good.as_str(), "0"),
+            (good.as_str(), "86401"),
+            (good.as_str(), "100000"),
+            (good.as_str(), "-5"),
+            (good.as_str(), "+5"),
+            (good.as_str(), "5.0"),
+            (good.as_str(), "0x10"),
+            (good.as_str(), "1e3"),
+            (good.as_str(), "5 "),
+            (good.as_str(), "5; exit 0"),
+            (good.as_str(), "\u{663}"),
+            (good.as_str(), "$(exit 0)"),
+            ("!!!not base64!!!", "60"),
+        ] {
+            let out = run_ps_exec(&pwsh, "Write-Output ran\n", limit, Some((watchdog, line)));
+            // A trailing space is trimmed by the line reader and is valid.
+            if line == "5 " {
+                assert_eq!(out.status.code(), Some(0), "{line:?}: {out:?}");
+                continue;
+            }
+            assert_eq!(out.status.code(), Some(90), "{line:?}: {out:?}");
+            assert!(!text(&out.stdout).contains("ran"), "{line:?}");
+        }
+        // The end of the input before the limit line is a refused header.
+        let out = run_ps_raw(&pwsh, b"");
+        assert_eq!(out.status.code(), Some(90));
     }
 
     #[test]

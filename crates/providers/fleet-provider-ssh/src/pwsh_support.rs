@@ -95,3 +95,41 @@ pub(crate) fn require_pwsh() -> Option<String> {
     }
     found
 }
+
+/// Runs `script` through the real exec bootstrap, with the session input
+/// the provider builds for `deadline`, or with `limit_line` and
+/// `watchdog_line` replaced by raw text.
+pub(crate) fn run_ps_exec(
+    pwsh: &str,
+    script: &str,
+    deadline: std::time::Duration,
+    overrides: Option<(&str, &str)>,
+) -> std::process::Output {
+    use base64::Engine as _;
+    let shell = GuestShell::for_os(GuestOs::Windows).unwrap();
+    let metadata = ScriptMetadata::default();
+    let input = match overrides {
+        None => shell.exec_session_input(script, &metadata, deadline),
+        Some((watchdog, limit)) => format!(
+            "{}\n{}\n{watchdog}\n{limit}\n",
+            crate::exec::encode_metadata(&metadata),
+            base64::engine::general_purpose::STANDARD.encode(script.as_bytes())
+        )
+        .into_bytes(),
+    };
+    let mut child = std::process::Command::new(pwsh)
+        .arg("-Command")
+        .arg(shell.exec_command_line(&metadata))
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut pipe = child.stdin.take().unwrap();
+    let writer = std::thread::spawn(move || {
+        let _ = pipe.write_all(&input);
+    });
+    let out = child.wait_with_output().unwrap();
+    let _ = writer.join();
+    out
+}
