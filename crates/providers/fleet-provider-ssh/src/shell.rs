@@ -204,7 +204,9 @@ pub const POWERSHELL_BOOTSTRAP: &str = powershell_bootstrap!("", "", "");
 /// watchdog started before the script runs. The limit must be 1 to 5 ASCII
 /// digits with a value of 1 to 86400, and the watchdog text must be base64;
 /// anything else exits 90 without running the script, as does a watchdog that
-/// cannot be started. After the script ends the watchdog is stopped. The script runs exactly as under [`POWERSHELL_BOOTSTRAP`] (no `try` around it), so error and exit-code behaviour is identical.
+/// cannot be started. After the script ends the watchdog is stopped. The
+/// script runs exactly as under [`POWERSHELL_BOOTSTRAP`] (no `try` around
+/// it), so error and exit-code behaviour is identical.
 pub const POWERSHELL_EXEC_BOOTSTRAP: &str = powershell_bootstrap!(
     concat!(
         "$fleetWdText=[Convert]::ToBase64String([Convert]::FromBase64String((fleetLine)));",
@@ -985,6 +987,11 @@ mod tests {
             "& /bin/sh -c 'exit 3'\n",
             "& /bin/sh -c 'exit 3'\nWrite-Output after\n",
             "[Console]::Error.WriteLine('err')\nexit 0\n",
+            "Write-Error 'x'\n",
+            "Write-Error 'x'\nWrite-Output after\n",
+            "$ErrorActionPreference = 'Stop'\n[int]::Parse('x')\nWrite-Output after\n",
+            "try { [int]::Parse('x') } catch { Write-Output caught }\nWrite-Output after\n",
+            "exit 256\n",
         ];
         for script in scripts {
             let plain = run_ps(&pwsh, script, &ScriptMetadata::default(), b"", None);
