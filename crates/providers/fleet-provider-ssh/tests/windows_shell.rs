@@ -389,11 +389,11 @@ fn a_detached_command_outlives_its_ssh_session_and_status_reads_it_back() {
     assert_eq!(started.exit_code, Some(0), "{started:?}");
     assert_eq!(started.stdout.trim(), "started");
     // The start session has ended; the command keeps running.
-    let running = probe_detached(&provider, &limiter, &spec, &handle).unwrap();
+    let running = probe_detached(&provider, &limiter, &spec, None, &handle).unwrap();
     assert_eq!(running.state, GuestState::Running, "{running:?}");
     let begun = std::time::Instant::now();
     let report = loop {
-        let report = probe_detached(&provider, &limiter, &spec, &handle).unwrap();
+        let report = probe_detached(&provider, &limiter, &spec, None, &handle).unwrap();
         if report.state == GuestState::Exited {
             break report;
         }

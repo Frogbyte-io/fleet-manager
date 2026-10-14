@@ -10117,6 +10117,13 @@
             "type": "string",
             "description": "The shell script to run (at most 64 KiB). It is never audited and\nthe detached-exec record keeps only its SHA-256 and size. Like `lab\nexec`, the queued operation's payload holds it, and the guest keeps it\nin `cmd.sh`."
           },
+          "session": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "`service` (the default) or `interactive`: the template's interactive\ntest user's desktop session (Windows guests only)."
+          },
           "timeoutSeconds": {
             "type": [
               "integer",
@@ -10138,6 +10145,13 @@
           "script": {
             "type": "string",
             "description": "The shell script to run (at most 64 KiB). It is never audited."
+          },
+          "session": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "`service` (the default) runs in the SSH login's session;\n`interactive` runs in the template's interactive test user's\ndesktop session (Windows guests whose template declares one)."
           },
           "timeoutSeconds": {
             "type": [
@@ -10884,6 +10898,13 @@
             "type": "string",
             "description": "The pinned image version id."
           },
+          "interactiveUser": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The local account whose desktop session `--session interactive`\nruns in (a name only, never a password); Windows guests only."
+          },
           "memoryMib": {
             "type": "integer",
             "format": "int32",
@@ -11017,6 +11038,13 @@
           "imageVersionId": {
             "type": "string",
             "description": "The pinned image version id."
+          },
+          "interactiveUser": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The local account whose desktop session `--session interactive`\nruns in (a name only, never a password); Windows guests only."
           },
           "memoryMib": {
             "type": "integer",
@@ -13270,6 +13298,13 @@
                 "imageVersionId": {
                   "type": "string",
                   "description": "The pinned image version id."
+                },
+                "interactiveUser": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "description": "The local account whose desktop session `--session interactive`\nruns in (a name only, never a password); Windows guests only."
                 },
                 "memoryMib": {
                   "type": "integer",
@@ -16653,6 +16688,13 @@
                 "type": "string",
                 "description": "The pinned image version id."
               },
+              "interactiveUser": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "description": "The local account whose desktop session `--session interactive`\nruns in (a name only, never a password); Windows guests only."
+              },
               "memoryMib": {
                 "type": "integer",
                 "format": "int32",
@@ -18530,6 +18572,13 @@
           "imageVersionId": {
             "type": "string",
             "description": "The pinned image version id."
+          },
+          "interactiveUser": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The local account whose desktop session `--session interactive`\nruns in: a name only, never a password. Windows guests only."
           },
           "memoryMib": {
             "type": "integer",

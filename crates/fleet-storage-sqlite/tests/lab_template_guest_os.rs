@@ -83,6 +83,7 @@ async fn a_row_without_a_declared_guest_os_reads_as_linux_and_bad_values_are_ref
             &NewLabTemplate {
                 content: LabTemplateContent {
                     guest_os: GuestOs::default(),
+                    interactive_user: None,
                     ..content(GuestOs::Linux)
                 },
             },
@@ -97,4 +98,54 @@ async fn a_row_without_a_declared_guest_os_reads_as_linux_and_bad_values_are_ref
         .execute(store.pool())
         .await;
     assert!(refused.is_err());
+}
+
+#[tokio::test]
+async fn the_interactive_user_survives_create_update_and_publish() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::open(&dir.path().join("fleet.db")).await.unwrap();
+    let labs = LabRepository::new(store.pool().clone());
+    let mut with_user = content(GuestOs::Windows);
+    with_user.interactive_user = Some("qa".to_owned());
+    let created = labs
+        .create(
+            &NewLabTemplate {
+                content: with_user.clone(),
+            },
+            NOW,
+        )
+        .await
+        .unwrap();
+    assert_eq!(created.content.interactive_user.as_deref(), Some("qa"));
+    let cleared = labs
+        .update(&created.id, &content(GuestOs::Windows), NOW)
+        .await
+        .unwrap();
+    assert_eq!(cleared.content.interactive_user, None);
+    let again = labs.update(&created.id, &with_user, NOW).await.unwrap();
+    let version = labs
+        .publish(
+            &created.id,
+            &fleet_application::lab::LabTemplateVersion {
+                id: "version-iu".to_owned(),
+                template_id: created.id.clone(),
+                name: again.content.name.clone(),
+                content: again.content.clone(),
+                image_digest: "sha256:fixture".to_owned(),
+                published_by: "tester".to_owned(),
+                published_at: NOW,
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(version.content.interactive_user.as_deref(), Some("qa"));
+    assert_eq!(
+        labs.get_version("version-iu")
+            .await
+            .unwrap()
+            .content
+            .interactive_user
+            .as_deref(),
+        Some("qa")
+    );
 }

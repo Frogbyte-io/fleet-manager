@@ -112,6 +112,7 @@ impl GuestExecPort for LocalGuest {
         _: &str,
         _: &str,
         _: fleet_core::GuestOs,
+        _: Option<&str>,
         handle: &str,
     ) -> Result<GuestProcess, String> {
         use std::io::Write as _;
@@ -191,6 +192,15 @@ impl Fixture {
 
     /// The same, for a template that declares the guest OS.
     async fn with_os(owner: &str, guest_os: fleet_core::GuestOs) -> Self {
+        Self::with_user(owner, guest_os, None).await
+    }
+
+    /// The same, for a template that also declares an interactive user.
+    async fn with_user(
+        owner: &str,
+        guest_os: fleet_core::GuestOs,
+        interactive_user: Option<&str>,
+    ) -> Self {
         let dir = tempfile::tempdir().unwrap();
         let store = Store::open(&dir.path().join("fleet.db")).await.unwrap();
         let guest_base = dir.path().join("guest-exec");
@@ -217,6 +227,7 @@ impl Fixture {
             cleanup: CleanupStrategy::Destroy,
             audio: None,
             guest_os,
+            interactive_user: interactive_user.map(str::to_owned),
         };
         let template: LabTemplate = LabTemplatePort::create(
             labs.as_ref(),
@@ -406,6 +417,7 @@ impl Fixture {
                 &self.lease_id,
                 script,
                 timeout,
+                fleet_core::ExecSession::Service,
                 key,
                 fleet_core::SystemClock::now_unix_millis(),
             )
@@ -981,6 +993,7 @@ async fn a_windows_lease_prepares_a_windows_start_and_the_executor_checks_the_le
     let payload: serde_json::Value =
         serde_json::from_str(prepared.operation.payload_json.as_deref().unwrap()).unwrap();
     assert_eq!(payload["guestOs"], "windows");
+    assert_eq!(payload["session"], "service");
 
     // A start queued without `guestOs` (an older controller) claims Linux
     // and is refused on a Windows lease before any session starts.
@@ -1159,6 +1172,7 @@ impl GuestExecPort for UnconfirmedGuest {
         _: &str,
         _: &str,
         _: fleet_core::GuestOs,
+        _: Option<&str>,
         _: &str,
     ) -> Result<GuestProcess, String> {
         Ok(GuestProcess {
@@ -1242,4 +1256,67 @@ async fn status_reads_are_audited_once_a_minute_per_handle() {
     let _ = std::process::Command::new("pkill")
         .args(["-f", "sleep 29.71"])
         .status();
+}
+
+#[tokio::test]
+async fn an_interactive_start_follows_the_templates_user_and_is_refused_elsewhere() {
+    async fn prepare(fixture: &Fixture) -> Result<PreparedStart, LabUseCaseError> {
+        fixture
+            .detach
+            .prepare_start(
+                &fleet_auth::LanAllowAllAuthorizer,
+                &lan(),
+                &fixture.lease_id,
+                "notepad",
+                None,
+                fleet_core::ExecSession::Interactive,
+                None,
+                fleet_core::SystemClock::now_unix_millis(),
+            )
+            .await
+    }
+    let windows = Fixture::with_user("tester", fleet_core::GuestOs::Windows, Some("qa")).await;
+    let prepared = prepare(&windows).await.unwrap();
+    let payload: serde_json::Value =
+        serde_json::from_str(prepared.operation.payload_json.as_deref().unwrap()).unwrap();
+    assert_eq!(payload["session"], "interactive");
+    assert_eq!(payload["interactiveUser"], "qa");
+    assert!(
+        !prepared
+            .operation
+            .payload_json
+            .as_deref()
+            .unwrap()
+            .contains("assword")
+    );
+    assert!(
+        windows
+            .audit_events()
+            .await
+            .iter()
+            .any(|event| event.contains("interactive")),
+        "the audit names the session"
+    );
+    // A payload edited to a hostile user name is refused before any guest session.
+    let mut hostile = prepared.clone();
+    let mut edited = payload;
+    edited["interactiveUser"] = serde_json::json!("qa' ; calc");
+    hostile.operation.payload_json = Some(edited.to_string());
+    let handle = windows.queue(&hostile).await;
+    let done = windows.run(&handle).await;
+    assert_eq!(done.state, "failed", "{done:?}");
+    assert!(
+        done.error_json
+            .as_deref()
+            .unwrap_or_default()
+            .contains("invalid_session"),
+        "{done:?}"
+    );
+
+    let no_user = Fixture::with_os("tester", fleet_core::GuestOs::Windows).await;
+    let error = prepare(&no_user).await.unwrap_err().to_string();
+    assert!(error.contains("no interactive user"), "{error}");
+    let linux = Fixture::new("tester").await;
+    let error = prepare(&linux).await.unwrap_err().to_string();
+    assert!(error.contains("unsupported"), "{error}");
 }

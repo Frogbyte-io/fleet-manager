@@ -1682,6 +1682,57 @@ impl ProvisionReadiness {
     }
 }
 
+impl ProvisionReadiness {
+    #[allow(clippy::too_many_arguments)]
+    async fn run_probe(
+        &self,
+        operations: &Operations,
+        parent_id: &str,
+        record: &fleet_application::lab::ProvisionRecord,
+        command: &str,
+        arguments: &[String],
+        guest_os: fleet_core::GuestOs,
+        remaining: Duration,
+    ) -> Result<bool, String> {
+        let child = operations.create(&fleet_auth::LanAllowAllAuthorizer, fleet_auth::LAN_PRINCIPAL_ID,
+            &fleet_application::operation::NewOperation {
+                kind: "ssh.exec".to_owned(), idempotency_key: None,
+                deadline_at: record.readiness_deadline_at, correlation_id: Some(record.id.clone()), review_token: None,
+                payload_json: Some(serde_json::json!({
+                    "machineId": record.machine_id, "endpointId": record.endpoint_id,
+                    "auth": {"type": "agent"}, "script": command,
+                    "arguments": arguments,
+                    "guestOs": guest_os.id(),
+                    "labParentOperationId": parent_id,
+                    "timeoutSeconds": remaining.as_secs().clamp(1, crate::exec::MAX_SCRIPT_TIMEOUT),
+                }).to_string()),
+            }).await.map_err(|_| "SSH probe operation could not be created")?;
+        let deadline = tokio::time::Instant::now() + remaining;
+        loop {
+            let finished = self.execute_child(operations, &child.id).await?;
+            if finished.cancel_requested {
+                return Err("SSH probe was cancelled".to_owned());
+            }
+            if !matches!(finished.state.as_str(), "pending" | "running") {
+                return Ok(finished.state == "succeeded");
+            }
+            if tokio::time::Instant::now() >= deadline
+                || operations.cancel_requested(parent_id).await.unwrap_or(true)
+            {
+                let _ = operations
+                    .cancel(
+                        &fleet_auth::LanAllowAllAuthorizer,
+                        fleet_auth::LAN_PRINCIPAL_ID,
+                        &child.id,
+                    )
+                    .await;
+                return Err("SSH probe deadline expired".to_owned());
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    }
+}
+
 #[async_trait::async_trait]
 impl fleet_application::lab::LabReadinessPort for ProvisionReadiness {
     async fn trust(
@@ -1760,41 +1811,42 @@ impl fleet_application::lab::LabReadinessPort for ProvisionReadiness {
         guest_os: fleet_core::GuestOs,
         remaining: Duration,
     ) -> Result<bool, String> {
-        let child = operations.create(&fleet_auth::LanAllowAllAuthorizer, fleet_auth::LAN_PRINCIPAL_ID,
-            &fleet_application::operation::NewOperation {
-                kind: "ssh.exec".to_owned(), idempotency_key: None,
-                deadline_at: record.readiness_deadline_at, correlation_id: Some(record.id.clone()), review_token: None,
-                payload_json: Some(serde_json::json!({
-                    "machineId": record.machine_id, "endpointId": record.endpoint_id,
-                    "auth": {"type": "agent"}, "script": command,
-                    "guestOs": guest_os.id(),
-                    "labParentOperationId": parent_id,
-                    "timeoutSeconds": remaining.as_secs().clamp(1, crate::exec::MAX_SCRIPT_TIMEOUT),
-                }).to_string()),
-            }).await.map_err(|_| "SSH probe operation could not be created")?;
-        let deadline = tokio::time::Instant::now() + remaining;
-        loop {
-            let finished = self.execute_child(operations, &child.id).await?;
-            if finished.cancel_requested {
-                return Err("SSH probe was cancelled".to_owned());
-            }
-            if !matches!(finished.state.as_str(), "pending" | "running") {
-                return Ok(finished.state == "succeeded");
-            }
-            if tokio::time::Instant::now() >= deadline
-                || operations.cancel_requested(parent_id).await.unwrap_or(true)
-            {
-                let _ = operations
-                    .cancel(
-                        &fleet_auth::LanAllowAllAuthorizer,
-                        fleet_auth::LAN_PRINCIPAL_ID,
-                        &child.id,
-                    )
-                    .await;
-                return Err("SSH probe deadline expired".to_owned());
-            }
-            tokio::time::sleep(Duration::from_millis(50)).await;
-        }
+        self.run_probe(
+            operations,
+            parent_id,
+            record,
+            command,
+            &[],
+            guest_os,
+            remaining,
+        )
+        .await
+    }
+
+    /// Readiness for an interactive test user (#397): true once that user
+    /// has an Active desktop session on the guest. The guest script reads
+    /// the session table only; its refusal text names the user and the WTS
+    /// state, never a credential.
+    async fn interactive_session(
+        &self,
+        operations: &Operations,
+        parent_id: &str,
+        record: &fleet_application::lab::ProvisionRecord,
+        user: &str,
+        remaining: Duration,
+    ) -> Result<bool, String> {
+        fleet_core::validate_interactive_user_name(user)?;
+        let metadata = fleet_provider_ssh::detached::session_probe_metadata(user);
+        self.run_probe(
+            operations,
+            parent_id,
+            record,
+            &fleet_provider_ssh::detached::session_probe_script(),
+            &metadata.arguments,
+            fleet_core::GuestOs::Windows,
+            remaining,
+        )
+        .await
     }
 
     async fn create_project(
@@ -4456,6 +4508,57 @@ impl LabDispatch {
         };
         let mut ssh = operation.clone();
         ssh.kind = "ssh.exec".to_owned();
+        // An interactive-session run (#397): the same supervisor as a
+        // detached command, started as the interactive user in its desktop
+        // session, waited for inside one SSH exec. The rule was applied when
+        // the operation was created; it is checked again here because the
+        // payload is data.
+        let session = payload["session"].as_str().unwrap_or("service");
+        if session != "service" {
+            let guest_os = payload["guestOs"].as_str().unwrap_or("linux");
+            let user = payload["interactiveUser"].as_str().unwrap_or_default();
+            let resolved = fleet_core::ExecSession::from_id(session).and_then(|session| {
+                session.resolve(
+                    fleet_core::GuestOs::from_id(guest_os)?,
+                    Some(user).filter(|user| !user.is_empty()),
+                )
+            });
+            let user = match resolved {
+                Ok(Some(user)) => user.to_owned(),
+                Ok(None) => String::new(),
+                Err(detail) => return refuse("invalid_session", detail).await,
+            };
+            if let Err(detail) = fleet_core::validate_interactive_user_name(&user) {
+                return refuse("invalid_session", detail).await;
+            }
+            let seconds = payload["timeoutSeconds"]
+                .as_u64()
+                .unwrap_or(60)
+                .clamp(1, fleet_application::lab::MAX_LAB_EXEC_INTERACTIVE_SECONDS);
+            let script = fleet_provider_ssh::detached::interactive_start_script(
+                payload["script"].as_str().unwrap_or_default(),
+                true,
+            );
+            let metadata = fleet_provider_ssh::detached::interactive_start_metadata(
+                &operation.id,
+                seconds,
+                &user,
+            );
+            ssh.payload_json = Some(
+                serde_json::json!({
+                    "machineId": machine_id,
+                    "endpointId": endpoint_id,
+                    "auth": {"type": "agent"},
+                    "script": script,
+                    "arguments": metadata.arguments,
+                    "guestOs": "windows",
+                    // The guest bound, the start and the wait margin.
+                    "timeoutSeconds": seconds + fleet_application::lab::INTERACTIVE_EXEC_MARGIN_SECONDS,
+                })
+                .to_string(),
+            );
+            return self.fallback.execute(operations, &ssh).await;
+        }
         ssh.payload_json = Some(
             serde_json::json!({
                 "machineId": machine_id,

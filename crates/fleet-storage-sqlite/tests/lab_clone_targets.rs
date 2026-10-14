@@ -369,6 +369,16 @@ impl fleet_application::lab::LabReadinessPort for Readiness {
             Ok(true)
         }
     }
+    async fn interactive_session(
+        &self,
+        _operations: &fleet_application::operation::Operations,
+        _parent_id: &str,
+        _record: &fleet_application::lab::ProvisionRecord,
+        _user: &str,
+        _remaining: std::time::Duration,
+    ) -> Result<bool, String> {
+        Ok(true)
+    }
     async fn ssh_probe(
         &self,
         _operations: &fleet_application::operation::Operations,

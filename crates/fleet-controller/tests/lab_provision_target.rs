@@ -977,6 +977,7 @@ impl Harness {
             cleanup: CleanupStrategy::Destroy,
             audio,
             guest_os: fleet_core::GuestOs::default(),
+            interactive_user: None,
         };
         let template: LabTemplate = LabTemplatePort::create(
             labs.as_ref(),
@@ -1688,6 +1689,22 @@ impl fleet_application::lab::LabReadinessPort for ReadyPorts {
             Ok(true)
         }
     }
+    async fn interactive_session(
+        &self,
+        _operations: &Operations,
+        _parent_id: &str,
+        _record: &ProvisionRecord,
+        user: &str,
+        _remaining: std::time::Duration,
+    ) -> Result<bool, String> {
+        self.calls.lock().unwrap().push("session");
+        assert_eq!(user, "qa");
+        if self.fail == Some("session") {
+            Err("unsafe session diagnostic".to_owned())
+        } else {
+            Ok(true)
+        }
+    }
     async fn ssh_probe(
         &self,
         _operations: &Operations,
@@ -1778,8 +1795,21 @@ async fn ready_harness(
     project: bool,
     fail: Option<&'static str>,
 ) -> (Harness, String, ProvisionRecord, Arc<Pve>, Arc<ReadyPorts>) {
+    ready_harness_for(probe, project, fail, None).await
+}
+
+async fn ready_harness_for(
+    probe: ReadinessProbe,
+    project: bool,
+    fail: Option<&'static str>,
+    interactive_user: Option<&str>,
+) -> (Harness, String, ProvisionRecord, Arc<Pve>, Arc<ReadyPorts>) {
     let harness = Harness::new().await;
     let mut version = harness.labs.get_version(&harness.version_id).await.unwrap();
+    if let Some(user) = interactive_user {
+        version.content.guest_os = fleet_core::GuestOs::Windows;
+        version.content.interactive_user = Some(user.to_owned());
+    }
     version.content.readiness_deadline_seconds = 30;
     version.content.readiness_probe = probe;
     version.content.readiness_command = Some("test -f /tmp/ready".to_owned());
@@ -1904,6 +1934,43 @@ async fn each_readiness_failure_names_the_step_and_retains_allocations() {
             fail == "verify"
         );
     }
+}
+
+#[tokio::test]
+async fn an_interactive_user_adds_a_session_step_that_names_its_failure() {
+    // Passing: the session step runs after SSH trust, once.
+    let (harness, lease_id, record, pve, ports) =
+        ready_harness_for(ReadinessProbe::GuestAgent, false, None, Some("qa")).await;
+    let executor = harness.executor(&pve, Some(TEMPLATE_VMID)).with_readiness(
+        ports.clone(),
+        Arc::new(AuditSink::new(harness.pool.clone())),
+    );
+    let (state, _, stored) = harness
+        .run_executor(&pve, executor, &lease_id, &record.id)
+        .await;
+    assert_eq!(state, "succeeded");
+    assert_eq!(stored.state, GuestState::Ready);
+    assert_eq!(*ports.calls.lock().unwrap(), vec!["trust", "session"]);
+
+    // A missing desktop session never passes readiness: it is a named failure.
+    let (harness, lease_id, record, pve, ports) = ready_harness_for(
+        ReadinessProbe::GuestAgent,
+        false,
+        Some("session"),
+        Some("qa"),
+    )
+    .await;
+    let executor = harness
+        .executor(&pve, Some(TEMPLATE_VMID))
+        .with_readiness(ports, Arc::new(AuditSink::new(harness.pool.clone())));
+    let (state, error, stored) = harness
+        .run_executor(&pve, executor, &lease_id, &record.id)
+        .await;
+    assert_eq!(state, "failed");
+    assert_eq!(stored.state, GuestState::NeverReady);
+    assert_eq!(stored.failed_step.as_deref(), Some("interactive_session"));
+    assert!(stored.ready_at.is_none());
+    assert!(!error.unwrap().1.contains("unsafe"));
 }
 
 #[derive(Debug, Default)]

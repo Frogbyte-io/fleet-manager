@@ -231,6 +231,17 @@ Outcome of the points this section used to list as open, from the live run ("Liv
 
 
 
+### Interactive desktop session (`--session interactive`, #397)
+
+Release QA needs a packaged desktop app to run in a real user session, not the non-interactive session 0 `sshd` gives every command. Declare the user on the template and let the image keep that user logged on:
+
+1. **Image recipe or operator: autologon.** Create an unprivileged local account (the "test user") and configure autologon for it, for example with Sysinternals Autologon or the `DefaultUserName` / `DefaultDomainName` / `AutoAdminLogon` Winlogon values and the password as an LSA secret. This is outside Fleet: Fleet never asks for, receives, stores or logs that password, and the template field is a name only. The account must not be the SSH administrator (use `lab exec` without a session for elevated work).
+2. **Template.** `fleetctl lab template-create ... --guest-os windows --interactive-user <name>` (API `interactiveUser`). It is part of the immutable version; a draft re-saved without it loses it. Names are 1 to 20 of `A-Za-z0-9_.-`, local accounts only; a non-Windows template with a user is refused.
+3. **Readiness.** After SSH trust and the probe, a lease is not ready until that user has an Active session. If autologon is broken the provision ends `never_ready` with failed step `interactive_session`. To see why, run on the guest as the SSH user: `Add-Type` is not needed, `quser` shows whether the user is logged on and in which state.
+4. **Use.** `fleetctl lab exec <lease> --session interactive --script --wait -- '<PowerShell>'` returns the exit code and bounded output; `--detach` works the same way and `lab exec-status` is unchanged. The synchronous bound is at most 810 s; use `--detach` for the long-running pattern. The command runs as the test user with a limited token, in a session id above 0, starting in the user's profile directory. The one-off Scheduled Task `\Fleet\fleet-lab-<handle>` is removed once the run has started; the lease's rollback or destruction discards everything else.
+
+Errors you can see in the result's stderr (`fleet:` prefix, never the command): exit 77 no Active session for the user (names the user and the WTS state), 78 the account or profile is missing, 75/76 the task never started or the start is unconfirmed, 70 the run reported no exit status in time. Linux guests answer `unsupported`.
+
 ### Live verification (Windows 11 Pro 26300, Windows PowerShell 5.1.26100, in-box OpenSSH 9.5.6.2)
 
 Run on the #442 fixture (one lease at a time; Proxmox clone, `guestOs: windows`, `sshUser: fleetadmin`, an administrator account) and a local standard account created for the purpose. Reproduce with a lease and `fleetctl lab exec --script`.

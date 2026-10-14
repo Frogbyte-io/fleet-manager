@@ -72,6 +72,7 @@ async fn lab_exec_runs_on_the_lease_machine_and_refuses_an_expired_lease() {
         cleanup: CleanupStrategy::Destroy,
         audio: None,
         guest_os: fleet_core::GuestOs::default(),
+        interactive_user: None,
     };
     let template: LabTemplate = LabTemplatePort::create(
         labs.as_ref(),
@@ -252,6 +253,56 @@ async fn lab_exec_runs_on_the_lease_machine_and_refuses_an_expired_lease() {
     assert_eq!(run(windows).await.state, "succeeded");
     assert_eq!(ssh.0.lock().unwrap()[1].2["guestOs"], "windows");
 
+    // An interactive-session run (#397): one SSH exec of the start-and-wait
+    // script, the user as an argument, the SSH deadline past the bound.
+    let interactive = |guest_os: &str, user: &str, session: &str| {
+        let mut new = queue("notepad");
+        new.payload_json = Some(
+            serde_json::json!({
+                "leaseId": lease.id, "script": "notepad", "timeoutSeconds": 30,
+                "guestOs": guest_os, "session": session, "interactiveUser": user,
+            })
+            .to_string(),
+        );
+        new
+    };
+    let done = run(interactive("windows", "qa", "interactive")).await;
+    assert_eq!(done.state, "succeeded");
+    let seen = ssh.0.lock().unwrap().clone();
+    let (_, kind, payload) = seen.last().unwrap();
+    assert_eq!(kind, "ssh.exec");
+    assert_eq!(payload["guestOs"], "windows");
+    assert_eq!(payload["arguments"][0], done.id.as_str());
+    assert_eq!(payload["arguments"][1], "30");
+    assert_eq!(payload["arguments"][2], "interactive:qa");
+    assert_eq!(payload["timeoutSeconds"], 30 + 90);
+    let script = payload["script"].as_str().unwrap();
+    assert!(script.contains("-LogonType Interactive") && script.contains("fleetEmit"));
+    assert!(
+        !script.contains("notepad"),
+        "the command rides as base64 only"
+    );
+    let before = ssh.0.lock().unwrap().len();
+    // The rule is applied again where the payload is data: a Linux guest, a
+    // missing user and a hostile user name never reach SSH.
+    for (os, user) in [
+        ("linux", "qa"),
+        ("windows", ""),
+        ("windows", "qa; calc"),
+        ("windows", "-x"),
+    ] {
+        let refused = run(interactive(os, user, "interactive")).await;
+        assert_eq!(refused.state, "failed", "{os} {user:?}");
+        assert!(
+            refused
+                .error_json
+                .as_deref()
+                .unwrap_or("")
+                .contains("invalid_session")
+        );
+    }
+    assert_eq!(ssh.0.lock().unwrap().len(), before);
+
     // Expired by the time it runs: refused, nothing reaches SSH.
     let mut expired = leases.get(&lease.id).await.unwrap();
     expired.expires_at = Some(now - 1);
@@ -264,7 +315,7 @@ async fn lab_exec_runs_on_the_lease_machine_and_refuses_an_expired_lease() {
             .unwrap_or_default()
             .contains("lease_not_ready")
     );
-    assert_eq!(ssh.0.lock().unwrap().len(), 2);
+    assert_eq!(ssh.0.lock().unwrap().len(), 3);
 
     // The generic surface refuses the kind outright.
     assert!(

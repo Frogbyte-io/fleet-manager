@@ -1377,6 +1377,12 @@ export interface ExecDetachedRequest {
      */
   script: string;
   /**
+     * `service` (the default) or `interactive`: the template's interactive
+     * test user's desktop session (Windows guests only).
+     * @nullable
+     */
+  session?: string | null;
+  /**
      * The bound in seconds, enforced in the guest. It defaults to, and can
      * never exceed, what is left of the lease's TTL: a detached command
      * cannot outlive its lease or extend it.
@@ -1392,6 +1398,13 @@ export interface ExecDetachedRequest {
 export interface ExecLeaseRequest {
   /** The shell script to run (at most 64 KiB). It is never audited. */
   script: string;
+  /**
+     * `service` (the default) runs in the SSH login's session;
+     * `interactive` runs in the template's interactive test user's
+     * desktop session (Windows guests whose template declares one).
+     * @nullable
+     */
+  session?: string | null;
   /**
      * The deadline, in seconds (1–900; default 60).
      * @minimum 0
@@ -1728,6 +1741,12 @@ export interface LabTemplateContentDto {
   /** The pinned image version id. */
   imageVersionId: string;
   /**
+     * The local account whose desktop session `--session interactive`
+     * runs in (a name only, never a password); Windows guests only.
+     * @nullable
+     */
+  interactiveUser?: string | null;
+  /**
      * The memory in MiB.
      * @minimum 0
      */
@@ -1799,6 +1818,12 @@ export interface LabTemplateDto {
   id: string;
   /** The pinned image version id. */
   imageVersionId: string;
+  /**
+     * The local account whose desktop session `--session interactive`
+     * runs in (a name only, never a password); Windows guests only.
+     * @nullable
+     */
+  interactiveUser?: string | null;
   /**
      * The memory in MiB.
      * @minimum 0
@@ -2897,6 +2922,12 @@ export type PageLabTemplateDtoItemsItem = {
   id: string;
   /** The pinned image version id. */
   imageVersionId: string;
+  /**
+     * The local account whose desktop session `--session interactive`
+     * runs in (a name only, never a password); Windows guests only.
+     * @nullable
+     */
+  interactiveUser?: string | null;
   /**
      * The memory in MiB.
      * @minimum 0
@@ -4920,6 +4951,12 @@ export type ResourceLabTemplateDtoData = {
   /** The pinned image version id. */
   imageVersionId: string;
   /**
+     * The local account whose desktop session `--session interactive`
+     * runs in (a name only, never a password); Windows guests only.
+     * @nullable
+     */
+  interactiveUser?: string | null;
+  /**
      * The memory in MiB.
      * @minimum 0
      */
@@ -6069,6 +6106,12 @@ export interface SaveLabTemplateRequest {
   guestOs?: string;
   /** The pinned image version id. */
   imageVersionId: string;
+  /**
+     * The local account whose desktop session `--session interactive`
+     * runs in: a name only, never a password. Windows guests only.
+     * @nullable
+     */
+  interactiveUser?: string | null;
   /**
      * The memory in MiB.
      * @minimum 0

@@ -130,6 +130,7 @@ impl GuestExecPort for DetachedGuest {
         _: &str,
         _: &str,
         _: fleet_core::GuestOs,
+        _: Option<&str>,
         _: &str,
     ) -> Result<GuestProcess, String> {
         let first = self.reads.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 0;
@@ -250,6 +251,7 @@ async fn publish(labs: &LabRepository, name: &str, cleanup: CleanupStrategy) -> 
         cleanup,
         audio: None,
         guest_os: fleet_core::GuestOs::default(),
+        interactive_user: None,
     };
     let template: LabTemplate = LabTemplatePort::create(
         labs,

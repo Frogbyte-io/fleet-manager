@@ -138,6 +138,9 @@ pub struct LabTemplateDto {
     pub audio: Option<LabAudioDto>,
     /// The guest's operating system: `linux` or `windows`.
     pub guest_os: String,
+    /// The local account whose desktop session `--session interactive`
+    /// runs in (a name only, never a password); Windows guests only.
+    pub interactive_user: Option<String>,
     /// The published version this draft descends from, when any.
     pub published_from: Option<String>,
     /// When the draft was created.
@@ -168,6 +171,7 @@ impl From<LabTemplate> for LabTemplateDto {
             cleanup: template.content.cleanup.id().to_owned(),
             audio: template.content.audio.map(Into::into),
             guest_os: template.content.guest_os.id().to_owned(),
+            interactive_user: template.content.interactive_user,
             published_from: template.published_from,
             created_at: template.created_at,
             updated_at: template.updated_at,
@@ -235,6 +239,9 @@ pub struct LabTemplateContentDto {
     pub audio: Option<LabAudioDto>,
     /// The guest's operating system: `linux` or `windows`.
     pub guest_os: String,
+    /// The local account whose desktop session `--session interactive`
+    /// runs in (a name only, never a password); Windows guests only.
+    pub interactive_user: Option<String>,
 }
 
 impl From<LabTemplateVersion> for LabTemplateVersionDto {
@@ -262,6 +269,7 @@ impl From<LabTemplateVersion> for LabTemplateVersionDto {
                 cleanup: version.content.cleanup.id().to_owned(),
                 audio: version.content.audio.map(Into::into),
                 guest_os: version.content.guest_os.id().to_owned(),
+                interactive_user: version.content.interactive_user,
             },
             image_digest: version.image_digest,
             published_by: version.published_by,
@@ -375,6 +383,10 @@ pub struct SaveLabTemplateRequest {
     /// The guest's operating system: `linux` (the default) or `windows`.
     #[serde(default = "default_lab_guest_os")]
     pub guest_os: String,
+    /// The local account whose desktop session `--session interactive`
+    /// runs in: a name only, never a password. Windows guests only.
+    #[serde(default)]
+    pub interactive_user: Option<String>,
 }
 
 fn default_lab_guest_os() -> String {
@@ -424,6 +436,7 @@ impl SaveLabTemplateRequest {
                 driver: audio.driver,
             }),
             guest_os,
+            interactive_user: self.interactive_user,
         })
     }
 }
@@ -1502,6 +1515,22 @@ pub struct ExecLeaseRequest {
     /// The deadline, in seconds (1–900; default 60).
     #[serde(default)]
     pub timeout_seconds: Option<u64>,
+    /// `service` (the default) runs in the SSH login's session;
+    /// `interactive` runs in the template's interactive test user's
+    /// desktop session (Windows guests whose template declares one).
+    #[serde(default)]
+    pub session: Option<String>,
+}
+
+/// Parses the optional `session` field of an exec request.
+pub(crate) fn parse_session(
+    session: Option<&str>,
+    correlation_id: CorrelationId,
+) -> Result<fleet_core::ExecSession, ApiErrorResponse> {
+    session.map_or(Ok(fleet_core::ExecSession::Service), |value| {
+        fleet_core::ExecSession::from_id(value)
+            .map_err(|detail| crate::machines::invalid_request(&detail, correlation_id))
+    })
 }
 
 /// Runs a command on a ready lease's guest as a `lab.exec` operation. The
@@ -1554,6 +1583,7 @@ pub async fn exec_lab_lease(
             &lease_id,
             &request.script,
             request.timeout_seconds.unwrap_or(60),
+            parse_session(request.session.as_deref(), correlation_id)?,
             // A retried request with the same key returns the original
             // command operation instead of running the script again.
             headers

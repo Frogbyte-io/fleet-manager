@@ -321,6 +321,17 @@ pub trait LabReadinessPort: fmt::Debug + Send + Sync {
         guest_os: fleet_core::GuestOs,
         remaining: std::time::Duration,
     ) -> Result<bool, String>;
+    /// Succeeds once the template's interactive test user has an Active
+    /// desktop session on the guest (#397). `false` retries until the
+    /// readiness deadline; the failure is then named `interactive_session`.
+    async fn interactive_session(
+        &self,
+        operations: &crate::operation::Operations,
+        _parent_id: &str,
+        record: &ProvisionRecord,
+        user: &str,
+        remaining: std::time::Duration,
+    ) -> Result<bool, String>;
     /// Creates or re-finds a durable M3 child with a provision-scoped key.
     async fn create_project(
         &self,
@@ -473,6 +484,27 @@ impl LabBootstrap<'_> {
                     remaining,
                 )
             })
+            .await?;
+        }
+        if let Some(user) = content.interactive_user.as_deref() {
+            content
+                .validate_interactive_user()
+                .map_err(|_| failure("interactive_session"))?;
+            self.poll(
+                operations,
+                operation_id,
+                &record,
+                "interactive_session",
+                |remaining| {
+                    self.readiness.interactive_session(
+                        operations,
+                        operation_id,
+                        &record,
+                        user,
+                        remaining,
+                    )
+                },
+            )
             .await?;
         }
         if content.readiness_probe == ReadinessProbe::ProjectReady
@@ -1554,6 +1586,7 @@ impl Lab {
         id: &str,
         script: &str,
         timeout_seconds: u64,
+        session: fleet_core::ExecSession,
         idempotency_key: Option<&str>,
         now: i64,
     ) -> Result<crate::operation::NewOperation, LabUseCaseError> {
@@ -1576,6 +1609,15 @@ impl Lab {
         if timeout_seconds == 0 || timeout_seconds > MAX_LAB_EXEC_TIMEOUT_SECONDS {
             return Err(LabUseCaseError::Invalid {
                 detail: format!("timeoutSeconds must be 1..={MAX_LAB_EXEC_TIMEOUT_SECONDS}"),
+            });
+        }
+        if session == fleet_core::ExecSession::Interactive
+            && timeout_seconds > MAX_LAB_EXEC_INTERACTIVE_SECONDS
+        {
+            return Err(LabUseCaseError::Invalid {
+                detail: format!(
+                    "an interactive exec's timeoutSeconds must be at most {MAX_LAB_EXEC_INTERACTIVE_SECONDS}; use exec-detached for longer commands"
+                ),
             });
         }
         let lease = self.leases.get(id).await.map_err(|detail| {
@@ -1609,13 +1651,16 @@ impl Lab {
                 detail: "the lease's guest has no registered Lab machine to run on".to_owned(),
             });
         }
-        let guest_os = self.guest_os_of(&lease).await?;
+        let (guest_os, template_user) = self.guest_of(&lease).await?;
+        let interactive_user = session
+            .resolve(guest_os, template_user.as_deref())
+            .map_err(|detail| LabUseCaseError::Invalid { detail })?;
         self.audit_event(
             principal,
             Permission::LabExec,
             Some(id),
             "lab_exec_requested",
-            None,
+            Some(("session", session.id())),
         )
         .await?;
         Ok(crate::operation::NewOperation {
@@ -1630,6 +1675,8 @@ impl Lab {
                     "script": script,
                     "timeoutSeconds": timeout_seconds,
                     "guestOs": guest_os.id(),
+                    "session": session.id(),
+                    "interactiveUser": interactive_user,
                 })
                 .to_string(),
             ),
@@ -1637,13 +1684,17 @@ impl Lab {
         })
     }
 
-    /// The guest OS of a lease's template version: it selects the guest
-    /// shell and the path rules, and the version is immutable.
-    async fn guest_os_of(&self, lease: &Lease) -> Result<fleet_core::GuestOs, LabUseCaseError> {
+    /// The guest OS and interactive user of a lease's template version: the
+    /// OS selects the guest shell and the path rules, and the version is
+    /// immutable.
+    async fn guest_of(
+        &self,
+        lease: &Lease,
+    ) -> Result<(fleet_core::GuestOs, Option<String>), LabUseCaseError> {
         self.templates
             .get_version(&lease.template_version_id)
             .await
-            .map(|version| version.content.guest_os)
+            .map(|version| (version.content.guest_os, version.content.interactive_user))
             .map_err(|detail| LabUseCaseError::Backend {
                 context: "templates",
                 detail,
@@ -2870,6 +2921,15 @@ pub fn provision_compensation(state: LeaseState, allocated: bool) -> Option<Leas
 pub const MAX_LAB_EXEC_SCRIPT_BYTES: usize = 64 * 1024;
 /// The longest a Lab exec may run (the SSH exec bound).
 pub const MAX_LAB_EXEC_TIMEOUT_SECONDS: u64 = 900;
+/// The extra seconds an interactive-session `lab.exec` allows its SSH session
+/// beyond the command's bound: the start, the supervisor's kill and the
+/// output copy (#397).
+pub const INTERACTIVE_EXEC_MARGIN_SECONDS: u64 = 90;
+/// The longest bound of a synchronous interactive `lab.exec`: the SSH session
+/// must outlast it by [`INTERACTIVE_EXEC_MARGIN_SECONDS`] within the 900 s
+/// SSH ceiling. Longer commands use the detached pattern.
+pub const MAX_LAB_EXEC_INTERACTIVE_SECONDS: u64 =
+    MAX_LAB_EXEC_TIMEOUT_SECONDS - INTERACTIVE_EXEC_MARGIN_SECONDS;
 
 /// Whether a lease may run a command at `now`: it is `ready` and its TTL
 /// has not expired. Checked when the exec is requested and again when it

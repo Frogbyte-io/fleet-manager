@@ -59,6 +59,7 @@ fn content(name: &str, image_version_id: &str) -> LabTemplateContent {
         cleanup: fleet_core::CleanupStrategy::Destroy,
         audio: None,
         guest_os: fleet_core::GuestOs::default(),
+        interactive_user: None,
     }
 }
 
@@ -1870,8 +1871,17 @@ async fn exec_runs_only_on_a_ready_unexpired_lease_with_a_lab_machine() {
         let lab = &lab;
         let id = lease.id.clone();
         async move {
-            lab.exec_lease(&AllowAll, &principal(), &id, script, timeout, None, now)
-                .await
+            lab.exec_lease(
+                &AllowAll,
+                &principal(),
+                &id,
+                script,
+                timeout,
+                fleet_core::ExecSession::Service,
+                None,
+                now,
+            )
+            .await
         }
     };
 
@@ -1922,6 +1932,32 @@ async fn exec_runs_only_on_a_ready_unexpired_lease_with_a_lab_machine() {
     let audited = format!("{:?}", audit.intents.lock().unwrap());
     assert!(audited.contains("lab_exec_requested"));
     assert!(!audited.contains("secret-ish-value"));
+    assert_eq!(payload["session"], "service");
+    assert!(payload["interactiveUser"].is_null());
+
+    // A Linux guest never provides an interactive session.
+    let interactive = |timeout: u64| {
+        let lab = &lab;
+        let id = lease.id.clone();
+        async move {
+            lab.exec_lease(
+                &AllowAll,
+                &principal(),
+                &id,
+                "notepad",
+                timeout,
+                fleet_core::ExecSession::Interactive,
+                None,
+                NOW + 5,
+            )
+            .await
+        }
+    };
+    let error = interactive(60).await.unwrap_err().to_string();
+    assert!(error.contains("unsupported"), "{error}");
+    // The synchronous interactive bound leaves room for the SSH session.
+    let error = interactive(900).await.unwrap_err().to_string();
+    assert!(error.contains("exec-detached"), "{error}");
 
     // A retried request with the same key maps to the same operation key,
     // scoped to the principal and the lease; another principal's key differs.
@@ -1935,6 +1971,7 @@ async fn exec_runs_only_on_a_ready_unexpired_lease_with_a_lab_machine() {
                 &id,
                 "true",
                 60,
+                fleet_core::ExecSession::Service,
                 Some("k1"),
                 now,
             )
@@ -1971,6 +2008,7 @@ async fn exec_runs_only_on_a_ready_unexpired_lease_with_a_lab_machine() {
                 &id,
                 "true",
                 60,
+                fleet_core::ExecSession::Service,
                 Some(key.as_str()),
                 now,
             )
@@ -1993,6 +2031,7 @@ async fn exec_runs_only_on_a_ready_unexpired_lease_with_a_lab_machine() {
             &lease.id,
             &oversized,
             60,
+            fleet_core::ExecSession::Service,
             None,
             NOW + 5
         )
@@ -2036,9 +2075,18 @@ async fn exec_runs_only_on_a_ready_unexpired_lease_with_a_lab_machine() {
         ));
     }
     assert!(matches!(
-        lab.exec_lease(&DenyAll, &principal(), &lease.id, "true", 60, None, NOW + 5)
-            .await
-            .unwrap_err(),
+        lab.exec_lease(
+            &DenyAll,
+            &principal(),
+            &lease.id,
+            "true",
+            60,
+            fleet_core::ExecSession::Service,
+            None,
+            NOW + 5
+        )
+        .await
+        .unwrap_err(),
         LabUseCaseError::Denied(_)
     ));
 }
@@ -2206,4 +2254,127 @@ async fn cleanup_retry_rearms_only_a_cleanup_failed_lease_authorized_and_audited
         leases.get(&lease.id).await.unwrap().state,
         LeaseState::Releasing
     );
+}
+
+#[tokio::test]
+#[allow(clippy::too_many_lines)]
+async fn interactive_exec_needs_a_windows_template_that_declares_the_user() {
+    use fleet_core::{ExecSession, GuestOs};
+    let templates = Arc::new(FakeTemplates::default());
+    let audit = Arc::new(FakeAudit::default());
+    let leases = Arc::new(FakeLeases::default());
+    let provisions = Arc::new(FakeProvisions::with_leases(leases.leases.clone()));
+    let lab = Lab::new(
+        templates,
+        provisions.clone(),
+        leases.clone(),
+        FakePins::with_promoted("rcp-1@abc"),
+        Arc::new(FakeProjects::default()),
+        audit.clone(),
+    );
+    let ready_lease = async |user: Option<&str>| {
+        let mut body = content("win-lab", "rcp-1@abc");
+        body.guest_os = GuestOs::Windows;
+        body.interactive_user = user.map(str::to_owned);
+        body.name = format!("win-lab-{}", user.unwrap_or("none"));
+        let template = lab
+            .create_template(
+                &AllowAll,
+                &principal(),
+                NewLabTemplate { content: body },
+                NOW,
+            )
+            .await
+            .unwrap();
+        let version = lab
+            .publish_template(&AllowAll, &principal(), &template.id, NOW + 1)
+            .await
+            .unwrap();
+        let lease = lab
+            .create_lease(
+                &AllowAll,
+                &principal(),
+                fleet_application::lab::NewLease {
+                    template_version_id: version.id.clone(),
+                    purpose: "interactive".to_owned(),
+                    project_id: None,
+                    cleanup: fleet_core::CleanupStrategy::Destroy,
+                    ttl_seconds: 3_600,
+                },
+                NOW + 2,
+            )
+            .await
+            .unwrap();
+        let mut record = provisions
+            .create(
+                &NewProvision {
+                    template_version_id: version.id.clone(),
+                    lease_id: Some(lease.id.clone()),
+                    idempotency_key: None,
+                    readiness_deadline_at: None,
+                },
+                NOW + 3,
+            )
+            .await
+            .unwrap();
+        record.machine_id = Some("machine-1".to_owned());
+        record.endpoint_id = Some("endpoint-1".to_owned());
+        provisions.update(&record).await.unwrap();
+        {
+            let mut stored = leases.leases.lock().unwrap();
+            let entry = stored
+                .iter_mut()
+                .find(|entry| entry.id == lease.id)
+                .unwrap();
+            entry.state = fleet_core::LeaseState::Ready;
+            entry.provision_id = Some(record.id.clone());
+            entry.expires_at = Some(NOW + 1_000_000);
+        }
+        lease.id
+    };
+    let with_user = ready_lease(Some("qa")).await;
+    let without_user = ready_lease(None).await;
+    let run = |id: &str, session: ExecSession| {
+        let lab = &lab;
+        let id = id.to_owned();
+        async move {
+            lab.exec_lease(
+                &AllowAll,
+                &principal(),
+                &id,
+                "notepad",
+                60,
+                session,
+                None,
+                NOW + 5,
+            )
+            .await
+        }
+    };
+    let new = run(&with_user, ExecSession::Interactive).await.unwrap();
+    let payload: serde_json::Value =
+        serde_json::from_str(new.payload_json.as_deref().unwrap()).unwrap();
+    assert_eq!(payload["session"], "interactive");
+    assert_eq!(payload["interactiveUser"], "qa");
+    assert_eq!(payload["guestOs"], "windows");
+    // Only the user's name is in the payload.
+    assert!(
+        !new.payload_json
+            .as_deref()
+            .unwrap()
+            .to_lowercase()
+            .contains("password")
+    );
+    let audited = format!("{:?}", audit.intents.lock().unwrap());
+    assert!(audited.contains("interactive"), "{audited}");
+    // The service session still works on the same lease and carries no user.
+    let service = run(&with_user, ExecSession::Service).await.unwrap();
+    let payload: serde_json::Value =
+        serde_json::from_str(service.payload_json.as_deref().unwrap()).unwrap();
+    assert_eq!(payload["session"], "service");
+    // A template without an interactive user has no desktop to run in.
+    let error = run(&without_user, ExecSession::Interactive)
+        .await
+        .unwrap_err();
+    assert!(error.to_string().contains("no interactive user"), "{error}");
 }
