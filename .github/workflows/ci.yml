@@ -200,22 +200,31 @@ jobs:
           set -euo pipefail
           archive="powershell-${POWERSHELL_VERSION}-linux-x64.tar.gz"
           dest="${RUNNER_TEMP}/powershell-${POWERSHELL_VERSION}"
+          # A re-run on the same runner must not extract over a stale tree.
+          rm -rf "${dest}" "${RUNNER_TEMP}/${archive}"
           mkdir -p "${dest}"
           curl --fail --silent --show-error --location --retry 3 \
+            --proto '=https' --proto-redir '=https' \
             "https://github.com/PowerShell/PowerShell/releases/download/v${POWERSHELL_VERSION}/${archive}" \
             -o "${RUNNER_TEMP}/${archive}"
           echo "${POWERSHELL_SHA256}  ${RUNNER_TEMP}/${archive}" | sha256sum --check --strict -
           tar -xzf "${RUNNER_TEMP}/${archive}" -C "${dest}"
           chmod +x "${dest}/pwsh"
-          "${dest}/pwsh" -NoProfile -Command '$PSVersionTable.PSVersion.ToString()'
+          actual="$("${dest}/pwsh" -NoProfile -Command '$PSVersionTable.PSVersion.ToString()')"
+          if [ "${actual}" != "${POWERSHELL_VERSION}" ]; then
+            echo "::error::pwsh reports ${actual}, expected ${POWERSHELL_VERSION}"
+            exit 1
+          fi
           echo "FLEET_PWSH=${dest}/pwsh" >> "$GITHUB_ENV"
+          # No telemetry or update-check traffic from the test runs.
+          {
+            echo "POWERSHELL_TELEMETRY_OPTOUT=1"
+            echo "POWERSHELL_UPDATECHECK=Off"
+            # A missing PowerShell must fail the tests, not skip them.
+            echo "FLEET_REQUIRE_PWSH=1"
+          } >> "$GITHUB_ENV"
 
-      # FLEET_REQUIRE_PWSH turns a missing PowerShell into a failure instead of
-      # a silent skip, so these tests cannot pass vacuously.
-      - name: Test
-        env:
-          FLEET_REQUIRE_PWSH: '1'
-        run: cargo test --workspace --all-features --locked
+      - run: cargo test --workspace --all-features --locked
       - name: Root verification command
         run: cargo xtask verify
 
