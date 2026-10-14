@@ -2034,14 +2034,15 @@ fn parse_lab_exec(rest: &[&str]) -> Result<Command, CliError> {
         match flag {
             "--wait" => wait = true,
             "--session" => {
-                session = Some(
-                    flags
-                        .next()
-                        .ok_or_else(|| CliError {
-                            message: "--session needs a value: service or interactive".to_owned(),
-                        })?
-                        .to_owned(),
-                );
+                let value = flags.next().ok_or_else(|| CliError {
+                    message: "--session needs a value: service or interactive".to_owned(),
+                })?;
+                if !matches!(value, "service" | "interactive") {
+                    return Err(CliError {
+                        message: "--session must be service or interactive".to_owned(),
+                    });
+                }
+                session = Some(value.to_owned());
             }
             "--detach" => detach = true,
             "--script" => raw = true,
@@ -3999,9 +4000,13 @@ fn follow_lab(
                 invocation,
                 &operation_id,
                 // An interactive run's SSH session outlasts its bound by 90 s.
-                timeout
-                    .unwrap_or(60)
-                    .saturating_add(if session.is_some() { 120 } else { 60 }),
+                timeout.unwrap_or(60).saturating_add(
+                    if session.as_deref() == Some("interactive") {
+                        120
+                    } else {
+                        60
+                    },
+                ),
             )?;
             Ok(serde_json::json!({ "data": {
                 "operationId": operation_id,

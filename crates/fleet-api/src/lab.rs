@@ -336,7 +336,9 @@ impl From<ProvisionView> for ProvisionRecordDto {
     }
 }
 
-/// The create/update request.
+/// The create/update request. An update replaces the whole draft: an
+/// optional field that is omitted (for example `interactiveUser`, `audio`,
+/// `guestOs`) is cleared or reset to its default, not kept.
 #[derive(Debug, Deserialize, ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct SaveLabTemplateRequest {
@@ -1512,7 +1514,8 @@ pub async fn get_lab_lease(
 pub struct ExecLeaseRequest {
     /// The shell script to run (at most 64 KiB). It is never audited.
     pub script: String,
-    /// The deadline, in seconds (1–900; default 60).
+    /// The deadline, in seconds (1–900; default 60; at most 810 with
+    /// `session` = `interactive`).
     #[serde(default)]
     pub timeout_seconds: Option<u64>,
     /// `service` (the default) runs in the SSH login's session;
@@ -1606,6 +1609,25 @@ pub async fn exec_lab_lease(
 mod template_mapping_tests {
     use super::*;
     use fleet_core::IdGenerator as _;
+
+    #[test]
+    fn a_resaved_draft_without_an_interactive_user_clears_it() {
+        let mut body = serde_json::json!({
+            "name":"lab", "description":"", "imageVersionId":"image-1", "cores":2,
+            "memoryMib":2048, "diskGib":20, "readinessProbe":"guest_agent",
+            "readinessDeadlineSeconds":120, "ttlSeconds":3600, "cleanup":"destroy",
+            "guestOs":"windows", "interactiveUser":"qa"
+        });
+        let with: SaveLabTemplateRequest = serde_json::from_value(body.clone()).unwrap();
+        let id = fleet_core::IdGenerator::next_correlation_id(&mut fleet_core::UuidV7Generator);
+        assert_eq!(
+            with.into_content(id).unwrap().interactive_user.as_deref(),
+            Some("qa")
+        );
+        body.as_object_mut().unwrap().remove("interactiveUser");
+        let without: SaveLabTemplateRequest = serde_json::from_value(body).unwrap();
+        assert_eq!(without.into_content(id).unwrap().interactive_user, None);
+    }
 
     #[test]
     fn template_ssh_settings_default_and_round_trip() {

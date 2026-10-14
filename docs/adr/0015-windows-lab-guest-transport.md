@@ -115,7 +115,7 @@ Results from the first fixture run (2026-10-10, [Windows fixture runbook](../ope
 
 ## Amendment: interactive-session exec (#397)
 
-Status: Proposed with this change. It answers the first open question above for the interactive case and refines, without reversing, the decision section.
+Amendment status: Proposed (with #486, #397); the ADR itself stays Proposed. It answers the first open question above for the interactive case and refines, without reversing, the decision section.
 
 **Account model (open question 1).** Two accounts: the SSH account is an administrator (it registers the task and creates directories); the interactive test user is a separate, unprivileged local account, named in the template as `interactiveUser`. Commands under `--session interactive` run as that user with a limited token (`-RunLevel Limited`), the "intended user's environment" Release QA needs. Steps that need elevation use the normal (service-session) exec.
 
@@ -125,4 +125,4 @@ Status: Proposed with this change. It answers the first open question above for 
 
 **Where the run's files live.** The supervisor runs as the test user, so its handle directory is `<user profile>\AppData\Local\fleet-lab\exec\<handle>`, created by the SSH administrator with a protected ACL naming SYSTEM, Administrators, the SSH user and the interactive user (the same trust check as the default base, with that account added). Status reads look in the default base first and then, when the template declares a user, in this one, so detached records need no new column.
 
-**Limits, stated.** A command in the interactive session starts in the user's profile directory, not the SSH login's. The test user can tamper with its own run's output files (it is the command's owner anyway). If two sessions exist for the user the Task Scheduler picks one. A synchronous interactive exec returns the last 1 MiB of each stream through the normal exec bounds; the SSH exit code is truncated to 8 bits as for any exec, and the guest start's own refusal codes (64, 70 to 78) are reported with a `fleet:` message on stderr. Linux returns `unsupported`.
+**Limits, stated.** A command in the interactive session starts in the user's profile directory, not the SSH login's. The test user can tamper with its own run's output files (it is the command's owner anyway). If two sessions exist for the user the Task Scheduler picks one. A synchronous interactive exec copies the last 1 MiB of each stream out of the guest (the SSH exec stream cap, `MAX_STREAM_BYTES`), and the controller then applies the normal exec result bound and scrubbing to what is printed; the SSH exit code is truncated to 8 bits as for any exec, and the guest start's own refusal codes (64, 70 to 78) are reported with a `fleet:` message on stderr. Linux returns `unsupported`.

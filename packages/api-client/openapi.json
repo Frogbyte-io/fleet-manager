@@ -10159,7 +10159,7 @@
               "null"
             ],
             "format": "int64",
-            "description": "The deadline, in seconds (1–900; default 60).",
+            "description": "The deadline, in seconds (1–900; default 60; at most 810 with\n`session` = `interactive`).",
             "minimum": 0
           }
         }
@@ -18513,7 +18513,7 @@
       },
       "SaveLabTemplateRequest": {
         "type": "object",
-        "description": "The create/update request.",
+        "description": "The create/update request. An update replaces the whole draft: an\noptional field that is omitted (for example `interactiveUser`, `audio`,\n`guestOs`) is cleared or reset to its default, not kept.",
         "required": [
           "name",
           "description",

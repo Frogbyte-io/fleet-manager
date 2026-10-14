@@ -1406,7 +1406,8 @@ export interface ExecLeaseRequest {
      */
   session?: string | null;
   /**
-     * The deadline, in seconds (1–900; default 60).
+     * The deadline, in seconds (1–900; default 60; at most 810 with
+     * `session` = `interactive`).
      * @minimum 0
      * @nullable
      */
@@ -6079,7 +6080,9 @@ export interface SaveCatalogRequest {
 }
 
 /**
- * The create/update request.
+ * The create/update request. An update replaces the whole draft: an
+ * optional field that is omitted (for example `interactiveUser`, `audio`,
+ * `guestOs`) is cleared or reset to its default, not kept.
  */
 export interface SaveLabTemplateRequest {
   audio?: null | LabAudioDto;

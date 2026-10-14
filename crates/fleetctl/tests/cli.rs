@@ -3435,6 +3435,12 @@ fn lab_exec_script_sends_the_one_word_untouched() {
         fleetctl::Command::LabExecDetach { session: Some(session), .. } if session == "interactive"
     ));
     assert!(lab_parse(&["lab", "exec", "lease-1", "--session"]).is_err());
+    assert!(
+        lab_parse(&["lab", "exec", "lease-1", "--session", "desktop", "--", "x"])
+            .unwrap_err()
+            .contains("service or interactive")
+    );
+    assert!(lab_parse(&["lab", "exec", "lease-1", "--session", "service", "--", "x"]).is_ok());
     assert!(matches!(
         lab_parse(&["lab", "exec", "lease-1", "--detach", "--script", "--", script]).unwrap(),
         fleetctl::Command::LabExecDetach { script: sent, .. } if sent == script
