@@ -374,7 +374,9 @@ fn a_detached_command_outlives_its_ssh_session_and_status_reads_it_back() {
         arguments: vec![handle.clone(), "60".to_owned()],
         ..ScriptMetadata::default()
     };
-    let started = execute_script(
+    // As production starts it: the command bounds itself and must outlive
+    // the session, so no guest-side watchdog.
+    let started = fleet_provider_ssh::execute_script_with(
         &provider,
         &limiter,
         &spec,
@@ -384,6 +386,7 @@ fn a_detached_command_outlives_its_ssh_session_and_status_reads_it_back() {
         ),
         &metadata,
         Duration::from_secs(60),
+        false,
     )
     .unwrap();
     assert_eq!(started.exit_code, Some(0), "{started:?}");

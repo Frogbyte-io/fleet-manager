@@ -50,7 +50,7 @@ pub use discovery::{
 };
 pub use exec::{
     ExecutionLimiter, ExecutionResult, MAX_STREAM_BYTES, ScriptMetadata, decode_metadata,
-    encode_metadata, execute_script, remote_prologue,
+    encode_metadata, execute_script, execute_script_with, remote_prologue,
 };
 pub use fetch::{FetchOutcome, fetch_file};
 pub use inventory::{COLLECTION_DEADLINE, PROBE_SOURCE, collect, parse_probe_output, probe_script};

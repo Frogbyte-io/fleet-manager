@@ -340,6 +340,9 @@ impl LabDetachDispatch {
                 "script": start_text,
                 "arguments": start_arguments,
                 "timeoutSeconds": fleet_provider_ssh::detached::SESSION_DEADLINE.as_secs(),
+                // The command is meant to outlive this session and bounds
+                // itself on the guest; the exec watchdog must not kill it.
+                "guestWatchdog": false,
             })
             .to_string(),
         );

@@ -226,6 +226,29 @@ pub fn execute_script(
     metadata: &ScriptMetadata,
     deadline: Duration,
 ) -> Result<ExecutionResult, SshProviderError> {
+    execute_script_with(
+        provider, limiter, endpoint, script, metadata, deadline, true,
+    )
+}
+
+/// [`execute_script`] with a choice about the Windows guest-side watchdog
+/// (#455), which stops the script's process tree at `deadline` because
+/// killing the local `ssh` does not. Pass `guest_watchdog: false` only for a
+/// script that bounds itself and must outlive the session, such as the start
+/// of a detached exec. It changes nothing on a Linux guest.
+///
+/// # Errors
+///
+/// As [`execute_script`].
+pub fn execute_script_with(
+    provider: &SshProvider,
+    limiter: &ExecutionLimiter,
+    endpoint: &SshConnectionSpec,
+    script: &str,
+    metadata: &ScriptMetadata,
+    deadline: Duration,
+    guest_watchdog: bool,
+) -> Result<ExecutionResult, SshProviderError> {
     if !limiter.acquire() {
         return Err(SshProviderError::Tool {
             tool: "ssh",
@@ -236,7 +259,14 @@ pub fn execute_script(
         });
         // The permit is deliberately not held: no process was started.
     }
-    let result = execute_script_inner(provider, endpoint, script, metadata, deadline);
+    let result = execute_script_inner(
+        provider,
+        endpoint,
+        script,
+        metadata,
+        deadline,
+        guest_watchdog,
+    );
     limiter.release();
     result
 }
@@ -247,11 +277,18 @@ fn execute_script_inner(
     script: &str,
     metadata: &ScriptMetadata,
     deadline: Duration,
+    guest_watchdog: bool,
 ) -> Result<ExecutionResult, SshProviderError> {
     let started = Instant::now();
     // The script rides stdin; nothing else is written after it.
-    let mut child =
-        crate::shell::spawn_script_session(provider, endpoint, metadata, script, deadline)?;
+    let mut child = crate::shell::spawn_session(
+        provider,
+        endpoint,
+        metadata,
+        script,
+        deadline,
+        guest_watchdog,
+    )?;
     drop(child.stdin.take());
 
     // Reader threads drain the pipes so a silent remote session cannot wedge
