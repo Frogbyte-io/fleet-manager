@@ -56,7 +56,9 @@ struct SshExecPayload {
     /// Whether a Windows guest runs the script under the guest-side deadline
     /// watchdog (#455). Absent means yes; only the start of a detached exec,
     /// which bounds itself on the guest and must outlive its session, sets
-    /// it to false.
+    /// it to false. This is a bound for honest scripts, not a security
+    /// boundary: whoever can queue an `ssh.exec` already runs arbitrary
+    /// script text on the guest and could kill the watchdog as well.
     #[serde(default = "watchdog_by_default")]
     guest_watchdog: bool,
 }

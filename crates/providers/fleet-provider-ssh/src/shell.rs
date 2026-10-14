@@ -204,7 +204,7 @@ pub const POWERSHELL_BOOTSTRAP: &str = powershell_bootstrap!("", "", "");
 /// watchdog started before the script runs. The limit must be 1 to 5 ASCII
 /// digits with a value of 1 to 86400, and the watchdog text must be base64;
 /// anything else exits 90 without running the script, as does a watchdog that
-/// cannot be started. After the script ends the watchdog is stopped.
+/// cannot be started. After the script ends the watchdog is stopped. The script runs exactly as under [`POWERSHELL_BOOTSTRAP`] (no `try` around it), so error and exit-code behaviour is identical.
 pub const POWERSHELL_EXEC_BOOTSTRAP: &str = powershell_bootstrap!(
     concat!(
         "$fleetWdText=[Convert]::ToBase64String([Convert]::FromBase64String((fleetLine)));",
@@ -227,8 +227,11 @@ pub const POWERSHELL_EXEC_BOOTSTRAP: &str = powershell_bootstrap!(
         "$fleetWd.StandardInput.Close()",
         "}catch{[Console]::Error.WriteLine('fleet: the deadline watchdog cannot be started');exit 90};",
     ),
-    "try{",
-    "}finally{try{$fleetWd.Kill()}catch{}};"
+    "",
+    // Straight-line, not try/finally: a try block would make a
+    // statement-terminating error end the whole script. The watchdog also
+    // ends by itself when this process does.
+    "try{$fleetWd.Kill()}catch{};"
 );
 
 /// The watchdog the exec bootstrap starts as a separate PowerShell process
@@ -265,7 +268,7 @@ try {
   if ($fleetParent.WaitForExit([int]$fleetWait)) { exit 0 }
   $fleetKids = @()
   try {
-    $fleetKids = @(Get-CimInstance -ClassName Win32_Process -Filter ('ParentProcessId=' + $fleetParentId) -OperationTimeoutSec 10 | Where-Object { $_.ProcessId -ne $fleetMe.Id -and $_.CreationDate.ToUniversalTime() -ge $fleetParentStart })
+    $fleetKids = @(Get-CimInstance -ClassName Win32_Process -Filter ('ParentProcessId=' + $fleetParentId) -OperationTimeoutSec 10 | Where-Object { $_.ProcessId -ne $fleetMe.Id -and $_.CreationDate -ne $null -and $_.CreationDate.ToUniversalTime() -ge $fleetParentStart })
   } catch { }
   try { $fleetParent.Kill() } catch { }
   $fleetTaskkill = [System.IO.Path]::Combine([Environment]::GetFolderPath('System'), 'taskkill.exe')
@@ -868,7 +871,9 @@ mod tests {
     fn the_watchdog_guards_against_a_recycled_pid_and_stale_children() {
         // The text-level controls; the firing path runs under pwsh and live.
         assert!(WATCHDOG_SCRIPT.contains("$fleetParentStart -gt $fleetMeStart"));
-        assert!(WATCHDOG_SCRIPT.contains("CreationDate.ToUniversalTime() -ge $fleetParentStart"));
+        assert!(WATCHDOG_SCRIPT.contains(
+            "$_.CreationDate -ne $null -and $_.CreationDate.ToUniversalTime() -ge $fleetParentStart"
+        ));
         assert!(WATCHDOG_SCRIPT.contains("-OperationTimeoutSec 10"));
         assert!(WATCHDOG_SCRIPT.contains("GetFolderPath('System')"));
         assert!(!WATCHDOG_SCRIPT.contains("SystemRoot"));
@@ -958,6 +963,48 @@ mod tests {
             );
             assert_eq!(out.status.code(), Some(0), "{line:?}: {out:?}");
         }
+    }
+
+    #[test]
+    fn the_watched_bootstrap_behaves_exactly_like_the_unwatched_one() {
+        let Some(pwsh) = require_pwsh() else { return };
+        let limit = Duration::from_secs(60);
+        let scripts = [
+            "[int]::Parse('x')\nWrite-Output after\n",
+            "Write-Output before\n[int]::Parse('x')\n",
+            "[int]::Parse('x')\nexit 3\n",
+            "$x = 0\n1/$x\nWrite-Output after\n",
+            "Get-Item -NoSuchParam\nWrite-Output after\n",
+            "function f { [int]::Parse('x') }\nf\nWrite-Output after\n",
+            "break\n",
+            "while ($true) { break }\nWrite-Output after\n",
+            "Write-Output ok\n",
+            "exit 7\n",
+            "throw 'boom'\nWrite-Output after\n",
+            "Get-Item /definitely/not/here\n",
+            "& /bin/sh -c 'exit 3'\n",
+            "& /bin/sh -c 'exit 3'\nWrite-Output after\n",
+            "[Console]::Error.WriteLine('err')\nexit 0\n",
+        ];
+        for script in scripts {
+            let plain = run_ps(&pwsh, script, &ScriptMetadata::default(), b"", None);
+            let watched = run_ps_exec(&pwsh, script, limit, None);
+            assert_eq!(
+                watched.status.code(),
+                plain.status.code(),
+                "{script:?}: {watched:?} vs {plain:?}"
+            );
+            assert_eq!(text(&watched.stdout), text(&plain.stdout), "{script:?}");
+            assert_eq!(text(&watched.stderr), text(&plain.stderr), "{script:?}");
+        }
+        // The cases the comparison must actually cover.
+        let code = |script: &str| run_ps_exec(&pwsh, script, limit, None).status.code();
+        let out = run_ps_exec(&pwsh, scripts[0], limit, None);
+        assert_eq!(out.status.code(), Some(0));
+        assert_eq!(text(&out.stdout), "after\n");
+        assert_eq!(code(scripts[1]), Some(1));
+        assert_eq!(code(scripts[2]), Some(3));
+        assert_eq!(code(scripts[6]), Some(1));
     }
 
     #[test]
