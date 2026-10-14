@@ -27,7 +27,7 @@ function run(envFile, { dir, githubEnv, githubOutput }) {
   // fixture's completeness decides the outcome, not the runner's.
   const env = { ...process.env, GITHUB_ENV: githubEnv, GITHUB_OUTPUT: githubOutput };
   for (const key of Object.keys(env)) {
-    if (/^(NODE|PNPM|COREPACK|CARGO_DENY|GITLEAKS)_/.test(key)) delete env[key];
+    if (/^(NODE|PNPM|COREPACK|CARGO_DENY|GITLEAKS|POWERSHELL)_/.test(key)) delete env[key];
   }
   return spawnSync('bash', [script, envFile], { encoding: 'utf8', env });
 }
@@ -99,7 +99,7 @@ test('the repository toolchain.env itself loads cleanly', () => {
   const result = run(join(here, '..', 'toolchain.env'), box);
   assert.equal(result.status, 0, result.stderr);
   const exported = readFileSync(box.githubEnv, 'utf8');
-  for (const key of ['NODE_VERSION', 'PNPM_VERSION', 'COREPACK_VERSION', 'CARGO_DENY_VERSION', 'GITLEAKS_VERSION', 'GITLEAKS_SHA256']) {
+  for (const key of ['NODE_VERSION', 'PNPM_VERSION', 'COREPACK_VERSION', 'CARGO_DENY_VERSION', 'GITLEAKS_VERSION', 'GITLEAKS_SHA256', 'POWERSHELL_VERSION', 'POWERSHELL_SHA256']) {
     assert.match(exported, new RegExp(`^${key}=[A-Za-z0-9._+-]+$`, 'm'), `missing ${key}`);
   }
   assert.ok(!exported.includes('\r'), 'carriage return reached the job environment');
