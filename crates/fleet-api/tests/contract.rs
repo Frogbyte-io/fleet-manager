@@ -2710,6 +2710,7 @@ async fn project_linked_lab_router() -> (
                     cleanup: CleanupStrategy::Destroy,
                     audio: None,
                     guest_os: fleet_core::GuestOs::default(),
+                    interactive_user: None,
                 },
             },
             1,

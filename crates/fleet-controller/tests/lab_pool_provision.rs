@@ -151,6 +151,7 @@ impl Harness {
             cleanup: CleanupStrategy::Revert,
             audio: None,
             guest_os: fleet_core::GuestOs::default(),
+            interactive_user: None,
         };
         let template: LabTemplate = LabTemplatePort::create(
             labs.as_ref(),

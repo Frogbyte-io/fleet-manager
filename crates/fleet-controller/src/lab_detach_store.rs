@@ -71,6 +71,7 @@ impl GuestExecPort for UnavailableGuestExec {
         _: &str,
         _: &str,
         _: fleet_core::GuestOs,
+        _: Option<&str>,
         _: &str,
     ) -> Result<GuestProcess, String> {
         Err(self.reason.clone())
@@ -84,6 +85,7 @@ impl GuestExecPort for SshGuestExec {
         machine_id: &str,
         endpoint_id: &str,
         guest_os: fleet_core::GuestOs,
+        interactive_user: Option<&str>,
         handle: &str,
     ) -> Result<GuestProcess, String> {
         let (mut spec, _, _) = crate::exec::resolve_ssh_endpoint(
@@ -97,8 +99,15 @@ impl GuestExecPort for SshGuestExec {
         let provider = self.provider.clone();
         let limiter = self.limiter.clone();
         let handle = handle.to_owned();
+        let interactive_user = interactive_user.map(str::to_owned);
         tokio::task::spawn_blocking(move || {
-            fleet_provider_ssh::detached::probe_detached(&provider, &limiter, &spec, &handle)
+            fleet_provider_ssh::detached::probe_detached(
+                &provider,
+                &limiter,
+                &spec,
+                interactive_user.as_deref(),
+                &handle,
+            )
         })
         .await
         .map_err(|error| format!("the status thread failed: {error}"))?
@@ -279,6 +288,47 @@ impl LabDetachDispatch {
                     .await;
             }
         };
+        // The rule was applied when the request was prepared; the payload is
+        // data, so it is applied again here.
+        let session = payload["session"].as_str().unwrap_or("service");
+        let interactive_user = match fleet_core::ExecSession::from_id(session).and_then(|session| {
+            session.resolve(
+                guest_os,
+                payload["interactiveUser"]
+                    .as_str()
+                    .filter(|user| !user.is_empty()),
+            )
+        }) {
+            Ok(Some(user)) => match fleet_core::validate_interactive_user_name(user) {
+                Ok(()) => Some(user.to_owned()),
+                Err(detail) => {
+                    return self
+                        .fail(operations, operation, "invalid_session", &detail)
+                        .await;
+                }
+            },
+            Ok(None) => None,
+            Err(detail) => {
+                return self
+                    .fail(operations, operation, "invalid_session", &detail)
+                    .await;
+            }
+        };
+        let (start_text, start_arguments) = match &interactive_user {
+            Some(user) => (
+                fleet_provider_ssh::detached::interactive_start_script(script, false),
+                fleet_provider_ssh::detached::interactive_start_metadata(
+                    &operation.id,
+                    timeout,
+                    user,
+                )
+                .arguments,
+            ),
+            None => (
+                fleet_provider_ssh::detached::start_script_for(shell, script),
+                vec![operation.id.clone(), timeout.to_string()],
+            ),
+        };
         let mut ssh = operation.clone();
         ssh.kind = "ssh.exec".to_owned();
         ssh.payload_json = Some(
@@ -287,8 +337,8 @@ impl LabDetachDispatch {
                 "endpointId": endpoint_id,
                 "auth": {"type": "agent"},
                 "guestOs": guest_os.id(),
-                "script": fleet_provider_ssh::detached::start_script_for(shell, script),
-                "arguments": [operation.id, timeout.to_string()],
+                "script": start_text,
+                "arguments": start_arguments,
                 "timeoutSeconds": fleet_provider_ssh::detached::SESSION_DEADLINE.as_secs(),
             })
             .to_string(),

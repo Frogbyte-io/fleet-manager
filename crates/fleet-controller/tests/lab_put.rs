@@ -183,6 +183,7 @@ impl Fixture {
             cleanup: CleanupStrategy::Destroy,
             audio: None,
             guest_os,
+            interactive_user: None,
         };
         let template: LabTemplate = LabTemplatePort::create(
             labs.as_ref(),

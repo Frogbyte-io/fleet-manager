@@ -183,12 +183,18 @@ pub fn start_script(command: &str) -> String {
 /// write-class access to nobody else. They are created with a protected ACL in
 /// the same call (the creator is the owner; nothing sets it), then checked
 /// again: a directory someone else created first fails the check.
-const WINDOWS_RESOLVE: &str = r"$ErrorActionPreference = 'Stop'
+const WINDOWS_RESOLVE: &str = r#"$ErrorActionPreference = 'Stop'
 $fleetHandle = $args[0]
 $fleetNum = $args[1]
 $fleetBase = $args[2]
 if ($fleetHandle -cnotmatch '^[A-Za-z0-9_-]{1,64}\z' -or $fleetNum -cnotmatch '^[0-9]{1,18}\z') { exit 64 }
 $fleetWindows = [Environment]::OSVersion.Platform -eq 'Win32NT'
+$fleetUser = $null
+if ($fleetBase -cmatch '^interactive:(.*)\z') {
+  $fleetUser = $Matches[1]
+  $fleetBase = $null
+  if ($fleetUser -cnotmatch '^[A-Za-z0-9_][A-Za-z0-9_.-]{0,19}\z') { exit 64 }
+}
 $fleetOverride = [bool]$fleetBase
 $fleetSystem = $null
 $fleetAdmins = $null
@@ -214,24 +220,154 @@ $fleetDir = [IO.Path]::Combine($fleetBase, $fleetHandle)
 # already names them) neither locks the user out nor fails the check.
 $fleetTrusted = @()
 if ($fleetWindows) { $fleetTrusted = @($fleetSystem, $fleetAdmins, $fleetMe) }
-function fleetIn($sid) { foreach ($t in $fleetTrusted) { if ($t.Equals($sid)) { return $true } }; return $false }
-function fleetSecure($path) {
+# The interactive run's directories (#397). They live under
+# `%ProgramData%\fleet-lab\interactive`, owned by the administrator and
+# writable by nobody else: the test user, who owns its own profile and could
+# otherwise swap a directory for a junction between the check and the use, has
+# no right on the base. Only the handle directory itself grants that user the
+# rights the supervisor needs (create files, plus Modify on the files it
+# creates), and only that leaf trusts the user as a writer. A directory
+# someone else pre-created fails the owner or ACL check (exit 71).
+$fleetIProfile = $null
+$fleetISid = $null
+$fleetLeafSid = $null
+$fleetIParent = $null
+$fleetIBase = $null
+$fleetIDir = $null
+$fleetResolveUser = $null
+if ($fleetUser) {
+  if (-not $fleetWindows) { exit 64 }
+  if (-not $env:ProgramData) { exit 71 }
+  $fleetIParent = [IO.Path]::Combine($env:ProgramData, 'fleet-lab')
+  $fleetIBase = [IO.Path]::Combine($fleetIParent, 'interactive')
+  $fleetIDir = [IO.Path]::Combine($fleetIBase, $fleetHandle)
+  # Run by dot-sourcing, only where the account is needed (start always;
+  # status only for a handle that is not in the default base).
+  $fleetResolveUser = {
+    try {
+      $fleetISid = (New-Object Security.Principal.NTAccount($env:COMPUTERNAME, $fleetUser)).Translate([Security.Principal.SecurityIdentifier])
+      $fleetIProfile = [string](Get-ItemProperty -LiteralPath ('HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\ProfileList\' + $fleetISid.Value) -Name ProfileImagePath -ErrorAction Stop).ProfileImagePath
+      if (-not [IO.Directory]::Exists($fleetIProfile)) { throw 'profile' }
+    } catch { [Console]::Error.WriteLine('fleet: the interactive user has no local account or profile on this guest'); exit 78 }
+    # Reads of the run's files go through a handle opened without following
+    # a reparse point and checked on that same handle (no reparse point, not
+    # a directory, one link).
+    try {
+    Add-Type -TypeDefinition @'
+using System;
+using System.IO;
+using System.Runtime.InteropServices;
+using Microsoft.Win32.SafeHandles;
+public static class FleetFile {
+  [StructLayout(LayoutKind.Sequential)]
+  struct BY_HANDLE_FILE_INFORMATION { public uint FileAttributes; public System.Runtime.InteropServices.ComTypes.FILETIME CreationTime, LastAccessTime, LastWriteTime; public uint VolumeSerialNumber, FileSizeHigh, FileSizeLow, NumberOfLinks, FileIndexHigh, FileIndexLow; }
+  [DllImport("kernel32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
+  static extern SafeFileHandle CreateFileW(string name, uint access, uint share, IntPtr sa, uint disp, uint flags, IntPtr tmpl);
+  [DllImport("kernel32.dll", SetLastError = true)]
+  static extern bool GetFileInformationByHandle(SafeFileHandle h, out BY_HANDLE_FILE_INFORMATION info);
+  public static FileStream CreateNew(string path) {
+    // CREATE_NEW | FILE_FLAG_OPEN_REPARSE_POINT: never follows a link, fails if anything is there.
+    SafeFileHandle h = CreateFileW(path, 0x40000000 | 0x00040000, 0, IntPtr.Zero, 1, 0x00200000, IntPtr.Zero);
+    if (h.IsInvalid) throw new IOException("create failed " + Marshal.GetLastWin32Error());
+    return new FileStream(h, FileAccess.Write, 4096, false);
+  }
+  public static FileStream Open(string path) {
+    SafeFileHandle h = CreateFileW(path, 0x80000000, 7, IntPtr.Zero, 3, 0x00200000, IntPtr.Zero);
+    if (h.IsInvalid) return null;
+    BY_HANDLE_FILE_INFORMATION i;
+    if (!GetFileInformationByHandle(h, out i) || (i.FileAttributes & 0x400) != 0 || (i.FileAttributes & 0x10) != 0 || i.NumberOfLinks != 1) { h.Dispose(); return null; }
+    return new FileStream(h, FileAccess.Read, 4096, false);
+  }
+}
+'@
+    } catch { [Console]::Error.WriteLine('fleet: the file helper could not be compiled on this guest'); exit 79 }
+    $fleetLeafSid = $fleetISid
+  }
+}
+function fleetIn($sid, $list) { foreach ($t in $list) { if ($t.Equals($sid)) { return $true } }; return $false }
+function fleetSecureFile($path) {
+  try {
+    $f = New-Object IO.FileInfo $path
+    if (-not $f.Exists -or ($f.Attributes -band [IO.FileAttributes]::ReparsePoint)) { return $false }
+    $acl = $f.GetAccessControl()
+    if (-not (fleetIn ($acl.GetOwner([Security.Principal.SecurityIdentifier])) $fleetTrusted)) { return $false }
+    foreach ($rule in $acl.GetAccessRules($true, $true, [Security.Principal.SecurityIdentifier])) {
+      if ($rule.AccessControlType -eq 'Allow' -and ((([int64]$rule.FileSystemRights) -band [int64]0x500D0156) -ne 0) -and -not (fleetIn $rule.IdentityReference $fleetTrusted)) { return $false }
+    }
+    return $true
+  } catch { return $false }
+}
+function fleetWriteFile($path, [byte[]]$bytes) {
+  if ($fleetWindows -and $fleetLeafSid) {
+    # Admin-owned, protected, readable by the interactive user and not
+    # deletable or writable by it.
+    $sec = New-Object Security.AccessControl.FileSecurity
+    $sec.SetAccessRuleProtection($true, $false)
+    foreach ($sid in $fleetTrusted) { $sec.AddAccessRule((New-Object Security.AccessControl.FileSystemAccessRule($sid, 'FullControl', 'None', 'None', 'Allow'))) }
+    $sec.AddAccessRule((New-Object Security.AccessControl.FileSystemAccessRule($fleetLeafSid, 'ReadAndExecute', 'None', 'None', 'Allow')))
+    $fs = New-Object IO.FileStream($path, [IO.FileMode]::CreateNew, [Security.AccessControl.FileSystemRights]'Write', [IO.FileShare]::None, 4096, [IO.FileOptions]::None, $sec)
+    try { $fs.Write($bytes, 0, $bytes.Length) } finally { $fs.Dispose() }
+  } else {
+    [IO.File]::WriteAllBytes($path, $bytes)
+  }
+}
+function fleetCreateNew($path) {
+  if ($fleetWindows -and $fleetLeafSid) {
+    $sec = New-Object Security.AccessControl.FileSecurity
+    $sec.SetAccessRuleProtection($true, $false)
+    foreach ($sid in $fleetTrusted) { $sec.AddAccessRule((New-Object Security.AccessControl.FileSystemAccessRule($sid, 'FullControl', 'None', 'None', 'Allow'))) }
+    $sec.AddAccessRule((New-Object Security.AccessControl.FileSystemAccessRule($fleetLeafSid, 'ReadAndExecute', 'None', 'None', 'Allow')))
+    $fs = [FleetFile]::CreateNew($path)
+    try { $fs.SetAccessControl($sec) } catch { $fs.Dispose(); throw }
+    return $fs
+  }
+  return (New-Object IO.FileStream($path, [IO.FileMode]::CreateNew, [IO.FileAccess]::Write, [IO.FileShare]::None))
+}
+function fleetGrantUser($path) {
+  # Only now, with the sentinel and the scripts in place, may the user write
+  # in the directory: it is never empty from here on.
+  $sec = (New-Object IO.DirectoryInfo $path).GetAccessControl()
+  $sec.AddAccessRule((New-Object Security.AccessControl.FileSystemAccessRule($fleetLeafSid, 'ReadAndExecute, WriteData', 'None', 'None', 'Allow')))
+  $sec.AddAccessRule((New-Object Security.AccessControl.FileSystemAccessRule($fleetLeafSid, 'Modify', 'ObjectInherit', 'InheritOnly', 'Allow')))
+  (New-Object IO.DirectoryInfo $path).SetAccessControl($sec)
+}
+function fleetSecure($path, $leaf) {
+  $list = $fleetTrusted
+  $strict = ($leaf -and $fleetLeafSid)
   if (-not $fleetWindows) { return $true }
   try {
     $info = New-Object IO.DirectoryInfo $path
     if (-not $info.Exists -or ($info.Attributes -band [IO.FileAttributes]::ReparsePoint)) { return $false }
     $acl = $info.GetAccessControl()
-    if (-not (fleetIn ($acl.GetOwner([Security.Principal.SecurityIdentifier])))) { return $false }
+    if (-not (fleetIn ($acl.GetOwner([Security.Principal.SecurityIdentifier])) $list)) { return $false }
     # Write-class bits, including the raw generic rights an ACE can carry
     # (GENERIC_ALL 0x10000000, GENERIC_WRITE 0x40000000) that the enum names miss.
     $writes = [int64]0x500D0156
+    $granted = 0
     foreach ($rule in $acl.GetAccessRules($true, $true, [Security.Principal.SecurityIdentifier])) {
-      if ($rule.AccessControlType -eq 'Allow' -and ((([int64]$rule.FileSystemRights) -band $writes) -ne 0) -and -not (fleetIn $rule.IdentityReference)) { return $false }
+      if ($strict -and $rule.IdentityReference.Equals($fleetLeafSid)) {
+        # The interactive user holds exactly the two grants made at creation.
+        # NTFS adds SYNCHRONIZE (0x100000) to the stored mask of read and modify grants.
+        $r = ([int64]$rule.FileSystemRights) -band [int64]0xFFEFFFFF; $inh = [int]$rule.InheritanceFlags; $prop = [int]$rule.PropagationFlags
+        if ($rule.AccessControlType -ne 'Allow' -or $rule.IsInherited) { return $false }
+        if ($r -eq [int64][Security.AccessControl.FileSystemRights]'ReadAndExecute, WriteData' -and $inh -eq 0 -and $prop -eq 0) { $granted = $granted -bor 1 }
+        elseif ($r -eq [int64][Security.AccessControl.FileSystemRights]'Modify' -and $inh -eq 2 -and $prop -eq 2) { $granted = $granted -bor 2 }
+        else { return $false }
+        continue
+      }
+      if ($rule.AccessControlType -eq 'Allow' -and ((([int64]$rule.FileSystemRights) -band $writes) -ne 0) -and -not (fleetIn $rule.IdentityReference $list)) { return $false }
+    }
+    if ($strict) {
+      if ($granted -ne 3) { return $false }
+      # The sentinel keeps the directory from ever being empty: the user can
+      # delete only what it created, and a mount point or junction can be set
+      # only on an empty directory.
+      if (-not (fleetSecureFile ([IO.Path]::Combine($path, '.fleet')))) { return $false }
     }
     return $true
   } catch { return $false }
 }
-function fleetMakeDir($path) {
+function fleetMakeDir($path, $leaf) {
   if (-not [IO.Directory]::Exists($path)) {
     try {
       if ($fleetWindows) {
@@ -253,7 +389,14 @@ function fleetChainSecure {
   foreach ($d in @($fleetParent, $fleetBase)) { if ([IO.Directory]::Exists($d) -and -not (fleetSecure $d)) { return $false } }
   return $true
 }
+function fleetOpenRead($path) {
+  if ($fleetLeafSid) { $fs = [FleetFile]::Open($path) }
+  else { $fs = New-Object IO.FileStream($path, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]'ReadWrite,Delete') }
+  if (-not $fs) { throw 'refused' }
+  return $fs
+}
 function fleetReg($path) {
+  if ($fleetLeafSid) { try { $f = [FleetFile]::Open($path); if ($f) { $f.Dispose(); return $true }; return $false } catch { return $false } }
   try { $i = New-Object IO.FileInfo $path; return ($i.Exists -and -not ($i.Attributes -band [IO.FileAttributes]::ReparsePoint)) } catch { return $false }
 }
 function fleetBoot {
@@ -264,7 +407,7 @@ function fleetBoot {
   }
   try { return (Get-Content -LiteralPath '/proc/sys/kernel/random/boot_id' -TotalCount 1) } catch { return '' }
 }
-";
+"#;
 
 /// The wrapper (`run.ps1`), written verbatim by the start script. With
 /// `-Mode body` it is the child that runs the command; otherwise it is the
@@ -350,33 +493,56 @@ if ($fleetChild.WaitForExit($fleetMs)) {
 /// The Windows start body: `$fleetCmd64` (the command as base64 UTF-8) and
 /// `$fleetWrapper` are set by the caller's prefix.
 const WINDOWS_START_BODY: &str = r#"$fleetBegan = [DateTime]::UtcNow
+$fleetExisting = $false
+function fleetDropTask {
+  if ($fleetUser) {
+    try { Unregister-ScheduledTask -TaskName ('fleet-lab-' + $fleetHandle) -TaskPath '\Fleet\' -Confirm:$false -ErrorAction Stop } catch { }
+  }
+}
+if ($fleetUser) {
+  . $fleetResolveUser
+  $fleetParent = $fleetIParent; $fleetBase = $fleetIBase; $fleetDir = $fleetIDir
+}
 if ($fleetWindows -and -not $fleetOverride) {
-  if (-not (fleetMakeDir $fleetParent)) { exit 71 }
-  if (-not (fleetMakeDir $fleetBase)) { exit 71 }
+  if (-not (fleetMakeDir $fleetParent)) { [Console]::Error.WriteLine('fleet: a guest directory the run needs exists but is not trusted (wrong owner or access list); another account may have created it first'); exit 71 }
+  if (-not (fleetMakeDir $fleetBase)) { [Console]::Error.WriteLine('fleet: a guest directory the run needs exists but is not trusted (wrong owner or access list); another account may have created it first'); exit 71 }
 } else {
   try { [void][IO.Directory]::CreateDirectory($fleetBase) } catch { exit 71 }
 }
 if ([IO.Directory]::Exists($fleetDir)) {
-  if (-not (fleetSecure $fleetDir)) { exit 71 }
-  [Console]::Out.Write("exists`n")
-  exit 0
+  if (-not (fleetSecure $fleetDir $true)) { exit 71 }
+  # A synchronous interactive run that finds its handle already started (a
+  # retried operation) waits for that run instead of starting another.
+  if (-not $fleetWait) {
+    [Console]::Out.Write("exists`n")
+    exit 0
+  }
+  $fleetExisting = $true
+  fleetDropTask
+}
+if (-not $fleetExisting) {
+if ($fleetUser) {
+  FLEET_SESSION_FIND_INLINE
 }
 if (-not (fleetMakeDir $fleetDir)) { exit 71 }
 try {
-  [IO.File]::WriteAllBytes([IO.Path]::Combine($fleetDir, 'body.ps1'), [Convert]::FromBase64String($fleetCmd64))
-  [IO.File]::WriteAllText([IO.Path]::Combine($fleetDir, 'run.ps1'), $fleetWrapper)
+  if ($fleetLeafSid) { fleetWriteFile ([IO.Path]::Combine($fleetDir, '.fleet')) ([byte[]]@()) }
+  fleetWriteFile ([IO.Path]::Combine($fleetDir, 'body.ps1')) ([Convert]::FromBase64String($fleetCmd64))
+  fleetWriteFile ([IO.Path]::Combine($fleetDir, 'run.ps1')) ([Text.Encoding]::UTF8.GetBytes($fleetWrapper))
+  if ($fleetLeafSid) { fleetGrantUser $fleetDir }
 } catch { exit 72 }
+if ($fleetLeafSid -and -not (fleetSecure $fleetDir $true)) { exit 71 }
 # A start that gives up and a wrapper that runs race for the gate: whoever
 # creates it first decides. The loser of the start's side only reports; the
 # marker keeps a late wrapper from running.
 function fleetGiveUp {
   $won = $false
   try {
-    $g = New-Object IO.FileStream([IO.Path]::Combine($fleetDir, 'gate'), [IO.FileMode]::CreateNew, [IO.FileAccess]::Write, [IO.FileShare]::None)
+    $g = fleetCreateNew ([IO.Path]::Combine($fleetDir, 'gate'))
     $g.Dispose()
     $won = $true
   } catch { }
-  if ($won) { try { [IO.File]::WriteAllText([IO.Path]::Combine($fleetDir, 'abandoned'), '') } catch { } }
+  if ($won) { try { (fleetCreateNew ([IO.Path]::Combine($fleetDir, 'abandoned'))).Dispose() } catch { } }
   return $won
 }
 $fleetRun = [IO.Path]::Combine($fleetDir, 'run.ps1')
@@ -391,6 +557,21 @@ if ($fleetWindows) {
     # allows breakaway from it. Unlike WMI process creation this works
     # for a standard (non-administrator) account, and the child keeps the
     # session's user, token and environment.
+    if ($fleetUser) {
+      if (([DateTime]::UtcNow - $fleetBegan).TotalSeconds -gt 15) { $fleetLaunched = $false }
+      else {
+        $fleetTaskArg = '-NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -File "{0}" -Dir "{1}" -Secs {2}' -f $fleetRun, $fleetDir, $fleetNum
+        $fleetTaskName = 'fleet-lab-' + $fleetHandle
+        # Interactive logon: no password, and the task runs only inside an
+        # existing session of that user (checked above).
+        $fleetAct = New-ScheduledTaskAction -Execute $fleetPs -Argument $fleetTaskArg -WorkingDirectory $fleetIProfile
+        $fleetPrin = New-ScheduledTaskPrincipal -UserId ($env:COMPUTERNAME + '\' + $fleetUser) -LogonType Interactive -RunLevel Limited
+        $fleetSet = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -ExecutionTimeLimit (New-TimeSpan -Seconds 0) -MultipleInstances Parallel
+        $fleetDef = New-ScheduledTask -Action $fleetAct -Principal $fleetPrin -Settings $fleetSet
+        [void](Register-ScheduledTask -TaskName $fleetTaskName -TaskPath '\Fleet\' -InputObject $fleetDef -Force)
+        Start-ScheduledTask -TaskName $fleetTaskName -TaskPath '\Fleet\'
+      }
+    } else {
     Add-Type -TypeDefinition @'
 using System;
 using System.Runtime.InteropServices;
@@ -418,6 +599,7 @@ public static class FleetLaunch {
     # after the controller has already read `never_started` would run anyway.
     if (([DateTime]::UtcNow - $fleetBegan).TotalSeconds -gt 15) { $fleetLaunched = $false }
     elseif ([FleetLaunch]::Start($fleetLine, $fleetCwd) -le 0) { $fleetLaunched = $false }
+    }
   } catch { $fleetLaunched = $false }
 } else {
   $fleetInfo = New-Object Diagnostics.ProcessStartInfo
@@ -434,7 +616,7 @@ public static class FleetLaunch {
 # A launch that failed (a launch error) never started a wrapper unless one slipped
 # in: take the gate to say so, and if the gate is already taken, wait for the
 # wrapper like any other start.
-if (-not $fleetLaunched -and (fleetGiveUp)) { exit 75 }
+if (-not $fleetLaunched -and (fleetGiveUp)) { fleetDropTask; exit 75 }
 # Worst case in this session: a few seconds to compile the launch helper, 25 s
 # here, 5 s below,
 # inside the 60 s session deadline together with ssh setup and PowerShell's
@@ -443,17 +625,143 @@ $fleetPidFile = [IO.Path]::Combine($fleetDir, 'pid')
 $fleetWaited = 0
 while (-not [IO.File]::Exists($fleetPidFile) -and $fleetWaited -lt 250) { Start-Sleep -Milliseconds 100; $fleetWaited++ }
 if (-not [IO.File]::Exists($fleetPidFile)) {
-  if (fleetGiveUp) { exit 75 }
+  if (fleetGiveUp) { fleetDropTask; exit 75 }
   # The wrapper holds the gate, so it is running (or about to). Give it a
   # little longer; if its pid is still not there the outcome is unknown, which
   # is not the same as failed: status decides.
   $fleetWaited = 0
   while (-not [IO.File]::Exists($fleetPidFile) -and $fleetWaited -lt 50) { Start-Sleep -Milliseconds 100; $fleetWaited++ }
-  if (-not [IO.File]::Exists($fleetPidFile)) { exit 76 }
+  if (-not [IO.File]::Exists($fleetPidFile)) {
+    # In wait mode the run may still start: go on waiting instead of reporting.
+    if (-not $fleetWait) { fleetDropTask; exit 76 }
+  }
 }
-[Console]::Out.Write("started`n")
-exit 0
+fleetDropTask
+if (-not $fleetWait) {
+  [Console]::Out.Write("started`n")
+  exit 0
+}
+}
 "#;
+
+/// The session finder shared by start and the readiness probe: compiles a
+/// `wtsapi32` helper and sets `$fleetSessionId` to the user's Active session
+/// (`-1` when none) and `$fleetSessionState` to the WTS state of a session
+/// that exists but is not Active. `WTSEnumerateSessions` and
+/// `WTSQuerySessionInformation` (user and domain) need no elevation; `quser`
+/// output is localized and `Get-Process -IncludeUserName` needs elevation.
+const WINDOWS_SESSION_FIND: &str = r#"try { Add-Type -TypeDefinition @'
+using System;
+using System.Collections.Generic;
+using System.Runtime.InteropServices;
+public static class FleetSessions {
+  [StructLayout(LayoutKind.Sequential)]
+  struct WTS_SESSION_INFO { public int SessionId; public IntPtr WinStationName; public int State; }
+  [DllImport("wtsapi32.dll", SetLastError = true)]
+  static extern bool WTSEnumerateSessionsW(IntPtr server, int reserved, int version, out IntPtr info, out int count);
+  [DllImport("wtsapi32.dll", SetLastError = true)]
+  static extern bool WTSQuerySessionInformationW(IntPtr server, int id, int cls, out IntPtr buf, out int bytes);
+  [DllImport("wtsapi32.dll")]
+  static extern void WTSFreeMemory(IntPtr p);
+  static string Query(int id, int cls) {
+    IntPtr buf; int bytes;
+    if (!WTSQuerySessionInformationW(IntPtr.Zero, id, cls, out buf, out bytes)) return "";
+    try { return Marshal.PtrToStringUni(buf) ?? ""; } finally { WTSFreeMemory(buf); }
+  }
+  public static string[] Sessions(string domain, string user) {
+    List<string> list = new List<string>();
+    IntPtr info; int count;
+    if (!WTSEnumerateSessionsW(IntPtr.Zero, 0, 1, out info, out count)) return list.ToArray();
+    try {
+      int size = Marshal.SizeOf(typeof(WTS_SESSION_INFO));
+      for (int i = 0; i < count; i++) {
+        WTS_SESSION_INFO s = (WTS_SESSION_INFO)Marshal.PtrToStructure(new IntPtr(info.ToInt64() + (long)i * size), typeof(WTS_SESSION_INFO));
+        if (s.SessionId == 0) continue;
+        if (string.Equals(Query(s.SessionId, 5), user, StringComparison.OrdinalIgnoreCase) && string.Equals(Query(s.SessionId, 7), domain, StringComparison.OrdinalIgnoreCase)) list.Add(s.SessionId.ToString() + ":" + s.State.ToString());
+      }
+    } finally { WTSFreeMemory(info); }
+    return list.ToArray();
+  }
+}
+'@
+} catch { [Console]::Error.WriteLine('fleet: the session helper could not be compiled on this guest'); exit 79 }
+$fleetSessionId = -1
+$fleetSessionState = ''
+foreach ($fleetEntry in [FleetSessions]::Sessions($env:COMPUTERNAME, $fleetUser)) {
+  $fleetParts = $fleetEntry.Split(':')
+  if ($fleetParts[1] -eq '0') { if ($fleetSessionId -lt 0) { $fleetSessionId = [int]$fleetParts[0] } } else { $fleetSessionState = $fleetParts[1] }
+}
+if ($fleetSessionId -lt 0) {
+  $fleetNote = 'fleet: interactive user ' + $fleetUser + ' has no active desktop session'
+  if ($fleetSessionState -ne '') { $fleetNote += ' (a session exists in WTS state ' + $fleetSessionState + ')' }
+  [Console]::Error.WriteLine($fleetNote + '; the image or operator must log that user on (autologon)')
+  exit 77
+}
+"#;
+
+/// The readiness probe (#397): exits 0 and prints `session=<id>` when the
+/// interactive user has an Active desktop session; otherwise prints why on
+/// stderr and exits 77 (`78` when the account has no profile, `64` for an
+/// invalid user name). Run with the argument `[user]`. It reads nothing
+/// secret and changes nothing.
+const WINDOWS_SESSION_PROBE: &str = r"$ErrorActionPreference = 'Stop'
+$fleetUser = $args[0]
+if ($fleetUser -cnotmatch '^[A-Za-z0-9_][A-Za-z0-9_.-]{0,19}\z') { exit 64 }
+";
+
+/// The synchronous tail (#397): after the interactive start, wait for the
+/// run's `exit` file (the supervisor enforces the bound and writes `124`),
+/// copy the last bytes of each stream to this session's own streams and
+/// exit with the command's code. The control directory stays in the guest;
+/// the controller's exec bounds and scrubbing apply to what is printed.
+const WINDOWS_INTERACTIVE_WAIT: &str = r"$fleetExitFile = [IO.Path]::Combine($fleetDir, 'exit')
+$fleetEnd = $fleetBegan.AddSeconds([double]$fleetNum + 75)
+if ([IO.File]::Exists([IO.Path]::Combine($fleetDir, 'abandoned')) -and -not (fleetReg ([IO.Path]::Combine($fleetDir, 'pid')))) {
+  [Console]::Error.WriteLine('fleet: the interactive command was abandoned before it started')
+  exit 75
+}
+$fleetAbandonedFile = [IO.Path]::Combine($fleetDir, 'abandoned')
+$fleetPidPath = [IO.Path]::Combine($fleetDir, 'pid')
+while (-not (fleetReg $fleetExitFile) -and [DateTime]::UtcNow -lt $fleetEnd) {
+  if ([IO.File]::Exists($fleetAbandonedFile) -and -not (fleetReg $fleetPidPath)) {
+    [Console]::Error.WriteLine('fleet: the interactive command was abandoned before it started')
+    exit 75
+  }
+  Start-Sleep -Milliseconds 250
+}
+if (-not (fleetReg $fleetExitFile)) {
+  [Console]::Error.WriteLine('fleet: the interactive command did not report an exit status within its bound (the start used part of it)')
+  exit 70
+}
+$fleetCode = 1
+try {
+  $fs = (fleetOpenRead $fleetExitFile)
+  try { $buf = New-Object byte[] 20; $n = $fs.Read($buf, 0, 20) } finally { $fs.Dispose() }
+  $fleetText = [Text.Encoding]::ASCII.GetString($buf, 0, $n).Trim()
+  if ($fleetText -cmatch '^-?[0-9]{1,11}\z') { $fleetCode = [int]$fleetText } else { [Console]::Error.WriteLine('fleet: the interactive run left an unreadable exit status') }
+} catch { [Console]::Error.WriteLine('fleet: the interactive run left an unreadable exit status') }
+function fleetEmit($name, $out) {
+  $file = [IO.Path]::Combine($fleetDir, $name)
+  if (-not (fleetReg $file)) { return }
+  try {
+    $fs = (fleetOpenRead $file)
+    try {
+      $take = [int][Math]::Min($fs.Length, 1048576)
+      $buf = New-Object byte[] $take
+      [void]$fs.Seek($fs.Length - $take, [IO.SeekOrigin]::Begin)
+      $got = 0
+      while ($got -lt $take) { $n = $fs.Read($buf, $got, $take - $got); if ($n -le 0) { break }; $got += $n }
+      $out.Write($buf, 0, $got)
+      $out.Flush()
+    } finally { $fs.Dispose() }
+  } catch { }
+}
+fleetEmit 'stdout' ([Console]::OpenStandardOutput())
+fleetEmit 'stderr' ([Console]::OpenStandardError())
+# A native code whose low byte is 0 would read as success through ssh.
+if ($fleetCode -ne 0 -and ($fleetCode -band 255) -eq 0) { $fleetCode = 1 }
+exit $fleetCode
+";
 
 /// The Windows status body: prints the same `key=value` lines as the Bash
 /// one. Only regular files that are not reparse points are read, each
@@ -462,7 +770,7 @@ exit 0
 const WINDOWS_STATUS_BODY: &str = r#"function fleetNumOf($path, $signed) {
   if (-not (fleetReg $path)) { return '' }
   try {
-    $fs = New-Object IO.FileStream($path, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]'ReadWrite,Delete')
+    $fs = (fleetOpenRead $path)
     try { $buf = New-Object byte[] 20; $n = $fs.Read($buf, 0, 20) } finally { $fs.Dispose() }
     $text = [Text.Encoding]::ASCII.GetString($buf, 0, $n).Trim()
     if ($signed) { if ($text -cmatch '^-?[0-9]{1,11}\z') { return $text } }
@@ -473,7 +781,7 @@ const WINDOWS_STATUS_BODY: &str = r#"function fleetNumOf($path, $signed) {
 function fleetSmall($path) {
   if (-not (fleetReg $path)) { return '' }
   try {
-    $fs = New-Object IO.FileStream($path, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]'ReadWrite,Delete')
+    $fs = (fleetOpenRead $path)
     try { $buf = New-Object byte[] 64; $n = $fs.Read($buf, 0, 64) } finally { $fs.Dispose() }
     return [Text.Encoding]::ASCII.GetString($buf, 0, $n).Trim()
   } catch { return '' }
@@ -492,15 +800,31 @@ function fleetAlive {
 }
 $fleetExit = [IO.Path]::Combine($fleetDir, 'exit')
 $fleetPid = [IO.Path]::Combine($fleetDir, 'pid')
+if ($fleetUser -and -not [IO.Directory]::Exists($fleetDir)) {
+  # Not in the default base: an interactive run keeps its directory under
+  # ProgramData, and only then is the account resolved.
+  . $fleetResolveUser
+  $fleetParent = $fleetIParent; $fleetBase = $fleetIBase; $fleetDir = $fleetIDir
+  $fleetExit = [IO.Path]::Combine($fleetDir, 'exit')
+  $fleetPid = [IO.Path]::Combine($fleetDir, 'pid')
+}
 if (-not (fleetChainSecure)) { exit 71 }
 if (-not [IO.Directory]::Exists($fleetDir)) {
   [Console]::Out.Write("state=absent`n")
   exit 0
 }
-if (-not (fleetSecure $fleetDir)) { exit 71 }
+$fleetHalf = $false
+if (-not (fleetSecure $fleetDir ($fleetDir -eq $fleetIDir))) {
+  # A directory the administrator created but did not finish (crashed between
+  # the create and the grant) has a trusted-only ACL and no user grant: it
+  # never started anything.
+  if ($fleetDir -eq $fleetIDir -and (fleetSecure $fleetDir)) { $fleetHalf = $true } else { exit 71 }
+}
 $fleetState = ''
 $fleetReason = ''
-if (fleetReg $fleetExit) {
+if ($fleetHalf) {
+  if (([DateTime]::UtcNow - (New-Object IO.DirectoryInfo $fleetDir).CreationTimeUtc).TotalSeconds -lt 60) { $fleetState = 'starting' } else { $fleetState = 'lost'; $fleetReason = 'never_started' }
+} elseif (fleetReg $fleetExit) {
   $fleetState = 'exited'
 } elseif (fleetReg $fleetPid) {
   # A boot counter that is unknown on either side is not evidence of a
@@ -535,7 +859,7 @@ foreach ($fleetStream in 'stdout', 'stderr') {
   $fleetB64 = ''
   if (fleetReg $fleetFile) {
     try {
-      $fs = New-Object IO.FileStream($fleetFile, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]'ReadWrite,Delete')
+      $fs = (fleetOpenRead $fleetFile)
       try {
         $fleetBytes = $fs.Length
         $take = [int][Math]::Min($fleetBytes, $fleetWant)
@@ -562,10 +886,76 @@ pub fn start_script_for(shell: crate::shell::GuestShell, command: &str) -> Strin
         crate::shell::GuestShell::Posix => start_script(command),
         crate::shell::GuestShell::PowerShell => {
             let encoded = base64::engine::general_purpose::STANDARD.encode(command.as_bytes());
-            format!(
-                "$fleetCmd64 = '{encoded}'\n$fleetWrapper = @'\n{WINDOWS_WRAPPER}'@\n{WINDOWS_RESOLVE}{WINDOWS_START_BODY}"
-            )
+            windows_start(&encoded, "")
         }
+    }
+}
+
+fn windows_start(encoded: &str, prefix: &str) -> String {
+    let body = WINDOWS_START_BODY.replace("FLEET_SESSION_FIND_INLINE", WINDOWS_SESSION_FIND);
+    format!(
+        "{prefix}$fleetCmd64 = '{encoded}'\n$fleetWrapper = @'\n{WINDOWS_WRAPPER}'@\n{WINDOWS_RESOLVE}{body}"
+    )
+}
+
+/// The script that starts `command` in the interactive user's desktop
+/// session on a Windows guest (#397). Run it with
+/// [`interactive_start_metadata`]. With `wait` false it behaves like
+/// [`start_script_for`] (prints `started` once the supervisor has recorded
+/// its pid, or `exists`); with `wait` true it then waits for the command,
+/// prints its last output bytes on its own stdout and stderr and exits with
+/// its code, so one SSH exec returns like a normal exec.
+///
+/// Refusals (stderr names the reason; no command text): 64 invalid
+/// argument, 71 directory not trusted, 72 command cannot be written, 75 the
+/// supervisor never started, 76 start unconfirmed, 77 the user has no active
+/// desktop session, 78 the user has no local account or profile, 70 (wait)
+/// no exit status in time.
+#[must_use]
+pub fn interactive_start_script(command: &str, wait: bool) -> String {
+    let encoded = base64::engine::general_purpose::STANDARD.encode(command.as_bytes());
+    let mut script = windows_start(&encoded, if wait { "$fleetWait = $true\n" } else { "" });
+    if wait {
+        script.push_str(WINDOWS_INTERACTIVE_WAIT);
+    }
+    script
+}
+
+/// The metadata for [`interactive_start_script`]: the handle, the bound in
+/// seconds and the interactive user's name (a name only).
+#[must_use]
+pub fn interactive_start_metadata(
+    handle: &str,
+    timeout_seconds: u64,
+    user: &str,
+) -> ScriptMetadata {
+    ScriptMetadata {
+        working_directory: String::new(),
+        environment: Vec::new(),
+        arguments: vec![
+            handle.to_owned(),
+            timeout_seconds.to_string(),
+            format!("interactive:{user}"),
+        ],
+    }
+}
+
+/// The readiness probe script for the interactive user's session (see
+/// [`WINDOWS_SESSION_PROBE`]); run with [`session_probe_metadata`].
+#[must_use]
+pub fn session_probe_script() -> String {
+    format!(
+        "{WINDOWS_SESSION_PROBE}{WINDOWS_SESSION_FIND}[Console]::Out.Write(\"session=\" + $fleetSessionId + \"`n\")\nexit 0\n"
+    )
+}
+
+/// The metadata for [`session_probe_script`].
+#[must_use]
+pub fn session_probe_metadata(user: &str) -> ScriptMetadata {
+    ScriptMetadata {
+        working_directory: String::new(),
+        environment: Vec::new(),
+        arguments: vec![user.to_owned()],
     }
 }
 
@@ -662,6 +1052,21 @@ pub fn status_metadata(handle: &str, tail_window: usize) -> ScriptMetadata {
         environment: Vec::new(),
         arguments: vec![handle.to_owned(), tail_window.to_string()],
     }
+}
+
+/// The metadata for [`status_script_for`] on a lease whose template declares
+/// an interactive user: the handle may live in that user's profile.
+#[must_use]
+pub fn status_metadata_for(
+    handle: &str,
+    tail_window: usize,
+    interactive_user: Option<&str>,
+) -> ScriptMetadata {
+    let mut metadata = status_metadata(handle, tail_window);
+    if let Some(user) = interactive_user {
+        metadata.arguments.push(format!("interactive:{user}"));
+    }
+    metadata
 }
 
 /// What the guest says about one handle.
@@ -781,6 +1186,7 @@ pub fn probe_detached(
     provider: &SshProvider,
     limiter: &ExecutionLimiter,
     endpoint: &SshConnectionSpec,
+    interactive_user: Option<&str>,
     handle: &str,
 ) -> Result<GuestReport, SshProviderError> {
     if !is_valid_handle(handle) {
@@ -794,7 +1200,7 @@ pub fn probe_detached(
         limiter,
         endpoint,
         &status_script_for(shell),
-        &status_metadata(handle, TAIL_WINDOW_BYTES),
+        &status_metadata_for(handle, TAIL_WINDOW_BYTES, interactive_user),
         STATUS_DEADLINE,
     )?;
     if result.killed_by_deadline {
@@ -1226,6 +1632,114 @@ mod tests {
             }
         }
 
+        #[test]
+        fn interactive_scripts_use_a_passwordless_interactive_logon_and_no_caller_text() {
+            let command = "Write-Output 'p4ssw0rd-looking-secret'; notepad";
+            for wait in [false, true] {
+                let script = interactive_start_script(command, wait);
+                // The command travels only as base64; the user only as an argument.
+                assert!(!script.contains("p4ssw0rd"), "{script}");
+                // The interactive run directory is admin-owned with a sentinel;
+                // files are read through a reparse-refusing handle.
+                assert!(script.contains("'.fleet'") && script.contains("fleetGrantUser"));
+                assert!(script.contains("OPEN_REPARSE") || script.contains("0x00200000"));
+                assert!(script.contains("NumberOfLinks != 1"));
+                assert!(!script.contains("notepad"), "{script}");
+                // Interactive logon needs no password: no stored credential is
+                // asked for or accepted.
+                assert!(script.contains("-LogonType Interactive"));
+                assert!(script.contains("-RunLevel Limited"));
+                let lower = script.to_ascii_lowercase();
+                for forbidden in [
+                    "-password",
+                    "s4u",
+                    "logontype password",
+                    "get-credential",
+                    "convertto-securestring",
+                ] {
+                    assert!(!lower.contains(forbidden), "{forbidden}");
+                }
+                assert_eq!(script.contains("$fleetWait = $true"), wait);
+                assert_eq!(script.contains("fleetEmit 'stdout'"), wait);
+                // The session finder is inlined exactly once.
+                assert!(script.contains("WTSEnumerateSessionsW"));
+                assert!(!script.contains("FLEET_SESSION_FIND_INLINE"));
+            }
+            let metadata = interactive_start_metadata("op-1", 30, "qa");
+            assert_eq!(metadata.arguments, ["op-1", "30", "interactive:qa"]);
+            // The non-interactive start is unchanged in kind: no task, no session code.
+            let plain = start_script_for(GuestShell::PowerShell, command);
+            assert!(plain.contains("FleetLaunch"));
+            assert!(!plain.contains("FLEET_SESSION_FIND_INLINE"));
+            let probe = session_probe_script();
+            assert!(probe.contains("exit 77") && probe.contains("session="));
+            assert_eq!(session_probe_metadata("qa").arguments, ["qa"]);
+            let status_args = status_metadata_for("h", 10, Some("qa")).arguments;
+            assert_eq!(status_args, ["h", "10", "interactive:qa"]);
+            assert_eq!(status_metadata_for("h", 10, None).arguments, ["h", "10"]);
+        }
+
+        #[test]
+        fn the_session_helper_compiles() {
+            let Some(pwsh) = require_pwsh() else { return };
+            let find = WINDOWS_SESSION_FIND;
+            let end = find.find("exit 79 }\n").unwrap() + "exit 79 }\n".len();
+            let snippet = format!(
+                "{}\n[Console]::Out.Write([FleetSessions].FullName)\n",
+                &find[..end]
+            );
+            let out = run_ps(&pwsh, &snippet, &ScriptMetadata::default(), b"", None);
+            assert_eq!(out.status.code(), Some(0), "{out:?}");
+            assert!(String::from_utf8_lossy(&out.stdout).contains("FleetSessions"));
+        }
+
+        #[test]
+        fn interactive_scripts_parse_and_refuse_bad_user_names_before_doing_anything() {
+            let Some(pwsh) = require_pwsh() else { return };
+            for script in [
+                interactive_start_script("echo hi", false),
+                interactive_start_script("echo hi", true),
+                status_script_for(GuestShell::PowerShell),
+                session_probe_script(),
+            ] {
+                let out = std::process::Command::new(&pwsh)
+                    .args(["-NoProfile", "-Command", "-"])
+                    .stdin(Stdio::piped())
+                    .stdout(Stdio::piped())
+                    .stderr(Stdio::piped())
+                    .spawn()
+                    .and_then(|mut child| {
+                        let b64 = base64::engine::general_purpose::STANDARD.encode(script.as_bytes());
+                        child.stdin.take().unwrap().write_all(
+                            format!("$e=$null;[void][System.Management.Automation.Language.Parser]::ParseInput([Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('{b64}')),[ref]$null,[ref]$e);if($e.Count){{$e|ForEach-Object{{$_.Message}};exit 1}}\n").as_bytes(),
+                        )?;
+                        child.wait_with_output()
+                    })
+                    .unwrap();
+                assert_eq!(
+                    out.status.code(),
+                    Some(0),
+                    "{}",
+                    String::from_utf8_lossy(&out.stdout)
+                );
+            }
+            // A hostile user name is refused (64) before anything runs.
+            for bad in [
+                "interactive:a b",
+                "interactive:-x",
+                "interactive:$(x)",
+                "interactive:a;b",
+                "interactive:",
+            ] {
+                let out = run(
+                    &pwsh,
+                    &interactive_start_script("echo hi", false),
+                    &["h1", "5", bad],
+                );
+                assert_eq!(out.status.code(), Some(64), "{bad}: {out:?}");
+            }
+        }
+
         fn pid_of(base: &Path, handle: &str) -> String {
             std::fs::read_to_string(base.join(handle).join("pid"))
                 .unwrap()
@@ -1512,8 +2026,14 @@ mod tests {
             }
             assert!(start.contains("CreateDirectory($path, $sec)"));
             // The creator is the owner: setting Administrators fails for a
-            // non-admin token. And only the user's own profile is used.
-            assert!(!start.contains("SetOwner") && !start.contains("ProgramData"));
+            // non-admin token. The default base is the SSH user's own profile; the
+            // only ProgramData use is the interactive base (administrator-owned,
+            // no right for the test user on it).
+            assert!(!start.contains("SetOwner"));
+            assert!(
+                !start.contains("$fleetBase = [IO.Path]::Combine($env:ProgramData"),
+                "the default base never leaves the profile"
+            );
             assert!(start.contains("LOCALAPPDATA") && start.contains("0x500D0156"));
             assert!(start.contains("SetAccessRuleProtection($true, $false)"));
             assert!(
@@ -1556,7 +2076,9 @@ mod tests {
             // test executes (it calls kernel32). It must at least compile, so
             // a typo does not wait for a Windows guest to be found.
             let start = start_script_for(GuestShell::PowerShell, "exit 0");
-            let from = start.find("Add-Type -TypeDefinition @'\n").unwrap();
+            let from = start
+                .find("Add-Type -TypeDefinition @'\nusing System;\nusing System.Runtime.InteropServices;\npublic static class FleetLaunch")
+                .unwrap();
             let end = from + start[from..].find("\n'@\n").unwrap() + 4;
             let snippet = format!(
                 "{}\n[Console]::Out.Write([FleetLaunch]::Start.GetType().Name + ' ' + [FleetLaunch].FullName)\n",

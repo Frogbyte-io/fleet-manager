@@ -38,6 +38,10 @@ pub struct ExecDetachedRequest {
     /// cannot outlive its lease or extend it.
     #[serde(default)]
     pub timeout_seconds: Option<u64>,
+    /// `service` (the default) or `interactive`: the template's interactive
+    /// test user's desktop session (Windows guests only).
+    #[serde(default)]
+    pub session: Option<String>,
 }
 
 /// A started detached command.
@@ -192,6 +196,7 @@ pub async fn exec_detached_lab_lease(
             &lease_id,
             &request.script,
             request.timeout_seconds,
+            crate::lab::parse_session(request.session.as_deref(), correlation_id)?,
             headers
                 .get(crate::IDEMPOTENCY_KEY_HEADER)
                 .and_then(|value| value.to_str().ok()),

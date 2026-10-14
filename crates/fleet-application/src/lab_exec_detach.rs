@@ -206,6 +206,7 @@ pub trait GuestExecPort: fmt::Debug + Send + Sync {
         machine_id: &str,
         endpoint_id: &str,
         guest_os: fleet_core::GuestOs,
+        interactive_user: Option<&str>,
         handle: &str,
     ) -> Result<GuestProcess, String>;
 }
@@ -367,6 +368,7 @@ impl LabExecDetach {
         lease_id: &str,
         script: &str,
         timeout_seconds: Option<u64>,
+        session: fleet_core::ExecSession,
         idempotency_key: Option<&str>,
         now: i64,
     ) -> Result<PreparedStart, LabUseCaseError> {
@@ -395,7 +397,10 @@ impl LabExecDetach {
         scope(principal, &lease.owner, || format!("lease {lease_id}"))?;
         lease_exec_ready(&lease, now).map_err(|detail| LabUseCaseError::Invalid { detail })?;
         self.require_machine(&lease).await?;
-        let guest_os = self.guest_os_of(&lease).await?;
+        let (guest_os, template_user) = self.guest_of(&lease).await?;
+        let interactive_user = session
+            .resolve(guest_os, template_user.as_deref())
+            .map_err(|detail| LabUseCaseError::Invalid { detail })?;
         let remaining = lease.expires_at.map_or(0, |expires| {
             u64::try_from((expires - now) / 1000).unwrap_or(0)
         });
@@ -419,6 +424,7 @@ impl LabExecDetach {
                 ("commandSha256", &command_sha256),
                 ("commandBytes", &command_bytes.to_string()),
                 ("timeoutSeconds", &timeout.to_string()),
+                ("session", session.id()),
             ],
         )
         .await?;
@@ -438,6 +444,8 @@ impl LabExecDetach {
                         "commandSha256": command_sha256,
                         "commandBytes": command_bytes,
                         "guestOs": guest_os.id(),
+                        "session": session.id(),
+                        "interactiveUser": interactive_user,
                     })
                     .to_string(),
                 ),
@@ -593,10 +601,16 @@ impl LabExecDetach {
             status.reason = Some("no_lab_machine".to_owned());
             return Ok(status);
         };
-        let guest_os = self.guest_os_of(&lease).await?;
+        let (guest_os, interactive_user) = self.guest_of(&lease).await?;
         let process = match self
             .guest
-            .probe(&machine_id, &endpoint_id, guest_os, handle)
+            .probe(
+                &machine_id,
+                &endpoint_id,
+                guest_os,
+                interactive_user.as_deref(),
+                handle,
+            )
             .await
         {
             Ok(process) => process,
@@ -635,15 +649,16 @@ impl LabExecDetach {
         Ok(status)
     }
 
-    /// The guest OS of the lease's immutable template version.
-    async fn guest_os_of(
+    /// The guest OS and interactive user of the lease's immutable template
+    /// version.
+    async fn guest_of(
         &self,
         lease: &fleet_core::Lease,
-    ) -> Result<fleet_core::GuestOs, LabUseCaseError> {
+    ) -> Result<(fleet_core::GuestOs, Option<String>), LabUseCaseError> {
         self.templates
             .get_version(&lease.template_version_id)
             .await
-            .map(|version| version.content.guest_os)
+            .map(|version| (version.content.guest_os, version.content.interactive_user))
             .map_err(|detail| backend("templates", detail))
     }
 

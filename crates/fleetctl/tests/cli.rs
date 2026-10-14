@@ -3338,6 +3338,7 @@ fn the_one_command_lab_flow_parses() {
             script: "echo 'a b' 'it'\\''s'".to_owned(),
             timeout: Some(120),
             wait: true,
+            session: None,
         }
     );
     assert!(
@@ -3421,8 +3422,25 @@ fn lab_exec_script_sends_the_one_word_untouched() {
             script: script.to_owned(),
             timeout: None,
             wait: true,
+            session: None,
         }
     );
+    // The interactive session option rides through to both exec forms.
+    assert!(matches!(
+        lab_parse(&["lab", "exec", "lease-1", "--session", "interactive", "--wait", "--", "notepad"]).unwrap(),
+        fleetctl::Command::LabExec { session: Some(session), wait: true, .. } if session == "interactive"
+    ));
+    assert!(matches!(
+        lab_parse(&["lab", "exec", "lease-1", "--detach", "--session", "interactive", "--", "notepad"]).unwrap(),
+        fleetctl::Command::LabExecDetach { session: Some(session), .. } if session == "interactive"
+    ));
+    assert!(lab_parse(&["lab", "exec", "lease-1", "--session"]).is_err());
+    assert!(
+        lab_parse(&["lab", "exec", "lease-1", "--session", "desktop", "--", "x"])
+            .unwrap_err()
+            .contains("service or interactive")
+    );
+    assert!(lab_parse(&["lab", "exec", "lease-1", "--session", "service", "--", "x"]).is_ok());
     assert!(matches!(
         lab_parse(&["lab", "exec", "lease-1", "--detach", "--script", "--", script]).unwrap(),
         fleetctl::Command::LabExecDetach { script: sent, .. } if sent == script
@@ -3814,6 +3832,7 @@ fn fleetctl_lists_and_downloads_lab_artifacts_with_digest_verification() {
             cleanup: fleet_core::CleanupStrategy::Destroy,
             audio: None,
             guest_os: fleet_core::GuestOs::default(),
+            interactive_user: None,
         };
         let template = LabTemplatePort::create(
             labs.as_ref(),

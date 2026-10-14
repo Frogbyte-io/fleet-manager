@@ -58,6 +58,7 @@ impl LabRepository {
                 _ => None,
             },
             guest_os: GuestOs::from_id(&row.get::<String, _>("guest_os"))?,
+            interactive_user: row.get("interactive_user"),
         })
     }
 
@@ -117,8 +118,8 @@ impl LabTemplatePort for LabRepository {
         let id = Uuid::now_v7().to_string();
         let content = &template.content;
         let result = sqlx::query(
-            "INSERT INTO lab_templates (id, name, description, image_version_id, cores, memory_mib, disk_gib, bootstrap_project_id, readiness_probe, readiness_command, readiness_deadline_seconds, ttl_seconds, cleanup, published_from, created_at, updated_at, ssh_user, ssh_port, ssh_trust_mode, ssh_fingerprint, audio_device, audio_driver, guest_os) \
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, NULL, ?14, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21)",
+            "INSERT INTO lab_templates (id, name, description, image_version_id, cores, memory_mib, disk_gib, bootstrap_project_id, readiness_probe, readiness_command, readiness_deadline_seconds, ttl_seconds, cleanup, published_from, created_at, updated_at, ssh_user, ssh_port, ssh_trust_mode, ssh_fingerprint, audio_device, audio_driver, guest_os, interactive_user) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, NULL, ?14, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22)",
         )
         .bind(&id)
         .bind(&content.name)
@@ -139,6 +140,7 @@ impl LabTemplatePort for LabRepository {
         .bind(content.audio.as_ref().map(|audio| audio.device.as_str()))
         .bind(content.audio.as_ref().map(|audio| audio.driver.as_str()))
         .bind(content.guest_os.id())
+        .bind(&content.interactive_user)
         .execute(&self.pool)
         .await;
         match result {
@@ -177,7 +179,7 @@ impl LabTemplatePort for LabRepository {
         now: i64,
     ) -> Result<LabTemplate, String> {
         let updated = sqlx::query(
-            "UPDATE lab_templates SET name = ?2, description = ?3, image_version_id = ?4, cores = ?5, memory_mib = ?6, disk_gib = ?7, bootstrap_project_id = ?8, readiness_probe = ?9, readiness_command = ?10, readiness_deadline_seconds = ?11, ttl_seconds = ?12, cleanup = ?13, updated_at = ?14, ssh_user = ?15, ssh_port = ?16, ssh_trust_mode = ?17, ssh_fingerprint = ?18, audio_device = ?19, audio_driver = ?20, guest_os = ?21 WHERE id = ?1",
+            "UPDATE lab_templates SET name = ?2, description = ?3, image_version_id = ?4, cores = ?5, memory_mib = ?6, disk_gib = ?7, bootstrap_project_id = ?8, readiness_probe = ?9, readiness_command = ?10, readiness_deadline_seconds = ?11, ttl_seconds = ?12, cleanup = ?13, updated_at = ?14, ssh_user = ?15, ssh_port = ?16, ssh_trust_mode = ?17, ssh_fingerprint = ?18, audio_device = ?19, audio_driver = ?20, guest_os = ?21, interactive_user = ?22 WHERE id = ?1",
         )
         .bind(id)
         .bind(&content.name)
@@ -198,6 +200,7 @@ impl LabTemplatePort for LabRepository {
         .bind(content.audio.as_ref().map(|audio| audio.device.as_str()))
         .bind(content.audio.as_ref().map(|audio| audio.driver.as_str()))
         .bind(content.guest_os.id())
+        .bind(&content.interactive_user)
         .execute(&self.pool)
         .await
         .map_err(|error| format!("update failed: {error}"))?;

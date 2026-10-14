@@ -143,6 +143,7 @@ impl World {
             cleanup: CleanupStrategy::Destroy,
             audio: None,
             guest_os: fleet_core::GuestOs::default(),
+            interactive_user: None,
         };
         let template = LabTemplatePort::create(
             &labs,
@@ -432,6 +433,16 @@ impl LabReadinessPort for Readiness {
         }
     }
 
+    async fn interactive_session(
+        &self,
+        _operations: &Operations,
+        _parent_id: &str,
+        _record: &ProvisionRecord,
+        _user: &str,
+        _remaining: std::time::Duration,
+    ) -> Result<bool, String> {
+        Ok(true)
+    }
     async fn ssh_probe(
         &self,
         _operations: &Operations,

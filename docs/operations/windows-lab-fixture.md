@@ -136,7 +136,7 @@ fleetctl --output json lab template-create --name windows11 --image-version <ver
 fleetctl --output json lab publish <template-id>
 ```
 
-Edit `proxmox_url` (and `node`) in a copy of `recipe.example.json` for your host first. **`lab template-create` has no SSH user option and defaults to `root`, which does not exist on this image, so a lease on that template cannot log in. Create the template through the API with `sshUser` set to the fixture administrator** (`POST /api/v1/lab/templates`, the same JSON the CLI sends plus `"sshUser": "fleetadmin"`, and `"guestOs": "windows"`), then `lab publish` it. The recipe (`cpu_type` and `os` matter, see below) builds a full clone of 7100 (`full_clone: true`: the TPM state and the efidisk are copied) as VMID 7110 with `communicator: none`, like the plain clone-to-template recipe in the Lab runbook. The plugin and Fleet's recipe gate accept it for a Windows guest.
+Edit `proxmox_url` (and `node`) in a copy of `recipe.example.json` for your host first. **`lab template-create` defaults the SSH user to `root`, which does not exist on this image, so a lease on that template cannot log in. Pass `--ssh-user fleetadmin` (the fixture administrator) with `--guest-os windows`** (or `POST /api/v1/lab/templates` with `"sshUser"` and `"guestOs"`), then `lab publish` it. For `lab exec --session interactive` (#397) also pass `--interactive-user <local-account>` once the image keeps that account logged on. The recipe (`cpu_type` and `os` matter, see below) builds a full clone of 7100 (`full_clone: true`: the TPM state and the efidisk are copied) as VMID 7110 with `communicator: none`, like the plain clone-to-template recipe in the Lab runbook. The plugin and Fleet's recipe gate accept it for a Windows guest.
 
 **Two findings from the first build.**
 
@@ -187,7 +187,7 @@ Run on 2026-10-10 against `dev` at `987c22f` (controller built from the same com
 | Recipe, version | `images create ... --source clone` then `publish`: the second recipe version (with `cpu_type: host`) is the working one |
 | Build | succeeded in about 150 s, artifact `pve:7110`. A full clone of a 64 GiB disk dominates |
 | Promotion | `images promote` accepted the version |
-| Lab templates | `windows11` (`--guest-os windows --cleanup revert --probe guest_agent`) and `windows11-fleetadmin`, the same plus `sshUser: fleetadmin` through `POST /api/v1/lab/templates`. The CLI has no SSH user flag and defaults to `root`, which does not exist on this image, so a lease needs the second template |
+| Lab templates | `windows11` (`--guest-os windows --cleanup revert --probe guest_agent`) and `windows11-fleetadmin`, the same plus `sshUser: fleetadmin` through `POST /api/v1/lab/templates`. The CLI's `--ssh-user` flag sets it (the default `root` does not exist on this image, so a lease needs the second template); `--interactive-user` declares the #397 test user |
 | Ids | recorded in the PR and the issue (they belong to the temporary controller's database, so they are not repeated in Git) |
 
 ### Pool member

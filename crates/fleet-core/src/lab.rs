@@ -90,6 +90,104 @@ impl GuestOs {
     }
 }
 
+/// The longest local Windows account name (the SAM limit).
+pub const MAX_INTERACTIVE_USER_LEN: usize = 20;
+
+/// Validates an interactive test user name: 1 to 20 characters of
+/// `[A-Za-z0-9_.-]`, not starting with `-` or `.`. A domain prefix (`\\`),
+/// an `@` suffix, spaces and every shell or path metacharacter are refused,
+/// so the name is safe as data in a guest script and names a local account.
+///
+/// # Errors
+///
+/// Fails on a name outside that shape.
+pub fn validate_interactive_user_name(user: &str) -> Result<(), String> {
+    if user.is_empty()
+        || user.len() > MAX_INTERACTIVE_USER_LEN
+        || user.starts_with(['-', '.'])
+        || !user
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'-' | b'.'))
+    {
+        return Err(format!(
+            "the interactive user must be a local account name of 1..={MAX_INTERACTIVE_USER_LEN} characters from A-Z a-z 0-9 _ - ."
+        ));
+    }
+    Ok(())
+}
+
+/// Which guest session a `lab exec` command runs in.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ExecSession {
+    /// The SSH login's own session (the default; on Windows a
+    /// non-interactive service session).
+    #[default]
+    Service,
+    /// The template's interactive test user's desktop session.
+    Interactive,
+}
+
+impl ExecSession {
+    /// The stable string used in the API and payloads.
+    #[must_use]
+    pub const fn id(self) -> &'static str {
+        match self {
+            Self::Service => "service",
+            Self::Interactive => "interactive",
+        }
+    }
+
+    /// Parses the stable string.
+    ///
+    /// # Errors
+    ///
+    /// Fails on an unrecognized session.
+    pub fn from_id(id: &str) -> Result<Self, String> {
+        match id {
+            "service" => Ok(Self::Service),
+            "interactive" => Ok(Self::Interactive),
+            other => Err(format!(
+                "unrecognized session {other:?}; use service or interactive"
+            )),
+        }
+    }
+
+    /// The rule for running in this session on a guest of `guest_os`
+    /// whose template declares `interactive_user`: the interactive user's
+    /// name when the command must run in its desktop, `None` for the
+    /// service session.
+    ///
+    /// # Errors
+    ///
+    /// Fails, with a message fit for the caller, when `interactive` is
+    /// asked of a guest that cannot provide it: a non-Windows guest
+    /// (unsupported) or a template that declares no interactive user.
+    pub fn resolve(
+        self,
+        guest_os: GuestOs,
+        interactive_user: Option<&str>,
+    ) -> Result<Option<&str>, String> {
+        match self {
+            Self::Service => Ok(None),
+            Self::Interactive => {
+                if guest_os != GuestOs::Windows {
+                    return Err(
+                        "unsupported: --session interactive runs only on Windows guests".to_owned(),
+                    );
+                }
+                let user = interactive_user.ok_or_else(|| {
+                    "the lease's template declares no interactive user, so there is no desktop session to run in".to_owned()
+                })?;
+                // A row saved before the rule existed, or edited directly,
+                // is refused here too, not only where the guest reads it.
+                validate_interactive_user_name(user)?;
+                Ok(Some(user))
+            }
+        }
+    }
+}
+
 /// The cleanup strategy a template declares. `destroy` is the default;
 /// `revert` applies only to explicitly pooled guests; `keep` is gated at
 /// lease time in FM-711 and recorded here as data.
@@ -291,6 +389,12 @@ pub struct LabTemplateContent {
     /// templates read as `linux`.
     #[serde(default)]
     pub guest_os: GuestOs,
+    /// The local account whose interactive desktop session
+    /// `lab exec --session interactive` runs commands in (a user name,
+    /// never a password). Windows guests only; the image recipe or the
+    /// operator keeps that user logged on (autologon).
+    #[serde(default)]
+    pub interactive_user: Option<String>,
 }
 
 impl Default for LabTemplateContent {
@@ -314,6 +418,7 @@ impl Default for LabTemplateContent {
             cleanup: CleanupStrategy::default(),
             audio: None,
             guest_os: GuestOs::default(),
+            interactive_user: None,
         }
     }
 }
@@ -358,6 +463,7 @@ impl LabTemplateContent {
             return Err("the ssh_exec probe requires a readiness command".to_owned());
         }
         self.validate_ssh()?;
+        self.validate_interactive_user()?;
         if let Some(audio) = &self.audio {
             audio.validate()?;
         }
@@ -370,6 +476,22 @@ impl LabTemplateContent {
             return Err("the project_ready probe requires a bootstrap project".to_owned());
         }
         Ok(())
+    }
+
+    /// Validates the interactive test user declaration: a plain local
+    /// account name, allowed only on a Windows guest.
+    ///
+    /// # Errors
+    /// Fails on a name that is not a local account name, or on a
+    /// non-Windows guest.
+    pub fn validate_interactive_user(&self) -> Result<(), String> {
+        let Some(user) = self.interactive_user.as_deref() else {
+            return Ok(());
+        };
+        if self.guest_os != GuestOs::Windows {
+            return Err("an interactive user needs a windows guest".to_owned());
+        }
+        validate_interactive_user_name(user)
     }
 
     /// Validates the non-secret SSH connection and host-key policy.
@@ -438,7 +560,51 @@ mod tests {
             cleanup: CleanupStrategy::Destroy,
             audio: None,
             guest_os: GuestOs::Linux,
+            interactive_user: None,
         }
+    }
+
+    #[test]
+    fn interactive_user_names_and_session_rule() {
+        let mut template = content();
+        template.interactive_user = Some("qa".to_owned());
+        assert!(template.validate().is_err(), "linux guest refused");
+        template.guest_os = GuestOs::Windows;
+        assert!(template.validate().is_ok());
+        for bad in [
+            "",
+            "-qa",
+            ".qa",
+            "a b",
+            "DOM\\qa",
+            "qa@x",
+            "q;a",
+            "a/b",
+            "$(x)",
+            "qa\n",
+            "abcdefghijklmnopqrstu",
+            "é",
+        ] {
+            template.interactive_user = Some(bad.to_owned());
+            assert!(template.validate().is_err(), "{bad:?}");
+        }
+        assert_eq!(
+            ExecSession::from_id("interactive"),
+            Ok(ExecSession::Interactive)
+        );
+        assert!(ExecSession::from_id("x").is_err());
+        assert_eq!(ExecSession::Service.resolve(GuestOs::Linux, None), Ok(None));
+        let linux = ExecSession::Interactive.resolve(GuestOs::Linux, Some("qa"));
+        assert!(linux.unwrap_err().starts_with("unsupported"));
+        assert!(
+            ExecSession::Interactive
+                .resolve(GuestOs::Windows, None)
+                .is_err()
+        );
+        assert_eq!(
+            ExecSession::Interactive.resolve(GuestOs::Windows, Some("qa")),
+            Ok(Some("qa"))
+        );
     }
 
     #[test]
