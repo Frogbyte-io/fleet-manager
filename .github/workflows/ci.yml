@@ -190,7 +190,32 @@ jobs:
           rust: 'true'
       - run: cargo fmt --all --check
       - run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
-      - run: cargo test --workspace --all-features --locked
+      # The Windows guest shell tests in fleet-provider-ssh run the fixed
+      # PowerShell scripts under a real PowerShell. The dev-box has none and the
+      # job has no root, so unpack the pinned official tarball under the runner
+      # temp directory. Version and checksum live in .github/toolchain.env.
+      - name: Install PowerShell 7
+        shell: bash
+        run: |
+          set -euo pipefail
+          archive="powershell-${POWERSHELL_VERSION}-linux-x64.tar.gz"
+          dest="${RUNNER_TEMP}/powershell-${POWERSHELL_VERSION}"
+          mkdir -p "${dest}"
+          curl --fail --silent --show-error --location --retry 3 \
+            "https://github.com/PowerShell/PowerShell/releases/download/v${POWERSHELL_VERSION}/${archive}" \
+            -o "${RUNNER_TEMP}/${archive}"
+          echo "${POWERSHELL_SHA256}  ${RUNNER_TEMP}/${archive}" | sha256sum --check --strict -
+          tar -xzf "${RUNNER_TEMP}/${archive}" -C "${dest}"
+          chmod +x "${dest}/pwsh"
+          "${dest}/pwsh" -NoProfile -Command '$PSVersionTable.PSVersion.ToString()'
+          echo "FLEET_PWSH=${dest}/pwsh" >> "$GITHUB_ENV"
+
+      # FLEET_REQUIRE_PWSH turns a missing PowerShell into a failure instead of
+      # a silent skip, so these tests cannot pass vacuously.
+      - name: Test
+        env:
+          FLEET_REQUIRE_PWSH: '1'
+        run: cargo test --workspace --all-features --locked
       - name: Root verification command
         run: cargo xtask verify
 
