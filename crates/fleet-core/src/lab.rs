@@ -176,11 +176,13 @@ impl ExecSession {
                         "unsupported: --session interactive runs only on Windows guests".to_owned(),
                     );
                 }
-                interactive_user
-                    .map(Some)
-                    .ok_or_else(|| {
-                        "the lease's template declares no interactive user, so there is no desktop session to run in".to_owned()
-                    })
+                let user = interactive_user.ok_or_else(|| {
+                    "the lease's template declares no interactive user, so there is no desktop session to run in".to_owned()
+                })?;
+                // A row saved before the rule existed, or edited directly,
+                // is refused here too, not only where the guest reads it.
+                validate_interactive_user_name(user)?;
+                Ok(Some(user))
             }
         }
     }

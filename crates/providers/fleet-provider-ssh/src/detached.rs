@@ -220,45 +220,58 @@ $fleetDir = [IO.Path]::Combine($fleetBase, $fleetHandle)
 # already names them) neither locks the user out nor fails the check.
 $fleetTrusted = @()
 if ($fleetWindows) { $fleetTrusted = @($fleetSystem, $fleetAdmins, $fleetMe) }
-# The interactive user's candidate directories (#397): the supervisor runs as
-# that user, so its handle directory must live where that user can write, and
-# the account is then also a trusted writer. The SSH user (an administrator)
-# creates it. Start uses these; status falls back to them when the default
-# directory has no such handle.
+# The interactive run's directories (#397). They live under
+# `%ProgramData%\fleet-lab\interactive`, owned by the administrator and
+# writable by nobody else: the test user, who owns its own profile and could
+# otherwise swap a directory for a junction between the check and the use, has
+# no right on the base. Only the handle directory itself grants that user the
+# rights the supervisor needs (create files, plus Modify on the files it
+# creates), and only that leaf trusts the user as a writer. A directory
+# someone else pre-created fails the owner or ACL check (exit 71).
 $fleetIProfile = $null
 $fleetISid = $null
+$fleetLeafSid = $null
 $fleetIParent = $null
 $fleetIBase = $null
 $fleetIDir = $null
+$fleetResolveUser = $null
 if ($fleetUser) {
   if (-not $fleetWindows) { exit 64 }
-  try {
-    $fleetISid = (New-Object Security.Principal.NTAccount($env:COMPUTERNAME, $fleetUser)).Translate([Security.Principal.SecurityIdentifier])
-    $fleetIProfile = [string](Get-ItemProperty -LiteralPath ('HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\ProfileList\' + $fleetISid.Value) -Name ProfileImagePath -ErrorAction Stop).ProfileImagePath
-    if (-not [IO.Directory]::Exists($fleetIProfile)) { throw 'profile' }
-  } catch { [Console]::Error.WriteLine('fleet: the interactive user has no local account or profile on this guest'); exit 78 }
-  $fleetIParent = [IO.Path]::Combine([IO.Path]::Combine($fleetIProfile, 'AppData', 'Local'), 'fleet-lab')
-  $fleetIBase = [IO.Path]::Combine($fleetIParent, 'exec')
+  if (-not $env:ProgramData) { exit 71 }
+  $fleetIParent = [IO.Path]::Combine($env:ProgramData, 'fleet-lab')
+  $fleetIBase = [IO.Path]::Combine($fleetIParent, 'interactive')
   $fleetIDir = [IO.Path]::Combine($fleetIBase, $fleetHandle)
+  # Run by dot-sourcing, only where the account is needed (start always;
+  # status only for a handle that is not in the default base).
+  $fleetResolveUser = {
+    try {
+      $fleetISid = (New-Object Security.Principal.NTAccount($env:COMPUTERNAME, $fleetUser)).Translate([Security.Principal.SecurityIdentifier])
+      $fleetIProfile = [string](Get-ItemProperty -LiteralPath ('HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\ProfileList\' + $fleetISid.Value) -Name ProfileImagePath -ErrorAction Stop).ProfileImagePath
+      if (-not [IO.Directory]::Exists($fleetIProfile)) { throw 'profile' }
+    } catch { [Console]::Error.WriteLine('fleet: the interactive user has no local account or profile on this guest'); exit 78 }
+    $fleetLeafSid = $fleetISid
+  }
 }
-function fleetIn($sid) { foreach ($t in $fleetTrusted) { if ($t.Equals($sid)) { return $true } }; return $false }
-function fleetSecure($path) {
+function fleetIn($sid, $list) { foreach ($t in $list) { if ($t.Equals($sid)) { return $true } }; return $false }
+function fleetSecure($path, $leaf) {
+  $list = $fleetTrusted
+  if ($leaf -and $fleetLeafSid) { $list = @($fleetTrusted) + @($fleetLeafSid) }
   if (-not $fleetWindows) { return $true }
   try {
     $info = New-Object IO.DirectoryInfo $path
     if (-not $info.Exists -or ($info.Attributes -band [IO.FileAttributes]::ReparsePoint)) { return $false }
     $acl = $info.GetAccessControl()
-    if (-not (fleetIn ($acl.GetOwner([Security.Principal.SecurityIdentifier])))) { return $false }
+    if (-not (fleetIn ($acl.GetOwner([Security.Principal.SecurityIdentifier])) $list)) { return $false }
     # Write-class bits, including the raw generic rights an ACE can carry
     # (GENERIC_ALL 0x10000000, GENERIC_WRITE 0x40000000) that the enum names miss.
     $writes = [int64]0x500D0156
     foreach ($rule in $acl.GetAccessRules($true, $true, [Security.Principal.SecurityIdentifier])) {
-      if ($rule.AccessControlType -eq 'Allow' -and ((([int64]$rule.FileSystemRights) -band $writes) -ne 0) -and -not (fleetIn $rule.IdentityReference)) { return $false }
+      if ($rule.AccessControlType -eq 'Allow' -and ((([int64]$rule.FileSystemRights) -band $writes) -ne 0) -and -not (fleetIn $rule.IdentityReference $list)) { return $false }
     }
     return $true
   } catch { return $false }
 }
-function fleetMakeDir($path) {
+function fleetMakeDir($path, $leaf) {
   if (-not [IO.Directory]::Exists($path)) {
     try {
       if ($fleetWindows) {
@@ -267,13 +280,20 @@ function fleetMakeDir($path) {
         foreach ($sid in $fleetTrusted) {
           $sec.AddAccessRule((New-Object Security.AccessControl.FileSystemAccessRule($sid, 'FullControl', 'ContainerInherit,ObjectInherit', 'None', 'Allow')))
         }
+        if ($leaf -and $fleetLeafSid) {
+          # The interactive user: create files in this directory (no
+          # subdirectory, no deleting or renaming the directory or other
+          # accounts' files) and Modify on the files created in it.
+          $sec.AddAccessRule((New-Object Security.AccessControl.FileSystemAccessRule($fleetLeafSid, 'ReadAndExecute, WriteData', 'None', 'None', 'Allow')))
+          $sec.AddAccessRule((New-Object Security.AccessControl.FileSystemAccessRule($fleetLeafSid, 'Modify', 'ObjectInherit', 'InheritOnly', 'Allow')))
+        }
         [void][IO.Directory]::CreateDirectory($path, $sec)
       } else {
         [void][IO.Directory]::CreateDirectory($path)
       }
     } catch { [Console]::Error.WriteLine('fleet: cannot create a guest directory (' + $_.Exception.GetType().Name + $(if ($_.Exception.InnerException) { ' / ' + $_.Exception.InnerException.GetType().Name } else { '' }) + ')') }
   }
-  return (fleetSecure $path)
+  return (fleetSecure $path $leaf)
 }
 function fleetChainSecure {
   if (-not $fleetWindows -or $fleetOverride) { return $true }
@@ -384,8 +404,8 @@ function fleetDropTask {
   }
 }
 if ($fleetUser) {
+  . $fleetResolveUser
   $fleetParent = $fleetIParent; $fleetBase = $fleetIBase; $fleetDir = $fleetIDir
-  $fleetTrusted = @($fleetSystem, $fleetAdmins, $fleetMe, $fleetISid)
 }
 if ($fleetWindows -and -not $fleetOverride) {
   if (-not (fleetMakeDir $fleetParent)) { exit 71 }
@@ -394,7 +414,7 @@ if ($fleetWindows -and -not $fleetOverride) {
   try { [void][IO.Directory]::CreateDirectory($fleetBase) } catch { exit 71 }
 }
 if ([IO.Directory]::Exists($fleetDir)) {
-  if (-not (fleetSecure $fleetDir)) { exit 71 }
+  if (-not (fleetSecure $fleetDir $true)) { exit 71 }
   # A synchronous interactive run that finds its handle already started (a
   # retried operation) waits for that run instead of starting another.
   if (-not $fleetWait) {
@@ -402,12 +422,13 @@ if ([IO.Directory]::Exists($fleetDir)) {
     exit 0
   }
   $fleetExisting = $true
+  fleetDropTask
 }
 if (-not $fleetExisting) {
 if ($fleetUser) {
   FLEET_SESSION_FIND_INLINE
 }
-if (-not (fleetMakeDir $fleetDir)) { exit 71 }
+if (-not (fleetMakeDir $fleetDir $true)) { exit 71 }
 try {
   [IO.File]::WriteAllBytes([IO.Path]::Combine($fleetDir, 'body.ps1'), [Convert]::FromBase64String($fleetCmd64))
   [IO.File]::WriteAllText([IO.Path]::Combine($fleetDir, 'run.ps1'), $fleetWrapper)
@@ -511,7 +532,10 @@ if (-not [IO.File]::Exists($fleetPidFile)) {
   # is not the same as failed: status decides.
   $fleetWaited = 0
   while (-not [IO.File]::Exists($fleetPidFile) -and $fleetWaited -lt 50) { Start-Sleep -Milliseconds 100; $fleetWaited++ }
-  if (-not [IO.File]::Exists($fleetPidFile)) { exit 76 }
+  if (-not [IO.File]::Exists($fleetPidFile)) {
+    # In wait mode the run may still start: go on waiting instead of reporting.
+    if (-not $fleetWait) { fleetDropTask; exit 76 }
+  }
 }
 fleetDropTask
 if (-not $fleetWait) {
@@ -591,7 +615,11 @@ if ($fleetUser -cnotmatch '^[A-Za-z0-9_][A-Za-z0-9_.-]{0,19}\z') { exit 64 }
 /// exit with the command's code. The control directory stays in the guest;
 /// the controller's exec bounds and scrubbing apply to what is printed.
 const WINDOWS_INTERACTIVE_WAIT: &str = r"$fleetExitFile = [IO.Path]::Combine($fleetDir, 'exit')
-$fleetEnd = [DateTime]::UtcNow.AddSeconds([double]$fleetNum + 60)
+$fleetEnd = $fleetBegan.AddSeconds([double]$fleetNum + 75)
+if ([IO.File]::Exists([IO.Path]::Combine($fleetDir, 'abandoned')) -and -not (fleetReg ([IO.Path]::Combine($fleetDir, 'pid')))) {
+  [Console]::Error.WriteLine('fleet: the interactive command was abandoned before it started')
+  exit 75
+}
 while (-not (fleetReg $fleetExitFile) -and [DateTime]::UtcNow -lt $fleetEnd) { Start-Sleep -Milliseconds 250 }
 if (-not (fleetReg $fleetExitFile)) {
   [Console]::Error.WriteLine('fleet: the interactive command did not report an exit status in time')
@@ -602,8 +630,8 @@ try {
   $fs = New-Object IO.FileStream($fleetExitFile, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]'ReadWrite,Delete')
   try { $buf = New-Object byte[] 20; $n = $fs.Read($buf, 0, 20) } finally { $fs.Dispose() }
   $fleetText = [Text.Encoding]::ASCII.GetString($buf, 0, $n).Trim()
-  if ($fleetText -cmatch '^-?[0-9]{1,11}\z') { $fleetCode = [int]$fleetText }
-} catch { }
+  if ($fleetText -cmatch '^-?[0-9]{1,11}\z') { $fleetCode = [int]$fleetText } else { [Console]::Error.WriteLine('fleet: the interactive run left an unreadable exit status') }
+} catch { [Console]::Error.WriteLine('fleet: the interactive run left an unreadable exit status') }
 function fleetEmit($name, $out) {
   $file = [IO.Path]::Combine($fleetDir, $name)
   if (-not (fleetReg $file)) { return }
@@ -665,10 +693,10 @@ function fleetAlive {
 $fleetExit = [IO.Path]::Combine($fleetDir, 'exit')
 $fleetPid = [IO.Path]::Combine($fleetDir, 'pid')
 if ($fleetUser -and -not [IO.Directory]::Exists($fleetDir)) {
-  # Not in the default base: an interactive run keeps its directory in the
-  # interactive user's profile.
+  # Not in the default base: an interactive run keeps its directory under
+  # ProgramData, and only then is the account resolved.
+  . $fleetResolveUser
   $fleetParent = $fleetIParent; $fleetBase = $fleetIBase; $fleetDir = $fleetIDir
-  $fleetTrusted = @($fleetSystem, $fleetAdmins, $fleetMe, $fleetISid)
   $fleetExit = [IO.Path]::Combine($fleetDir, 'exit')
   $fleetPid = [IO.Path]::Combine($fleetDir, 'pid')
 }
@@ -677,7 +705,7 @@ if (-not [IO.Directory]::Exists($fleetDir)) {
   [Console]::Out.Write("state=absent`n")
   exit 0
 }
-if (-not (fleetSecure $fleetDir)) { exit 71 }
+if (-not (fleetSecure $fleetDir ($fleetDir -eq $fleetIDir))) { exit 71 }
 $fleetState = ''
 $fleetReason = ''
 if (fleetReg $fleetExit) {
@@ -1877,8 +1905,14 @@ mod tests {
             }
             assert!(start.contains("CreateDirectory($path, $sec)"));
             // The creator is the owner: setting Administrators fails for a
-            // non-admin token. And only the user's own profile is used.
-            assert!(!start.contains("SetOwner") && !start.contains("ProgramData"));
+            // non-admin token. The default base is the SSH user's own profile; the
+            // only ProgramData use is the interactive base (administrator-owned,
+            // no right for the test user on it).
+            assert!(!start.contains("SetOwner"));
+            assert!(
+                !start.contains("$fleetBase = [IO.Path]::Combine($env:ProgramData"),
+                "the default base never leaves the profile"
+            );
             assert!(start.contains("LOCALAPPDATA") && start.contains("0x500D0156"));
             assert!(start.contains("SetAccessRuleProtection($true, $false)"));
             assert!(
