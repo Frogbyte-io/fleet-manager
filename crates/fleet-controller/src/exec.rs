@@ -53,6 +53,16 @@ struct SshExecPayload {
     /// every non-Lab machine, and operations queued before the field existed.
     #[serde(default)]
     guest_os: fleet_core::GuestOs,
+    /// Whether a Windows guest runs the script under the guest-side deadline
+    /// watchdog (#455). Absent means yes; only the start of a detached exec,
+    /// which bounds itself on the guest and must outlive its session, sets
+    /// it to false.
+    #[serde(default = "watchdog_by_default")]
+    guest_watchdog: bool,
+}
+
+fn watchdog_by_default() -> bool {
+    true
 }
 
 /// How the endpoint authenticates.
@@ -298,6 +308,7 @@ impl ScriptExecutor {
             },
             timeout_seconds: payload.timeout_seconds,
             guest_os: payload.guest_os,
+            guest_watchdog: true,
         })
         .await
     }
@@ -337,7 +348,13 @@ impl ScriptExecutor {
             arguments: payload.arguments.clone(),
         };
         let (result, detail) = self
-            .run_script(&spec, &payload.script, &metadata, deadline)
+            .run_script(
+                &spec,
+                &payload.script,
+                &metadata,
+                deadline,
+                payload.guest_watchdog,
+            )
             .await;
 
         match (result, detail) {
@@ -409,6 +426,7 @@ impl ScriptExecutor {
         script: &str,
         metadata: &ScriptMetadata,
         deadline: Duration,
+        guest_watchdog: bool,
     ) -> (Option<fleet_provider_ssh::ExecutionResult>, Option<String>) {
         let provider = self.provider.clone();
         let limiter = self.limiter.clone();
@@ -416,8 +434,14 @@ impl ScriptExecutor {
         let script = script.to_owned();
         let metadata = metadata.clone();
         tokio::task::spawn_blocking(move || {
-            fleet_provider_ssh::execute_script(
-                &provider, &limiter, &spec, &script, &metadata, deadline,
+            fleet_provider_ssh::execute_script_with(
+                &provider,
+                &limiter,
+                &spec,
+                &script,
+                &metadata,
+                deadline,
+                guest_watchdog,
             )
         })
         .await
@@ -539,6 +563,22 @@ pub(crate) use fleet_core::{scrub_and_bound_with, scrub_window};
 mod tests {
     use super::{redact_collected_facts, scrub_and_bound, transport_failure_json};
     use fleet_core::RESULT_STRING_BOUND;
+
+    /// The guest-side deadline watchdog (#455) is on unless a payload turns
+    /// it off, and only the detached start does.
+    #[test]
+    fn an_ssh_exec_payload_runs_under_the_guest_watchdog_unless_it_says_not() {
+        let base = |extra: &str| {
+            format!(
+                r#"{{"machineId":"m","endpointId":"e","script":"s","auth":{{"type":"agent"}},"timeoutSeconds":5{extra}}}"#
+            )
+        };
+        let default: super::SshExecPayload = serde_json::from_str(&base("")).unwrap();
+        assert!(default.guest_watchdog);
+        let off: super::SshExecPayload =
+            serde_json::from_str(&base(r#","guestWatchdog":false"#)).unwrap();
+        assert!(!off.guest_watchdog);
+    }
 
     /// The transport error text for a failed connection or collection is
     /// node- and tool-supplied: a userinfo URL is masked and a huge detail cut.

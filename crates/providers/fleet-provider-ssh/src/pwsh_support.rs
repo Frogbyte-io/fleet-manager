@@ -133,3 +133,51 @@ pub(crate) fn run_ps_exec(
     let _ = writer.join();
     out
 }
+
+/// Runs the real exec bootstrap with exactly `stdin` as the session input.
+pub(crate) fn run_ps_raw_exec(pwsh: &str, stdin: &[u8]) -> std::process::Output {
+    let shell = GuestShell::for_os(GuestOs::Windows).unwrap();
+    let mut child = std::process::Command::new(pwsh)
+        .arg("-Command")
+        .arg(shell.exec_command_line(&ScriptMetadata::default()))
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut pipe = child.stdin.take().unwrap();
+    let input = stdin.to_vec();
+    let writer = std::thread::spawn(move || {
+        let _ = pipe.write_all(&input);
+    });
+    let out = child.wait_with_output().unwrap();
+    let _ = writer.join();
+    out
+}
+
+/// Like [`run_ps_exec`], but the session's stdin stays open after the
+/// input (as a `ssh` session whose client has not closed it), and the
+/// writer is released when the session ends.
+pub(crate) fn run_ps_exec_open_stdin(
+    pwsh: &str,
+    script: &str,
+    deadline: std::time::Duration,
+) -> std::process::Output {
+    let shell = GuestShell::for_os(GuestOs::Windows).unwrap();
+    let metadata = ScriptMetadata::default();
+    let input = shell.exec_session_input(script, &metadata, deadline);
+    let mut child = std::process::Command::new(pwsh)
+        .arg("-Command")
+        .arg(shell.exec_command_line(&metadata))
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut pipe = child.stdin.take().unwrap();
+    pipe.write_all(&input).unwrap();
+    // Keep the pipe open until the session is gone.
+    let out = child.wait_with_output().unwrap();
+    drop(pipe);
+    out
+}
