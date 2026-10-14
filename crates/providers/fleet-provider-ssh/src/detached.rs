@@ -183,7 +183,7 @@ pub fn start_script(command: &str) -> String {
 /// write-class access to nobody else. They are created with a protected ACL in
 /// the same call (the creator is the owner; nothing sets it), then checked
 /// again: a directory someone else created first fails the check.
-const WINDOWS_RESOLVE: &str = r"$ErrorActionPreference = 'Stop'
+const WINDOWS_RESOLVE: &str = r#"$ErrorActionPreference = 'Stop'
 $fleetHandle = $args[0]
 $fleetNum = $args[1]
 $fleetBase = $args[2]
@@ -249,13 +249,71 @@ if ($fleetUser) {
       $fleetIProfile = [string](Get-ItemProperty -LiteralPath ('HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\ProfileList\' + $fleetISid.Value) -Name ProfileImagePath -ErrorAction Stop).ProfileImagePath
       if (-not [IO.Directory]::Exists($fleetIProfile)) { throw 'profile' }
     } catch { [Console]::Error.WriteLine('fleet: the interactive user has no local account or profile on this guest'); exit 78 }
+    # Reads of the run's files go through a handle opened without following
+    # a reparse point and checked on that same handle (no reparse point, not
+    # a directory, one link).
+    Add-Type -TypeDefinition @'
+using System;
+using System.IO;
+using System.Runtime.InteropServices;
+using Microsoft.Win32.SafeHandles;
+public static class FleetFile {
+  [StructLayout(LayoutKind.Sequential)]
+  struct BY_HANDLE_FILE_INFORMATION { public uint FileAttributes; public System.Runtime.InteropServices.ComTypes.FILETIME CreationTime, LastAccessTime, LastWriteTime; public uint VolumeSerialNumber, FileSizeHigh, FileSizeLow, NumberOfLinks, FileIndexHigh, FileIndexLow; }
+  [DllImport("kernel32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
+  static extern SafeFileHandle CreateFileW(string name, uint access, uint share, IntPtr sa, uint disp, uint flags, IntPtr tmpl);
+  [DllImport("kernel32.dll", SetLastError = true)]
+  static extern bool GetFileInformationByHandle(SafeFileHandle h, out BY_HANDLE_FILE_INFORMATION info);
+  public static FileStream Open(string path) {
+    SafeFileHandle h = CreateFileW(path, 0x80000000, 7, IntPtr.Zero, 3, 0x00200000, IntPtr.Zero);
+    if (h.IsInvalid) return null;
+    BY_HANDLE_FILE_INFORMATION i;
+    if (!GetFileInformationByHandle(h, out i) || (i.FileAttributes & 0x400) != 0 || (i.FileAttributes & 0x10) != 0 || i.NumberOfLinks != 1) { h.Dispose(); return null; }
+    return new FileStream(h, FileAccess.Read, 4096, false);
+  }
+}
+'@
     $fleetLeafSid = $fleetISid
   }
 }
 function fleetIn($sid, $list) { foreach ($t in $list) { if ($t.Equals($sid)) { return $true } }; return $false }
+function fleetSecureFile($path) {
+  try {
+    $f = New-Object IO.FileInfo $path
+    if (-not $f.Exists -or ($f.Attributes -band [IO.FileAttributes]::ReparsePoint)) { return $false }
+    $acl = $f.GetAccessControl()
+    if (-not (fleetIn ($acl.GetOwner([Security.Principal.SecurityIdentifier])) $fleetTrusted)) { return $false }
+    foreach ($rule in $acl.GetAccessRules($true, $true, [Security.Principal.SecurityIdentifier])) {
+      if ($rule.AccessControlType -eq 'Allow' -and ((([int64]$rule.FileSystemRights) -band [int64]0x500D0156) -ne 0) -and -not (fleetIn $rule.IdentityReference $fleetTrusted)) { return $false }
+    }
+    return $true
+  } catch { return $false }
+}
+function fleetWriteFile($path, [byte[]]$bytes) {
+  if ($fleetWindows -and $fleetLeafSid) {
+    # Admin-owned, protected, readable by the interactive user and not
+    # deletable or writable by it.
+    $sec = New-Object Security.AccessControl.FileSecurity
+    $sec.SetAccessRuleProtection($true, $false)
+    foreach ($sid in $fleetTrusted) { $sec.AddAccessRule((New-Object Security.AccessControl.FileSystemAccessRule($sid, 'FullControl', 'None', 'None', 'Allow'))) }
+    $sec.AddAccessRule((New-Object Security.AccessControl.FileSystemAccessRule($fleetLeafSid, 'ReadAndExecute', 'None', 'None', 'Allow')))
+    $fs = New-Object IO.FileStream($path, [IO.FileMode]::CreateNew, [Security.AccessControl.FileSystemRights]'Write', [IO.FileShare]::None, 4096, [IO.FileOptions]::None, $sec)
+    try { $fs.Write($bytes, 0, $bytes.Length) } finally { $fs.Dispose() }
+  } else {
+    [IO.File]::WriteAllBytes($path, $bytes)
+  }
+}
+function fleetGrantUser($path) {
+  # Only now, with the sentinel and the scripts in place, may the user write
+  # in the directory: it is never empty from here on.
+  $sec = (New-Object IO.DirectoryInfo $path).GetAccessControl()
+  $sec.AddAccessRule((New-Object Security.AccessControl.FileSystemAccessRule($fleetLeafSid, 'ReadAndExecute, WriteData', 'None', 'None', 'Allow')))
+  $sec.AddAccessRule((New-Object Security.AccessControl.FileSystemAccessRule($fleetLeafSid, 'Modify', 'ObjectInherit', 'InheritOnly', 'Allow')))
+  (New-Object IO.DirectoryInfo $path).SetAccessControl($sec)
+}
 function fleetSecure($path, $leaf) {
   $list = $fleetTrusted
-  if ($leaf -and $fleetLeafSid) { $list = @($fleetTrusted) + @($fleetLeafSid) }
+  $strict = ($leaf -and $fleetLeafSid)
   if (-not $fleetWindows) { return $true }
   try {
     $info = New-Object IO.DirectoryInfo $path
@@ -265,8 +323,26 @@ function fleetSecure($path, $leaf) {
     # Write-class bits, including the raw generic rights an ACE can carry
     # (GENERIC_ALL 0x10000000, GENERIC_WRITE 0x40000000) that the enum names miss.
     $writes = [int64]0x500D0156
+    $granted = 0
     foreach ($rule in $acl.GetAccessRules($true, $true, [Security.Principal.SecurityIdentifier])) {
+      if ($strict -and $rule.IdentityReference.Equals($fleetLeafSid)) {
+        # The interactive user holds exactly the two grants made at creation.
+        # NTFS adds SYNCHRONIZE (0x100000) to the stored mask of read and modify grants.
+        $r = ([int64]$rule.FileSystemRights) -band [int64]0xFFEFFFFF; $inh = [int]$rule.InheritanceFlags; $prop = [int]$rule.PropagationFlags
+        if ($rule.AccessControlType -ne 'Allow' -or $rule.IsInherited) { return $false }
+        if ($r -eq [int64][Security.AccessControl.FileSystemRights]'ReadAndExecute, WriteData' -and $inh -eq 0 -and $prop -eq 0) { $granted = $granted -bor 1 }
+        elseif ($r -eq [int64][Security.AccessControl.FileSystemRights]'Modify' -and $inh -eq 2 -and $prop -eq 2) { $granted = $granted -bor 2 }
+        else { return $false }
+        continue
+      }
       if ($rule.AccessControlType -eq 'Allow' -and ((([int64]$rule.FileSystemRights) -band $writes) -ne 0) -and -not (fleetIn $rule.IdentityReference $list)) { return $false }
+    }
+    if ($strict) {
+      if ($granted -ne 3) { return $false }
+      # The sentinel keeps the directory from ever being empty: the user can
+      # delete only what it created, and a mount point or junction can be set
+      # only on an empty directory.
+      if (-not (fleetSecureFile ([IO.Path]::Combine($path, '.fleet')))) { return $false }
     }
     return $true
   } catch { return $false }
@@ -280,27 +356,27 @@ function fleetMakeDir($path, $leaf) {
         foreach ($sid in $fleetTrusted) {
           $sec.AddAccessRule((New-Object Security.AccessControl.FileSystemAccessRule($sid, 'FullControl', 'ContainerInherit,ObjectInherit', 'None', 'Allow')))
         }
-        if ($leaf -and $fleetLeafSid) {
-          # The interactive user: create files in this directory (no
-          # subdirectory, no deleting or renaming the directory or other
-          # accounts' files) and Modify on the files created in it.
-          $sec.AddAccessRule((New-Object Security.AccessControl.FileSystemAccessRule($fleetLeafSid, 'ReadAndExecute, WriteData', 'None', 'None', 'Allow')))
-          $sec.AddAccessRule((New-Object Security.AccessControl.FileSystemAccessRule($fleetLeafSid, 'Modify', 'ObjectInherit', 'InheritOnly', 'Allow')))
-        }
         [void][IO.Directory]::CreateDirectory($path, $sec)
       } else {
         [void][IO.Directory]::CreateDirectory($path)
       }
     } catch { [Console]::Error.WriteLine('fleet: cannot create a guest directory (' + $_.Exception.GetType().Name + $(if ($_.Exception.InnerException) { ' / ' + $_.Exception.InnerException.GetType().Name } else { '' }) + ')') }
   }
-  return (fleetSecure $path $leaf)
+  return (fleetSecure $path)
 }
 function fleetChainSecure {
   if (-not $fleetWindows -or $fleetOverride) { return $true }
   foreach ($d in @($fleetParent, $fleetBase)) { if ([IO.Directory]::Exists($d) -and -not (fleetSecure $d)) { return $false } }
   return $true
 }
+function fleetOpenRead($path) {
+  if ($fleetLeafSid) { $fs = [FleetFile]::Open($path) }
+  else { $fs = New-Object IO.FileStream($path, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]'ReadWrite,Delete') }
+  if (-not $fs) { throw 'refused' }
+  return $fs
+}
 function fleetReg($path) {
+  if ($fleetLeafSid) { try { $f = [FleetFile]::Open($path); if ($f) { $f.Dispose(); return $true }; return $false } catch { return $false } }
   try { $i = New-Object IO.FileInfo $path; return ($i.Exists -and -not ($i.Attributes -band [IO.FileAttributes]::ReparsePoint)) } catch { return $false }
 }
 function fleetBoot {
@@ -311,7 +387,7 @@ function fleetBoot {
   }
   try { return (Get-Content -LiteralPath '/proc/sys/kernel/random/boot_id' -TotalCount 1) } catch { return '' }
 }
-";
+"#;
 
 /// The wrapper (`run.ps1`), written verbatim by the start script. With
 /// `-Mode body` it is the child that runs the command; otherwise it is the
@@ -408,8 +484,8 @@ if ($fleetUser) {
   $fleetParent = $fleetIParent; $fleetBase = $fleetIBase; $fleetDir = $fleetIDir
 }
 if ($fleetWindows -and -not $fleetOverride) {
-  if (-not (fleetMakeDir $fleetParent)) { exit 71 }
-  if (-not (fleetMakeDir $fleetBase)) { exit 71 }
+  if (-not (fleetMakeDir $fleetParent)) { [Console]::Error.WriteLine('fleet: a guest directory the run needs exists but is not trusted (wrong owner or access list); another account may have created it first'); exit 71 }
+  if (-not (fleetMakeDir $fleetBase)) { [Console]::Error.WriteLine('fleet: a guest directory the run needs exists but is not trusted (wrong owner or access list); another account may have created it first'); exit 71 }
 } else {
   try { [void][IO.Directory]::CreateDirectory($fleetBase) } catch { exit 71 }
 }
@@ -428,11 +504,14 @@ if (-not $fleetExisting) {
 if ($fleetUser) {
   FLEET_SESSION_FIND_INLINE
 }
-if (-not (fleetMakeDir $fleetDir $true)) { exit 71 }
+if (-not (fleetMakeDir $fleetDir)) { exit 71 }
 try {
-  [IO.File]::WriteAllBytes([IO.Path]::Combine($fleetDir, 'body.ps1'), [Convert]::FromBase64String($fleetCmd64))
-  [IO.File]::WriteAllText([IO.Path]::Combine($fleetDir, 'run.ps1'), $fleetWrapper)
+  if ($fleetLeafSid) { fleetWriteFile ([IO.Path]::Combine($fleetDir, '.fleet')) ([byte[]]@()) }
+  fleetWriteFile ([IO.Path]::Combine($fleetDir, 'body.ps1')) ([Convert]::FromBase64String($fleetCmd64))
+  fleetWriteFile ([IO.Path]::Combine($fleetDir, 'run.ps1')) ([Text.Encoding]::UTF8.GetBytes($fleetWrapper))
+  if ($fleetLeafSid) { fleetGrantUser $fleetDir }
 } catch { exit 72 }
+if ($fleetLeafSid -and -not (fleetSecure $fleetDir $true)) { exit 71 }
 # A start that gives up and a wrapper that runs race for the gate: whoever
 # creates it first decides. The loser of the start's side only reports; the
 # marker keeps a late wrapper from running.
@@ -443,7 +522,7 @@ function fleetGiveUp {
     $g.Dispose()
     $won = $true
   } catch { }
-  if ($won) { try { [IO.File]::WriteAllText([IO.Path]::Combine($fleetDir, 'abandoned'), '') } catch { } }
+  if ($won) { try { (New-Object IO.FileStream([IO.Path]::Combine($fleetDir, 'abandoned'), [IO.FileMode]::CreateNew, [IO.FileAccess]::Write, [IO.FileShare]::None)).Dispose() } catch { } }
   return $won
 }
 $fleetRun = [IO.Path]::Combine($fleetDir, 'run.ps1')
@@ -620,14 +699,22 @@ if ([IO.File]::Exists([IO.Path]::Combine($fleetDir, 'abandoned')) -and -not (fle
   [Console]::Error.WriteLine('fleet: the interactive command was abandoned before it started')
   exit 75
 }
-while (-not (fleetReg $fleetExitFile) -and [DateTime]::UtcNow -lt $fleetEnd) { Start-Sleep -Milliseconds 250 }
+$fleetAbandonedFile = [IO.Path]::Combine($fleetDir, 'abandoned')
+$fleetPidPath = [IO.Path]::Combine($fleetDir, 'pid')
+while (-not (fleetReg $fleetExitFile) -and [DateTime]::UtcNow -lt $fleetEnd) {
+  if ([IO.File]::Exists($fleetAbandonedFile) -and -not (fleetReg $fleetPidPath)) {
+    [Console]::Error.WriteLine('fleet: the interactive command was abandoned before it started')
+    exit 75
+  }
+  Start-Sleep -Milliseconds 250
+}
 if (-not (fleetReg $fleetExitFile)) {
-  [Console]::Error.WriteLine('fleet: the interactive command did not report an exit status in time')
+  [Console]::Error.WriteLine('fleet: the interactive command did not report an exit status within its bound (the start used part of it)')
   exit 70
 }
 $fleetCode = 1
 try {
-  $fs = New-Object IO.FileStream($fleetExitFile, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]'ReadWrite,Delete')
+  $fs = (fleetOpenRead $fleetExitFile)
   try { $buf = New-Object byte[] 20; $n = $fs.Read($buf, 0, 20) } finally { $fs.Dispose() }
   $fleetText = [Text.Encoding]::ASCII.GetString($buf, 0, $n).Trim()
   if ($fleetText -cmatch '^-?[0-9]{1,11}\z') { $fleetCode = [int]$fleetText } else { [Console]::Error.WriteLine('fleet: the interactive run left an unreadable exit status') }
@@ -636,7 +723,7 @@ function fleetEmit($name, $out) {
   $file = [IO.Path]::Combine($fleetDir, $name)
   if (-not (fleetReg $file)) { return }
   try {
-    $fs = New-Object IO.FileStream($file, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]'ReadWrite,Delete')
+    $fs = (fleetOpenRead $file)
     try {
       $take = [int][Math]::Min($fs.Length, 1048576)
       $buf = New-Object byte[] $take
@@ -662,7 +749,7 @@ exit $fleetCode
 const WINDOWS_STATUS_BODY: &str = r#"function fleetNumOf($path, $signed) {
   if (-not (fleetReg $path)) { return '' }
   try {
-    $fs = New-Object IO.FileStream($path, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]'ReadWrite,Delete')
+    $fs = (fleetOpenRead $path)
     try { $buf = New-Object byte[] 20; $n = $fs.Read($buf, 0, 20) } finally { $fs.Dispose() }
     $text = [Text.Encoding]::ASCII.GetString($buf, 0, $n).Trim()
     if ($signed) { if ($text -cmatch '^-?[0-9]{1,11}\z') { return $text } }
@@ -673,7 +760,7 @@ const WINDOWS_STATUS_BODY: &str = r#"function fleetNumOf($path, $signed) {
 function fleetSmall($path) {
   if (-not (fleetReg $path)) { return '' }
   try {
-    $fs = New-Object IO.FileStream($path, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]'ReadWrite,Delete')
+    $fs = (fleetOpenRead $path)
     try { $buf = New-Object byte[] 64; $n = $fs.Read($buf, 0, 64) } finally { $fs.Dispose() }
     return [Text.Encoding]::ASCII.GetString($buf, 0, $n).Trim()
   } catch { return '' }
@@ -743,7 +830,7 @@ foreach ($fleetStream in 'stdout', 'stderr') {
   $fleetB64 = ''
   if (fleetReg $fleetFile) {
     try {
-      $fs = New-Object IO.FileStream($fleetFile, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]'ReadWrite,Delete')
+      $fs = (fleetOpenRead $fleetFile)
       try {
         $fleetBytes = $fs.Length
         $take = [int][Math]::Min($fleetBytes, $fleetWant)
@@ -1523,6 +1610,11 @@ mod tests {
                 let script = interactive_start_script(command, wait);
                 // The command travels only as base64; the user only as an argument.
                 assert!(!script.contains("p4ssw0rd"), "{script}");
+                // The interactive run directory is admin-owned with a sentinel;
+                // files are read through a reparse-refusing handle.
+                assert!(script.contains("'.fleet'") && script.contains("fleetGrantUser"));
+                assert!(script.contains("OPEN_REPARSE") || script.contains("0x00200000"));
+                assert!(script.contains("NumberOfLinks != 1"));
                 assert!(!script.contains("notepad"), "{script}");
                 // Interactive logon needs no password: no stored credential is
                 // asked for or accepted.
