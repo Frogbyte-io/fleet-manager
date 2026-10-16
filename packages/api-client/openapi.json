@@ -1083,6 +1083,272 @@
         }
       }
     },
+    "/api/v1/dns/changes": {
+      "post": {
+        "tags": [
+          "dns"
+        ],
+        "summary": "Requests a record change. The controller reads the zone, computes the\npreview (current record against proposed), and files an action request\n(`dns.record.upsert` or `dns.record.delete`) whose parameters carry that\npreview. The default risk class is `approve`: a person approves it in the\nconsole or with `fleetctl requests approve`. When the request executes,\nthe zone is read again; a zone that changed since the preview fails the\noperation instead of being overwritten.",
+        "description": "# Errors\n\nReturns the public error envelope on refusal, invalid values, an unknown\nzone, a change that would do nothing, a credential-like TXT value, or a\nprovider failure.",
+        "operationId": "createDnsChange",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateDnsChangeRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "description": "The action request was recorded; its parameters carry the preview.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Resource_ActionRequestDto"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "A value is invalid, the change would do nothing, or a value looks like a credential.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The caller may not read DNS or request actions, or policy denies the action.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No Cloudflare account or zone matches the name, or the record to delete does not exist.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Several accounts hold the zone, or the idempotency key was used for a different request.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "Cloudflare refused the token or could not be reached.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The DNS surface or the broker is not wired.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/dns/records": {
+      "get": {
+        "tags": [
+          "dns"
+        ],
+        "summary": "Reads the records at a fully qualified name through the Cloudflare\naccount whose zone contains it, and records them as an observation beside\nthe matching `domain` Registry entry.",
+        "description": "# Errors\n\nReturns the public error envelope on refusal, a missing name, an unknown\nzone, or a provider failure.",
+        "operationId": "listDnsRecords",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "query",
+            "description": "The fully qualified name.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "type",
+            "in": "query",
+            "description": "Only records of this type.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "account",
+            "in": "query",
+            "description": "The Cloudflare account (id or label), when several hold the zone.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The records at the name.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Resource_DnsRecordsDto"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The name or type is malformed.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The caller may not read DNS.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No Cloudflare account or zone matches the name.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Several accounts hold the zone; name one.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "Cloudflare refused the token or could not be reached.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The DNS surface is not wired, or Cloudflare's rate limit applies.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/dns/zones": {
+      "get": {
+        "tags": [
+          "dns"
+        ],
+        "summary": "Lists the zones each Cloudflare account's token can see. One account's\nfailure is reported on that account, not as a failure of the rest.",
+        "description": "# Errors\n\nReturns the public error envelope on refusal or when no Cloudflare\naccount exists.",
+        "operationId": "listDnsZones",
+        "parameters": [
+          {
+            "name": "account",
+            "in": "query",
+            "description": "Only this Cloudflare account (id or label).",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The zones per account.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Resource_DnsZonesDto"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The caller may not read DNS.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No Cloudflare account is configured.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The DNS surface is not wired.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/events": {
       "get": {
         "tags": [
@@ -9601,6 +9867,46 @@
   },
   "components": {
     "schemas": {
+      "AccountZonesDto": {
+        "type": "object",
+        "description": "The zones one Cloudflare account's token can see.",
+        "required": [
+          "accountId",
+          "accountLabel",
+          "zones"
+        ],
+        "properties": {
+          "accountId": {
+            "type": "string",
+            "description": "The account's id."
+          },
+          "accountLabel": {
+            "type": "string",
+            "description": "The account's label."
+          },
+          "failure": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The failure class when the zones could not be read (`auth`,\n`permission`, `rate_limited`, `unavailable`, ...)."
+          },
+          "failureDetail": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "What went wrong, when it did."
+          },
+          "zones": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/DnsZoneDto"
+            },
+            "description": "The zones."
+          }
+        }
+      },
       "ActionRequestDto": {
         "type": "object",
         "description": "An action request.",
@@ -10844,6 +11150,85 @@
           }
         }
       },
+      "CreateDnsChangeRequest": {
+        "type": "object",
+        "description": "A record change to request.",
+        "required": [
+          "operation",
+          "name",
+          "type",
+          "content",
+          "reason"
+        ],
+        "properties": {
+          "account": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The Cloudflare account (id or label), when several hold the zone."
+          },
+          "content": {
+            "type": "string",
+            "description": "The record value. For a delete, the value of the record to remove."
+          },
+          "idempotencyKey": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "A key making a retry return the request already made."
+          },
+          "name": {
+            "type": "string",
+            "description": "The fully qualified record name."
+          },
+          "operation": {
+            "$ref": "#/components/schemas/DnsChangeKind",
+            "description": "`upsert` or `delete`."
+          },
+          "priority": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "The MX preference. Upsert only.",
+            "minimum": 0
+          },
+          "proxied": {
+            "type": [
+              "boolean",
+              "null"
+            ],
+            "description": "Proxy through Cloudflare (A, AAAA, CNAME). Upsert only."
+          },
+          "reason": {
+            "type": "string",
+            "description": "Why, for the approver (at most 1000 characters)."
+          },
+          "replaces": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The existing value an upsert replaces; without it a new value is\nadded (A, AAAA, TXT, MX), and a CNAME replaces its single value."
+          },
+          "ttl": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "The TTL in seconds: 1 (automatic) or 60 to 86400. Upsert only.",
+            "minimum": 0
+          },
+          "type": {
+            "type": "string",
+            "description": "The record type: A, AAAA, CNAME, TXT, or MX."
+          }
+        }
+      },
       "CreateEnrollmentTokenRequest": {
         "type": "object",
         "description": "The create-enrollment-token request.",
@@ -11507,6 +11892,153 @@
           "status": {
             "type": "string",
             "description": "Whether the observation is complete (`known`) or the checkout was\nunreadable (`unavailable`)."
+          }
+        }
+      },
+      "DnsChangeKind": {
+        "type": "string",
+        "description": "Which change.",
+        "enum": [
+          "upsert",
+          "delete"
+        ]
+      },
+      "DnsRecordDto": {
+        "type": "object",
+        "description": "One DNS record.",
+        "required": [
+          "type",
+          "name",
+          "content",
+          "ttl",
+          "proxied"
+        ],
+        "properties": {
+          "content": {
+            "type": "string",
+            "description": "The value, normalized per type."
+          },
+          "id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The provider's record id."
+          },
+          "name": {
+            "type": "string",
+            "description": "The fully qualified name."
+          },
+          "priority": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "The MX preference.",
+            "minimum": 0
+          },
+          "proxied": {
+            "type": "boolean",
+            "description": "Whether traffic is proxied through the provider."
+          },
+          "ttl": {
+            "type": "integer",
+            "format": "int32",
+            "description": "The TTL in seconds; 1 is automatic.",
+            "minimum": 0
+          },
+          "type": {
+            "type": "string",
+            "description": "The record type."
+          }
+        }
+      },
+      "DnsRecordsDto": {
+        "type": "object",
+        "description": "The records at one name.",
+        "required": [
+          "accountId",
+          "accountLabel",
+          "zone",
+          "name",
+          "records",
+          "observedAt"
+        ],
+        "properties": {
+          "accountId": {
+            "type": "string",
+            "description": "The account that answered."
+          },
+          "accountLabel": {
+            "type": "string",
+            "description": "Its label."
+          },
+          "name": {
+            "type": "string",
+            "description": "The name asked about."
+          },
+          "observedAt": {
+            "type": "integer",
+            "format": "int64",
+            "description": "When the records were read (epoch milliseconds)."
+          },
+          "records": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/DnsRecordDto"
+            },
+            "description": "The records."
+          },
+          "registryEntry": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The `domain/<key>` Registry entry the observation attached to, when\nthe Registry has one."
+          },
+          "zone": {
+            "$ref": "#/components/schemas/DnsZoneDto",
+            "description": "The zone the name belongs to."
+          }
+        }
+      },
+      "DnsZoneDto": {
+        "type": "object",
+        "description": "One DNS zone.",
+        "required": [
+          "id",
+          "name",
+          "status"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "description": "The provider's zone id."
+          },
+          "name": {
+            "type": "string",
+            "description": "The zone's apex name."
+          },
+          "status": {
+            "type": "string",
+            "description": "The provider's status for the zone."
+          }
+        }
+      },
+      "DnsZonesDto": {
+        "type": "object",
+        "description": "The zones of every Cloudflare account.",
+        "required": [
+          "accounts"
+        ],
+        "properties": {
+          "accounts": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/AccountZonesDto"
+            },
+            "description": "One entry per account."
           }
         }
       },
@@ -18831,6 +19363,89 @@
           }
         }
       },
+      "Resource_DnsRecordsDto": {
+        "type": "object",
+        "description": "A single resource.\n\nThe payload is nested under `data` so that later top-level fields are an\nadditive change rather than a breaking one.",
+        "required": [
+          "data"
+        ],
+        "properties": {
+          "data": {
+            "type": "object",
+            "description": "The records at one name.",
+            "required": [
+              "accountId",
+              "accountLabel",
+              "zone",
+              "name",
+              "records",
+              "observedAt"
+            ],
+            "properties": {
+              "accountId": {
+                "type": "string",
+                "description": "The account that answered."
+              },
+              "accountLabel": {
+                "type": "string",
+                "description": "Its label."
+              },
+              "name": {
+                "type": "string",
+                "description": "The name asked about."
+              },
+              "observedAt": {
+                "type": "integer",
+                "format": "int64",
+                "description": "When the records were read (epoch milliseconds)."
+              },
+              "records": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/components/schemas/DnsRecordDto"
+                },
+                "description": "The records."
+              },
+              "registryEntry": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "description": "The `domain/<key>` Registry entry the observation attached to, when\nthe Registry has one."
+              },
+              "zone": {
+                "$ref": "#/components/schemas/DnsZoneDto",
+                "description": "The zone the name belongs to."
+              }
+            }
+          }
+        }
+      },
+      "Resource_DnsZonesDto": {
+        "type": "object",
+        "description": "A single resource.\n\nThe payload is nested under `data` so that later top-level fields are an\nadditive change rather than a breaking one.",
+        "required": [
+          "data"
+        ],
+        "properties": {
+          "data": {
+            "type": "object",
+            "description": "The zones of every Cloudflare account.",
+            "required": [
+              "accounts"
+            ],
+            "properties": {
+              "accounts": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/components/schemas/AccountZonesDto"
+                },
+                "description": "One entry per account."
+              }
+            }
+          }
+        }
+      },
       "Resource_EnrollmentTokenCreatedDto": {
         "type": "object",
         "description": "A single resource.\n\nThe payload is nested under `data` so that later top-level fields are an\nadditive change rather than a breaking one.",
@@ -22367,6 +22982,10 @@
     {
       "name": "registry",
       "description": "The descriptive Registry of the active desired revision: types, entries, and relations. Read-only; edits are commits to the Fleet repository."
+    },
+    {
+      "name": "dns",
+      "description": "DNS zones and records read through a Cloudflare external account, and record changes (`dns.record.upsert`, `dns.record.delete`) requested through the action broker with a computed preview. Fleet holds the token and never returns it."
     },
     {
       "name": "operations",

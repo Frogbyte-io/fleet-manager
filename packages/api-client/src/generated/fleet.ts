@@ -3,6 +3,41 @@
  * Do not edit: run `pnpm --filter @frogbyte-io/fleet-api-client generate`.
  */
 /**
+ * One DNS zone.
+ */
+export interface DnsZoneDto {
+  /** The provider's zone id. */
+  id: string;
+  /** The zone's apex name. */
+  name: string;
+  /** The provider's status for the zone. */
+  status: string;
+}
+
+/**
+ * The zones one Cloudflare account's token can see.
+ */
+export interface AccountZonesDto {
+  /** The account's id. */
+  accountId: string;
+  /** The account's label. */
+  accountLabel: string;
+  /**
+     * The failure class when the zones could not be read (`auth`,
+     * `permission`, `rate_limited`, `unavailable`, ...).
+     * @nullable
+     */
+  failure?: string | null;
+  /**
+     * What went wrong, when it did.
+     * @nullable
+     */
+  failureDetail?: string | null;
+  /** The zones. */
+  zones: DnsZoneDto[];
+}
+
+/**
  * The structured, secret-free parameters.
  */
 export type ActionRequestDtoParameters = { [key: string]: unknown };
@@ -913,6 +948,66 @@ export interface CreateActionRequest {
 }
 
 /**
+ * Which change.
+ */
+export type DnsChangeKind = typeof DnsChangeKind[keyof typeof DnsChangeKind];
+
+
+export const DnsChangeKind = {
+  upsert: 'upsert',
+  delete: 'delete',
+} as const;
+
+/**
+ * A record change to request.
+ */
+export interface CreateDnsChangeRequest {
+  /**
+     * The Cloudflare account (id or label), when several hold the zone.
+     * @nullable
+     */
+  account?: string | null;
+  /** The record value. For a delete, the value of the record to remove. */
+  content: string;
+  /**
+     * A key making a retry return the request already made.
+     * @nullable
+     */
+  idempotencyKey?: string | null;
+  /** The fully qualified record name. */
+  name: string;
+  /** `upsert` or `delete`. */
+  operation: DnsChangeKind;
+  /**
+     * The MX preference. Upsert only.
+     * @minimum 0
+     * @nullable
+     */
+  priority?: number | null;
+  /**
+     * Proxy through Cloudflare (A, AAAA, CNAME). Upsert only.
+     * @nullable
+     */
+  proxied?: boolean | null;
+  /** Why, for the approver (at most 1000 characters). */
+  reason: string;
+  /**
+     * The existing value an upsert replaces; without it a new value is
+     * added (A, AAAA, TXT, MX), and a CNAME replaces its single value.
+     * @nullable
+     */
+  replaces?: string | null;
+  /**
+     * The TTL in seconds: 1 (automatic) or 60 to 86400. Upsert only.
+     * @minimum 0
+     * @nullable
+     */
+  ttl?: number | null;
+  /** The record type: A, AAAA, CNAME, TXT, or MX. */
+  type: string;
+}
+
+/**
  * The create-enrollment-token request.
  */
 export interface CreateEnrollmentTokenRequest {
@@ -1410,6 +1505,68 @@ export interface DiscoveredCheckoutDto {
      * unreadable (`unavailable`).
      */
   status: string;
+}
+
+/**
+ * One DNS record.
+ */
+export interface DnsRecordDto {
+  /** The value, normalized per type. */
+  content: string;
+  /**
+     * The provider's record id.
+     * @nullable
+     */
+  id?: string | null;
+  /** The fully qualified name. */
+  name: string;
+  /**
+     * The MX preference.
+     * @minimum 0
+     * @nullable
+     */
+  priority?: number | null;
+  /** Whether traffic is proxied through the provider. */
+  proxied: boolean;
+  /**
+     * The TTL in seconds; 1 is automatic.
+     * @minimum 0
+     */
+  ttl: number;
+  /** The record type. */
+  type: string;
+}
+
+/**
+ * The records at one name.
+ */
+export interface DnsRecordsDto {
+  /** The account that answered. */
+  accountId: string;
+  /** Its label. */
+  accountLabel: string;
+  /** The name asked about. */
+  name: string;
+  /** When the records were read (epoch milliseconds). */
+  observedAt: number;
+  /** The records. */
+  records: DnsRecordDto[];
+  /**
+     * The `domain/<key>` Registry entry the observation attached to, when
+     * the Registry has one.
+     * @nullable
+     */
+  registryEntry?: string | null;
+  /** The zone the name belongs to. */
+  zone: DnsZoneDto;
+}
+
+/**
+ * The zones of every Cloudflare account.
+ */
+export interface DnsZonesDto {
+  /** One entry per account. */
+  accounts: AccountZonesDto[];
 }
 
 /**
@@ -5384,6 +5541,60 @@ export interface ResourceDetachedExecStatusDto {
 }
 
 /**
+ * The records at one name.
+ */
+export type ResourceDnsRecordsDtoData = {
+  /** The account that answered. */
+  accountId: string;
+  /** Its label. */
+  accountLabel: string;
+  /** The name asked about. */
+  name: string;
+  /** When the records were read (epoch milliseconds). */
+  observedAt: number;
+  /** The records. */
+  records: DnsRecordDto[];
+  /**
+     * The `domain/<key>` Registry entry the observation attached to, when
+     * the Registry has one.
+     * @nullable
+     */
+  registryEntry?: string | null;
+  /** The zone the name belongs to. */
+  zone: DnsZoneDto;
+};
+
+/**
+ * A single resource.
+ *
+ * The payload is nested under `data` so that later top-level fields are an
+ * additive change rather than a breaking one.
+ */
+export interface ResourceDnsRecordsDto {
+  /** The records at one name. */
+  data: ResourceDnsRecordsDtoData;
+}
+
+/**
+ * The zones of every Cloudflare account.
+ */
+export type ResourceDnsZonesDtoData = {
+  /** One entry per account. */
+  accounts: AccountZonesDto[];
+};
+
+/**
+ * A single resource.
+ *
+ * The payload is nested under `data` so that later top-level fields are an
+ * additive change rather than a breaking one.
+ */
+export interface ResourceDnsZonesDto {
+  /** The zones of every Cloudflare account. */
+  data: ResourceDnsZonesDtoData;
+}
+
+/**
  * The create-enrollment-token response. The token value is shown exactly
  * once; only its hash is stored.
  */
@@ -7456,6 +7667,28 @@ cursor?: string | null;
 limit?: number | null;
 };
 
+export type ListDnsRecordsParams = {
+/**
+ * The fully qualified name.
+ */
+name: string;
+/**
+ * Only records of this type.
+ */
+type?: string;
+/**
+ * The Cloudflare account (id or label), when several hold the zone.
+ */
+account?: string;
+};
+
+export type ListDnsZonesParams = {
+/**
+ * Only this Cloudflare account (id or label).
+ */
+account?: string;
+};
+
 export type ListExternalAccountsParams = {
 /**
  * Restrict to one provider kind.
@@ -8908,6 +9141,258 @@ const res = await fetch(getStoreDesiredSourceCredentialUrl(),
 
   const data: storeDesiredSourceCredentialResponse['data'] = body ? JSON.parse(body) : {}
   return { data, status: res.status, headers: res.headers } as storeDesiredSourceCredentialResponse
+}
+
+
+
+export type createDnsChangeResponse201 = {
+  data: ResourceActionRequestDto
+  status: 201
+}
+
+export type createDnsChangeResponse400 = {
+  data: ApiError
+  status: 400
+}
+
+export type createDnsChangeResponse403 = {
+  data: ApiError
+  status: 403
+}
+
+export type createDnsChangeResponse404 = {
+  data: ApiError
+  status: 404
+}
+
+export type createDnsChangeResponse409 = {
+  data: ApiError
+  status: 409
+}
+
+export type createDnsChangeResponse502 = {
+  data: ApiError
+  status: 502
+}
+
+export type createDnsChangeResponse503 = {
+  data: ApiError
+  status: 503
+}
+
+export type createDnsChangeResponseSuccess = (createDnsChangeResponse201) & {
+  headers: Headers;
+};
+export type createDnsChangeResponseError = (createDnsChangeResponse400 | createDnsChangeResponse403 | createDnsChangeResponse404 | createDnsChangeResponse409 | createDnsChangeResponse502 | createDnsChangeResponse503) & {
+  headers: Headers;
+};
+
+export type createDnsChangeResponse = (createDnsChangeResponseSuccess | createDnsChangeResponseError)
+
+export const getCreateDnsChangeUrl = () => {
+
+
+
+
+  return `/api/v1/dns/changes`
+}
+
+/**
+ * # Errors
+ *
+ * Returns the public error envelope on refusal, invalid values, an unknown
+ * zone, a change that would do nothing, a credential-like TXT value, or a
+ * provider failure.
+ * @summary Requests a record change. The controller reads the zone, computes the
+preview (current record against proposed), and files an action request
+(`dns.record.upsert` or `dns.record.delete`) whose parameters carry that
+preview. The default risk class is `approve`: a person approves it in the
+console or with `fleetctl requests approve`. When the request executes,
+the zone is read again; a zone that changed since the preview fails the
+operation instead of being overwritten.
+ */
+export const createDnsChange = async (createDnsChangeRequest: CreateDnsChangeRequest, options?: RequestInit): Promise<createDnsChangeResponse> => {
+
+    const getHeaders = (h?: NonNullable<RequestInit['headers']>): Record<string, string | readonly string[]> => {
+    if (!h) return {};
+    if (h instanceof Headers) return Object.fromEntries(h.entries());
+    if (Array.isArray(h)) return Object.fromEntries(h);
+    return h;
+  };
+const res = await fetch(getCreateDnsChangeUrl(),
+  {
+    ...options,
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...getHeaders(options?.headers) },
+    body: JSON.stringify(createDnsChangeRequest)
+  }
+)
+
+
+  const body = [204, 205, 304].includes(res.status) ? null : await res.text();
+
+  const data: createDnsChangeResponse['data'] = body ? JSON.parse(body) : {}
+  return { data, status: res.status, headers: res.headers } as createDnsChangeResponse
+}
+
+
+
+export type listDnsRecordsResponse200 = {
+  data: ResourceDnsRecordsDto
+  status: 200
+}
+
+export type listDnsRecordsResponse400 = {
+  data: ApiError
+  status: 400
+}
+
+export type listDnsRecordsResponse403 = {
+  data: ApiError
+  status: 403
+}
+
+export type listDnsRecordsResponse404 = {
+  data: ApiError
+  status: 404
+}
+
+export type listDnsRecordsResponse409 = {
+  data: ApiError
+  status: 409
+}
+
+export type listDnsRecordsResponse502 = {
+  data: ApiError
+  status: 502
+}
+
+export type listDnsRecordsResponse503 = {
+  data: ApiError
+  status: 503
+}
+
+export type listDnsRecordsResponseSuccess = (listDnsRecordsResponse200) & {
+  headers: Headers;
+};
+export type listDnsRecordsResponseError = (listDnsRecordsResponse400 | listDnsRecordsResponse403 | listDnsRecordsResponse404 | listDnsRecordsResponse409 | listDnsRecordsResponse502 | listDnsRecordsResponse503) & {
+  headers: Headers;
+};
+
+export type listDnsRecordsResponse = (listDnsRecordsResponseSuccess | listDnsRecordsResponseError)
+
+export const getListDnsRecordsUrl = (params: ListDnsRecordsParams,) => {
+  const normalizedParams = new URLSearchParams();
+
+  Object.entries(params || {}).forEach(([key, value]) => {
+
+    if (value !== undefined) {
+      normalizedParams.append(key, value === null ? 'null' : String(value))
+    }
+  });
+
+  const stringifiedParams = normalizedParams.toString();
+
+  return stringifiedParams.length > 0 ? `/api/v1/dns/records?${stringifiedParams}` : `/api/v1/dns/records`
+}
+
+/**
+ * # Errors
+ *
+ * Returns the public error envelope on refusal, a missing name, an unknown
+ * zone, or a provider failure.
+ * @summary Reads the records at a fully qualified name through the Cloudflare
+account whose zone contains it, and records them as an observation beside
+the matching `domain` Registry entry.
+ */
+export const listDnsRecords = async (params: ListDnsRecordsParams, options?: RequestInit): Promise<listDnsRecordsResponse> => {
+
+  const res = await fetch(getListDnsRecordsUrl(params),
+  {
+    ...options,
+    method: 'GET'
+
+
+  }
+)
+
+
+  const body = [204, 205, 304].includes(res.status) ? null : await res.text();
+
+  const data: listDnsRecordsResponse['data'] = body ? JSON.parse(body) : {}
+  return { data, status: res.status, headers: res.headers } as listDnsRecordsResponse
+}
+
+
+
+export type listDnsZonesResponse200 = {
+  data: ResourceDnsZonesDto
+  status: 200
+}
+
+export type listDnsZonesResponse403 = {
+  data: ApiError
+  status: 403
+}
+
+export type listDnsZonesResponse404 = {
+  data: ApiError
+  status: 404
+}
+
+export type listDnsZonesResponse503 = {
+  data: ApiError
+  status: 503
+}
+
+export type listDnsZonesResponseSuccess = (listDnsZonesResponse200) & {
+  headers: Headers;
+};
+export type listDnsZonesResponseError = (listDnsZonesResponse403 | listDnsZonesResponse404 | listDnsZonesResponse503) & {
+  headers: Headers;
+};
+
+export type listDnsZonesResponse = (listDnsZonesResponseSuccess | listDnsZonesResponseError)
+
+export const getListDnsZonesUrl = (params?: ListDnsZonesParams,) => {
+  const normalizedParams = new URLSearchParams();
+
+  Object.entries(params || {}).forEach(([key, value]) => {
+
+    if (value !== undefined) {
+      normalizedParams.append(key, value === null ? 'null' : String(value))
+    }
+  });
+
+  const stringifiedParams = normalizedParams.toString();
+
+  return stringifiedParams.length > 0 ? `/api/v1/dns/zones?${stringifiedParams}` : `/api/v1/dns/zones`
+}
+
+/**
+ * # Errors
+ *
+ * Returns the public error envelope on refusal or when no Cloudflare
+ * account exists.
+ * @summary Lists the zones each Cloudflare account's token can see. One account's
+failure is reported on that account, not as a failure of the rest.
+ */
+export const listDnsZones = async (params?: ListDnsZonesParams, options?: RequestInit): Promise<listDnsZonesResponse> => {
+
+  const res = await fetch(getListDnsZonesUrl(params),
+  {
+    ...options,
+    method: 'GET'
+
+
+  }
+)
+
+
+  const body = [204, 205, 304].includes(res.status) ? null : await res.text();
+
+  const data: listDnsZonesResponse['data'] = body ? JSON.parse(body) : {}
+  return { data, status: res.status, headers: res.headers } as listDnsZonesResponse
 }
 
 

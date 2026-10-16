@@ -17,6 +17,7 @@ pub mod auth;
 mod correlation;
 pub mod credentials;
 pub mod desired;
+pub mod dns;
 mod envelope;
 mod error;
 pub mod external_accounts;
@@ -175,6 +176,13 @@ pub const API_BASE_PATH: &str = "/api/v1";
         tailnet::CorrelationCandidateDto,
         tailnet::ImportTailnetDeviceRequest,
         tailnet::TailnetStatusDto,
+        dns::AccountZonesDto,
+        dns::CreateDnsChangeRequest,
+        dns::DnsChangeKind,
+        dns::DnsRecordDto,
+        dns::DnsRecordsDto,
+        dns::DnsZoneDto,
+        dns::DnsZonesDto,
         external_accounts::CreateExternalAccountRequest,
         external_accounts::UpdateExternalAccountRequest,
         external_accounts::ExternalAccountDto,
@@ -241,6 +249,7 @@ pub const API_BASE_PATH: &str = "/api/v1";
         (name = "audit", description = "Authorized, metadata-only audit event queries."),
         (name = "desired", description = "The active desired-state revision and its validated, non-secret resources. Read-only; activation is an operation."),
         (name = "registry", description = "The descriptive Registry of the active desired revision: types, entries, and relations. Read-only; edits are commits to the Fleet repository."),
+        (name = "dns", description = "DNS zones and records read through a Cloudflare external account, and record changes (`dns.record.upsert`, `dns.record.delete`) requested through the action broker with a computed preview. Fleet holds the token and never returns it."),
         (name = "operations", description = "Durable operations: accepted remote work."),
         (name = "requests", description = "The action broker (ADR 0016): agents request typed provider actions; policy or a person approves them; approved requests run as durable operations. Before authenticated identities, policy is a guardrail keyed on risk class, not a security boundary."),
         (name = "credentials", description = "Delegated, scoped, short-lived credentials for CI and agents (ADR 0011). The token is returned once at issue time and is never listed or audited."),
@@ -438,6 +447,9 @@ pub fn api(state: Arc<operations::ApiState>) -> (Router, utoipa::openapi::OpenAp
                     requests::create_action_request,
                     requests::list_action_requests
                 ))
+                .routes(routes!(dns::list_dns_zones))
+                .routes(routes!(dns::list_dns_records))
+                .routes(routes!(dns::create_dns_change))
                 .routes(routes!(requests::get_action_request))
                 .routes(routes!(requests::approve_action_request))
                 .routes(routes!(requests::deny_action_request))

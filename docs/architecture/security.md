@@ -93,6 +93,7 @@ Initial permission vocabulary includes:
 - `audit.read`, `fleet.policy.admin`, `fleet.admin`
 - `events.read` (payload-free fleet change notifications)
 - `action.request`, `action.approve`, `action.deny`, `action.read` (the action broker)
+- `dns.read` (read Cloudflare zones and records, and compute the preview of a change; the change itself is an `action.request` for `dns.record.upsert` or `dns.record.delete`)
 
 Future bindings can scope resources by ID, project, provider account, machine group/tag, environment classification, owner, TTL, and resource ceilings. Do not build an ad-hoc expression language. M1 implements the authorization port and explicit trusted-LAN policy; evaluate an embedded engine only when authenticated or multi-user deployment requires concrete policies.
 

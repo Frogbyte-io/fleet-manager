@@ -11,6 +11,7 @@ pub mod broker;
 pub mod catalog_installs;
 pub mod composition;
 pub mod credentials;
+pub mod dns;
 pub mod events;
 pub mod external_accounts;
 pub mod idempotency;

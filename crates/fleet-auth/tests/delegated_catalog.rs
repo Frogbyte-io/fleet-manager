@@ -146,6 +146,7 @@ fn the_named_refusals_of_the_issue_are_refused() {
         (Permission::ProxmoxDestructive, None),
         (Permission::ExternalAccountRead, None),
         (Permission::ExternalAccountConfig, None),
+        (Permission::DnsRead, None),
         (Permission::TailnetConfig, None),
         (Permission::SourceActivate, None),
         (Permission::SourceSettings, None),

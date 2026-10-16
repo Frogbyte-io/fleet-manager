@@ -25,7 +25,7 @@ use crate::error::{ApiError, ApiErrorResponse};
 /// The origin recorded for a request that arrived over this HTTP API.
 const API_ORIGIN: &str = "api";
 
-fn broker_or_error(
+pub(crate) fn broker_or_error(
     state: &crate::operations::ApiState,
     correlation_id: CorrelationId,
 ) -> Result<Arc<Broker>, ApiErrorResponse> {
@@ -40,7 +40,10 @@ fn broker_or_error(
     })
 }
 
-fn map_broker_error(error: &BrokerError, correlation_id: CorrelationId) -> ApiErrorResponse {
+pub(crate) fn map_broker_error(
+    error: &BrokerError,
+    correlation_id: CorrelationId,
+) -> ApiErrorResponse {
     let (status, code, retry) = match error {
         BrokerError::Denied(_) => (StatusCode::FORBIDDEN, "denied", RetryClass::Never),
         BrokerError::PolicyDenied { .. } => {

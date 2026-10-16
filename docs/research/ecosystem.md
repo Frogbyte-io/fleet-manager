@@ -101,6 +101,14 @@ Findings: GitHub recommends Apps for organization/on-behalf-of-user API access. 
 
 Decision: the web controller uses GitHub App web authorization; the headless CLI may use device flow. Ask for the least permissions, use expiring tokens, encrypt refresh/access tokens, and initialize one serialized commit. Organization repository creation/installation is a distinct approval path. Do not start with a broad classic PAT.
 
+### Cloudflare DNS
+
+Sources: [DNS records API](https://developers.cloudflare.com/api/resources/dns/subresources/records/) (list, create, update with `PUT`, delete), [zones list](https://developers.cloudflare.com/api/resources/zones/methods/list/), [API token permissions](https://developers.cloudflare.com/fundamentals/api/reference/permissions/), [API rate limits](https://developers.cloudflare.com/fundamentals/api/reference/limits/) (1200 requests per five minutes per user).
+
+Findings: every answer is the `{ success, errors: [{ code, message }], result, result_info }` envelope; lists paginate with `page` and `per_page` and report `result_info.total_pages`; a `429` carries `Retry-After`. A scoped API token (Zone:Read, DNS:Edit on chosen zones) is enough; no global API key is needed. A name can hold several records of a type (A, AAAA, TXT, MX), so a record is not identified by name and type alone. Cloudflare reports `TXT` content in quotes. Fleet's contract fixtures are adapted from the documented examples, because no live token was available when FM-1042 was written; an ignored capture test records scrubbed fixtures from a real account.
+
+Decision: a narrow `reqwest` client over the documented endpoints behind the application's `DnsGateway` port, with errors classified at the provider boundary and the same rules as the token probe (https only except a literal loopback, no redirects, bounded bodies). No Cloudflare SDK was adopted: the surface is five endpoints, and a port keeps another DNS host possible without changing the application. Reads are open to `dns.read`; every change is an action request with a previewed diff and an approval. Record types are limited to A, AAAA, CNAME, TXT, and MX; CAA, NS, SRV, and registrar or zone operations are out of scope.
+
 ## Tools to integrate optionally
 
 ### mise

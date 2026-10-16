@@ -237,6 +237,10 @@ pub enum Permission {
     ActionDeny,
     /// List and read action requests, with their scrubbed parameters.
     ActionRead,
+    /// Read DNS zones and records through a Cloudflare account, and compute
+    /// the preview of a record change (FM-1042). Risky: it sends the
+    /// account's token off the host. The change itself is an action request.
+    DnsRead,
 }
 
 impl Permission {
@@ -314,6 +318,7 @@ impl Permission {
         Permission::ActionApprove,
         Permission::ActionDeny,
         Permission::ActionRead,
+        Permission::DnsRead,
     ];
 
     /// The stable action id, as recorded in decisions and audit events.
@@ -390,6 +395,7 @@ impl Permission {
             Permission::ActionApprove => "action.approve",
             Permission::ActionDeny => "action.deny",
             Permission::ActionRead => "action.read",
+            Permission::DnsRead => "dns.read",
         }
     }
 
@@ -468,6 +474,7 @@ impl Permission {
             | Permission::LabExecRead
             | Permission::ActionRequest
             | Permission::ActionApprove
+            | Permission::DnsRead
             | Permission::ActionDeny => true,
         }
     }
@@ -510,6 +517,7 @@ impl Permission {
             | Permission::LabLeaseRead
             | Permission::RegistryRead
             | Permission::LabArtifactRead
+            | Permission::DnsRead
             | Permission::ActionRead => false,
             Permission::MachineReadSensitive
             | Permission::OperationCancel

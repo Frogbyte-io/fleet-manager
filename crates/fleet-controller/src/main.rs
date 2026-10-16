@@ -152,6 +152,10 @@ fn run_serve(mut config: fleet_config::ControllerConfig) -> ExitCode {
                                 secret_store.clone(),
                             ),
                         );
+                        node_services.dns = Some(fleet_controller::dns_exec::compose_dns(
+                            store.pool(),
+                            secret_store.clone(),
+                        ));
                         Some(node_services)
                     }
                     Err(error) => {
@@ -908,6 +912,15 @@ fn run_serve(mut config: fleet_config::ControllerConfig) -> ExitCode {
                         store.pool().clone(),
                     )),
                 ));
+            // FM-1042: the brokered DNS kinds run through the DNS use cases.
+            let with_lab: std::sync::Arc<dyn fleet_application::worker::OperationExecutor> =
+                match services.as_ref().and_then(|services| services.dns.clone()) {
+                    Some(dns) => std::sync::Arc::new(fleet_controller::dns_exec::DnsDispatch::new(
+                        with_lab,
+                        std::sync::Arc::new(fleet_controller::dns_exec::DnsExecutor::new(dns)),
+                    )),
+                    None => with_lab,
+                };
             match &services {
                 Some(services) => {
                     let node_machines: std::sync::Arc<dyn fleet_application::machine::MachinePort> =

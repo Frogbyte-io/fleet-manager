@@ -66,7 +66,7 @@ pub const BROKER_IDEMPOTENCY_PREFIX: &str = "action-request:";
 /// machine-scoped shape plus the plan and its approval identities
 /// (FM-402); the source kinds carry the remote/commit payloads and are
 /// catalog-level (FM-403).
-pub const CREATABLE_KINDS: [&str; 65] = [
+pub const CREATABLE_KINDS: [&str; 67] = [
     "noop",
     "ssh.exec",
     "agentless.inventory",
@@ -132,6 +132,9 @@ pub const CREATABLE_KINDS: [&str; 65] = [
     "lab.collect",
     "lab.put",
     "lab.pool.fill",
+    // Brokered DNS kinds (FM-1042): created only through the action broker.
+    "dns.record.upsert",
+    "dns.record.delete",
 ];
 
 /// The machine-scoped permission a kind's creation requires, when any.
