@@ -124,12 +124,9 @@ GitHub Actions workflow for your Fleet Git repository (not this one). It runs
 broken Registry entry is refused before it can merge, and the controller never
 sees a candidate that would fail validation.
 
-> `fleetctl registry validate` is delivered by FM-1013 and does not exist yet.
-> The workflow is written against that planned command: it runs the same
-> validator the controller runs over the checkout, and exits non-zero when any
-> document has a diagnostic. Until FM-1013 lands, the workflow's validate step
-> fails with "unknown command". Adjust the install step to however your
-> runners obtain `fleetctl`.
+`fleetctl registry validate` runs the same validator the controller runs over
+the checkout, and exits non-zero when any document has an error. Adjust the
+install step to however your runners obtain `fleetctl`.
 
 To use it:
 
@@ -143,3 +140,102 @@ To use it:
 
 The job reads only the repository checkout. It needs no controller URL and no
 secret, and it must not be given one.
+
+## `fleetctl registry` reference
+
+Reads go through the controller API (the active revision). Writes edit YAML in
+a local checkout of the Fleet repository, found from the working directory or
+`--repo <path>`; the controller never writes to Git. Every command accepts
+`--output json`.
+
+```bash
+fleetctl registry types                       # types, origin, key field, entry counts
+fleetctl registry list [--type T] [--tag T] [--query Q] [--target class:ref] [--relation R]
+fleetctl registry find aptabase               # substring search over keys, values, tags, notes
+fleetctl registry get domain/example.com
+
+fleetctl registry set domain/example.com --field registrar=Webhuset --field autoRenew=true
+fleetctl registry set service/aptabase --from-json - < patch.json
+fleetctl registry unset domain/example.com --field dnsHost [--notes]
+fleetctl registry rm domain/example.com
+fleetctl registry relate domain/example.com used-by service/aptabase [--remove]
+fleetctl registry tags add|rm domain/example.com client-x
+fleetctl registry validate
+fleetctl registry publish -m "example.com DNS moved to Cloudflare"
+```
+
+- **Addresses** are `<type>/<key>`. The key must start with a letter or digit
+  and use only letters, digits, and `. _ @ + -`, so it is always one safe path
+  component. The file is `fleet/registry/<type>/<key>.yaml` (key lowercased).
+  An existing entry is found by type and key wherever its file is.
+- **`set`** creates or patches. Fields you leave out are untouched. A
+  `--field name=value` is typed by the type's definition (`true`/`false`,
+  numbers, comma-separated lists or a JSON array for list fields). The key
+  field is set from the address. `--from-json` takes an object with `fields`
+  (merged by name, `null` removes), and `tags`, `links`, `relations`, `notes`
+  (each replaces the whole property). A new entry gets a UUIDv7
+  `metadata.id` and a `metadata.name` slug such as `domain-example-com`.
+- **Relation targets** are `<type>/<key>`, `machine:<name>`, `project:<name>`,
+  `coolify:<reference>`, or `proxmoxGuest:<reference>`. Relating twice is a
+  no-op.
+- **Nothing invalid is written.** The edited tree is validated in memory
+  first, and an edit that adds any error (unknown field, wrong value type,
+  missing required field, a disallowed relation, a credential-looking value)
+  is refused with `FM_SCHEMA_*` diagnostics. Diagnostics and errors never echo
+  a value. A new warning, such as a dangling relation, is printed but does not
+  block.
+- **Formatting.** Existing files are patched in place, so comments, key order,
+  and untouched lines survive, and the result is verified by parsing it back.
+  If the patch engine cannot reproduce an edit exactly, the file is rewritten
+  in the canonical layout and the command says its comments were lost. New
+  files always use the canonical layout. Re-running a command that changes
+  nothing writes nothing.
+- **Multi-document files** are readable but not editable: split the entry into
+  its own file first.
+- **`validate`** prints each diagnostic as `location [FM_SCHEMA_...] message`
+  (JSON: `valid`, `files`, `errors`, `warnings`) and exits 1 on any error. It
+  needs no controller and no token. The file set is what Git would carry
+  (`git ls-files --cached --others --exclude-standard`, `*.yaml` only), so
+  ignored files and `.git` never count; a symlink named `*.yaml` is refused,
+  as the controller does not follow symlinks.
+- **Case and file names.** Keys are unique case-insensitively (FM-1010's
+  `FM_SCHEMA_REGISTRY_DUPLICATE_KEY` compares them lowercased), and so is
+  lookup: `domain/Example.com` finds `domain/example.com`. A new file name is
+  the lowercased key, with a `_` after a stem Windows reserves (`con`, `aux`,
+  `nul`, `prn`, `com1`-`com9`, `lpt1`-`lpt9`), for example `con_.yaml`. An
+  existing file is matched case-insensitively too, so two spellings can never
+  create two files. An unparsable YAML file stops an edit instead of being
+  skipped.
+- **`publish -m <message>`** validates the tree, refuses staged changes that
+  are not Registry content (a `.yaml` file holding only Registry documents),
+  commits only the Registry paths, then
+  follows `registry.changeMode`, read from the controller (`--change-mode
+  direct|pull-request` overrides it, and is needed when the controller is not
+  reachable). In `direct` mode it pushes to the default branch and the
+  checkout must be on it. In `pull-request` mode it creates a branch, pushes
+  it, and opens a pull request with `gh pr create` when `gh` is installed,
+  otherwise it prints the compare URL (remote credentials are never printed).
+  The default branch comes from `origin/HEAD`, or `--base`. It never asks for or
+  passes a token: authentication is your Git and `gh` configuration, and
+  prompts are disabled (`GIT_TERMINAL_PROMPT=0`, and SSH `BatchMode=yes` unless
+  you set `GIT_SSH_COMMAND`).
+  - Only `.yaml` files holding nothing but Registry documents are staged. Any
+    other file under `fleet/registry/` (a `.txt`, an `.env`) makes the publish
+    refuse and list it.
+  - If the push fails, the commit stays local: the error shows the last lines
+    of Git's output and says `committed locally as <sha>; nothing was pushed;
+    fix and run git push`. Running `publish` again, with no new changes, pushes
+    the waiting commits.
+  - Direct mode (and a pull request branch cut from the default branch) refuses
+    when `origin/<base>..HEAD` already holds commits that change non-Registry
+    files, and reports how many commits and which files.
+  - `--base` and `--branch` must be valid branch names, and `--branch` must
+    differ from the default branch.
+
+### Editing trade-off
+
+Comment-preserving YAML editing uses the `yamlpatch` crate (MIT, maintained by
+the zizmor project, tree-sitter based). It supports block and single-line flow
+styles, not multi-line flow collections, hence the verified fallback to the
+canonical layout. `yaml-edit` (pure Rust, Apache-2.0) was the alternative; it
+is at 0.3 and much younger.
