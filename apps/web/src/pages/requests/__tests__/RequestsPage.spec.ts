@@ -19,6 +19,12 @@ import RequestsPage from '../RequestsPage.vue'
 import { invalidateFleetEvent } from '@/shell/fleetEvents'
 import { routes } from '@/router'
 
+/** Answers like the API: `state=pending` filters, anything else is the whole page. */
+function serve(items: ActionRequestDto[]) {
+  listActionRequests.mockImplementation(async (params?: { state?: string }) =>
+    ok({ items: params?.state ? items.filter(r => r.state === params.state) : items, page: { nextCursor: null, limit: 200 } }))
+}
+
 function ok<T>(data: T, status = 200) {
   return { status, data, headers: new Headers() }
 }
@@ -64,15 +70,30 @@ enableAutoUnmount(afterEach)
 beforeEach(() => {
   for (const mock of [listActionRequests, approveActionRequest, denyActionRequest])
     mock.mockReset()
-  listActionRequests.mockResolvedValue(ok({ items: [
+  serve([
     request(),
     request({ id: 'req-2', state: 'succeeded', decidedBy: 'anonymous-lan-admin', operationId: 'op-9876543210ab', updatedAt: NOW - 1000 }),
     request({ id: 'req-3', state: 'denied', decidedBy: 'anonymous-lan-admin', decisionNote: 'not during the freeze', updatedAt: NOW - 2000 }),
     request({ id: 'req-4', state: 'failed', decidedBy: 'anonymous-lan-admin', failure: 'the operation was refused', updatedAt: NOW - 3000 }),
-  ], page: { nextCursor: null, limit: 200 } }))
+  ])
 })
 
 describe('Approval inbox', () => {
+  it('reads the pending queue with state=pending, and the history as its own query', async () => {
+    await mountAt()
+    expect(listActionRequests).toHaveBeenCalledWith({ state: 'pending', limit: 200 })
+    expect(listActionRequests).toHaveBeenCalledWith({ limit: 200 })
+  })
+
+  it('folds the decider and the operation into the outcome cell for narrow widths', async () => {
+    const { wrapper } = await mountAt()
+    const meta = wrapper.get('[data-testid="outcome-meta-req-2"]')
+    expect(meta.text()).toContain('anonymous-lan-admin')
+    expect(meta.get('a').attributes('href')).toBe('/operations?op=op-9876543210ab')
+    // Without an operation there is no link to fold in.
+    expect(wrapper.get('[data-testid="outcome-meta-req-3"]').find('a').exists()).toBe(false)
+  })
+
   it('lists pending requests with action, target, parameters, reason, requester, age, and risk', async () => {
     const { wrapper } = await mountAt()
     const card = wrapper.get('[data-testid="request-req-1"]')
@@ -95,7 +116,7 @@ describe('Approval inbox', () => {
   })
 
   it('says so when nothing is pending or decided', async () => {
-    listActionRequests.mockResolvedValue(ok({ items: [], page: { nextCursor: null, limit: 200 } }))
+    serve([])
     const { wrapper } = await mountAt()
     expect(wrapper.find('[data-testid="pending-empty"]').exists()).toBe(true)
     expect(wrapper.find('[data-testid="history-empty"]').exists()).toBe(true)
@@ -116,7 +137,8 @@ describe('Approval inbox', () => {
     await wrapper.get('[data-testid="confirm"]').trigger('click')
     await flushPromises()
     expect(approveActionRequest).toHaveBeenCalledWith('req-1')
-    expect(listActionRequests).toHaveBeenCalledTimes(2)
+    // Both the pending queue and the history are read again.
+    expect(listActionRequests).toHaveBeenCalledTimes(4)
   })
 
   it('denies with an optional note', async () => {
@@ -124,7 +146,8 @@ describe('Approval inbox', () => {
     const { wrapper } = await mountAt()
     await wrapper.get('[data-testid="deny"]').trigger('click')
     await wrapper.get('[data-testid="deny-note"]').setValue('not now')
-    expect(wrapper.get('[data-testid="fleetctl-command"]').text()).toContain('--note')
+    expect(wrapper.get('[data-testid="fleetctl-command"]').text()).toContain('--note "<note>"')
+    expect(wrapper.get('[data-testid="fleetctl-command"]').text()).not.toContain('not now')
     await wrapper.get('[data-testid="confirm"]').trigger('click')
     await flushPromises()
     expect(denyActionRequest).toHaveBeenCalledWith('req-1', { note: 'not now' })
@@ -158,7 +181,7 @@ describe('Approval inbox', () => {
 
   it('refetches when the event stream announces a request change', async () => {
     const { wrapper, queryClient } = await mountAt()
-    listActionRequests.mockResolvedValue(ok({ items: [request({ id: 'req-5', target: 'app-5' })], page: { nextCursor: null, limit: 200 } }))
+    serve([request({ id: 'req-5', target: 'app-5' })])
     invalidateFleetEvent(queryClient, 'request.changed')
     await flushPromises()
     expect(wrapper.find('[data-testid="request-req-5"]').exists()).toBe(true)
@@ -166,7 +189,7 @@ describe('Approval inbox', () => {
   })
 
   it('warns that a full page may hide older requests', async () => {
-    listActionRequests.mockResolvedValue(ok({ items: Array.from({ length: 200 }, (_, i) => request({ id: `r${i}`, state: 'succeeded' })), page: { nextCursor: null, limit: 200 } }))
+    serve(Array.from({ length: 200 }, (_, i) => request({ id: `r${i}`, state: 'succeeded' })))
     const { wrapper } = await mountAt()
     expect(wrapper.get('[role="status"]').text()).toContain('newest 200')
   })

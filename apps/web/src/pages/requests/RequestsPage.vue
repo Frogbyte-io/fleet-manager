@@ -9,16 +9,19 @@ import { relativeTime } from '../fleet/inventory'
 import { errorMessage } from '../machine/api'
 import PendingRequest from './components/PendingRequest.vue'
 import { historyRequests, pendingRequests, riskTone, stateTone } from './requests'
-import { REQUESTS_LIMIT, useRequestsList } from './useRequests'
+import { REQUESTS_LIMIT, useHistoryRequests, usePendingRequests } from './useRequests'
 
 // The approval inbox: provider actions agents asked Fleet to run, waiting
 // for a person (ADR 0016). The list follows the fleet event stream.
-const list = useRequestsList()
+// The pending queue and the history are separate queries: a long history
+// can never hide a request that is waiting.
+const pendingQuery = usePendingRequests()
+const historyQuery = useHistoryRequests()
 const route = useRoute()
 
-const all = computed(() => list.data.value?.items ?? [])
-const pending = computed(() => pendingRequests(all.value))
-const history = computed(() => historyRequests(all.value))
+const pending = computed(() => pendingRequests(pendingQuery.data.value?.items ?? []))
+const history = computed(() => historyRequests(historyQuery.data.value?.items ?? []))
+const loadError = computed(() => pendingQuery.error.value ?? historyQuery.error.value)
 // `?request=` highlights one request, so attention rows link straight to it.
 const focused = computed(() => (typeof route.query.request === 'string' ? route.query.request : null))
 </script>
@@ -33,18 +36,18 @@ const focused = computed(() => (typeof route.query.request === 'string' ? route.
     </h1>
 
     <div
-      v-if="list.error.value"
+      v-if="loadError"
       class="mt-4 border-l-2 border-l-fc-err bg-card px-3 py-2 text-xs text-fc-muted"
       role="alert"
     >
-      Could not load requests: {{ errorMessage(list.error.value) }}
+      Could not load requests: {{ errorMessage(loadError) }}
     </div>
     <div
-      v-if="list.data.value?.truncated"
+      v-if="pendingQuery.data.value?.truncated || historyQuery.data.value?.truncated"
       class="mt-4 border-l-2 border-l-fc-warn bg-card px-3 py-2 text-xs text-fc-muted"
       role="status"
     >
-      Showing the newest {{ REQUESTS_LIMIT }} requests; the API does not page further, so older ones are not listed.
+      Showing the newest {{ REQUESTS_LIMIT }} requests per list; the API does not page further, so older ones are not listed.
     </div>
 
     <section
@@ -64,7 +67,7 @@ const focused = computed(() => (typeof route.query.request === 'string' ? route.
         >{{ pending.length }}</span>
       </div>
       <div
-        v-if="list.isLoading.value"
+        v-if="pendingQuery.isLoading.value"
         class="mt-3 grid gap-2"
       >
         <Skeleton
@@ -107,7 +110,7 @@ const focused = computed(() => (typeof route.query.request === 'string' ? route.
         <span class="font-mono text-[10px] text-fc-faint">{{ history.length }}</span>
       </div>
       <p
-        v-if="!list.isLoading.value && history.length === 0"
+        v-if="!historyQuery.isLoading.value && history.length === 0"
         class="mt-3 rounded-sm border border-fc-line p-6 text-sm text-fc-muted"
         data-testid="history-empty"
       >
@@ -115,10 +118,10 @@ const focused = computed(() => (typeof route.query.request === 'string' ? route.
       </p>
       <div
         v-else-if="history.length > 0"
-        class="mt-3 overflow-x-auto"
+        class="mt-3"
       >
         <table
-          class="w-full min-w-[720px] border border-fc-line bg-card text-xs"
+          class="w-full border border-fc-line bg-card text-xs"
           data-testid="history-table"
         >
           <thead>
@@ -129,10 +132,10 @@ const focused = computed(() => (typeof route.query.request === 'string' ? route.
               <th class="fc-kicker px-2 py-1.5 font-normal">
                 Outcome
               </th>
-              <th class="fc-kicker px-2 py-1.5 font-normal">
+              <th class="fc-kicker hidden px-2 py-1.5 font-normal md:table-cell">
                 Decided by
               </th>
-              <th class="fc-kicker px-2 py-1.5 font-normal">
+              <th class="fc-kicker hidden px-2 py-1.5 font-normal md:table-cell">
                 Operation
               </th>
               <th class="fc-kicker px-2 py-1.5 font-normal">
@@ -177,11 +180,45 @@ const focused = computed(() => (typeof route.query.request === 'string' ? route.
                 >
                   {{ request.failure }}
                 </p>
+                <!-- Below md the decider and the operation fold into this cell. -->
+                <dl
+                  class="mt-1 font-mono text-[10px] text-fc-muted md:hidden"
+                  :data-testid="`outcome-meta-${request.id}`"
+                >
+                  <div
+                    v-if="request.decidedBy"
+                    class="flex gap-1"
+                  >
+                    <dt class="text-fc-faint">
+                      by
+                    </dt>
+                    <dd class="break-all">
+                      {{ request.decidedBy }}
+                    </dd>
+                  </div>
+                  <div
+                    v-if="request.operationId"
+                    class="flex gap-1"
+                  >
+                    <dt class="text-fc-faint">
+                      op
+                    </dt>
+                    <dd>
+                      <RouterLink
+                        :to="{ path: '/operations', query: { op: request.operationId } }"
+                        class="text-fc-info hover:text-fc-ink"
+                        :aria-label="`Open operation ${request.operationId}`"
+                      >
+                        {{ request.operationId.slice(0, 12) }} →
+                      </RouterLink>
+                    </dd>
+                  </div>
+                </dl>
               </td>
-              <td class="px-2 py-1.5 font-mono text-[11px] text-fc-muted">
+              <td class="hidden px-2 py-1.5 font-mono text-[11px] text-fc-muted md:table-cell">
                 {{ request.decidedBy ?? '—' }}
               </td>
-              <td class="px-2 py-1.5 font-mono text-[11px]">
+              <td class="hidden px-2 py-1.5 font-mono text-[11px] md:table-cell">
                 <RouterLink
                   v-if="request.operationId"
                   :to="{ path: '/operations', query: { op: request.operationId } }"

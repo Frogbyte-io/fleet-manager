@@ -9,26 +9,43 @@ import {
 
 import { retryTransient, unwrap } from '../machine/api'
 
-// Action requests, shared by the inbox and the Overview. The fleet event
-// stream's `request.changed` (and `operation.changed`, which moves an
-// executing request) invalidate this key, so the inbox stays live.
+// Action requests. The inbox and the Overview attention list read the pending
+// queue (`state=pending`); the history is a separate query, so a long history
+// can never push a waiting request off the page. The fleet event stream's
+// `request.changed` (and `operation.changed`, which moves an executing
+// request) invalidate the shared ['requests'] prefix, so both stay live.
 
-export const REQUESTS_KEY = ['requests', 'list'] as const
+export const PENDING_REQUESTS_KEY = ['requests', 'pending'] as const
+export const HISTORY_REQUESTS_KEY = ['requests', 'history'] as const
 /** The list takes a limit and no cursor; this is the API's maximum. */
 export const REQUESTS_LIMIT = 200
 
-export function useRequestsList() {
+async function readRequests(params: { state?: string, limit: number }) {
+  const response = await listActionRequests(params)
+  if (response.status !== 200)
+    unwrap(response)
+  return (response.data as { items: ActionRequestDto[] }).items
+}
+
+/** Requests waiting for a decision, from a `state=pending` query. */
+export function usePendingRequests() {
   return useQuery({
-    queryKey: REQUESTS_KEY,
+    queryKey: PENDING_REQUESTS_KEY,
     queryFn: async () => {
-      const response = await listActionRequests({ limit: REQUESTS_LIMIT })
-      if (response.status !== 200)
-        unwrap(response)
-      const page = response.data as { items: ActionRequestDto[], page?: { nextCursor?: string | null } }
-      // The pending list is read from the same page as the history, so a full
-      // page may hide older pending requests: say so rather than imply a
-      // complete inbox.
-      return { items: page.items, truncated: page.items.length >= REQUESTS_LIMIT }
+      const items = await readRequests({ state: 'pending', limit: REQUESTS_LIMIT })
+      return { items, truncated: items.length >= REQUESTS_LIMIT }
+    },
+    retry: retryTransient,
+  })
+}
+
+/** The newest decided requests: everything the API lists except what is pending. */
+export function useHistoryRequests() {
+  return useQuery({
+    queryKey: HISTORY_REQUESTS_KEY,
+    queryFn: async () => {
+      const items = await readRequests({ limit: REQUESTS_LIMIT })
+      return { items: items.filter(r => r.state !== 'pending'), truncated: items.length >= REQUESTS_LIMIT }
     },
     retry: retryTransient,
   })

@@ -7808,13 +7808,48 @@ fn send_with_key(
     correlation_id: String,
     idempotency_key: Option<&str>,
 ) -> Result<Value, CliError> {
+    send_classified(
+        client,
+        invocation,
+        method,
+        path,
+        query,
+        body,
+        correlation_id,
+        idempotency_key,
+        None,
+    )
+    .map_err(|(error, _transient)| error)
+}
+
+/// [`send_with_key`] with an optional cap on this one request's time, and a
+/// failure that says whether it was transient: the controller did not
+/// answer, or answered 5xx (a retry may succeed), as opposed to a refusal
+/// or a malformed answer (it will not).
+#[allow(clippy::too_many_arguments)]
+fn send_classified(
+    client: &reqwest::blocking::Client,
+    invocation: &Invocation,
+    method: reqwest::Method,
+    path: &str,
+    query: &[(&'static str, String)],
+    body: Option<&Value>,
+    correlation_id: String,
+    idempotency_key: Option<&str>,
+    timeout: Option<std::time::Duration>,
+) -> Result<Value, (CliError, bool)> {
+    let permanent = |error: CliError| (error, false);
     let mut request = with_credential(
         client
             .request(method, format!("{}{}", invocation.url, path))
             .header("x-correlation-id", correlation_id),
-    )?;
+    )
+    .map_err(permanent)?;
     if let Some(key) = idempotency_key {
         request = request.header("idempotency-key", key);
+    }
+    if let Some(timeout) = timeout {
+        request = request.timeout(timeout);
     }
     if !query.is_empty() {
         request = request.query(query);
@@ -7822,22 +7857,36 @@ fn send_with_key(
     if let Some(body) = body {
         request = request.json(body);
     }
-    let response = request.send().map_err(|error| CliError {
-        message: format!("the controller did not answer: {error}"),
+    let response = request.send().map_err(|error| {
+        (
+            CliError {
+                message: format!("the controller did not answer: {error}"),
+            },
+            true,
+        )
     })?;
     let status = reqwest::StatusCode::as_u16(&response.status());
     if status == 204 {
         return Ok(Value::Null);
     }
-    let body: Value = response.json().map_err(|error| CliError {
-        message: format!("the controller's answer was not JSON: {error}"),
+    let server_error = (500..600).contains(&status);
+    let body: Value = response.json().map_err(|error| {
+        (
+            CliError {
+                message: format!("the controller's answer was not JSON: {error}"),
+            },
+            server_error,
+        )
     })?;
     if !(200..300).contains(&status) {
         let code = body["code"].as_str().unwrap_or("unknown");
         let message = body["message"].as_str().unwrap_or("no detail");
-        return Err(CliError {
-            message: format!("the controller refused ({status}, {code}): {message}"),
-        });
+        return Err((
+            CliError {
+                message: format!("the controller refused ({status}, {code}): {message}"),
+            },
+            server_error,
+        ));
     }
     Ok(body)
 }

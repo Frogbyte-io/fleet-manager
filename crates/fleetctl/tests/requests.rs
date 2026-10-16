@@ -193,6 +193,21 @@ fn parsing_walks_the_requests_forms() {
             note: Some("not now".to_owned())
         })
     );
+    // The note is trimmed, and a blank one is no note.
+    assert_eq!(
+        parse(&["requests", "deny", "req-1", "--note", "  not now \t"]),
+        fleetctl::Command::Requests(RequestsAction::Deny {
+            id: "req-1".to_owned(),
+            note: Some("not now".to_owned())
+        })
+    );
+    assert_eq!(
+        parse(&["requests", "deny", "req-1", "--note", "   "]),
+        fleetctl::Command::Requests(RequestsAction::Deny {
+            id: "req-1".to_owned(),
+            note: None
+        })
+    );
 }
 
 #[test]
@@ -408,7 +423,7 @@ fn the_poll_backs_off_and_never_sleeps_past_the_bound() {
     let mut pauses = Vec::new();
     let mut reads = 0;
     let (outcome, _) = fleetctl::requests::poll_outcome(
-        || {
+        |_| {
             reads += 1;
             Ok(json!({ "state": "pending" }))
         },
@@ -429,7 +444,7 @@ fn the_poll_backs_off_and_never_sleeps_past_the_bound() {
 #[test]
 fn the_poll_returns_at_once_for_a_settled_request() {
     let (outcome, request) = fleetctl::requests::poll_outcome(
-        || Ok(json!({ "state": "succeeded" })),
+        |_| Ok(json!({ "state": "succeeded" })),
         Duration::from_secs(5),
         |_| panic!("a settled request is not waited on"),
     )
@@ -476,4 +491,107 @@ fn text_output_renders_rows_and_details_without_control_characters() {
     let text = fleetctl::render_requests_for_test(&waited);
     assert!(text.starts_with("outcome: denied"), "{text}");
     assert!(text.contains("note: not now"), "{text}");
+}
+
+fn transient() -> fleetctl::requests::ReadFailure {
+    fleetctl::requests::ReadFailure {
+        error: fleetctl::CliError {
+            message: "the controller did not answer".to_owned(),
+        },
+        transient: true,
+    }
+}
+
+#[test]
+fn the_poll_retries_three_transient_failures_and_resets_the_count() {
+    let mut script = vec![
+        Err(transient()),
+        Err(transient()),
+        Err(transient()),
+        Ok(json!({ "state": "pending" })),
+        Err(transient()),
+        Err(transient()),
+        Err(transient()),
+        Ok(json!({ "state": "succeeded" })),
+    ]
+    .into_iter();
+    let (outcome, _) = fleetctl::requests::poll_outcome(
+        |_| script.next().unwrap(),
+        Duration::from_secs(60),
+        |_| {},
+    )
+    .unwrap();
+    assert_eq!(outcome, Outcome::Executed);
+}
+
+#[test]
+fn the_poll_gives_up_on_the_fourth_consecutive_transient_failure() {
+    let mut reads = 0;
+    let error = fleetctl::requests::poll_outcome(
+        |_| {
+            reads += 1;
+            Err(transient())
+        },
+        Duration::from_secs(60),
+        |_| {},
+    )
+    .unwrap_err();
+    assert_eq!(reads, 4);
+    assert!(
+        error.message.contains("did not answer"),
+        "{}",
+        error.message
+    );
+}
+
+#[test]
+fn the_poll_does_not_retry_a_refusal_and_hands_each_read_the_time_left() {
+    let mut reads = 0;
+    let error = fleetctl::requests::poll_outcome(
+        |_| {
+            reads += 1;
+            Err(fleetctl::requests::ReadFailure {
+                error: fleetctl::CliError {
+                    message: "refused (403)".to_owned(),
+                },
+                transient: false,
+            })
+        },
+        Duration::from_secs(60),
+        |_| {},
+    )
+    .unwrap_err();
+    assert_eq!(reads, 1);
+    assert!(error.message.contains("403"));
+
+    let mut left = Vec::new();
+    let _ = fleetctl::requests::poll_outcome(
+        |remaining| {
+            left.push(remaining);
+            Ok(json!({ "state": "pending" }))
+        },
+        Duration::from_secs(2),
+        |_| {},
+    )
+    .unwrap();
+    assert!(
+        left[0] <= Duration::from_secs(2) && left[0] > Duration::from_millis(1900),
+        "{left:?}"
+    );
+    assert!(left.windows(2).all(|pair| pair[1] < pair[0]), "{left:?}");
+}
+
+#[test]
+fn a_server_error_during_the_wait_is_retried_over_http() {
+    let controller = Controller::start(vec![
+        request_body("pending"),
+        (
+            503,
+            r#"{"code":"unavailable","message":"restarting"}"#.to_owned(),
+        ),
+        request_body("succeeded"),
+    ]);
+    let (answer, code) = run_json(&controller, &["requests", "get", "req-1", "--wait=30s"]);
+    assert_eq!(code, 0);
+    assert_eq!(answer["outcome"], "executed");
 }

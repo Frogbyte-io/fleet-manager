@@ -62,9 +62,13 @@ export function approveCommand(id: string): string {
   return `fleetctl requests approve ${shellWord(id)} --output json`
 }
 
+/**
+ * The command box never shows the typed note: a note is free text and may
+ * carry anything, and the box is copied and screenshotted. A typed note shows
+ * as a `"<note>"` placeholder; a blank one leaves `--note` out, as the CLI does.
+ */
 export function denyCommand(id: string, note: string): string {
-  const trimmed = note.trim()
-  return `fleetctl requests deny ${shellWord(id)}${trimmed ? ` --note ${shellWord(trimmed)}` : ''} --output json`
+  return `fleetctl requests deny ${shellWord(id)}${note.trim() ? ' --note "<note>"' : ''} --output json`
 }
 
 /** `expires in 12M`, or `expired` once the deadline passed. */

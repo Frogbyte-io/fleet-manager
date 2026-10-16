@@ -19,7 +19,7 @@ import { useImages } from '../images/useImages'
 import { leaseDetailKey } from '../lab/useLab'
 import { retryTransient, unwrap } from '../machine/api'
 import { useOperationsList } from '../operations/useOperations'
-import { useRequestsList } from '../requests/useRequests'
+import { usePendingRequests } from '../requests/useRequests'
 import { isFingerprintMismatch } from '../proxmox/proxmox'
 import { useProxmox } from '../proxmox/useProxmox'
 
@@ -101,7 +101,7 @@ export function useOverview() {
     refetchInterval: 60_000,
   })
   const operations = useOperationsList()
-  const requests = useRequestsList()
+  const requests = usePendingRequests()
   const proxmox = useProxmox()
   const images = useImages()
   const drift = useFleetDrift()

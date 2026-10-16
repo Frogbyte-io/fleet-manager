@@ -33,7 +33,9 @@ describe('request helpers', () => {
   it('builds the equivalent fleetctl commands, quoting a note', () => {
     expect(approveCommand('req-1')).toBe('fleetctl requests approve req-1 --output json')
     expect(denyCommand('req-1', '')).toBe('fleetctl requests deny req-1 --output json')
-    expect(denyCommand('req-1', 'not now; it\'s risky')).toBe('fleetctl requests deny req-1 --note \'not now; it\'\\\'\'s risky\' --output json')
+    expect(denyCommand('req-1', '   ')).toBe('fleetctl requests deny req-1 --output json')
+    // The typed note is never rendered.
+    expect(denyCommand('req-1', 'not now; it\'s risky')).toBe('fleetctl requests deny req-1 --note "<note>" --output json')
   })
 
   it('words the deadline', () => {

@@ -21,6 +21,8 @@ pub const MAX_WAIT: Duration = Duration::from_hours(1);
 pub const DEFAULT_WAIT: Duration = Duration::from_mins(5);
 /// The first poll interval; it doubles up to [`MAX_POLL_INTERVAL`].
 const MIN_POLL_INTERVAL: Duration = Duration::from_millis(250);
+/// The longest one read may take, however much of the wait is left.
+const READ_TIMEOUT: Duration = Duration::from_secs(30);
 /// The longest pause between polls.
 const MAX_POLL_INTERVAL: Duration = Duration::from_secs(5);
 
@@ -224,7 +226,10 @@ pub(crate) fn parse(rest: &[&str], output: &mut Output) -> Result<Command, CliEr
                     message: format!("--limit must be a number, not {raw:?}"),
                 })?);
             }
-            ("deny", "--note") => note = Some(value("note")?),
+            // A blank note is no note: it is trimmed and left out of the body.
+            ("deny", "--note") => {
+                note = Some(value("note")?.trim().to_owned()).filter(|note| !note.is_empty());
+            }
             (_, other) => {
                 return Err(CliError {
                     message: format!("unknown flag {other:?}; see the usage below\n\n{}", usage()),
@@ -291,19 +296,35 @@ fn encode(segment: &str) -> String {
     out
 }
 
-/// Waits for the request's outcome: reads it (through `fetch`, which
-/// answers the request object) with exponential backoff until it reaches a
-/// final state or `bound` has passed, and answers `(outcome, request)`.
-/// A request still `pending`, `approved`, or `executing` at the bound is
+/// One failed read of a request, and whether a retry may succeed.
+#[derive(Debug)]
+pub struct ReadFailure {
+    /// What went wrong.
+    pub error: CliError,
+    /// The controller did not answer or answered 5xx; a refusal is not.
+    pub transient: bool,
+}
+
+/// How many reads in a row may fail transiently and be retried; the next
+/// failure ends the wait.
+const MAX_TRANSIENT_FAILURES: u32 = 3;
+
+/// Waits for the request's outcome: reads it (through `fetch`, which is
+/// given the time left in the wait to cap that one read and answers the
+/// request object) with exponential backoff until it reaches a final state
+/// or `bound` has passed, and answers `(outcome, request)`. A request still
+/// `pending`, `approved`, or `executing` at the bound is
 /// [`Outcome::StillPending`]; the bound never makes the wait hang and never
-/// cancels the request. `sleep` pauses between reads (a test passes a
-/// recorder).
+/// cancels the request. Up to [`MAX_TRANSIENT_FAILURES`] consecutive
+/// transient read failures are retried on the same backoff; a refusal, or
+/// a fourth consecutive transient failure, ends the wait with that error. `sleep`
+/// pauses between reads (a test passes a recorder).
 ///
 /// # Errors
 ///
-/// Fails when a read fails.
+/// Fails when a read is refused or keeps failing transiently.
 pub fn poll_outcome(
-    mut fetch: impl FnMut() -> Result<Value, CliError>,
+    mut fetch: impl FnMut(Duration) -> Result<Value, ReadFailure>,
     bound: Duration,
     mut sleep: impl FnMut(Duration),
 ) -> Result<(Outcome, Value), CliError> {
@@ -313,14 +334,41 @@ pub fn poll_outcome(
     // `sleep` that returns at once still ends the wait.
     let mut slept = Duration::ZERO;
     let mut interval = MIN_POLL_INTERVAL;
+    let mut failures = 0;
+    let mut last_failure = None;
+    let mut last_request: Option<Value> = None;
     loop {
-        let request = fetch()?;
-        if let Some(outcome) = request["state"].as_str().and_then(Outcome::of_state) {
-            return Ok((outcome, request));
+        let remaining = bound.saturating_sub(started.elapsed().max(slept));
+        let request = match fetch(remaining) {
+            Ok(request) => {
+                failures = 0;
+                last_request = Some(request.clone());
+                Some(request)
+            }
+            Err(failure) => {
+                failures += 1;
+                if !failure.transient || failures > MAX_TRANSIENT_FAILURES {
+                    return Err(failure.error);
+                }
+                last_failure = Some(failure.error);
+                None
+            }
+        };
+        if let Some(request) = &request
+            && let Some(outcome) = request["state"].as_str().and_then(Outcome::of_state)
+        {
+            return Ok((outcome, request.clone()));
         }
         let remaining = bound.saturating_sub(started.elapsed().max(slept));
         if remaining.is_zero() {
-            return Ok((Outcome::StillPending, request));
+            // The last read that did answer stands: a final read cut short
+            // by the bound is not a failure of the wait.
+            return match last_request {
+                Some(request) => Ok((Outcome::StillPending, request)),
+                None => Err(last_failure.unwrap_or_else(|| CliError {
+                    message: "the wait ended before the controller answered".to_owned(),
+                })),
+            };
         }
         let pause = interval.min(remaining);
         sleep(pause);
@@ -341,7 +389,7 @@ pub fn outcome_body(outcome: Outcome, request: &Value) -> Value {
 ///
 /// # Errors
 ///
-/// Fails when a read is refused or the controller does not answer.
+/// Fails when a read is refused or the controller keeps not answering.
 pub fn wait_for_outcome(
     client: &reqwest::blocking::Client,
     invocation: &Invocation,
@@ -349,12 +397,13 @@ pub fn wait_for_outcome(
     bound: Duration,
 ) -> Result<(Outcome, Value), CliError> {
     poll_outcome(
-        || {
+        |remaining| {
             let (method, path, query, body) = request(&RequestsAction::Get {
                 id: id.to_owned(),
                 wait: None,
             });
-            let answer = crate::send(
+            // A read never outlasts what is left of the wait.
+            let answer = crate::send_classified(
                 client,
                 invocation,
                 method,
@@ -362,7 +411,10 @@ pub fn wait_for_outcome(
                 &query,
                 body.as_ref(),
                 uuid::Uuid::now_v7().to_string(),
-            )?;
+                None,
+                Some(remaining.min(READ_TIMEOUT)),
+            )
+            .map_err(|(error, transient)| ReadFailure { error, transient })?;
             Ok(answer.get("data").cloned().unwrap_or(answer))
         },
         bound,
