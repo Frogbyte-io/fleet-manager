@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
 
 import {
+  cellValue,
   columnDefs,
   entryLinks,
   fieldDefs,
@@ -41,7 +42,7 @@ describe('fieldDefs and columnDefs', () => {
   })
 
   it('tolerates a missing or malformed spec', () => {
-    expect(fieldDefs(null, 'k')).toEqual([])
+    expect(fieldDefs(null, 'k').map(d => d.name)).toEqual(['k'])
     expect(fieldDefs({ fields: { a: 7, b: { type: 'weird' } } }, 'a').map(d => d.type)).toEqual(['string', 'string'])
   })
 
@@ -80,6 +81,20 @@ describe('renderValue', () => {
   })
 })
 
+describe('key column and email', () => {
+  it('adds a synthetic key column when the type does not declare the key', () => {
+    const defs = fieldDefs({ fields: { plan: { type: 'string' } } }, 'slug')
+    expect(defs[0]).toMatchObject({ name: 'slug', isKey: true, synthetic: true })
+    expect(cellValue(defs[0]!, { key: 'aptabase', fields: {} })).toBe('aptabase')
+  })
+
+  it('links only plausible emails', () => {
+    expect(renderValue({ type: 'email', items: null }, 'ops@example.org')).toMatchObject({ kind: 'link' })
+    expect(renderValue({ type: 'email', items: null }, 'a@b.c?subject=x&bcc=y@z.d')).toMatchObject({ kind: 'text' })
+    expect(renderValue({ type: 'email', items: null }, 'not an email')).toMatchObject({ kind: 'text' })
+  })
+})
+
 describe('entry helpers', () => {
   it('reports values the type does not declare', () => {
     const defs = fieldDefs(spec, 'fqdn')
@@ -97,11 +112,11 @@ describe('entry helpers', () => {
 describe('targetLink', () => {
   const machines = new Map([['build-1', 'id-9']])
 
-  it('links relations to entries, machines, and projects', () => {
+  it('links entries and known machines; unresolved targets stay text', () => {
     expect(targetLink({ class: 'registry', reference: 'service/aptabase' }, machines).to).toEqual({ path: '/registry', query: { type: 'service', entry: 'aptabase' } })
     expect(targetLink({ class: 'machine', reference: 'build-1' }, machines).to).toEqual({ path: '/fleet/machines/id-9' })
-    expect(targetLink({ class: 'machine', reference: 'gone' }, machines).to).toEqual({ path: '/fleet' })
-    expect(targetLink({ class: 'project', reference: 'site' }, machines).to).toEqual({ path: '/projects' })
+    expect(targetLink({ class: 'machine', reference: 'gone' }, machines).to).toBeNull()
+    expect(targetLink({ class: 'project', reference: 'site' }, machines).to).toBeNull()
   })
 
   it('leaves targets without a page as text', () => {
@@ -127,6 +142,8 @@ describe('sourceLocation', () => {
     expect(JSON.stringify(result)).not.toContain('hunter2')
     expect(JSON.stringify(result)).not.toContain('user')
     expect(parseRemote('https://tok@github.com/a/b')).toEqual({ host: 'github.com', repo: 'a/b' })
+    expect(parseRemote('https://git.example:8443/a/b')).toEqual({ host: 'git.example:8443', repo: 'a/b' })
+    expect(parseRemote('ssh://git@git.example:2222/a/b')).toEqual({ host: 'git.example', repo: 'a/b' })
   })
 
   it('falls back to the path for unknown hosts, missing data, and unsafe paths', () => {

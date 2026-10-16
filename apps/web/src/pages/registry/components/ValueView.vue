@@ -10,8 +10,7 @@ defineProps<{ value: Rendered }>()
   <span
     v-if="value.kind === 'empty'"
     class="text-fc-faint"
-    aria-label="empty"
-  >–</span>
+  ><span aria-hidden="true">–</span><span class="sr-only">empty</span></span>
   <span
     v-else-if="value.kind === 'bool'"
     class="font-mono text-[10px] uppercase tracking-wider"
@@ -38,6 +37,6 @@ defineProps<{ value: Rendered }>()
   <span
     v-else
     class="break-words"
-    :class="value.mono ? 'font-mono text-[11.5px]' : ''"
+    :class="value.mono ? 'font-mono text-[11px]' : ''"
   >{{ value.text }}</span>
 </template>

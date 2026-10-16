@@ -15,6 +15,8 @@ export interface FieldDef {
   required: boolean
   description: string | null
   isKey: boolean
+  /** True when the type does not declare its key field; the value is the entry's key. */
+  synthetic?: boolean
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -38,8 +40,16 @@ export function fieldDefs(spec: unknown, keyField: string): FieldDef[] {
       isKey: name === keyField,
     })
   }
+  if (!defs.some(d => d.isKey))
+    defs.push({ name: keyField, type: 'string', items: null, required: true, description: null, isKey: true, synthetic: true })
   defs.sort((a, b) => Number(b.isKey) - Number(a.isKey) || a.name.localeCompare(b.name))
   return defs
+}
+
+/** The value a column shows for an entry; the key column falls back to `entry.key`. */
+export function cellValue(def: FieldDef, entry: { key: string, fields: unknown }): unknown {
+  const value = fieldValues(entry.fields)[def.name]
+  return def.isKey && (def.synthetic || value === undefined) ? entry.key : value
 }
 
 /** Table columns: the key field and the first few declared fields; the drawer shows the rest. */
@@ -100,6 +110,8 @@ export function formatDate(value: string, now = Date.now()): string {
   return days > 0 ? `${value} (in ${days} ${unit})` : `${value} (${-days} ${unit} ago)`
 }
 
+const EMAIL = /^[^\s@<>"',;:()\\]+@[^\s@<>"',;:()\\]+\.[^\s@<>"',;:()\\]+$/
+
 function renderScalar(type: ScalarType, value: unknown, now: number): Rendered {
   if (value === null || value === undefined || value === '')
     return { kind: 'empty' }
@@ -114,7 +126,7 @@ function renderScalar(type: ScalarType, value: unknown, now: number): Rendered {
       return href ? { kind: 'link', text, href } : { kind: 'text', text, mono: true }
     }
     case 'email':
-      return { kind: 'link', text, href: `mailto:${text}` }
+      return EMAIL.test(text) ? { kind: 'link', text, href: `mailto:${text}` } : { kind: 'text', text, mono: true }
     case 'money':
       return { kind: 'text', text: formatMoney(text) }
     case 'date':
@@ -191,7 +203,8 @@ const CLASS_LABELS: Record<string, string> = {
 /**
  * Where a relation target lives in the console. Machines resolve by name to
  * their id when the machine list knows it; Registry entries open in the
- * Registry; the rest link to their section or stay as text.
+ * Registry. Anything unresolved (an unknown machine, projects, which have no
+ * page per name) stays plain text rather than a misleading link.
  */
 export function targetLink(target: TargetRef, machineIds: ReadonlyMap<string, string>): TargetLink {
   const classLabel = CLASS_LABELS[target.class] ?? target.class
@@ -205,10 +218,8 @@ export function targetLink(target: TargetRef, machineIds: ReadonlyMap<string, st
     }
     case 'machine': {
       const id = machineIds.get(target.reference)
-      return { to: id ? { path: `/fleet/machines/${encodeURIComponent(id)}` } : { path: '/fleet' }, label, classLabel }
+      return { to: id ? { path: `/fleet/machines/${encodeURIComponent(id)}` } : null, label, classLabel }
     }
-    case 'project':
-      return { to: { path: '/projects' }, label, classLabel }
     case 'proxmoxGuest':
       return { to: { path: '/proxmox' }, label, classLabel }
     default:
@@ -242,7 +253,9 @@ export function parseRemote(remote: string): Remote | null {
     }
     if (!['https:', 'http:', 'ssh:', 'git:'].includes(url.protocol))
       return null
-    host = url.hostname
+    // Keep the port for http(s) (it is part of the web address); drop it for
+    // ssh and git, whose port is not the web port.
+    host = url.protocol === 'https:' || url.protocol === 'http:' ? url.host : url.hostname
     path = url.pathname
   }
   const repo = path.replace(/^\/+/, '').replace(/\/+$/, '').replace(/\.git$/, '')
@@ -261,6 +274,8 @@ function validRepoPath(path: string): boolean {
  * hosts. Any other remote (or a missing path) yields the path alone so the
  * caller can show the `fleetctl registry set` command instead. The result
  * never contains anything from the remote beyond host and repository.
+ * An http remote is upgraded to https, and only github.com and gitlab.* hosts
+ * are mapped; the API reports no branch, so the URL is pinned to the commit.
  */
 export function sourceLocation(remote: string | null | undefined, commitSha: string | null | undefined, sourcePath: string | null | undefined): SourceLocation {
   const path = sourcePath && validRepoPath(sourcePath) ? sourcePath : null

@@ -50,9 +50,9 @@ const mocks = vi.hoisted(() => ({ entries: [] as unknown[] }))
 
 vi.mock('@frogbyte-io/fleet-api-client', () => ({
   listRegistryTypes: vi.fn(async () => ({ status: 200, data: { items: [domainType, serviceType], revision }, headers: new Headers() })),
-  listRegistryEntries: vi.fn(async (params: { type?: string }) => ({
+  listRegistryEntries: vi.fn(async (params: { type?: string, tag?: string }) => ({
     status: 200,
-    data: { items: params.type === 'domain' ? mocks.entries : [], page: { limit: 200, nextCursor: null }, revision },
+    data: { items: params.type === 'domain' ? (mocks.entries as { tags: string[] }[]).filter(e => !params.tag || e.tags.includes(params.tag)) : [], page: { limit: 200, nextCursor: null }, revision },
     headers: new Headers(),
   })),
   getRegistryEntry: vi.fn(async () => ({ status: 200, data: { data: entry, revision }, headers: new Headers() })),
@@ -110,7 +110,7 @@ describe('RegistryPage', () => {
     wrapper.unmount()
   })
 
-  it('opens the drawer with relations both ways and an Edit in repository link', async () => {
+  it('opens the drawer with relations both ways and a source link, path, and set command', async () => {
     const wrapper = await mountAt('/registry?type=domain&entry=example.org')
     const body = document.body
     expect(body.querySelector('[data-testid="drawer-fields"]')?.textContent).toContain('Porkbun')
@@ -121,8 +121,11 @@ describe('RegistryPage', () => {
     expect(body.querySelector('[data-testid="drawer-incoming"]')?.textContent).toContain('service/mailer')
     expect(body.querySelector('[data-testid="drawer-links"] a')?.getAttribute('href')).toBe('https://dash.example.org/dns')
     expect(body.textContent).toContain('Moved in 2025.')
-    expect(body.querySelector('[data-testid="edit-in-repository"]')?.getAttribute('href'))
+    expect(body.querySelector('[data-testid="view-source-at-revision"]')?.getAttribute('href'))
       .toBe(`https://github.com/acme/fleet/blob/${SHA}/fleet/registry/domain/example.org.yaml`)
+    // The path and command are shown next to the link, not only as a fallback.
+    expect(body.querySelector('[data-testid="source-path"]')?.textContent).toContain('fleet/registry/domain/example.org.yaml')
+    expect(body.querySelector('[data-testid="set-command"]')?.textContent).toContain('fleetctl registry set domain/example.org')
     wrapper.unmount()
   })
 
@@ -132,6 +135,15 @@ describe('RegistryPage', () => {
     const empty = wrapper.find('[data-testid="registry-empty"]').text()
     expect(empty).toContain('fleetctl registry set domain/<fqdn>')
     expect(empty).toContain('fleetctl registry publish')
+    wrapper.unmount()
+  })
+
+  it('sends the tag to the API and keeps a URL tag selected', async () => {
+    const { listRegistryEntries } = vi.mocked(await import('@frogbyte-io/fleet-api-client'))
+    mocks.entries = []
+    const wrapper = await mountAt('/registry?type=domain&tag=other')
+    expect(listRegistryEntries).toHaveBeenCalledWith(expect.objectContaining({ type: 'domain', tag: 'other' }))
+    expect((wrapper.find('[data-testid="registry-tag"]').element as HTMLSelectElement).value).toBe('other')
     wrapper.unmount()
   })
 
@@ -145,8 +157,8 @@ describe('RegistryPage', () => {
     const { getDesiredSource } = vi.mocked(await import('@frogbyte-io/fleet-api-client'))
     getDesiredSource.mockImplementation(async () => ({ status: 200, data: { data: { remote: 'https://git.internal.example/acme/fleet' } }, headers: new Headers() }) as never)
     const wrapper = await mountAt('/registry?type=domain&entry=example.org')
-    expect(document.body.querySelector('[data-testid="edit-in-repository"]')).toBeNull()
-    const fallback = document.body.querySelector('[data-testid="edit-fallback"]')!.textContent
+    expect(document.body.querySelector('[data-testid="view-source-at-revision"]')).toBeNull()
+    const fallback = document.body.querySelector('[data-testid="source-path"]')!.textContent
     expect(fallback).toContain('fleet/registry/domain/example.org.yaml')
     expect(fallback).toContain('fleetctl registry set domain/example.org')
     wrapper.unmount()

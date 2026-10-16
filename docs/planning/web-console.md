@@ -191,7 +191,7 @@ Contents:
 
 ### Registry (FM-1015)
 - Read-only, generic over any Registry type (built-in or repository-defined): type switcher, table whose columns come from the type's fields, search (`q`), tag filter. State is in the URL (`?type&q&tag&entry`).
-- Detail drawer: typed field values (dates with relative hint, money, booleans, links, lists), links, notes, relations both ways (entries, machines, projects), the revision it was read at, and an **Edit in repository** link built from the desired-source remote + commit + `sourcePath` for GitHub/GitLab-style hosts (credentials never shown). For any other remote the drawer shows the path and the `fleetctl registry set` command.
+- Detail drawer: typed field values (dates with relative hint, money, booleans, links, lists), links, notes, relations both ways (entries, machines, projects), the revision it was read at, and a **View source at revision** link (commit-pinned; the API reports no branch) built from the desired-source remote + commit + `sourcePath` for GitHub/GitLab-style hosts (credentials never shown). The source path and a copyable `fleetctl registry set` command are always shown beside it.
 - Empty states explain the `fleetctl registry set/validate/publish` workflow. Editing in the UI is a non-goal; domain/service-specific views are FM-1021.
 
 ### Operations & Audit

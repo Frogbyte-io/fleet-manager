@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { refDebounced } from '@vueuse/core'
+import { useDebounceFn } from '@vueuse/core'
 import { computed, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 
@@ -8,7 +8,7 @@ import { Skeleton } from '@/components/ui/skeleton'
 import { errorMessage } from '../machine/api'
 import EntryDrawer from './components/EntryDrawer.vue'
 import ValueView from './components/ValueView.vue'
-import { columnDefs, fieldDefs, fieldValues, renderValue } from './registry'
+import { cellValue, columnDefs, fieldDefs, renderValue } from './registry'
 import { useRegistryEntries, useRegistryTypes } from './useRegistry'
 
 // A read-only view over any Registry type, rendered from the type's own
@@ -24,7 +24,10 @@ const activeType = computed(() => typeList.value.find(t => t.name === requestedT
 const typeName = computed(() => activeType.value?.name ?? null)
 
 const text = ref(typeof route.query.q === 'string' ? route.query.q : '')
-const debounced = refDebounced(text, 250)
+// The text the queries use: debounced while typing, but set immediately when
+// the type changes so a new type is never queried with the old text.
+const applied = ref(text.value)
+const applyLater = useDebounceFn((value: string) => { applied.value = value }, 250)
 const tag = computed(() => (typeof route.query.tag === 'string' ? route.query.tag : ''))
 const selectedKey = computed(() => (typeof route.query.entry === 'string' ? route.query.entry : null))
 
@@ -34,25 +37,43 @@ function setQuery(patch: Record<string, string | undefined>) {
 
 function selectType(name: string) {
   text.value = ''
+  applied.value = ''
   router.replace({ query: { type: name } })
 }
 
-watch(debounced, value => setQuery({ q: value.trim() || undefined }))
+watch(text, value => applyLater(value))
+watch(applied, value => setQuery({ q: value.trim() || undefined }))
 // A link from a relation can change the type or search from outside.
 watch(() => route.query.q, (value) => {
   const next = typeof value === 'string' ? value : ''
-  if (next !== text.value.trim())
+  if (next !== text.value.trim()) {
     text.value = next
+    applied.value = next
+  }
+})
+watch(typeName, () => {
+  if (typeof route.query.q !== 'string' && text.value) {
+    text.value = ''
+    applied.value = ''
+  }
 })
 
-const entries = useRegistryEntries(typeName, debounced)
-const allEntries = computed(() => entries.data.value?.items ?? [])
-const tags = computed(() => [...new Set(allEntries.value.flatMap(e => e.tags))].sort())
-const rows = computed(() => (tag.value ? allEntries.value.filter(e => e.tags.includes(tag.value)) : allEntries.value))
+const entries = useRegistryEntries(typeName, applied, tag)
+// Tag options come from the type's unfiltered entries, so choosing a tag does
+// not remove the other options.
+const unfiltered = useRegistryEntries(typeName, '', '')
+const rows = computed(() => entries.data.value?.items ?? [])
+const tagOptions = computed(() => {
+  const found = new Set((unfiltered.data.value?.items ?? []).flatMap(e => e.tags))
+  if (tag.value)
+    found.add(tag.value)
+  return [...found].sort()
+})
+const tagsComplete = computed(() => !!unfiltered.data.value && !unfiltered.data.value.truncated)
 
 const defs = computed(() => (activeType.value ? fieldDefs(activeType.value.spec, activeType.value.keyField) : []))
 const columns = computed(() => columnDefs(defs.value))
-const filtered = computed(() => debounced.value.trim() !== '' || tag.value !== '')
+const filtered = computed(() => applied.value.trim() !== '' || tag.value !== '')
 const revision = computed(() => types.data.value?.revision ?? null)
 
 const loading = computed(() => types.isLoading.value || (!!typeName.value && entries.isLoading.value))
@@ -135,7 +156,10 @@ const loading = computed(() => types.isLoading.value || (!!typeName.value && ent
             data-testid="registry-search"
           >
         </label>
-        <label class="flex flex-col gap-1">
+        <label
+          v-if="tagsComplete || tag"
+          class="flex flex-col gap-1"
+        >
           <span class="fc-kicker">Tag</span>
           <select
             :value="tag"
@@ -145,7 +169,7 @@ const loading = computed(() => types.isLoading.value || (!!typeName.value && ent
           >
             <option value="">All tags</option>
             <option
-              v-for="t in tags"
+              v-for="t in tagOptions"
               :key="t"
               :value="t"
             >
@@ -208,6 +232,7 @@ fleetctl registry publish -m "Add {{ activeType.name }}"</pre>
         >
           <table
             class="w-full border border-fc-line bg-card text-[13px]"
+            :aria-label="`${activeType.displayName} entries`"
             data-testid="registry-table"
           >
             <thead>
@@ -215,12 +240,16 @@ fleetctl registry publish -m "Add {{ activeType.name }}"</pre>
                 <th
                   v-for="(col, index) in columns"
                   :key="col.name"
+                  scope="col"
                   class="fc-kicker px-2 py-1.5 font-normal"
                   :class="index >= 2 ? 'hidden md:table-cell' : ''"
                 >
                   {{ col.name }}
                 </th>
-                <th class="fc-kicker hidden px-2 py-1.5 font-normal lg:table-cell">
+                <th
+                  scope="col"
+                  class="fc-kicker hidden px-2 py-1.5 font-normal lg:table-cell"
+                >
                   Tags
                 </th>
               </tr>
@@ -247,11 +276,11 @@ fleetctl registry publish -m "Add {{ activeType.name }}"</pre>
                     :aria-label="`Open ${activeType.name}/${entry.key}`"
                     @click.stop="setQuery({ entry: entry.key })"
                   >
-                    <ValueView :value="renderValue(col, fieldValues(entry.fields)[col.name])" />
+                    <ValueView :value="renderValue(col, cellValue(col, entry))" />
                   </button>
                   <ValueView
                     v-else
-                    :value="renderValue(col, fieldValues(entry.fields)[col.name])"
+                    :value="renderValue(col, cellValue(col, entry))"
                   />
                 </td>
                 <td class="hidden px-2 py-1.5 lg:table-cell">

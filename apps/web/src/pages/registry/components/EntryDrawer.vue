@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed } from 'vue'
+import { computed, ref } from 'vue'
 import { RouterLink } from 'vue-router'
 import type { RegistryTypeDto } from '@frogbyte-io/fleet-api-client'
 
@@ -9,6 +9,7 @@ import { errorMessage } from '../../machine/api'
 import {
   entryLinks,
   fieldDefs,
+  cellValue,
   fieldValues,
   renderValue,
   setCommand,
@@ -44,6 +45,19 @@ const incoming = computed(() => (referencedBy.data.value?.items ?? []).map(r => 
   label: `${r.entryType}/${r.entryKey}`,
   to: { path: '/registry', query: { type: r.entryType, entry: r.entryKey } },
 })))
+const sourcePath = computed(() => data.value?.sourcePath ?? null)
+const command = computed(() => setCommand(props.type.name, props.entryKey))
+const copied = ref(false)
+async function copy() {
+  try {
+    await navigator.clipboard.writeText(command.value)
+    copied.value = true
+    setTimeout(() => { copied.value = false }, 1500)
+  }
+  catch {
+    copied.value = false
+  }
+}
 const location = computed(() => sourceLocation(source.data.value, revision.value?.commitSha, data.value?.sourcePath))
 
 function onOpenChange(open: boolean) {
@@ -73,7 +87,7 @@ function onOpenChange(open: boolean) {
         </SheetDescription>
       </SheetHeader>
 
-      <div class="grid gap-5 px-4 pb-6 text-[13px]">
+      <div class="grid min-w-0 grid-cols-[minmax(0,1fr)] gap-5 px-4 pb-6 text-[13px] [&>*]:min-w-0 [&_section]:min-w-0">
         <p
           v-if="entry.error.value"
           class="border-l-2 border-l-fc-err bg-card px-3 py-2 text-xs text-fc-muted"
@@ -105,7 +119,7 @@ function onOpenChange(open: boolean) {
                   {{ def.name }}<span v-if="def.required"> · required</span>
                 </dt>
                 <dd class="mt-0.5">
-                  <ValueView :value="renderValue(def, values[def.name])" />
+                  <ValueView :value="renderValue(def, cellValue(def, data))" />
                 </dd>
               </div>
               <div
@@ -196,7 +210,7 @@ function onOpenChange(open: boolean) {
                 </RouterLink>
                 <span
                   v-else
-                  class="break-all font-mono text-[11.5px]"
+                  class="break-all font-mono text-[11px]"
                 >{{ item.link.label }}</span>
               </li>
             </ul>
@@ -262,25 +276,35 @@ function onOpenChange(open: boolean) {
                 target="_blank"
                 rel="noopener noreferrer"
                 class="text-fc-info hover:underline"
-                data-testid="edit-in-repository"
-              >Edit in repository</a>
-              <span class="ml-2 break-all font-mono text-[11px] text-fc-faint">{{ data.sourcePath }}</span>
+                data-testid="view-source-at-revision"
+              >View source at revision</a>
             </p>
             <div
-              v-else
               class="mt-1"
-              data-testid="edit-fallback"
+              data-testid="source-path"
             >
               <p
-                v-if="location.path"
-                class="break-all font-mono text-[11px] text-fc-muted"
+                v-if="sourcePath"
+                class="break-words font-mono text-[11px] text-fc-muted [overflow-wrap:anywhere]"
               >
-                {{ location.path }}
+                {{ sourcePath }}
               </p>
               <p class="mt-1 text-xs text-fc-faint">
-                No web link for this repository. Edit the file in a checkout, or run:
+                {{ location.kind === 'web' ? 'To change it, edit the file in a checkout of the Fleet Git repository, or run:' : 'No web link for this repository. Edit the file in a checkout, or run:' }}
               </p>
-              <pre class="mt-1 overflow-x-auto rounded-sm bg-fc-inset p-2 font-mono text-[11.5px]">{{ setCommand(type.name, entryKey) }}</pre>
+              <div class="mt-1 flex items-start gap-2">
+                <pre
+                  class="min-w-0 flex-1 overflow-x-auto rounded-sm bg-fc-inset p-2 font-mono text-[11.5px]"
+                  data-testid="set-command"
+                >{{ command }}</pre>
+                <button
+                  type="button"
+                  class="shrink-0 rounded-sm border border-fc-line2 px-2 py-1 text-xs text-fc-muted hover:text-fc-ink"
+                  @click="copy"
+                >
+                  {{ copied ? 'Copied' : 'Copy' }}
+                </button>
+              </div>
             </div>
             <p class="mt-2 text-[11px] text-fc-faint">
               Read-only here. Changes go through Fleet Git.

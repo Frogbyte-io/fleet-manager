@@ -51,16 +51,18 @@ export function useRegistryTypes() {
   })
 }
 
-export function useRegistryEntries(type: MaybeRefOrGetter<string | null>, text: MaybeRefOrGetter<string>) {
+export function useRegistryEntries(type: MaybeRefOrGetter<string | null>, text: MaybeRefOrGetter<string>, tag: MaybeRefOrGetter<string> = '') {
   return useQuery({
-    queryKey: computed(() => ['registry', 'entries', toValue(type), toValue(text)] as const),
+    queryKey: computed(() => ['registry', 'entries', toValue(type), toValue(text), toValue(tag)] as const),
     enabled: computed(() => !!toValue(type)),
     queryFn: async () => {
       const q = toValue(text).trim()
+      const tagFilter = toValue(tag)
       return allPages<RegistryEntryDto>(cursor => listRegistryEntries({
         type: toValue(type),
         limit: 200,
         ...(q ? { q } : {}),
+        ...(tagFilter ? { tag: tagFilter } : {}),
         ...(cursor ? { cursor } : {}),
       }))
     },
@@ -101,6 +103,7 @@ export function useRegistryReferencedBy(type: MaybeRefOrGetter<string | null>, k
 export function useMachineIds(enabled: MaybeRefOrGetter<boolean>) {
   return useQuery({
     queryKey: ['registry', 'machine-ids'] as const,
+    staleTime: 60_000,
     enabled: computed(() => toValue(enabled)),
     queryFn: async () => {
       const { items } = await fetchAllPages<MachineDto>(async (cursor) => {
@@ -119,6 +122,7 @@ export function useMachineIds(enabled: MaybeRefOrGetter<boolean>) {
 export function useDesiredSourceRemote(enabled: MaybeRefOrGetter<boolean>) {
   return useQuery({
     queryKey: ['registry', 'desired-source'] as const,
+    staleTime: 60_000,
     enabled: computed(() => toValue(enabled)),
     queryFn: async () => unwrap<{ remote?: string | null }>(await getDesiredSource()).remote ?? null,
     retry: retryTransient,
