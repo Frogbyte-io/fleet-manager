@@ -1,0 +1,1 @@
+schemas/fixtures/invalid/registry-duplicate-key.yaml#document=3/spec/fields/slug [FM_SCHEMA_REGISTRY_DUPLICATE_KEY] another "vendor-fixture" entry with this key was first declared at schemas/fixtures/invalid/registry-duplicate-key.yaml#document=2

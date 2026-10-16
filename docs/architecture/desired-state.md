@@ -108,6 +108,41 @@ The `source.fetch` payload carries no credential reference: the executor reads t
 
 A `Machine` resource binds `spec.profiles` and `spec.projects` by `metadata.name`, and is matched to the registered Fleet machine with the same name. Activation validation refuses an unresolved profile or project name (`FM_SCHEMA_SEMANTIC_UNRESOLVED_REFERENCE`), a profile `extends` cycle (`FM_SCHEMA_SEMANTIC_PROFILE_CYCLE`), and duplicate names within Machine, Profile, or Project (`FM_SCHEMA_SEMANTIC_DUPLICATE_NAME`), so such a revision cannot become active. Planning composes the bound profiles as one synthetic profile that extends them (deny wins over include across the whole binding, conflicts refuse with `PlanningError::Composition`), adds each bound project's tools and its checkout (remote and root; a project without a root has no checkout), and yields `mise.install` and `projects.clone` actions through the unchanged planner. Applying a `projects.clone` action clones from the fetch form stored with the registered project of that remote (the project registry, not the spelling written in Fleet Git), so the remote must also be registered as a project; an unregistered remote fails the step with `invalid_project_remote` before git runs. Several projects may be bound; one remote at two roots, or two remotes at one root, is a conflict. Profile skill requirements join `SkillPreset` assignments as machine-scoped assignments: assignments union, a `SkillPreset` deny of a profile-required skill refuses the plan, and a profile `deny` removes only requirements within profile composition. Profile capability requirements are report-only: unmet ones appear as `unsupported` differences. Project `skills` are not composed. A machine with no matching `Machine` resource, or one that binds nothing, plans as before.
 
+### Registry kinds (FM-1010, ADR 0016)
+
+`RegistryType` (display name, natural-key field, fields over a closed value-type set, required flags, allowed relation types) and `RegistryEntry` (type, fields, tags, links, notes, relations to `registry` `<type>/<key>`, `machine`, `project`, `coolify`, or `proxmoxGuest` targets) are descriptive: the planner reads only the kinds it names, so Registry resources never produce plan steps. Their semantic validation lives in `fleet-schema` (`registry.rs`), inside the one entry point the controller and the CLI share. It refuses unknown types, unknown fields, wrong value types, missing required fields, duplicate keys per type (case-insensitive), relation types a type does not allow, redefining a built-in type, and any string the controller's credential scrubber (`fleet_core::redact_credentials`) would change (`FM_SCHEMA_SEMANTIC_CREDENTIAL_VALUE`; the diagnostic names the path, never the value, and a field name that is not a plain identifier is never echoed). Dangling relation targets are warnings (`FM_SCHEMA_WARN_REGISTRY_DANGLING_RELATION`) returned by `validate_sources_report` beside the errors; `validate_sources` returns errors only, so warnings never block activation. Built-in types and known machine/project/Coolify/Proxmox targets are supplied through `RegistryContext`. The scrubber also runs over each field as `name: value` and each link as `label: url`, and over map keys; no diagnostic prints a key that is not a plain field name. Because the scrubber treats `<word>password: value` as a credential pair, write "1Password (Webhuset vault)" rather than "1Password: Webhuset" (by design; there is no exception). Value rules: URLs allow `http`, `https`, and `ssh` with a non-empty host and no credentials (also applied to link URLs); hostnames allow underscore-leading labels, refuse a trailing dot, and refuse a bare IPv4 address; list items must be unique; tags are unique lowercase slugs; a registry relation target must name a defined or built-in type (error), and a missing entry of that type is a warning.
+
+### Built-in Registry types (FM-1011, ADR 0016)
+
+`domain` and `service` live in `fleet-schema` (`registry_builtin.rs`), versioned by `BUILTIN_REGISTRY_TYPES_VERSION` like built-in skills (ADR 0012); a test pins the definitions' SHA-256 so any change forces a version bump. `RegistryContext::default()` carries them, so the controller's activation path, `fleet-schema validate`, and a future `fleetctl registry validate` resolve them without a file in the repository, and a repository `RegistryType` of the same name is refused (`FM_SCHEMA_REGISTRY_BUILTIN_REDEFINED`). Every entry also carries the standard `tags`, `links`, `notes`, and `relations`. Field names are the spec keys; `required` marks the natural key and mandatory fields; suggestions are not enforced.
+
+`domain` (key `fqdn`; relations `resolves-to`, `hosted-on`, `used-by`, `depends-on`, `billed-to`):
+
+| Field | Type | Notes |
+| --- | --- | --- |
+| `fqdn` | hostname, required | natural key |
+| `registrar` | enum | suggestions: Hostinger, Webhuset, Porkbun, GoDaddy, Cloudflare, Namecheap |
+| `registrarAccount` | string | account label, never a credential |
+| `dnsHost` | string | who serves the zone |
+| `nameservers` | list of hostname | |
+| `expires` | date | |
+| `autoRenew` | boolean | |
+| `loginAt` | string | where the login lives, e.g. "1Password (Webhuset vault)" |
+
+`service` (key `slug`; relations `used-by`, `hosted-on`, `depends-on`, `serves`, `billed-to`):
+
+| Field | Type | Notes |
+| --- | --- | --- |
+| `slug` | string, required | natural key |
+| `name` | string, required | |
+| `vendor`, `plan`, `billingOwner`, `hostingProvider`, `region` | string | |
+| `purpose` | text | |
+| `cost` | money | `<amount> <ISO 4217 code>` |
+| `billingPeriod` | enum | suggestions: monthly, yearly, other |
+| `renewal` | date | |
+| `loginAt` | string | as for `domain` |
+| `url` | url | |
+
 ### Drift read model (FM-408)
 
 `GET /api/v1/desired/drift` (paged over machines) and `GET /api/v1/machines/{id}/drift` return each machine's differences from the active revision, computed by the same path as plans, so drift and plan cannot disagree. Reading drift needs `skills.read` for the machine; unreadable machines are omitted from the list. Each entry is `computed`, `no_revision` (nothing is active, so nothing can drift), or `unavailable` (with a caller-safe reason); one machine's failure never fails the page. Only differing fields are listed, and `unknown`/`unsupported` are counted separately from actionable drift, so an unobserved machine is never reported as in sync. The console shows drift in the Skills matrix (an "Against Fleet Git" row and per-skill markers), the Overview attention queue, and the machine's Desired tab.
