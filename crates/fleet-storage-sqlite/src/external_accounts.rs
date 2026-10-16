@@ -118,7 +118,18 @@ impl ExternalAccountPort for ExternalAccountRepository {
         .await;
         match result {
             Ok(done) if done.rows_affected() == 0 => Err(format!("account {id} not found")),
-            Ok(_) => self.get(id).await,
+            Ok(_) => {
+                if clear_probe {
+                    // The subject changed, so a cached discovery of the old
+                    // instance would be a lie (FM-1030).
+                    sqlx::query("DELETE FROM coolify_observations WHERE account_id = ?1")
+                        .bind(id)
+                        .execute(&self.pool)
+                        .await
+                        .map_err(|error| format!("observation clear failed: {error}"))?;
+                }
+                self.get(id).await
+            }
             Err(error) if is_unique_violation(&error) => Err(taken(account)),
             Err(error) => Err(format!("update failed: {error}")),
         }

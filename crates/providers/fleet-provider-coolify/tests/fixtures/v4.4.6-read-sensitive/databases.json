@@ -1,0 +1,58 @@
+[
+  {
+    "uuid": "dbpostgres00000000001",
+    "name": "shop-db",
+    "description": null,
+    "image": "postgres:16-alpine",
+    "status": "running:healthy",
+    "environment_id": 1,
+    "is_public": false,
+    "public_port": null,
+    "postgres_user": "postgres",
+    "postgres_db": "shop",
+    "database_type": "standalone-postgresql",
+    "backup_configs": [
+      {
+        "frequency": "0 0 * * *",
+        "database_backup_marker": "BACKUP-MARKER",
+        "s3_secret": "SENTINEL-SECRET-s3"
+      }
+    ],
+    "created_at": "2026-01-15T10:00:00.000000Z",
+    "updated_at": "2026-01-15T10:00:00.000000Z",
+    "postgres_password": "SENTINEL-SECRET-pg",
+    "internal_db_url": "postgres://u:SENTINEL-SECRET-dburl@db:5432/x",
+    "external_db_url": "postgres://u:SENTINEL-SECRET-ext@host:5432/x",
+    "init_scripts": [
+      "SENTINEL-SECRET-init"
+    ],
+    "redis_password": "SENTINEL-SECRET-redis"
+  },
+  {
+    "uuid": "dbredis0000000000002",
+    "name": "cache",
+    "description": "Session cache",
+    "image": "valkey/valkey:8",
+    "status": "exited",
+    "environment_id": 1,
+    "is_public": true,
+    "public_port": 6380,
+    "database_type": "standalone-redis",
+    "backup_configs": [
+      {
+        "frequency": "0 0 * * *",
+        "database_backup_marker": "BACKUP-MARKER",
+        "s3_secret": "SENTINEL-SECRET-s3"
+      }
+    ],
+    "created_at": "2026-01-15T10:00:00.000000Z",
+    "updated_at": "2026-01-15T10:00:00.000000Z",
+    "postgres_password": "SENTINEL-SECRET-pg",
+    "internal_db_url": "postgres://u:SENTINEL-SECRET-dburl@db:5432/x",
+    "external_db_url": "postgres://u:SENTINEL-SECRET-ext@host:5432/x",
+    "init_scripts": [
+      "SENTINEL-SECRET-init"
+    ],
+    "redis_password": "SENTINEL-SECRET-redis"
+  }
+]

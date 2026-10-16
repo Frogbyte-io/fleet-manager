@@ -241,6 +241,12 @@ pub enum Permission {
     /// the preview of a record change (FM-1042). Risky: it sends the
     /// account's token off the host. The change itself is an action request.
     DnsRead,
+    /// Record RDAP and DNS observations against a Registry domain entry,
+    /// on demand or from the scheduled sweep (FM-1020). A mutation of
+    /// Fleet-side observations (never of Fleet Git) that makes outbound
+    /// public lookups. The resource is `<type>/<key>` for one entry and
+    /// absent for the whole sweep.
+    RegistryObserve,
 }
 
 impl Permission {
@@ -319,6 +325,7 @@ impl Permission {
         Permission::ActionDeny,
         Permission::ActionRead,
         Permission::DnsRead,
+        Permission::RegistryObserve,
     ];
 
     /// The stable action id, as recorded in decisions and audit events.
@@ -396,6 +403,7 @@ impl Permission {
             Permission::ActionDeny => "action.deny",
             Permission::ActionRead => "action.read",
             Permission::DnsRead => "dns.read",
+            Permission::RegistryObserve => "registry.observe",
         }
     }
 
@@ -475,7 +483,8 @@ impl Permission {
             | Permission::ActionRequest
             | Permission::ActionApprove
             | Permission::DnsRead
-            | Permission::ActionDeny => true,
+            | Permission::ActionDeny
+            | Permission::RegistryObserve => true,
         }
     }
 
@@ -517,8 +526,9 @@ impl Permission {
             | Permission::LabLeaseRead
             | Permission::RegistryRead
             | Permission::LabArtifactRead
+            | Permission::ActionRead
             | Permission::DnsRead
-            | Permission::ActionRead => false,
+            | Permission::RegistryObserve => false,
             Permission::MachineReadSensitive
             | Permission::OperationCancel
             | Permission::SecretRead

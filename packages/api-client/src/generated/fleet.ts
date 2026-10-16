@@ -3,41 +3,6 @@
  * Do not edit: run `pnpm --filter @frogbyte-io/fleet-api-client generate`.
  */
 /**
- * One DNS zone.
- */
-export interface DnsZoneDto {
-  /** The provider's zone id. */
-  id: string;
-  /** The zone's apex name. */
-  name: string;
-  /** The provider's status for the zone. */
-  status: string;
-}
-
-/**
- * The zones one Cloudflare account's token can see.
- */
-export interface AccountZonesDto {
-  /** The account's id. */
-  accountId: string;
-  /** The account's label. */
-  accountLabel: string;
-  /**
-     * The failure class when the zones could not be read (`auth`,
-     * `permission`, `rate_limited`, `unavailable`, ...).
-     * @nullable
-     */
-  failure?: string | null;
-  /**
-     * What went wrong, when it did.
-     * @nullable
-     */
-  failureDetail?: string | null;
-  /** The zones. */
-  zones: DnsZoneDto[];
-}
-
-/**
  * The structured, secret-free parameters.
  */
 export type ActionRequestDtoParameters = { [key: string]: unknown };
@@ -855,6 +820,339 @@ export interface ConfirmProxmoxFingerprintRequest {
 }
 
 /**
+ * A deployed application.
+ */
+export interface CoolifyApplicationDto {
+  /**
+     * The build pack.
+     * @nullable
+     */
+  buildPack?: string | null;
+  /**
+     * When Coolify created it.
+     * @nullable
+     */
+  createdAt?: string | null;
+  /** The description. */
+  description: string;
+  /**
+     * The image reference of an image application.
+     * @nullable
+     */
+  dockerImage?: string | null;
+  /**
+     * The numeric environment id.
+     * @nullable
+     */
+  environmentId?: number | null;
+  /** The public hostnames and URLs. */
+  fqdns: string[];
+  /**
+     * The source branch.
+     * @nullable
+     */
+  gitBranch?: string | null;
+  /**
+     * The source repository, credentials removed.
+     * @nullable
+     */
+  gitRepository?: string | null;
+  /** The name. */
+  name: string;
+  /** Coolify's status, such as `running:healthy`. */
+  status: string;
+  /**
+     * When Coolify last changed it.
+     * @nullable
+     */
+  updatedAt?: string | null;
+  /** Coolify's identity. */
+  uuid: string;
+}
+
+/**
+ * A classified, credential-free failure of one resource class.
+ */
+export interface CoolifyFailureDto {
+  /** A short explanation; never a token, URL, or response body. */
+  detail: string;
+  /**
+     * `unauthorized`, `insufficient_permission`, `not_found`,
+     * `unreachable`, `timeout`, `rate_limited`, or `invalid_response`.
+     */
+  kind: string;
+}
+
+/**
+ * The observation state of one resource class.
+ */
+export interface CoolifyClassDto {
+  /** When the latest attempt ran (epoch millis). */
+  attemptedAt: number;
+  /**
+     * `servers`, `projects`, `applications`, `services`, `databases`, or
+     * `deployments`.
+     */
+  class: string;
+  failure?: null | CoolifyFailureDto;
+  /**
+     * How many items the snapshot holds for the class.
+     * @minimum 0
+     */
+  itemCount: number;
+  /**
+     * When the items were last listed successfully; absent when never.
+     * @nullable
+     */
+  observedAt?: number | null;
+  /** Why the latest attempt was only partial. */
+  partial: CoolifyFailureDto[];
+  /**
+     * Whether the items are stale: the latest attempt failed, the class was
+     * never listed, or the last success is old.
+     */
+  stale: boolean;
+  /** Whether the stored items were cut to fit the snapshot size bound. */
+  truncated: boolean;
+}
+
+/**
+ * A managed database. No credentials or connection URLs.
+ */
+export interface CoolifyDatabaseDto {
+  /** The description. */
+  description: string;
+  /**
+     * The engine, such as `postgresql`.
+     * @nullable
+     */
+  engine?: string | null;
+  /**
+     * The numeric environment id.
+     * @nullable
+     */
+  environmentId?: number | null;
+  /**
+     * The image reference.
+     * @nullable
+     */
+  image?: string | null;
+  /**
+     * Whether the database is exposed on a public port.
+     * @nullable
+     */
+  isPublic?: boolean | null;
+  /** The name. */
+  name: string;
+  /**
+     * The public port.
+     * @nullable
+     */
+  publicPort?: number | null;
+  /** Coolify's status. */
+  status: string;
+  /** Coolify's identity. */
+  uuid: string;
+}
+
+/**
+ * One deployment of an application. No logs.
+ */
+export interface CoolifyDeploymentDto {
+  /**
+     * The application's name.
+     * @nullable
+     */
+  applicationName?: string | null;
+  /**
+     * The application's identity, when known.
+     * @nullable
+     */
+  applicationUuid?: string | null;
+  /**
+     * The commit.
+     * @nullable
+     */
+  commit?: string | null;
+  /**
+     * The first line of the commit message.
+     * @nullable
+     */
+  commitMessage?: string | null;
+  /**
+     * When it was queued.
+     * @nullable
+     */
+  createdAt?: string | null;
+  /** Coolify's identity. */
+  deploymentUuid: string;
+  /**
+     * Whether the API started it.
+     * @nullable
+     */
+  isApi?: boolean | null;
+  /**
+     * Whether a webhook started it.
+     * @nullable
+     */
+  isWebhook?: boolean | null;
+  /**
+     * The pull request number for preview deployments.
+     * @nullable
+     */
+  pullRequestId?: number | null;
+  /**
+     * The server's name.
+     * @nullable
+     */
+  serverName?: string | null;
+  /** `queued`, `in_progress`, `finished`, `failed`, or `cancelled`. */
+  status: string;
+  /**
+     * When it last changed.
+     * @nullable
+     */
+  updatedAt?: string | null;
+}
+
+/**
+ * An environment of a project.
+ */
+export interface CoolifyEnvironmentDto {
+  /** The description. */
+  description: string;
+  /** Coolify's numeric environment id. */
+  id: number;
+  /** The name. */
+  name: string;
+}
+
+/**
+ * A project with its environments.
+ */
+export interface CoolifyProjectDto {
+  /** The description. */
+  description: string;
+  /** Whether the environments could not be refreshed by the latest run. */
+  detailsStale: boolean;
+  /** The environments; carried from the previous run when `detailsStale`. */
+  environments: CoolifyEnvironmentDto[];
+  /** The name. */
+  name: string;
+  /** Coolify's identity. */
+  uuid: string;
+}
+
+/**
+ * A Coolify server.
+ */
+export interface CoolifyServerDto {
+  /** The address Coolify connects to. */
+  address: string;
+  /** The description. */
+  description: string;
+  /** The name. */
+  name: string;
+  /**
+     * The proxy kind, when set.
+     * @nullable
+     */
+  proxyType?: string | null;
+  /**
+     * Whether Coolify considers it reachable.
+     * @nullable
+     */
+  reachable?: boolean | null;
+  /**
+     * Whether Coolify considers it usable.
+     * @nullable
+     */
+  usable?: boolean | null;
+  /** Coolify's identity. */
+  uuid: string;
+}
+
+/**
+ * A one-click or Compose service.
+ */
+export interface CoolifyServiceDto {
+  /**
+     * When Coolify created it.
+     * @nullable
+     */
+  createdAt?: string | null;
+  /** The description. */
+  description: string;
+  /** Whether the hostnames could not be refreshed by the latest run. */
+  detailsStale: boolean;
+  /**
+     * The numeric environment id.
+     * @nullable
+     */
+  environmentId?: number | null;
+  /**
+     * The public hostnames of its applications; carried from the previous
+     * run when `detailsStale`.
+     */
+  fqdns: string[];
+  /** The name. */
+  name: string;
+  /**
+     * The one-click service type.
+     * @nullable
+     */
+  serviceType?: string | null;
+  /**
+     * Coolify's status, when the list reports one.
+     * @nullable
+     */
+  status?: string | null;
+  /**
+     * When Coolify last changed it.
+     * @nullable
+     */
+  updatedAt?: string | null;
+  /** Coolify's identity. */
+  uuid: string;
+}
+
+/**
+ * The stamped, stale-aware Coolify snapshot of one account.
+ */
+export interface CoolifyObservationDto {
+  /** The account the snapshot belongs to. */
+  accountId: string;
+  /** Applications. */
+  applications: CoolifyApplicationDto[];
+  /** The per-class state: stamps, staleness, and failures. */
+  classes: CoolifyClassDto[];
+  /** Databases. */
+  databases: CoolifyDatabaseDto[];
+  /** Recent deployments, newest first. */
+  deployments: CoolifyDeploymentDto[];
+  /** The time staleness was evaluated against (epoch millis). */
+  evaluatedAt: number;
+  /** Projects with their environments. */
+  projects: CoolifyProjectDto[];
+  /** When the snapshot was last written (epoch millis). */
+  recordedAt: number;
+  /** Servers. */
+  servers: CoolifyServerDto[];
+  /** Services. */
+  services: CoolifyServiceDto[];
+  /**
+     * The Coolify version last seen.
+     * @nullable
+     */
+  version?: string | null;
+  /**
+     * Warnings from the latest run, such as a token that can read
+     * sensitive values (use a read-only token).
+     */
+  warnings: string[];
+}
+
+/**
  * One Fleet machine a tailnet device may be.
  */
 export interface CorrelationCandidateDto {
@@ -945,66 +1243,6 @@ export interface CreateActionRequest {
      * characters).
      */
   target: string;
-}
-
-/**
- * Which change.
- */
-export type DnsChangeKind = typeof DnsChangeKind[keyof typeof DnsChangeKind];
-
-
-export const DnsChangeKind = {
-  upsert: 'upsert',
-  delete: 'delete',
-} as const;
-
-/**
- * A record change to request.
- */
-export interface CreateDnsChangeRequest {
-  /**
-     * The Cloudflare account (id or label), when several hold the zone.
-     * @nullable
-     */
-  account?: string | null;
-  /** The record value. For a delete, the value of the record to remove. */
-  content: string;
-  /**
-     * A key making a retry return the request already made.
-     * @nullable
-     */
-  idempotencyKey?: string | null;
-  /** The fully qualified record name. */
-  name: string;
-  /** `upsert` or `delete`. */
-  operation: DnsChangeKind;
-  /**
-     * The MX preference. Upsert only.
-     * @minimum 0
-     * @nullable
-     */
-  priority?: number | null;
-  /**
-     * Proxy through Cloudflare (A, AAAA, CNAME). Upsert only.
-     * @nullable
-     */
-  proxied?: boolean | null;
-  /** Why, for the approver (at most 1000 characters). */
-  reason: string;
-  /**
-     * The existing value an upsert replaces; without it a new value is
-     * added (A, AAAA, TXT, MX), and a CNAME replaces its single value.
-     * @nullable
-     */
-  replaces?: string | null;
-  /**
-     * The TTL in seconds: 1 (automatic) or 60 to 86400. Upsert only.
-     * @minimum 0
-     * @nullable
-     */
-  ttl?: number | null;
-  /** The record type: A, AAAA, CNAME, TXT, or MX. */
-  type: string;
 }
 
 /**
@@ -1508,65 +1746,280 @@ export interface DiscoveredCheckoutDto {
 }
 
 /**
- * One DNS record.
- */
-export interface DnsRecordDto {
-  /** The value, normalized per type. */
-  content: string;
-  /**
-     * The provider's record id.
-     * @nullable
-     */
-  id?: string | null;
-  /** The fully qualified name. */
-  name: string;
-  /**
-     * The MX preference.
-     * @minimum 0
-     * @nullable
-     */
-  priority?: number | null;
-  /** Whether traffic is proxied through the provider. */
-  proxied: boolean;
-  /**
-     * The TTL in seconds; 1 is automatic.
-     * @minimum 0
-     */
-  ttl: number;
-  /** The record type. */
-  type: string;
-}
-
-/**
- * The records at one name.
+ * Records of each type at one DNS name.
  */
 export interface DnsRecordsDto {
-  /** The account that answered. */
-  accountId: string;
-  /** Its label. */
-  accountLabel: string;
-  /** The name asked about. */
-  name: string;
-  /** When the records were read (epoch milliseconds). */
-  observedAt: number;
-  /** The records. */
-  records: DnsRecordDto[];
-  /**
-     * The `domain/<key>` Registry entry the observation attached to, when
-     * the Registry has one.
-     * @nullable
-     */
-  registryEntry?: string | null;
-  /** The zone the name belongs to. */
-  zone: DnsZoneDto;
+  /** A values. */
+  a: string[];
+  /** AAAA values. */
+  aaaa: string[];
+  /** CNAME values. */
+  cname: string[];
+  /** NS values (meaningful at the apex). */
+  ns: string[];
 }
 
 /**
- * The zones of every Cloudflare account.
+ * The status of the DNS half of an observation.
  */
-export interface DnsZonesDto {
-  /** One entry per account. */
-  accounts: AccountZonesDto[];
+export type DnsStatusDto = typeof DnsStatusDto[keyof typeof DnsStatusDto];
+
+
+export const DnsStatusDto = {
+  ok: 'ok',
+  not_found: 'not_found',
+  error: 'error',
+} as const;
+
+/**
+ * The DNS half of a domain observation.
+ */
+export interface DnsObservationDto {
+  /** Records at the apex. */
+  apex: DnsRecordsDto;
+  /**
+     * Why, for `not_found` and `error`.
+     * @nullable
+     */
+  detail?: string | null;
+  /** How the lookup ended. */
+  status: DnsStatusDto;
+  /** Records at `www.<apex>`. */
+  www: DnsRecordsDto;
+}
+
+/**
+ * The status of the RDAP half of an observation.
+ */
+export type RdapStatusDto = typeof RdapStatusDto[keyof typeof RdapStatusDto];
+
+
+export const RdapStatusDto = {
+  ok: 'ok',
+  unavailable: 'unavailable',
+  not_found: 'not_found',
+  error: 'error',
+} as const;
+
+/**
+ * The RDAP half of a domain observation.
+ */
+export interface RdapObservationDto {
+  /**
+     * Why, for `unavailable`, `not_found`, and `error`.
+     * @nullable
+     */
+  detail?: string | null;
+  /**
+     * The expiry as a calendar date (`YYYY-MM-DD`). Some ccTLD registries
+     * do not publish one.
+     * @nullable
+     */
+  expires?: string | null;
+  /** The nameservers the registry lists. */
+  nameservers: string[];
+  /**
+     * The registrar's name as the registry reports it.
+     * @nullable
+     */
+  registrar?: string | null;
+  /**
+     * The RDAP server's base URL, when one was resolved.
+     * @nullable
+     */
+  server?: string | null;
+  /** How the lookup ended. */
+  status: RdapStatusDto;
+  /** The EPP status values. */
+  statuses: string[];
+}
+
+/**
+ * One public lookup result for a domain entry. Recorded in the
+ * controller's database; never written to Fleet Git.
+ */
+export interface DomainObservationDto {
+  /** The public DNS data. */
+  dns: DnsObservationDto;
+  /**
+     * Consecutive attempts with a failed half.
+     * @minimum 0
+     */
+  failures: number;
+  /**
+     * The latest attempt's failure, when a half failed.
+     * @nullable
+     */
+  lastError?: string | null;
+  /** When the latest lookup attempt finished (epoch milliseconds). */
+  observedAt: number;
+  /** The public registration data. */
+  rdap: RdapObservationDto;
+  /**
+     * When the data of a half that now fails to refresh was last good
+     * (epoch milliseconds); set only while old data is being kept.
+     * @nullable
+     */
+  staleSince?: number | null;
+}
+
+/**
+ * How a field's recorded value compares with the observation.
+ */
+export type FieldStateDto = typeof FieldStateDto[keyof typeof FieldStateDto];
+
+
+export const FieldStateDto = {
+  in_sync: 'in_sync',
+  changed: 'changed',
+  unknown: 'unknown',
+} as const;
+
+/**
+ * What the lookups saw.
+ * @nullable
+ */
+export type FieldDiffDtoObserved = { [key: string]: unknown } | null;
+
+/**
+ * What the entry (Fleet Git) records.
+ * @nullable
+ */
+export type FieldDiffDtoRecorded = { [key: string]: unknown } | null;
+
+/**
+ * The difference for one entry field.
+ */
+export interface FieldDiffDto {
+  /** `registrar`, `expires`, `nameservers`, or `dnsHost`. */
+  field: string;
+  /**
+     * What the lookups saw.
+     * @nullable
+     */
+  observed?: FieldDiffDtoObserved;
+  /**
+     * What the entry (Fleet Git) records.
+     * @nullable
+     */
+  recorded?: FieldDiffDtoRecorded;
+  /** The comparison. */
+  state: FieldStateDto;
+}
+
+/**
+ * The suggested value, in the field's type (a string, or a list of
+ * strings for `nameservers`).
+ */
+export type SuggestedFieldDtoValue = { [key: string]: unknown };
+
+/**
+ * One suggested field value.
+ */
+export interface SuggestedFieldDto {
+  /** The entry field. */
+  field: string;
+  /**
+     * The suggested value, in the field's type (a string, or a list of
+     * strings for `nameservers`).
+     */
+  value: SuggestedFieldDtoValue;
+}
+
+/**
+ * The derived warning rules.
+ */
+export type WarningCodeDto = typeof WarningCodeDto[keyof typeof WarningCodeDto];
+
+
+export const WarningCodeDto = {
+  registrar_mismatch: 'registrar_mismatch',
+  nameservers_mismatch: 'nameservers_mismatch',
+  dns_host_mismatch: 'dns_host_mismatch',
+  expiry_changed: 'expiry_changed',
+  expiring: 'expiring',
+  auto_renew_off_expiring: 'auto_renew_off_expiring',
+  stale_observation: 'stale_observation',
+  rdap_not_found: 'rdap_not_found',
+  lookup_failing: 'lookup_failing',
+} as const;
+
+/**
+ * How serious a warning is.
+ */
+export type SeverityDto = typeof SeverityDto[keyof typeof SeverityDto];
+
+
+export const SeverityDto = {
+  info: 'info',
+  warn: 'warn',
+  err: 'err',
+} as const;
+
+/**
+ * One derived warning.
+ */
+export interface DomainWarningDto {
+  /** Which rule fired. */
+  code: WarningCodeDto;
+  /** A sentence for people. */
+  message: string;
+  /** How serious it is. */
+  severity: SeverityDto;
+}
+
+/**
+ * A domain entry's latest observation compared with the entry.
+ */
+export interface DomainObservationViewDto {
+  /** Per-field comparison, in a stable order. */
+  diffs: FieldDiffDto[];
+  /** The entry's key (`domain/<key>`). */
+  key: string;
+  observation?: null | DomainObservationDto;
+  /**
+     * The field changes that would bring the entry in line with the
+     * observation. A person or agent applies them with
+     * `fleetctl registry set` and publishes through Git; Fleet never
+     * writes them.
+     */
+  suggestion: SuggestedFieldDto[];
+  /**
+     * Derived warnings, most serious first. These feed the Overview's
+     * needs-attention queue.
+     */
+  warnings: DomainWarningDto[];
+}
+
+/**
+ * Where a list response sits in its result set.
+ *
+ * Pagination is cursor-based, never offset-based: an offset silently skips or
+ * repeats rows when the underlying set changes between requests. The cursor is
+ * opaque, and a client that parses one is relying on an implementation detail
+ * that is free to change.
+ */
+export interface PageInfo {
+  /**
+     * The number of items this page was limited to.
+     * @minimum 0
+     */
+  limit: number;
+  /**
+     * Cursor for the next page, or `null` on the last page.
+     * @nullable
+     */
+  nextCursor?: string | null;
+}
+
+/**
+ * A page of domain observation views.
+ */
+export interface DomainObservationPage {
+  /** The views, ordered by key. */
+  items: DomainObservationViewDto[];
+  /** Where this page sits in the result set. */
+  page: PageInfo;
 }
 
 /**
@@ -1794,6 +2247,13 @@ export interface ExternalAccountDto {
   lastProbe?: null | ExternalProbeDto;
   /** Free-form operator notes. */
   notes: string;
+  /**
+     * A policy the stored record breaks: `https_required` for an http base
+     * URL that is not a loopback address. Such an account is never probed
+     * or discovered until its base URL is edited to https.
+     * @nullable
+     */
+  policyViolation?: string | null;
   /** When the account last changed (epoch millis). */
   updatedAt: number;
 }
@@ -2723,27 +3183,6 @@ export interface OperationAccepted {
 }
 
 /**
- * Where a list response sits in its result set.
- *
- * Pagination is cursor-based, never offset-based: an offset silently skips or
- * repeats rows when the underlying set changes between requests. The cursor is
- * opaque, and a client that parses one is relying on an implementation detail
- * that is free to change.
- */
-export interface PageInfo {
-  /**
-     * The number of items this page was limited to.
-     * @minimum 0
-     */
-  limit: number;
-  /**
-     * Cursor for the next page, or `null` on the last page.
-     * @nullable
-     */
-  nextCursor?: string | null;
-}
-
-/**
  * The structured, secret-free parameters.
  */
 export type PageActionRequestDtoItemsItemParameters = { [key: string]: unknown };
@@ -3215,6 +3654,13 @@ export type PageExternalAccountDtoItemsItem = {
   lastProbe?: null | ExternalProbeDto;
   /** Free-form operator notes. */
   notes: string;
+  /**
+     * A policy the stored record breaks: `https_required` for an http base
+     * URL that is not a loopback address. Such an account is never probed
+     * or discovered until its base URL is edited to https.
+     * @nullable
+     */
+  policyViolation?: string | null;
   /** When the account last changed (epoch millis). */
   updatedAt: number;
 };
@@ -5336,6 +5782,53 @@ export interface ResourceClearedBuildAddressDto {
 }
 
 /**
+ * The stamped, stale-aware Coolify snapshot of one account.
+ */
+export type ResourceCoolifyObservationDtoData = {
+  /** The account the snapshot belongs to. */
+  accountId: string;
+  /** Applications. */
+  applications: CoolifyApplicationDto[];
+  /** The per-class state: stamps, staleness, and failures. */
+  classes: CoolifyClassDto[];
+  /** Databases. */
+  databases: CoolifyDatabaseDto[];
+  /** Recent deployments, newest first. */
+  deployments: CoolifyDeploymentDto[];
+  /** The time staleness was evaluated against (epoch millis). */
+  evaluatedAt: number;
+  /** Projects with their environments. */
+  projects: CoolifyProjectDto[];
+  /** When the snapshot was last written (epoch millis). */
+  recordedAt: number;
+  /** Servers. */
+  servers: CoolifyServerDto[];
+  /** Services. */
+  services: CoolifyServiceDto[];
+  /**
+     * The Coolify version last seen.
+     * @nullable
+     */
+  version?: string | null;
+  /**
+     * Warnings from the latest run, such as a token that can read
+     * sensitive values (use a read-only token).
+     */
+  warnings: string[];
+};
+
+/**
+ * A single resource.
+ *
+ * The payload is nested under `data` so that later top-level fields are an
+ * additive change rather than a breaking one.
+ */
+export interface ResourceCoolifyObservationDto {
+  /** The stamped, stale-aware Coolify snapshot of one account. */
+  data: ResourceCoolifyObservationDtoData;
+}
+
+/**
  * A credential's metadata. The token and its hash are never part of it.
  */
 export type ResourceCredentialDtoData = {
@@ -5541,60 +6034,6 @@ export interface ResourceDetachedExecStatusDto {
 }
 
 /**
- * The records at one name.
- */
-export type ResourceDnsRecordsDtoData = {
-  /** The account that answered. */
-  accountId: string;
-  /** Its label. */
-  accountLabel: string;
-  /** The name asked about. */
-  name: string;
-  /** When the records were read (epoch milliseconds). */
-  observedAt: number;
-  /** The records. */
-  records: DnsRecordDto[];
-  /**
-     * The `domain/<key>` Registry entry the observation attached to, when
-     * the Registry has one.
-     * @nullable
-     */
-  registryEntry?: string | null;
-  /** The zone the name belongs to. */
-  zone: DnsZoneDto;
-};
-
-/**
- * A single resource.
- *
- * The payload is nested under `data` so that later top-level fields are an
- * additive change rather than a breaking one.
- */
-export interface ResourceDnsRecordsDto {
-  /** The records at one name. */
-  data: ResourceDnsRecordsDtoData;
-}
-
-/**
- * The zones of every Cloudflare account.
- */
-export type ResourceDnsZonesDtoData = {
-  /** One entry per account. */
-  accounts: AccountZonesDto[];
-};
-
-/**
- * A single resource.
- *
- * The payload is nested under `data` so that later top-level fields are an
- * additive change rather than a breaking one.
- */
-export interface ResourceDnsZonesDto {
-  /** The zones of every Cloudflare account. */
-  data: ResourceDnsZonesDtoData;
-}
-
-/**
  * The create-enrollment-token response. The token value is shown exactly
  * once; only its hash is stored.
  */
@@ -5645,6 +6084,13 @@ export type ResourceExternalAccountDtoData = {
   lastProbe?: null | ExternalProbeDto;
   /** Free-form operator notes. */
   notes: string;
+  /**
+     * A policy the stored record breaks: `https_required` for an http base
+     * URL that is not a loopback address. Such an account is never probed
+     * or discovered until its base URL is edited to https.
+     * @nullable
+     */
+  policyViolation?: string | null;
   /** When the account last changed (epoch millis). */
   updatedAt: number;
 };
@@ -7667,28 +8113,6 @@ cursor?: string | null;
 limit?: number | null;
 };
 
-export type ListDnsRecordsParams = {
-/**
- * The fully qualified name.
- */
-name: string;
-/**
- * Only records of this type.
- */
-type?: string;
-/**
- * The Cloudflare account (id or label), when several hold the zone.
- */
-account?: string;
-};
-
-export type ListDnsZonesParams = {
-/**
- * Only this Cloudflare account (id or label).
- */
-account?: string;
-};
-
 export type ListExternalAccountsParams = {
 /**
  * Restrict to one provider kind.
@@ -7955,6 +8379,25 @@ export type ListRegistryEntryReferencesParams = {
  * @nullable
  */
 relation?: string | null;
+/**
+ * Opaque cursor returned as the previous page's `nextCursor`.
+ * @nullable
+ */
+cursor?: string | null;
+/**
+ * Requested page size, clamped to the API maximum.
+ * @minimum 0
+ * @nullable
+ */
+limit?: number | null;
+};
+
+export type ListDomainObservationsParams = {
+/**
+ * Only domains with at least one warning.
+ * @nullable
+ */
+attention?: boolean | null;
 /**
  * Opaque cursor returned as the previous page's `nextCursor`.
  * @nullable
@@ -9145,258 +9588,6 @@ const res = await fetch(getStoreDesiredSourceCredentialUrl(),
 
 
 
-export type createDnsChangeResponse201 = {
-  data: ResourceActionRequestDto
-  status: 201
-}
-
-export type createDnsChangeResponse400 = {
-  data: ApiError
-  status: 400
-}
-
-export type createDnsChangeResponse403 = {
-  data: ApiError
-  status: 403
-}
-
-export type createDnsChangeResponse404 = {
-  data: ApiError
-  status: 404
-}
-
-export type createDnsChangeResponse409 = {
-  data: ApiError
-  status: 409
-}
-
-export type createDnsChangeResponse502 = {
-  data: ApiError
-  status: 502
-}
-
-export type createDnsChangeResponse503 = {
-  data: ApiError
-  status: 503
-}
-
-export type createDnsChangeResponseSuccess = (createDnsChangeResponse201) & {
-  headers: Headers;
-};
-export type createDnsChangeResponseError = (createDnsChangeResponse400 | createDnsChangeResponse403 | createDnsChangeResponse404 | createDnsChangeResponse409 | createDnsChangeResponse502 | createDnsChangeResponse503) & {
-  headers: Headers;
-};
-
-export type createDnsChangeResponse = (createDnsChangeResponseSuccess | createDnsChangeResponseError)
-
-export const getCreateDnsChangeUrl = () => {
-
-
-
-
-  return `/api/v1/dns/changes`
-}
-
-/**
- * # Errors
- *
- * Returns the public error envelope on refusal, invalid values, an unknown
- * zone, a change that would do nothing, a credential-like TXT value, or a
- * provider failure.
- * @summary Requests a record change. The controller reads the zone, computes the
-preview (current record against proposed), and files an action request
-(`dns.record.upsert` or `dns.record.delete`) whose parameters carry that
-preview. The default risk class is `approve`: a person approves it in the
-console or with `fleetctl requests approve`. When the request executes,
-the zone is read again; a zone that changed since the preview fails the
-operation instead of being overwritten.
- */
-export const createDnsChange = async (createDnsChangeRequest: CreateDnsChangeRequest, options?: RequestInit): Promise<createDnsChangeResponse> => {
-
-    const getHeaders = (h?: NonNullable<RequestInit['headers']>): Record<string, string | readonly string[]> => {
-    if (!h) return {};
-    if (h instanceof Headers) return Object.fromEntries(h.entries());
-    if (Array.isArray(h)) return Object.fromEntries(h);
-    return h;
-  };
-const res = await fetch(getCreateDnsChangeUrl(),
-  {
-    ...options,
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json', ...getHeaders(options?.headers) },
-    body: JSON.stringify(createDnsChangeRequest)
-  }
-)
-
-
-  const body = [204, 205, 304].includes(res.status) ? null : await res.text();
-
-  const data: createDnsChangeResponse['data'] = body ? JSON.parse(body) : {}
-  return { data, status: res.status, headers: res.headers } as createDnsChangeResponse
-}
-
-
-
-export type listDnsRecordsResponse200 = {
-  data: ResourceDnsRecordsDto
-  status: 200
-}
-
-export type listDnsRecordsResponse400 = {
-  data: ApiError
-  status: 400
-}
-
-export type listDnsRecordsResponse403 = {
-  data: ApiError
-  status: 403
-}
-
-export type listDnsRecordsResponse404 = {
-  data: ApiError
-  status: 404
-}
-
-export type listDnsRecordsResponse409 = {
-  data: ApiError
-  status: 409
-}
-
-export type listDnsRecordsResponse502 = {
-  data: ApiError
-  status: 502
-}
-
-export type listDnsRecordsResponse503 = {
-  data: ApiError
-  status: 503
-}
-
-export type listDnsRecordsResponseSuccess = (listDnsRecordsResponse200) & {
-  headers: Headers;
-};
-export type listDnsRecordsResponseError = (listDnsRecordsResponse400 | listDnsRecordsResponse403 | listDnsRecordsResponse404 | listDnsRecordsResponse409 | listDnsRecordsResponse502 | listDnsRecordsResponse503) & {
-  headers: Headers;
-};
-
-export type listDnsRecordsResponse = (listDnsRecordsResponseSuccess | listDnsRecordsResponseError)
-
-export const getListDnsRecordsUrl = (params: ListDnsRecordsParams,) => {
-  const normalizedParams = new URLSearchParams();
-
-  Object.entries(params || {}).forEach(([key, value]) => {
-
-    if (value !== undefined) {
-      normalizedParams.append(key, value === null ? 'null' : String(value))
-    }
-  });
-
-  const stringifiedParams = normalizedParams.toString();
-
-  return stringifiedParams.length > 0 ? `/api/v1/dns/records?${stringifiedParams}` : `/api/v1/dns/records`
-}
-
-/**
- * # Errors
- *
- * Returns the public error envelope on refusal, a missing name, an unknown
- * zone, or a provider failure.
- * @summary Reads the records at a fully qualified name through the Cloudflare
-account whose zone contains it, and records them as an observation beside
-the matching `domain` Registry entry.
- */
-export const listDnsRecords = async (params: ListDnsRecordsParams, options?: RequestInit): Promise<listDnsRecordsResponse> => {
-
-  const res = await fetch(getListDnsRecordsUrl(params),
-  {
-    ...options,
-    method: 'GET'
-
-
-  }
-)
-
-
-  const body = [204, 205, 304].includes(res.status) ? null : await res.text();
-
-  const data: listDnsRecordsResponse['data'] = body ? JSON.parse(body) : {}
-  return { data, status: res.status, headers: res.headers } as listDnsRecordsResponse
-}
-
-
-
-export type listDnsZonesResponse200 = {
-  data: ResourceDnsZonesDto
-  status: 200
-}
-
-export type listDnsZonesResponse403 = {
-  data: ApiError
-  status: 403
-}
-
-export type listDnsZonesResponse404 = {
-  data: ApiError
-  status: 404
-}
-
-export type listDnsZonesResponse503 = {
-  data: ApiError
-  status: 503
-}
-
-export type listDnsZonesResponseSuccess = (listDnsZonesResponse200) & {
-  headers: Headers;
-};
-export type listDnsZonesResponseError = (listDnsZonesResponse403 | listDnsZonesResponse404 | listDnsZonesResponse503) & {
-  headers: Headers;
-};
-
-export type listDnsZonesResponse = (listDnsZonesResponseSuccess | listDnsZonesResponseError)
-
-export const getListDnsZonesUrl = (params?: ListDnsZonesParams,) => {
-  const normalizedParams = new URLSearchParams();
-
-  Object.entries(params || {}).forEach(([key, value]) => {
-
-    if (value !== undefined) {
-      normalizedParams.append(key, value === null ? 'null' : String(value))
-    }
-  });
-
-  const stringifiedParams = normalizedParams.toString();
-
-  return stringifiedParams.length > 0 ? `/api/v1/dns/zones?${stringifiedParams}` : `/api/v1/dns/zones`
-}
-
-/**
- * # Errors
- *
- * Returns the public error envelope on refusal or when no Cloudflare
- * account exists.
- * @summary Lists the zones each Cloudflare account's token can see. One account's
-failure is reported on that account, not as a failure of the rest.
- */
-export const listDnsZones = async (params?: ListDnsZonesParams, options?: RequestInit): Promise<listDnsZonesResponse> => {
-
-  const res = await fetch(getListDnsZonesUrl(params),
-  {
-    ...options,
-    method: 'GET'
-
-
-  }
-)
-
-
-  const body = [204, 205, 304].includes(res.status) ? null : await res.text();
-
-  const data: listDnsZonesResponse['data'] = body ? JSON.parse(body) : {}
-  return { data, status: res.status, headers: res.headers } as listDnsZonesResponse
-}
-
-
-
 export type listExternalAccountsResponse200 = {
   data: PageExternalAccountDto
   status: 200
@@ -9716,6 +9907,142 @@ const res = await fetch(getUpdateExternalAccountUrl(accountId),
 
   const data: updateExternalAccountResponse['data'] = body ? JSON.parse(body) : {}
   return { data, status: res.status, headers: res.headers } as updateExternalAccountResponse
+}
+
+
+
+export type discoverCoolifyAccountResponse200 = {
+  data: ResourceCoolifyObservationDto
+  status: 200
+}
+
+export type discoverCoolifyAccountResponse400 = {
+  data: ApiError
+  status: 400
+}
+
+export type discoverCoolifyAccountResponse403 = {
+  data: ApiError
+  status: 403
+}
+
+export type discoverCoolifyAccountResponse404 = {
+  data: ApiError
+  status: 404
+}
+
+export type discoverCoolifyAccountResponse409 = {
+  data: ApiError
+  status: 409
+}
+
+export type discoverCoolifyAccountResponseSuccess = (discoverCoolifyAccountResponse200) & {
+  headers: Headers;
+};
+export type discoverCoolifyAccountResponseError = (discoverCoolifyAccountResponse400 | discoverCoolifyAccountResponse403 | discoverCoolifyAccountResponse404 | discoverCoolifyAccountResponse409) & {
+  headers: Headers;
+};
+
+export type discoverCoolifyAccountResponse = (discoverCoolifyAccountResponseSuccess | discoverCoolifyAccountResponseError)
+
+export const getDiscoverCoolifyAccountUrl = (accountId: string,) => {
+
+
+
+
+  return `/api/v1/external-accounts/${accountId}/coolify/discover`
+}
+
+/**
+ * # Errors
+ *
+ * Returns the public error envelope on refusal, an unknown or non-Coolify
+ * account, or a missing stored token.
+ * @summary Runs a read-only discovery of a Coolify account and records the
+snapshot. An unreachable or refusing Coolify is a successful run whose
+per-class state says so; the previous items stay, marked stale.
+ */
+export const discoverCoolifyAccount = async (accountId: string, options?: RequestInit): Promise<discoverCoolifyAccountResponse> => {
+
+  const res = await fetch(getDiscoverCoolifyAccountUrl(accountId),
+  {
+    ...options,
+    method: 'POST'
+
+
+  }
+)
+
+
+  const body = [204, 205, 304].includes(res.status) ? null : await res.text();
+
+  const data: discoverCoolifyAccountResponse['data'] = body ? JSON.parse(body) : {}
+  return { data, status: res.status, headers: res.headers } as discoverCoolifyAccountResponse
+}
+
+
+
+export type getCoolifyObservationsResponse200 = {
+  data: ResourceCoolifyObservationDto
+  status: 200
+}
+
+export type getCoolifyObservationsResponse400 = {
+  data: ApiError
+  status: 400
+}
+
+export type getCoolifyObservationsResponse403 = {
+  data: ApiError
+  status: 403
+}
+
+export type getCoolifyObservationsResponse404 = {
+  data: ApiError
+  status: 404
+}
+
+export type getCoolifyObservationsResponseSuccess = (getCoolifyObservationsResponse200) & {
+  headers: Headers;
+};
+export type getCoolifyObservationsResponseError = (getCoolifyObservationsResponse400 | getCoolifyObservationsResponse403 | getCoolifyObservationsResponse404) & {
+  headers: Headers;
+};
+
+export type getCoolifyObservationsResponse = (getCoolifyObservationsResponseSuccess | getCoolifyObservationsResponseError)
+
+export const getGetCoolifyObservationsUrl = (accountId: string,) => {
+
+
+
+
+  return `/api/v1/external-accounts/${accountId}/coolify/observations`
+}
+
+/**
+ * # Errors
+ *
+ * Returns the public error envelope on refusal, an unknown or non-Coolify
+ * account, or when no discovery has run yet.
+ * @summary Reads the cached Coolify snapshot of an account, with per-class stamps
+and staleness evaluated now.
+ */
+export const getCoolifyObservations = async (accountId: string, options?: RequestInit): Promise<getCoolifyObservationsResponse> => {
+
+  const res = await fetch(getGetCoolifyObservationsUrl(accountId),
+  {
+    ...options,
+    method: 'GET'
+
+
+  }
+)
+
+
+  const body = [204, 205, 304].includes(res.status) ? null : await res.text();
+
+  const data: getCoolifyObservationsResponse['data'] = body ? JSON.parse(body) : {}
+  return { data, status: res.status, headers: res.headers } as getCoolifyObservationsResponse
 }
 
 
@@ -16282,6 +16609,168 @@ export const getRegistryEntry = async (type: string,
 
 
 
+export type getDomainObservationResponse200 = {
+  data: DomainObservationViewDto
+  status: 200
+}
+
+export type getDomainObservationResponse400 = {
+  data: ApiError
+  status: 400
+}
+
+export type getDomainObservationResponse403 = {
+  data: ApiError
+  status: 403
+}
+
+export type getDomainObservationResponse404 = {
+  data: ApiError
+  status: 404
+}
+
+export type getDomainObservationResponse500 = {
+  data: ApiError
+  status: 500
+}
+
+export type getDomainObservationResponse503 = {
+  data: ApiError
+  status: 503
+}
+
+export type getDomainObservationResponseSuccess = (getDomainObservationResponse200) & {
+  headers: Headers;
+};
+export type getDomainObservationResponseError = (getDomainObservationResponse400 | getDomainObservationResponse403 | getDomainObservationResponse404 | getDomainObservationResponse500 | getDomainObservationResponse503) & {
+  headers: Headers;
+};
+
+export type getDomainObservationResponse = (getDomainObservationResponseSuccess | getDomainObservationResponseError)
+
+export const getGetDomainObservationUrl = (type: string,
+    key: string,) => {
+
+
+
+
+  return `/api/v1/registry/entries/${type}/${key}/observations`
+}
+
+/**
+ * # Errors
+ *
+ * Returns an API error when the entry does not exist or is not a domain,
+ * or authentication, authorization, or storage fails.
+ * @summary Reads one domain entry's latest observation and its comparison with the
+entry.
+ */
+export const getDomainObservation = async (type: string,
+    key: string, options?: RequestInit): Promise<getDomainObservationResponse> => {
+
+  const res = await fetch(getGetDomainObservationUrl(type,key),
+  {
+    ...options,
+    method: 'GET'
+
+
+  }
+)
+
+
+  const body = [204, 205, 304].includes(res.status) ? null : await res.text();
+
+  const data: getDomainObservationResponse['data'] = body ? JSON.parse(body) : {}
+  return { data, status: res.status, headers: res.headers } as getDomainObservationResponse
+}
+
+
+
+export type refreshDomainObservationResponse200 = {
+  data: DomainObservationViewDto
+  status: 200
+}
+
+export type refreshDomainObservationResponse400 = {
+  data: ApiError
+  status: 400
+}
+
+export type refreshDomainObservationResponse403 = {
+  data: ApiError
+  status: 403
+}
+
+export type refreshDomainObservationResponse404 = {
+  data: ApiError
+  status: 404
+}
+
+export type refreshDomainObservationResponse429 = {
+  data: ApiError
+  status: 429
+}
+
+export type refreshDomainObservationResponse500 = {
+  data: ApiError
+  status: 500
+}
+
+export type refreshDomainObservationResponse503 = {
+  data: ApiError
+  status: 503
+}
+
+export type refreshDomainObservationResponseSuccess = (refreshDomainObservationResponse200) & {
+  headers: Headers;
+};
+export type refreshDomainObservationResponseError = (refreshDomainObservationResponse400 | refreshDomainObservationResponse403 | refreshDomainObservationResponse404 | refreshDomainObservationResponse429 | refreshDomainObservationResponse500 | refreshDomainObservationResponse503) & {
+  headers: Headers;
+};
+
+export type refreshDomainObservationResponse = (refreshDomainObservationResponseSuccess | refreshDomainObservationResponseError)
+
+export const getRefreshDomainObservationUrl = (type: string,
+    key: string,) => {
+
+
+
+
+  return `/api/v1/registry/entries/${type}/${key}/observations/refresh`
+}
+
+/**
+ * # Errors
+ *
+ * Returns an API error when the entry does not exist or is not a domain,
+ * the caller may not observe, the RDAP server's rate-limit slot is not
+ * available soon (429), or storage fails. A lookup that fails is recorded
+ * in the returned observation, not reported as an error.
+ * @summary Looks the domain up now (RDAP and DNS) and records the observation. A
+mutation of observations, never of Fleet Git: authorized as
+`registry.observe` and audited.
+ */
+export const refreshDomainObservation = async (type: string,
+    key: string, options?: RequestInit): Promise<refreshDomainObservationResponse> => {
+
+  const res = await fetch(getRefreshDomainObservationUrl(type,key),
+  {
+    ...options,
+    method: 'POST'
+
+
+  }
+)
+
+
+  const body = [204, 205, 304].includes(res.status) ? null : await res.text();
+
+  const data: refreshDomainObservationResponse['data'] = body ? JSON.parse(body) : {}
+  return { data, status: res.status, headers: res.headers } as refreshDomainObservationResponse
+}
+
+
+
 export type listRegistryEntryReferencesResponse200 = {
   data: RegistryPageRegistryReferenceDto
   status: 200
@@ -16359,6 +16848,84 @@ export const listRegistryEntryReferences = async (type: string,
 
   const data: listRegistryEntryReferencesResponse['data'] = body ? JSON.parse(body) : {}
   return { data, status: res.status, headers: res.headers } as listRegistryEntryReferencesResponse
+}
+
+
+
+export type listDomainObservationsResponse200 = {
+  data: DomainObservationPage
+  status: 200
+}
+
+export type listDomainObservationsResponse400 = {
+  data: ApiError
+  status: 400
+}
+
+export type listDomainObservationsResponse403 = {
+  data: ApiError
+  status: 403
+}
+
+export type listDomainObservationsResponse500 = {
+  data: ApiError
+  status: 500
+}
+
+export type listDomainObservationsResponse503 = {
+  data: ApiError
+  status: 503
+}
+
+export type listDomainObservationsResponseSuccess = (listDomainObservationsResponse200) & {
+  headers: Headers;
+};
+export type listDomainObservationsResponseError = (listDomainObservationsResponse400 | listDomainObservationsResponse403 | listDomainObservationsResponse500 | listDomainObservationsResponse503) & {
+  headers: Headers;
+};
+
+export type listDomainObservationsResponse = (listDomainObservationsResponseSuccess | listDomainObservationsResponseError)
+
+export const getListDomainObservationsUrl = (params?: ListDomainObservationsParams,) => {
+  const normalizedParams = new URLSearchParams();
+
+  Object.entries(params || {}).forEach(([key, value]) => {
+
+    if (value !== undefined) {
+      normalizedParams.append(key, value === null ? 'null' : String(value))
+    }
+  });
+
+  const stringifiedParams = normalizedParams.toString();
+
+  return stringifiedParams.length > 0 ? `/api/v1/registry/observations?${stringifiedParams}` : `/api/v1/registry/observations`
+}
+
+/**
+ * # Errors
+ *
+ * Returns an API error when the cursor is malformed, or authentication,
+ * authorization, or storage fails.
+ * @summary Lists the observations of domain entries, compared with the entries,
+ordered by key. With `attention=true`, only domains with a warning:
+the feed of the Overview's needs-attention queue.
+ */
+export const listDomainObservations = async (params?: ListDomainObservationsParams, options?: RequestInit): Promise<listDomainObservationsResponse> => {
+
+  const res = await fetch(getListDomainObservationsUrl(params),
+  {
+    ...options,
+    method: 'GET'
+
+
+  }
+)
+
+
+  const body = [204, 205, 304].includes(res.status) ? null : await res.text();
+
+  const data: listDomainObservationsResponse['data'] = body ? JSON.parse(body) : {}
+  return { data, status: res.status, headers: res.headers } as listDomainObservationsResponse
 }
 
 

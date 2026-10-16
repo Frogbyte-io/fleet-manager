@@ -14,6 +14,7 @@
 pub mod apply;
 pub mod audit;
 pub mod auth;
+pub mod coolify;
 mod correlation;
 pub mod credentials;
 pub mod desired;
@@ -134,6 +135,20 @@ pub const API_BASE_PATH: &str = "/api/v1";
         registry::RegistryRelationDto,
         registry::RegistryEntryDto,
         registry::RegistryReferenceDto,
+        registry::RdapStatusDto,
+        registry::RdapObservationDto,
+        registry::DnsRecordsDto,
+        registry::DnsStatusDto,
+        registry::DnsObservationDto,
+        registry::DomainObservationDto,
+        registry::FieldStateDto,
+        registry::FieldDiffDto,
+        registry::SeverityDto,
+        registry::WarningCodeDto,
+        registry::DomainWarningDto,
+        registry::SuggestedFieldDto,
+        registry::DomainObservationViewDto,
+        registry::DomainObservationPage,
         desired::RevisionRequest,
         skill_catalog::CatalogContentDto,
         skill_catalog::CatalogDto,
@@ -183,6 +198,16 @@ pub const API_BASE_PATH: &str = "/api/v1";
         dns::DnsRecordsDto,
         dns::DnsZoneDto,
         dns::DnsZonesDto,
+        coolify::CoolifyObservationDto,
+        coolify::CoolifyClassDto,
+        coolify::CoolifyFailureDto,
+        coolify::CoolifyServerDto,
+        coolify::CoolifyProjectDto,
+        coolify::CoolifyEnvironmentDto,
+        coolify::CoolifyApplicationDto,
+        coolify::CoolifyServiceDto,
+        coolify::CoolifyDatabaseDto,
+        coolify::CoolifyDeploymentDto,
         external_accounts::CreateExternalAccountRequest,
         external_accounts::UpdateExternalAccountRequest,
         external_accounts::ExternalAccountDto,
@@ -248,7 +273,7 @@ pub const API_BASE_PATH: &str = "/api/v1";
         (name = "events", description = "Payload-free SSE invalidation notifications."),
         (name = "audit", description = "Authorized, metadata-only audit event queries."),
         (name = "desired", description = "The active desired-state revision and its validated, non-secret resources. Read-only; activation is an operation."),
-        (name = "registry", description = "The descriptive Registry of the active desired revision: types, entries, and relations. Read-only; edits are commits to the Fleet repository."),
+        (name = "registry", description = "The descriptive Registry of the active desired revision: types, entries, and relations. Edits are commits to the Fleet repository; the only mutation is recording public RDAP/DNS observations of domain entries."),
         (name = "dns", description = "DNS zones and records read through a Cloudflare external account, and record changes (`dns.record.upsert`, `dns.record.delete`) requested through the action broker with a computed preview. Fleet holds the token and never returns it."),
         (name = "operations", description = "Durable operations: accepted remote work."),
         (name = "requests", description = "The action broker (ADR 0016): agents request typed provider actions; policy or a person approves them; approved requests run as durable operations. Before authenticated identities, policy is a guardrail keyed on risk class, not a security boundary."),
@@ -352,6 +377,9 @@ pub fn api(state: Arc<operations::ApiState>) -> (Router, utoipa::openapi::OpenAp
                 .routes(routes!(registry::get_registry_entry))
                 .routes(routes!(registry::list_registry_entry_references))
                 .routes(routes!(registry::list_registry_references))
+                .routes(routes!(registry::list_domain_observations))
+                .routes(routes!(registry::get_domain_observation))
+                .routes(routes!(registry::refresh_domain_observation))
                 .routes(routes!(desired::get_desired_revision))
                 .routes(routes!(desired::list_desired_resources))
                 .routes(routes!(
@@ -410,6 +438,8 @@ pub fn api(state: Arc<operations::ApiState>) -> (Router, utoipa::openapi::OpenAp
                     external_accounts::delete_external_account
                 ))
                 .routes(routes!(external_accounts::probe_external_account))
+                .routes(routes!(coolify::discover_coolify_account))
+                .routes(routes!(coolify::get_coolify_observations))
                 .routes(routes!(proxmox::delete_proxmox_account))
                 .routes(routes!(proxmox::observe_proxmox_fingerprint))
                 .routes(routes!(proxmox::confirm_proxmox_fingerprint))

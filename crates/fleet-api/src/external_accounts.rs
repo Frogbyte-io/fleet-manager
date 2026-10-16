@@ -116,6 +116,10 @@ pub struct ExternalAccountDto {
     pub account_id: Option<String>,
     /// Free-form operator notes.
     pub notes: String,
+    /// A policy the stored record breaks: `https_required` for an http base
+    /// URL that is not a loopback address. Such an account is never probed
+    /// or discovered until its base URL is edited to https.
+    pub policy_violation: Option<String>,
     /// The latest probe, absent until one runs after the last credential
     /// or endpoint change.
     pub last_probe: Option<ExternalProbeDto>,
@@ -128,6 +132,7 @@ pub struct ExternalAccountDto {
 impl From<ExternalAccount> for ExternalAccountDto {
     fn from(account: ExternalAccount) -> Self {
         Self {
+            policy_violation: account.policy_violation().map(str::to_owned),
             id: account.id,
             kind: account.kind.into(),
             label: account.label,
@@ -233,7 +238,10 @@ fn accounts_or_error(
     })
 }
 
-fn map_error(error: &ExternalAccountError, correlation_id: CorrelationId) -> ApiErrorResponse {
+pub(crate) fn map_error(
+    error: &ExternalAccountError,
+    correlation_id: CorrelationId,
+) -> ApiErrorResponse {
     let (status, code, retry): (StatusCode, &str, RetryClass) = match error {
         ExternalAccountError::Denied(_) => (StatusCode::FORBIDDEN, "denied", RetryClass::Never),
         ExternalAccountError::NotFound { .. } => {

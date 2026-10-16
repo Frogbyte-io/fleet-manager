@@ -35,6 +35,7 @@ pub mod proxmox_exec;
 pub mod proxmox_store;
 pub mod proxmox_tasks_store;
 pub mod ready;
+pub mod registry_enrich;
 pub mod skills;
 pub mod source;
 pub mod source_poller;
@@ -95,6 +96,9 @@ pub struct NodeServices {
     /// The DNS use cases (FM-1042); set by the binary once the secret store
     /// is open, absent otherwise.
     pub dns: Option<Arc<fleet_application::dns::Dns>>,
+    /// The Coolify read discovery use cases (FM-1030); set with the
+    /// external accounts, absent otherwise.
+    pub coolify_discovery: Option<Arc<fleet_application::coolify::CoolifyDiscovery>>,
 }
 
 fn event_hub_for_services(
@@ -161,6 +165,7 @@ pub fn compose_node_services_with_events(
         git_credentials: None,
         external_accounts: None,
         dns: None,
+        coolify_discovery: None,
         nodes,
         gateway,
         events,
@@ -402,8 +407,22 @@ fn api_state(
             lab,
             desired: Some(std::sync::Arc::new({
                 let desired = compose_desired_source(&pool);
-                match git_credentials {
+                let desired = match git_credentials {
                     Some(credentials) => desired.with_credentials(credentials),
+                    None => desired,
+                };
+                // FM-1020: the domain lookup enricher. `main` refuses to
+                // start on a malformed setting, so the fallback only
+                // serves test composition.
+                let enricher = desired.registry().cloned().and_then(|registry| {
+                    registry_enrich::compose_domain_enricher(
+                        &pool,
+                        registry,
+                        registry_enrich::enrich_settings_from_env().unwrap_or_default(),
+                    )
+                });
+                match enricher {
+                    Some(enricher) => desired.with_domain_enricher(enricher),
                     None => desired,
                 }
             })),
@@ -630,7 +649,12 @@ fn build_router_for_caller(
     let credentials = api_state.credentials.clone();
     let external_accounts = services.and_then(|services| services.external_accounts.clone());
     let dns = services.and_then(|services| services.dns.clone());
+    let coolify_discovery = services.and_then(|services| services.coolify_discovery.clone());
     let mut api_router = fleet_api::router(api_state.clone());
+    if let Some(coolify_discovery) = coolify_discovery {
+        // The Coolify discovery surface (FM-1030), same shape.
+        api_router = api_router.layer(axum::Extension(coolify_discovery));
+    }
     if let Some(external_accounts) = external_accounts {
         // The external accounts surface (FM-1001) takes its use cases as a
         // request extension, so the shared API state stays untouched.

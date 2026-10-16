@@ -10,6 +10,7 @@ pub mod authz;
 pub mod broker;
 pub mod catalog_installs;
 pub mod composition;
+pub mod coolify;
 pub mod credentials;
 pub mod dns;
 pub mod events;

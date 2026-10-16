@@ -5,6 +5,8 @@ import { computed, ref } from 'vue'
 import {
   getLabLease,
   listAuditEvents,
+  listDomainObservations,
+  type DomainObservationViewDto,
   listMachines,
   listOnboardingDrafts,
   type AuditEventDto,
@@ -25,6 +27,7 @@ import { useProxmox } from '../proxmox/useProxmox'
 
 import {
   activity,
+  domainRows,
   driftRows,
   kpis,
   leaseRows,
@@ -100,6 +103,14 @@ export function useOverview() {
     // No event announces an orphan report, so re-read on a slow clock.
     refetchInterval: 60_000,
   })
+  // Domains with a warning (FM-1020): expiry window, auto-renew, drift.
+  const domains = useQuery({
+    queryKey: ['registry', 'domain-attention'],
+    queryFn: async () => page<DomainObservationViewDto>(await listDomainObservations({ attention: true, limit: 200 })),
+    retry: retryTransient,
+    // Lookups run on the controller's schedule; no event announces them.
+    refetchInterval: 5 * 60_000,
+  })
   const operations = useOperationsList()
   const requests = usePendingRequests()
   const proxmox = useProxmox()
@@ -145,6 +156,7 @@ export function useOverview() {
       ...onboardingRows(drafts.data.value ?? []),
       ...templatePinRows(images.templates.data.value ?? [], images.versions.value),
       ...driftRows(drift.query.data.value?.items ?? []),
+      ...domainRows(domains.data.value ?? []),
     ])
   })
 
@@ -160,6 +172,7 @@ export function useOverview() {
     requests.error.value && 'action requests',
     proxmox.accounts.error.value && 'Proxmox accounts',
     drift.query.error.value && 'skill drift',
+    domains.error.value && 'domain observations',
     images.leases.error.value && 'Lab leases',
     orphanAudit.error.value && 'Lab orphan reports',
     // Audit pages run oldest first, so a cut read misses the newest reports.

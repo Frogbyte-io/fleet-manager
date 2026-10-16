@@ -1,4 +1,5 @@
-//! The Coolify provider: a token health probe (FM-1001).
+//! The Coolify provider: a token health probe (FM-1001) and read-only
+//! resource discovery (FM-1030, see [`discovery`]).
 //!
 //! Coolify's API tokens carry abilities (`read`, `write`, `deploy`,
 //! `read:sensitive`, `root`; see <https://coolify.io/docs/api-reference/permissions>),
@@ -31,6 +32,12 @@
 //! is sent only as a bearer header and never appears in any returned value.
 #![warn(missing_docs)]
 
+pub mod discovery;
+pub mod scrub;
+mod translate;
+
+pub use discovery::{CoolifyHttpSource, Limits, discover, discover_with};
+
 use std::error::Error as _;
 use std::time::Duration;
 
@@ -50,6 +57,14 @@ const UNVERIFIED: [&str; 2] = ["write", "deploy"];
 /// `base_url` is the instance root without a trailing slash, for example
 /// `https://coolify.example.com`.
 pub async fn probe(base_url: &str, token: &str) -> ProbeReport {
+    // The bearer token never travels over plain http, except to a literal
+    // loopback address (a local stub).
+    if base_url.starts_with("http://") && !fleet_core::base_url_is_loopback(base_url) {
+        return ProbeReport::simple(
+            ProbeStatus::Unreachable,
+            "the base URL uses http; the token is only sent over https (edit the account to use https)",
+        );
+    }
     let Ok(client) = reqwest::Client::builder()
         .timeout(REQUEST_TIMEOUT)
         .redirect(reqwest::redirect::Policy::none())
@@ -138,10 +153,13 @@ fn classify(status: u16, body: &str) -> ProbeReport {
     }
 }
 
-/// A Coolify version string: starts with a digit, then letters, digits,
+/// A Coolify version string: optionally `v`, then a digit, then letters, digits,
 /// `.`, `-`, or `+`, at most 40 characters. `/version` answers plain text.
 fn looks_like_version(body: &str) -> bool {
+    // Coolify's OpenAPI example for `/version` is `v4.0.0`; the running
+    // service answers without the `v`. Both are versions.
     let text = body.trim().trim_matches('"');
+    let text = text.strip_prefix('v').unwrap_or(text);
     !text.is_empty()
         && text.len() <= 40
         && text.starts_with(|c: char| c.is_ascii_digit())
@@ -156,10 +174,8 @@ fn message_of(body: &str) -> String {
     serde_json::from_str::<serde_json::Value>(body)
         .ok()
         .and_then(|value| value.get("message")?.as_str().map(str::to_owned))
+        .map(|message| translate::clean(&message, 120))
         .unwrap_or_default()
-        .chars()
-        .take(120)
-        .collect()
 }
 
 /// The host of a `Location` header value, nothing else (the path and query

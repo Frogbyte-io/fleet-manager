@@ -66,6 +66,15 @@ fn run_serve(mut config: fleet_config::ControllerConfig) -> ExitCode {
         eprintln!("fleet-controller: refusing to start: {error}");
         return ExitCode::FAILURE;
     }
+    // Likewise the Registry enricher: a typo must not silently change how
+    // often public RDAP servers are queried.
+    let enrich_settings = match fleet_controller::registry_enrich::enrich_settings_from_env() {
+        Ok(settings) => settings,
+        Err(error) => {
+            eprintln!("fleet-controller: refusing to start: {error}");
+            return ExitCode::FAILURE;
+        }
+    };
     let settings = Settings {
         listen: config.listen,
         tailscale_serve_listen: config.tailscale_serve_listen,
@@ -156,6 +165,12 @@ fn run_serve(mut config: fleet_config::ControllerConfig) -> ExitCode {
                             store.pool(),
                             secret_store.clone(),
                         ));
+                        node_services.coolify_discovery = Some(
+                            fleet_controller::external_accounts_store::compose_coolify_discovery(
+                                store.pool(),
+                                secret_store.clone(),
+                            ),
+                        );
                         Some(node_services)
                     }
                     Err(error) => {
@@ -1129,6 +1144,31 @@ fn run_serve(mut config: fleet_config::ControllerConfig) -> ExitCode {
                 let _ = sweeper_shutdown_rx.await;
             }))
         });
+        // FM-1020: the scheduled RDAP/DNS sweep over Registry domain
+        // entries (interval 0 turns it off; the on-demand refresh stays).
+        let (enrich_shutdown, enrich_shutdown_rx) = tokio::sync::oneshot::channel::<()>();
+        let enrich_handle = (!enrich_settings.interval.is_zero())
+            .then(|| {
+                let desired = fleet_controller::compose_desired_source(store.pool());
+                desired.registry().cloned().and_then(|registry| {
+                    fleet_controller::registry_enrich::compose_domain_enricher(
+                        store.pool(),
+                        registry,
+                        enrich_settings.clone(),
+                    )
+                })
+            })
+            .flatten()
+            .map(|enricher| {
+                let interval = enrich_settings.interval;
+                tokio::spawn(fleet_controller::registry_enrich::run_sweeper(
+                    enricher,
+                    interval,
+                    async move {
+                        let _ = enrich_shutdown_rx.await;
+                    },
+                ))
+            });
         // FM-1014: the optional periodic desired-source fetch queues the
         // ordinary `source.fetch` for the remote's head (0 = off, the
         // default); a Registry-only result then auto-activates.
@@ -1185,6 +1225,10 @@ fn run_serve(mut config: fleet_config::ControllerConfig) -> ExitCode {
             shutdown_signal(),
         )
         .await;
+        let _ = enrich_shutdown.send(());
+        if let Some(handle) = enrich_handle {
+            let _ = handle.await;
+        }
         let _ = poller_shutdown.send(());
         if let Some(handle) = poller_handle {
             let _ = handle.await;

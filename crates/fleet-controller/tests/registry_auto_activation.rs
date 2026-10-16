@@ -469,9 +469,9 @@ fn the_example_workflow_validates_on_pull_requests_and_holds_no_secret() {
     // The job is offline: no controller token or URL reaches it.
     assert!(!workflow.contains("secrets."));
     assert!(!workflow.contains("FLEET_TOKEN"));
-    // The guide names the planned command and where the workflow lives.
+    // The guide names the command and where the workflow lives.
     let guide = std::fs::read_to_string(guides.join("registry-workflow.md")).unwrap();
-    assert!(guide.contains("FM-1013"));
+    assert!(guide.contains("fleetctl registry validate"));
     assert!(guide.contains("registry-validate.workflow.yml"));
     assert!(guide.contains("POST /api/v1/desired/fetch"));
 }

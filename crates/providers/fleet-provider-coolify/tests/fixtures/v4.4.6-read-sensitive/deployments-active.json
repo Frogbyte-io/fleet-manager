@@ -1,0 +1,27 @@
+[
+  {
+    "id": 11,
+    "application_id": 1,
+    "deployment_uuid": "depactive00000000011",
+    "pull_request_id": 0,
+    "force_rebuild": false,
+    "commit": "HEAD",
+    "status": "in_progress",
+    "is_webhook": true,
+    "is_api": false,
+    "created_at": "2026-01-16T09:00:00.000000Z",
+    "updated_at": "2026-01-16T09:01:00.000000Z",
+    "current_process_id": "123",
+    "restart_only": false,
+    "server_id": 0,
+    "application_name": "web",
+    "server_name": "localhost",
+    "deployment_url": "/project/prjshop/environment/production/application/appweb/deployment/depactive",
+    "destination_id": "1",
+    "only_this_server": false,
+    "rollback": false,
+    "commit_message": null,
+    "logs": "[{\"output\": \"password=SENTINEL-SECRET-log\"}]",
+    "configuration_snapshot": "SENTINEL-SECRET-snap"
+  }
+]

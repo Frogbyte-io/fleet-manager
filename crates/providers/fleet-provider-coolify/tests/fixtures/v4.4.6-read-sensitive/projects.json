@@ -1,0 +1,14 @@
+[
+  {
+    "id": 1,
+    "uuid": "prjshop0000000000001",
+    "name": "shop",
+    "description": "Storefront"
+  },
+  {
+    "id": 2,
+    "uuid": "prjtools000000000002",
+    "name": "internal-tools",
+    "description": null
+  }
+]

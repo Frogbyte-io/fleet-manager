@@ -1083,272 +1083,6 @@
         }
       }
     },
-    "/api/v1/dns/changes": {
-      "post": {
-        "tags": [
-          "dns"
-        ],
-        "summary": "Requests a record change. The controller reads the zone, computes the\npreview (current record against proposed), and files an action request\n(`dns.record.upsert` or `dns.record.delete`) whose parameters carry that\npreview. The default risk class is `approve`: a person approves it in the\nconsole or with `fleetctl requests approve`. When the request executes,\nthe zone is read again; a zone that changed since the preview fails the\noperation instead of being overwritten.",
-        "description": "# Errors\n\nReturns the public error envelope on refusal, invalid values, an unknown\nzone, a change that would do nothing, a credential-like TXT value, or a\nprovider failure.",
-        "operationId": "createDnsChange",
-        "requestBody": {
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/CreateDnsChangeRequest"
-              }
-            }
-          },
-          "required": true
-        },
-        "responses": {
-          "201": {
-            "description": "The action request was recorded; its parameters carry the preview.",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Resource_ActionRequestDto"
-                }
-              }
-            }
-          },
-          "400": {
-            "description": "A value is invalid, the change would do nothing, or a value looks like a credential.",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ApiError"
-                }
-              }
-            }
-          },
-          "403": {
-            "description": "The caller may not read DNS or request actions, or policy denies the action.",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ApiError"
-                }
-              }
-            }
-          },
-          "404": {
-            "description": "No Cloudflare account or zone matches the name, or the record to delete does not exist.",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ApiError"
-                }
-              }
-            }
-          },
-          "409": {
-            "description": "Several accounts hold the zone, or the idempotency key was used for a different request.",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ApiError"
-                }
-              }
-            }
-          },
-          "502": {
-            "description": "Cloudflare refused the token or could not be reached.",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ApiError"
-                }
-              }
-            }
-          },
-          "503": {
-            "description": "The DNS surface or the broker is not wired.",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ApiError"
-                }
-              }
-            }
-          }
-        }
-      }
-    },
-    "/api/v1/dns/records": {
-      "get": {
-        "tags": [
-          "dns"
-        ],
-        "summary": "Reads the records at a fully qualified name through the Cloudflare\naccount whose zone contains it, and records them as an observation beside\nthe matching `domain` Registry entry.",
-        "description": "# Errors\n\nReturns the public error envelope on refusal, a missing name, an unknown\nzone, or a provider failure.",
-        "operationId": "listDnsRecords",
-        "parameters": [
-          {
-            "name": "name",
-            "in": "query",
-            "description": "The fully qualified name.",
-            "required": true,
-            "schema": {
-              "type": "string"
-            }
-          },
-          {
-            "name": "type",
-            "in": "query",
-            "description": "Only records of this type.",
-            "required": false,
-            "schema": {
-              "type": "string"
-            }
-          },
-          {
-            "name": "account",
-            "in": "query",
-            "description": "The Cloudflare account (id or label), when several hold the zone.",
-            "required": false,
-            "schema": {
-              "type": "string"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "The records at the name.",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Resource_DnsRecordsDto"
-                }
-              }
-            }
-          },
-          "400": {
-            "description": "The name or type is malformed.",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ApiError"
-                }
-              }
-            }
-          },
-          "403": {
-            "description": "The caller may not read DNS.",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ApiError"
-                }
-              }
-            }
-          },
-          "404": {
-            "description": "No Cloudflare account or zone matches the name.",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ApiError"
-                }
-              }
-            }
-          },
-          "409": {
-            "description": "Several accounts hold the zone; name one.",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ApiError"
-                }
-              }
-            }
-          },
-          "502": {
-            "description": "Cloudflare refused the token or could not be reached.",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ApiError"
-                }
-              }
-            }
-          },
-          "503": {
-            "description": "The DNS surface is not wired, or Cloudflare's rate limit applies.",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ApiError"
-                }
-              }
-            }
-          }
-        }
-      }
-    },
-    "/api/v1/dns/zones": {
-      "get": {
-        "tags": [
-          "dns"
-        ],
-        "summary": "Lists the zones each Cloudflare account's token can see. One account's\nfailure is reported on that account, not as a failure of the rest.",
-        "description": "# Errors\n\nReturns the public error envelope on refusal or when no Cloudflare\naccount exists.",
-        "operationId": "listDnsZones",
-        "parameters": [
-          {
-            "name": "account",
-            "in": "query",
-            "description": "Only this Cloudflare account (id or label).",
-            "required": false,
-            "schema": {
-              "type": "string"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "The zones per account.",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Resource_DnsZonesDto"
-                }
-              }
-            }
-          },
-          "403": {
-            "description": "The caller may not read DNS.",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ApiError"
-                }
-              }
-            }
-          },
-          "404": {
-            "description": "No Cloudflare account is configured.",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ApiError"
-                }
-              }
-            }
-          },
-          "503": {
-            "description": "The DNS surface is not wired.",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ApiError"
-                }
-              }
-            }
-          }
-        }
-      }
-    },
     "/api/v1/events": {
       "get": {
         "tags": [
@@ -1681,6 +1415,142 @@
           },
           "409": {
             "description": "The label is taken for that kind.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/external-accounts/{accountId}/coolify/discover": {
+      "post": {
+        "tags": [
+          "external-accounts"
+        ],
+        "summary": "Runs a read-only discovery of a Coolify account and records the\nsnapshot. An unreachable or refusing Coolify is a successful run whose\nper-class state says so; the previous items stay, marked stale.",
+        "description": "# Errors\n\nReturns the public error envelope on refusal, an unknown or non-Coolify\naccount, or a missing stored token.",
+        "operationId": "discoverCoolifyAccount",
+        "parameters": [
+          {
+            "name": "accountId",
+            "in": "path",
+            "description": "The Coolify account's identity.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The snapshot after the run.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Resource_CoolifyObservationDto"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The account is not a Coolify account.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The caller may not configure external accounts.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "The account does not exist.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The account's token is not in the secret store.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/external-accounts/{accountId}/coolify/observations": {
+      "get": {
+        "tags": [
+          "external-accounts"
+        ],
+        "summary": "Reads the cached Coolify snapshot of an account, with per-class stamps\nand staleness evaluated now.",
+        "description": "# Errors\n\nReturns the public error envelope on refusal, an unknown or non-Coolify\naccount, or when no discovery has run yet.",
+        "operationId": "getCoolifyObservations",
+        "parameters": [
+          {
+            "name": "accountId",
+            "in": "path",
+            "description": "The Coolify account's identity.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The cached snapshot.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Resource_CoolifyObservationDto"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The account is not a Coolify account.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The caller may not read external accounts.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "The account does not exist or has not been discovered yet.",
             "content": {
               "application/json": {
                 "schema": {
@@ -8456,6 +8326,200 @@
         }
       }
     },
+    "/api/v1/registry/entries/{type}/{key}/observations": {
+      "get": {
+        "tags": [
+          "registry"
+        ],
+        "summary": "Reads one domain entry's latest observation and its comparison with the\nentry.",
+        "description": "# Errors\n\nReturns an API error when the entry does not exist or is not a domain,\nor authentication, authorization, or storage fails.",
+        "operationId": "getDomainObservation",
+        "parameters": [
+          {
+            "name": "type",
+            "in": "path",
+            "description": "The entry's type name; only `domain`.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "key",
+            "in": "path",
+            "description": "The entry's natural key.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DomainObservationViewDto"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The entry is not a domain.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The caller may not read the Registry.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such entry in the active revision.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "The request could not be completed.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The enricher is not wired.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/registry/entries/{type}/{key}/observations/refresh": {
+      "post": {
+        "tags": [
+          "registry"
+        ],
+        "summary": "Looks the domain up now (RDAP and DNS) and records the observation. A\nmutation of observations, never of Fleet Git: authorized as\n`registry.observe` and audited.",
+        "description": "# Errors\n\nReturns an API error when the entry does not exist or is not a domain,\nthe caller may not observe, the RDAP server's rate-limit slot is not\navailable soon (429), or storage fails. A lookup that fails is recorded\nin the returned observation, not reported as an error.",
+        "operationId": "refreshDomainObservation",
+        "parameters": [
+          {
+            "name": "type",
+            "in": "path",
+            "description": "The entry's type name; only `domain`.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "key",
+            "in": "path",
+            "description": "The entry's natural key.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DomainObservationViewDto"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The entry is not a domain.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The caller may not observe.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such entry in the active revision.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "The RDAP server is being queried at its rate limit.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "The request could not be completed.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The enricher is not wired.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/registry/entries/{type}/{key}/referenced-by": {
       "get": {
         "tags": [
@@ -8565,6 +8629,108 @@
           },
           "503": {
             "description": "The Registry surface is not wired.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/registry/observations": {
+      "get": {
+        "tags": [
+          "registry"
+        ],
+        "summary": "Lists the observations of domain entries, compared with the entries,\nordered by key. With `attention=true`, only domains with a warning:\nthe feed of the Overview's needs-attention queue.",
+        "description": "# Errors\n\nReturns an API error when the cursor is malformed, or authentication,\nauthorization, or storage fails.",
+        "operationId": "listDomainObservations",
+        "parameters": [
+          {
+            "name": "attention",
+            "in": "query",
+            "description": "Only domains with at least one warning.",
+            "required": false,
+            "schema": {
+              "type": [
+                "boolean",
+                "null"
+              ]
+            }
+          },
+          {
+            "name": "cursor",
+            "in": "query",
+            "description": "Opaque cursor returned as the previous page's `nextCursor`.",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "description": "Requested page size, clamped to the API maximum.",
+            "required": false,
+            "schema": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "int32",
+              "minimum": 0
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DomainObservationPage"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The cursor is malformed.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The caller may not read the Registry.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "The request could not be completed.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The enricher is not wired.",
             "content": {
               "application/json": {
                 "schema": {
@@ -9867,46 +10033,6 @@
   },
   "components": {
     "schemas": {
-      "AccountZonesDto": {
-        "type": "object",
-        "description": "The zones one Cloudflare account's token can see.",
-        "required": [
-          "accountId",
-          "accountLabel",
-          "zones"
-        ],
-        "properties": {
-          "accountId": {
-            "type": "string",
-            "description": "The account's id."
-          },
-          "accountLabel": {
-            "type": "string",
-            "description": "The account's label."
-          },
-          "failure": {
-            "type": [
-              "string",
-              "null"
-            ],
-            "description": "The failure class when the zones could not be read (`auth`,\n`permission`, `rate_limited`, `unavailable`, ...)."
-          },
-          "failureDetail": {
-            "type": [
-              "string",
-              "null"
-            ],
-            "description": "What went wrong, when it did."
-          },
-          "zones": {
-            "type": "array",
-            "items": {
-              "$ref": "#/components/schemas/DnsZoneDto"
-            },
-            "description": "The zones."
-          }
-        }
-      },
       "ActionRequestDto": {
         "type": "object",
         "description": "An action request.",
@@ -10998,6 +11124,603 @@
           }
         }
       },
+      "CoolifyApplicationDto": {
+        "type": "object",
+        "description": "A deployed application.",
+        "required": [
+          "uuid",
+          "name",
+          "description",
+          "status",
+          "fqdns"
+        ],
+        "properties": {
+          "buildPack": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The build pack."
+          },
+          "createdAt": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "When Coolify created it."
+          },
+          "description": {
+            "type": "string",
+            "description": "The description."
+          },
+          "dockerImage": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The image reference of an image application."
+          },
+          "environmentId": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "The numeric environment id."
+          },
+          "fqdns": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "The public hostnames and URLs."
+          },
+          "gitBranch": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The source branch."
+          },
+          "gitRepository": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The source repository, credentials removed."
+          },
+          "name": {
+            "type": "string",
+            "description": "The name."
+          },
+          "status": {
+            "type": "string",
+            "description": "Coolify's status, such as `running:healthy`."
+          },
+          "updatedAt": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "When Coolify last changed it."
+          },
+          "uuid": {
+            "type": "string",
+            "description": "Coolify's identity."
+          }
+        }
+      },
+      "CoolifyClassDto": {
+        "type": "object",
+        "description": "The observation state of one resource class.",
+        "required": [
+          "class",
+          "itemCount",
+          "attemptedAt",
+          "stale",
+          "partial",
+          "truncated"
+        ],
+        "properties": {
+          "attemptedAt": {
+            "type": "integer",
+            "format": "int64",
+            "description": "When the latest attempt ran (epoch millis)."
+          },
+          "class": {
+            "type": "string",
+            "description": "`servers`, `projects`, `applications`, `services`, `databases`, or\n`deployments`."
+          },
+          "failure": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/CoolifyFailureDto",
+                "description": "Why the latest attempt failed; the previous items are kept."
+              }
+            ]
+          },
+          "itemCount": {
+            "type": "integer",
+            "description": "How many items the snapshot holds for the class.",
+            "minimum": 0
+          },
+          "observedAt": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "When the items were last listed successfully; absent when never."
+          },
+          "partial": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/CoolifyFailureDto"
+            },
+            "description": "Why the latest attempt was only partial."
+          },
+          "stale": {
+            "type": "boolean",
+            "description": "Whether the items are stale: the latest attempt failed, the class was\nnever listed, or the last success is old."
+          },
+          "truncated": {
+            "type": "boolean",
+            "description": "Whether the stored items were cut to fit the snapshot size bound."
+          }
+        }
+      },
+      "CoolifyDatabaseDto": {
+        "type": "object",
+        "description": "A managed database. No credentials or connection URLs.",
+        "required": [
+          "uuid",
+          "name",
+          "description",
+          "status"
+        ],
+        "properties": {
+          "description": {
+            "type": "string",
+            "description": "The description."
+          },
+          "engine": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The engine, such as `postgresql`."
+          },
+          "environmentId": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "The numeric environment id."
+          },
+          "image": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The image reference."
+          },
+          "isPublic": {
+            "type": [
+              "boolean",
+              "null"
+            ],
+            "description": "Whether the database is exposed on a public port."
+          },
+          "name": {
+            "type": "string",
+            "description": "The name."
+          },
+          "publicPort": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "The public port."
+          },
+          "status": {
+            "type": "string",
+            "description": "Coolify's status."
+          },
+          "uuid": {
+            "type": "string",
+            "description": "Coolify's identity."
+          }
+        }
+      },
+      "CoolifyDeploymentDto": {
+        "type": "object",
+        "description": "One deployment of an application. No logs.",
+        "required": [
+          "deploymentUuid",
+          "status"
+        ],
+        "properties": {
+          "applicationName": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The application's name."
+          },
+          "applicationUuid": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The application's identity, when known."
+          },
+          "commit": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The commit."
+          },
+          "commitMessage": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The first line of the commit message."
+          },
+          "createdAt": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "When it was queued."
+          },
+          "deploymentUuid": {
+            "type": "string",
+            "description": "Coolify's identity."
+          },
+          "isApi": {
+            "type": [
+              "boolean",
+              "null"
+            ],
+            "description": "Whether the API started it."
+          },
+          "isWebhook": {
+            "type": [
+              "boolean",
+              "null"
+            ],
+            "description": "Whether a webhook started it."
+          },
+          "pullRequestId": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "The pull request number for preview deployments."
+          },
+          "serverName": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The server's name."
+          },
+          "status": {
+            "type": "string",
+            "description": "`queued`, `in_progress`, `finished`, `failed`, or `cancelled`."
+          },
+          "updatedAt": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "When it last changed."
+          }
+        }
+      },
+      "CoolifyEnvironmentDto": {
+        "type": "object",
+        "description": "An environment of a project.",
+        "required": [
+          "id",
+          "name",
+          "description"
+        ],
+        "properties": {
+          "description": {
+            "type": "string",
+            "description": "The description."
+          },
+          "id": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Coolify's numeric environment id."
+          },
+          "name": {
+            "type": "string",
+            "description": "The name."
+          }
+        }
+      },
+      "CoolifyFailureDto": {
+        "type": "object",
+        "description": "A classified, credential-free failure of one resource class.",
+        "required": [
+          "kind",
+          "detail"
+        ],
+        "properties": {
+          "detail": {
+            "type": "string",
+            "description": "A short explanation; never a token, URL, or response body."
+          },
+          "kind": {
+            "type": "string",
+            "description": "`unauthorized`, `insufficient_permission`, `not_found`,\n`unreachable`, `timeout`, `rate_limited`, or `invalid_response`."
+          }
+        }
+      },
+      "CoolifyObservationDto": {
+        "type": "object",
+        "description": "The stamped, stale-aware Coolify snapshot of one account.",
+        "required": [
+          "accountId",
+          "recordedAt",
+          "evaluatedAt",
+          "warnings",
+          "classes",
+          "servers",
+          "projects",
+          "applications",
+          "services",
+          "databases",
+          "deployments"
+        ],
+        "properties": {
+          "accountId": {
+            "type": "string",
+            "description": "The account the snapshot belongs to."
+          },
+          "applications": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/CoolifyApplicationDto"
+            },
+            "description": "Applications."
+          },
+          "classes": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/CoolifyClassDto"
+            },
+            "description": "The per-class state: stamps, staleness, and failures."
+          },
+          "databases": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/CoolifyDatabaseDto"
+            },
+            "description": "Databases."
+          },
+          "deployments": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/CoolifyDeploymentDto"
+            },
+            "description": "Recent deployments, newest first."
+          },
+          "evaluatedAt": {
+            "type": "integer",
+            "format": "int64",
+            "description": "The time staleness was evaluated against (epoch millis)."
+          },
+          "projects": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/CoolifyProjectDto"
+            },
+            "description": "Projects with their environments."
+          },
+          "recordedAt": {
+            "type": "integer",
+            "format": "int64",
+            "description": "When the snapshot was last written (epoch millis)."
+          },
+          "servers": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/CoolifyServerDto"
+            },
+            "description": "Servers."
+          },
+          "services": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/CoolifyServiceDto"
+            },
+            "description": "Services."
+          },
+          "version": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The Coolify version last seen."
+          },
+          "warnings": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Warnings from the latest run, such as a token that can read\nsensitive values (use a read-only token)."
+          }
+        }
+      },
+      "CoolifyProjectDto": {
+        "type": "object",
+        "description": "A project with its environments.",
+        "required": [
+          "uuid",
+          "name",
+          "description",
+          "environments",
+          "detailsStale"
+        ],
+        "properties": {
+          "description": {
+            "type": "string",
+            "description": "The description."
+          },
+          "detailsStale": {
+            "type": "boolean",
+            "description": "Whether the environments could not be refreshed by the latest run."
+          },
+          "environments": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/CoolifyEnvironmentDto"
+            },
+            "description": "The environments; carried from the previous run when `detailsStale`."
+          },
+          "name": {
+            "type": "string",
+            "description": "The name."
+          },
+          "uuid": {
+            "type": "string",
+            "description": "Coolify's identity."
+          }
+        }
+      },
+      "CoolifyServerDto": {
+        "type": "object",
+        "description": "A Coolify server.",
+        "required": [
+          "uuid",
+          "name",
+          "description",
+          "address"
+        ],
+        "properties": {
+          "address": {
+            "type": "string",
+            "description": "The address Coolify connects to."
+          },
+          "description": {
+            "type": "string",
+            "description": "The description."
+          },
+          "name": {
+            "type": "string",
+            "description": "The name."
+          },
+          "proxyType": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The proxy kind, when set."
+          },
+          "reachable": {
+            "type": [
+              "boolean",
+              "null"
+            ],
+            "description": "Whether Coolify considers it reachable."
+          },
+          "usable": {
+            "type": [
+              "boolean",
+              "null"
+            ],
+            "description": "Whether Coolify considers it usable."
+          },
+          "uuid": {
+            "type": "string",
+            "description": "Coolify's identity."
+          }
+        }
+      },
+      "CoolifyServiceDto": {
+        "type": "object",
+        "description": "A one-click or Compose service.",
+        "required": [
+          "uuid",
+          "name",
+          "description",
+          "fqdns",
+          "detailsStale"
+        ],
+        "properties": {
+          "createdAt": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "When Coolify created it."
+          },
+          "description": {
+            "type": "string",
+            "description": "The description."
+          },
+          "detailsStale": {
+            "type": "boolean",
+            "description": "Whether the hostnames could not be refreshed by the latest run."
+          },
+          "environmentId": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "The numeric environment id."
+          },
+          "fqdns": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "The public hostnames of its applications; carried from the previous\nrun when `detailsStale`."
+          },
+          "name": {
+            "type": "string",
+            "description": "The name."
+          },
+          "serviceType": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The one-click service type."
+          },
+          "status": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Coolify's status, when the list reports one."
+          },
+          "updatedAt": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "When Coolify last changed it."
+          },
+          "uuid": {
+            "type": "string",
+            "description": "Coolify's identity."
+          }
+        }
+      },
       "CorrelatedDeviceDto": {
         "type": "object",
         "description": "One tailnet device with its Fleet-machine candidates (evidence only).",
@@ -11147,85 +11870,6 @@
           "target": {
             "type": "string",
             "description": "What the action acts on, in the provider's terms (at most 256\ncharacters)."
-          }
-        }
-      },
-      "CreateDnsChangeRequest": {
-        "type": "object",
-        "description": "A record change to request.",
-        "required": [
-          "operation",
-          "name",
-          "type",
-          "content",
-          "reason"
-        ],
-        "properties": {
-          "account": {
-            "type": [
-              "string",
-              "null"
-            ],
-            "description": "The Cloudflare account (id or label), when several hold the zone."
-          },
-          "content": {
-            "type": "string",
-            "description": "The record value. For a delete, the value of the record to remove."
-          },
-          "idempotencyKey": {
-            "type": [
-              "string",
-              "null"
-            ],
-            "description": "A key making a retry return the request already made."
-          },
-          "name": {
-            "type": "string",
-            "description": "The fully qualified record name."
-          },
-          "operation": {
-            "$ref": "#/components/schemas/DnsChangeKind",
-            "description": "`upsert` or `delete`."
-          },
-          "priority": {
-            "type": [
-              "integer",
-              "null"
-            ],
-            "format": "int32",
-            "description": "The MX preference. Upsert only.",
-            "minimum": 0
-          },
-          "proxied": {
-            "type": [
-              "boolean",
-              "null"
-            ],
-            "description": "Proxy through Cloudflare (A, AAAA, CNAME). Upsert only."
-          },
-          "reason": {
-            "type": "string",
-            "description": "Why, for the approver (at most 1000 characters)."
-          },
-          "replaces": {
-            "type": [
-              "string",
-              "null"
-            ],
-            "description": "The existing value an upsert replaces; without it a new value is\nadded (A, AAAA, TXT, MX), and a CNAME replaces its single value."
-          },
-          "ttl": {
-            "type": [
-              "integer",
-              "null"
-            ],
-            "format": "int32",
-            "description": "The TTL in seconds: 1 (automatic) or 60 to 86400. Upsert only.",
-            "minimum": 0
-          },
-          "type": {
-            "type": "string",
-            "description": "The record type: A, AAAA, CNAME, TXT, or MX."
           }
         }
       },
@@ -11895,150 +12539,220 @@
           }
         }
       },
-      "DnsChangeKind": {
-        "type": "string",
-        "description": "Which change.",
-        "enum": [
-          "upsert",
-          "delete"
-        ]
-      },
-      "DnsRecordDto": {
+      "DnsObservationDto": {
         "type": "object",
-        "description": "One DNS record.",
+        "description": "The DNS half of a domain observation.",
         "required": [
-          "type",
-          "name",
-          "content",
-          "ttl",
-          "proxied"
+          "status",
+          "apex",
+          "www"
         ],
         "properties": {
-          "content": {
-            "type": "string",
-            "description": "The value, normalized per type."
+          "apex": {
+            "$ref": "#/components/schemas/DnsRecordsDto",
+            "description": "Records at the apex."
           },
-          "id": {
+          "detail": {
             "type": [
               "string",
               "null"
             ],
-            "description": "The provider's record id."
+            "description": "Why, for `not_found` and `error`."
           },
-          "name": {
-            "type": "string",
-            "description": "The fully qualified name."
+          "status": {
+            "$ref": "#/components/schemas/DnsStatusDto",
+            "description": "How the lookup ended."
           },
-          "priority": {
-            "type": [
-              "integer",
-              "null"
-            ],
-            "format": "int32",
-            "description": "The MX preference.",
-            "minimum": 0
-          },
-          "proxied": {
-            "type": "boolean",
-            "description": "Whether traffic is proxied through the provider."
-          },
-          "ttl": {
-            "type": "integer",
-            "format": "int32",
-            "description": "The TTL in seconds; 1 is automatic.",
-            "minimum": 0
-          },
-          "type": {
-            "type": "string",
-            "description": "The record type."
+          "www": {
+            "$ref": "#/components/schemas/DnsRecordsDto",
+            "description": "Records at `www.<apex>`."
           }
         }
       },
       "DnsRecordsDto": {
         "type": "object",
-        "description": "The records at one name.",
+        "description": "Records of each type at one DNS name.",
         "required": [
-          "accountId",
-          "accountLabel",
-          "zone",
-          "name",
-          "records",
-          "observedAt"
+          "ns",
+          "a",
+          "aaaa",
+          "cname"
         ],
         "properties": {
-          "accountId": {
-            "type": "string",
-            "description": "The account that answered."
-          },
-          "accountLabel": {
-            "type": "string",
-            "description": "Its label."
-          },
-          "name": {
-            "type": "string",
-            "description": "The name asked about."
-          },
-          "observedAt": {
-            "type": "integer",
-            "format": "int64",
-            "description": "When the records were read (epoch milliseconds)."
-          },
-          "records": {
+          "a": {
             "type": "array",
             "items": {
-              "$ref": "#/components/schemas/DnsRecordDto"
+              "type": "string"
             },
-            "description": "The records."
+            "description": "A values."
           },
-          "registryEntry": {
+          "aaaa": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "AAAA values."
+          },
+          "cname": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "CNAME values."
+          },
+          "ns": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "NS values (meaningful at the apex)."
+          }
+        }
+      },
+      "DnsStatusDto": {
+        "type": "string",
+        "description": "The status of the DNS half of an observation.",
+        "enum": [
+          "ok",
+          "not_found",
+          "error"
+        ]
+      },
+      "DomainObservationDto": {
+        "type": "object",
+        "description": "One public lookup result for a domain entry. Recorded in the\ncontroller's database; never written to Fleet Git.",
+        "required": [
+          "observedAt",
+          "failures",
+          "rdap",
+          "dns"
+        ],
+        "properties": {
+          "dns": {
+            "$ref": "#/components/schemas/DnsObservationDto",
+            "description": "The public DNS data."
+          },
+          "failures": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Consecutive attempts with a failed half.",
+            "minimum": 0
+          },
+          "lastError": {
             "type": [
               "string",
               "null"
             ],
-            "description": "The `domain/<key>` Registry entry the observation attached to, when\nthe Registry has one."
+            "description": "The latest attempt's failure, when a half failed."
           },
-          "zone": {
-            "$ref": "#/components/schemas/DnsZoneDto",
-            "description": "The zone the name belongs to."
+          "observedAt": {
+            "type": "integer",
+            "format": "int64",
+            "description": "When the latest lookup attempt finished (epoch milliseconds)."
+          },
+          "rdap": {
+            "$ref": "#/components/schemas/RdapObservationDto",
+            "description": "The public registration data."
+          },
+          "staleSince": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "When the data of a half that now fails to refresh was last good\n(epoch milliseconds); set only while old data is being kept."
           }
         }
       },
-      "DnsZoneDto": {
+      "DomainObservationPage": {
         "type": "object",
-        "description": "One DNS zone.",
+        "description": "A page of domain observation views.",
         "required": [
-          "id",
-          "name",
-          "status"
+          "items",
+          "page"
         ],
         "properties": {
-          "id": {
-            "type": "string",
-            "description": "The provider's zone id."
-          },
-          "name": {
-            "type": "string",
-            "description": "The zone's apex name."
-          },
-          "status": {
-            "type": "string",
-            "description": "The provider's status for the zone."
-          }
-        }
-      },
-      "DnsZonesDto": {
-        "type": "object",
-        "description": "The zones of every Cloudflare account.",
-        "required": [
-          "accounts"
-        ],
-        "properties": {
-          "accounts": {
+          "items": {
             "type": "array",
             "items": {
-              "$ref": "#/components/schemas/AccountZonesDto"
+              "$ref": "#/components/schemas/DomainObservationViewDto"
             },
-            "description": "One entry per account."
+            "description": "The views, ordered by key."
+          },
+          "page": {
+            "$ref": "#/components/schemas/PageInfo",
+            "description": "Where this page sits in the result set."
+          }
+        }
+      },
+      "DomainObservationViewDto": {
+        "type": "object",
+        "description": "A domain entry's latest observation compared with the entry.",
+        "required": [
+          "key",
+          "diffs",
+          "warnings",
+          "suggestion"
+        ],
+        "properties": {
+          "diffs": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/FieldDiffDto"
+            },
+            "description": "Per-field comparison, in a stable order."
+          },
+          "key": {
+            "type": "string",
+            "description": "The entry's key (`domain/<key>`)."
+          },
+          "observation": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/DomainObservationDto",
+                "description": "The latest observation, or null before the first lookup."
+              }
+            ]
+          },
+          "suggestion": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/SuggestedFieldDto"
+            },
+            "description": "The field changes that would bring the entry in line with the\nobservation. A person or agent applies them with\n`fleetctl registry set` and publishes through Git; Fleet never\nwrites them."
+          },
+          "warnings": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/DomainWarningDto"
+            },
+            "description": "Derived warnings, most serious first. These feed the Overview's\nneeds-attention queue."
+          }
+        }
+      },
+      "DomainWarningDto": {
+        "type": "object",
+        "description": "One derived warning.",
+        "required": [
+          "code",
+          "severity",
+          "message"
+        ],
+        "properties": {
+          "code": {
+            "$ref": "#/components/schemas/WarningCodeDto",
+            "description": "Which rule fired."
+          },
+          "message": {
+            "type": "string",
+            "description": "A sentence for people."
+          },
+          "severity": {
+            "$ref": "#/components/schemas/SeverityDto",
+            "description": "How serious it is."
           }
         }
       },
@@ -12401,6 +13115,13 @@
             "type": "string",
             "description": "Free-form operator notes."
           },
+          "policyViolation": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "A policy the stored record breaks: `https_required` for an http base\nURL that is not a loopback address. Such an account is never probed\nor discovered until its base URL is edited to https."
+          },
           "updatedAt": {
             "type": "integer",
             "format": "int64",
@@ -12478,6 +13199,38 @@
         },
         "additionalProperties": false
       },
+      "FieldDiffDto": {
+        "type": "object",
+        "description": "The difference for one entry field.",
+        "required": [
+          "field",
+          "state"
+        ],
+        "properties": {
+          "field": {
+            "type": "string",
+            "description": "`registrar`, `expires`, `nameservers`, or `dnsHost`."
+          },
+          "observed": {
+            "type": [
+              "object",
+              "null"
+            ],
+            "description": "What the lookups saw."
+          },
+          "recorded": {
+            "type": [
+              "object",
+              "null"
+            ],
+            "description": "What the entry (Fleet Git) records."
+          },
+          "state": {
+            "$ref": "#/components/schemas/FieldStateDto",
+            "description": "The comparison."
+          }
+        }
+      },
       "FieldDifferenceDto": {
         "type": "object",
         "description": "One field difference, as the planner produced it.",
@@ -12516,6 +13269,15 @@
             "description": "The drift state."
           }
         }
+      },
+      "FieldStateDto": {
+        "type": "string",
+        "description": "How a field's recorded value compares with the observation.",
+        "enum": [
+          "in_sync",
+          "changed",
+          "unknown"
+        ]
       },
       "FieldViolation": {
         "type": "object",
@@ -15399,6 +16161,13 @@
                   "type": "string",
                   "description": "Free-form operator notes."
                 },
+                "policyViolation": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "description": "A policy the stored record breaks: `https_required` for an http base\nURL that is not a loopback address. Such an account is never probed\nor discovered until its base URL is edited to https."
+                },
                 "updatedAt": {
                   "type": "integer",
                   "format": "int64",
@@ -17922,6 +18691,73 @@
         },
         "additionalProperties": false
       },
+      "RdapObservationDto": {
+        "type": "object",
+        "description": "The RDAP half of a domain observation.",
+        "required": [
+          "status",
+          "statuses",
+          "nameservers"
+        ],
+        "properties": {
+          "detail": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Why, for `unavailable`, `not_found`, and `error`."
+          },
+          "expires": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The expiry as a calendar date (`YYYY-MM-DD`). Some ccTLD registries\ndo not publish one."
+          },
+          "nameservers": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "The nameservers the registry lists."
+          },
+          "registrar": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The registrar's name as the registry reports it."
+          },
+          "server": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The RDAP server's base URL, when one was resolved."
+          },
+          "status": {
+            "$ref": "#/components/schemas/RdapStatusDto",
+            "description": "How the lookup ended."
+          },
+          "statuses": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "The EPP status values."
+          }
+        }
+      },
+      "RdapStatusDto": {
+        "type": "string",
+        "description": "The status of the RDAP half of an observation.",
+        "enum": [
+          "ok",
+          "unavailable",
+          "not_found",
+          "error"
+        ]
+      },
       "ReadyAuthDto": {
         "oneOf": [
           {
@@ -19075,6 +19911,111 @@
           }
         }
       },
+      "Resource_CoolifyObservationDto": {
+        "type": "object",
+        "description": "A single resource.\n\nThe payload is nested under `data` so that later top-level fields are an\nadditive change rather than a breaking one.",
+        "required": [
+          "data"
+        ],
+        "properties": {
+          "data": {
+            "type": "object",
+            "description": "The stamped, stale-aware Coolify snapshot of one account.",
+            "required": [
+              "accountId",
+              "recordedAt",
+              "evaluatedAt",
+              "warnings",
+              "classes",
+              "servers",
+              "projects",
+              "applications",
+              "services",
+              "databases",
+              "deployments"
+            ],
+            "properties": {
+              "accountId": {
+                "type": "string",
+                "description": "The account the snapshot belongs to."
+              },
+              "applications": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/components/schemas/CoolifyApplicationDto"
+                },
+                "description": "Applications."
+              },
+              "classes": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/components/schemas/CoolifyClassDto"
+                },
+                "description": "The per-class state: stamps, staleness, and failures."
+              },
+              "databases": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/components/schemas/CoolifyDatabaseDto"
+                },
+                "description": "Databases."
+              },
+              "deployments": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/components/schemas/CoolifyDeploymentDto"
+                },
+                "description": "Recent deployments, newest first."
+              },
+              "evaluatedAt": {
+                "type": "integer",
+                "format": "int64",
+                "description": "The time staleness was evaluated against (epoch millis)."
+              },
+              "projects": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/components/schemas/CoolifyProjectDto"
+                },
+                "description": "Projects with their environments."
+              },
+              "recordedAt": {
+                "type": "integer",
+                "format": "int64",
+                "description": "When the snapshot was last written (epoch millis)."
+              },
+              "servers": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/components/schemas/CoolifyServerDto"
+                },
+                "description": "Servers."
+              },
+              "services": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/components/schemas/CoolifyServiceDto"
+                },
+                "description": "Services."
+              },
+              "version": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "description": "The Coolify version last seen."
+              },
+              "warnings": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                },
+                "description": "Warnings from the latest run, such as a token that can read\nsensitive values (use a read-only token)."
+              }
+            }
+          }
+        }
+      },
       "Resource_CredentialDto": {
         "type": "object",
         "description": "A single resource.\n\nThe payload is nested under `data` so that later top-level fields are an\nadditive change rather than a breaking one.",
@@ -19363,89 +20304,6 @@
           }
         }
       },
-      "Resource_DnsRecordsDto": {
-        "type": "object",
-        "description": "A single resource.\n\nThe payload is nested under `data` so that later top-level fields are an\nadditive change rather than a breaking one.",
-        "required": [
-          "data"
-        ],
-        "properties": {
-          "data": {
-            "type": "object",
-            "description": "The records at one name.",
-            "required": [
-              "accountId",
-              "accountLabel",
-              "zone",
-              "name",
-              "records",
-              "observedAt"
-            ],
-            "properties": {
-              "accountId": {
-                "type": "string",
-                "description": "The account that answered."
-              },
-              "accountLabel": {
-                "type": "string",
-                "description": "Its label."
-              },
-              "name": {
-                "type": "string",
-                "description": "The name asked about."
-              },
-              "observedAt": {
-                "type": "integer",
-                "format": "int64",
-                "description": "When the records were read (epoch milliseconds)."
-              },
-              "records": {
-                "type": "array",
-                "items": {
-                  "$ref": "#/components/schemas/DnsRecordDto"
-                },
-                "description": "The records."
-              },
-              "registryEntry": {
-                "type": [
-                  "string",
-                  "null"
-                ],
-                "description": "The `domain/<key>` Registry entry the observation attached to, when\nthe Registry has one."
-              },
-              "zone": {
-                "$ref": "#/components/schemas/DnsZoneDto",
-                "description": "The zone the name belongs to."
-              }
-            }
-          }
-        }
-      },
-      "Resource_DnsZonesDto": {
-        "type": "object",
-        "description": "A single resource.\n\nThe payload is nested under `data` so that later top-level fields are an\nadditive change rather than a breaking one.",
-        "required": [
-          "data"
-        ],
-        "properties": {
-          "data": {
-            "type": "object",
-            "description": "The zones of every Cloudflare account.",
-            "required": [
-              "accounts"
-            ],
-            "properties": {
-              "accounts": {
-                "type": "array",
-                "items": {
-                  "$ref": "#/components/schemas/AccountZonesDto"
-                },
-                "description": "One entry per account."
-              }
-            }
-          }
-        }
-      },
       "Resource_EnrollmentTokenCreatedDto": {
         "type": "object",
         "description": "A single resource.\n\nThe payload is nested under `data` so that later top-level fields are an\nadditive change rather than a breaking one.",
@@ -19546,6 +20404,13 @@
               "notes": {
                 "type": "string",
                 "description": "Free-form operator notes."
+              },
+              "policyViolation": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "description": "A policy the stored record breaks: `https_required` for an http base\nURL that is not a loopback address. Such an account is never probed\nor discovered until its base URL is edited to https."
               },
               "updatedAt": {
                 "type": "integer",
@@ -22010,6 +22875,15 @@
           }
         }
       },
+      "SeverityDto": {
+        "type": "string",
+        "description": "How serious a warning is.",
+        "enum": [
+          "info",
+          "warn",
+          "err"
+        ]
+      },
       "SkillsAuthDto": {
         "oneOf": [
           {
@@ -22764,6 +23638,24 @@
           }
         }
       },
+      "SuggestedFieldDto": {
+        "type": "object",
+        "description": "One suggested field value.",
+        "required": [
+          "field",
+          "value"
+        ],
+        "properties": {
+          "field": {
+            "type": "string",
+            "description": "The entry field."
+          },
+          "value": {
+            "type": "object",
+            "description": "The suggested value, in the field's type (a string, or a list of\nstrings for `nameservers`)."
+          }
+        }
+      },
       "SystemInfo": {
         "type": "object",
         "description": "The system view served at `/api/v1/system`.",
@@ -22955,6 +23847,21 @@
           }
         },
         "additionalProperties": false
+      },
+      "WarningCodeDto": {
+        "type": "string",
+        "description": "The derived warning rules.",
+        "enum": [
+          "registrar_mismatch",
+          "nameservers_mismatch",
+          "dns_host_mismatch",
+          "expiry_changed",
+          "expiring",
+          "auto_renew_off_expiring",
+          "stale_observation",
+          "rdap_not_found",
+          "lookup_failing"
+        ]
       }
     }
   },
@@ -22981,11 +23888,7 @@
     },
     {
       "name": "registry",
-      "description": "The descriptive Registry of the active desired revision: types, entries, and relations. Read-only; edits are commits to the Fleet repository."
-    },
-    {
-      "name": "dns",
-      "description": "DNS zones and records read through a Cloudflare external account, and record changes (`dns.record.upsert`, `dns.record.delete`) requested through the action broker with a computed preview. Fleet holds the token and never returns it."
+      "description": "The descriptive Registry of the active desired revision: types, entries, and relations. Edits are commits to the Fleet repository; the only mutation is recording public RDAP/DNS observations of domain entries."
     },
     {
       "name": "operations",

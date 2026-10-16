@@ -54,6 +54,30 @@ fleetctl --output json lab provisions
   -> GET /api/v1/lab/provisions
 fleetctl --output json lab release <lease-id>
   -> POST /api/v1/lab/leases/lease-id-example/release body {"keep":false}
+fleetctl --output json registry types
+  -> GET /api/v1/registry/types
+fleetctl --output json registry find aptabase
+  -> GET /api/v1/registry/entries?q=aptabase
+fleetctl --output json registry list --type domain --tag client-x
+  -> GET /api/v1/registry/entries?type=domain&tag=client-x
+fleetctl --output json registry get domain/example.com
+  -> GET /api/v1/registry/entries/domain/example.com
+fleetctl --output json registry list --target domain/example.com --relation used-by
+  -> GET /api/v1/registry/entries?target=domain/example.com&relation=used-by
+fleetctl --output json registry set domain/example.com --field registrar=Webhuset --field autoRenew=true --field loginAt="1Password (Webhuset vault)"
+  -> local Fleet Git checkout: Set { reference: EntryRef { entry_type: "domain", key: "example.com" }, fields: [("registrar", "Webhuset"), ("autoRenew", "true"), ("loginAt", "1Password (Webhuset vault)")], notes: None, from_json: None, repo: None }
+fleetctl --output json registry set service/aptabase --field name=Aptabase --field vendor=Aptabase
+  -> local Fleet Git checkout: Set { reference: EntryRef { entry_type: "service", key: "aptabase" }, fields: [("name", "Aptabase"), ("vendor", "Aptabase")], notes: None, from_json: None, repo: None }
+fleetctl --output json registry relate domain/example.com used-by service/aptabase
+  -> local Fleet Git checkout: Relate { from: EntryRef { entry_type: "domain", key: "example.com" }, relation: "used-by", target: "service/aptabase", remove: false, repo: None }
+fleetctl --output json registry tags add domain/example.com client-x
+  -> local Fleet Git checkout: Tags { add: true, reference: EntryRef { entry_type: "domain", key: "example.com" }, tags: ["client-x"], repo: None }
+fleetctl --output json registry unset domain/example.com --field dnsHost
+  -> local Fleet Git checkout: Unset { reference: EntryRef { entry_type: "domain", key: "example.com" }, fields: ["dnsHost"], notes: false, repo: None }
+fleetctl --output json registry validate
+  -> local Fleet Git checkout: Validate { repo: None }
+fleetctl --output json registry publish -m "Record example.com registrar"
+  -> local Fleet Git checkout: Publish { message: "Record example.com registrar", change_mode: None, base: None, branch: None, repo: None }
 fleetctl --output json operations list --limit 20
   -> GET /api/v1/operations?limit=20
 fleetctl --output json operations get <operation-id>
