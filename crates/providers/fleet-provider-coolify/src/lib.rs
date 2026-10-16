@@ -54,18 +54,12 @@ enum Gate {
 /// `base_url` is the instance root without a trailing slash, for example
 /// `https://coolify.example.com`.
 pub async fn probe(base_url: &str, token: &str) -> ProbeReport {
-    let client = match reqwest::Client::builder()
+    let Ok(client) = reqwest::Client::builder()
         .timeout(REQUEST_TIMEOUT)
         .redirect(reqwest::redirect::Policy::none())
         .build()
-    {
-        Ok(client) => client,
-        Err(_) => {
-            return ProbeReport::simple(
-                ProbeStatus::Unreachable,
-                "the HTTP client could not start",
-            );
-        }
+    else {
+        return ProbeReport::simple(ProbeStatus::Unreachable, "the HTTP client could not start");
     };
     let mut granted = Vec::new();
     let mut missing = Vec::new();

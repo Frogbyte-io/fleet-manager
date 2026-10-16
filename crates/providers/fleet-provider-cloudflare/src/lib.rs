@@ -63,18 +63,12 @@ pub async fn probe(base_url: &str, account_id: Option<&str>, token: &str) -> Pro
         Some(account) => format!("{base_url}/accounts/{account}/tokens/verify"),
         None => format!("{base_url}/user/tokens/verify"),
     };
-    let client = match reqwest::Client::builder()
+    let Ok(client) = reqwest::Client::builder()
         .timeout(REQUEST_TIMEOUT)
         .redirect(reqwest::redirect::Policy::none())
         .build()
-    {
-        Ok(client) => client,
-        Err(_) => {
-            return ProbeReport::simple(
-                ProbeStatus::Unreachable,
-                "the HTTP client could not start",
-            );
-        }
+    else {
+        return ProbeReport::simple(ProbeStatus::Unreachable, "the HTTP client could not start");
     };
     let mut response = match client
         .get(url)
@@ -111,8 +105,7 @@ fn classify(status: u16, body: &[u8], account_owned: bool) -> ProbeReport {
     let first_error = envelope
         .as_ref()
         .and_then(|envelope| envelope.errors.first())
-        .map(|error| error.message.as_str())
-        .unwrap_or("");
+        .map_or("", |error| error.message.as_str());
     match status {
         401 => ProbeReport::simple(
             ProbeStatus::Unauthorized,

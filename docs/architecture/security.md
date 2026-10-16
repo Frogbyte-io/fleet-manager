@@ -87,6 +87,7 @@ Authentication, authorization, human approval, and provider privilege are separa
 - Controller secrets are individually encrypted with an authenticated cipher. A versioned master key is mounted from a protected file/Docker secret outside the database and supports planned rotation.
 - Secrets are decrypted just in time at the adapter boundary, held for the shortest practical duration, zeroized where supported, and redacted by value/pattern before persistence or streaming.
 - SSH private keys should preferably remain in an agent/credential helper or use short-lived certificates. Stored keys are encrypted secret records with strict provider scope.
+- External provider account tokens (Coolify, Cloudflare) are encrypted secret records named `external/<account-id>`, write-only through the API and `fleetctl`, and used only by the probe at the provider boundary. See `provider-model.md`.
 - Project environment values stay in Frogenv/SOPS/age. Fleet invokes `frogenv env run`; it does not list values or become a decryption UI.
 - Backups require both encrypted data and separately protected master-key recovery instructions. Losing either has an explicit failure mode.
 

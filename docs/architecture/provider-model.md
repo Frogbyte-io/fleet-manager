@@ -97,6 +97,18 @@ Packer recipes and provisioners are privileged code. Saving changes produces an 
 
 A future catalog distributes signed/versioned recipes, manifests, provisioning assets, compatibility constraints, and integrity/provenance metadata. It does not distribute VM disks or licensed operating-system installation media.
 
+## External provider accounts (Coolify, Cloudflare)
+
+API-token providers outside Proxmox share one account registry (FM-1001; `crates/fleet-application/src/external_accounts.rs`). It generalizes the Proxmox account shape where it fits and does not migrate Proxmox accounts.
+
+- **Account:** provider kind (a closed enum, `coolify` or `cloudflare`), label (unique within a kind; several accounts per kind are allowed), base URL, an optional provider account id (Cloudflare account-owned tokens), notes, and the latest probe result. The token is an encrypted secret record named `external/<account-id>`; only that namespace resolves for these accounts.
+- **Surfaces:** `GET|POST /api/v1/external-accounts`, `GET|PATCH|DELETE /api/v1/external-accounts/{id}`, `POST .../probe`; `fleetctl accounts list|get|create|update|delete|probe`; Settings > Provider accounts. All three are adapters over the same use cases.
+- **Authorization and audit:** `external_account.read` lists and reads; `external_account.config` creates, updates, probes, and deletes (a probe sends the token off-host, so it is privileged). Both are administrator-only and refused for delegated credentials. Every mutation records a two-phase audit intent (`external_account_creating` then `external_account_created`, likewise `updating`, `probing`, `deleting`). Metadata carries the kind, label, and probe status only.
+- **Write-only token:** it arrives on create or on update, is stored encrypted, and is never returned by the API, printed by `fleetctl` (it is read from stdin), logged, or placed in audit metadata or operation payloads. Replacing the token or changing the endpoint clears the stored probe.
+- **Probe classification:** `ok`, `unreachable` (transport failure or a non-provider answer), `unauthorized` (token refused, expired, or disabled), and `insufficient_permission` (token valid, permissions missing). A failing service is a successful probe with that status, not an API error.
+- **Provider crates:** `fleet-provider-cloudflare` calls `GET /user/tokens/verify`, or `GET /accounts/{id}/tokens/verify` when an account id is set, and reads `result.status`. `fleet-provider-coolify` has no documented "token abilities" endpoint to call, so it infers `read`, `write`, and `deploy` by sending non-mutating `GET` requests to routes the API gates behind exactly one ability (`/api/v1/version`, `/api/v1/enable`, `/api/v1/deploy`): `401` is unauthorized, `403` is a missing ability, `2xx`/`400`/`405` mean the gate passed, and anything else leaves the ability unverified and is reported missing. This is an inference from Coolify's route middleware, not a documented contract; replace it if Coolify documents an abilities endpoint. The `read:sensitive` and `root` abilities are not probed. Both crates return fleet-core `ProbeReport`s, so provider DTOs stay in the provider crates.
+- **Out of scope here:** Coolify and Cloudflare resource discovery (FM-1030, FM-1042).
+
 ## Recipes and custom actions
 
 Recipes are data interpreted by a built-in node runner, not providers and not a plugin SDK. A proposed schema includes:

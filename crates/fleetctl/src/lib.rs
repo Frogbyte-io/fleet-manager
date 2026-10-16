@@ -8745,6 +8745,9 @@ pub fn render_accounts_for_test(value: &Value) -> String {
     accounts::render(value)
 }
 
+/// Method, path, query pairs, and JSON body of a request.
+pub type AccountsRequestForTest = (String, String, Vec<(String, String)>, Option<Value>);
+
 /// The controller request for an `accounts` subcommand, with the stdin
 /// token supplied by the caller; exposed for tests.
 ///
@@ -8755,7 +8758,7 @@ pub fn render_accounts_for_test(value: &Value) -> String {
 pub fn accounts_request_for_test(
     action: &accounts::AccountsAction,
     token: &str,
-) -> Result<(String, String, Vec<(String, String)>, Option<Value>), CliError> {
+) -> Result<AccountsRequestForTest, CliError> {
     let (method, path, query, body) = accounts::request(action, || Ok(token.to_owned()))?;
     Ok((
         method.to_string(),

@@ -89,10 +89,10 @@ impl ExternalAccountPort for Accounts {
             .iter_mut()
             .find(|a| a.id == id)
             .ok_or_else(|| format!("account {id} not found"))?;
-        account.label = new.label.clone();
-        account.base_url = new.base_url.clone();
-        account.scope_id = new.scope_id.clone();
-        account.notes = new.notes.clone();
+        account.label.clone_from(&new.label);
+        account.base_url.clone_from(&new.base_url);
+        account.scope_id.clone_from(&new.scope_id);
+        account.notes.clone_from(&new.notes);
         if clear_probe {
             account.last_probe = None;
         }

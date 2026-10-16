@@ -26,7 +26,7 @@ pub const MAX_PROBE_DETAIL_LEN: usize = 300;
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ExternalProviderKind {
-    /// A Coolify instance (self-hosted PaaS).
+    /// A Coolify instance (self-hosted platform).
     Coolify,
     /// Cloudflare (DNS, account-scoped API tokens).
     Cloudflare,

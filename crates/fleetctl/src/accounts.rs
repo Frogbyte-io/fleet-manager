@@ -180,9 +180,9 @@ pub(crate) fn request(
             notes,
         } => {
             let mut body = json!({"kind": kind, "label": label, "token": token()?});
-            set(&mut body, "baseUrl", base_url);
-            set(&mut body, "accountId", account_id);
-            set(&mut body, "notes", notes);
+            set(&mut body, "baseUrl", base_url.as_ref());
+            set(&mut body, "accountId", account_id.as_ref());
+            set(&mut body, "notes", notes.as_ref());
             (
                 reqwest::Method::POST,
                 base.to_owned(),
@@ -199,10 +199,10 @@ pub(crate) fn request(
             rotate_token,
         } => {
             let mut body = json!({});
-            set(&mut body, "label", label);
-            set(&mut body, "baseUrl", base_url);
-            set(&mut body, "accountId", account_id);
-            set(&mut body, "notes", notes);
+            set(&mut body, "label", label.as_ref());
+            set(&mut body, "baseUrl", base_url.as_ref());
+            set(&mut body, "accountId", account_id.as_ref());
+            set(&mut body, "notes", notes.as_ref());
             if *rotate_token {
                 body["token"] = Value::String(token()?);
             }
@@ -228,7 +228,7 @@ pub(crate) fn request(
     })
 }
 
-fn set(body: &mut Value, key: &str, value: &Option<String>) {
+fn set(body: &mut Value, key: &str, value: Option<&String>) {
     if let Some(value) = value {
         body[key] = Value::String(value.clone());
     }
