@@ -423,6 +423,9 @@ pub fn validate_sources_report(
                     if has_specific_diagnostic(document, &instance_path) {
                         continue;
                     }
+                    // A map key may itself be a credential: never echo a
+                    // segment that is not a plain name or an index.
+                    let instance_path = registry::sanitize_pointer(&instance_path);
                     diagnostics.push(Diagnostic {
                         code: "FM_SCHEMA_INVALID",
                         location: format!("{base}{instance_path}"),

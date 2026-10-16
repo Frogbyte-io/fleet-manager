@@ -36,8 +36,14 @@ pub struct RegistryContext {
     /// Known relation targets by class: `machine`, `project`, `coolify`,
     /// `proxmoxGuest`. A class that is absent is not checked for dangling
     /// targets (the observed side may be unknown to the caller); a present
-    /// class warns for targets outside it. `Machine` and `Project`
-    /// resources in the revision always count as known.
+    /// class warns for targets outside it. For `machine` and `project`, the
+    /// `Machine` and `Project` resources in the revision count as known too,
+    /// but only when the class is present. Independently of this map, every
+    /// target is format-checked: machine and project names must be slugs,
+    /// Coolify and Proxmox references must be non-empty, at most 128
+    /// characters, with no whitespace or control characters. A registry
+    /// target must name a defined or built-in type (an error), and a
+    /// missing entry of such a type is a warning.
     pub known_targets: BTreeMap<String, BTreeSet<String>>,
 }
 
@@ -88,17 +94,25 @@ fn is_key_value(key: &str) -> bool {
         && chars.all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '@' | '+' | '-'))
 }
 
+/// A DNS name: dot-separated labels of letters, digits, and hyphens; a
+/// label may start with an underscore (`_dmarc.example.com`). A trailing
+/// dot is refused, and so is a name whose last label is all digits, so a
+/// bare IPv4 address is not a hostname.
 fn is_hostname(value: &str) -> bool {
-    let value = value.strip_suffix('.').unwrap_or(value);
     !value.is_empty()
         && value.len() <= 253
         && value.split('.').all(|label| {
-            !label.is_empty()
+            let body = label.strip_prefix('_').unwrap_or(label);
+            !body.is_empty()
                 && label.len() <= 63
-                && !label.starts_with('-')
-                && !label.ends_with('-')
-                && label.chars().all(|c| c.is_ascii_alphanumeric() || c == '-')
+                && !body.starts_with('-')
+                && !body.ends_with('-')
+                && body.chars().all(|c| c.is_ascii_alphanumeric() || c == '-')
         })
+        && !value
+            .rsplit('.')
+            .next()
+            .is_some_and(|last| last.bytes().all(|b| b.is_ascii_digit()))
 }
 
 fn is_email(value: &str) -> bool {
@@ -106,7 +120,8 @@ fn is_email(value: &str) -> bool {
         && value.split_once('@').is_some_and(|(local, domain)| {
             !local.is_empty()
                 && local.len() <= 64
-                && !local.contains(['@', ' '])
+                && !local.contains(['@', ',', ';', '<', '>', '(', ')', '[', ']', '"'])
+                && !value.chars().any(|c| c.is_whitespace() || c.is_control())
                 && is_hostname(domain)
         })
 }
@@ -134,7 +149,7 @@ fn is_date(value: &str) -> bool {
         2 => 28,
         _ => return false,
     };
-    (1..=days).contains(&day)
+    year >= 1 && (1..=days).contains(&day)
 }
 
 fn is_money(value: &str) -> bool {
@@ -148,12 +163,52 @@ fn is_money(value: &str) -> bool {
     !whole.is_empty()
         && whole.len() <= 15
         && whole.bytes().all(|b| b.is_ascii_digit())
+        && (whole == "0" || !whole.starts_with('0'))
         && fraction
             .is_none_or(|f| (1..=4).contains(&f.len()) && f.bytes().all(|b| b.is_ascii_digit()))
         && code.len() == 3
         && code.bytes().all(|b| b.is_ascii_uppercase())
 }
 
+/// `host[:port]`: a bracketed IPv6 literal, an IPv4 address, or a
+/// hostname. The host must be non-empty.
+fn is_host_port(authority: &str) -> bool {
+    let (host_ok, port) = if let Some(rest) = authority.strip_prefix('[') {
+        let Some((inner, after)) = rest.split_once(']') else {
+            return false;
+        };
+        let ok = !inner.is_empty()
+            && inner
+                .chars()
+                .all(|c| c.is_ascii_hexdigit() || matches!(c, ':' | '.'));
+        if after.is_empty() {
+            (ok, None)
+        } else if let Some(port) = after.strip_prefix(':') {
+            (ok, Some(port))
+        } else {
+            return false;
+        }
+    } else if let Some((host, port)) = authority.rsplit_once(':') {
+        (is_hostname(host) || is_ipv4(host), Some(port))
+    } else {
+        (is_hostname(authority) || is_ipv4(authority), None)
+    };
+    host_ok
+        && port
+            .is_none_or(|p| !p.is_empty() && p.len() <= 5 && p.bytes().all(|b| b.is_ascii_digit()))
+}
+
+fn is_ipv4(value: &str) -> bool {
+    let parts: Vec<&str> = value.split('.').collect();
+    parts.len() == 4
+        && parts
+            .iter()
+            .all(|p| !p.is_empty() && p.len() <= 3 && p.bytes().all(|b| b.is_ascii_digit()))
+}
+
+/// A URL value: `http`, `https`, or `ssh` with a host and no credentials
+/// in the authority. (`mailto:` is not allowed: the credential scrubber reads
+/// `mailto:user@host` as userinfo.)
 fn is_url(value: &str) -> bool {
     if value.len() > 2048 || value.chars().any(|c| c.is_whitespace() || c.is_control()) {
         return false;
@@ -162,16 +217,9 @@ fn is_url(value: &str) -> bool {
         return false;
     };
     let authority = rest.split(['/', '?', '#']).next().unwrap_or_default();
-    !scheme.is_empty()
-        && scheme
-            .chars()
-            .next()
-            .is_some_and(|c| c.is_ascii_lowercase())
-        && scheme
-            .chars()
-            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || matches!(c, '+' | '-' | '.'))
-        && !authority.is_empty()
+    matches!(scheme, "http" | "https" | "ssh")
         && !authority.contains('@')
+        && is_host_port(authority)
 }
 
 /// Whether `value` is a legal value of the scalar type.
@@ -209,8 +257,28 @@ fn scalar_name(scalar: RegistryScalarType) -> &'static str {
     }
 }
 
-/// Every string in a JSON value with its pointer. Map keys that are not
-/// plain field names are reported under `<invalid-name>`.
+/// A JSON pointer that is safe to print: any segment that is neither an
+/// array index nor a plain field name could be (or contain) a credential,
+/// so it is replaced.
+pub(crate) fn sanitize_pointer(pointer: &str) -> String {
+    pointer
+        .split('/')
+        .map(|segment| {
+            if segment.is_empty()
+                || segment.bytes().all(|b| b.is_ascii_digit())
+                || is_field_name(segment)
+            {
+                segment
+            } else {
+                "<invalid-name>"
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("/")
+}
+
+/// Every string in a JSON value with its safe pointer, including map keys
+/// (a key can carry a credential too).
 fn collect_strings<'a>(value: &'a Value, pointer: &str, out: &mut Vec<(String, &'a str)>) {
     match value {
         Value::String(text) => out.push((pointer.to_owned(), text)),
@@ -221,11 +289,8 @@ fn collect_strings<'a>(value: &'a Value, pointer: &str, out: &mut Vec<(String, &
         }
         Value::Object(map) => {
             for (key, item) in map {
-                let segment = if pointer.ends_with("/fields") {
-                    safe_key(key)
-                } else {
-                    key
-                };
+                let segment = safe_key(key);
+                out.push((format!("{pointer}/{segment}"), key));
                 collect_strings(item, &format!("{pointer}/{segment}"), out);
             }
         }
@@ -233,16 +298,58 @@ fn collect_strings<'a>(value: &'a Value, pointer: &str, out: &mut Vec<(String, &
     }
 }
 
+fn credential_error(location: String) -> Diagnostic {
+    diagnostic(
+        "FM_SCHEMA_SEMANTIC_CREDENTIAL_VALUE",
+        location,
+        "a Registry value must not carry a credential; keep secrets in Fleet's secret store and describe where they live instead",
+    )
+}
+
+fn carries_credential(text: &str) -> bool {
+    fleet_core::redact_credentials(text) != text
+}
+
+/// Scrubs every string and key of the spec, and the name/value pairs the
+/// scrubber only recognizes joined (`password: hunter2` split across a
+/// field name and its value, or a link's label and URL).
 fn scan_credentials(base: &str, spec: &Value, errors: &mut Vec<Diagnostic>) {
     let mut strings = Vec::new();
     collect_strings(spec, &format!("{base}/spec"), &mut strings);
     for (location, text) in strings {
-        if fleet_core::redact_credentials(text) != text {
-            errors.push(diagnostic(
-                "FM_SCHEMA_SEMANTIC_CREDENTIAL_VALUE",
-                location,
-                "a Registry value must not carry a credential; keep secrets in Fleet's secret store and describe where they live instead",
-            ));
+        if carries_credential(text) {
+            errors.push(credential_error(location));
+        }
+    }
+    if let Some(fields) = spec.get("fields").and_then(Value::as_object) {
+        for (name, value) in fields {
+            let at = format!("{base}/spec/fields/{}", safe_key(name));
+            let items: Vec<(String, &Value)> = match value {
+                Value::Array(list) => list
+                    .iter()
+                    .enumerate()
+                    .map(|(index, item)| (format!("{at}/{index}"), item))
+                    .collect(),
+                other => vec![(at, other)],
+            };
+            for (location, item) in items {
+                if let Value::String(text) = item
+                    && carries_credential(&format!("{name}: {text}"))
+                {
+                    errors.push(credential_error(location));
+                }
+            }
+        }
+    }
+    if let Some(links) = spec.get("links").and_then(Value::as_array) {
+        for (index, link) in links.iter().enumerate() {
+            if let (Some(label), Some(url)) = (
+                link.get("label").and_then(Value::as_str),
+                link.get("url").and_then(Value::as_str),
+            ) && carries_credential(&format!("{label}: {url}"))
+            {
+                errors.push(credential_error(format!("{base}/spec/links/{index}")));
+            }
         }
     }
 }
@@ -318,7 +425,8 @@ fn validate_type_definition(
                 "suggestions are only valid on string, enum, and list fields".to_owned(),
             ));
         }
-        if field.value_type.scalar() == Some(RegistryScalarType::Enum)
+        if (field.value_type.scalar() == Some(RegistryScalarType::Enum)
+            || field.items == Some(RegistryScalarType::Enum))
             && field.suggestions.is_empty()
         {
             errors.push(invalid(
@@ -362,6 +470,12 @@ fn validate_field_value(
                 for (index, element) in items.iter().enumerate() {
                     if !scalar_matches(item, element) {
                         errors.push(mismatch(format!("{location}/{index}"), scalar_name(item)));
+                    } else if items[..index].contains(element) {
+                        errors.push(diagnostic(
+                            "FM_SCHEMA_REGISTRY_DUPLICATE_ITEM",
+                            format!("{location}/{index}"),
+                            "a list field must not repeat an item",
+                        ));
                     }
                 }
             }
@@ -489,6 +603,38 @@ pub(crate) fn validate_registry(
                 ));
             }
         }
+        let mut tags = BTreeSet::new();
+        for (index, tag) in entry.tags.iter().enumerate() {
+            if !is_slug(tag) {
+                errors.push(diagnostic(
+                    "FM_SCHEMA_REGISTRY_INVALID_TAG",
+                    format!("{base}/spec/tags/{index}"),
+                    "a tag must be a lowercase slug of at most 63 characters",
+                ));
+            } else if !tags.insert(tag.as_str()) {
+                errors.push(diagnostic(
+                    "FM_SCHEMA_REGISTRY_INVALID_TAG",
+                    format!("{base}/spec/tags/{index}"),
+                    "a tag must not repeat",
+                ));
+            }
+        }
+        for (index, link) in entry.links.iter().enumerate() {
+            if !is_url(&link.url) {
+                errors.push(diagnostic(
+                    "FM_SCHEMA_REGISTRY_INVALID_LINK",
+                    format!("{base}/spec/links/{index}/url"),
+                    "a link must be an http, https, or ssh URL with a host and no credentials, ",
+                ));
+            }
+            if link.label.trim().is_empty() || link.label.chars().any(char::is_control) {
+                errors.push(diagnostic(
+                    "FM_SCHEMA_REGISTRY_INVALID_LINK",
+                    format!("{base}/spec/links/{index}/label"),
+                    "a link label must be non-blank single-line text",
+                ));
+            }
+        }
         if let Some(key) = entry_key(type_spec, &entry) {
             if is_key_value(&key) {
                 if let Some(first) = keys.insert((entry.entry_type.clone(), key), base.clone()) {
@@ -533,7 +679,13 @@ pub(crate) fn validate_registry(
         let allowed = types.get(&entry.entry_type).map(|t| &t.spec.relations);
         for (index, relation) in entry.relations.iter().enumerate() {
             let at = format!("{base}/spec/relations/{index}");
-            if allowed.is_some_and(|list| !list.contains(&relation.relation_type)) {
+            if !is_slug(&relation.relation_type) {
+                errors.push(diagnostic(
+                    "FM_SCHEMA_REGISTRY_INVALID_RELATION_TYPE",
+                    format!("{at}/type"),
+                    "a relation type must be a lowercase slug",
+                ));
+            } else if allowed.is_some_and(|list| !list.contains(&relation.relation_type)) {
                 errors.push(diagnostic(
                     "FM_SCHEMA_REGISTRY_RELATION_NOT_ALLOWED",
                     format!("{at}/type"),
@@ -546,6 +698,7 @@ pub(crate) fn validate_registry(
             check_target(
                 &at,
                 &relation.target,
+                &types,
                 &keys,
                 &known,
                 &mut errors,
@@ -559,6 +712,7 @@ pub(crate) fn validate_registry(
 fn check_target(
     at: &str,
     target: &RegistryRelationTarget,
+    types: &BTreeMap<String, TypeEntry>,
     keys: &BTreeMap<(String, String), String>,
     known: &BTreeMap<&str, BTreeSet<String>>,
     errors: &mut Vec<Diagnostic>,
@@ -582,7 +736,13 @@ fn check_target(
     match target {
         RegistryRelationTarget::Registry(reference) => match reference.split_once('/') {
             Some((type_name, key)) if is_slug(type_name) && is_key_value(key) => {
-                if !keys.contains_key(&(type_name.to_owned(), key.to_ascii_lowercase())) {
+                if !types.contains_key(type_name) {
+                    errors.push(diagnostic(
+                        "FM_SCHEMA_REGISTRY_UNKNOWN_TARGET_TYPE",
+                        location.clone(),
+                        "the relation target names a Registry type that is neither defined nor built in",
+                    ));
+                } else if !keys.contains_key(&(type_name.to_owned(), key.to_ascii_lowercase())) {
                     warnings.push(dangling("Registry entry in this revision"));
                 }
             }
