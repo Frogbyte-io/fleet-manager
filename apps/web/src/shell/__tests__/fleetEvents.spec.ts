@@ -41,6 +41,7 @@ describe('fleet event query invalidation', () => {
   const cases: [string, ...string[][]][] = [
     ['machine.changed', ['fleet', 'machines'], ['machine', 'm1'], ['machines', 'matrix'], ['skills', 'machines']],
     ['operation.changed', ['operation', 'o1']],
+    ['request.changed', ['requests', 'list']],
     ['lease.changed', ['lab', 'leases'], ['lab', 'provisions']],
     ['onboarding.changed', ['add', 'drafts'], ['onboarding-draft', 'd1']],
     ['proxmox.changed', ['fleet', 'proxmox-accounts'], ['fleet', 'proxmox-discovery', 'a1'], ['fleet', 'proxmox-guests', 'a1'], ['machine', 'm1']],

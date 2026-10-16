@@ -8,6 +8,7 @@ const listMachines = vi.fn()
 const listOnboardingDrafts = vi.fn()
 const listAuditEvents = vi.fn()
 const listOperations = vi.fn()
+const listActionRequests = vi.fn()
 const listProxmoxAccounts = vi.fn()
 const discoverProxmoxCluster = vi.fn()
 const listProxmoxGuests = vi.fn()
@@ -24,6 +25,7 @@ vi.mock('@frogbyte-io/fleet-api-client', () => ({
   listOnboardingDrafts: (...a: unknown[]) => listOnboardingDrafts(...a),
   listAuditEvents: (...a: unknown[]) => listAuditEvents(...a),
   listOperations: (...a: unknown[]) => listOperations(...a),
+  listActionRequests: (...a: unknown[]) => listActionRequests(...a),
   listProxmoxAccounts: (...a: unknown[]) => listProxmoxAccounts(...a),
   discoverProxmoxCluster: (...a: unknown[]) => discoverProxmoxCluster(...a),
   listProxmoxGuests: (...a: unknown[]) => listProxmoxGuests(...a),
@@ -59,6 +61,7 @@ function everythingFine() {
   listOnboardingDrafts.mockResolvedValue(ok(page([])))
   listAuditEvents.mockResolvedValue(ok(page([])))
   listOperations.mockResolvedValue(ok(page([])))
+  listActionRequests.mockResolvedValue(ok(page([])))
   listProxmoxAccounts.mockResolvedValue(ok(page([])))
   listImageRecipes.mockResolvedValue(ok(page([])))
   listLabTemplates.mockResolvedValue(ok(page([])))
@@ -86,7 +89,7 @@ function row(wrapper: Awaited<ReturnType<typeof mountPage>>, source: string) {
 enableAutoUnmount(afterEach)
 
 beforeEach(() => {
-  for (const mock of [listMachines, listOnboardingDrafts, listAuditEvents, listOperations, listProxmoxAccounts, discoverProxmoxCluster, listProxmoxGuests, listImageRecipes, listImageRecipeVersions, listLabTemplates, listLabLeases, getSystemInfo, listDesiredDrift, getLabLease])
+  for (const mock of [listMachines, listOnboardingDrafts, listAuditEvents, listOperations, listActionRequests, listProxmoxAccounts, discoverProxmoxCluster, listProxmoxGuests, listImageRecipes, listImageRecipeVersions, listLabTemplates, listLabLeases, getSystemInfo, listDesiredDrift, getLabLease])
     mock.mockReset()
   everythingFine()
 })
@@ -159,6 +162,23 @@ describe('Overview attention queue', () => {
     const wrapper = await mountPage()
     expect(row(wrapper, 'operation-blocked').text()).toContain('approve frogenv')
     expect(row(wrapper, 'operation-blocked').attributes('href')).toBe('/operations?op=op-9')
+  })
+
+  it('lists a pending action request and links to it in the approval inbox', async () => {
+    listActionRequests.mockResolvedValue(ok(page([
+      { id: 'req-1', actionId: 'coolify.application.redeploy', target: 'app-1', requester: 'agent-7', reason: 'ship the fix', state: 'pending', createdAt: 5 },
+      { id: 'req-2', actionId: 'coolify.application.redeploy', target: 'app-2', requester: 'agent-7', reason: 'old', state: 'succeeded', createdAt: 4 },
+    ])))
+    const wrapper = await mountPage()
+    expect(row(wrapper, 'request-pending').text()).toContain('coolify.application.redeploy on app-1 awaits approval')
+    expect(row(wrapper, 'request-pending').attributes('href')).toBe('/requests?request=req-1')
+    expect(wrapper.findAll('[data-testid="attention-request-pending"]')).toHaveLength(1)
+  })
+
+  it('names action requests when they could not be loaded', async () => {
+    listActionRequests.mockResolvedValue(ok({ code: 'denied', message: 'no' }, 403))
+    const wrapper = await mountPage()
+    expect(wrapper.text()).toContain('action requests')
   })
 
   it('lists a changed Proxmox fingerprint and links to Proxmox', async () => {
