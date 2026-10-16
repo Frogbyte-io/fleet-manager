@@ -10922,7 +10922,8 @@
           "itemCount",
           "attemptedAt",
           "stale",
-          "partial"
+          "partial",
+          "truncated"
         ],
         "properties": {
           "attemptedAt": {
@@ -10968,6 +10969,10 @@
           "stale": {
             "type": "boolean",
             "description": "Whether the items are stale: the latest attempt failed, the class was\nnever listed, or the last success is old."
+          },
+          "truncated": {
+            "type": "boolean",
+            "description": "Whether the stored items were cut to fit the snapshot size bound."
           }
         }
       },
@@ -11163,7 +11168,7 @@
           },
           "kind": {
             "type": "string",
-            "description": "`unauthorized`, `insufficient_permission`, `not_found`,\n`unreachable`, `timeout`, or `invalid_response`."
+            "description": "`unauthorized`, `insufficient_permission`, `not_found`,\n`unreachable`, `timeout`, `rate_limited`, or `invalid_response`."
           }
         }
       },
@@ -11174,6 +11179,7 @@
           "accountId",
           "recordedAt",
           "evaluatedAt",
+          "warnings",
           "classes",
           "servers",
           "projects",
@@ -11252,6 +11258,13 @@
               "null"
             ],
             "description": "The Coolify version last seen."
+          },
+          "warnings": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Warnings from the latest run, such as a token that can read\nsensitive values (use a read-only token)."
           }
         }
       },
@@ -11262,19 +11275,24 @@
           "uuid",
           "name",
           "description",
-          "environments"
+          "environments",
+          "detailsStale"
         ],
         "properties": {
           "description": {
             "type": "string",
             "description": "The description."
           },
+          "detailsStale": {
+            "type": "boolean",
+            "description": "Whether the environments could not be refreshed by the latest run."
+          },
           "environments": {
             "type": "array",
             "items": {
               "$ref": "#/components/schemas/CoolifyEnvironmentDto"
             },
-            "description": "The environments."
+            "description": "The environments; carried from the previous run when `detailsStale`."
           },
           "name": {
             "type": "string",
@@ -11342,7 +11360,8 @@
           "uuid",
           "name",
           "description",
-          "fqdns"
+          "fqdns",
+          "detailsStale"
         ],
         "properties": {
           "createdAt": {
@@ -11355,6 +11374,10 @@
           "description": {
             "type": "string",
             "description": "The description."
+          },
+          "detailsStale": {
+            "type": "boolean",
+            "description": "Whether the hostnames could not be refreshed by the latest run."
           },
           "environmentId": {
             "type": [
@@ -11369,7 +11392,7 @@
             "items": {
               "type": "string"
             },
-            "description": "The public hostnames of its applications."
+            "description": "The public hostnames of its applications; carried from the previous\nrun when `detailsStale`."
           },
           "name": {
             "type": "string",
@@ -19267,6 +19290,7 @@
               "accountId",
               "recordedAt",
               "evaluatedAt",
+              "warnings",
               "classes",
               "servers",
               "projects",
@@ -19345,6 +19369,13 @@
                   "null"
                 ],
                 "description": "The Coolify version last seen."
+              },
+              "warnings": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                },
+                "description": "Warnings from the latest run, such as a token that can read\nsensitive values (use a read-only token)."
               }
             }
           }

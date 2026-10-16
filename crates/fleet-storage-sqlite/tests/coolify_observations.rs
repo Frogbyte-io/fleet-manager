@@ -34,35 +34,54 @@ fn snapshot() -> CoolifySnapshot {
                 name: "edge".to_owned(),
                 ..CoolifyServer::default()
             }],
+            truncated: false,
         },
+        warnings: vec!["use a read-only token".to_owned()],
         ..CoolifySnapshot::default()
     }
 }
 
-#[tokio::test]
-async fn a_snapshot_round_trips_and_is_replaced_in_place() {
+async fn rig() -> (
+    tempfile::TempDir,
+    ExternalAccountRepository,
+    CoolifyObservationRepository,
+) {
     let dir = tempfile::tempdir().expect("a temp directory");
     let store = Store::open(&dir.path().join("fleet.db"))
         .await
         .expect("the store must open");
-    let accounts = ExternalAccountRepository::new(store.pool().clone());
-    let repo = CoolifyObservationRepository::new(store.pool().clone());
+    (
+        dir,
+        ExternalAccountRepository::new(store.pool().clone()),
+        CoolifyObservationRepository::new(store.pool().clone()),
+    )
+}
+
+#[tokio::test]
+async fn a_snapshot_round_trips_and_is_replaced_in_place() {
+    let (_dir, accounts, repo) = rig().await;
     let created = accounts
         .create(&account("https://c.example.test"))
         .await
         .expect("account");
 
     assert!(repo.load(&created.id).await.expect("load").is_none());
-    repo.save(&created.id, &snapshot(), 100)
-        .await
-        .expect("save");
+    assert!(
+        repo.save(&created.id, &snapshot(), 100, created.updated_at)
+            .await
+            .expect("save")
+    );
     let (loaded, recorded_at) = repo.load(&created.id).await.expect("load").expect("row");
     assert_eq!(loaded, snapshot());
     assert_eq!(recorded_at, 100);
 
     let mut newer = snapshot();
     newer.version = Some("4.5.0".to_owned());
-    repo.save(&created.id, &newer, 200).await.expect("replace");
+    assert!(
+        repo.save(&created.id, &newer, 200, created.updated_at)
+            .await
+            .expect("replace")
+    );
     let (loaded, recorded_at) = repo.load(&created.id).await.expect("load").expect("row");
     assert_eq!(loaded.version.as_deref(), Some("4.5.0"));
     assert_eq!(recorded_at, 200);
@@ -70,17 +89,12 @@ async fn a_snapshot_round_trips_and_is_replaced_in_place() {
 
 #[tokio::test]
 async fn the_snapshot_goes_with_the_account_and_with_a_changed_origin() {
-    let dir = tempfile::tempdir().expect("a temp directory");
-    let store = Store::open(&dir.path().join("fleet.db"))
-        .await
-        .expect("the store must open");
-    let accounts = ExternalAccountRepository::new(store.pool().clone());
-    let repo = CoolifyObservationRepository::new(store.pool().clone());
+    let (_dir, accounts, repo) = rig().await;
     let created = accounts
         .create(&account("https://c.example.test"))
         .await
         .expect("account");
-    repo.save(&created.id, &snapshot(), 100)
+    repo.save(&created.id, &snapshot(), 100, created.updated_at)
         .await
         .expect("save");
 
@@ -92,19 +106,49 @@ async fn the_snapshot_goes_with_the_account_and_with_a_changed_origin() {
     assert!(repo.load(&created.id).await.expect("load").is_some());
 
     // A subject change drops it.
-    accounts
+    let moved = accounts
         .update(&created.id, &account("https://other.example.test"), true)
         .await
         .expect("move");
     assert!(repo.load(&created.id).await.expect("load").is_none());
 
-    repo.save(&created.id, &snapshot(), 100)
-        .await
-        .expect("save");
+    assert!(
+        repo.save(&created.id, &snapshot(), 100, moved.updated_at)
+            .await
+            .expect("save")
+    );
     accounts.delete(&created.id).await.expect("delete");
     assert!(repo.load(&created.id).await.expect("load").is_none());
     assert!(
-        repo.save(&created.id, &snapshot(), 100).await.is_err(),
+        !repo
+            .save(&created.id, &snapshot(), 100, moved.updated_at)
+            .await
+            .expect("a gone account is not an error"),
         "a snapshot cannot outlive its account"
     );
+}
+
+#[tokio::test]
+async fn a_run_started_before_an_account_change_cannot_store_its_result() {
+    let (_dir, accounts, repo) = rig().await;
+    let created = accounts
+        .create(&account("https://c.example.test"))
+        .await
+        .expect("account");
+    // The account is edited (a new origin) while a run that started from
+    // `created` is still in flight.
+    std::thread::sleep(std::time::Duration::from_millis(5));
+    let moved = accounts
+        .update(&created.id, &account("https://other.example.test"), true)
+        .await
+        .expect("move");
+    assert_ne!(moved.updated_at, created.updated_at);
+    assert!(
+        !repo
+            .save(&created.id, &snapshot(), 100, created.updated_at)
+            .await
+            .expect("save"),
+        "the stale run's result must be discarded"
+    );
+    assert!(repo.load(&created.id).await.expect("load").is_none());
 }

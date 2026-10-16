@@ -38,7 +38,7 @@ use crate::external_accounts::{
     ExternalAccount, ExternalAccountError, ExternalAccountPort, ExternalCredentialStore,
 };
 use crate::operation::AuditPort;
-use fleet_core::{ExternalProviderKind, SensitiveString, SystemClock};
+use fleet_core::{ExternalProviderKind, SensitiveString, SystemClock, base_url_is_loopback};
 
 /// How long a successful class observation stays fresh.
 pub const OBSERVATION_STALE_AFTER_MS: i64 = 15 * 60 * 1000;
@@ -88,9 +88,12 @@ pub struct CoolifyProject {
     pub name: String,
     /// The operator's description.
     pub description: String,
-    /// The environments, empty when their fetch failed (see the class
-    /// failure).
+    /// The environments. When their fetch failed, the previous run's are
+    /// carried forward if known (and `details_stale` is set), else empty.
     pub environments: Vec<CoolifyEnvironment>,
+    /// Whether the environments could not be refreshed by the latest run.
+    #[serde(default)]
+    pub details_stale: bool,
 }
 
 /// A deployed application.
@@ -139,8 +142,12 @@ pub struct CoolifyService {
     pub service_type: Option<String>,
     /// The numeric environment id.
     pub environment_id: Option<i64>,
-    /// The public hostnames of the service's applications.
+    /// The public hostnames of the service's applications; carried forward
+    /// from the previous run when their fetch failed (`details_stale`).
     pub fqdns: Vec<String>,
+    /// Whether the hostnames could not be refreshed by the latest run.
+    #[serde(default)]
+    pub details_stale: bool,
     /// When Coolify created it.
     pub created_at: Option<String>,
     /// When Coolify last changed it.
@@ -258,6 +265,8 @@ pub enum FailureKind {
     Unreachable,
     /// A request or the whole run timed out.
     Timeout,
+    /// Coolify answered HTTP 429, or the run's own request budget ran out.
+    RateLimited,
     /// The answer was not the documented shape, or an unexpected status.
     InvalidResponse,
 }
@@ -272,6 +281,7 @@ impl FailureKind {
             Self::NotFound => "not_found",
             Self::Unreachable => "unreachable",
             Self::Timeout => "timeout",
+            Self::RateLimited => "rate_limited",
             Self::InvalidResponse => "invalid_response",
         }
     }
@@ -318,6 +328,8 @@ pub struct RawCoolifyDiscovery {
     pub databases: ClassResult<CoolifyDatabase>,
     /// Recent deployments.
     pub deployments: ClassResult<CoolifyDeployment>,
+    /// Run-level warnings, such as a token that can read sensitive values.
+    pub warnings: Vec<String>,
 }
 
 /// The discovery port. The provider crate implements it; tests implement it
@@ -343,6 +355,9 @@ pub struct ClassObservation<T> {
     pub partial: Vec<ClassFailure>,
     /// The items from the last attempt that produced any.
     pub items: Vec<T>,
+    /// Whether the stored items were cut to fit the snapshot size bound.
+    #[serde(default)]
+    pub truncated: bool,
 }
 
 impl<T> Default for ClassObservation<T> {
@@ -353,6 +368,7 @@ impl<T> Default for ClassObservation<T> {
             failure: None,
             partial: Vec::new(),
             items: Vec::new(),
+            truncated: false,
         }
     }
 }
@@ -370,6 +386,7 @@ impl<T: Clone> ClassObservation<T> {
                     failure: None,
                     partial: Vec::new(),
                     items,
+                    truncated: false,
                 }
             }
             ClassResult::Partial(mut items, partial) => {
@@ -380,6 +397,7 @@ impl<T: Clone> ClassObservation<T> {
                     failure: None,
                     partial,
                     items,
+                    truncated: false,
                 }
             }
             ClassResult::Failed(failure) => Self {
@@ -388,6 +406,7 @@ impl<T: Clone> ClassObservation<T> {
                 failure: Some(failure),
                 partial: Vec::new(),
                 items: previous.map(|p| p.items.clone()).unwrap_or_default(),
+                truncated: previous.is_some_and(|p| p.truncated),
             },
         }
     }
@@ -423,13 +442,20 @@ pub struct CoolifySnapshot {
     pub databases: ClassObservation<CoolifyDatabase>,
     /// Recent deployments.
     pub deployments: ClassObservation<CoolifyDeployment>,
+    /// Warnings from the latest run (for example, a token that can read
+    /// sensitive values: use a read-only token).
+    #[serde(default)]
+    pub warnings: Vec<String>,
 }
+
+/// The most snapshot JSON bytes kept per account before classes are cut.
+pub const MAX_SNAPSHOT_BYTES: usize = 4 * 1024 * 1024;
 
 impl CoolifySnapshot {
     /// Folds a run into the previous snapshot.
     #[must_use]
     pub fn fold(previous: Option<&Self>, raw: RawCoolifyDiscovery, now: i64) -> Self {
-        Self {
+        let mut folded = Self {
             version: raw
                 .version
                 .or_else(|| previous.and_then(|p| p.version.clone())),
@@ -447,6 +473,76 @@ impl CoolifySnapshot {
                 raw.deployments,
                 now,
             ),
+            warnings: raw.warnings,
+        };
+        if let Some(previous) = previous {
+            folded.carry_forward_details(previous);
+        }
+        folded
+    }
+
+    /// Items whose follow-up request failed keep the previous run's detail
+    /// (environments, hostnames), flagged `details_stale`.
+    fn carry_forward_details(&mut self, previous: &Self) {
+        for project in &mut self.projects.items {
+            if project.details_stale
+                && project.environments.is_empty()
+                && let Some(old) = previous
+                    .projects
+                    .items
+                    .iter()
+                    .find(|p| p.uuid == project.uuid)
+            {
+                project.environments.clone_from(&old.environments);
+            }
+        }
+        for service in &mut self.services.items {
+            if service.details_stale
+                && service.fqdns.is_empty()
+                && let Some(old) = previous
+                    .services
+                    .items
+                    .iter()
+                    .find(|s| s.uuid == service.uuid)
+            {
+                service.fqdns.clone_from(&old.fqdns);
+            }
+        }
+    }
+
+    /// Cuts the largest classes (halving them) until the serialized
+    /// snapshot fits `max_bytes`, flagging each cut class `truncated`,
+    /// instead of failing the save.
+    pub fn bound(&mut self, max_bytes: usize) {
+        loop {
+            let size = serde_json::to_vec(self).map_or(0, |bytes| bytes.len());
+            if size <= max_bytes {
+                return;
+            }
+            let counts = [
+                self.servers.items.len(),
+                self.projects.items.len(),
+                self.applications.items.len(),
+                self.services.items.len(),
+                self.databases.items.len(),
+                self.deployments.items.len(),
+            ];
+            let Some((index, count)) = counts.iter().copied().enumerate().max_by_key(|(_, n)| *n)
+            else {
+                return;
+            };
+            if count == 0 {
+                return;
+            }
+            let keep = count / 2;
+            match index {
+                0 => cut(&mut self.servers, keep),
+                1 => cut(&mut self.projects, keep),
+                2 => cut(&mut self.applications, keep),
+                3 => cut(&mut self.services, keep),
+                4 => cut(&mut self.databases, keep),
+                _ => cut(&mut self.deployments, keep),
+            }
         }
     }
 
@@ -494,6 +590,11 @@ impl CoolifySnapshot {
     }
 }
 
+fn cut<T>(class: &mut ClassObservation<T>, keep: usize) {
+    class.items.truncate(keep);
+    class.truncated = true;
+}
+
 /// A snapshot with its account and the evaluation time, as the read model
 /// returns it.
 #[derive(Clone, Debug, PartialEq)]
@@ -517,17 +618,21 @@ pub trait CoolifyObservationPort: fmt::Debug + Send + Sync {
     ///
     /// Fails when the backend errors.
     async fn load(&self, account_id: &str) -> Result<Option<(CoolifySnapshot, i64)>, String>;
-    /// Stores (replacing) an account's snapshot.
+    /// Stores (replacing) an account's snapshot, only while the account is
+    /// still in the state the run started from (`account_updated_at`).
+    /// Returns `false`, storing nothing, when the account changed or is
+    /// gone.
     ///
     /// # Errors
     ///
-    /// Fails when the account is gone or the backend errors.
+    /// Fails when the backend errors.
     async fn save(
         &self,
         account_id: &str,
         snapshot: &CoolifySnapshot,
         recorded_at: i64,
-    ) -> Result<(), String>;
+        account_updated_at: i64,
+    ) -> Result<bool, String>;
 }
 
 /// The Coolify discovery use cases.
@@ -620,6 +725,12 @@ impl CoolifyDiscovery {
             Some(id),
         )?;
         let account = self.coolify_account(id).await?;
+        if account.base_url.starts_with("http://") && !base_url_is_loopback(&account.base_url) {
+            return Err(ExternalAccountError::Invalid {
+                detail: "a Coolify base URL must use https (a loopback address is allowed); update the account"
+                    .to_owned(),
+            });
+        }
         let token = self
             .credentials
             .load(id)
@@ -641,14 +752,45 @@ impl CoolifyDiscovery {
             .discover(&account.base_url, &SensitiveString::new(token))
             .await;
         let now = SystemClock::now_unix_millis();
-        let snapshot = CoolifySnapshot::fold(previous.as_ref().map(|(s, _)| s), raw, now);
-        self.observations
-            .save(id, &snapshot, now)
+        let mut snapshot = CoolifySnapshot::fold(previous.as_ref().map(|(s, _)| s), raw, now);
+        snapshot.bound(MAX_SNAPSHOT_BYTES);
+        let saved = match self
+            .observations
+            .save(id, &snapshot, now, account.updated_at)
             .await
-            .map_err(|detail| ExternalAccountError::Backend {
-                context: "coolify observations",
-                detail,
-            })?;
+        {
+            Ok(saved) => saved,
+            Err(detail) => {
+                // Record the failure; the detail stays out of the audit log.
+                self.audit(
+                    principal,
+                    id,
+                    "coolify_discovery_failed",
+                    &[("label", account.label.as_str()), ("stage", "save")],
+                )
+                .await?;
+                return Err(ExternalAccountError::Backend {
+                    context: "coolify observations",
+                    detail,
+                });
+            }
+        };
+        if !saved {
+            self.audit(
+                principal,
+                id,
+                "coolify_discovery_discarded",
+                &[
+                    ("label", account.label.as_str()),
+                    ("reason", "account_changed"),
+                ],
+            )
+            .await?;
+            return Err(ExternalAccountError::Conflict {
+                detail: "the account changed while discovery ran, so its result was discarded; run discovery again"
+                    .to_owned(),
+            });
+        }
         let counts = snapshot
             .summary(now)
             .into_iter()

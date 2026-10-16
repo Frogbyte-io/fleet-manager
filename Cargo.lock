@@ -772,6 +772,7 @@ dependencies = [
  "fleet-core",
  "reqwest",
  "serde_json",
+ "tempfile",
  "tokio",
 ]
 

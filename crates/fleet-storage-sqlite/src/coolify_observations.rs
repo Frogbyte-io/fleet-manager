@@ -49,22 +49,28 @@ impl CoolifyObservationPort for CoolifyObservationRepository {
         account_id: &str,
         snapshot: &CoolifySnapshot,
         recorded_at: i64,
-    ) -> Result<(), String> {
+        account_updated_at: i64,
+    ) -> Result<bool, String> {
         let json = serde_json::to_string(snapshot)
             .map_err(|error| format!("snapshot encode failed: {error}"))?;
         if json.len() > MAX_SNAPSHOT_BYTES {
             return Err("the discovery snapshot is larger than the storage limit".to_owned());
         }
-        sqlx::query(
-            "INSERT INTO coolify_observations (account_id, snapshot, recorded_at) VALUES (?1, ?2, ?3) \
+        // Conditional on the account still being in the state the run
+        // started from: a changed or removed account stores nothing.
+        let done = sqlx::query(
+            "INSERT INTO coolify_observations (account_id, snapshot, recorded_at) \
+             SELECT ?1, ?2, ?3 WHERE EXISTS \
+               (SELECT 1 FROM external_accounts WHERE id = ?1 AND updated_at = ?4) \
              ON CONFLICT(account_id) DO UPDATE SET snapshot = excluded.snapshot, recorded_at = excluded.recorded_at",
         )
         .bind(account_id)
         .bind(json)
         .bind(recorded_at)
+        .bind(account_updated_at)
         .execute(&self.pool)
         .await
         .map_err(|error| format!("save failed: {error}"))?;
-        Ok(())
+        Ok(done.rows_affected() > 0)
     }
 }

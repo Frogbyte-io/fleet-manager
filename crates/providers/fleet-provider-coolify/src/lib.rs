@@ -36,7 +36,7 @@ pub mod discovery;
 pub mod scrub;
 mod translate;
 
-pub use discovery::{CoolifyHttpSource, discover};
+pub use discovery::{CoolifyHttpSource, Limits, discover, discover_with};
 
 use std::error::Error as _;
 use std::time::Duration;
@@ -166,10 +166,8 @@ fn message_of(body: &str) -> String {
     serde_json::from_str::<serde_json::Value>(body)
         .ok()
         .and_then(|value| value.get("message")?.as_str().map(str::to_owned))
+        .map(|message| translate::clean(&message, 120))
         .unwrap_or_default()
-        .chars()
-        .take(120)
-        .collect()
 }
 
 /// The host of a `Location` header value, nothing else (the path and query

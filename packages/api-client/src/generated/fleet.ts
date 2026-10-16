@@ -878,7 +878,7 @@ export interface CoolifyFailureDto {
   detail: string;
   /**
      * `unauthorized`, `insufficient_permission`, `not_found`,
-     * `unreachable`, `timeout`, or `invalid_response`.
+     * `unreachable`, `timeout`, `rate_limited`, or `invalid_response`.
      */
   kind: string;
 }
@@ -912,6 +912,8 @@ export interface CoolifyClassDto {
      * never listed, or the last success is old.
      */
   stale: boolean;
+  /** Whether the stored items were cut to fit the snapshot size bound. */
+  truncated: boolean;
 }
 
 /**
@@ -1031,7 +1033,9 @@ export interface CoolifyEnvironmentDto {
 export interface CoolifyProjectDto {
   /** The description. */
   description: string;
-  /** The environments. */
+  /** Whether the environments could not be refreshed by the latest run. */
+  detailsStale: boolean;
+  /** The environments; carried from the previous run when `detailsStale`. */
   environments: CoolifyEnvironmentDto[];
   /** The name. */
   name: string;
@@ -1079,12 +1083,17 @@ export interface CoolifyServiceDto {
   createdAt?: string | null;
   /** The description. */
   description: string;
+  /** Whether the hostnames could not be refreshed by the latest run. */
+  detailsStale: boolean;
   /**
      * The numeric environment id.
      * @nullable
      */
   environmentId?: number | null;
-  /** The public hostnames of its applications. */
+  /**
+     * The public hostnames of its applications; carried from the previous
+     * run when `detailsStale`.
+     */
   fqdns: string[];
   /** The name. */
   name: string;
@@ -1136,6 +1145,11 @@ export interface CoolifyObservationDto {
      * @nullable
      */
   version?: string | null;
+  /**
+     * Warnings from the latest run, such as a token that can read
+     * sensitive values (use a read-only token).
+     */
+  warnings: string[];
 }
 
 /**
@@ -5526,6 +5540,11 @@ export type ResourceCoolifyObservationDtoData = {
      * @nullable
      */
   version?: string | null;
+  /**
+     * Warnings from the latest run, such as a token that can read
+     * sensitive values (use a read-only token).
+     */
+  warnings: string[];
 };
 
 /**

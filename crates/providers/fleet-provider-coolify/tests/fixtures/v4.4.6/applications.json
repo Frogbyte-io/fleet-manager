@@ -53,7 +53,7 @@
     "description": null,
     "fqdn": null,
     "git_commit_sha": "HEAD",
-    "docker_registry_image_name": "ghcr.io/example-org/legacy",
+    "docker_registry_image_name": "registry.example.test/example-org/legacy",
     "docker_registry_image_tag": "1.4.2",
     "build_pack": "dockerimage",
     "ports_exposes": "3000",

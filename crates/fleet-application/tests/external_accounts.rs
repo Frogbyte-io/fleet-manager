@@ -749,3 +749,36 @@ async fn a_failed_credential_write_restores_the_previous_origin() {
         Some(TOKEN)
     );
 }
+
+#[tokio::test]
+async fn coolify_requires_https_except_on_literal_loopback() {
+    let rig = rig(ProbeStatus::Ok);
+    let allow = Deny(vec![]);
+    let coolify_at = |url: &str| CreateExternalAccount {
+        kind: ExternalProviderKind::Coolify,
+        label: "deploy".to_owned(),
+        base_url: Some(url.to_owned()),
+        scope_id: None,
+        notes: None,
+    };
+    for url in [
+        "http://coolify.example.test",
+        "http://localhost.example.test",
+    ] {
+        let error = rig
+            .service
+            .create(&allow, &principal(), coolify_at(url), TOKEN)
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("https"), "{url}: {error}");
+    }
+    rig.service
+        .create(
+            &allow,
+            &principal(),
+            coolify_at("http://127.0.0.1:9"),
+            TOKEN,
+        )
+        .await
+        .expect("a loopback stub");
+}

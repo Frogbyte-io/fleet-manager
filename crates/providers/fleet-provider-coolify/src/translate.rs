@@ -19,7 +19,7 @@ const SHORT: usize = 200;
 const LONG: usize = 500;
 const MAX_FQDNS: usize = 50;
 
-fn clean(text: &str, bound: usize) -> String {
+pub(crate) fn clean(text: &str, bound: usize) -> String {
     let flat = flatten_control_characters(&redact_credentials(&redact_url_credentials(text)));
     flat.chars().take(bound).collect()
 }
@@ -123,6 +123,7 @@ pub(crate) fn project(value: &Value) -> Option<CoolifyProject> {
         name: text_or_empty(value, "name", SHORT),
         description: text_or_empty(value, "description", LONG),
         environments: Vec::new(),
+        details_stale: false,
     })
 }
 
@@ -172,6 +173,7 @@ pub(crate) fn service(value: &Value) -> Option<CoolifyService> {
         service_type: text(value, "service_type", 100),
         environment_id: int(value, "environment_id"),
         fqdns: Vec::new(),
+        details_stale: false,
         created_at: text(value, "created_at", 40),
         updated_at: text(value, "updated_at", 40),
     })

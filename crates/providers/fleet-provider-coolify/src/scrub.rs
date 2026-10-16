@@ -5,23 +5,30 @@
 //!
 //! * a key that can hold a secret (password, secret, token, key, env,
 //!   compose, logs, command, label, script, url) is removed entirely;
+//! * object keys that are not plain `snake_case` words (a map keyed by a
+//!   service or host name, say) are replaced by `key-N`;
 //! * identities and names become stable pseudonyms (the same real value
 //!   maps to the same pseudonym across files, so references still line up);
-//! * hostnames become `*.example.test`, addresses become TEST-NET-1;
+//! * hostnames become `*.example.test`, addresses become TEST-NET-1
+//!   (192.0.2.0/24), image names are never kept;
 //! * a short allow-list of enumerations (status, build pack, proxy type,
 //!   service type) and all numbers and booleans pass through;
 //! * every other string becomes `[scrubbed]`.
 //!
-//! [`capture`] fetches the read-only routes of a live instance and returns
-//! the scrubbed bodies; [`ensure_clean`] refuses output that still carries
-//! the token or a credential shape. The ignored test
-//! `tests/capture.rs` drives them for an operator.
+//! [`capture`] fetches the read-only routes a discovery run requests
+//! (bounded) and returns the scrubbed bodies under the file names the
+//! contract tests read; [`ensure_clean`] refuses output that still carries
+//! the token, the instance host, a credential shape, a hostname outside
+//! `.example.test`, or an address outside 192.0.2.0/24; [`check_fixture_dir`]
+//! applies the same check to a committed fixture directory. The ignored test
+//! `tests/capture.rs` drives capture for an operator.
 
 use std::collections::HashMap;
+use std::path::Path;
 
 use serde_json::{Map, Value};
 
-use crate::discovery::{Route, Run};
+use crate::discovery::{Limits, Route, Run};
 
 /// Key fragments whose values are never kept.
 const DROP_FRAGMENTS: [&str; 18] = [
@@ -57,10 +64,13 @@ const VERBATIM_KEYS: [&str; 8] = [
     "updated_at",
 ];
 
+/// How many projects, services, and applications are expanded.
+const EXPAND: usize = 3;
+
 /// The stable pseudonym table for one capture session.
 #[derive(Debug, Default)]
 pub struct FixtureScrubber {
-    names: HashMap<(String, String), String>,
+    names: HashMap<(String, String), usize>,
 }
 
 impl FixtureScrubber {
@@ -72,16 +82,36 @@ impl FixtureScrubber {
 
     fn pseudonym(&mut self, class: &str, real: &str) -> usize {
         let next = self.names.len() + 1;
-        let entry = self
+        *self
             .names
             .entry((class.to_owned(), real.to_owned()))
-            .or_insert_with(|| next.to_string());
-        entry.parse().unwrap_or(0)
+            .or_insert(next)
+    }
+
+    /// The pseudonym a real Coolify uuid gets in every scrubbed file.
+    pub fn uuid_for(&mut self, real: &str) -> String {
+        let n = self.pseudonym("uuid", real);
+        format!("uuid{n:020}")
     }
 
     /// Scrubs one JSON document.
     pub fn scrub(&mut self, value: &Value) -> Value {
         self.value(None, value)
+    }
+
+    /// A kept object key must be a plain `snake_case` word.
+    fn key(&mut self, name: &str) -> String {
+        if !name.is_empty()
+            && name.len() <= 40
+            && name
+                .chars()
+                .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_')
+        {
+            name.to_owned()
+        } else {
+            let n = self.pseudonym("key", name);
+            format!("key-{n}")
+        }
     }
 
     fn value(&mut self, key: Option<&str>, value: &Value) -> Value {
@@ -97,7 +127,8 @@ impl FixtureScrubber {
                     {
                         continue;
                     }
-                    out.insert(name.clone(), self.value(Some(&lower), inner));
+                    let kept = self.key(name);
+                    out.insert(kept, self.value(Some(&lower), inner));
                 }
                 Value::Object(out)
             }
@@ -147,10 +178,7 @@ impl FixtureScrubber {
             };
         }
         match key {
-            "uuid" | "deployment_uuid" | "parent_deployment_uuid" => {
-                let n = self.pseudonym("uuid", text);
-                format!("uuid{n:020}")
-            }
+            "uuid" | "deployment_uuid" | "parent_deployment_uuid" => self.uuid_for(text),
             "name" | "application_name" | "server_name" => {
                 let n = self.pseudonym("name", text);
                 format!("name-{n}")
@@ -185,48 +213,143 @@ impl FixtureScrubber {
                 format!("registry.example.test/image-{n}")
             }
             "docker_registry_image_tag" => "latest".to_owned(),
-            "image" => text
-                .rsplit('/')
-                .next()
-                .unwrap_or("image")
-                .chars()
-                .take(60)
-                .collect(),
+            // The name can identify a private project; keep at most the tag.
+            "image" => match text.rsplit_once(':') {
+                Some((_, tag)) if !tag.contains('/') && tag.len() <= 40 => {
+                    format!("[scrubbed]:{tag}")
+                }
+                _ => "[scrubbed]".to_owned(),
+            },
             _ => "[scrubbed]".to_owned(),
         }
     }
 }
 
-/// Refuses scrubbed output that still carries the token or a credential
-/// shape.
+/// Refuses scrubbed output that still carries the token, the instance host,
+/// a credential shape, a hostname outside `.example.test`, or an address
+/// outside 192.0.2.0/24.
 ///
 /// # Errors
 ///
 /// Fails with a description that never includes the offending text.
-pub fn ensure_clean(output: &str, token: &str) -> Result<(), String> {
+pub fn ensure_clean(output: &str, token: &str, instance_host: Option<&str>) -> Result<(), String> {
     if !token.is_empty() && output.contains(token) {
         return Err("the scrubbed output still contains the token".to_owned());
+    }
+    if let Some(host) = instance_host.filter(|host| !host.is_empty())
+        && output
+            .to_ascii_lowercase()
+            .contains(&host.to_ascii_lowercase())
+    {
+        return Err("the scrubbed output still contains the instance host".to_owned());
     }
     if fleet_core::redact_credentials(output) != output {
         return Err("the scrubbed output still contains a credential shape".to_owned());
     }
+    for word in output.split(|c: char| !(c.is_ascii_alphanumeric() || c == '.' || c == '-')) {
+        let word = word.trim_matches(|c| c == '.' || c == '-');
+        if !word.contains('.') {
+            continue;
+        }
+        let labels: Vec<&str> = word.split('.').collect();
+        if labels.iter().any(|label| label.is_empty()) {
+            continue;
+        }
+        if labels.len() == 4
+            && labels
+                .iter()
+                .all(|label| label.parse::<u8>().is_ok() && !label.is_empty())
+        {
+            if !word.starts_with("192.0.2.") {
+                return Err("the scrubbed output has an address outside 192.0.2.0/24".to_owned());
+            }
+            continue;
+        }
+        let last = labels[labels.len() - 1];
+        if last.len() >= 2 && last.chars().all(|c| c.is_ascii_alphabetic()) {
+            let ours = word == "example.test" || word.ends_with(".example.test");
+            if !ours {
+                return Err(
+                    "the scrubbed output has a hostname that does not end in .example.test"
+                        .to_owned(),
+                );
+            }
+        }
+    }
     Ok(())
 }
 
-/// Fetches the read-only routes of a live instance and returns
-/// `(file name, scrubbed body)` pairs for a fixture directory. One project,
-/// service, and application are expanded to keep the set small.
+/// Checks every file of a fixture directory the way capture checks its own
+/// output, and validates `version.txt`.
+///
+/// # Errors
+///
+/// Fails on an unreadable directory, a bad version file, or a file that is
+/// not clean.
+pub fn check_fixture_dir(dir: &Path) -> Result<(), String> {
+    let entries = std::fs::read_dir(dir).map_err(|error| format!("{}: {error}", dir.display()))?;
+    for entry in entries {
+        let path = entry.map_err(|error| error.to_string())?.path();
+        let name = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or_default()
+            .to_owned();
+        let body = std::fs::read_to_string(&path).map_err(|error| format!("{name}: {error}"))?;
+        if name == "version.txt" && !crate::looks_like_version(&body) {
+            return Err("version.txt is not a Coolify version".to_owned());
+        }
+        ensure_clean(&body, "", None).map_err(|error| format!("{name}: {error}"))?;
+    }
+    Ok(())
+}
+
+/// The instance host of a base URL.
+fn host_of(base_url: &str) -> Option<String> {
+    let rest = base_url.split_once("://")?.1;
+    let authority = rest.split(['/', '?', '#']).next()?;
+    let host = authority.rsplit('@').next()?;
+    let host = host.rsplit_once(':').map_or(host, |(host, _)| host);
+    (!host.is_empty()).then(|| host.to_owned())
+}
+
+/// The uuids of the first `count` items of a raw list.
+fn uuids_of(raw: &str, count: usize) -> Vec<String> {
+    serde_json::from_str::<Value>(raw)
+        .ok()
+        .map(|value| {
+            let items = match &value {
+                Value::Array(items) => items.iter().collect::<Vec<_>>(),
+                Value::Object(map) => map.values().collect(),
+                _ => Vec::new(),
+            };
+            items
+                .into_iter()
+                .filter_map(|item| item.get("uuid")?.as_str().map(str::to_owned))
+                .take(count)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Fetches the read-only routes a discovery run requests, expanding at most
+/// three projects, services, and applications, and returns `(file name,
+/// scrubbed body)` pairs for a fixture directory, named the way the
+/// contract tests read them (`project-environments-<uuid>.json`,
+/// `service-applications-<uuid>.json`, `application-deployments-<uuid>.json`
+/// with pseudonymized uuids).
 ///
 /// # Errors
 ///
 /// Fails when a route cannot be read or the scrubbed output is not clean.
 pub async fn capture(base_url: &str, token: &str) -> Result<Vec<(String, String)>, String> {
+    let limits = Limits::default();
     let client = reqwest::Client::builder()
-        .timeout(crate::REQUEST_TIMEOUT)
+        .timeout(limits.request_timeout)
         .redirect(reqwest::redirect::Policy::none())
         .build()
         .map_err(|_| "the HTTP client could not start".to_owned())?;
-    let run = Run::new(client, base_url, token);
+    let run = Run::new(client, base_url, token, limits);
     let mut scrubber = FixtureScrubber::new();
     let mut files: Vec<(String, String)> = Vec::new();
     let version = run
@@ -250,41 +373,42 @@ pub async fn capture(base_url: &str, token: &str) -> Result<Vec<(String, String)
         files.push((name.to_owned(), scrub_text(&mut scrubber, &body)?));
         raw_bodies.push(body);
     }
-    // One project, service, and application are expanded; the uuids are the
-    // real ones, so they are read from the raw lists before scrubbing.
-    let first_uuid = |raw: &str| {
-        serde_json::from_str::<Value>(raw)
-            .ok()
-            .and_then(|value| value.as_array()?.first().cloned())
-            .and_then(|item| item.get("uuid")?.as_str().map(str::to_owned))
-    };
-    let projects = first_uuid(&raw_bodies[1]);
-    let applications = first_uuid(&raw_bodies[2]);
-    let services = first_uuid(&raw_bodies[3]);
-    for (name, route) in [
-        (
-            "project-environments.json",
-            projects.as_deref().map(Route::ProjectEnvironments),
-        ),
-        (
-            "service-applications.json",
-            services.as_deref().map(Route::ServiceApplications),
-        ),
-        (
-            "application-deployments.json",
-            applications.as_deref().map(Route::ApplicationDeployments),
-        ),
-    ] {
-        if let Some(route) = route {
-            let body = run
-                .raw(route)
-                .await
-                .map_err(|failure| format!("{name}: {}", failure.detail))?;
-            files.push((name.to_owned(), scrub_text(&mut scrubber, &body)?));
+    // The real uuids come from the raw lists; the file names carry their
+    // pseudonyms, which match the scrubbed lists.
+    for real in uuids_of(&raw_bodies[1], EXPAND) {
+        let body = run
+            .raw(Route::ProjectEnvironments(&real))
+            .await
+            .map_err(|failure| format!("project environments: {}", failure.detail))?;
+        let name = format!("project-environments-{}.json", scrubber.uuid_for(&real));
+        files.push((name, scrub_text(&mut scrubber, &body)?));
+    }
+    for real in uuids_of(&raw_bodies[3], EXPAND) {
+        match run.raw(Route::ServiceApplications(&real)).await {
+            Ok(body) => {
+                let name = format!("service-applications-{}.json", scrubber.uuid_for(&real));
+                files.push((name, scrub_text(&mut scrubber, &body)?));
+            }
+            // Before Coolify v4.2.0 the route does not exist; discovery
+            // tolerates that, so capture does too.
+            Err(failure) if failure.kind == fleet_application::coolify::FailureKind::NotFound => {}
+            Err(failure) => return Err(format!("service applications: {}", failure.detail)),
         }
     }
+    for real in uuids_of(&raw_bodies[2], EXPAND) {
+        let body = run
+            .raw(Route::ApplicationDeployments(&real))
+            .await
+            .map_err(|failure| format!("application deployments: {}", failure.detail))?;
+        let name = format!("application-deployments-{}.json", scrubber.uuid_for(&real));
+        files.push((name, scrub_text(&mut scrubber, &body)?));
+    }
+    let host = host_of(base_url);
     for (name, body) in &files {
-        ensure_clean(body, token).map_err(|error| format!("{name}: {error}"))?;
+        if name == "version.txt" && !crate::looks_like_version(body) {
+            return Err("version.txt: not a Coolify version".to_owned());
+        }
+        ensure_clean(body, token, host.as_deref()).map_err(|error| format!("{name}: {error}"))?;
     }
     Ok(files)
 }
@@ -310,6 +434,7 @@ mod tests {
             "ip": "10.1.2.3",
             "fqdn": "https://api.real-company.com,https://x.real-company.com",
             "status": "running:healthy",
+            "image": "registry.real-company.com/team/secret-app:1.2",
             "postgres_password": "hunter2",
             "manual_webhook_secret_github": "whsec",
             "docker_compose_raw": "services: {}",
@@ -317,6 +442,7 @@ mod tests {
             "logs": "token=abc",
             "settings": {"is_reachable": true, "api_token": "t"},
             "unknown_field": "free text with real-company.com",
+            "real-company.com": {"x": "y"},
             "port": 22,
         });
         let out = scrubber.scrub(&input);
@@ -330,23 +456,49 @@ mod tests {
             "whsec",
             "services",
             "token=abc",
+            "secret-app",
         ] {
             assert!(!rendered.contains(leak), "{leak} leaked: {rendered}");
         }
         assert_eq!(out["status"], "running:healthy");
         assert_eq!(out["port"], 22);
+        assert_eq!(out["image"], "[scrubbed]:1.2");
         assert_eq!(out["settings"]["is_reachable"], true);
         assert_eq!(out["unknown_field"], "[scrubbed]");
         assert!(out.get("postgres_password").is_none());
-        // Stable across files.
+        assert!(
+            out.as_object()
+                .unwrap()
+                .keys()
+                .any(|key| key.starts_with("key-")),
+            "hostname keys are pseudonyms"
+        );
+        // Stable across files, and the same as the file-name pseudonym.
         let again = scrubber.scrub(&json!({"uuid": "abc123real"}));
         assert_eq!(again["uuid"], out["uuid"]);
+        assert_eq!(again["uuid"], scrubber.uuid_for("abc123real"));
     }
 
     #[test]
-    fn ensure_clean_refuses_the_token_and_credential_shapes() {
-        assert!(ensure_clean("{\"a\": \"b\"}", "tok-123").is_ok());
-        assert!(ensure_clean("x tok-123 y", "tok-123").is_err());
-        assert!(ensure_clean("https://user:hunter2@example.test/x", "tok").is_err());
+    fn ensure_clean_refuses_the_token_hosts_addresses_and_credential_shapes() {
+        let ok = |text: &str| ensure_clean(text, "tok-123", Some("coolify.corp.com"));
+        assert!(ok("{\"a\": \"https://app-1.example.test\", \"ip\": \"192.0.2.9\"}").is_ok());
+        assert!(ok("{\"version\": \"4.4.6\", \"at\": \"2026-01-15T10:00:00.000000Z\"}").is_ok());
+        assert!(ok("x tok-123 y").is_err());
+        assert!(ok("see https://user:hunter2@example.test/x").is_err());
+        assert!(ok("https://COOLIFY.corp.com/api").is_err());
+        assert!(ok("https://app.other.com/x").is_err());
+        assert!(ok("ip 10.0.0.5").is_err());
+        assert!(ok("ip 198.51.100.7").is_err());
+        assert!(ok("host example.test.evil.org").is_err());
+    }
+
+    #[test]
+    fn the_instance_host_is_read_from_the_base_url() {
+        assert_eq!(
+            host_of("https://user@coolify.corp.com:8443/x").as_deref(),
+            Some("coolify.corp.com")
+        );
+        assert_eq!(host_of("http://127.0.0.1:9").as_deref(), Some("127.0.0.1"));
     }
 }

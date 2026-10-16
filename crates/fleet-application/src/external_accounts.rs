@@ -736,13 +736,10 @@ fn normalized(
     validate_label(label).map_err(|error| invalid(error.to_string()))?;
     validate_notes(notes).map_err(|error| invalid(error.to_string()))?;
     let base_url = normalize_base_url(base_url).map_err(|error| invalid(error.to_string()))?;
-    // The Cloudflare token travels as a bearer header: https only, except
-    // for a loopback address (a local stub).
-    if kind == ExternalProviderKind::Cloudflare
-        && !base_url.starts_with("https://")
-        && !base_url_is_loopback(&base_url)
-    {
-        return Err(invalid("a cloudflare base URL must use https"));
+    // The token travels as a bearer header: https only, except for a
+    // literal loopback address (a local stub). Both kinds.
+    if !base_url.starts_with("https://") && !base_url_is_loopback(&base_url) {
+        return Err(invalid(format!("a {kind} base URL must use https")));
     }
     if let Some(scope) = scope_id {
         if kind != ExternalProviderKind::Cloudflare {

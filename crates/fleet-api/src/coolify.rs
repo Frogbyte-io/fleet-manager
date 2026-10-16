@@ -31,7 +31,7 @@ use crate::error::{ApiError, ApiErrorResponse};
 #[serde(rename_all = "camelCase")]
 pub struct CoolifyFailureDto {
     /// `unauthorized`, `insufficient_permission`, `not_found`,
-    /// `unreachable`, `timeout`, or `invalid_response`.
+    /// `unreachable`, `timeout`, `rate_limited`, or `invalid_response`.
     pub kind: String,
     /// A short explanation; never a token, URL, or response body.
     pub detail: String,
@@ -66,6 +66,8 @@ pub struct CoolifyClassDto {
     pub failure: Option<CoolifyFailureDto>,
     /// Why the latest attempt was only partial.
     pub partial: Vec<CoolifyFailureDto>,
+    /// Whether the stored items were cut to fit the snapshot size bound.
+    pub truncated: bool,
 }
 
 /// A Coolify server.
@@ -134,8 +136,10 @@ pub struct CoolifyProjectDto {
     pub name: String,
     /// The description.
     pub description: String,
-    /// The environments.
+    /// The environments; carried from the previous run when `detailsStale`.
     pub environments: Vec<CoolifyEnvironmentDto>,
+    /// Whether the environments could not be refreshed by the latest run.
+    pub details_stale: bool,
 }
 
 impl From<CoolifyProject> for CoolifyProjectDto {
@@ -145,6 +149,7 @@ impl From<CoolifyProject> for CoolifyProjectDto {
             name: item.name,
             description: item.description,
             environments: item.environments.into_iter().map(Into::into).collect(),
+            details_stale: item.details_stale,
         }
     }
 }
@@ -214,8 +219,11 @@ pub struct CoolifyServiceDto {
     pub service_type: Option<String>,
     /// The numeric environment id.
     pub environment_id: Option<i64>,
-    /// The public hostnames of its applications.
+    /// The public hostnames of its applications; carried from the previous
+    /// run when `detailsStale`.
     pub fqdns: Vec<String>,
+    /// Whether the hostnames could not be refreshed by the latest run.
+    pub details_stale: bool,
     /// When Coolify created it.
     pub created_at: Option<String>,
     /// When Coolify last changed it.
@@ -232,6 +240,7 @@ impl From<CoolifyService> for CoolifyServiceDto {
             service_type: item.service_type,
             environment_id: item.environment_id,
             fqdns: item.fqdns,
+            details_stale: item.details_stale,
             created_at: item.created_at,
             updated_at: item.updated_at,
         }
@@ -339,6 +348,9 @@ pub struct CoolifyObservationDto {
     pub recorded_at: i64,
     /// The time staleness was evaluated against (epoch millis).
     pub evaluated_at: i64,
+    /// Warnings from the latest run, such as a token that can read
+    /// sensitive values (use a read-only token).
+    pub warnings: Vec<String>,
     /// The per-class state: stamps, staleness, and failures.
     pub classes: Vec<CoolifyClassDto>,
     /// Servers.
@@ -364,6 +376,7 @@ fn class_dto<T>(name: &str, observation: &ClassObservation<T>, now: i64) -> Cool
         stale: observation.is_stale(now),
         failure: observation.failure.as_ref().map(Into::into),
         partial: observation.partial.iter().map(Into::into).collect(),
+        truncated: observation.truncated,
     }
 }
 
@@ -388,6 +401,7 @@ impl From<CoolifyObservation> for CoolifyObservationDto {
             version: snapshot.version,
             recorded_at: observation.recorded_at,
             evaluated_at: observation.evaluated_at,
+            warnings: snapshot.warnings,
             classes,
             servers: convert(snapshot.servers.items),
             projects: convert(snapshot.projects.items),

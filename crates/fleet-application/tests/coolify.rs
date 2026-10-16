@@ -10,8 +10,9 @@ use fleet_application::authz::{
     AccessRequest, ActingPrincipal, Authorizer, Decision, Permission, ReasonId,
 };
 use fleet_application::coolify::{
-    ClassFailure, ClassResult, CoolifyDatabase, CoolifyDiscovery, CoolifyObservationPort,
-    CoolifyServer, CoolifySnapshot, CoolifySource, FailureKind, RawCoolifyDiscovery,
+    ClassFailure, ClassResult, CoolifyDatabase, CoolifyDeployment, CoolifyDiscovery,
+    CoolifyEnvironment, CoolifyObservationPort, CoolifyProject, CoolifyServer, CoolifyService,
+    CoolifySnapshot, CoolifySource, FailureKind, RawCoolifyDiscovery,
 };
 use fleet_application::external_accounts::{
     ExternalAccount, ExternalAccountError, ExternalAccountPort, ExternalCredentialStore,
@@ -113,20 +114,38 @@ impl CoolifySource for Source {
     }
 }
 
+/// Stores snapshots; `changed` simulates the account changing mid-run and
+/// `fail` a backend failure.
 #[derive(Debug, Default)]
-struct Observations(Mutex<HashMap<String, (CoolifySnapshot, i64)>>);
+struct Observations {
+    rows: Mutex<HashMap<String, (CoolifySnapshot, i64)>>,
+    changed: Mutex<bool>,
+    fail: Mutex<bool>,
+}
 
 #[async_trait]
 impl CoolifyObservationPort for Observations {
     async fn load(&self, id: &str) -> Result<Option<(CoolifySnapshot, i64)>, String> {
-        Ok(self.0.lock().unwrap().get(id).cloned())
+        Ok(self.rows.lock().unwrap().get(id).cloned())
     }
-    async fn save(&self, id: &str, snapshot: &CoolifySnapshot, at: i64) -> Result<(), String> {
-        self.0
+    async fn save(
+        &self,
+        id: &str,
+        snapshot: &CoolifySnapshot,
+        at: i64,
+        _account_updated_at: i64,
+    ) -> Result<bool, String> {
+        if *self.fail.lock().unwrap() {
+            return Err("disk full with secret-ish text".to_owned());
+        }
+        if *self.changed.lock().unwrap() {
+            return Ok(false);
+        }
+        self.rows
             .lock()
             .unwrap()
             .insert(id.to_owned(), (snapshot.clone(), at));
-        Ok(())
+        Ok(true)
     }
 }
 
@@ -178,6 +197,7 @@ fn all_ok() -> RawCoolifyDiscovery {
             ..CoolifyDatabase::default()
         }]),
         deployments: ClassResult::Complete(vec![]),
+        warnings: Vec::new(),
     }
 }
 
@@ -259,7 +279,7 @@ async fn discovery_resolves_the_token_just_in_time_records_and_audits_without_it
     );
     assert_eq!(observation.snapshot.version.as_deref(), Some("4.4.6"));
     assert_eq!(observation.snapshot.servers.items.len(), 1);
-    assert!(rig.observations.0.lock().unwrap().contains_key("c1"));
+    assert!(rig.observations.rows.lock().unwrap().contains_key("c1"));
     assert_eq!(
         events(&rig.audit),
         ["coolify_discovering", "coolify_discovered"]
@@ -341,7 +361,7 @@ async fn running_discovery_is_authorized_centrally_before_any_credential_or_netw
     // Read permission alone does not run discovery either.
     assert!(rig.source.tokens.lock().unwrap().is_empty());
     assert!(events(&rig.audit).is_empty());
-    assert!(rig.observations.0.lock().unwrap().is_empty());
+    assert!(rig.observations.rows.lock().unwrap().is_empty());
 }
 
 #[tokio::test]
@@ -369,4 +389,137 @@ async fn only_coolify_accounts_with_a_stored_token_can_be_discovered() {
     ));
     assert!(no_secret.source.tokens.lock().unwrap().is_empty());
     assert!(events(&no_secret.audit).is_empty());
+}
+
+#[tokio::test]
+async fn a_result_for_an_account_that_changed_mid_run_is_discarded_and_audited() {
+    let rig = rig(vec![all_ok()], true);
+    *rig.observations.changed.lock().unwrap() = true;
+    let result = rig
+        .service
+        .discover(&Deny(vec![]), &principal(), "c1")
+        .await;
+    let Err(ExternalAccountError::Conflict { detail }) = result else {
+        panic!("a changed account must conflict");
+    };
+    assert!(detail.contains("discarded"), "{detail}");
+    assert!(rig.observations.rows.lock().unwrap().is_empty());
+    assert_eq!(
+        events(&rig.audit),
+        ["coolify_discovering", "coolify_discovery_discarded"]
+    );
+}
+
+#[tokio::test]
+async fn a_failed_save_is_audited_without_the_backend_detail() {
+    let rig = rig(vec![all_ok()], true);
+    *rig.observations.fail.lock().unwrap() = true;
+    let result = rig
+        .service
+        .discover(&Deny(vec![]), &principal(), "c1")
+        .await;
+    assert!(matches!(result, Err(ExternalAccountError::Backend { .. })));
+    assert_eq!(
+        events(&rig.audit),
+        ["coolify_discovering", "coolify_discovery_failed"]
+    );
+    let audit = format!("{:?}", rig.audit.0.lock().unwrap());
+    assert!(!audit.contains("secret-ish"), "{audit}");
+}
+
+#[tokio::test]
+async fn an_http_base_url_off_loopback_is_refused_before_the_token_is_used() {
+    let mut stored = account("c1", ExternalProviderKind::Coolify);
+    stored.base_url = "http://coolify.example.test".to_owned();
+    let source = Arc::new(Source::default());
+    let mut credentials = Credentials::default();
+    credentials.0.insert("c1".to_owned(), TOKEN.to_owned());
+    let service = CoolifyDiscovery::new(
+        Arc::new(Accounts(vec![stored])),
+        Arc::new(credentials),
+        source.clone(),
+        Arc::new(Observations::default()),
+        Arc::new(Audit::default()),
+    );
+    let result = service.discover(&Deny(vec![]), &principal(), "c1").await;
+    assert!(matches!(result, Err(ExternalAccountError::Invalid { .. })));
+    assert!(source.tokens.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn items_whose_follow_up_failed_keep_the_previous_details_flagged_stale() {
+    let mut first = all_ok();
+    first.projects = ClassResult::Complete(vec![CoolifyProject {
+        uuid: "p1".to_owned(),
+        environments: vec![CoolifyEnvironment {
+            id: 1,
+            name: "production".to_owned(),
+            description: String::new(),
+        }],
+        ..CoolifyProject::default()
+    }]);
+    first.services = ClassResult::Complete(vec![CoolifyService {
+        uuid: "v1".to_owned(),
+        fqdns: vec!["https://a.example.test".to_owned()],
+        ..CoolifyService::default()
+    }]);
+    let mut second = all_ok();
+    let failure = ClassFailure {
+        kind: FailureKind::Timeout,
+        detail: "x".to_owned(),
+    };
+    second.projects = ClassResult::Partial(
+        vec![CoolifyProject {
+            uuid: "p1".to_owned(),
+            details_stale: true,
+            ..CoolifyProject::default()
+        }],
+        vec![failure.clone()],
+    );
+    second.services = ClassResult::Partial(
+        vec![CoolifyService {
+            uuid: "v1".to_owned(),
+            details_stale: true,
+            ..CoolifyService::default()
+        }],
+        vec![failure],
+    );
+    let rig = rig(vec![first, second], true);
+    for _ in 0..2 {
+        rig.service
+            .discover(&Deny(vec![]), &principal(), "c1")
+            .await
+            .expect("discovery");
+    }
+    let read = rig
+        .service
+        .observation(&Deny(vec![]), &principal(), "c1")
+        .await
+        .expect("read");
+    let project = &read.snapshot.projects.items[0];
+    assert!(project.details_stale);
+    assert_eq!(project.environments.len(), 1);
+    let service = &read.snapshot.services.items[0];
+    assert!(service.details_stale);
+    assert_eq!(service.fqdns, ["https://a.example.test"]);
+}
+
+#[test]
+fn an_oversized_snapshot_is_cut_per_class_and_flagged_instead_of_failing() {
+    let mut run = all_ok();
+    run.deployments = ClassResult::Complete(
+        (0..400)
+            .map(|n| CoolifyDeployment {
+                deployment_uuid: format!("dep{n:040}"),
+                ..CoolifyDeployment::default()
+            })
+            .collect(),
+    );
+    let mut snapshot = CoolifySnapshot::fold(None, run, 1);
+    snapshot.bound(8 * 1024);
+    let size = serde_json::to_vec(&snapshot).unwrap().len();
+    assert!(size <= 8 * 1024, "{size}");
+    assert!(snapshot.deployments.truncated);
+    assert!(!snapshot.servers.truncated, "small classes are left alone");
+    assert_eq!(snapshot.servers.items.len(), 1);
 }
