@@ -1,6 +1,6 @@
 ---
 name: fleet
-description: Operate this Fleet Manager controller with fleetctl --output json - check controller health, find machines, prepare projects on a machine, run disposable Lab environments, follow operations, and read skill deployments. Use whenever a task involves the fleet's machines, Lab leases, or controller state.
+description: Operate this Fleet Manager controller with fleetctl --output json - check controller health, find machines, prepare projects on a machine, run disposable Lab environments, follow operations, and read skill deployments, and look up or record the Registry (domains, services, vendors, accounts, hosting). Use whenever a task involves the fleet's machines, Lab leases, controller state, or where something is hosted or who provides it.
 ---
 
 # Fleet
@@ -207,6 +207,64 @@ fleetctl --output json lab release <lease-id>
   resolves `placement_ambiguous` and `placement_unresolved` but not
   `placement_no_candidate` (that fails with `template_missing`).
 - `lab release` is the low-level `lab destroy`; the same rules apply.
+
+## Registry
+
+The Registry is the fleet's descriptive record of things that are not
+machines: domains and services (vendor, plan, cost, renewal, where it is
+hosted, where its login lives). It lives in Fleet Git; the controller serves
+the active revision read-only.
+
+**Look up before you ask the user, and record what you learn.** Consult it
+when a task mentions a domain, a vendor, a subscription, an account, or "where
+is X hosted / who runs X / who pays for X".
+
+```bash
+fleetctl --output json registry types
+fleetctl --output json registry find aptabase
+fleetctl --output json registry list --type domain --tag client-x
+fleetctl --output json registry get domain/example.com
+fleetctl --output json registry list --target domain/example.com --relation used-by
+```
+
+Built-in types: `domain` (key `fqdn`) and `service` (key `slug`).
+`registry types` shows each type's fields and allowed relations. An address
+is `<type>/<key>`, for example `service/aptabase`.
+
+### Recording facts
+
+Reads use the controller. Edits change YAML in a local checkout of the Fleet
+Git repository (run from inside it or pass `--repo <path>`); nothing reaches
+the controller until you publish.
+
+```bash
+fleetctl --output json registry set domain/example.com --field registrar=Webhuset --field autoRenew=true --field loginAt="1Password (Webhuset vault)"
+fleetctl --output json registry set service/aptabase --field name=Aptabase --field vendor=Aptabase
+fleetctl --output json registry relate domain/example.com used-by service/aptabase
+fleetctl --output json registry tags add domain/example.com client-x
+fleetctl --output json registry unset domain/example.com --field dnsHost
+fleetctl --output json registry validate
+fleetctl --output json registry publish -m "Record example.com registrar"
+```
+
+1. `set` creates or patches an entry; fields you omit stay as they are. Use
+   `relate <from> <relation> <target>` for links (`--remove` undoes one).
+   Relation targets are `<type>/<key>`, `machine:<name>`, or `project:<name>`.
+2. Nothing invalid is written: an unknown field, wrong value type, or
+   credential-looking value is refused with an `FM_SCHEMA_*` diagnostic.
+3. Run `registry validate` before publishing.
+4. `publish -m <message>` commits only Registry files, then follows the
+   controller's `registry.changeMode`. `direct` pushes to the default branch:
+   the change is live once the controller activates it. `pull-request` (the
+   default) pushes a branch and opens a pull request, or prints a compare URL:
+   the change is not live until a person merges it. In that case tell the
+   user and give them the link; do not claim the Registry changed.
+5. `rm` deletes an entry; do it only when the user asked for it.
+
+**Never write secrets into the Registry.** No passwords, tokens, recovery
+codes, or keys in any field, note, or tag. Use `loginAt` to say where a login
+lives, for example `1Password (Webhuset vault)`, never the credential itself.
+Record only what you verified or were told; leave unknown fields out.
 
 ## Operations
 
