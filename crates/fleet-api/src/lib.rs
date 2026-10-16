@@ -14,6 +14,7 @@
 pub mod apply;
 pub mod audit;
 pub mod auth;
+pub mod coolify;
 mod correlation;
 pub mod credentials;
 pub mod desired;
@@ -189,6 +190,16 @@ pub const API_BASE_PATH: &str = "/api/v1";
         tailnet::CorrelationCandidateDto,
         tailnet::ImportTailnetDeviceRequest,
         tailnet::TailnetStatusDto,
+        coolify::CoolifyObservationDto,
+        coolify::CoolifyClassDto,
+        coolify::CoolifyFailureDto,
+        coolify::CoolifyServerDto,
+        coolify::CoolifyProjectDto,
+        coolify::CoolifyEnvironmentDto,
+        coolify::CoolifyApplicationDto,
+        coolify::CoolifyServiceDto,
+        coolify::CoolifyDatabaseDto,
+        coolify::CoolifyDeploymentDto,
         external_accounts::CreateExternalAccountRequest,
         external_accounts::UpdateExternalAccountRequest,
         external_accounts::ExternalAccountDto,
@@ -418,6 +429,8 @@ pub fn api(state: Arc<operations::ApiState>) -> (Router, utoipa::openapi::OpenAp
                     external_accounts::delete_external_account
                 ))
                 .routes(routes!(external_accounts::probe_external_account))
+                .routes(routes!(coolify::discover_coolify_account))
+                .routes(routes!(coolify::get_coolify_observations))
                 .routes(routes!(proxmox::delete_proxmox_account))
                 .routes(routes!(proxmox::observe_proxmox_fingerprint))
                 .routes(routes!(proxmox::confirm_proxmox_fingerprint))

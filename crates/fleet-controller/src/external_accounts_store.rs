@@ -143,3 +143,23 @@ pub fn compose_external_accounts(
         Arc::new(fleet_storage_sqlite::AuditSink::new(pool.clone())),
     ))
 }
+
+/// Composes the Coolify discovery use case over the same account table, the
+/// same credential namespace, and the HTTP source (FM-1030).
+#[must_use]
+pub fn compose_coolify_discovery(
+    pool: &sqlx::SqlitePool,
+    secrets: Arc<SecretStore>,
+) -> Arc<fleet_application::coolify::CoolifyDiscovery> {
+    Arc::new(fleet_application::coolify::CoolifyDiscovery::new(
+        Arc::new(fleet_storage_sqlite::ExternalAccountRepository::new(
+            pool.clone(),
+        )),
+        Arc::new(SecretBackedExternalCredentials::new(secrets)),
+        Arc::new(fleet_provider_coolify::CoolifyHttpSource),
+        Arc::new(fleet_storage_sqlite::CoolifyObservationRepository::new(
+            pool.clone(),
+        )),
+        Arc::new(fleet_storage_sqlite::AuditSink::new(pool.clone())),
+    ))
+}

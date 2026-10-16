@@ -15,6 +15,7 @@
 pub mod action_requests;
 pub mod audit;
 pub mod build_addresses;
+pub mod coolify_observations;
 pub mod credentials;
 pub mod external_accounts;
 pub mod guest_links;
@@ -40,6 +41,7 @@ pub mod source;
 pub use action_requests::ActionRequestRepository;
 pub use audit::{AuditLedger, AuditSink};
 pub use build_addresses::BuildAddressRepository;
+pub use coolify_observations::CoolifyObservationRepository;
 pub use credentials::CredentialRepository;
 pub use external_accounts::ExternalAccountRepository;
 pub use guest_links::GuestLinkRepository;

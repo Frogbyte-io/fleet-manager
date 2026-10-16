@@ -1426,6 +1426,142 @@
         }
       }
     },
+    "/api/v1/external-accounts/{accountId}/coolify/discover": {
+      "post": {
+        "tags": [
+          "external-accounts"
+        ],
+        "summary": "Runs a read-only discovery of a Coolify account and records the\nsnapshot. An unreachable or refusing Coolify is a successful run whose\nper-class state says so; the previous items stay, marked stale.",
+        "description": "# Errors\n\nReturns the public error envelope on refusal, an unknown or non-Coolify\naccount, or a missing stored token.",
+        "operationId": "discoverCoolifyAccount",
+        "parameters": [
+          {
+            "name": "accountId",
+            "in": "path",
+            "description": "The Coolify account's identity.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The snapshot after the run.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Resource_CoolifyObservationDto"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The account is not a Coolify account.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The caller may not configure external accounts.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "The account does not exist.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The account's token is not in the secret store.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/external-accounts/{accountId}/coolify/observations": {
+      "get": {
+        "tags": [
+          "external-accounts"
+        ],
+        "summary": "Reads the cached Coolify snapshot of an account, with per-class stamps\nand staleness evaluated now.",
+        "description": "# Errors\n\nReturns the public error envelope on refusal, an unknown or non-Coolify\naccount, or when no discovery has run yet.",
+        "operationId": "getCoolifyObservations",
+        "parameters": [
+          {
+            "name": "accountId",
+            "in": "path",
+            "description": "The Coolify account's identity.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The cached snapshot.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Resource_CoolifyObservationDto"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The account is not a Coolify account.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The caller may not read external accounts.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "The account does not exist or has not been discovered yet.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/external-accounts/{accountId}/probe": {
       "post": {
         "tags": [
@@ -10988,6 +11124,603 @@
           }
         }
       },
+      "CoolifyApplicationDto": {
+        "type": "object",
+        "description": "A deployed application.",
+        "required": [
+          "uuid",
+          "name",
+          "description",
+          "status",
+          "fqdns"
+        ],
+        "properties": {
+          "buildPack": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The build pack."
+          },
+          "createdAt": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "When Coolify created it."
+          },
+          "description": {
+            "type": "string",
+            "description": "The description."
+          },
+          "dockerImage": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The image reference of an image application."
+          },
+          "environmentId": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "The numeric environment id."
+          },
+          "fqdns": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "The public hostnames and URLs."
+          },
+          "gitBranch": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The source branch."
+          },
+          "gitRepository": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The source repository, credentials removed."
+          },
+          "name": {
+            "type": "string",
+            "description": "The name."
+          },
+          "status": {
+            "type": "string",
+            "description": "Coolify's status, such as `running:healthy`."
+          },
+          "updatedAt": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "When Coolify last changed it."
+          },
+          "uuid": {
+            "type": "string",
+            "description": "Coolify's identity."
+          }
+        }
+      },
+      "CoolifyClassDto": {
+        "type": "object",
+        "description": "The observation state of one resource class.",
+        "required": [
+          "class",
+          "itemCount",
+          "attemptedAt",
+          "stale",
+          "partial",
+          "truncated"
+        ],
+        "properties": {
+          "attemptedAt": {
+            "type": "integer",
+            "format": "int64",
+            "description": "When the latest attempt ran (epoch millis)."
+          },
+          "class": {
+            "type": "string",
+            "description": "`servers`, `projects`, `applications`, `services`, `databases`, or\n`deployments`."
+          },
+          "failure": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/CoolifyFailureDto",
+                "description": "Why the latest attempt failed; the previous items are kept."
+              }
+            ]
+          },
+          "itemCount": {
+            "type": "integer",
+            "description": "How many items the snapshot holds for the class.",
+            "minimum": 0
+          },
+          "observedAt": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "When the items were last listed successfully; absent when never."
+          },
+          "partial": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/CoolifyFailureDto"
+            },
+            "description": "Why the latest attempt was only partial."
+          },
+          "stale": {
+            "type": "boolean",
+            "description": "Whether the items are stale: the latest attempt failed, the class was\nnever listed, or the last success is old."
+          },
+          "truncated": {
+            "type": "boolean",
+            "description": "Whether the stored items were cut to fit the snapshot size bound."
+          }
+        }
+      },
+      "CoolifyDatabaseDto": {
+        "type": "object",
+        "description": "A managed database. No credentials or connection URLs.",
+        "required": [
+          "uuid",
+          "name",
+          "description",
+          "status"
+        ],
+        "properties": {
+          "description": {
+            "type": "string",
+            "description": "The description."
+          },
+          "engine": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The engine, such as `postgresql`."
+          },
+          "environmentId": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "The numeric environment id."
+          },
+          "image": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The image reference."
+          },
+          "isPublic": {
+            "type": [
+              "boolean",
+              "null"
+            ],
+            "description": "Whether the database is exposed on a public port."
+          },
+          "name": {
+            "type": "string",
+            "description": "The name."
+          },
+          "publicPort": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "The public port."
+          },
+          "status": {
+            "type": "string",
+            "description": "Coolify's status."
+          },
+          "uuid": {
+            "type": "string",
+            "description": "Coolify's identity."
+          }
+        }
+      },
+      "CoolifyDeploymentDto": {
+        "type": "object",
+        "description": "One deployment of an application. No logs.",
+        "required": [
+          "deploymentUuid",
+          "status"
+        ],
+        "properties": {
+          "applicationName": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The application's name."
+          },
+          "applicationUuid": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The application's identity, when known."
+          },
+          "commit": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The commit."
+          },
+          "commitMessage": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The first line of the commit message."
+          },
+          "createdAt": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "When it was queued."
+          },
+          "deploymentUuid": {
+            "type": "string",
+            "description": "Coolify's identity."
+          },
+          "isApi": {
+            "type": [
+              "boolean",
+              "null"
+            ],
+            "description": "Whether the API started it."
+          },
+          "isWebhook": {
+            "type": [
+              "boolean",
+              "null"
+            ],
+            "description": "Whether a webhook started it."
+          },
+          "pullRequestId": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "The pull request number for preview deployments."
+          },
+          "serverName": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The server's name."
+          },
+          "status": {
+            "type": "string",
+            "description": "`queued`, `in_progress`, `finished`, `failed`, or `cancelled`."
+          },
+          "updatedAt": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "When it last changed."
+          }
+        }
+      },
+      "CoolifyEnvironmentDto": {
+        "type": "object",
+        "description": "An environment of a project.",
+        "required": [
+          "id",
+          "name",
+          "description"
+        ],
+        "properties": {
+          "description": {
+            "type": "string",
+            "description": "The description."
+          },
+          "id": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Coolify's numeric environment id."
+          },
+          "name": {
+            "type": "string",
+            "description": "The name."
+          }
+        }
+      },
+      "CoolifyFailureDto": {
+        "type": "object",
+        "description": "A classified, credential-free failure of one resource class.",
+        "required": [
+          "kind",
+          "detail"
+        ],
+        "properties": {
+          "detail": {
+            "type": "string",
+            "description": "A short explanation; never a token, URL, or response body."
+          },
+          "kind": {
+            "type": "string",
+            "description": "`unauthorized`, `insufficient_permission`, `not_found`,\n`unreachable`, `timeout`, `rate_limited`, or `invalid_response`."
+          }
+        }
+      },
+      "CoolifyObservationDto": {
+        "type": "object",
+        "description": "The stamped, stale-aware Coolify snapshot of one account.",
+        "required": [
+          "accountId",
+          "recordedAt",
+          "evaluatedAt",
+          "warnings",
+          "classes",
+          "servers",
+          "projects",
+          "applications",
+          "services",
+          "databases",
+          "deployments"
+        ],
+        "properties": {
+          "accountId": {
+            "type": "string",
+            "description": "The account the snapshot belongs to."
+          },
+          "applications": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/CoolifyApplicationDto"
+            },
+            "description": "Applications."
+          },
+          "classes": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/CoolifyClassDto"
+            },
+            "description": "The per-class state: stamps, staleness, and failures."
+          },
+          "databases": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/CoolifyDatabaseDto"
+            },
+            "description": "Databases."
+          },
+          "deployments": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/CoolifyDeploymentDto"
+            },
+            "description": "Recent deployments, newest first."
+          },
+          "evaluatedAt": {
+            "type": "integer",
+            "format": "int64",
+            "description": "The time staleness was evaluated against (epoch millis)."
+          },
+          "projects": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/CoolifyProjectDto"
+            },
+            "description": "Projects with their environments."
+          },
+          "recordedAt": {
+            "type": "integer",
+            "format": "int64",
+            "description": "When the snapshot was last written (epoch millis)."
+          },
+          "servers": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/CoolifyServerDto"
+            },
+            "description": "Servers."
+          },
+          "services": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/CoolifyServiceDto"
+            },
+            "description": "Services."
+          },
+          "version": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The Coolify version last seen."
+          },
+          "warnings": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Warnings from the latest run, such as a token that can read\nsensitive values (use a read-only token)."
+          }
+        }
+      },
+      "CoolifyProjectDto": {
+        "type": "object",
+        "description": "A project with its environments.",
+        "required": [
+          "uuid",
+          "name",
+          "description",
+          "environments",
+          "detailsStale"
+        ],
+        "properties": {
+          "description": {
+            "type": "string",
+            "description": "The description."
+          },
+          "detailsStale": {
+            "type": "boolean",
+            "description": "Whether the environments could not be refreshed by the latest run."
+          },
+          "environments": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/CoolifyEnvironmentDto"
+            },
+            "description": "The environments; carried from the previous run when `detailsStale`."
+          },
+          "name": {
+            "type": "string",
+            "description": "The name."
+          },
+          "uuid": {
+            "type": "string",
+            "description": "Coolify's identity."
+          }
+        }
+      },
+      "CoolifyServerDto": {
+        "type": "object",
+        "description": "A Coolify server.",
+        "required": [
+          "uuid",
+          "name",
+          "description",
+          "address"
+        ],
+        "properties": {
+          "address": {
+            "type": "string",
+            "description": "The address Coolify connects to."
+          },
+          "description": {
+            "type": "string",
+            "description": "The description."
+          },
+          "name": {
+            "type": "string",
+            "description": "The name."
+          },
+          "proxyType": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The proxy kind, when set."
+          },
+          "reachable": {
+            "type": [
+              "boolean",
+              "null"
+            ],
+            "description": "Whether Coolify considers it reachable."
+          },
+          "usable": {
+            "type": [
+              "boolean",
+              "null"
+            ],
+            "description": "Whether Coolify considers it usable."
+          },
+          "uuid": {
+            "type": "string",
+            "description": "Coolify's identity."
+          }
+        }
+      },
+      "CoolifyServiceDto": {
+        "type": "object",
+        "description": "A one-click or Compose service.",
+        "required": [
+          "uuid",
+          "name",
+          "description",
+          "fqdns",
+          "detailsStale"
+        ],
+        "properties": {
+          "createdAt": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "When Coolify created it."
+          },
+          "description": {
+            "type": "string",
+            "description": "The description."
+          },
+          "detailsStale": {
+            "type": "boolean",
+            "description": "Whether the hostnames could not be refreshed by the latest run."
+          },
+          "environmentId": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "The numeric environment id."
+          },
+          "fqdns": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "The public hostnames of its applications; carried from the previous\nrun when `detailsStale`."
+          },
+          "name": {
+            "type": "string",
+            "description": "The name."
+          },
+          "serviceType": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The one-click service type."
+          },
+          "status": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Coolify's status, when the list reports one."
+          },
+          "updatedAt": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "When Coolify last changed it."
+          },
+          "uuid": {
+            "type": "string",
+            "description": "Coolify's identity."
+          }
+        }
+      },
       "CorrelatedDeviceDto": {
         "type": "object",
         "description": "One tailnet device with its Fleet-machine candidates (evidence only).",
@@ -12381,6 +13114,13 @@
           "notes": {
             "type": "string",
             "description": "Free-form operator notes."
+          },
+          "policyViolation": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "A policy the stored record breaks: `https_required` for an http base\nURL that is not a loopback address. Such an account is never probed\nor discovered until its base URL is edited to https."
           },
           "updatedAt": {
             "type": "integer",
@@ -15420,6 +16160,13 @@
                 "notes": {
                   "type": "string",
                   "description": "Free-form operator notes."
+                },
+                "policyViolation": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "description": "A policy the stored record breaks: `https_required` for an http base\nURL that is not a loopback address. Such an account is never probed\nor discovered until its base URL is edited to https."
                 },
                 "updatedAt": {
                   "type": "integer",
@@ -19164,6 +19911,111 @@
           }
         }
       },
+      "Resource_CoolifyObservationDto": {
+        "type": "object",
+        "description": "A single resource.\n\nThe payload is nested under `data` so that later top-level fields are an\nadditive change rather than a breaking one.",
+        "required": [
+          "data"
+        ],
+        "properties": {
+          "data": {
+            "type": "object",
+            "description": "The stamped, stale-aware Coolify snapshot of one account.",
+            "required": [
+              "accountId",
+              "recordedAt",
+              "evaluatedAt",
+              "warnings",
+              "classes",
+              "servers",
+              "projects",
+              "applications",
+              "services",
+              "databases",
+              "deployments"
+            ],
+            "properties": {
+              "accountId": {
+                "type": "string",
+                "description": "The account the snapshot belongs to."
+              },
+              "applications": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/components/schemas/CoolifyApplicationDto"
+                },
+                "description": "Applications."
+              },
+              "classes": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/components/schemas/CoolifyClassDto"
+                },
+                "description": "The per-class state: stamps, staleness, and failures."
+              },
+              "databases": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/components/schemas/CoolifyDatabaseDto"
+                },
+                "description": "Databases."
+              },
+              "deployments": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/components/schemas/CoolifyDeploymentDto"
+                },
+                "description": "Recent deployments, newest first."
+              },
+              "evaluatedAt": {
+                "type": "integer",
+                "format": "int64",
+                "description": "The time staleness was evaluated against (epoch millis)."
+              },
+              "projects": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/components/schemas/CoolifyProjectDto"
+                },
+                "description": "Projects with their environments."
+              },
+              "recordedAt": {
+                "type": "integer",
+                "format": "int64",
+                "description": "When the snapshot was last written (epoch millis)."
+              },
+              "servers": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/components/schemas/CoolifyServerDto"
+                },
+                "description": "Servers."
+              },
+              "services": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/components/schemas/CoolifyServiceDto"
+                },
+                "description": "Services."
+              },
+              "version": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "description": "The Coolify version last seen."
+              },
+              "warnings": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                },
+                "description": "Warnings from the latest run, such as a token that can read\nsensitive values (use a read-only token)."
+              }
+            }
+          }
+        }
+      },
       "Resource_CredentialDto": {
         "type": "object",
         "description": "A single resource.\n\nThe payload is nested under `data` so that later top-level fields are an\nadditive change rather than a breaking one.",
@@ -19552,6 +20404,13 @@
               "notes": {
                 "type": "string",
                 "description": "Free-form operator notes."
+              },
+              "policyViolation": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "description": "A policy the stored record breaks: `https_required` for an http base\nURL that is not a loopback address. Such an account is never probed\nor discovered until its base URL is edited to https."
               },
               "updatedAt": {
                 "type": "integer",
