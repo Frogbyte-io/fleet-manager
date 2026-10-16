@@ -365,7 +365,7 @@ Outcome: one place to answer "what do we have, where is it, what does it cost, a
 
 Exit gate: an agent finds a domain or service with `fleetctl registry find`, records a change through `fleetctl registry publish`, and sees it active without a manual step; the console shows domains, third-party services, and running services; an agent-requested DNS change runs only after approval, and no provider token appears in any output.
 
-M10 depends on landed M4 (desired state) and M9 (console). Registrar or vendor sync, Resend, and key provisioning into Frogenv are not part of it.
+M10 depends on M4 Fleet Git source fetch and activation, and on the M9 console. Registrar or vendor sync, Resend, and key provisioning into Frogenv are not part of it.
 
 ### Later — scale, convenience, and additional providers
 
