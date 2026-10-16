@@ -413,6 +413,78 @@ fn collect_yaml(
     }
 }
 
+/// Compares two commits in the candidate's own clone for the
+/// auto-activation policy: ancestry, and whether every changed file holds
+/// only Registry documents on both sides. Reads in memory; runs no hooks.
+#[derive(Debug)]
+pub struct GitRevisionComparer {
+    source: GitSource,
+}
+
+impl GitRevisionComparer {
+    /// Composes the comparer over the git work root the fetches use.
+    #[must_use]
+    pub fn new(work_root: std::path::PathBuf) -> Self {
+        Self {
+            source: GitSource::new(work_root),
+        }
+    }
+}
+
+/// Whether one version of a file holds only Registry documents: a `.yaml`
+/// file with at least one document, every `kind` a Registry kind.
+fn registry_only_text(path: &str, text: &str) -> bool {
+    if !std::path::Path::new(path)
+        .extension()
+        .is_some_and(|extension| extension == "yaml")
+    {
+        return false;
+    }
+    match fleet_schema::document_kinds(text) {
+        Ok(kinds) => {
+            !kinds.is_empty()
+                && kinds
+                    .iter()
+                    .all(|kind| fleet_application::source::REGISTRY_KINDS.contains(&kind.as_str()))
+        }
+        Err(_) => false,
+    }
+}
+
+#[async_trait::async_trait]
+impl fleet_application::source::RevisionComparer for GitRevisionComparer {
+    async fn compare(
+        &self,
+        active_commit: &str,
+        candidate_commit: &str,
+    ) -> Result<fleet_application::source::RevisionChange, String> {
+        let source = self.source.clone();
+        let clone = self
+            .source
+            .work_root()
+            .join(format!("candidate-{candidate_commit}"));
+        let (active, candidate) = (active_commit.to_owned(), candidate_commit.to_owned());
+        let comparison = tokio::task::spawn_blocking(move || {
+            source.compare_commits(&clone, &active, &candidate)
+        })
+        .await
+        .map_err(|error| format!("the comparison thread failed: {error}"))??;
+        let only_registry_files = comparison.changed.iter().all(|file| {
+            !file.opaque
+                && (file.before.is_some() || file.after.is_some())
+                && file
+                    .before
+                    .iter()
+                    .chain(file.after.iter())
+                    .all(|text| registry_only_text(&file.path, text))
+        });
+        Ok(fleet_application::source::RevisionChange {
+            descendant: comparison.descendant,
+            only_registry_files,
+        })
+    }
+}
+
 /// The kind-dispatching wrapper the controller composes: the source kinds
 /// route to the [`SourceExecutor`], everything else falls through to the
 /// rest of the chain unchanged.

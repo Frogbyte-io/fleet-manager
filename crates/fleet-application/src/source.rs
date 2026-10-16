@@ -141,6 +141,77 @@ pub trait SourcePort: std::fmt::Debug + Send + Sync {
         &self,
         revision: &ActiveRevision,
     ) -> Result<ActiveRevision, String>;
+    /// Compare-and-set activation for the controller's own auto-activation:
+    /// inside one serialized section the backend checks that the active
+    /// revision still equals `expected` (`None` meaning none is active),
+    /// and, when `require_auto_activate` is set, re-reads the
+    /// `registry.autoActivate` setting (absent means on), and only then
+    /// switches to `revision`. A refusal changes nothing.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the backend errors.
+    async fn activate_if_active(
+        &self,
+        expected: Option<&ActiveRevision>,
+        revision: &ActiveRevision,
+        require_auto_activate: bool,
+    ) -> Result<CasOutcome, String>;
+}
+
+/// The result of a compare-and-set activation.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum CasOutcome {
+    /// The revision is now active.
+    Activated,
+    /// The active revision was no longer the expected one; nothing changed.
+    ActiveChanged,
+    /// `registry.autoActivate` was off at the moment of the write; nothing
+    /// changed.
+    AutoActivateOff,
+}
+
+/// How a candidate commit relates to the active commit in the controller's
+/// own clone of the repository.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct RevisionChange {
+    /// Whether the candidate commit descends from the active commit. An
+    /// older or diverged commit never auto-activates.
+    pub descendant: bool,
+    /// Whether every tracked file that differs between the two commits
+    /// (both versions) holds only `RegistryType`/`RegistryEntry` documents,
+    /// or is absent on one side. A changed non-YAML file, a mixed file, or
+    /// a changed non-Registry document makes this false.
+    pub only_registry_files: bool,
+}
+
+/// Compares two commits in the controller's clone. The adapter never runs
+/// hooks or any project code.
+#[async_trait::async_trait]
+pub trait RevisionComparer: std::fmt::Debug + Send + Sync {
+    /// Compares `candidate_commit` against `active_commit`.
+    ///
+    /// # Errors
+    ///
+    /// Fails with a secret-free detail when the comparison cannot be made
+    /// (for example the active commit is not in the clone).
+    async fn compare(
+        &self,
+        active_commit: &str,
+        candidate_commit: &str,
+    ) -> Result<RevisionChange, String>;
+}
+
+/// Reads whether a `source.fetch` operation is still pending or running,
+/// with a kind-and-state filtered query.
+#[async_trait::async_trait]
+pub trait FetchActivityPort: std::fmt::Debug + Send + Sync {
+    /// Whether any `source.fetch` operation is not yet terminal.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the backend errors.
+    async fn fetch_in_flight(&self) -> Result<bool, String>;
 }
 
 /// The outcome of one fetch: the candidate's digest and validation
@@ -368,6 +439,13 @@ pub fn diff_resources(
     summary
 }
 
+/// What an auto-activation's write is conditional on.
+#[derive(Clone, Debug)]
+struct CasGuard {
+    /// The active revision the decision was made against.
+    expected: Option<ActiveRevision>,
+}
+
 /// What the auto-activation policy did with one fetched candidate.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum AutoActivation {
@@ -381,7 +459,7 @@ pub enum AutoActivation {
     /// The candidate waits for manual activation (or needs nothing).
     Skipped {
         /// A stable, non-secret reason.
-        reason: &'static str,
+        reason: String,
     },
 }
 
@@ -390,6 +468,7 @@ pub enum AutoActivation {
 pub struct DesiredSource {
     port: std::sync::Arc<dyn SourcePort>,
     settings: Option<std::sync::Arc<dyn SettingsPort>>,
+    comparer: Option<std::sync::Arc<dyn RevisionComparer>>,
     audit: std::sync::Arc<dyn crate::operation::AuditPort>,
     credentials: Option<std::sync::Arc<dyn GitCredentialStore>>,
 }
@@ -404,9 +483,18 @@ impl DesiredSource {
         Self {
             port,
             settings: None,
+            comparer: None,
             audit,
             credentials: None,
         }
+    }
+
+    /// Attaches the commit comparer auto-activation needs. Without one,
+    /// nothing auto-activates: ancestry and file content cannot be verified.
+    #[must_use]
+    pub fn with_comparer(mut self, comparer: std::sync::Arc<dyn RevisionComparer>) -> Self {
+        self.comparer = Some(comparer);
+        self
     }
 
     /// Attaches the durable settings store. Without one the Registry
@@ -503,6 +591,7 @@ impl DesiredSource {
             candidate_known,
             operation_id,
             &[],
+            None,
         )
         .await
     }
@@ -511,7 +600,7 @@ impl DesiredSource {
     /// the identity the audit event records (the same, except for the
     /// controller's own auto-activation); `extra` is additional non-secret
     /// audit metadata.
-    #[allow(clippy::too_many_arguments)]
+    #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
     async fn activate_as(
         &self,
         authorizer: &dyn crate::authz::Authorizer,
@@ -522,6 +611,7 @@ impl DesiredSource {
         candidate_known: bool,
         operation_id: Option<&str>,
         extra: &[(&str, String)],
+        guard: Option<&CasGuard>,
     ) -> Result<ActiveRevision, crate::project::ProjectUseCaseError> {
         use crate::authz::{AccessRequest, Permission, authorize};
         authorize(
@@ -619,15 +709,63 @@ impl DesiredSource {
             commit_sha: digest.commit_sha.clone(),
             content_digest: digest.content_digest.clone(),
         };
-        // The backend serializes the check-and-set: a concurrent
-        // activation cannot race.
-        self.port
-            .activate_serialized(&revision)
+        let backend = |detail: String| crate::project::ProjectUseCaseError::Backend {
+            context: "source_activate",
+            detail,
+        };
+        let Some(guard) = guard else {
+            // The backend serializes the check-and-set: a concurrent
+            // activation cannot race.
+            return self
+                .port
+                .activate_serialized(&revision)
+                .await
+                .map_err(backend);
+        };
+        // The guarded path: the write happens only if the active revision
+        // is still the one the diff was computed against and the setting
+        // still allows it. A refusal is recorded, never silent.
+        let outcome = self
+            .port
+            .activate_if_active(guard.expected.as_ref(), &revision, true)
+            .await
+            .map_err(backend)?;
+        let reason = match outcome {
+            CasOutcome::Activated => return Ok(revision),
+            CasOutcome::ActiveChanged => "the active revision changed during auto-activation",
+            CasOutcome::AutoActivateOff => "registry.autoActivate was turned off",
+        };
+        let mut skipped = crate::audit::AuditMetadata::default();
+        for (key, value) in [
+            ("event", "registry_auto_activation_skipped"),
+            ("commitSha", digest.commit_sha.as_str()),
+            ("reason", reason),
+        ] {
+            skipped.insert(key, value).map_err(|error| {
+                crate::project::ProjectUseCaseError::Backend {
+                    context: "audit",
+                    detail: error.to_string(),
+                }
+            })?;
+        }
+        self.audit
+            .record_intent(&crate::audit::AuditIntent {
+                actor: actor.to_owned(),
+                action: Permission::SourceActivate.id().to_owned(),
+                resource: None,
+                decision: crate::authz::Decision::allow(),
+                correlation_id: None,
+                operation_id: None,
+                metadata: skipped,
+            })
             .await
             .map_err(|detail| crate::project::ProjectUseCaseError::Backend {
-                context: "source_activate",
+                context: "audit",
                 detail,
-            })
+            })?;
+        Err(crate::project::ProjectUseCaseError::Conflict {
+            detail: reason.to_owned(),
+        })
     }
 
     async fn read_settings(&self) -> Result<RegistrySettings, String> {
@@ -687,7 +825,7 @@ impl DesiredSource {
             authorizer,
             AccessRequest {
                 principal_id,
-                action: Permission::SourceActivate,
+                action: Permission::SourceSettings,
                 resource: None,
             },
         )
@@ -719,29 +857,44 @@ impl DesiredSource {
                 .insert(SETTING_CHANGE_MODE, mode.as_str())
                 .map_err(audit_error)?;
         }
+        let intent = |metadata| crate::audit::AuditIntent {
+            actor: principal_id.to_owned(),
+            action: Permission::SourceSettings.id().to_owned(),
+            resource: None,
+            decision: crate::authz::Decision::allow(),
+            correlation_id: None,
+            operation_id: None,
+            metadata,
+        };
         self.audit
-            .record_intent(&crate::audit::AuditIntent {
-                actor: principal_id.to_owned(),
-                action: Permission::SourceActivate.id().to_owned(),
-                resource: None,
-                decision: crate::authz::Decision::allow(),
-                correlation_id: None,
-                operation_id: None,
-                metadata,
-            })
+            .record_intent(&intent(metadata))
             .await
             .map_err(backend)?;
-        if let Some(value) = auto_activate {
-            port.set(SETTING_AUTO_ACTIVATE, if value { "true" } else { "false" })
-                .await
-                .map_err(backend)?;
+        let written = async {
+            if let Some(value) = auto_activate {
+                port.set(SETTING_AUTO_ACTIVATE, if value { "true" } else { "false" })
+                    .await?;
+            }
+            if let Some(mode) = change_mode {
+                port.set(SETTING_CHANGE_MODE, mode.as_str()).await?;
+            }
+            self.read_settings().await
         }
-        if let Some(mode) = change_mode {
-            port.set(SETTING_CHANGE_MODE, mode.as_str())
-                .await
-                .map_err(backend)?;
-        }
-        self.read_settings().await.map_err(backend)
+        .await;
+        // The outcome record follows the write: success or failure, so an
+        // intent is never left without its result.
+        let mut outcome = crate::audit::AuditMetadata::default();
+        let event = if written.is_ok() {
+            "registry_settings_updated"
+        } else {
+            "registry_settings_update_failed"
+        };
+        outcome.insert("event", event).map_err(audit_error)?;
+        self.audit
+            .record_intent(&intent(outcome))
+            .await
+            .map_err(backend)?;
+        written.map_err(backend)
     }
 
     /// Applies the Registry auto-activation policy to a candidate that was
@@ -758,6 +911,7 @@ impl DesiredSource {
     ///
     /// Fails on denial or a backend failure; a candidate that merely does
     /// not qualify is [`AutoActivation::Skipped`], not an error.
+    #[allow(clippy::too_many_lines)]
     pub async fn auto_activate(
         &self,
         authorizer: &dyn crate::authz::Authorizer,
@@ -769,41 +923,44 @@ impl DesiredSource {
         let backend = |context: &'static str| {
             move |detail: String| crate::project::ProjectUseCaseError::Backend { context, detail }
         };
+        let skip = |reason: &str| {
+            Ok(AutoActivation::Skipped {
+                reason: reason.to_owned(),
+            })
+        };
         if !self
             .read_settings()
             .await
             .map_err(backend("registry_settings"))?
             .auto_activate
         {
-            return Ok(AutoActivation::Skipped {
-                reason: "registry.autoActivate is off",
-            });
+            return skip("registry.autoActivate is off");
         }
-        let Some(active) = self
+        let Some(comparer) = &self.comparer else {
+            return skip("no commit comparer is wired; ancestry cannot be verified");
+        };
+        // Everything below is decided against this one revision, and the
+        // write is conditional on it still being active.
+        let Some(expected) = self
             .port
             .active_revision()
             .await
             .map_err(backend("source_verify"))?
         else {
-            return Ok(AutoActivation::Skipped {
-                reason: "no revision is active yet; the first activation is manual",
-            });
+            return skip("no revision is active yet; the first activation is manual");
         };
-        if active.commit_sha == digest.commit_sha && active.content_digest == digest.content_digest
+        if expected.commit_sha == digest.commit_sha
+            && expected.content_digest == digest.content_digest
         {
-            return Ok(AutoActivation::Skipped {
-                reason: "the candidate is already active",
-            });
+            return skip("the candidate is already active");
         }
         if !self
             .port
-            .snapshot_held(&active)
+            .snapshot_held(&expected)
             .await
             .map_err(backend("source_verify"))?
         {
-            return Ok(AutoActivation::Skipped {
-                reason: "the active revision holds no snapshot to compare against",
-            });
+            return skip("the active revision holds no snapshot to compare against");
         }
         let mut held = Vec::new();
         let mut after: Option<String> = None;
@@ -823,26 +980,43 @@ impl DesiredSource {
         }
         let diff = diff_resources(&held, candidate);
         if diff.is_empty() {
-            return Ok(AutoActivation::Skipped {
-                reason: "the candidate changes no resource",
-            });
+            return skip("the candidate changes no resource");
         }
         if !diff.registry_only() {
-            return Ok(AutoActivation::Skipped {
-                reason: "the candidate changes more than Registry resources; activate it manually",
-            });
+            return skip(
+                "the candidate changes more than Registry resources; activate it manually",
+            );
+        }
+        // The resource diff is not enough: the candidate must also be a
+        // descendant of the active commit (never move backwards), and every
+        // changed file must hold only Registry documents.
+        let Ok(change) = comparer
+            .compare(&expected.commit_sha, &digest.commit_sha)
+            .await
+        else {
+            return skip("the commits could not be compared; activate it manually");
+        };
+        if !change.descendant {
+            return skip("the candidate is not a descendant of the active commit");
+        }
+        if !change.only_registry_files {
+            return skip("a changed file holds more than Registry documents; activate it manually");
         }
         // The activation is not linked to the fetch operation's own audit
         // row (that one belongs to the fetch); the fetch is named in the
-        // metadata instead.
+        // metadata instead. `authorizedAs` is what the authorizer decided
+        // on: nominal today (the trusted-LAN authorizer allows its caller)
+        // until the controller has a real system principal.
         let mut extra = vec![
             ("trigger", "registry-auto-activation".to_owned()),
             ("diffSummary", diff.render()),
+            ("authorizedAs", principal_id.to_owned()),
+            ("previousCommit", expected.commit_sha.clone()),
         ];
         if let Some(operation_id) = fetch_operation_id {
             extra.push(("fetchOperation", operation_id.to_owned()));
         }
-        let revision = self
+        match self
             .activate_as(
                 authorizer,
                 principal_id,
@@ -852,9 +1026,18 @@ impl DesiredSource {
                 true,
                 None,
                 &extra,
+                Some(&CasGuard {
+                    expected: Some(expected),
+                }),
             )
-            .await?;
-        Ok(AutoActivation::Activated { revision, diff })
+            .await
+        {
+            Ok(revision) => Ok(AutoActivation::Activated { revision, diff }),
+            Err(crate::project::ProjectUseCaseError::Conflict { detail }) => {
+                Ok(AutoActivation::Skipped { reason: detail })
+            }
+            Err(error) => Err(error),
+        }
     }
 
     /// The configured remote, when one is set.
@@ -1335,6 +1518,9 @@ mod tests {
         snapshots: Mutex<Vec<(ActiveRevision, Vec<DesiredResourceRecord>)>>,
         remote: Mutex<Option<String>>,
         credential_ref: Mutex<Option<String>>,
+        /// Simulates a concurrent activation landing just before the
+        /// compare-and-set runs.
+        concurrent: Mutex<Option<ActiveRevision>>,
     }
 
     #[async_trait::async_trait]
@@ -1426,6 +1612,22 @@ mod tests {
         ) -> Result<ActiveRevision, String> {
             *self.active.lock().unwrap() = Some(revision.clone());
             Ok(revision.clone())
+        }
+        async fn activate_if_active(
+            &self,
+            expected: Option<&ActiveRevision>,
+            revision: &ActiveRevision,
+            _require_auto_activate: bool,
+        ) -> Result<super::CasOutcome, String> {
+            if let Some(other) = self.concurrent.lock().unwrap().take() {
+                *self.active.lock().unwrap() = Some(other);
+            }
+            let mut active = self.active.lock().unwrap();
+            if active.as_ref() != expected {
+                return Ok(super::CasOutcome::ActiveChanged);
+            }
+            *active = Some(revision.clone());
+            Ok(super::CasOutcome::Activated)
         }
     }
 
@@ -2029,10 +2231,36 @@ mod tests {
         }
     }
 
+    #[derive(Debug)]
+    struct FakeComparer(super::RevisionChange);
+    #[async_trait::async_trait]
+    impl super::RevisionComparer for FakeComparer {
+        async fn compare(&self, _: &str, _: &str) -> Result<super::RevisionChange, String> {
+            Ok(self.0)
+        }
+    }
+
+    fn comparer(descendant: bool, only_registry_files: bool) -> Arc<FakeComparer> {
+        Arc::new(FakeComparer(super::RevisionChange {
+            descendant,
+            only_registry_files,
+        }))
+    }
+
     /// A service with `base` already fetched and active.
     async fn active_with(base: Vec<DesiredResourceRecord>) -> (DesiredSource, Arc<FakeAudit>) {
-        let (service, audit, _) = service();
-        let service = service.with_settings(Arc::new(FakeSettings::default()));
+        let (service, audit, _) = active_with_parts(base, comparer(true, true)).await;
+        (service, audit)
+    }
+
+    async fn active_with_parts(
+        base: Vec<DesiredResourceRecord>,
+        comparer: Arc<FakeComparer>,
+    ) -> (DesiredSource, Arc<FakeAudit>, Arc<FakePort>) {
+        let (service, audit, port) = service();
+        let service = service
+            .with_settings(Arc::new(FakeSettings::default()))
+            .with_comparer(comparer);
         fetched_with(&service, "aaa", "d1", base).await;
         service
             .activate(
@@ -2046,7 +2274,7 @@ mod tests {
             .await
             .unwrap();
         audit.intents.lock().unwrap().clear();
-        (service, audit)
+        (service, audit, port)
     }
 
     async fn fetched_with(
@@ -2238,10 +2466,13 @@ mod tests {
         assert_eq!(updated.change_mode, super::ChangeMode::Direct);
         assert!(updated.auto_activate, "omitted fields stay");
         let intents = audit.intents.lock().unwrap();
-        assert_eq!(intents.len(), 1);
+        assert_eq!(intents.len(), 2, "an intent and an outcome record");
         assert_eq!(intents[0].actor, "anonymous-lan-admin");
+        assert_eq!(intents[0].action, "source.settings");
         let metadata: std::collections::BTreeMap<_, _> = intents[0].metadata.entries().collect();
         assert_eq!(metadata["registry.changeMode"], "direct");
+        let outcome: std::collections::BTreeMap<_, _> = intents[1].metadata.entries().collect();
+        assert_eq!(outcome["event"], "registry_settings_updated");
     }
 
     #[tokio::test]
@@ -2285,5 +2516,93 @@ mod tests {
             super::ChangeMode::PullRequest
         );
         assert!(super::ChangeMode::parse("push").is_err());
+    }
+
+    #[tokio::test]
+    async fn an_active_revision_that_changes_before_the_write_is_not_overwritten() {
+        let (service, audit, port) = active_with_parts(vec![], comparer(true, true)).await;
+        let next = vec![kinded("RegistryEntry", "e1", serde_json::json!({}))];
+        fetched_with(&service, "bbb", "d2", next.clone()).await;
+        // A manual activation of another revision lands between the diff and
+        // the write.
+        fetched_with(
+            &service,
+            "ccc",
+            "d3",
+            vec![kinded("Machine", "m", serde_json::json!({}))],
+        )
+        .await;
+        *port.concurrent.lock().unwrap() = Some(revision("ccc", "d3"));
+        let outcome = auto(&service, "bbb", "d2", &next).await;
+        let super::AutoActivation::Skipped { reason } = outcome else {
+            panic!("the stale decision must not write");
+        };
+        assert!(reason.contains("changed during"), "{reason}");
+        assert_eq!(
+            service.port.active_revision().await.unwrap(),
+            Some(revision("ccc", "d3")),
+            "the concurrent activation stands"
+        );
+        let intents = audit.intents.lock().unwrap();
+        let skipped = intents
+            .iter()
+            .filter(|i| {
+                i.metadata
+                    .entries()
+                    .any(|(k, v)| k == "event" && v == "registry_auto_activation_skipped")
+            })
+            .count();
+        assert_eq!(skipped, 1, "the refusal is recorded");
+    }
+
+    #[tokio::test]
+    async fn an_older_or_diverged_commit_is_not_auto_activated() {
+        let (service, _, _) = active_with_parts(vec![], comparer(false, true)).await;
+        let next = vec![kinded("RegistryEntry", "e1", serde_json::json!({}))];
+        fetched_with(&service, "bbb", "d2", next.clone()).await;
+        let outcome = auto(&service, "bbb", "d2", &next).await;
+        let super::AutoActivation::Skipped { reason } = outcome else {
+            panic!("not a descendant");
+        };
+        assert!(reason.contains("not a descendant"), "{reason}");
+        assert_eq!(
+            service.port.active_revision().await.unwrap(),
+            Some(revision("aaa", "d1"))
+        );
+    }
+
+    #[tokio::test]
+    async fn a_changed_file_with_more_than_registry_documents_is_manual() {
+        let (service, _, _) = active_with_parts(vec![], comparer(true, false)).await;
+        let next = vec![kinded("RegistryEntry", "e1", serde_json::json!({}))];
+        fetched_with(&service, "bbb", "d2", next.clone()).await;
+        let outcome = auto(&service, "bbb", "d2", &next).await;
+        assert!(matches!(outcome, super::AutoActivation::Skipped { .. }));
+        assert_eq!(
+            service.port.active_revision().await.unwrap(),
+            Some(revision("aaa", "d1"))
+        );
+    }
+
+    #[tokio::test]
+    async fn without_a_comparer_nothing_auto_activates() {
+        let (service, _, _) = service();
+        let service = service.with_settings(Arc::new(FakeSettings::default()));
+        fetched_with(&service, "aaa", "d1", vec![]).await;
+        service
+            .activate(
+                &AllowAll,
+                "anonymous-lan-admin",
+                &digest("aaa", "d1"),
+                true,
+                true,
+                None,
+            )
+            .await
+            .unwrap();
+        let next = vec![kinded("RegistryEntry", "e1", serde_json::json!({}))];
+        fetched_with(&service, "bbb", "d2", next.clone()).await;
+        let outcome = auto(&service, "bbb", "d2", &next).await;
+        assert!(matches!(outcome, super::AutoActivation::Skipped { .. }));
     }
 }

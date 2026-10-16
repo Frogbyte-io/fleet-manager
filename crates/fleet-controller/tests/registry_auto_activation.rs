@@ -11,7 +11,7 @@ use axum::http::{Request, StatusCode};
 use fleet_api::{API_BASE_PATH, CORRELATION_ID_HEADER, operations::ApiState, router};
 use fleet_application::operation::Operations;
 use fleet_application::source::DesiredSource;
-use fleet_controller::source::SourceExecutor;
+use fleet_controller::source::{GitRevisionComparer, SourceExecutor};
 use fleet_controller::source_poller::{HeadResolver, PollOutcome, SourcePoller};
 use fleet_storage_sqlite::{SourceRepository, Store};
 use tower::ServiceExt as _;
@@ -69,7 +69,8 @@ async fn harness(dir: &Path) -> Harness {
             Arc::new(SourceRepository::new(store.pool().clone())),
             audit(),
         )
-        .with_settings(Arc::new(SourceRepository::new(store.pool().clone()))),
+        .with_settings(Arc::new(SourceRepository::new(store.pool().clone())))
+        .with_comparer(Arc::new(GitRevisionComparer::new(dir.join("git-source")))),
     );
     let operations = Arc::new(Operations::new(
         Arc::new(fleet_storage_sqlite::OperationRepository::new(
@@ -99,6 +100,10 @@ async fn harness(dir: &Path) -> Harness {
 }
 
 impl Harness {
+    fn activity(&self) -> Arc<dyn fleet_application::source::FetchActivityPort> {
+        Arc::new(SourceRepository::new(self.store.pool().clone()))
+    }
+
     async fn call(
         &self,
         method: &str,
@@ -340,7 +345,11 @@ async fn the_settings_are_readable_changeable_audited_and_gate_auto_activation()
     .fetch_all(harness.store.pool())
     .await
     .unwrap();
-    assert_eq!(events.len(), 1, "one audited change; rejects write nothing");
+    assert_eq!(
+        events.len(),
+        2,
+        "one audited change (intent and outcome); rejects write nothing"
+    );
     assert_eq!(events[0].0, fleet_auth::LAN_PRINCIPAL_ID);
     assert!(events[0].1.contains("registry.autoActivate"));
 
@@ -370,6 +379,7 @@ async fn the_poller_queues_one_fetch_never_overlaps_and_follows_new_commits() {
     let poller = SourcePoller::new(
         harness.desired.clone(),
         harness.operations.clone(),
+        harness.activity(),
         head.clone(),
     );
 
@@ -440,6 +450,7 @@ async fn an_unreachable_remote_queues_nothing() {
     let poller = SourcePoller::new(
         harness.desired.clone(),
         harness.operations.clone(),
+        harness.activity(),
         Arc::new(BrokenHead),
     );
     assert_eq!(
@@ -480,4 +491,148 @@ fn the_git_head_resolver_reads_a_real_head() {
             .resolve_head(dir.path().join("missing").to_str().unwrap(), None)
             .is_err()
     );
+}
+
+#[tokio::test]
+async fn an_older_registry_only_commit_never_moves_active_backwards() {
+    let dir = tempfile::tempdir().unwrap();
+    let harness = activated(dir.path()).await;
+    let older = commit(&harness.repo, &[("entry.yaml", &entry("two"))]);
+    let newer = commit(&harness.repo, &[("entry.yaml", &entry("three"))]);
+    let fetched = harness.fetch(&newer).await;
+    assert_eq!(fetched["result"]["autoActivation"]["activated"], true);
+    // The older commit differs from the active one only in a Registry entry,
+    // but it is not a descendant: it waits.
+    let fetched = harness.fetch(&older).await;
+    assert_eq!(fetched["result"]["autoActivation"]["activated"], false);
+    assert!(
+        fetched["result"]["autoActivation"]["reason"]
+            .as_str()
+            .unwrap()
+            .contains("not a descendant"),
+        "{fetched}"
+    );
+    assert_eq!(harness.active_sha().await.as_deref(), Some(newer.as_str()));
+}
+
+#[tokio::test]
+async fn non_registry_content_riding_along_is_manual() {
+    let dir = tempfile::tempdir().unwrap();
+    let harness = activated(dir.path()).await;
+    let first = harness.active_sha().await.unwrap();
+    // A Registry change plus a non-YAML file.
+    let with_text = commit(
+        &harness.repo,
+        &[("entry.yaml", &entry("two")), ("notes.txt", "hello")],
+    );
+    let fetched = harness.fetch(&with_text).await;
+    assert_eq!(fetched["result"]["autoActivation"]["activated"], false);
+    assert_eq!(harness.active_sha().await, Some(first.clone()));
+    // A Registry change plus a changed non-Registry file whose resources do
+    // not differ (only its metadata label).
+    let relabelled = commit(
+        &harness.repo,
+        &[
+            ("entry.yaml", &entry("three")),
+            ("fleet.yaml", CONFIG_CHANGED),
+        ],
+    );
+    let fetched = harness.fetch(&relabelled).await;
+    assert_eq!(fetched["result"]["autoActivation"]["activated"], false);
+    assert_eq!(harness.active_sha().await, Some(first));
+}
+
+#[tokio::test]
+async fn the_compare_and_set_refuses_a_changed_active_and_a_setting_turned_off() {
+    use fleet_application::source::{ActiveRevision, CasOutcome, SourcePort};
+    let dir = tempfile::tempdir().unwrap();
+    let harness = activated(dir.path()).await;
+    let port = SourceRepository::new(harness.store.pool().clone());
+    let active = port.active_revision().await.unwrap().unwrap();
+    let other = ActiveRevision {
+        commit_sha: "f".repeat(40),
+        content_digest: "e".repeat(64),
+    };
+    // A stale expectation changes nothing, even though the revision is
+    // otherwise valid input.
+    let stale = ActiveRevision {
+        commit_sha: "1".repeat(40),
+        content_digest: "2".repeat(64),
+    };
+    assert_eq!(
+        port.activate_if_active(Some(&stale), &other, true)
+            .await
+            .unwrap(),
+        CasOutcome::ActiveChanged
+    );
+    assert_eq!(
+        port.activate_if_active(None, &other, true).await.unwrap(),
+        CasOutcome::ActiveChanged,
+        "none-active expectation against an active revision"
+    );
+    assert_eq!(port.active_revision().await.unwrap(), Some(active.clone()));
+    // The setting is re-read inside the serialized write.
+    let (status, _) = harness
+        .call(
+            "PUT",
+            "/desired/settings",
+            Some(serde_json::json!({"autoActivate": false})),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        port.activate_if_active(Some(&active), &other, true)
+            .await
+            .unwrap(),
+        CasOutcome::AutoActivateOff
+    );
+    assert_eq!(port.active_revision().await.unwrap(), Some(active.clone()));
+    // Without the setting requirement the matching expectation writes.
+    assert_eq!(
+        port.activate_if_active(Some(&active), &other, false)
+            .await
+            .unwrap(),
+        CasOutcome::Activated
+    );
+}
+
+#[tokio::test]
+async fn a_settings_change_is_audited_under_its_own_action_with_an_outcome() {
+    let dir = tempfile::tempdir().unwrap();
+    let harness = harness(dir.path()).await;
+    let (status, _) = harness
+        .call(
+            "PUT",
+            "/desired/settings",
+            Some(serde_json::json!({"changeMode": "direct"})),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    let events: Vec<(String, String)> = sqlx::query_as(
+        "SELECT action, metadata_json FROM audit_events WHERE action = 'source.settings' ORDER BY seq",
+    )
+    .fetch_all(harness.store.pool())
+    .await
+    .unwrap();
+    assert_eq!(events.len(), 2, "{events:?}");
+    assert!(events[0].1.contains("registry_settings_update"));
+    assert!(events[1].1.contains("registry_settings_updated"));
+}
+
+#[tokio::test]
+async fn the_poller_backs_off_after_repeated_failures() {
+    let dir = tempfile::tempdir().unwrap();
+    let harness = harness(dir.path()).await;
+    harness.configure().await;
+    let poller = SourcePoller::new(
+        harness.desired.clone(),
+        harness.operations.clone(),
+        harness.activity(),
+        Arc::new(BrokenHead),
+    );
+    assert!(matches!(poller.tick().await, PollOutcome::ResolveFailed(_)));
+    assert_eq!(poller.tick().await, PollOutcome::BackingOff);
+    assert!(matches!(poller.tick().await, PollOutcome::ResolveFailed(_)));
+    assert_eq!(poller.tick().await, PollOutcome::BackingOff);
+    assert_eq!(poller.tick().await, PollOutcome::BackingOff);
 }

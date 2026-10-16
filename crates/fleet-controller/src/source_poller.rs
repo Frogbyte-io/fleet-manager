@@ -15,7 +15,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use fleet_application::operation::{NewOperation, Operations};
-use fleet_application::source::{DesiredSource, GitCredentialStore};
+use fleet_application::source::{DesiredSource, FetchActivityPort, GitCredentialStore};
 use fleet_provider_git::{GitCredential, GitSource};
 
 /// Resolves the head commit of a remote, so tests can stand in for the
@@ -95,7 +95,12 @@ pub enum PollOutcome {
     },
     /// The operation could not be queued.
     QueueFailed(String),
+    /// Recent failures: this tick is skipped (a simple backoff).
+    BackingOff,
 }
+
+/// The most ticks skipped after repeated failures.
+const MAX_BACKOFF_TICKS: u32 = 8;
 
 /// The last fetch this loop queued.
 #[derive(Debug)]
@@ -104,13 +109,24 @@ struct Queued {
     commit_sha: String,
 }
 
+/// What the loop remembers between ticks.
+#[derive(Debug, Default)]
+struct PollState {
+    last: Option<Queued>,
+    /// Consecutive failed ticks.
+    failures: u32,
+    /// Ticks still to skip.
+    skip: u32,
+}
+
 /// The periodic fetch loop.
 #[derive(Debug)]
 pub struct SourcePoller {
     desired: Arc<DesiredSource>,
     operations: Arc<Operations>,
+    activity: Arc<dyn FetchActivityPort>,
     resolver: Arc<dyn HeadResolver>,
-    last: tokio::sync::Mutex<Option<Queued>>,
+    state: tokio::sync::Mutex<PollState>,
 }
 
 impl SourcePoller {
@@ -119,33 +135,49 @@ impl SourcePoller {
     pub fn new(
         desired: Arc<DesiredSource>,
         operations: Arc<Operations>,
+        activity: Arc<dyn FetchActivityPort>,
         resolver: Arc<dyn HeadResolver>,
     ) -> Self {
         Self {
             desired,
             operations,
+            activity,
             resolver,
-            last: tokio::sync::Mutex::new(None),
+            state: tokio::sync::Mutex::new(PollState::default()),
         }
     }
 
     /// Runs one tick. Ticks serialize: a second call waits for the first.
+    /// Repeated failures skip a growing number of ticks (1, 2, 4, 8).
     pub async fn tick(&self) -> PollOutcome {
+        let mut state = self.state.lock().await;
+        if state.skip > 0 {
+            state.skip -= 1;
+            return PollOutcome::BackingOff;
+        }
+        let outcome = self.tick_inner(&mut state.last).await;
+        match outcome {
+            PollOutcome::ResolveFailed(_) | PollOutcome::QueueFailed(_) => {
+                state.failures = state.failures.saturating_add(1);
+                state.skip =
+                    (1_u32 << state.failures.min(4).saturating_sub(1)).min(MAX_BACKOFF_TICKS);
+            }
+            _ => {
+                state.failures = 0;
+            }
+        }
+        outcome
+    }
+
+    async fn tick_inner(&self, last: &mut Option<Queued>) -> PollOutcome {
         let authorizer = fleet_auth::LanAllowAllAuthorizer;
         let principal = fleet_auth::LAN_PRINCIPAL_ID;
-        let mut last = self.last.lock().await;
-        // Never overlap a fetch, whoever queued it.
-        match self.operations.list(&authorizer, principal, 100).await {
-            Ok(operations) => {
-                if operations.iter().any(|operation| {
-                    operation.kind == "source.fetch"
-                        && fleet_core::OperationState::from_id(&operation.state)
-                            .is_ok_and(|state| !state.is_terminal())
-                }) {
-                    return PollOutcome::Busy;
-                }
-            }
-            Err(error) => return PollOutcome::QueueFailed(error.to_string()),
+        // Never overlap a fetch, whoever queued it: a kind-and-state
+        // filtered query, not a scan of recent operations.
+        match self.activity.fetch_in_flight().await {
+            Ok(true) => return PollOutcome::Busy,
+            Ok(false) => {}
+            Err(error) => return PollOutcome::QueueFailed(error),
         }
         let config = match self.desired.configuration(&authorizer, principal).await {
             Ok(Some(config)) => config,
@@ -225,6 +257,7 @@ impl SourcePoller {
                     eprintln!("desired-source poller: {detail}; retrying next interval");
                 }
                 PollOutcome::NoRemote
+                | PollOutcome::BackingOff
                 | PollOutcome::Busy
                 | PollOutcome::Unchanged
                 | PollOutcome::Queued { .. } => {}

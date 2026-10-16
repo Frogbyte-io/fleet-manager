@@ -21,17 +21,32 @@ for the activation rules.
 4. An invalid candidate never becomes active, and the last valid revision
    stays active.
 
-Auto-activation has three guards you can rely on:
+Auto-activation has these guards you can rely on:
 
 - **No active revision, no auto-activation.** The first activation is always
   manual.
 - **Registry-only means all of it.** The candidate's resources are compared
   with the active snapshot; one added, removed, or changed resource of any
-  other kind keeps the whole revision waiting.
+  other kind keeps the whole revision waiting. Every tracked file that
+  differs between the active and candidate commits must also hold only
+  `RegistryType`/`RegistryEntry` documents, in both versions: a changed
+  non-YAML file, `fleet.yaml`, or a file mixing in other kinds keeps it
+  waiting.
+- **Never backwards.** The candidate commit must be a descendant of the active
+  commit (`git merge-base --is-ancestor`, in the controller's own clone, no
+  hooks). An older or diverged commit waits for manual activation.
+- **Never over a concurrent change.** The write is a compare-and-set against
+  the revision the decision was made on, and re-reads `registry.autoActivate`
+  in the same serialized section. If the active revision changed meanwhile
+  (for example a manual activation), the auto-activation is skipped and a
+  `registry_auto_activation_skipped` audit event records why.
 - **It is audited.** Each automatic activation is an audit event under the
   controller's own identity (`system:fleet-controller`), carrying the commit
-  SHA and a count per kind (for example `RegistryEntry:+1/-0/~2`, meaning one
-  added, none removed, two changed). Resource contents are never recorded.
+  SHA, the previous commit, `authorizedAs`, and a count per kind (for example
+  `RegistryEntry:+1/-0/~2`, meaning one added, none removed, two changed).
+  Resource contents are never recorded. `authorizedAs` names the principal
+  the authorizer decided on; today that is the trusted-LAN principal, so the
+  authorization is nominal until the controller has a real system principal.
 
 There are two ways a pushed commit reaches the controller.
 
@@ -85,8 +100,9 @@ fleetctl desired settings set --change-mode direct
 
 The same settings are on the console's Settings page under Desired state, and
 `GET`/`PUT /api/v1/desired/settings` is the API. Reading needs the
-`source.fetch` permission; changing needs `source.activate` (the permission
-that governs activation itself). Every change is audited.
+`source.fetch` permission; changing needs the dedicated `source.settings`
+permission, which delegated Lab credentials do not get. Every change is audited
+as an intent before the write and an outcome record after it.
 
 ## Validate Registry changes in CI
 

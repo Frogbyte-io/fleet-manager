@@ -465,10 +465,15 @@ fn run_serve(mut config: fleet_config::ControllerConfig) -> ExitCode {
                                         store.pool().clone(),
                                     )),
                                 )
-                                .with_settings(
+                                .with_settings(std::sync::Arc::new(
+                                    fleet_storage_sqlite::SourceRepository::new(
+                                        store.pool().clone(),
+                                    ),
+                                ))
+                                .with_comparer(
                                     std::sync::Arc::new(
-                                        fleet_storage_sqlite::SourceRepository::new(
-                                            store.pool().clone(),
+                                        fleet_controller::source::GitRevisionComparer::new(
+                                            config.data_dir.join("git-source"),
                                         ),
                                     ),
                                 ),
@@ -1150,6 +1155,9 @@ fn run_serve(mut config: fleet_config::ControllerConfig) -> ExitCode {
             let poller = fleet_controller::source_poller::SourcePoller::new(
                 desired,
                 poller_operations,
+                std::sync::Arc::new(fleet_storage_sqlite::SourceRepository::new(
+                    store.pool().clone(),
+                )),
                 std::sync::Arc::new(fleet_controller::source_poller::GitHeadResolver::new(
                     fleet_provider_git::GitSource::new(config.data_dir.join("git-source")),
                     credentials,
