@@ -6,8 +6,7 @@
 # documents) on every pull request, with the same validator the controller
 # runs before it activates a revision. See docs/guides/registry-workflow.md.
 #
-# `fleetctl registry validate` is delivered by FM-1013 and is not available
-# yet; this file is written against that planned command.
+# `fleetctl registry validate` runs the same validator the controller runs.
 name: registry-validate
 
 on:
