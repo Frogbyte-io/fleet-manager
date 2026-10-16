@@ -6,7 +6,7 @@ Status: proposed; a dedicated threat model is an M1 deliverable
 
 - Browser/CLI/Fleet-skill caller to controller
 - Controller to agentless SSH host
-- Controller to third-party APIs (GitHub, Tailscale, Proxmox)
+- Controller to third-party APIs (GitHub, Tailscale, Proxmox, Coolify, Cloudflare)
 - Controller to enrolled `fleetd`
 - `fleetd` service to local users/agents and privileged OS facilities
 - `fleetd` to Docker socket, Git checkout, skills, Frogenv, and project commands
@@ -51,6 +51,14 @@ A presented token is checked against the store on every request, so expiry and r
 The `fleet-auth` authorizer decides a credential principal from a deny-by-default catalog table, `DELEGATED_LAB_LOOP`: `lab.template.use` (the allow-list), `lab.lease` (create, release), `lab.lease.read`, `lab.lease.provision`, `lab.extend`, `lab.exec`, `lab.exec.read`, `lab.artifacts`, `lab.artifacts.read`, and `operation.create` / `operation.read` for the Lab kinds only. Everything else, including `lab.keep`, standalone `lab.provision`, template, image, pool, Proxmox, secret, machine, audit, and settings actions, is refused with `policy.action_not_delegated`. Adding an action is one table row and one test. Leases record the owner `credential:<owner>`, artifacts copy it, and the Lab use cases report another owner's lease, artifact, or operation as not found.
 
 The credential narrows a caller that presents it; it is not a perimeter. Anonymous callers of the trusted-LAN listener stay administrators until the rest of M8 (sessions, bootstrap, refusing anonymous administration) lands.
+
+## Brokered provider actions (proposed, ADR 0016)
+
+API-token providers (Coolify and Cloudflare in M10) are provider accounts whose tokens are encrypted secret records. No API, CLI output, log, audit event, operation payload, or result returns a token, and agents never receive one. An agent asks for a change by creating an `ActionRequest`: a typed provider action with structured, validated parameters. Each action type has a risk class, `auto`, `approve`, or `deny`, configurable per type. An approved request runs as a durable operation through the same authorization and audit path as any other mutation. Requests, decisions, and approvers are audited; parameters are validated, not interpreted as text.
+
+Until authenticated identities are in use, the requester and approver are both `anonymous-lan-admin` (or a Tailscale admin), so the policy is a guardrail against agent mistakes, not a boundary against a hostile LAN caller. Delegated credentials (ADR 0011) are the path to per-agent scoping: a delegated principal may request and never approve.
+
+Registry resources in Fleet Git (ADR 0016) have no secret value type. Validation runs the credential scrubber over every value and rejects matches; a field may say where a login lives, never what it is.
 
 ## Authorization
 

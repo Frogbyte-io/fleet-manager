@@ -30,6 +30,7 @@ fleet/
 ├── recipes/
 ├── actions/
 ├── lab-templates/
+├── registry/                  # RegistryType and RegistryEntry resources, one file per entry (ADR 0016)
 └── policies/                  # non-secret bindings/policy documents when enabled
 ```
 
@@ -73,8 +74,8 @@ Legacy roles/packs provide fixtures for these semantics but do not force the old
 - Fetching a commit creates an immutable candidate identified by commit SHA plus content digest.
 - Schema and semantic validation complete before activation.
 - The last valid revision remains active on fetch/validation failure.
-- Activation is serialized and audited. Users can inspect and manually select a prior valid revision.
-- Fleet does not auto-resolve Git conflicts or push UI changes behind the user's back.
+- Activation is serialized and audited. Users can inspect and manually select a prior valid revision. A valid candidate whose only differences from the active revision are Registry resources activates automatically through the same path (ADR 0016); any other change needs explicit activation.
+- Fleet does not auto-resolve Git conflicts or push UI changes behind the user's back. The controller never writes to Fleet Git; Registry edits are commits made by people and agents (`fleetctl registry`), pushed directly or through a pull request per the `registry.changeMode` setting, which the Git host enforces.
 - UI editing, when added, creates a reviewed commit/branch/PR or an explicit direct commit. It never mutates only the imported SQLite copy.
 
 Database tables may cache parsed active resources and validation diagnostics for performance. That cache is rebuildable from the recorded Git revision and is not a second desired-state authority.
@@ -110,6 +111,10 @@ A `Machine` resource binds `spec.profiles` and `spec.projects` by `metadata.name
 ### Drift read model (FM-408)
 
 `GET /api/v1/desired/drift` (paged over machines) and `GET /api/v1/machines/{id}/drift` return each machine's differences from the active revision, computed by the same path as plans, so drift and plan cannot disagree. Reading drift needs `skills.read` for the machine; unreadable machines are omitted from the list. Each entry is `computed`, `no_revision` (nothing is active, so nothing can drift), or `unavailable` (with a caller-safe reason); one machine's failure never fails the page. Only differing fields are listed, and `unknown`/`unsupported` are counted separately from actionable drift, so an unobserved machine is never reported as in sync. The console shows drift in the Skills matrix (an "Against Fleet Git" row and per-skill markers), the Overview attention queue, and the machine's Desired tab.
+
+### Registry (proposed, ADR 0016)
+
+`RegistryType` and `RegistryEntry` resources are descriptive: the planner, apply engine, and drift model ignore them. A type is data: a display name, a natural-key field, fields drawn from a closed set of value types (string, text, number, boolean, date, url, hostname, email, money, enum with suggestions, and lists of these), and the relation names it allows. `domain` and `service` are built in and versioned with the controller; a repository may add types but not redefine a built-in one. An entry is addressed as `<type>/<key>` and conventionally lives at `fleet/registry/<type>/<key>.yaml`. Semantic validation refuses an unknown type, a field or relation the type does not declare, a value of the wrong type, a duplicate key within a type, and any value the credential scrubber would redact. A relation to a missing entry or an unknown Fleet resource is a warning. Enrichers (RDAP and DNS for domains) store observations against entries in SQLite and never change the entry; differences appear as drift or suggestions.
 
 ## Observed state
 
@@ -149,4 +154,4 @@ The web flow uses a GitHub App user authorization flow and expiring token. Fleet
 
 ## Scope boundary
 
-Fleet profiles should cover developer-fleet outcomes such as project roots, required tools/runtimes, agent tools, skill presets, Frogenv readiness, node settings, and selected service integrations. They do not become a generic file/package/service language. If a team needs broad configuration management, a Fleet action invokes Ansible, Nix, chezmoi, or a project-owned tool and verifies its bounded outcome.
+Fleet profiles should cover developer-fleet outcomes such as project roots, required tools/runtimes, agent tools, skill presets, Frogenv readiness, node settings, and selected service integrations. They do not become a generic file/package/service language. Registry resources (ADR 0016) are a separate, descriptive class: they record what exists and how it connects, and are never applied. If a team needs broad configuration management, a Fleet action invokes Ansible, Nix, chezmoi, or a project-owned tool and verifies its bounded outcome.

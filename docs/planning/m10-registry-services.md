@@ -1,6 +1,6 @@
 # M10 — Registry, running services, and brokered provider actions
 
-Status: planned (2026-10-12). Milestone: [M10](https://github.com/Frogbyte-io/fleet-manager/milestone/11). The plan revision and ADR are FM-1000; until it merges, this document is the proposal of record for M10.
+Status: planned (2026-10-12). Milestone: [M10](https://github.com/Frogbyte-io/fleet-manager/milestone/11). Boundaries: [ADR 0016](../adr/0016-descriptive-registry-and-action-broker.md) (FM-1000, proposed) and the M10 section of [PLAN.md](../PLAN.md).
 
 ## Goal
 
