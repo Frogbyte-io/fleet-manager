@@ -11,7 +11,7 @@ export function service(id: string, patch: Partial<RunningServiceDto> = {}): Run
     kind: 'application',
     sources: ['coolify'],
     state: 'running',
-    coolify: { accountId: 'acc1', accountLabel: 'Main Coolify', uuid: `uuid-${id}`, status: 'running:healthy', projectUuid: 'p1', projectName: 'Website', environmentName: 'production', detail: 'ghcr.io/example/app:1.2' },
+    coolify: { accountId: 'acc1', accountLabel: 'Main Coolify', uuid: `uuid-${id}`, status: 'running:healthy', projectUuid: 'p-Website', projectName: 'Website', environmentName: 'production', detail: 'ghcr.io/example/app:1.2' },
     server: { uuid: 's1', name: 'edge-1', address: '192.0.2.10' },
     serverBasis: 'deployment',
     placement: { state: 'matched', basis: 'explicit_tag', machine: { id: 'm1', name: 'edge-1' }, candidates: [], hiddenCandidates: 0 },
@@ -43,10 +43,10 @@ export function coverage(patch: Partial<ServicesCoverageDto> = {}): ServicesCove
 export function sampleServices(): RunningServiceDto[] {
   return [
     service('blog'),
-    service('api', { state: 'degraded', coolify: { ...service('api').coolify!, projectName: 'Platform', status: 'running:unhealthy' }, lastDeploy: { deploymentUuid: 'd2', status: 'failed', commit: 'def5678', at: '2026-10-15T11:00:00Z', stale: false } }),
-    service('worker', { kind: 'service', state: 'stopped', fqdns: [], lastDeploy: null, coolify: { ...service('worker').coolify!, projectName: 'Platform' } }),
+    service('api', { state: 'degraded', coolify: { ...service('api').coolify!, projectUuid: 'p-Platform', projectName: 'Platform', status: 'running:unhealthy' }, lastDeploy: { deploymentUuid: 'd2', status: 'failed', commit: 'def5678', at: '2026-10-15T11:00:00Z', stale: false } }),
+    service('worker', { kind: 'service', state: 'stopped', fqdns: [], lastDeploy: null, coolify: { ...service('worker').coolify!, projectUuid: 'p-Platform', projectName: 'Platform' } }),
     service('docs', { stale: true, staleReasons: ['coolify_applications_stale', 'fqdns_stale'], server: { uuid: 's2', name: 'edge-2', address: '192.0.2.20' }, placement: { state: 'ambiguous', basis: 'address', machine: null, candidates: [{ id: 'm2', name: 'edge-2a' }, { id: 'm3', name: 'edge-2b' }], hiddenCandidates: 1 } }),
     service('db', { kind: 'database', fqdns: [], lastDeploy: null, server: null, serverBasis: 'unknown', placement: NO_PLACEMENT, coolify: { ...service('db').coolify!, projectName: null, environmentName: null } }),
-    { ...service('cache'), id: 'docker:m1:cache', kind: 'container', sources: ['docker'], coolify: null, deepLink: null, fqdns: [], lastDeploy: null } as RunningServiceDto,
+    { ...service('cache'), id: 'docker:m1:cache', kind: 'container', sources: ['docker'], coolify: null, server: null, serverBasis: 'unknown', deepLink: null, fqdns: [], lastDeploy: null } as RunningServiceDto,
   ]
 }

@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, ref, watch } from 'vue'
-import { RouterLink, useRoute } from 'vue-router'
+import { RouterLink, useRoute, useRouter } from 'vue-router'
 
 import { Input } from '@/components/ui/input'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
@@ -17,6 +17,7 @@ import {
   filterOptions,
   groupServices,
   matchesFilters,
+  statusFromQuery,
   statusCounts,
   type GroupBy,
 } from './services'
@@ -26,6 +27,7 @@ import { useServices } from './useServices'
 // Docker containers and Registry entries by the controller. Read-only; the
 // page shows what the public API reports, including what it could not read.
 const route = useRoute()
+const router = useRouter()
 const services = useServices()
 
 const viewMode = ref<'cards' | 'table'>(localStorage.getItem(SERVICES_VIEW_KEY) === 'table' ? 'table' : 'cards')
@@ -45,8 +47,8 @@ const groupBy = ref<GroupBy>('server')
 const uuid = computed(() => (typeof route.query.uuid === 'string' ? route.query.uuid : ''))
 // `?status=stale` and the like, so the Overview can link a filtered view.
 watch(() => route.query.status, (value) => {
-  if (typeof value === 'string' && value)
-    status.value = value
+  if (value !== undefined)
+    status.value = statusFromQuery(value)
 }, { immediate: true })
 
 const all = computed(() => services.data.value?.items ?? [])
@@ -64,6 +66,11 @@ function resetFilters() {
   project.value = 'any'
   source.value = 'any'
   status.value = 'any'
+  // A Registry link's ?uuid= narrows too, so clearing must drop it (and a status preset).
+  const rest = { ...route.query }
+  delete rest.uuid
+  delete rest.status
+  void router.replace({ query: rest })
 }
 </script>
 
@@ -190,11 +197,11 @@ function resetFilters() {
             Any server
           </SelectItem>
           <SelectItem
-            v-for="name in options.servers"
-            :key="name"
-            :value="name"
+            v-for="option in options.servers"
+            :key="option.key"
+            :value="option.key"
           >
-            {{ name }}
+            {{ option.label }}
           </SelectItem>
           <SelectItem
             v-if="options.noServer"
@@ -217,11 +224,11 @@ function resetFilters() {
             Any project
           </SelectItem>
           <SelectItem
-            v-for="name in options.projects"
-            :key="name"
-            :value="name"
+            v-for="option in options.projects"
+            :key="option.key"
+            :value="option.key"
           >
-            {{ name }}
+            {{ option.label }}
           </SelectItem>
           <SelectItem
             v-if="options.noProject"

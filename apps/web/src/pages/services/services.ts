@@ -30,9 +30,9 @@ export type StatusFilter = typeof STATUS_FILTERS[number]
 
 export interface ServiceFilters {
   search: string
-  /** `any`, `none` (no known server), or a server name. */
+  /** `any`, `none` (no known server), or a {@link serverKey}. */
   server: string
-  /** `any`, `none` (no Coolify project), or a `project / environment` label. */
+  /** `any`, `none` (no Coolify project), or a {@link projectKey}. */
   project: string
   /** `any`, `coolify`, or `docker`. */
   source: string
@@ -44,11 +44,25 @@ export interface ServiceFilters {
 
 export const NO_FILTERS: ServiceFilters = { search: '', server: 'any', project: 'any', source: 'any', status: 'any', uuid: '' }
 
+const NONE_KEY = 'none'
 const NO_SERVER = 'No known server'
 const NO_PROJECT = 'No Coolify project'
 
 export function serverLabel(service: RunningServiceDto): string {
   return service.server?.name ?? NO_SERVER
+}
+
+/** Identity of the server: Coolify uuids are only unique per account. */
+export function serverKey(service: RunningServiceDto): string {
+  return service.server ? `${service.coolify?.accountId ?? ''}:${service.server.uuid}` : NONE_KEY
+}
+
+/** Identity of the project and environment, per account. */
+export function projectKey(service: RunningServiceDto): string {
+  const coolify = service.coolify
+  if (!coolify?.projectName)
+    return NONE_KEY
+  return `${coolify.accountId}:${coolify.projectUuid ?? coolify.projectName}:${coolify.environmentName ?? ''}`
 }
 
 export function projectLabel(service: RunningServiceDto): string {
@@ -193,7 +207,8 @@ export function deployView(service: RunningServiceDto): DeployView | null {
 }
 
 export function matchesFilters(service: RunningServiceDto, filters: ServiceFilters): boolean {
-  if (filters.uuid && service.coolify?.uuid !== filters.uuid)
+  // Registry relations match the uuid case-insensitively (FM-1031).
+  if (filters.uuid && service.coolify?.uuid.toLowerCase() !== filters.uuid.toLowerCase())
     return false
   if (filters.search) {
     const needle = filters.search.toLowerCase()
@@ -201,14 +216,12 @@ export function matchesFilters(service: RunningServiceDto, filters: ServiceFilte
     if (!text.includes(needle))
       return false
   }
-  if (filters.server !== 'any' && serverLabel(service) !== (filters.server === 'none' ? NO_SERVER : filters.server))
+  if (filters.server !== 'any' && serverKey(service) !== filters.server)
     return false
-  if (filters.project !== 'any' && projectLabel(service) !== (filters.project === 'none' ? NO_PROJECT : filters.project))
+  if (filters.project !== 'any' && projectKey(service) !== filters.project)
     return false
   if (filters.source !== 'any' && !service.sources.includes(filters.source))
     return false
-  if (filters.status === 'stale')
-    return service.stale
   if (filters.status !== 'any' && effectiveStatus(service) !== filters.status)
     return false
   return true
@@ -226,8 +239,8 @@ export interface ServiceGroup {
 
 function groupKey(service: RunningServiceDto, by: GroupBy): string {
   switch (by) {
-    case 'server': return serverLabel(service)
-    case 'project': return projectLabel(service)
+    case 'server': return serverKey(service)
+    case 'project': return projectKey(service)
     case 'source': return sourceLabel(service)
     case 'status': return effectiveStatus(service)
     default: return ''
@@ -251,38 +264,60 @@ export function groupServices(services: RunningServiceDto[], by: GroupBy): Servi
     list.push(service)
     map.set(key, list)
   }
-  const last = new Set([NO_SERVER, NO_PROJECT])
+  const label = (key: string, first: RunningServiceDto): string =>
+    by === 'server' ? serverLabel(first) : by === 'project' ? projectLabel(first) : key
   return [...map.entries()]
-    .map(([key, list]) => ({ key, name: key, services: list }))
+    .map(([key, list]) => ({ key, name: label(key, list[0]!), services: list }))
     .sort((a, b) => {
       if (by === 'status')
         return (STATUS_ORDER[a.key] ?? 9) - (STATUS_ORDER[b.key] ?? 9)
-      return Number(last.has(a.key)) - Number(last.has(b.key)) || a.name.localeCompare(b.name)
+      return Number(a.key === NONE_KEY) - Number(b.key === NONE_KEY) || a.name.localeCompare(b.name) || a.key.localeCompare(b.key)
     })
 }
 
+export interface FilterOption {
+  key: string
+  label: string
+}
+
 export interface FilterOptions {
-  servers: string[]
-  projects: string[]
+  servers: FilterOption[]
+  projects: FilterOption[]
   noServer: boolean
   noProject: boolean
 }
 
-/** The server and project values present in the data. */
+function options(entries: Map<string, string>): FilterOption[] {
+  const counts = new Map<string, number>()
+  for (const label of entries.values())
+    counts.set(label, (counts.get(label) ?? 0) + 1)
+  return [...entries]
+    // Two servers or projects that share a name (different accounts) stay apart by their key.
+    .map(([key, label]) => ({ key, label: (counts.get(label) ?? 0) > 1 ? `${label} (${key.split(':')[0]})` : label }))
+    .sort((a, b) => a.label.localeCompare(b.label) || a.key.localeCompare(b.key))
+}
+
+/** The servers and projects present, one entry per identity. */
 export function filterOptions(services: RunningServiceDto[]): FilterOptions {
-  const servers = new Set<string>()
-  const projects = new Set<string>()
+  const servers = new Map<string, string>()
+  const projects = new Map<string, string>()
   for (const service of services) {
-    servers.add(serverLabel(service))
-    projects.add(projectLabel(service))
+    if (service.server)
+      servers.set(serverKey(service), serverLabel(service))
+    if (projectKey(service) !== NONE_KEY)
+      projects.set(projectKey(service), projectLabel(service))
   }
-  const named = (set: Set<string>, none: string) => [...set].filter(v => v !== none).sort((a, b) => a.localeCompare(b))
   return {
-    servers: named(servers, NO_SERVER),
-    projects: named(projects, NO_PROJECT),
-    noServer: servers.has(NO_SERVER),
-    noProject: projects.has(NO_PROJECT),
+    servers: options(servers),
+    projects: options(projects),
+    noServer: services.some(s => !s.server),
+    noProject: services.some(s => projectKey(s) === NONE_KEY),
   }
+}
+
+/** A `?status=` value that names a real status filter, else `any`. */
+export function statusFromQuery(value: unknown): string {
+  return typeof value === 'string' && (STATUS_FILTERS as readonly string[]).includes(value) ? value : 'any'
 }
 
 export function statusCounts(services: RunningServiceDto[]): Record<StatusFilter, number> {

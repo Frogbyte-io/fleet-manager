@@ -13,6 +13,7 @@ import {
   placementView,
   registryLinkTo,
   staleReason,
+  statusFromQuery,
   statusCounts,
   statusView,
 } from '../services'
@@ -82,12 +83,16 @@ describe('filtering', () => {
     expect(names({})).toHaveLength(6)
     expect(names({ source: 'docker' })).toEqual(['cache'])
     expect(names({ source: 'coolify' })).toHaveLength(5)
-    expect(names({ server: 'edge-2' })).toEqual(['docs'])
-    expect(names({ server: 'none' })).toEqual(['db'])
-    expect(names({ project: 'Platform / production' })).toEqual(['api', 'worker'])
+    expect(names({ server: 'acc1:s2' })).toEqual(['docs'])
+    expect(names({ server: 'none' })).toEqual(['cache', 'db'])
+    expect(names({ project: 'acc1:p-Platform:production' })).toEqual(['api', 'worker'])
     expect(names({ project: 'none' })).toEqual(['cache', 'db'])
     expect(names({ status: 'degraded' })).toEqual(['api'])
     expect(names({ status: 'stale' })).toEqual(['docs'])
+    // One meaning of stale: the filter and the count agree, and a stale degraded service stays degraded.
+    const staleDegraded = service('sd', { state: 'degraded', stale: true })
+    expect(matchesFilters(staleDegraded, { ...NO_FILTERS, status: 'stale' })).toBe(false)
+    expect(matchesFilters(staleDegraded, { ...NO_FILTERS, status: 'degraded' })).toBe(true)
     expect(names({ status: 'running' })).toEqual(['blog', 'cache', 'db'])
   })
 
@@ -95,12 +100,27 @@ describe('filtering', () => {
     expect(names({ search: 'DOCS.example' })).toEqual(['docs'])
     expect(names({ search: 'ghcr.io/example' })).toHaveLength(5)
     expect(names({ uuid: 'uuid-api' })).toEqual(['api'])
+    expect(names({ uuid: 'UUID-API' })).toEqual(['api'])
+  })
+
+  it('keeps same-named servers from different accounts apart', () => {
+    const other = service('o', { coolify: { ...service('o').coolify!, accountId: 'acc2' } })
+    const opts = filterOptions([service('a'), other])
+    expect(opts.servers.map(o => [o.key, o.label])).toEqual([['acc1:s1', 'edge-1 (acc1)'], ['acc2:s1', 'edge-1 (acc2)']])
+    expect(matchesFilters(other, { ...NO_FILTERS, server: 'acc1:s1' })).toBe(false)
+    expect(groupServices([service('a'), other], 'server')).toHaveLength(2)
+  })
+
+  it('validates a status from the query', () => {
+    expect(statusFromQuery('degraded')).toBe('degraded')
+    expect(statusFromQuery('bogus')).toBe('any')
+    expect(statusFromQuery(['x'])).toBe('any')
   })
 
   it('offers the servers and projects present', () => {
     expect(filterOptions(sampleServices())).toEqual({
-      servers: ['edge-1', 'edge-2'],
-      projects: ['Platform / production', 'Website / production'],
+      servers: [{ key: 'acc1:s1', label: 'edge-1' }, { key: 'acc1:s2', label: 'edge-2' }],
+      projects: [{ key: 'acc1:p-Platform:production', label: 'Platform / production' }, { key: 'acc1:p-Website:production', label: 'Website / production' }],
       noServer: true,
       noProject: true,
     })
@@ -116,9 +136,9 @@ describe('grouping', () => {
 
   it('groups by server with the no-server bucket last', () => {
     expect(grouped('server')).toEqual([
-      ['edge-1', ['api', 'blog', 'cache', 'worker']],
+      ['edge-1', ['api', 'blog', 'worker']],
       ['edge-2', ['docs']],
-      ['No known server', ['db']],
+      ['No known server', ['cache', 'db']],
     ])
   })
 

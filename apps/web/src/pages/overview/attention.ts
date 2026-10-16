@@ -356,9 +356,11 @@ export function serviceRenewalRows(entries: RegistryEntryDto[], now = Date.now()
 
 /**
  * Running services (FM-1032) that are unhealthy or whose latest deployment
- * failed: a degraded service is an error, a stopped one a warning (it may be
- * intended). A failed deployment is its own row. Data that is stale is
- * labelled in the detail, never read as a pass, and never raised on its own.
+ * failed. A degraded service is an error (a warning when its data is stale,
+ * since it may have recovered); a stopped one is information (it may be
+ * intended). A failed deployment is an error only when the service is not
+ * running, otherwise a warning (the previous version may still be serving).
+ * Data that is merely stale is labelled in the detail and never raised alone.
  */
 export function serviceHealthRows(services: Pick<RunningServiceDto, 'id' | 'name' | 'state' | 'stale' | 'lastDeploy'>[], now = 0): AttentionRow[] {
   const rows: AttentionRow[] = []
@@ -368,7 +370,7 @@ export function serviceHealthRows(services: Pick<RunningServiceDto, 'id' | 'name
       rows.push({
         key: `service-unhealthy:${service.id}`,
         source: 'service-unhealthy',
-        severity: service.state === 'degraded' ? 'err' : 'warn',
+        severity: service.state === 'degraded' ? (service.stale ? 'warn' : 'err') : 'info',
         title: `${service.name} is ${service.state}`,
         detail: `Reported ${service.state}${stale}.`,
         to: detailPath(service.id),
@@ -380,9 +382,9 @@ export function serviceHealthRows(services: Pick<RunningServiceDto, 'id' | 'name
       rows.push({
         key: `service-deploy-failed:${service.id}`,
         source: 'service-deploy-failed',
-        severity: 'err',
+        severity: service.state === 'running' ? 'warn' : 'err',
         title: `${service.name} deployment ${deploy.label.replace(' · stale', '')}`,
-        detail: `The latest deployment did not succeed${service.lastDeploy?.stale ? ' (deployment data is stale)' : ''}.`,
+        detail: `The latest deployment did not succeed${service.state === 'running' ? '; the service is still running' : ''}${service.lastDeploy?.stale ? ' (deployment data is stale)' : ''}.`,
         to: detailPath(service.id),
         at: now,
       })

@@ -230,18 +230,25 @@ describe('kpis and activity', () => {
     const svc = (id: string, state: string, extra: Record<string, unknown> = {}) => ({ id, name: id, state, stale: false, lastDeploy: null, ...extra })
     const deploy = (status: string, stale = false) => ({ deploymentUuid: 'd', status, stale })
     const rows = serviceHealthRows([
-      svc('coolify:a1:ok', 'running', { lastDeploy: deploy('finished') }),
-      svc('coolify:a1:bad', 'degraded'),
-      svc('coolify:a1:off', 'stopped', { stale: true }),
-      svc('coolify:a1:stale', 'running', { stale: true }),
-      svc('coolify:a1:failed', 'running', { lastDeploy: deploy('failed', true) }),
+      svc('ok', 'running', { lastDeploy: deploy('finished') }),
+      svc('bad', 'degraded'),
+      svc('recovering', 'degraded', { stale: true }),
+      svc('off', 'stopped', { stale: true }),
+      svc('stale', 'running', { stale: true }),
+      svc('failed', 'running', { lastDeploy: deploy('failed', true) }),
+      svc('down', 'stopped', { lastDeploy: deploy('failed') }),
     ], NOW)
-    expect(rows.map(r => [r.key, r.source, r.severity, r.to])).toEqual([
-      ['service-unhealthy:coolify:a1:bad', 'service-unhealthy', 'err', '/services/coolify%3Aa1%3Abad'],
-      ['service-unhealthy:coolify:a1:off', 'service-unhealthy', 'warn', '/services/coolify%3Aa1%3Aoff'],
-      ['service-deploy-failed:coolify:a1:failed', 'service-deploy-failed', 'err', '/services/coolify%3Aa1%3Afailed'],
+    expect(rows.map(r => [r.key.replace(/^service-/, ''), r.severity])).toEqual([
+      ['unhealthy:bad', 'err'],
+      ['unhealthy:recovering', 'warn'],
+      ['unhealthy:off', 'info'],
+      ['deploy-failed:failed', 'warn'],
+      ['unhealthy:down', 'info'],
+      ['deploy-failed:down', 'err'],
     ])
-    expect(rows[1]!.detail).toContain('stale')
-    expect(rows[2]!.detail).toContain('deployment data is stale')
+    expect(rows[0]!.to).toBe('/services/bad')
+    expect(rows[2]!.detail).toContain('stale')
+    expect(rows[3]!.detail).toContain('still running')
+    expect(rows[3]!.detail).toContain('deployment data is stale')
   })
 })

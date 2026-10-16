@@ -119,7 +119,10 @@ const panelClass = 'rounded-sm border border-fc-line bg-fc-panel p-4'
         <p class="font-semibold text-fc-ink">
           Stale data: this is the last known state, not a current one.
         </p>
-        <ul class="mt-1 list-disc pl-4">
+        <ul
+          v-if="service.staleReasons.length > 0"
+          class="mt-1 list-disc pl-4"
+        >
           <li
             v-for="reason in service.staleReasons"
             :key="reason"

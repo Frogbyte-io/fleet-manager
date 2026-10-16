@@ -50,9 +50,9 @@ describe('Services page', () => {
     const { wrapper } = await mountAt('/services', ServicesPage)
     const groups = wrapper.findAll('[data-testid="service-group"]')
     expect(groups.map(g => g.find('h2').text().replace(/\s+/g, ' '))).toEqual([
-      'edge-1 4 SERVICES',
+      'edge-1 3 SERVICES',
       'edge-2 1 SERVICE',
-      'No known server 1 SERVICE',
+      'No known server 2 SERVICES',
     ])
     expect(wrapper.findAll('[data-testid="service-card"]')).toHaveLength(6)
     expect(wrapper.text()).toContain('6 running services · 1 degraded · 1 stale')
@@ -90,7 +90,7 @@ describe('Services page', () => {
     expect(localStorage.getItem(SERVICES_VIEW_KEY)).toBe('table')
     expect(wrapper.find('[data-testid="cards-view"]').exists()).toBe(false)
     expect(wrapper.findAll('[data-testid="service-row"]')).toHaveLength(6)
-    expect(wrapper.findAll('[data-testid="table-group"]').map(g => g.text())).toEqual(['edge-1 · 4', 'edge-2 · 1', 'No known server · 1'])
+    expect(wrapper.findAll('[data-testid="table-group"]').map(g => g.text())).toEqual(['edge-1 · 3', 'edge-2 · 1', 'No known server · 2'])
     // Wide-only columns hide on a 390 px screen, so the table scrolls instead of overflowing the page.
     expect(wrapper.get('table').element.parentElement?.className).toContain('overflow')
     const hidden = wrapper.findAll('th').filter(th => th.classes().includes('hidden'))
@@ -119,6 +119,21 @@ describe('Services page', () => {
     listRunningServices.mockResolvedValue(listing())
     const { wrapper } = await mountAt('/services?uuid=uuid-api', ServicesPage)
     expect(wrapper.findAll('[data-testid="service-card"]').map(c => c.attributes('data-service-id'))).toEqual(['coolify:acc1:api'])
+  })
+
+  it('clears the uuid narrowing with Clear filters', async () => {
+    listRunningServices.mockResolvedValue(listing())
+    const { wrapper, router } = await mountAt('/services?uuid=uuid-api', ServicesPage)
+    await wrapper.get('[data-testid="reset-filters"]').trigger('click')
+    await flushPromises()
+    expect(router.currentRoute.value.query.uuid).toBeUndefined()
+    expect(wrapper.findAll('[data-testid="service-card"]')).toHaveLength(6)
+  })
+
+  it('ignores an unknown status in the query', async () => {
+    listRunningServices.mockResolvedValue(listing())
+    const { wrapper } = await mountAt('/services?status=bogus', ServicesPage)
+    expect(wrapper.findAll('[data-testid="service-card"]')).toHaveLength(6)
   })
 
   it('starts on a status from the query', async () => {
@@ -190,6 +205,12 @@ describe('Service detail page', () => {
     getRunningService.mockResolvedValue(detail(service('x', { deepLink: 'javascript:alert(1)' })))
     const { wrapper } = await mountAt('/services/coolify%3Aacc1%3Ax', ServiceDetailPage)
     expect(wrapper.find('[data-testid="coolify-link"]').exists()).toBe(false)
+  })
+
+  it('draws no empty reasons list for a stale service without reasons', async () => {
+    getRunningService.mockResolvedValue(detail(service('x', { stale: true, staleReasons: [] })))
+    const { wrapper } = await mountAt('/services/coolify%3Aacc1%3Ax', ServiceDetailPage)
+    expect(wrapper.get('[data-testid="stale-banner"]').find('ul').exists()).toBe(false)
   })
 
   it('says so when the service is gone', async () => {
