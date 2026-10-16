@@ -846,6 +846,94 @@ export interface ClearedBuildAddressDto {
 }
 
 /**
+ * One DNS record.
+ */
+export interface DnsRecordDto {
+  /** The value, normalized per type. */
+  content: string;
+  /**
+     * The provider's record id.
+     * @nullable
+     */
+  id?: string | null;
+  /** The fully qualified name. */
+  name: string;
+  /**
+     * The MX preference.
+     * @minimum 0
+     * @nullable
+     */
+  priority?: number | null;
+  /** Whether traffic is proxied through the provider. */
+  proxied: boolean;
+  /**
+     * The TTL in seconds; 1 is automatic.
+     * @minimum 0
+     */
+  ttl: number;
+  /** The record type. */
+  type: string;
+}
+
+/**
+ * The records last observed at a name through one Cloudflare account.
+ */
+export interface CloudflareDnsObservationDto {
+  /** The account that answered. */
+  accountId: string;
+  /** The name the records are at. */
+  name: string;
+  /** When they were read (epoch milliseconds). */
+  observedAt: number;
+  /** The records. */
+  records: DnsRecordDto[];
+  /**
+     * The `domain/<key>` Registry entry the records attached to, when the
+     * Registry had one when they were read.
+     * @nullable
+     */
+  registryEntry?: string | null;
+  /** The zone's provider id. */
+  zoneId: string;
+  /** The zone's apex name. */
+  zoneName: string;
+}
+
+/**
+ * The stored observations of one name.
+ */
+export interface CloudflareDnsObservationsDto {
+  /** The name asked about. */
+  name: string;
+  /** One entry per account and zone that was read, newest first. */
+  observations: CloudflareDnsObservationDto[];
+}
+
+/**
+ * The records at one name.
+ */
+export interface CloudflareDnsRecordsDto {
+  /** The account that answered. */
+  accountId: string;
+  /** Its label. */
+  accountLabel: string;
+  /** The name asked about. */
+  name: string;
+  /** When the records were read (epoch milliseconds). */
+  observedAt: number;
+  /** The records. */
+  records: DnsRecordDto[];
+  /**
+     * The `domain/<key>` Registry entry the observation attached to, when
+     * the Registry has one.
+     * @nullable
+     */
+  registryEntry?: string | null;
+  /** The zone the name belongs to. */
+  zone: DnsZoneDto;
+}
+
+/**
  * Guest paths to copy from a ready lease.
  */
 export interface CollectArtifactsRequest {
@@ -1912,91 +2000,17 @@ export interface DiscoveredCheckoutDto {
 }
 
 /**
- * One DNS record.
- */
-export interface DnsRecordDto {
-  /** The value, normalized per type. */
-  content: string;
-  /**
-     * The provider's record id.
-     * @nullable
-     */
-  id?: string | null;
-  /** The fully qualified name. */
-  name: string;
-  /**
-     * The MX preference.
-     * @minimum 0
-     * @nullable
-     */
-  priority?: number | null;
-  /** Whether traffic is proxied through the provider. */
-  proxied: boolean;
-  /**
-     * The TTL in seconds; 1 is automatic.
-     * @minimum 0
-     */
-  ttl: number;
-  /** The record type. */
-  type: string;
-}
-
-/**
- * The records last observed at a name through one Cloudflare account.
- */
-export interface DnsObservationDto {
-  /** The account that answered. */
-  accountId: string;
-  /** The name the records are at. */
-  name: string;
-  /** When they were read (epoch milliseconds). */
-  observedAt: number;
-  /** The records. */
-  records: DnsRecordDto[];
-  /**
-     * The `domain/<key>` Registry entry the records attached to, when the
-     * Registry had one when they were read.
-     * @nullable
-     */
-  registryEntry?: string | null;
-  /** The zone's provider id. */
-  zoneId: string;
-  /** The zone's apex name. */
-  zoneName: string;
-}
-
-/**
- * The stored observations of one name.
- */
-export interface DnsObservationsDto {
-  /** The name asked about. */
-  name: string;
-  /** One entry per account and zone that was read, newest first. */
-  observations: DnsObservationDto[];
-}
-
-/**
- * The records at one name.
+ * Records of each type at one DNS name.
  */
 export interface DnsRecordsDto {
-  /** The account that answered. */
-  accountId: string;
-  /** Its label. */
-  accountLabel: string;
-  /** The name asked about. */
-  name: string;
-  /** When the records were read (epoch milliseconds). */
-  observedAt: number;
-  /** The records. */
-  records: DnsRecordDto[];
-  /**
-     * The `domain/<key>` Registry entry the observation attached to, when
-     * the Registry has one.
-     * @nullable
-     */
-  registryEntry?: string | null;
-  /** The zone the name belongs to. */
-  zone: DnsZoneDto;
+  /** A values. */
+  a: string[];
+  /** AAAA values. */
+  aaaa: string[];
+  /** CNAME values. */
+  cname: string[];
+  /** NS values (meaningful at the apex). */
+  ns: string[];
 }
 
 /**
@@ -2010,6 +2024,23 @@ export const DnsStatusDto = {
   not_found: 'not_found',
   error: 'error',
 } as const;
+
+/**
+ * The DNS half of a domain observation.
+ */
+export interface DnsObservationDto {
+  /** Records at the apex. */
+  apex: DnsRecordsDto;
+  /**
+     * Why, for `not_found` and `error`.
+     * @nullable
+     */
+  detail?: string | null;
+  /** How the lookup ended. */
+  status: DnsStatusDto;
+  /** Records at `www.<apex>`. */
+  www: DnsRecordsDto;
+}
 
 /**
  * The zones of every Cloudflare account.
@@ -6030,6 +6061,62 @@ export interface ResourceClearedBuildAddressDto {
 }
 
 /**
+ * The stored observations of one name.
+ */
+export type ResourceCloudflareDnsObservationsDtoData = {
+  /** The name asked about. */
+  name: string;
+  /** One entry per account and zone that was read, newest first. */
+  observations: CloudflareDnsObservationDto[];
+};
+
+/**
+ * A single resource.
+ *
+ * The payload is nested under `data` so that later top-level fields are an
+ * additive change rather than a breaking one.
+ */
+export interface ResourceCloudflareDnsObservationsDto {
+  /** The stored observations of one name. */
+  data: ResourceCloudflareDnsObservationsDtoData;
+}
+
+/**
+ * The records at one name.
+ */
+export type ResourceCloudflareDnsRecordsDtoData = {
+  /** The account that answered. */
+  accountId: string;
+  /** Its label. */
+  accountLabel: string;
+  /** The name asked about. */
+  name: string;
+  /** When the records were read (epoch milliseconds). */
+  observedAt: number;
+  /** The records. */
+  records: DnsRecordDto[];
+  /**
+     * The `domain/<key>` Registry entry the observation attached to, when
+     * the Registry has one.
+     * @nullable
+     */
+  registryEntry?: string | null;
+  /** The zone the name belongs to. */
+  zone: DnsZoneDto;
+};
+
+/**
+ * A single resource.
+ *
+ * The payload is nested under `data` so that later top-level fields are an
+ * additive change rather than a breaking one.
+ */
+export interface ResourceCloudflareDnsRecordsDto {
+  /** The records at one name. */
+  data: ResourceCloudflareDnsRecordsDtoData;
+}
+
+/**
  * The stamped, stale-aware Coolify snapshot of one account.
  */
 export type ResourceCoolifyObservationDtoData = {
@@ -6279,62 +6366,6 @@ export type ResourceDetachedExecStatusDtoData = {
 export interface ResourceDetachedExecStatusDto {
   /** The state of a detached command. */
   data: ResourceDetachedExecStatusDtoData;
-}
-
-/**
- * The stored observations of one name.
- */
-export type ResourceDnsObservationsDtoData = {
-  /** The name asked about. */
-  name: string;
-  /** One entry per account and zone that was read, newest first. */
-  observations: DnsObservationDto[];
-};
-
-/**
- * A single resource.
- *
- * The payload is nested under `data` so that later top-level fields are an
- * additive change rather than a breaking one.
- */
-export interface ResourceDnsObservationsDto {
-  /** The stored observations of one name. */
-  data: ResourceDnsObservationsDtoData;
-}
-
-/**
- * The records at one name.
- */
-export type ResourceDnsRecordsDtoData = {
-  /** The account that answered. */
-  accountId: string;
-  /** Its label. */
-  accountLabel: string;
-  /** The name asked about. */
-  name: string;
-  /** When the records were read (epoch milliseconds). */
-  observedAt: number;
-  /** The records. */
-  records: DnsRecordDto[];
-  /**
-     * The `domain/<key>` Registry entry the observation attached to, when
-     * the Registry has one.
-     * @nullable
-     */
-  registryEntry?: string | null;
-  /** The zone the name belongs to. */
-  zone: DnsZoneDto;
-};
-
-/**
- * A single resource.
- *
- * The payload is nested under `data` so that later top-level fields are an
- * additive change rather than a breaking one.
- */
-export interface ResourceDnsRecordsDto {
-  /** The records at one name. */
-  data: ResourceDnsRecordsDtoData;
 }
 
 /**
@@ -10291,7 +10322,7 @@ const res = await fetch(getCreateDnsChangeUrl(),
 
 
 export type listDnsObservationsResponse200 = {
-  data: ResourceDnsObservationsDto
+  data: ResourceCloudflareDnsObservationsDto
   status: 200
 }
 
@@ -10365,7 +10396,7 @@ export const listDnsObservations = async (params: ListDnsObservationsParams, opt
 
 
 export type listDnsRecordsResponse200 = {
-  data: ResourceDnsRecordsDto
+  data: ResourceCloudflareDnsRecordsDto
   status: 200
 }
 

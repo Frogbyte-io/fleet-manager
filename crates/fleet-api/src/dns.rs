@@ -213,7 +213,7 @@ pub struct DnsZonesDto {
 /// The records at one name.
 #[derive(Clone, Debug, Serialize, ToSchema)]
 #[serde(rename_all = "camelCase")]
-pub struct DnsRecordsDto {
+pub struct CloudflareDnsRecordsDto {
     /// The account that answered.
     pub account_id: String,
     /// Its label.
@@ -231,7 +231,7 @@ pub struct DnsRecordsDto {
     pub observed_at: i64,
 }
 
-impl From<RecordsView> for DnsRecordsDto {
+impl From<RecordsView> for CloudflareDnsRecordsDto {
     fn from(view: RecordsView) -> Self {
         Self {
             account_id: view.account_id,
@@ -321,7 +321,7 @@ pub struct ListRecordsParams {
         ("account" = Option<String>, Query, description = "The Cloudflare account (id or label), when several hold the zone.")
     ),
     responses(
-        (status = 200, description = "The records at the name.", body = Resource<DnsRecordsDto>),
+        (status = 200, description = "The records at the name.", body = Resource<CloudflareDnsRecordsDto>),
         (status = 400, description = "The name or type is malformed.", body = crate::error::ApiError),
         (status = 403, description = "The caller may not read DNS.", body = crate::error::ApiError),
         (status = 404, description = "No Cloudflare account or zone matches the name.", body = crate::error::ApiError),
@@ -336,7 +336,7 @@ pub async fn list_dns_records(
     Extension(correlation_id): Extension<CorrelationId>,
     dns: Option<Extension<Arc<Dns>>>,
     Query(params): Query<ListRecordsParams>,
-) -> Result<Json<Resource<DnsRecordsDto>>, ApiErrorResponse> {
+) -> Result<Json<Resource<CloudflareDnsRecordsDto>>, ApiErrorResponse> {
     let dns = dns_or_error(dns, correlation_id)?;
     let principal = crate::operations::principal_or_error(principal, correlation_id)?;
     let name = params.name.as_deref().ok_or_else(|| {
@@ -364,7 +364,7 @@ pub async fn list_dns_records(
 /// The records last observed at a name through one Cloudflare account.
 #[derive(Clone, Debug, Serialize, ToSchema)]
 #[serde(rename_all = "camelCase")]
-pub struct DnsObservationDto {
+pub struct CloudflareDnsObservationDto {
     /// The account that answered.
     pub account_id: String,
     /// The zone's provider id.
@@ -382,7 +382,7 @@ pub struct DnsObservationDto {
     pub observed_at: i64,
 }
 
-impl From<DnsObservation> for DnsObservationDto {
+impl From<DnsObservation> for CloudflareDnsObservationDto {
     fn from(observation: DnsObservation) -> Self {
         Self {
             account_id: observation.account_id,
@@ -399,11 +399,11 @@ impl From<DnsObservation> for DnsObservationDto {
 /// The stored observations of one name.
 #[derive(Clone, Debug, Serialize, ToSchema)]
 #[serde(rename_all = "camelCase")]
-pub struct DnsObservationsDto {
+pub struct CloudflareDnsObservationsDto {
     /// The name asked about.
     pub name: String,
     /// One entry per account and zone that was read, newest first.
-    pub observations: Vec<DnsObservationDto>,
+    pub observations: Vec<CloudflareDnsObservationDto>,
 }
 
 /// Query parameters of the observations read.
@@ -428,7 +428,7 @@ pub struct ListObservationsParams {
     operation_id = "listDnsObservations",
     params(("name" = String, Query, description = "The fully qualified name.")),
     responses(
-        (status = 200, description = "The stored observations of the name.", body = Resource<DnsObservationsDto>),
+        (status = 200, description = "The stored observations of the name.", body = Resource<CloudflareDnsObservationsDto>),
         (status = 400, description = "The name is missing or malformed.", body = crate::error::ApiError),
         (status = 403, description = "The caller may not read DNS.", body = crate::error::ApiError),
         (status = 503, description = "The DNS surface is not wired.", body = crate::error::ApiError),
@@ -440,7 +440,7 @@ pub async fn list_dns_observations(
     Extension(correlation_id): Extension<CorrelationId>,
     dns: Option<Extension<Arc<Dns>>>,
     Query(params): Query<ListObservationsParams>,
-) -> Result<Json<Resource<DnsObservationsDto>>, ApiErrorResponse> {
+) -> Result<Json<Resource<CloudflareDnsObservationsDto>>, ApiErrorResponse> {
     let dns = dns_or_error(dns, correlation_id)?;
     let principal = crate::operations::principal_or_error(principal, correlation_id)?;
     let name = params.name.as_deref().ok_or_else(|| {
@@ -455,7 +455,7 @@ pub async fn list_dns_observations(
         .observations(state.authorizer.as_ref(), &principal.id, name)
         .await
         .map_err(|error| map_error(&error, correlation_id))?;
-    Ok(Json(Resource::new(DnsObservationsDto {
+    Ok(Json(Resource::new(CloudflareDnsObservationsDto {
         name: name.trim().trim_end_matches('.').to_ascii_lowercase(),
         observations: observations.into_iter().map(Into::into).collect(),
     })))

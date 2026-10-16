@@ -1200,7 +1200,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/Resource_DnsObservationsDto"
+                  "$ref": "#/components/schemas/Resource_CloudflareDnsObservationsDto"
                 }
               }
             }
@@ -1281,7 +1281,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/Resource_DnsRecordsDto"
+                  "$ref": "#/components/schemas/Resource_CloudflareDnsRecordsDto"
                 }
               }
             }
@@ -11646,6 +11646,125 @@
           }
         }
       },
+      "CloudflareDnsObservationDto": {
+        "type": "object",
+        "description": "The records last observed at a name through one Cloudflare account.",
+        "required": [
+          "accountId",
+          "zoneId",
+          "zoneName",
+          "name",
+          "records",
+          "observedAt"
+        ],
+        "properties": {
+          "accountId": {
+            "type": "string",
+            "description": "The account that answered."
+          },
+          "name": {
+            "type": "string",
+            "description": "The name the records are at."
+          },
+          "observedAt": {
+            "type": "integer",
+            "format": "int64",
+            "description": "When they were read (epoch milliseconds)."
+          },
+          "records": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/DnsRecordDto"
+            },
+            "description": "The records."
+          },
+          "registryEntry": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The `domain/<key>` Registry entry the records attached to, when the\nRegistry had one when they were read."
+          },
+          "zoneId": {
+            "type": "string",
+            "description": "The zone's provider id."
+          },
+          "zoneName": {
+            "type": "string",
+            "description": "The zone's apex name."
+          }
+        }
+      },
+      "CloudflareDnsObservationsDto": {
+        "type": "object",
+        "description": "The stored observations of one name.",
+        "required": [
+          "name",
+          "observations"
+        ],
+        "properties": {
+          "name": {
+            "type": "string",
+            "description": "The name asked about."
+          },
+          "observations": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/CloudflareDnsObservationDto"
+            },
+            "description": "One entry per account and zone that was read, newest first."
+          }
+        }
+      },
+      "CloudflareDnsRecordsDto": {
+        "type": "object",
+        "description": "The records at one name.",
+        "required": [
+          "accountId",
+          "accountLabel",
+          "zone",
+          "name",
+          "records",
+          "observedAt"
+        ],
+        "properties": {
+          "accountId": {
+            "type": "string",
+            "description": "The account that answered."
+          },
+          "accountLabel": {
+            "type": "string",
+            "description": "Its label."
+          },
+          "name": {
+            "type": "string",
+            "description": "The name asked about."
+          },
+          "observedAt": {
+            "type": "integer",
+            "format": "int64",
+            "description": "When the records were read (epoch milliseconds)."
+          },
+          "records": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/DnsRecordDto"
+            },
+            "description": "The records."
+          },
+          "registryEntry": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The `domain/<key>` Registry entry the observation attached to, when\nthe Registry has one."
+          },
+          "zone": {
+            "$ref": "#/components/schemas/DnsZoneDto",
+            "description": "The zone the name belongs to."
+          }
+        }
+      },
       "CollectArtifactsRequest": {
         "type": "object",
         "description": "Guest paths to copy from a ready lease.",
@@ -13264,71 +13383,31 @@
       },
       "DnsObservationDto": {
         "type": "object",
-        "description": "The records last observed at a name through one Cloudflare account.",
+        "description": "The DNS half of a domain observation.",
         "required": [
-          "accountId",
-          "zoneId",
-          "zoneName",
-          "name",
-          "records",
-          "observedAt"
+          "status",
+          "apex",
+          "www"
         ],
         "properties": {
-          "accountId": {
-            "type": "string",
-            "description": "The account that answered."
+          "apex": {
+            "$ref": "#/components/schemas/DnsRecordsDto",
+            "description": "Records at the apex."
           },
-          "name": {
-            "type": "string",
-            "description": "The name the records are at."
-          },
-          "observedAt": {
-            "type": "integer",
-            "format": "int64",
-            "description": "When they were read (epoch milliseconds)."
-          },
-          "records": {
-            "type": "array",
-            "items": {
-              "$ref": "#/components/schemas/DnsRecordDto"
-            },
-            "description": "The records."
-          },
-          "registryEntry": {
+          "detail": {
             "type": [
               "string",
               "null"
             ],
-            "description": "The `domain/<key>` Registry entry the records attached to, when the\nRegistry had one when they were read."
+            "description": "Why, for `not_found` and `error`."
           },
-          "zoneId": {
-            "type": "string",
-            "description": "The zone's provider id."
+          "status": {
+            "$ref": "#/components/schemas/DnsStatusDto",
+            "description": "How the lookup ended."
           },
-          "zoneName": {
-            "type": "string",
-            "description": "The zone's apex name."
-          }
-        }
-      },
-      "DnsObservationsDto": {
-        "type": "object",
-        "description": "The stored observations of one name.",
-        "required": [
-          "name",
-          "observations"
-        ],
-        "properties": {
-          "name": {
-            "type": "string",
-            "description": "The name asked about."
-          },
-          "observations": {
-            "type": "array",
-            "items": {
-              "$ref": "#/components/schemas/DnsObservationDto"
-            },
-            "description": "One entry per account and zone that was read, newest first."
+          "www": {
+            "$ref": "#/components/schemas/DnsRecordsDto",
+            "description": "Records at `www.<apex>`."
           }
         }
       },
@@ -13385,50 +13464,41 @@
       },
       "DnsRecordsDto": {
         "type": "object",
-        "description": "The records at one name.",
+        "description": "Records of each type at one DNS name.",
         "required": [
-          "accountId",
-          "accountLabel",
-          "zone",
-          "name",
-          "records",
-          "observedAt"
+          "ns",
+          "a",
+          "aaaa",
+          "cname"
         ],
         "properties": {
-          "accountId": {
-            "type": "string",
-            "description": "The account that answered."
-          },
-          "accountLabel": {
-            "type": "string",
-            "description": "Its label."
-          },
-          "name": {
-            "type": "string",
-            "description": "The name asked about."
-          },
-          "observedAt": {
-            "type": "integer",
-            "format": "int64",
-            "description": "When the records were read (epoch milliseconds)."
-          },
-          "records": {
+          "a": {
             "type": "array",
             "items": {
-              "$ref": "#/components/schemas/DnsRecordDto"
+              "type": "string"
             },
-            "description": "The records."
+            "description": "A values."
           },
-          "registryEntry": {
-            "type": [
-              "string",
-              "null"
-            ],
-            "description": "The `domain/<key>` Registry entry the observation attached to, when\nthe Registry has one."
+          "aaaa": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "AAAA values."
           },
-          "zone": {
-            "$ref": "#/components/schemas/DnsZoneDto",
-            "description": "The zone the name belongs to."
+          "cname": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "CNAME values."
+          },
+          "ns": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "NS values (meaningful at the apex)."
           }
         }
       },
@@ -20793,6 +20863,94 @@
           }
         }
       },
+      "Resource_CloudflareDnsObservationsDto": {
+        "type": "object",
+        "description": "A single resource.\n\nThe payload is nested under `data` so that later top-level fields are an\nadditive change rather than a breaking one.",
+        "required": [
+          "data"
+        ],
+        "properties": {
+          "data": {
+            "type": "object",
+            "description": "The stored observations of one name.",
+            "required": [
+              "name",
+              "observations"
+            ],
+            "properties": {
+              "name": {
+                "type": "string",
+                "description": "The name asked about."
+              },
+              "observations": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/components/schemas/CloudflareDnsObservationDto"
+                },
+                "description": "One entry per account and zone that was read, newest first."
+              }
+            }
+          }
+        }
+      },
+      "Resource_CloudflareDnsRecordsDto": {
+        "type": "object",
+        "description": "A single resource.\n\nThe payload is nested under `data` so that later top-level fields are an\nadditive change rather than a breaking one.",
+        "required": [
+          "data"
+        ],
+        "properties": {
+          "data": {
+            "type": "object",
+            "description": "The records at one name.",
+            "required": [
+              "accountId",
+              "accountLabel",
+              "zone",
+              "name",
+              "records",
+              "observedAt"
+            ],
+            "properties": {
+              "accountId": {
+                "type": "string",
+                "description": "The account that answered."
+              },
+              "accountLabel": {
+                "type": "string",
+                "description": "Its label."
+              },
+              "name": {
+                "type": "string",
+                "description": "The name asked about."
+              },
+              "observedAt": {
+                "type": "integer",
+                "format": "int64",
+                "description": "When the records were read (epoch milliseconds)."
+              },
+              "records": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/components/schemas/DnsRecordDto"
+                },
+                "description": "The records."
+              },
+              "registryEntry": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "description": "The `domain/<key>` Registry entry the observation attached to, when\nthe Registry has one."
+              },
+              "zone": {
+                "$ref": "#/components/schemas/DnsZoneDto",
+                "description": "The zone the name belongs to."
+              }
+            }
+          }
+        }
+      },
       "Resource_CoolifyObservationDto": {
         "type": "object",
         "description": "A single resource.\n\nThe payload is nested under `data` so that later top-level fields are an\nadditive change rather than a breaking one.",
@@ -21181,94 +21339,6 @@
               "truncatedStdout": {
                 "type": "boolean",
                 "description": "Whether output was dropped from the front of stdout."
-              }
-            }
-          }
-        }
-      },
-      "Resource_DnsObservationsDto": {
-        "type": "object",
-        "description": "A single resource.\n\nThe payload is nested under `data` so that later top-level fields are an\nadditive change rather than a breaking one.",
-        "required": [
-          "data"
-        ],
-        "properties": {
-          "data": {
-            "type": "object",
-            "description": "The stored observations of one name.",
-            "required": [
-              "name",
-              "observations"
-            ],
-            "properties": {
-              "name": {
-                "type": "string",
-                "description": "The name asked about."
-              },
-              "observations": {
-                "type": "array",
-                "items": {
-                  "$ref": "#/components/schemas/DnsObservationDto"
-                },
-                "description": "One entry per account and zone that was read, newest first."
-              }
-            }
-          }
-        }
-      },
-      "Resource_DnsRecordsDto": {
-        "type": "object",
-        "description": "A single resource.\n\nThe payload is nested under `data` so that later top-level fields are an\nadditive change rather than a breaking one.",
-        "required": [
-          "data"
-        ],
-        "properties": {
-          "data": {
-            "type": "object",
-            "description": "The records at one name.",
-            "required": [
-              "accountId",
-              "accountLabel",
-              "zone",
-              "name",
-              "records",
-              "observedAt"
-            ],
-            "properties": {
-              "accountId": {
-                "type": "string",
-                "description": "The account that answered."
-              },
-              "accountLabel": {
-                "type": "string",
-                "description": "Its label."
-              },
-              "name": {
-                "type": "string",
-                "description": "The name asked about."
-              },
-              "observedAt": {
-                "type": "integer",
-                "format": "int64",
-                "description": "When the records were read (epoch milliseconds)."
-              },
-              "records": {
-                "type": "array",
-                "items": {
-                  "$ref": "#/components/schemas/DnsRecordDto"
-                },
-                "description": "The records."
-              },
-              "registryEntry": {
-                "type": [
-                  "string",
-                  "null"
-                ],
-                "description": "The `domain/<key>` Registry entry the observation attached to, when\nthe Registry has one."
-              },
-              "zone": {
-                "$ref": "#/components/schemas/DnsZoneDto",
-                "description": "The zone the name belongs to."
               }
             }
           }
