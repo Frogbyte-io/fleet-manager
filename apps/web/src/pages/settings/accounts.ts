@@ -15,7 +15,7 @@ export function kindTitle(kind: ProviderKind): string {
   return PROVIDER_KINDS.find(entry => entry.id === kind)?.title ?? kind
 }
 
-type Tone = 'ok' | 'warn' | 'err' | 'muted'
+type Tone = 'ok' | 'info' | 'warn' | 'err' | 'muted'
 
 export interface ProbeView {
   label: string
@@ -29,7 +29,11 @@ export function probeView(probe: ExternalProbeDto | null | undefined): ProbeView
     return { label: 'not probed', tone: 'muted', detail: '' }
   switch (probe.status) {
     case 'ok':
-      return { label: 'ok', tone: 'ok', detail: probe.detail }
+      // Not green when permissions could not be verified: ok does not
+      // vouch for them.
+      return probe.unverified.length > 0
+        ? { label: `ok (${probe.unverified.length} unverified)`, tone: 'info', detail: probe.detail }
+        : { label: 'ok', tone: 'ok', detail: probe.detail }
     case 'unreachable':
       return { label: 'unreachable', tone: 'err', detail: probe.detail }
     case 'unauthorized':

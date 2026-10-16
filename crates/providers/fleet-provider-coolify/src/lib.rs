@@ -76,14 +76,24 @@ pub async fn probe(base_url: &str, token: &str) -> ProbeReport {
             .get(reqwest::header::LOCATION)
             .and_then(|value| value.to_str().ok())
             .and_then(location_host);
+        let hint = redirect_hint(base_url);
         let detail = match host {
-            Some(host) => format!("redirected to {host}; use the https base URL"),
-            None => "redirected; use the https base URL".to_owned(),
+            Some(host) => format!("redirected to {host}; {hint}"),
+            None => format!("redirected; {hint}"),
         };
         return ProbeReport::simple(ProbeStatus::Unreachable, &detail);
     }
     let body = body_text(response).await;
     classify(status, &body)
+}
+
+/// Only an http base URL is helped by switching to https.
+fn redirect_hint(base_url: &str) -> &'static str {
+    if base_url.starts_with("http://") {
+        "use the https base URL"
+    } else {
+        "check the base URL"
+    }
 }
 
 fn classify(status: u16, body: &str) -> ProbeReport {
@@ -205,4 +215,21 @@ async fn body_text(mut response: reqwest::Response) -> String {
     }
     buffer.truncate(BODY_BOUND);
     String::from_utf8_lossy(&buffer).into_owned()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::redirect_hint;
+
+    #[test]
+    fn the_https_hint_is_only_for_http_base_urls() {
+        assert_eq!(
+            redirect_hint("http://c.example.test"),
+            "use the https base URL"
+        );
+        assert_eq!(
+            redirect_hint("https://c.example.test"),
+            "check the base URL"
+        );
+    }
 }

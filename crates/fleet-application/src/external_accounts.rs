@@ -505,11 +505,28 @@ impl ExternalAccounts {
             .update(id, &merged, subject_changed)
             .await
             .map_err(backend_or_taken)?;
-        if let Some(token) = new_token {
-            self.credentials
-                .store(id, token)
-                .await
-                .map_err(ExternalAccountError::Credentials)?;
+        if let Some(token) = new_token
+            && let Err(error) = self.credentials.store(id, token).await
+        {
+            // The old token must not stay bound to a new origin: put the
+            // previous record back (the probe stays cleared, since it was
+            // taken against a state that no longer applies).
+            let previous = NewExternalAccount {
+                kind: current.kind,
+                label: current.label.clone(),
+                base_url: current.base_url.clone(),
+                scope_id: current.scope_id.clone(),
+                notes: current.notes.clone(),
+            };
+            if let Err(restore) = self.accounts.update(id, &previous, true).await {
+                return Err(ExternalAccountError::Backend {
+                    context: "credentials",
+                    detail: format!(
+                        "the secret write failed ({error}) and restoring the previous record failed too ({restore})"
+                    ),
+                });
+            }
+            return Err(ExternalAccountError::Credentials(error));
         }
         self.audit(
             principal,

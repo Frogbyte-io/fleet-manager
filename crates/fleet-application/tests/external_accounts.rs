@@ -696,3 +696,56 @@ async fn a_failed_token_replacement_leaves_the_old_token_and_no_stale_probe() {
         "no probe outlives a credential change attempt"
     );
 }
+
+#[tokio::test]
+async fn a_failed_credential_write_restores_the_previous_origin() {
+    let credentials = Arc::new(FlakyCredentials::default());
+    let service = ExternalAccounts::new(
+        Arc::new(Accounts::default()),
+        credentials.clone(),
+        Arc::new(Prober {
+            status: ProbeStatus::Ok,
+            seen: Mutex::default(),
+        }),
+        Arc::new(Audit::default()),
+    );
+    let allow = Deny(vec![]);
+    let account = service
+        .create(&allow, &principal(), coolify("prod"), TOKEN)
+        .await
+        .unwrap();
+    service
+        .probe(&allow, &principal(), &account.id)
+        .await
+        .unwrap();
+    *credentials.fail.lock().unwrap() = true;
+    let error = service
+        .update(
+            &allow,
+            &principal(),
+            &account.id,
+            UpdateExternalAccount {
+                base_url: Some("https://other.example.test".to_owned()),
+                notes: Some("changed".to_owned()),
+                ..Default::default()
+            },
+            Some("replacement-token-123456"),
+        )
+        .await
+        .unwrap_err();
+    assert!(matches!(error, ExternalAccountError::Credentials(_)));
+    let after = service
+        .get(&allow, &principal(), &account.id)
+        .await
+        .unwrap();
+    assert_eq!(
+        after.base_url, "https://coolify.example.test",
+        "the old token is not left bound to the new origin"
+    );
+    assert_eq!(after.notes, "", "the whole previous record is restored");
+    assert!(after.last_probe.is_none(), "the probe stays cleared");
+    assert_eq!(
+        credentials.load(&account.id).await.unwrap().as_deref(),
+        Some(TOKEN)
+    );
+}

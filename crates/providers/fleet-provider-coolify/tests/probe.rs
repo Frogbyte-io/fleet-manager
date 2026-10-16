@@ -158,7 +158,8 @@ async fn a_redirect_stops_the_probe_and_names_only_the_target_host() {
     let report = fleet_provider_coolify::probe(&base, TOKEN).await;
     assert_eq!(report.status, ProbeStatus::Unreachable);
     assert!(report.detail.contains("redirected"), "{}", report.detail);
-    assert!(report.detail.contains("https base URL"));
+    // The stub is http, so switching to https is the useful hint.
+    assert!(report.detail.contains("use the https base URL"));
     assert!(report.detail.contains("other.example:8443"));
     assert!(!report.detail.contains("secret/path"));
     assert!(!report.detail.contains("zzz"));

@@ -148,7 +148,7 @@ function originChanged(account: ExternalAccountDto): boolean {
   return !sameOrigin(account.baseUrl, edit.value.baseUrl)
 }
 
-const toneFor = (tone: string) => tone as 'ok' | 'warn' | 'err' | 'muted'
+const toneFor = (tone: string) => tone as 'ok' | 'info' | 'warn' | 'err' | 'muted'
 const inputClass = 'h-8 rounded-sm border border-input bg-background px-2 text-foreground'
 const buttonClass = 'h-8 rounded-sm border border-fc-info/40 px-3 text-fc-info hover:bg-fc-info/10 disabled:opacity-50'
 </script>

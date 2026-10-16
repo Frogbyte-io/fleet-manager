@@ -345,17 +345,31 @@ pub(crate) fn render(value: &Value) -> String {
     lines.join("\n")
 }
 
+/// The PROBE column: the status, with the count of permissions the probe
+/// could not verify when it said `ok`.
+fn probe_column(account: &Value) -> String {
+    let status = clean(
+        account["lastProbe"]["status"]
+            .as_str()
+            .unwrap_or("not probed"),
+    );
+    let unverified = account["lastProbe"]["unverified"]
+        .as_array()
+        .map_or(0, Vec::len);
+    if status == "ok" && unverified > 0 {
+        format!("ok ({unverified} unverified)")
+    } else {
+        status
+    }
+}
+
 fn row(account: &Value) -> String {
     format!(
         "{:<38} {:<11} {:<20} {:<24} {}",
         text_of(&account["id"]),
         text_of(&account["kind"]),
         text_of(&account["label"]),
-        clean(
-            account["lastProbe"]["status"]
-                .as_str()
-                .unwrap_or("not probed")
-        ),
+        probe_column(account),
         text_of(&account["baseUrl"]),
     )
 }

@@ -93,7 +93,9 @@ impl FromStr for ExternalProviderKind {
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ProbeStatus {
-    /// The service answered and the token has every permission Fleet needs.
+    /// The service answered and every permission the probe could verify is
+    /// present. Permissions it deliberately did not verify are listed in
+    /// the report's `unverified`; `ok` does not vouch for them.
     Ok,
     /// The service could not be reached (DNS, TCP, TLS, timeout).
     Unreachable,
@@ -254,8 +256,9 @@ pub fn base_url_origin(base_url: &str) -> String {
     format!("{scheme}://{authority}")
 }
 
-/// Whether the base URL's host is a loopback address (a local stub or a
-/// local test instance).
+/// Whether the base URL's host is a literal loopback address (`127.0.0.0/8`
+/// or `::1`). The hostname `localhost` is not accepted: it resolves through
+/// the resolver and hosts file, so it proves nothing.
 #[must_use]
 pub fn base_url_is_loopback(base_url: &str) -> bool {
     let origin = base_url_origin(base_url);
@@ -265,7 +268,8 @@ pub fn base_url_is_loopback(base_url: &str) -> bool {
     } else {
         authority.split(':').next().unwrap_or("")
     };
-    host == "localhost" || host == "127.0.0.1" || host == "::1"
+    host.parse::<std::net::IpAddr>()
+        .is_ok_and(|address| address.is_loopback())
 }
 
 /// Validates a provider-side scope id (a Cloudflare account id).
@@ -322,7 +326,9 @@ mod tests {
             base_url_origin("https://host.example")
         );
         assert!(base_url_is_loopback("http://127.0.0.1:18080"));
-        assert!(base_url_is_loopback("http://localhost"));
+        assert!(base_url_is_loopback("http://127.8.9.10"));
+        assert!(!base_url_is_loopback("http://localhost"));
+        assert!(!base_url_is_loopback("http://127.0.0.1.example.test"));
         assert!(base_url_is_loopback("http://[::1]:80"));
         assert!(!base_url_is_loopback(
             "https://api.cloudflare.com/client/v4"

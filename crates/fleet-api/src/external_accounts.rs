@@ -59,7 +59,8 @@ impl From<ExternalProviderKind> for ExternalProviderKindDto {
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize, ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum ProbeStatusDto {
-    /// Reachable, authorized, and holding every permission Fleet needs.
+    /// Reachable and authorized, and every permission the probe could
+    /// verify is present; see `unverified` for what it could not check.
     Ok,
     /// The service could not be reached.
     Unreachable,

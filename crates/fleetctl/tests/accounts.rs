@@ -191,3 +191,18 @@ fn text_output_strips_control_characters_and_shows_unverified() {
     assert_eq!(text.lines().count(), 5, "{text:?}");
     assert!(text.contains("unverified: write, deploy"), "{text}");
 }
+
+#[test]
+fn the_probe_column_counts_unverified_permissions() {
+    let probed = |unverified: Vec<&str>| {
+        json!({"items": [{
+            "id": "acc-1", "kind": "coolify", "label": "prod", "baseUrl": "https://c.example.test",
+            "lastProbe": {"status": "ok", "detail": "d", "granted": ["read"], "missing": [],
+                "unverified": unverified, "checkedAt": 1}
+        }], "page": {"limit": 50, "nextCursor": null}})
+    };
+    let text = fleetctl::render_accounts_for_test(&probed(vec!["write", "deploy"]));
+    assert!(text.contains("ok (2 unverified)"), "{text}");
+    let text = fleetctl::render_accounts_for_test(&probed(vec![]));
+    assert!(!text.contains("unverified"), "{text}");
+}

@@ -62,7 +62,8 @@ describe('provider account helpers', () => {
   it('reads each probe classification honestly', () => {
     expect(probeView(null).label).toBe('not probed')
     const base = { detail: 'd', granted: [], missing: [], unverified: [], checkedAt: 1 }
-    expect(probeView({ ...base, status: 'ok' }).tone).toBe('ok')
+    expect(probeView({ ...base, status: 'ok' })).toMatchObject({ label: 'ok', tone: 'ok' })
+    expect(probeView({ ...base, status: 'ok', unverified: ['write', 'deploy'] })).toMatchObject({ label: 'ok (2 unverified)', tone: 'info' })
     expect(probeView({ ...base, status: 'unreachable' }).tone).toBe('err')
     expect(probeView({ ...base, status: 'unauthorized' }).tone).toBe('err')
     expect(probeView({ ...base, status: 'insufficient_permission' })).toMatchObject({ label: 'insufficient permission', tone: 'warn' })
@@ -88,7 +89,7 @@ describe('ProviderAccountsSection', () => {
       account({ lastProbe: { status: 'ok', detail: 'accepted', granted: ['read'], missing: [], unverified: ['write', 'deploy'], checkedAt: Date.now() } }),
     ]))
     const wrapper = await mountSection()
-    expect(wrapper.find('[data-testid="probe-chip"]').text()).toContain('ok')
+    expect(wrapper.find('[data-testid="probe-chip"]').text()).toContain('ok (2 unverified)')
     expect(wrapper.find('[data-testid="probe-unverified"]').text()).toContain('write, deploy')
     expect(wrapper.html()).not.toContain(TOKEN)
   })
