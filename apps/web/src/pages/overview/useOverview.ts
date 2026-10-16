@@ -19,6 +19,7 @@ import { useImages } from '../images/useImages'
 import { leaseDetailKey } from '../lab/useLab'
 import { retryTransient, unwrap } from '../machine/api'
 import { useOperationsList } from '../operations/useOperations'
+import { usePendingRequests } from '../requests/useRequests'
 import { isFingerprintMismatch } from '../proxmox/proxmox'
 import { useProxmox } from '../proxmox/useProxmox'
 
@@ -32,6 +33,7 @@ import {
   orphanRows,
   operationRows,
   proxmoxRows,
+  requestRows,
   sortAttention,
   templatePinRows,
 } from './attention'
@@ -99,6 +101,7 @@ export function useOverview() {
     refetchInterval: 60_000,
   })
   const operations = useOperationsList()
+  const requests = usePendingRequests()
   const proxmox = useProxmox()
   const images = useImages()
   const drift = useFleetDrift()
@@ -137,6 +140,7 @@ export function useOverview() {
       ...leaseRows(leases.value, now.value, remains.value),
       ...orphanRows(orphanAudit.data.value?.items ?? [], guestIndex.value),
       ...operationRows(operationList.value),
+      ...requestRows(requests.data.value?.items ?? []),
       ...proxmoxRows(proxmox.views.value),
       ...onboardingRows(drafts.data.value ?? []),
       ...templatePinRows(images.templates.data.value ?? [], images.versions.value),
@@ -153,6 +157,7 @@ export function useOverview() {
     machines.error.value && 'machines',
     drafts.error.value && 'onboarding drafts',
     operations.error.value && 'operations',
+    requests.error.value && 'action requests',
     proxmox.accounts.error.value && 'Proxmox accounts',
     drift.query.error.value && 'skill drift',
     images.leases.error.value && 'Lab leases',
@@ -168,6 +173,7 @@ export function useOverview() {
   const loading = computed(() => machines.isLoading.value
     || drift.query.isLoading.value
     || operations.isLoading.value
+    || requests.isLoading.value
     || drafts.isLoading.value
     || proxmox.loading.value
     || images.leases.isLoading.value

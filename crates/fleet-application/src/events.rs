@@ -23,6 +23,8 @@ pub enum EventKind {
     ProxmoxChanged,
     /// Tailnet observations may have changed.
     TailnetChanged,
+    /// An action request was made or changed state (FM-1041).
+    RequestChanged,
 }
 
 impl EventKind {
@@ -36,6 +38,7 @@ impl EventKind {
             Self::OnboardingChanged => "onboarding.changed",
             Self::ProxmoxChanged => "proxmox.changed",
             Self::TailnetChanged => "tailnet.changed",
+            Self::RequestChanged => "request.changed",
         }
     }
 }
