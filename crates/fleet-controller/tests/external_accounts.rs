@@ -202,6 +202,16 @@ async fn accounts_walk_create_probe_update_delete_without_ever_echoing_the_token
     assert_eq!(body["items"].as_array().unwrap().len(), 1);
     assert!(!body.to_string().contains(TOKEN));
 
+    // Moving to another origin without a new token is refused.
+    let (status, body) = raw(
+        address,
+        "PATCH",
+        &format!("/api/v1/external-accounts/{id}"),
+        Some(json!({"baseUrl": "http://127.0.0.1:9"})),
+    )
+    .await;
+    assert_eq!(status, 400, "{body}");
+
     // Replacing the token with a wrong one flips the probe to unauthorized.
     let (status, body) = raw(
         address,

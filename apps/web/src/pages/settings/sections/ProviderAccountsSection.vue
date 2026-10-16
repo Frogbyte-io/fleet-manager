@@ -22,6 +22,7 @@ import {
   kindTitle,
   probeCommand,
   probeView,
+  sameOrigin,
   type CreateDraft,
   type ProviderKind,
 } from '../accounts'
@@ -143,6 +144,10 @@ async function saveEdit(account: ExternalAccountDto) {
   edit.value.token = ''
 }
 
+function originChanged(account: ExternalAccountDto): boolean {
+  return !sameOrigin(account.baseUrl, edit.value.baseUrl)
+}
+
 const toneFor = (tone: string) => tone as 'ok' | 'warn' | 'err' | 'muted'
 const inputClass = 'h-8 rounded-sm border border-input bg-background px-2 text-foreground'
 const buttonClass = 'h-8 rounded-sm border border-fc-info/40 px-3 text-fc-info hover:bg-fc-info/10 disabled:opacity-50'
@@ -245,6 +250,13 @@ const buttonClass = 'h-8 rounded-sm border border-fc-info/40 px-3 text-fc-info h
               class="font-mono text-fc-warn"
             >
               missing: {{ account.lastProbe.missing.join(', ') }}
+            </p>
+            <p
+              v-if="account.lastProbe.unverified.length"
+              class="font-mono text-fc-faint"
+              data-testid="probe-unverified"
+            >
+              not verified: {{ account.lastProbe.unverified.join(', ') }}
             </p>
           </div>
 
@@ -355,12 +367,19 @@ const buttonClass = 'h-8 rounded-sm border border-fc-info/40 px-3 text-fc-info h
               <button
                 type="submit"
                 :class="buttonClass"
-                :disabled="busyId === account.id || edit.label.trim() === ''"
+                :disabled="busyId === account.id || edit.label.trim() === '' || (originChanged(account) && edit.token.trim() === '')"
                 data-testid="edit-save"
               >
                 Save changes
               </button>
               <span class="ml-2 text-[11px] text-fc-faint">Changing the endpoint or token clears the last probe.</span>
+              <p
+                v-if="originChanged(account)"
+                class="mt-1 text-[11px] text-fc-warn"
+                data-testid="origin-hint"
+              >
+                A different scheme, host, or port needs a new token in the same request.
+              </p>
             </div>
           </form>
 
@@ -458,7 +477,7 @@ const buttonClass = 'h-8 rounded-sm border border-fc-info/40 px-3 text-fc-info h
         </div>
       </form>
       <p class="text-[11px] text-fc-faint">
-        Coolify needs a token with read, write, and deploy permissions. Cloudflare tokens are checked with the token verify endpoint. The token is stored encrypted and is not returned by the API, the CLI, or the audit log.
+        A Coolify probe verifies the read ability only; write and deploy cannot be checked without changing state, so they show as not verified. Cloudflare tokens are checked with the token verify endpoint and need an https base URL. The token is stored encrypted and is not returned by the API, the CLI, or the audit log.
       </p>
       <p
         v-if="createError"

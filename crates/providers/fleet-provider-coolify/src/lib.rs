@@ -1,53 +1,49 @@
-//! The Coolify provider: a token health and permission probe (FM-1001).
+//! The Coolify provider: a token health probe (FM-1001).
 //!
 //! Coolify's API tokens carry abilities (`read`, `write`, `deploy`,
 //! `read:sensitive`, `root`; see <https://coolify.io/docs/api-reference/permissions>),
 //! but the documented API has no endpoint that returns the calling token's
-//! abilities. The probe therefore uses only non-mutating `GET` requests
-//! against routes that the API gates behind exactly one ability
-//! (`routes/api.php` in the Coolify repository), and reads the answer:
+//! abilities. This probe therefore never guesses at them with a request
+//! that could change state: on Coolify before v4.2.0, `GET /api/v1/enable`
+//! and `GET /api/v1/deploy` reach handlers that re-enable the API or start
+//! a deployment, so the probe never calls them (or any route other than the
+//! one below), on any version.
 //!
-//! * `GET /api/v1/version` is gated by `read`;
-//! * `GET /api/v1/enable` is gated by `write` (the route only answers
-//!   "POST required");
-//! * `GET /api/v1/deploy` is gated by `deploy` (likewise).
+//! The probe sends exactly one request, `GET /api/v1/version` with no
+//! query. The route is gated by the `read` ability (`routes/api.php` in the
+//! Coolify repository), so an answer verifies `read`:
 //!
-//! `401` means the token is refused; `403` means the ability is missing;
-//! `2xx`, `400`, and `405` mean the ability gate let the request through. A
-//! `root` token passes every gate. `read:sensitive` has no side-effect-free
-//! GET route that is gated by it alone, so it is not probed. Any other
-//! status (for example `404`) leaves that ability undetermined, which is
-//! reported as missing with that detail rather than guessed.
+//! * `2xx` with a version string: the answer is Coolify and the token holds
+//!   `read`;
+//! * `2xx` with anything else, or `404`: not a Coolify API (`unreachable`);
+//! * `401`: the token is refused (`unauthorized`);
+//! * `403` with Coolify's "Missing required permissions" body: the token is
+//!   valid but lacks `read` (`insufficient_permission`); any other `403`
+//!   (API access disabled, caller IP not allowed) is `unauthorized` and
+//!   carries Coolify's message;
+//! * any `3xx`: the probe stops and reports the redirect (naming only the
+//!   target host), because following it could carry the bearer token to
+//!   another origin or scheme.
 //!
-//! This is an inference from route middleware, not a documented contract.
-//! If Coolify later documents a token-abilities endpoint, replace the
-//! write and deploy probes with it. The token is sent only as a bearer
-//! header and never appears in any returned value.
+//! `write` and `deploy` are reported as `unverified`, a distinct list from
+//! `missing`: Fleet has no side-effect-free way to learn them. The
+//! `read:sensitive` and `root` abilities are not probed either. The token
+//! is sent only as a bearer header and never appears in any returned value.
 #![warn(missing_docs)]
 
+use std::error::Error as _;
 use std::time::Duration;
 
 use fleet_core::{ProbeReport, ProbeStatus};
 
-/// How long one request may take.
+/// How long the request may take.
 pub const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
-/// The most response body bytes read for a detail.
+/// The only path the probe ever requests.
+pub const PROBE_PATH: &str = "/api/v1/version";
+/// The most response body bytes read.
 const BODY_BOUND: usize = 512;
-
-/// The abilities Fleet needs, each with the GET route that is gated by it.
-const ABILITY_PROBES: [(&str, &str); 3] = [
-    ("read", "/api/v1/version"),
-    ("write", "/api/v1/enable"),
-    ("deploy", "/api/v1/deploy"),
-];
-
-enum Gate {
-    Granted,
-    Missing(String),
-    Undetermined(u16),
-    Unauthorized(String),
-    Unreachable(String),
-}
+/// The abilities this probe cannot verify without a mutating request.
+const UNVERIFIED: [&str; 2] = ["write", "deploy"];
 
 /// Probes one Coolify instance with one API token.
 ///
@@ -61,44 +57,8 @@ pub async fn probe(base_url: &str, token: &str) -> ProbeReport {
     else {
         return ProbeReport::simple(ProbeStatus::Unreachable, "the HTTP client could not start");
     };
-    let mut granted = Vec::new();
-    let mut missing = Vec::new();
-    let mut notes = Vec::new();
-    for (ability, path) in ABILITY_PROBES {
-        match gate(&client, base_url, path, token).await {
-            Gate::Granted => granted.push(ability.to_owned()),
-            Gate::Missing(detail) => {
-                missing.push(ability.to_owned());
-                notes.push(format!("{ability}: {detail}"));
-            }
-            Gate::Undetermined(status) => {
-                missing.push(ability.to_owned());
-                notes.push(format!("{ability}: could not verify (HTTP {status})"));
-            }
-            Gate::Unauthorized(detail) => {
-                return ProbeReport::simple(ProbeStatus::Unauthorized, &detail);
-            }
-            Gate::Unreachable(detail) => {
-                return ProbeReport::simple(ProbeStatus::Unreachable, &detail);
-            }
-        }
-    }
-    let mut report = if missing.is_empty() {
-        ProbeReport::simple(ProbeStatus::Ok, "the token holds read, write, and deploy")
-    } else {
-        ProbeReport::simple(
-            ProbeStatus::InsufficientPermission,
-            &format!("missing: {}", notes.join("; ")),
-        )
-    };
-    report.granted = granted;
-    report.missing = missing;
-    report
-}
-
-async fn gate(client: &reqwest::Client, base_url: &str, path: &str, token: &str) -> Gate {
     let response = match client
-        .get(format!("{base_url}{path}"))
+        .get(format!("{base_url}{PROBE_PATH}"))
         .bearer_auth(token)
         .header("Accept", "application/json")
         .send()
@@ -106,37 +66,132 @@ async fn gate(client: &reqwest::Client, base_url: &str, path: &str, token: &str)
     {
         Ok(response) => response,
         Err(error) => {
-            // reqwest errors can embed the URL; the base URL carries no
-            // credentials (validated at the boundary), but keep the detail
-            // to a category.
-            let category = if error.is_timeout() {
-                "the request timed out"
-            } else if error.is_connect() {
-                "the connection failed"
-            } else {
-                "the request failed"
-            };
-            return Gate::Unreachable(category.to_owned());
+            return ProbeReport::simple(ProbeStatus::Unreachable, transport_category(&error));
         }
     };
     let status = response.status().as_u16();
-    let detail = body_text(response).await;
+    if (300..400).contains(&status) {
+        let host = response
+            .headers()
+            .get(reqwest::header::LOCATION)
+            .and_then(|value| value.to_str().ok())
+            .and_then(location_host);
+        let detail = match host {
+            Some(host) => format!("redirected to {host}; use the https base URL"),
+            None => "redirected; use the https base URL".to_owned(),
+        };
+        return ProbeReport::simple(ProbeStatus::Unreachable, &detail);
+    }
+    let body = body_text(response).await;
+    classify(status, &body)
+}
+
+fn classify(status: u16, body: &str) -> ProbeReport {
     match status {
-        401 => Gate::Unauthorized(format!(
-            "the token was refused (HTTP 401){}",
-            suffix(&detail)
-        )),
-        403 => Gate::Missing(format!("HTTP 403{}", suffix(&detail))),
-        200..=299 | 400 | 405 => Gate::Granted,
-        other => Gate::Undetermined(other),
+        200..=299 if looks_like_version(body) => {
+            let mut report = ProbeReport::simple(
+                ProbeStatus::Ok,
+                "the token is accepted (read); write and deploy are not verified",
+            );
+            report.granted = vec!["read".to_owned()];
+            report.unverified = UNVERIFIED.map(str::to_owned).to_vec();
+            report
+        }
+        200..=299 | 404 => ProbeReport::simple(
+            ProbeStatus::Unreachable,
+            "the answer is not a Coolify API; check the base URL",
+        ),
+        401 => ProbeReport::simple(
+            ProbeStatus::Unauthorized,
+            "the token was refused (HTTP 401)",
+        ),
+        403 if message_of(body)
+            .to_ascii_lowercase()
+            .contains("missing required permissions") =>
+        {
+            let mut report = ProbeReport::simple(
+                ProbeStatus::InsufficientPermission,
+                "the token is valid but lacks the read ability",
+            );
+            report.missing = vec!["read".to_owned()];
+            report.unverified = UNVERIFIED.map(str::to_owned).to_vec();
+            report
+        }
+        403 => ProbeReport::simple(
+            ProbeStatus::Unauthorized,
+            &format!("the request was refused (HTTP 403): {}", message_of(body)),
+        ),
+        other => ProbeReport::simple(
+            ProbeStatus::Unreachable,
+            &format!("unexpected HTTP status {other}"),
+        ),
     }
 }
 
-fn suffix(detail: &str) -> String {
-    if detail.is_empty() {
-        String::new()
+/// A Coolify version string: starts with a digit, then letters, digits,
+/// `.`, `-`, or `+`, at most 40 characters. `/version` answers plain text.
+fn looks_like_version(body: &str) -> bool {
+    let text = body.trim().trim_matches('"');
+    !text.is_empty()
+        && text.len() <= 40
+        && text.starts_with(|c: char| c.is_ascii_digit())
+        && text
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '+'))
+}
+
+/// The `message` sentence of a JSON error body, empty when there is none
+/// (HTML error pages are dropped).
+fn message_of(body: &str) -> String {
+    body.split("\"message\":\"")
+        .nth(1)
+        .and_then(|rest| rest.split('"').next())
+        .unwrap_or("")
+        .chars()
+        .take(120)
+        .collect()
+}
+
+/// The host of a `Location` header value, nothing else (the path and query
+/// can carry anything).
+fn location_host(location: &str) -> Option<String> {
+    let rest = location.split_once("://")?.1;
+    let authority = rest.split(['/', '?', '#']).next()?;
+    let host = authority.rsplit('@').next()?;
+    (!host.is_empty()
+        && host.len() <= 100
+        && host.chars().all(|c| !c.is_control() && !c.is_whitespace()))
+    .then(|| host.to_owned())
+}
+
+/// A category for a transport failure; never the URL or any server text.
+fn transport_category(error: &reqwest::Error) -> &'static str {
+    if error.is_timeout() {
+        return "the request timed out";
+    }
+    let mut chain = String::new();
+    let mut source = error.source();
+    while let Some(cause) = source {
+        chain.push_str(&cause.to_string().to_ascii_lowercase());
+        chain.push(' ');
+        source = cause.source();
+    }
+    if [
+        "certificate",
+        "tls",
+        "ssl",
+        "handshake",
+        "corrupt message",
+        "unknownissuer",
+    ]
+    .iter()
+    .any(|needle| chain.contains(needle))
+    {
+        "the TLS handshake failed (certificate or protocol); check the base URL scheme and certificate"
+    } else if error.is_connect() {
+        "the connection failed"
     } else {
-        format!(": {detail}")
+        "the request failed"
     }
 }
 
@@ -149,13 +204,5 @@ async fn body_text(mut response: reqwest::Response) -> String {
         }
     }
     buffer.truncate(BODY_BOUND);
-    // Only a plain `message` sentence is worth showing; anything else
-    // (HTML error pages) is dropped.
-    let text = String::from_utf8_lossy(&buffer);
-    let message = text
-        .split("\"message\":\"")
-        .nth(1)
-        .and_then(|rest| rest.split('"').next())
-        .unwrap_or("");
-    message.chars().take(120).collect()
+    String::from_utf8_lossy(&buffer).into_owned()
 }

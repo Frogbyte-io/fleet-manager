@@ -28,8 +28,8 @@ use crate::authz::{AccessRequest, ActingPrincipal, Authorizer, Decision, Permiss
 use crate::operation::AuditPort;
 use crate::proxmox::CredentialStoreError;
 use fleet_core::{
-    ExternalProviderKind, MAX_TOKEN_SECRET_LEN, ProbeReport, SensitiveString, normalize_base_url,
-    validate_label, validate_notes, validate_scope_id,
+    ExternalProviderKind, MAX_TOKEN_SECRET_LEN, ProbeReport, SensitiveString, base_url_is_loopback,
+    base_url_origin, normalize_base_url, validate_label, validate_notes, validate_scope_id,
 };
 
 /// The latest probe result recorded on an account.
@@ -465,6 +465,16 @@ impl ExternalAccounts {
             scope,
             patch.notes.as_deref().unwrap_or(&current.notes),
         )?;
+        // A token is bound to the service it was issued for: moving the
+        // account to another origin needs a new token in the same request,
+        // so the stored one is never sent somewhere it was not meant for.
+        if base_url_origin(&merged.base_url) != base_url_origin(&current.base_url)
+            && new_token.is_none()
+        {
+            return Err(invalid(
+                "changing the base URL's scheme, host, or port needs a new token in the same request",
+            ));
+        }
         self.audit(
             principal,
             Some(id),
@@ -483,12 +493,10 @@ impl ExternalAccounts {
             ],
         )
         .await?;
-        if let Some(token) = new_token {
-            self.credentials
-                .store(id, token)
-                .await
-                .map_err(ExternalAccountError::Credentials)?;
-        }
+        // The record changes first, clearing the stored probe whenever the
+        // credential or endpoint changes, so a probe can never describe a
+        // credential or endpoint it did not use. The credential follows;
+        // if it fails, the old token stays and the error is returned.
         let subject_changed = new_token.is_some()
             || merged.base_url != current.base_url
             || merged.scope_id != current.scope_id;
@@ -497,6 +505,12 @@ impl ExternalAccounts {
             .update(id, &merged, subject_changed)
             .await
             .map_err(backend_or_taken)?;
+        if let Some(token) = new_token {
+            self.credentials
+                .store(id, token)
+                .await
+                .map_err(ExternalAccountError::Credentials)?;
+        }
         self.audit(
             principal,
             Some(id),
@@ -705,6 +719,14 @@ fn normalized(
     validate_label(label).map_err(|error| invalid(error.to_string()))?;
     validate_notes(notes).map_err(|error| invalid(error.to_string()))?;
     let base_url = normalize_base_url(base_url).map_err(|error| invalid(error.to_string()))?;
+    // The Cloudflare token travels as a bearer header: https only, except
+    // for a loopback address (a local stub).
+    if kind == ExternalProviderKind::Cloudflare
+        && !base_url.starts_with("https://")
+        && !base_url_is_loopback(&base_url)
+    {
+        return Err(invalid("a cloudflare base URL must use https"));
+    }
     if let Some(scope) = scope_id {
         if kind != ExternalProviderKind::Cloudflare {
             return Err(invalid(format!(

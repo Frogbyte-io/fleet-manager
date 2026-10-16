@@ -111,3 +111,28 @@ async fn nothing_listening_is_unreachable_and_a_foreign_answer_is_flagged() {
     let report = fleet_provider_cloudflare::probe(&base, None, TOKEN).await;
     assert_eq!(report.status, ProbeStatus::Unreachable);
 }
+
+#[tokio::test]
+async fn the_account_403_suggests_clearing_the_account_id() {
+    let (base, _) = stub(HashMap::from([(
+        "/accounts/acc123/tokens/verify",
+        (403, BAD),
+    )]))
+    .await;
+    let report = fleet_provider_cloudflare::probe(&base, Some("acc123"), TOKEN).await;
+    assert!(
+        report.detail.contains("clear the account id"),
+        "{}",
+        report.detail
+    );
+}
+
+#[tokio::test]
+async fn a_tls_failure_has_its_own_category() {
+    // A plain-HTTP server answering an https URL fails the handshake.
+    let (base, _) = stub(HashMap::from([("/user/tokens/verify", (200, ACTIVE))])).await;
+    let https = base.replace("http://", "https://");
+    let report = fleet_provider_cloudflare::probe(&https, None, TOKEN).await;
+    assert_eq!(report.status, ProbeStatus::Unreachable);
+    assert!(report.detail.contains("TLS"), "{}", report.detail);
+}

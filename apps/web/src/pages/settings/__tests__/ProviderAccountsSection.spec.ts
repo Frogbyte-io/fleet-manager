@@ -17,7 +17,7 @@ vi.mock('@frogbyte-io/fleet-api-client', () => ({
 }))
 
 import ProviderAccountsSection from '../sections/ProviderAccountsSection.vue'
-import { createCommand, probeView } from '../accounts'
+import { createCommand, probeView, sameOrigin } from '../accounts'
 
 const TOKEN = 'typed-secret-token-0001'
 
@@ -61,7 +61,7 @@ beforeEach(() => {
 describe('provider account helpers', () => {
   it('reads each probe classification honestly', () => {
     expect(probeView(null).label).toBe('not probed')
-    const base = { detail: 'd', granted: [], missing: [], checkedAt: 1 }
+    const base = { detail: 'd', granted: [], missing: [], unverified: [], checkedAt: 1 }
     expect(probeView({ ...base, status: 'ok' }).tone).toBe('ok')
     expect(probeView({ ...base, status: 'unreachable' }).tone).toBe('err')
     expect(probeView({ ...base, status: 'unauthorized' }).tone).toBe('err')
@@ -85,11 +85,11 @@ describe('ProviderAccountsSection', () => {
 
   it('lists accounts with their probe result and never renders a token', async () => {
     listExternalAccounts.mockResolvedValue(page([
-      account({ lastProbe: { status: 'insufficient_permission', detail: 'missing: deploy', granted: ['read', 'write'], missing: ['deploy'], checkedAt: Date.now() } }),
+      account({ lastProbe: { status: 'ok', detail: 'accepted', granted: ['read'], missing: [], unverified: ['write', 'deploy'], checkedAt: Date.now() } }),
     ]))
     const wrapper = await mountSection()
-    expect(wrapper.find('[data-testid="probe-chip"]').text()).toContain('insufficient permission')
-    expect(wrapper.find('[data-testid="probe-detail"]').text()).toContain('missing: deploy')
+    expect(wrapper.find('[data-testid="probe-chip"]').text()).toContain('ok')
+    expect(wrapper.find('[data-testid="probe-unverified"]').text()).toContain('write, deploy')
     expect(wrapper.html()).not.toContain(TOKEN)
   })
 
@@ -149,5 +149,25 @@ describe('ProviderAccountsSection', () => {
     await wrapper.find('[data-testid="edit-form"]').trigger('submit')
     await flushPromises()
     expect(updateExternalAccount).toHaveBeenCalledWith('acc-1', expect.objectContaining({ token: undefined }))
+  })
+})
+
+describe('origin changes', () => {
+  it('compares scheme, host, and port only', () => {
+    expect(sameOrigin('https://a.example.test/x', 'HTTPS://A.example.test')).toBe(true)
+    expect(sameOrigin('https://a.example.test', 'http://a.example.test')).toBe(false)
+    expect(sameOrigin('https://a.example.test', 'https://a.example.test:8443')).toBe(false)
+  })
+
+  it('requires a new token before saving a different origin', async () => {
+    listExternalAccounts.mockResolvedValue(page([account()]))
+    updateExternalAccount.mockResolvedValue(ok({ data: account() }))
+    const wrapper = await mountSection()
+    await wrapper.find('[data-testid="edit-button"]').trigger('click')
+    await wrapper.find('[data-testid="edit-form"] input[class*="font-mono"]').setValue('https://elsewhere.example.test')
+    expect(wrapper.find('[data-testid="origin-hint"]').exists()).toBe(true)
+    expect(wrapper.find('[data-testid="edit-save"]').attributes('disabled')).toBeDefined()
+    await wrapper.find('[data-testid="edit-token"]').setValue('fresh-token-value')
+    expect(wrapper.find('[data-testid="edit-save"]').attributes('disabled')).toBeUndefined()
   })
 })

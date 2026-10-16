@@ -126,8 +126,12 @@ pub struct ProbeReport {
     pub detail: String,
     /// Permissions the token was seen to hold.
     pub granted: Vec<String>,
-    /// Permissions Fleet needs that the token lacks.
+    /// Permissions Fleet needs that the token was seen to lack.
     pub missing: Vec<String>,
+    /// Permissions the probe deliberately did not verify (it never calls
+    /// a route that could change state), so their state is unknown.
+    #[serde(default)]
+    pub unverified: Vec<String>,
 }
 
 impl ProbeReport {
@@ -139,6 +143,7 @@ impl ProbeReport {
             detail: bound_detail(detail),
             granted: Vec::new(),
             missing: Vec::new(),
+            unverified: Vec::new(),
         }
     }
 }
@@ -181,6 +186,17 @@ pub fn validate_label(label: &str) -> Result<(), AccountFieldError> {
             "the label must not have control characters or surrounding spaces",
         ));
     }
+    refuse_secret_like(label, "label")
+}
+
+/// Refuses text the credential scrubber would change: a label or note is
+/// shown in lists and audit events, so it must not look like a secret.
+fn refuse_secret_like(text: &str, what: &str) -> Result<(), AccountFieldError> {
+    if crate::redact_credentials(text) != text {
+        return Err(AccountFieldError(format!(
+            "the {what} looks like it contains a credential; credentials belong in the token field"
+        )));
+    }
     Ok(())
 }
 
@@ -193,7 +209,7 @@ pub fn validate_notes(notes: &str) -> Result<(), AccountFieldError> {
     if notes.chars().count() > MAX_ACCOUNT_NOTES_LEN || notes.contains('\0') {
         return Err(invalid("the notes must be at most 2000 characters"));
     }
-    Ok(())
+    refuse_secret_like(notes, "notes")
 }
 
 /// Validates and normalizes a base URL: `http` or `https`, a host, no
@@ -226,6 +242,30 @@ pub fn normalize_base_url(raw: &str) -> Result<String, AccountFieldError> {
         ));
     }
     Ok(trimmed.trim_end_matches('/').to_owned())
+}
+
+/// The scheme, host, and port of a normalized base URL, lower-cased. Two
+/// base URLs with the same origin address the same service.
+#[must_use]
+pub fn base_url_origin(base_url: &str) -> String {
+    let lower = base_url.to_ascii_lowercase();
+    let (scheme, rest) = lower.split_once("://").unwrap_or(("", &lower));
+    let authority = rest.split('/').next().unwrap_or("");
+    format!("{scheme}://{authority}")
+}
+
+/// Whether the base URL's host is a loopback address (a local stub or a
+/// local test instance).
+#[must_use]
+pub fn base_url_is_loopback(base_url: &str) -> bool {
+    let origin = base_url_origin(base_url);
+    let authority = origin.split_once("://").map_or("", |(_, a)| a);
+    let host = if let Some(bracketed) = authority.strip_prefix('[') {
+        bracketed.split(']').next().unwrap_or("")
+    } else {
+        authority.split(':').next().unwrap_or("")
+    };
+    host == "localhost" || host == "127.0.0.1" || host == "::1"
 }
 
 /// Validates a provider-side scope id (a Cloudflare account id).
@@ -269,6 +309,32 @@ mod tests {
         assert!(normalize_base_url("https://user:pw@host").is_err());
         assert!(normalize_base_url("https://host/?token=abc").is_err());
         assert!(normalize_base_url("https://").is_err());
+    }
+
+    #[test]
+    fn origins_ignore_path_and_case_and_loopback_is_recognized() {
+        assert_eq!(
+            base_url_origin("HTTPS://Host.Example:8443/api"),
+            "https://host.example:8443"
+        );
+        assert_ne!(
+            base_url_origin("http://host.example"),
+            base_url_origin("https://host.example")
+        );
+        assert!(base_url_is_loopback("http://127.0.0.1:18080"));
+        assert!(base_url_is_loopback("http://localhost"));
+        assert!(base_url_is_loopback("http://[::1]:80"));
+        assert!(!base_url_is_loopback(
+            "https://api.cloudflare.com/client/v4"
+        ));
+    }
+
+    #[test]
+    fn secret_looking_labels_and_notes_are_refused() {
+        assert!(validate_label("Authorization: Bearer abcdefghijklmnop").is_err());
+        assert!(validate_notes("see https://user:hunter2@example.com/x").is_err());
+        assert!(validate_notes("Main deploy host for client sites").is_ok());
+        assert!(validate_label("production").is_ok());
     }
 
     #[test]

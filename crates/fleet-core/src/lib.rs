@@ -34,8 +34,8 @@ pub use error::{ErrorCode, FleetError, ParseErrorCodeError, PublicError, RetryCl
 pub use external_account::{
     AccountFieldError, ExternalProviderKind, MAX_ACCOUNT_LABEL_LEN, MAX_ACCOUNT_NOTES_LEN,
     MAX_BASE_URL_LEN, MAX_PROBE_DETAIL_LEN, MAX_TOKEN_SECRET_LEN, ParseProviderKindError,
-    ProbeReport, ProbeStatus, bound_detail, normalize_base_url, validate_label, validate_notes,
-    validate_scope_id,
+    ProbeReport, ProbeStatus, base_url_is_loopback, base_url_origin, bound_detail,
+    normalize_base_url, validate_label, validate_notes, validate_scope_id,
 };
 pub use id::{CorrelationId, IdGenerator, ParseIdError, ResourceId, UuidV7Generator};
 

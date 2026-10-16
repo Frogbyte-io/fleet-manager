@@ -15,7 +15,10 @@
 //!   token: `unauthorized`;
 //! * `403` on the account-owned endpoint: `insufficient_permission`, the
 //!   token is valid but not for that account;
-//! * `active` and inside its validity window: `ok`.
+//! * `active`: `ok`. Fleet does not evaluate `expires_on` or `not_before`;
+//!   Cloudflare reports an expired token as `expired`, which is refused;
+//! * any other status (including a redirect, which is never followed):
+//!   `unreachable`.
 //!
 //! The verify endpoint does not list the token's policies, so a token that
 //! verifies is reported `ok`; per-zone permissions are checked by the DNS
@@ -23,6 +26,7 @@
 //! only and never appears in any returned value.
 #![warn(missing_docs)]
 
+use std::error::Error as _;
 use std::time::Duration;
 
 use fleet_core::{ProbeReport, ProbeStatus};
@@ -79,14 +83,7 @@ pub async fn probe(base_url: &str, account_id: Option<&str>, token: &str) -> Pro
     {
         Ok(response) => response,
         Err(error) => {
-            let category = if error.is_timeout() {
-                "the request timed out"
-            } else if error.is_connect() {
-                "the connection failed"
-            } else {
-                "the request failed"
-            };
-            return ProbeReport::simple(ProbeStatus::Unreachable, category);
+            return ProbeReport::simple(ProbeStatus::Unreachable, transport_category(&error));
         }
     };
     let status = response.status().as_u16();
@@ -113,7 +110,10 @@ fn classify(status: u16, body: &[u8], account_owned: bool) -> ProbeReport {
         ),
         403 if account_owned => ProbeReport::simple(
             ProbeStatus::InsufficientPermission,
-            &format!("the token is not valid for that account (HTTP 403) {first_error}"),
+            &format!(
+                "the token is not valid for that account (HTTP 403) {first_error}; \
+                 for a user-owned token, clear the account id"
+            ),
         ),
         403 => ProbeReport::simple(
             ProbeStatus::Unauthorized,
@@ -149,5 +149,36 @@ fn classify(status: u16, body: &[u8], account_owned: bool) -> ProbeReport {
             ProbeStatus::Unreachable,
             &format!("unexpected HTTP status {other}"),
         ),
+    }
+}
+
+/// A category for a transport failure; never the URL or any server text.
+fn transport_category(error: &reqwest::Error) -> &'static str {
+    if error.is_timeout() {
+        return "the request timed out";
+    }
+    let mut chain = String::new();
+    let mut source = error.source();
+    while let Some(cause) = source {
+        chain.push_str(&cause.to_string().to_ascii_lowercase());
+        chain.push(' ');
+        source = cause.source();
+    }
+    if [
+        "certificate",
+        "tls",
+        "ssl",
+        "handshake",
+        "corrupt message",
+        "unknownissuer",
+    ]
+    .iter()
+    .any(|needle| chain.contains(needle))
+    {
+        "the TLS handshake failed (certificate or protocol); check the base URL scheme and certificate"
+    } else if error.is_connect() {
+        "the connection failed"
+    } else {
+        "the request failed"
     }
 }

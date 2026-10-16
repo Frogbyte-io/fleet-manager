@@ -16,6 +16,10 @@ pub enum AccountsAction {
     List {
         /// Restrict to `coolify` or `cloudflare`.
         kind: Option<String>,
+        /// The page size.
+        limit: Option<u32>,
+        /// The `nextCursor` of the previous page.
+        cursor: Option<String>,
     },
     /// Read one account.
     Get {
@@ -88,6 +92,8 @@ pub(crate) fn parse(rest: &[&str], output: &mut Output) -> Result<Command, CliEr
     let mut account_id = None;
     let mut notes = None;
     let mut rotate_token = false;
+    let mut limit = None;
+    let mut cursor = None;
     let mut flags = flags.iter().copied();
     while let Some(flag) = flags.next() {
         let mut value = |name: &str| {
@@ -112,6 +118,13 @@ pub(crate) fn parse(rest: &[&str], output: &mut Output) -> Result<Command, CliEr
                 };
             }
             ("list" | "create", "--kind") => kind = Some(value("kind")?),
+            ("list", "--cursor") => cursor = Some(value("cursor")?),
+            ("list", "--limit") => {
+                let raw = value("limit")?;
+                limit = Some(raw.parse().map_err(|_| CliError {
+                    message: format!("--limit must be a number, not {raw:?}"),
+                })?);
+            }
             ("create" | "update", "--label") => label = Some(value("label")?),
             ("create" | "update", "--base-url") => base_url = Some(value("base-url")?),
             ("create" | "update", "--account-id") => account_id = Some(value("account-id")?),
@@ -128,7 +141,11 @@ pub(crate) fn parse(rest: &[&str], output: &mut Output) -> Result<Command, CliEr
         message: format!("--{name} is required"),
     };
     let action = match (*verb, positional) {
-        ("list", _) => AccountsAction::List { kind },
+        ("list", _) => AccountsAction::List {
+            kind,
+            limit,
+            cursor,
+        },
         ("get", Some(id)) => AccountsAction::Get { id },
         ("delete", Some(id)) => AccountsAction::Delete { id },
         ("probe", Some(id)) => AccountsAction::Probe { id },
@@ -160,15 +177,23 @@ pub(crate) fn request(
 ) -> Result<RequestShape, CliError> {
     let base = "/api/v1/external-accounts";
     Ok(match action {
-        AccountsAction::List { kind } => (
+        AccountsAction::List {
+            kind,
+            limit,
+            cursor,
+        } => (
             reqwest::Method::GET,
             base.to_owned(),
-            kind.iter().map(|kind| ("kind", kind.clone())).collect(),
+            kind.iter()
+                .map(|kind| ("kind", kind.clone()))
+                .chain(limit.iter().map(|limit| ("limit", limit.to_string())))
+                .chain(cursor.iter().map(|cursor| ("cursor", cursor.clone())))
+                .collect(),
             None,
         ),
         AccountsAction::Get { id } => (
             reqwest::Method::GET,
-            format!("{base}/{id}"),
+            format!("{base}/{}", encode(id)),
             Vec::new(),
             None,
         ),
@@ -208,24 +233,50 @@ pub(crate) fn request(
             }
             (
                 reqwest::Method::PATCH,
-                format!("{base}/{id}"),
+                format!("{base}/{}", encode(id)),
                 Vec::new(),
                 Some(body),
             )
         }
         AccountsAction::Delete { id } => (
             reqwest::Method::DELETE,
-            format!("{base}/{id}"),
+            format!("{base}/{}", encode(id)),
             Vec::new(),
             None,
         ),
         AccountsAction::Probe { id } => (
             reqwest::Method::POST,
-            format!("{base}/{id}/probe"),
+            format!("{base}/{}/probe", encode(id)),
             Vec::new(),
             None,
         ),
     })
+}
+
+/// Percent-encodes one path segment: only unreserved characters pass.
+fn encode(segment: &str) -> String {
+    use std::fmt::Write as _;
+    let mut out = String::with_capacity(segment.len());
+    for byte in segment.bytes() {
+        if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b'~') {
+            out.push(char::from(byte));
+        } else {
+            let _ = write!(out, "%{byte:02X}");
+        }
+    }
+    out
+}
+
+/// Server-supplied text for a terminal: control characters (escape
+/// sequences, newlines) become spaces.
+fn clean(text: &str) -> String {
+    text.chars()
+        .map(|c| if c.is_control() { ' ' } else { c })
+        .collect()
+}
+
+fn text_of(value: &Value) -> String {
+    clean(value.as_str().unwrap_or("-"))
 }
 
 fn set(body: &mut Value, key: &str, value: Option<&String>) {
@@ -246,7 +297,10 @@ pub(crate) fn render(value: &Value) -> String {
         )];
         lines.extend(items.iter().map(row));
         if let Some(cursor) = value["page"]["nextCursor"].as_str() {
-            lines.push(format!("next page: --cursor '{cursor}'"));
+            lines.push(format!(
+                "next page: --cursor '{}'",
+                clean(cursor).replace('\'', "'\\''")
+            ));
         }
         return lines.join("\n");
     }
@@ -256,21 +310,29 @@ pub(crate) fn render(value: &Value) -> String {
     }
     let mut lines = vec![
         row(account),
-        format!("  notes: {}", account["notes"].as_str().unwrap_or("")),
+        format!(
+            "  notes: {}",
+            clean(account["notes"].as_str().unwrap_or(""))
+        ),
     ];
     if let Some(probe) = account.get("lastProbe").filter(|probe| !probe.is_null()) {
         lines.push(format!(
             "  probe: {} ({})",
-            probe["status"].as_str().unwrap_or("-"),
-            probe["detail"].as_str().unwrap_or("")
+            text_of(&probe["status"]),
+            clean(probe["detail"].as_str().unwrap_or(""))
         ));
-        for (key, label) in [("granted", "granted"), ("missing", "missing")] {
+        for (key, label) in [
+            ("granted", "granted"),
+            ("missing", "missing"),
+            ("unverified", "unverified"),
+        ] {
             let names = probe[key]
                 .as_array()
                 .map(|names| {
                     names
                         .iter()
                         .filter_map(Value::as_str)
+                        .map(clean)
                         .collect::<Vec<_>>()
                         .join(", ")
                 })
@@ -286,12 +348,14 @@ pub(crate) fn render(value: &Value) -> String {
 fn row(account: &Value) -> String {
     format!(
         "{:<38} {:<11} {:<20} {:<24} {}",
-        account["id"].as_str().unwrap_or("-"),
-        account["kind"].as_str().unwrap_or("-"),
-        account["label"].as_str().unwrap_or("-"),
-        account["lastProbe"]["status"]
-            .as_str()
-            .unwrap_or("not probed"),
-        account["baseUrl"].as_str().unwrap_or("-"),
+        text_of(&account["id"]),
+        text_of(&account["kind"]),
+        text_of(&account["label"]),
+        clean(
+            account["lastProbe"]["status"]
+                .as_str()
+                .unwrap_or("not probed")
+        ),
+        text_of(&account["baseUrl"]),
     )
 }

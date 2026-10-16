@@ -90,8 +90,11 @@ pub struct ExternalProbeDto {
     pub detail: String,
     /// Permissions the token was seen to hold.
     pub granted: Vec<String>,
-    /// Permissions Fleet needs that the token lacks.
+    /// Permissions Fleet needs that the token was seen to lack.
     pub missing: Vec<String>,
+    /// Permissions the probe did not verify: it never calls a route that
+    /// could change state, so their state is unknown.
+    pub unverified: Vec<String>,
     /// When the probe ran (epoch millis).
     pub checked_at: i64,
 }
@@ -135,6 +138,7 @@ impl From<ExternalAccount> for ExternalAccountDto {
                 detail: probe.report.detail,
                 granted: probe.report.granted,
                 missing: probe.report.missing,
+                unverified: probe.report.unverified,
                 checked_at: probe.checked_at,
             }),
             created_at: account.created_at,
@@ -144,7 +148,7 @@ impl From<ExternalAccount> for ExternalAccountDto {
 }
 
 /// The create-account request. The token is write-only.
-#[derive(Debug, Deserialize, ToSchema)]
+#[derive(Deserialize, ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct CreateExternalAccountRequest {
     /// The provider kind.
@@ -163,7 +167,7 @@ pub struct CreateExternalAccountRequest {
 }
 
 /// The update-account request. Absent fields are left alone.
-#[derive(Debug, Deserialize, ToSchema)]
+#[derive(Deserialize, ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct UpdateExternalAccountRequest {
     /// A new label.
@@ -176,6 +180,29 @@ pub struct UpdateExternalAccountRequest {
     pub notes: Option<String>,
     /// A replacement API token (write-only).
     pub token: Option<String>,
+}
+
+impl std::fmt::Debug for CreateExternalAccountRequest {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CreateExternalAccountRequest")
+            .field("kind", &self.kind)
+            .field("label", &self.label)
+            .field("base_url", &self.base_url)
+            .field("account_id", &self.account_id)
+            .field("token", &"<redacted>")
+            .finish_non_exhaustive()
+    }
+}
+
+impl std::fmt::Debug for UpdateExternalAccountRequest {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("UpdateExternalAccountRequest")
+            .field("label", &self.label)
+            .field("base_url", &self.base_url)
+            .field("account_id", &self.account_id)
+            .field("token", &self.token.as_ref().map(|_| "<redacted>"))
+            .finish_non_exhaustive()
+    }
 }
 
 /// The list-accounts query parameters.
@@ -514,4 +541,22 @@ pub async fn probe_external_account(
         .await
         .map_err(|error| map_error(&error, correlation_id))?;
     Ok(Json(Resource::new(account.into())))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn request_debug_output_never_carries_the_token() {
+        let create: CreateExternalAccountRequest = serde_json::from_str(
+            r#"{"kind":"coolify","label":"x","baseUrl":"https://c.example.test","token":"super-secret-1234"}"#,
+        )
+        .unwrap();
+        let update: UpdateExternalAccountRequest =
+            serde_json::from_str(r#"{"token":"super-secret-5678"}"#).unwrap();
+        let rendered = format!("{create:?} {update:?}");
+        assert!(!rendered.contains("super-secret"), "{rendered}");
+        assert!(rendered.contains("<redacted>"));
+    }
 }

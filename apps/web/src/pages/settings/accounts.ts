@@ -76,3 +76,13 @@ export function probeCommand(id: string): string {
 export function deleteCommand(id: string): string {
   return join(['fleetctl', 'accounts', 'delete', id])
 }
+
+/** Whether two base URLs share scheme, host, and port (case-insensitive). */
+export function sameOrigin(a: string, b: string): boolean {
+  const origin = (url: string) => {
+    const lower = url.trim().toLowerCase()
+    const [scheme, rest = ''] = lower.split('://')
+    return `${scheme}://${rest.split('/')[0]}`
+  }
+  return origin(a) === origin(b)
+}

@@ -1487,10 +1487,15 @@ export interface ExternalProbeDto {
   detail: string;
   /** Permissions the token was seen to hold. */
   granted: string[];
-  /** Permissions Fleet needs that the token lacks. */
+  /** Permissions Fleet needs that the token was seen to lack. */
   missing: string[];
   /** The classification. */
   status: ProbeStatusDto;
+  /**
+     * Permissions the probe did not verify: it never calls a route that
+     * could change state, so their state is unknown.
+     */
+  unverified: string[];
 }
 
 /**

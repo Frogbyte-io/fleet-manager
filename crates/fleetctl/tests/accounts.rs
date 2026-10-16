@@ -22,7 +22,9 @@ fn the_grammar_covers_every_verb() {
     assert_eq!(
         action(&["accounts", "list", "--kind", "coolify"]),
         AccountsAction::List {
-            kind: Some("coolify".to_owned())
+            kind: Some("coolify".to_owned()),
+            limit: None,
+            cursor: None,
         }
     );
     assert_eq!(
@@ -109,7 +111,11 @@ fn only_create_and_rotation_carry_the_token_and_it_goes_in_the_body_only() {
     assert_eq!(body.unwrap()["token"], TOKEN);
 
     for read in [
-        AccountsAction::List { kind: None },
+        AccountsAction::List {
+            kind: None,
+            limit: None,
+            cursor: None,
+        },
         AccountsAction::Get { id: "a".to_owned() },
         AccountsAction::Delete { id: "a".to_owned() },
         AccountsAction::Probe { id: "a".to_owned() },
@@ -139,4 +145,49 @@ fn text_output_shows_probe_status_and_permissions_but_the_response_has_no_token(
     assert!(fleetctl::render_accounts_for_test(&list).contains("prod"));
     let empty = json!({"items": [], "page": {"limit": 50, "nextCursor": null}});
     assert_eq!(fleetctl::render_accounts_for_test(&empty), "(no accounts)");
+}
+
+#[test]
+fn list_paging_flags_reach_the_query() {
+    let list = action(&["accounts", "list", "--limit", "5", "--cursor", "acc-9"]);
+    let (_, path, query, _) = fleetctl::accounts_request_for_test(&list, TOKEN).unwrap();
+    assert_eq!(path, "/api/v1/external-accounts");
+    assert_eq!(
+        query,
+        [
+            ("limit".to_owned(), "5".to_owned()),
+            ("cursor".to_owned(), "acc-9".to_owned())
+        ]
+    );
+    assert!(fleetctl::parse(&args(&["accounts", "list", "--limit", "abc"])).is_err());
+}
+
+#[test]
+fn ids_are_percent_encoded_in_paths() {
+    let get = AccountsAction::Get {
+        id: "a/b?c#d e".to_owned(),
+    };
+    let (_, path, _, _) = fleetctl::accounts_request_for_test(&get, TOKEN).unwrap();
+    assert_eq!(path, "/api/v1/external-accounts/a%2Fb%3Fc%23d%20e");
+    let probe = AccountsAction::Probe {
+        id: "../x".to_owned(),
+    };
+    let (_, path, _, _) = fleetctl::accounts_request_for_test(&probe, TOKEN).unwrap();
+    assert_eq!(path, "/api/v1/external-accounts/..%2Fx/probe");
+}
+
+#[test]
+fn text_output_strips_control_characters_and_shows_unverified() {
+    let account = json!({"data": {
+        "id": "acc-1", "kind": "coolify", "label": "evil\u{1b}[31mred\nname",
+        "baseUrl": "https://c.example.test", "notes": "a\u{7}b\rc",
+        "lastProbe": {"status": "ok", "detail": "fine\u{1b}[2J", "granted": ["read"],
+            "missing": [], "unverified": ["write", "deploy"], "checkedAt": 3}
+    }});
+    let text = fleetctl::render_accounts_for_test(&account);
+    assert!(!text.contains('\u{1b}'), "{text:?}");
+    assert!(!text.contains('\u{7}'), "{text:?}");
+    assert!(!text.contains('\r'), "{text:?}");
+    assert_eq!(text.lines().count(), 5, "{text:?}");
+    assert!(text.contains("unverified: write, deploy"), "{text}");
 }

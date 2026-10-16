@@ -503,3 +503,196 @@ async fn delete_removes_the_account_and_its_token() {
         ["external_account_deleting", "external_account_deleted"]
     );
 }
+
+#[tokio::test]
+async fn moving_to_another_origin_needs_a_new_token_in_the_same_request() {
+    let rig = rig(ProbeStatus::Ok);
+    let allow = Deny(vec![]);
+    let account = rig
+        .service
+        .create(&allow, &principal(), coolify("prod"), TOKEN)
+        .await
+        .unwrap();
+    let to = |url: &str| UpdateExternalAccount {
+        base_url: Some(url.to_owned()),
+        ..Default::default()
+    };
+    for url in [
+        "https://other.example.test",
+        "http://coolify.example.test",
+        "https://coolify.example.test:8443",
+    ] {
+        let error = rig
+            .service
+            .update(&allow, &principal(), &account.id, to(url), None)
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(error, ExternalAccountError::Invalid { .. }),
+            "{url}"
+        );
+    }
+    // Nothing changed, and nothing was audited as an update.
+    assert_eq!(
+        rig.credentials.load(&account.id).await.unwrap().as_deref(),
+        Some(TOKEN)
+    );
+    assert!(!events(&rig.audit).contains(&"external_account_updating".to_owned()));
+    // A path-only change keeps the origin; a new token authorizes a move.
+    rig.service
+        .update(
+            &allow,
+            &principal(),
+            &account.id,
+            to("https://coolify.example.test/sub"),
+            None,
+        )
+        .await
+        .expect("same origin");
+    let moved = rig
+        .service
+        .update(
+            &allow,
+            &principal(),
+            &account.id,
+            to("https://other.example.test"),
+            Some("a-new-token-for-the-new-host"),
+        )
+        .await
+        .expect("new origin with a new token");
+    assert_eq!(moved.base_url, "https://other.example.test");
+}
+
+#[tokio::test]
+async fn cloudflare_requires_https_except_on_loopback() {
+    let rig = rig(ProbeStatus::Ok);
+    let allow = Deny(vec![]);
+    let cloudflare = |url: &str| CreateExternalAccount {
+        kind: ExternalProviderKind::Cloudflare,
+        label: "dns".to_owned(),
+        base_url: Some(url.to_owned()),
+        scope_id: None,
+        notes: None,
+    };
+    let error = rig
+        .service
+        .create(
+            &allow,
+            &principal(),
+            cloudflare("http://api.example.test"),
+            TOKEN,
+        )
+        .await
+        .unwrap_err();
+    assert!(error.to_string().contains("https"), "{error}");
+    rig.service
+        .create(
+            &allow,
+            &principal(),
+            cloudflare("http://127.0.0.1:9"),
+            TOKEN,
+        )
+        .await
+        .expect("loopback stub");
+}
+
+#[tokio::test]
+async fn a_label_or_note_the_scrubber_would_change_is_refused() {
+    let rig = rig(ProbeStatus::Ok);
+    let allow = Deny(vec![]);
+    let error = rig
+        .service
+        .create(
+            &allow,
+            &principal(),
+            coolify("Authorization: Bearer abcdefghijklmnop"),
+            TOKEN,
+        )
+        .await
+        .unwrap_err();
+    assert!(matches!(error, ExternalAccountError::Invalid { .. }));
+    let with_notes = CreateExternalAccount {
+        notes: Some("see https://user:hunter2@example.test/x".to_owned()),
+        ..coolify("ok")
+    };
+    let error = rig
+        .service
+        .create(&allow, &principal(), with_notes, TOKEN)
+        .await
+        .unwrap_err();
+    assert!(matches!(error, ExternalAccountError::Invalid { .. }));
+    assert!(rig.audit.0.lock().unwrap().is_empty());
+}
+
+/// A credential store whose writes can be made to fail.
+#[derive(Debug, Default)]
+struct FlakyCredentials {
+    inner: Credentials,
+    fail: Mutex<bool>,
+}
+
+#[async_trait]
+impl ExternalCredentialStore for FlakyCredentials {
+    async fn load(&self, id: &str) -> Result<Option<String>, CredentialStoreError> {
+        self.inner.load(id).await
+    }
+    async fn store(&self, id: &str, secret: &str) -> Result<(), CredentialStoreError> {
+        if *self.fail.lock().unwrap() {
+            return Err(CredentialStoreError::Backend {
+                detail: "store down".to_owned(),
+            });
+        }
+        self.inner.store(id, secret).await
+    }
+    async fn clear(&self, id: &str) -> Result<(), CredentialStoreError> {
+        self.inner.clear(id).await
+    }
+}
+
+#[tokio::test]
+async fn a_failed_token_replacement_leaves_the_old_token_and_no_stale_probe() {
+    let credentials = Arc::new(FlakyCredentials::default());
+    let service = ExternalAccounts::new(
+        Arc::new(Accounts::default()),
+        credentials.clone(),
+        Arc::new(Prober {
+            status: ProbeStatus::Ok,
+            seen: Mutex::default(),
+        }),
+        Arc::new(Audit::default()),
+    );
+    let allow = Deny(vec![]);
+    let account = service
+        .create(&allow, &principal(), coolify("prod"), TOKEN)
+        .await
+        .unwrap();
+    service
+        .probe(&allow, &principal(), &account.id)
+        .await
+        .unwrap();
+    *credentials.fail.lock().unwrap() = true;
+    let error = service
+        .update(
+            &allow,
+            &principal(),
+            &account.id,
+            UpdateExternalAccount::default(),
+            Some("replacement-token-123456"),
+        )
+        .await
+        .unwrap_err();
+    assert!(matches!(error, ExternalAccountError::Credentials(_)));
+    assert_eq!(
+        credentials.load(&account.id).await.unwrap().as_deref(),
+        Some(TOKEN),
+        "the old token stays"
+    );
+    let after = service
+        .get(&allow, &principal(), &account.id)
+        .await
+        .unwrap();
+    assert!(
+        after.last_probe.is_none(),
+        "no probe outlives a credential change attempt"
+    );
+}

@@ -10658,6 +10658,7 @@
           "detail",
           "granted",
           "missing",
+          "unverified",
           "checkedAt"
         ],
         "properties": {
@@ -10682,11 +10683,18 @@
             "items": {
               "type": "string"
             },
-            "description": "Permissions Fleet needs that the token lacks."
+            "description": "Permissions Fleet needs that the token was seen to lack."
           },
           "status": {
             "$ref": "#/components/schemas/ProbeStatusDto",
             "description": "The classification."
+          },
+          "unverified": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Permissions the probe did not verify: it never calls a route that\ncould change state, so their state is unknown."
           }
         }
       },
