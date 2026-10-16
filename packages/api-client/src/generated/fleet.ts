@@ -891,6 +891,13 @@ export interface CreateActionRequest {
   /** The provider action's id, for example `coolify.application.redeploy`. */
   actionId: string;
   /**
+     * A key (1 to 128 printable ASCII characters) making a retry return the
+     * request already made. It is scoped to the caller; reusing it for a
+     * different request answers 409.
+     * @nullable
+     */
+  idempotencyKey?: string | null;
+  /**
      * Structured parameters the action defines (an object of at most 8
      * KiB). They must be secret-free: Fleet holds provider credentials and
      * refuses a request whose parameters look like one.
@@ -14501,10 +14508,15 @@ export type listActionRequestsResponse500 = {
   status: 500
 }
 
+export type listActionRequestsResponse503 = {
+  data: ApiError
+  status: 503
+}
+
 export type listActionRequestsResponseSuccess = (listActionRequestsResponse200) & {
   headers: Headers;
 };
-export type listActionRequestsResponseError = (listActionRequestsResponse400 | listActionRequestsResponse403 | listActionRequestsResponse500) & {
+export type listActionRequestsResponseError = (listActionRequestsResponse400 | listActionRequestsResponse403 | listActionRequestsResponse500 | listActionRequestsResponse503) & {
   headers: Headers;
 };
 
@@ -14568,15 +14580,25 @@ export type createActionRequestResponse403 = {
   status: 403
 }
 
+export type createActionRequestResponse409 = {
+  data: ApiError
+  status: 409
+}
+
 export type createActionRequestResponse500 = {
   data: ApiError
   status: 500
 }
 
+export type createActionRequestResponse503 = {
+  data: ApiError
+  status: 503
+}
+
 export type createActionRequestResponseSuccess = (createActionRequestResponse201) & {
   headers: Headers;
 };
-export type createActionRequestResponseError = (createActionRequestResponse400 | createActionRequestResponse403 | createActionRequestResponse500) & {
+export type createActionRequestResponseError = (createActionRequestResponse400 | createActionRequestResponse403 | createActionRequestResponse409 | createActionRequestResponse500 | createActionRequestResponse503) & {
   headers: Headers;
 };
 
@@ -14647,10 +14669,15 @@ export type getActionRequestResponse500 = {
   status: 500
 }
 
+export type getActionRequestResponse503 = {
+  data: ApiError
+  status: 503
+}
+
 export type getActionRequestResponseSuccess = (getActionRequestResponse200) & {
   headers: Headers;
 };
-export type getActionRequestResponseError = (getActionRequestResponse403 | getActionRequestResponse404 | getActionRequestResponse500) & {
+export type getActionRequestResponseError = (getActionRequestResponse403 | getActionRequestResponse404 | getActionRequestResponse500 | getActionRequestResponse503) & {
   headers: Headers;
 };
 
@@ -14715,10 +14742,15 @@ export type approveActionRequestResponse500 = {
   status: 500
 }
 
+export type approveActionRequestResponse503 = {
+  data: ApiError
+  status: 503
+}
+
 export type approveActionRequestResponseSuccess = (approveActionRequestResponse200) & {
   headers: Headers;
 };
-export type approveActionRequestResponseError = (approveActionRequestResponse403 | approveActionRequestResponse404 | approveActionRequestResponse409 | approveActionRequestResponse500) & {
+export type approveActionRequestResponseError = (approveActionRequestResponse403 | approveActionRequestResponse404 | approveActionRequestResponse409 | approveActionRequestResponse500 | approveActionRequestResponse503) & {
   headers: Headers;
 };
 
@@ -14793,10 +14825,15 @@ export type denyActionRequestResponse500 = {
   status: 500
 }
 
+export type denyActionRequestResponse503 = {
+  data: ApiError
+  status: 503
+}
+
 export type denyActionRequestResponseSuccess = (denyActionRequestResponse200) & {
   headers: Headers;
 };
-export type denyActionRequestResponseError = (denyActionRequestResponse400 | denyActionRequestResponse403 | denyActionRequestResponse404 | denyActionRequestResponse409 | denyActionRequestResponse500) & {
+export type denyActionRequestResponseError = (denyActionRequestResponse400 | denyActionRequestResponse403 | denyActionRequestResponse404 | denyActionRequestResponse409 | denyActionRequestResponse500 | denyActionRequestResponse503) & {
   headers: Headers;
 };
 

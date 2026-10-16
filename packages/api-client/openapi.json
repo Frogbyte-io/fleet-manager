@@ -7542,6 +7542,16 @@
                 }
               }
             }
+          },
+          "503": {
+            "description": "The action broker is not wired: the controller has no database.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
           }
         }
       },
@@ -7584,7 +7594,17 @@
             }
           },
           "403": {
-            "description": "The caller may not request actions.",
+            "description": "The caller may not request actions (`denied`), or policy denies the action (`policy_denied`): nothing is stored, only an audit event.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The idempotency key was already used for a different request.",
             "content": {
               "application/json": {
                 "schema": {
@@ -7595,6 +7615,16 @@
           },
           "500": {
             "description": "A backend port failed.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The action broker is not wired: the controller has no database.",
             "content": {
               "application/json": {
                 "schema": {
@@ -7665,6 +7695,16 @@
                 }
               }
             }
+          },
+          "503": {
+            "description": "The action broker is not wired: the controller has no database.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
           }
         }
       }
@@ -7700,7 +7740,7 @@
             }
           },
           "403": {
-            "description": "The caller may not approve, or policy now denies the action.",
+            "description": "The caller may not approve (`denied`), or policy now denies the action (`policy_denied`): the request ends `denied`.",
             "content": {
               "application/json": {
                 "schema": {
@@ -7731,6 +7771,16 @@
           },
           "500": {
             "description": "A backend port failed.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The action broker is not wired: the controller has no database.",
             "content": {
               "application/json": {
                 "schema": {
@@ -7831,6 +7881,16 @@
           },
           "500": {
             "description": "A backend port failed.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The action broker is not wired: the controller has no database.",
             "content": {
               "application/json": {
                 "schema": {
@@ -9761,6 +9821,13 @@
           "actionId": {
             "type": "string",
             "description": "The provider action's id, for example `coolify.application.redeploy`."
+          },
+          "idempotencyKey": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "A key (1 to 128 printable ASCII characters) making a retry return the\nrequest already made. It is scoped to the caller; reusing it for a\ndifferent request answers 409."
           },
           "parameters": {
             "type": "object",

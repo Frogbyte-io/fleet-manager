@@ -292,12 +292,15 @@ fn api_state(
         let audit = fleet_application::audit::AuditQueries::new(std::sync::Arc::new(
             fleet_storage_sqlite::AuditLedger::new(&pool),
         ));
-        let operations = std::sync::Arc::new(operations);
+        // The kinds provider actions own run only through the broker.
+        let action_registry = compose_action_registry();
+        let operations =
+            std::sync::Arc::new(operations.with_brokered_kinds(action_registry.operation_kinds()));
         let requests = fleet_application::broker::Broker::new(
             std::sync::Arc::new(fleet_storage_sqlite::ActionRequestRepository::new(
                 pool.clone(),
             )),
-            compose_action_registry(),
+            action_registry,
             operations.clone(),
             // `main` refuses to start on a malformed setting, so the
             // fallback only serves test composition.

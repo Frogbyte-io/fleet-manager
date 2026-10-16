@@ -10,9 +10,11 @@ use fleet_application::authz::{AccessRequest, Authorizer, Decision, Permission, 
 use fleet_application::broker::test_support::{NOOP_ACTION_ID, NoopAction};
 use fleet_application::broker::{
     ActionRegistry, ActionRequest, ActionRequestPort as _, Broker, BrokerError, BrokerSettings,
-    NewActionRequest, TransitionUpdate,
+    NewActionRequest, ProviderAction, TransitionUpdate,
 };
-use fleet_application::operation::{OperationPort as _, Operations};
+use fleet_application::operation::{
+    NewOperation, OperationPort as _, OperationUseCaseError, Operations,
+};
 use fleet_core::{ActionRequestState, RiskClass};
 use fleet_storage_sqlite::{
     ActionRequestRepository, AuditLedger, AuditSink, OperationRepository, Store,
@@ -43,12 +45,47 @@ impl Authorizer for Without {
     }
 }
 
+/// Allows approving only the named action id.
+#[derive(Debug)]
+struct ApproveOnly(&'static str);
+impl Authorizer for ApproveOnly {
+    fn decide(&self, request: AccessRequest<'_>) -> Decision {
+        if request.action == Permission::ActionApprove && request.resource != Some(self.0) {
+            Decision::deny(ReasonId::OutOfScope)
+        } else {
+            Decision::allow()
+        }
+    }
+}
+
+/// An action whose operation can never be built.
+#[derive(Debug)]
+struct Unbuildable;
+impl ProviderAction for Unbuildable {
+    fn id(&self) -> &'static str {
+        "test.unbuildable.run"
+    }
+    fn operation_kind(&self) -> &'static str {
+        "noop"
+    }
+    fn risk_class(&self) -> RiskClass {
+        RiskClass::Approve
+    }
+    fn validate(&self, _target: &str, _parameters: &serde_json::Value) -> Result<(), String> {
+        Ok(())
+    }
+    fn operation(&self, _request: &ActionRequest) -> Result<NewOperation, String> {
+        Err("the provider is unreachable".to_owned())
+    }
+}
+
 struct World {
     _dir: tempfile::TempDir,
     store: Store,
     broker: Arc<Broker>,
     requests: Arc<ActionRequestRepository>,
     operations: Arc<OperationRepository>,
+    use_cases: Arc<Operations>,
 }
 
 impl World {
@@ -60,17 +97,20 @@ impl World {
         let dir = tempfile::tempdir().unwrap();
         let store = Store::open(&dir.path().join("fleet.db")).await.unwrap();
         let operations = Arc::new(OperationRepository::new(store.pool().clone()));
-        let use_cases = Arc::new(Operations::new(
-            operations.clone(),
-            Arc::new(AuditSink::new(store.pool().clone())),
-        ));
+        let use_cases = Arc::new(
+            Operations::new(
+                operations.clone(),
+                Arc::new(AuditSink::new(store.pool().clone())),
+            )
+            .with_brokered_kinds(["noop".to_owned()]),
+        );
         let requests = Arc::new(ActionRequestRepository::new(store.pool().clone()));
         let mut registry = ActionRegistry::new();
         registry.register(Arc::new(NoopAction { risk })).unwrap();
         let broker = Arc::new(Broker::new(
             requests.clone(),
             Arc::new(registry),
-            use_cases,
+            use_cases.clone(),
             settings,
         ));
         Self {
@@ -79,6 +119,7 @@ impl World {
             broker,
             requests,
             operations,
+            use_cases,
         }
     }
 
@@ -90,6 +131,7 @@ impl World {
             reason: "the deploy looks stale".to_owned(),
             origin: "api".to_owned(),
             correlation_id: Some("corr-1".to_owned()),
+            idempotency_key: None,
         }
     }
 
@@ -187,29 +229,39 @@ async fn an_auto_class_request_executes_at_once_as_the_requester() {
 }
 
 #[tokio::test]
-async fn a_deny_class_request_is_recorded_denied_and_never_runs() {
+async fn a_deny_class_request_is_refused_at_creation_with_an_audit_event_only() {
     let world = World::new(RiskClass::Deny).await;
-    let request = world.create(NOW).await;
-    assert_eq!(request.state, ActionRequestState::Denied);
-    assert_eq!(request.decided_by.as_deref(), Some("policy:deny"));
-    assert_eq!(world.operation_count().await, 0);
-    assert_eq!(
-        world.audited(&request.id).await,
-        ["action.request ->denied"]
-    );
-    // A denied request cannot be approved afterwards.
     let error = world
         .broker
-        .approve(&Permit, APPROVER, &request.id, NOW)
+        .create(&Permit, REQUESTER, World::new_request(), NOW)
         .await
         .unwrap_err();
-    assert!(matches!(
-        error,
-        BrokerError::Conflict {
-            state: ActionRequestState::Denied,
-            ..
-        }
-    ));
+    assert!(matches!(error, BrokerError::PolicyDenied { .. }), "{error}");
+    // No row, no operation.
+    assert!(
+        world
+            .broker
+            .list(&Permit, APPROVER, None, 50, NOW)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(world.operation_count().await, 0);
+    // One refused audit event, naming no request.
+    let page = AuditLedger::new(world.store.pool())
+        .query(&AuditFilter {
+            limit: 100,
+            action: Some("action.request".to_owned()),
+            ..AuditFilter::default()
+        })
+        .await
+        .unwrap();
+    assert_eq!(page.events.len(), 1);
+    let event = &page.events[0];
+    assert!(!event.allowed);
+    assert_eq!(event.reason, "policy.risk_class_deny");
+    assert_eq!(event.resource, None);
+    assert_eq!(event.actor, REQUESTER);
 }
 
 #[tokio::test]
@@ -515,28 +567,138 @@ async fn approving_requires_its_own_permission_and_changes_nothing_when_refused(
 }
 
 #[tokio::test]
-async fn approval_rechecks_authorization_at_the_operation_path() {
-    let world = World::new(RiskClass::Approve).await;
-    let request = world.create(NOW).await;
-    // The approver holds action.approve but may not create operations.
-    let failed = world
+async fn a_delegated_requester_can_request_and_never_approve_or_use_the_generic_route() {
+    // No operation.create and no action.approve, like a delegated credential.
+    let agent = Without(vec![Permission::OperationCreate, Permission::ActionApprove]);
+    let world = World::new(RiskClass::Auto).await;
+    let auto = world
         .broker
-        .approve(
-            &Without(vec![Permission::OperationCreate]),
-            APPROVER,
-            &request.id,
-            NOW + 1,
-        )
+        .create(&agent, REQUESTER, World::new_request(), NOW)
         .await
         .unwrap();
-    assert_eq!(failed.state, ActionRequestState::Failed);
-    assert!(failed.failure.as_deref().unwrap().contains("not permitted"));
-    assert_eq!(failed.decided_by.as_deref(), Some(APPROVER));
+    assert_eq!(auto.state, ActionRequestState::Executing);
+    assert_eq!(world.operation_count().await, 1);
+    // The generic route is closed to it ...
+    let new = NewOperation {
+        kind: "noop".to_owned(),
+        ..NewOperation::default()
+    };
+    assert!(matches!(
+        world.use_cases.create(&agent, REQUESTER, &new).await,
+        Err(OperationUseCaseError::Denied(_))
+    ));
+    // ... and to a caller that does hold operation.create: brokered kinds
+    // are refused there, whoever asks.
+    let error = world
+        .use_cases
+        .create(&Permit, APPROVER, &new)
+        .await
+        .unwrap_err();
+    assert!(error.to_string().contains("POST /requests"), "{error}");
+    assert_eq!(world.operation_count().await, 1);
+
+    // An approve-class request waits for a person; the agent cannot approve
+    // it, the approver needs no operation.create to.
+    let world = World::new(RiskClass::Approve).await;
+    let request = world
+        .broker
+        .create(&agent, REQUESTER, World::new_request(), NOW)
+        .await
+        .unwrap();
+    assert!(matches!(
+        world
+            .broker
+            .approve(&agent, REQUESTER, &request.id, NOW + 1)
+            .await
+            .unwrap_err(),
+        BrokerError::Denied(_)
+    ));
+    let deciding_human = Without(vec![Permission::OperationCreate]);
+    let approved = world
+        .broker
+        .approve(&deciding_human, APPROVER, &request.id, NOW + 2)
+        .await
+        .unwrap();
+    assert_eq!(approved.state, ActionRequestState::Executing);
+    assert_eq!(world.operation_count().await, 1);
+}
+
+#[tokio::test]
+async fn the_broker_idempotency_prefix_is_reserved_on_the_generic_route() {
+    let world = World::new(RiskClass::Approve).await;
+    let new = NewOperation {
+        kind: "ssh.exec".to_owned(),
+        idempotency_key: Some("action-request:anything".to_owned()),
+        ..NewOperation::default()
+    };
+    let error = world
+        .use_cases
+        .create(&Permit, APPROVER, &new)
+        .await
+        .unwrap_err();
+    assert!(error.to_string().contains("reserved"), "{error}");
     assert_eq!(world.operation_count().await, 0);
 }
 
 #[tokio::test]
-async fn a_changed_policy_that_now_denies_beats_an_approval() {
+async fn an_operation_that_already_holds_the_request_key_must_be_the_same_operation() {
+    let world = World::new(RiskClass::Approve).await;
+    let request = world.create(NOW).await;
+    // Something else (bypassing the use case) took the key first.
+    world
+        .operations
+        .create(
+            "noop",
+            Some(&format!("action-request:{}", request.id)),
+            None,
+            None,
+            Some(r#"{"target":"somewhere-else"}"#),
+        )
+        .await
+        .unwrap();
+    let failed = world
+        .broker
+        .approve(&Permit, APPROVER, &request.id, NOW + 1)
+        .await
+        .unwrap();
+    assert_eq!(failed.state, ActionRequestState::Failed);
+    assert!(
+        failed
+            .failure
+            .as_deref()
+            .unwrap()
+            .contains("different operation")
+    );
+    assert_eq!(failed.operation_id, None);
+}
+
+#[tokio::test]
+async fn approval_is_authorized_against_the_requests_action_id() {
+    let world = World::new(RiskClass::Approve).await;
+    let request = world.create(NOW).await;
+    assert!(matches!(
+        world
+            .broker
+            .approve(
+                &ApproveOnly("other.action.id"),
+                APPROVER,
+                &request.id,
+                NOW + 1
+            )
+            .await
+            .unwrap_err(),
+        BrokerError::Denied(_)
+    ));
+    let approved = world
+        .broker
+        .approve(&ApproveOnly(NOOP_ACTION_ID), APPROVER, &request.id, NOW + 2)
+        .await
+        .unwrap();
+    assert_eq!(approved.state, ActionRequestState::Executing);
+}
+
+#[tokio::test]
+async fn a_changed_policy_that_now_denies_ends_the_request_denied_by_policy() {
     let world = World::new(RiskClass::Approve).await;
     let request = world.create(NOW).await;
     // Rebuild the broker over the same database with a deny override.
@@ -551,10 +713,7 @@ async fn a_changed_policy_that_now_denies_beats_an_approval() {
     let broker = Broker::new(
         world.requests.clone(),
         Arc::new(registry),
-        Arc::new(Operations::new(
-            world.operations.clone(),
-            Arc::new(AuditSink::new(world.store.pool().clone())),
-        )),
+        world.use_cases.clone(),
         settings,
     );
     assert!(matches!(
@@ -564,6 +723,20 @@ async fn a_changed_policy_that_now_denies_beats_an_approval() {
             .unwrap_err(),
         BrokerError::PolicyDenied { .. }
     ));
+    let after = broker
+        .get(&Permit, APPROVER, &request.id, NOW + 2)
+        .await
+        .unwrap();
+    assert_eq!(after.state, ActionRequestState::Denied);
+    assert_eq!(after.decided_by.as_deref(), Some("policy:deny"));
+    assert_eq!(world.operation_count().await, 0);
+    assert_eq!(
+        world.audited(&request.id).await,
+        [
+            "action.request ->pending",
+            "action.policy_deny pending>denied"
+        ]
+    );
 }
 
 #[tokio::test]
@@ -632,11 +805,9 @@ async fn the_request_follows_its_operation_to_a_terminal_state() {
     }
 }
 
-#[tokio::test]
-async fn an_approved_request_whose_operation_never_started_fails_honestly() {
-    let world = World::new(RiskClass::Approve).await;
-    let request = world.create(NOW).await;
-    // Simulate a controller that stopped between the decision and execution.
+/// Leaves a request `approved` with no operation, as a controller stopped
+/// between the decision and execution would.
+async fn strand_approved(world: &World, request: &ActionRequest) {
     let update = TransitionUpdate {
         from: ActionRequestState::Pending,
         to: ActionRequestState::Approved,
@@ -662,6 +833,13 @@ async fn an_approved_request_whose_operation_never_started_fails_honestly() {
         .await
         .unwrap()
         .unwrap();
+}
+
+#[tokio::test]
+async fn a_stuck_approved_request_is_recovered_by_creating_its_operation() {
+    let world = World::new(RiskClass::Approve).await;
+    let request = world.create(NOW).await;
+    strand_approved(&world, &request).await;
     let soon = world
         .broker
         .get(&Permit, APPROVER, &request.id, NOW + 2)
@@ -673,14 +851,230 @@ async fn an_approved_request_whose_operation_never_started_fails_honestly() {
         .get(&Permit, APPROVER, &request.id, NOW + 120_000)
         .await
         .unwrap();
+    assert_eq!(later.state, ActionRequestState::Executing);
+    assert_eq!(world.operation_count().await, 1);
+    assert_eq!(later.decided_by.as_deref(), Some(APPROVER));
+}
+
+#[tokio::test]
+async fn a_stuck_approved_request_with_a_created_but_unlinked_operation_links_it() {
+    let world = World::new(RiskClass::Approve).await;
+    let request = world.create(NOW).await;
+    strand_approved(&world, &request).await;
+    // The slow start created the operation but never linked it.
+    let action = NoopAction {
+        risk: RiskClass::Approve,
+    };
+    let mut new = action.operation(&request).unwrap();
+    new.idempotency_key = Some(format!("action-request:{}", request.id));
+    let existing = world
+        .use_cases
+        .create_brokered(&Permit, APPROVER, &new)
+        .await
+        .unwrap();
+    let later = world
+        .broker
+        .get(&Permit, APPROVER, &request.id, NOW + 120_000)
+        .await
+        .unwrap();
+    assert_eq!(later.state, ActionRequestState::Executing);
+    assert_eq!(later.operation_id.as_deref(), Some(existing.id.as_str()));
+    // Still one operation: the live one was linked, not orphaned.
+    assert_eq!(world.operation_count().await, 1);
+}
+
+#[tokio::test]
+async fn a_stuck_approved_request_that_cannot_start_fails_with_an_audit_event() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::open(&dir.path().join("fleet.db")).await.unwrap();
+    let operations = Arc::new(OperationRepository::new(store.pool().clone()));
+    let use_cases = Arc::new(
+        Operations::new(
+            operations.clone(),
+            Arc::new(AuditSink::new(store.pool().clone())),
+        )
+        .with_brokered_kinds(["noop".to_owned()]),
+    );
+    let requests = Arc::new(ActionRequestRepository::new(store.pool().clone()));
+    let mut registry = ActionRegistry::new();
+    registry.register(Arc::new(Unbuildable)).unwrap();
+    let broker = Broker::new(
+        requests.clone(),
+        Arc::new(registry),
+        use_cases,
+        BrokerSettings::default(),
+    );
+    let mut new = World::new_request();
+    new.action_id = "test.unbuildable.run".to_owned();
+    let request = broker.create(&Permit, REQUESTER, new, NOW).await.unwrap();
+    let update = TransitionUpdate {
+        from: ActionRequestState::Pending,
+        to: ActionRequestState::Approved,
+        decided_by: Some(APPROVER.to_owned()),
+        decision_note: None,
+        operation_id: None,
+        failure: None,
+        at: NOW + 1,
+        require_unexpired: true,
+    };
+    let audit = fleet_application::audit::AuditIntent {
+        actor: APPROVER.to_owned(),
+        action: "action.approve".to_owned(),
+        resource: Some(request.id.clone()),
+        decision: Decision::allow(),
+        correlation_id: None,
+        operation_id: None,
+        metadata: fleet_application::audit::AuditMetadata::default(),
+    };
+    requests
+        .transition(&request.id, &update, &audit)
+        .await
+        .unwrap()
+        .unwrap();
+    let later = broker
+        .get(&Permit, APPROVER, &request.id, NOW + 120_000)
+        .await
+        .unwrap();
     assert_eq!(later.state, ActionRequestState::Failed);
     assert!(
         later
             .failure
             .as_deref()
             .unwrap()
-            .contains("controller stopped")
+            .contains("could not start")
     );
+    let page = AuditLedger::new(store.pool())
+        .query(&AuditFilter {
+            limit: 100,
+            resource: Some(request.id.clone()),
+            action: Some("action.fail".to_owned()),
+            ..AuditFilter::default()
+        })
+        .await
+        .unwrap();
+    assert_eq!(page.events.len(), 1);
+}
+
+#[tokio::test]
+async fn an_executing_request_whose_operation_vanished_fails_after_a_grace() {
+    let world = World::new(RiskClass::Auto).await;
+    let request = world.create(NOW).await;
+    let operation_id = request.operation_id.clone().unwrap();
+    sqlx::query("DELETE FROM operations WHERE id = ?1")
+        .bind(&operation_id)
+        .execute(world.store.pool())
+        .await
+        .unwrap();
+    let soon = world
+        .broker
+        .get(&Permit, APPROVER, &request.id, NOW + 1_000)
+        .await
+        .unwrap();
+    assert_eq!(soon.state, ActionRequestState::Executing);
+    let later = world
+        .broker
+        .get(&Permit, APPROVER, &request.id, NOW + 120_000)
+        .await
+        .unwrap();
+    assert_eq!(later.state, ActionRequestState::Failed);
+    assert!(
+        later
+            .failure
+            .as_deref()
+            .unwrap()
+            .contains("could not be found")
+    );
+}
+
+#[tokio::test]
+async fn an_idempotency_key_makes_a_retry_return_the_same_request_per_requester() {
+    let world = World::new(RiskClass::Approve).await;
+    let mut new = World::new_request();
+    new.idempotency_key = Some("retry-1".to_owned());
+    let first = world
+        .broker
+        .create(&Permit, REQUESTER, new.clone(), NOW)
+        .await
+        .unwrap();
+    let again = world
+        .broker
+        .create(&Permit, REQUESTER, new.clone(), NOW + 5)
+        .await
+        .unwrap();
+    assert_eq!(first.id, again.id);
+    assert_eq!(
+        world
+            .broker
+            .list(&Permit, APPROVER, None, 50, NOW + 6)
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
+    // Different content under the same key conflicts.
+    let mut other = new.clone();
+    other.target = "app-2".to_owned();
+    assert!(matches!(
+        world
+            .broker
+            .create(&Permit, REQUESTER, other, NOW + 7)
+            .await
+            .unwrap_err(),
+        BrokerError::Conflict { .. }
+    ));
+    // The key is scoped to the requester.
+    let theirs = world
+        .broker
+        .create(&Permit, "agent-2", new, NOW + 8)
+        .await
+        .unwrap();
+    assert_ne!(theirs.id, first.id);
+    // A malformed key is refused without echoing it.
+    let mut bad = World::new_request();
+    bad.idempotency_key = Some("has space".to_owned());
+    let error = world
+        .broker
+        .create(&Permit, REQUESTER, bad, NOW)
+        .await
+        .unwrap_err();
+    assert!(!error.to_string().contains("has space"));
+}
+
+#[tokio::test]
+async fn errors_do_not_echo_caller_input() {
+    let world = World::new(RiskClass::Approve).await;
+    let mut unknown = World::new_request();
+    unknown.action_id = "echo.me.back".to_owned();
+    let error = world
+        .broker
+        .create(&Permit, REQUESTER, unknown, NOW)
+        .await
+        .unwrap_err();
+    assert!(!error.to_string().contains("echo.me.back"), "{error}");
+    let mut malformed = World::new_request();
+    malformed.action_id = "Not A Valid Id".to_owned();
+    let error = world
+        .broker
+        .create(&Permit, REQUESTER, malformed, NOW)
+        .await
+        .unwrap_err();
+    assert!(!error.to_string().contains("Not A Valid Id"), "{error}");
+    let error = world
+        .broker
+        .get(&Permit, APPROVER, "echo-path-id", NOW)
+        .await
+        .unwrap_err();
+    assert!(!error.to_string().contains("echo-path-id"), "{error}");
+    let mut target = World::new_request();
+    target.target = "app\n1".to_owned();
+    assert!(matches!(
+        world
+            .broker
+            .create(&Permit, REQUESTER, target, NOW)
+            .await
+            .unwrap_err(),
+        BrokerError::Invalid { .. }
+    ));
 }
 
 #[tokio::test]

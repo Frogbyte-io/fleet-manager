@@ -6,6 +6,10 @@ license.workspace = true
 repository.workspace = true
 publish.workspace = true
 
+[features]
+# The broker's `NoopAction`, for tests of the broker and its adapters.
+test-support = []
+
 [dependencies]
 async-trait = "0.1.89"
 fleet-core = { path = "../fleet-core" }

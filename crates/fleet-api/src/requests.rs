@@ -42,8 +42,9 @@ fn broker_or_error(
 
 fn map_broker_error(error: &BrokerError, correlation_id: CorrelationId) -> ApiErrorResponse {
     let (status, code, retry) = match error {
-        BrokerError::Denied(_) | BrokerError::PolicyDenied { .. } => {
-            (StatusCode::FORBIDDEN, "denied", RetryClass::Never)
+        BrokerError::Denied(_) => (StatusCode::FORBIDDEN, "denied", RetryClass::Never),
+        BrokerError::PolicyDenied { .. } => {
+            (StatusCode::FORBIDDEN, "policy_denied", RetryClass::Never)
         }
         BrokerError::Invalid { .. } => (
             StatusCode::BAD_REQUEST,
@@ -171,6 +172,11 @@ pub struct CreateActionRequest {
     pub parameters: serde_json::Value,
     /// Why, for the approver (at most 1000 characters).
     pub reason: String,
+    /// A key (1 to 128 printable ASCII characters) making a retry return the
+    /// request already made. It is scoped to the caller; reusing it for a
+    /// different request answers 409.
+    #[serde(default)]
+    pub idempotency_key: Option<String>,
 }
 
 /// An optional note with a denial.
@@ -208,8 +214,10 @@ pub struct ListActionRequestsParams {
     responses(
         (status = 201, description = "The request was recorded; its state shows what policy did.", body = Resource<ActionRequestDto>),
         (status = 400, description = "The action is unknown, a field is invalid, or the parameters look like a credential.", body = crate::error::ApiError),
-        (status = 403, description = "The caller may not request actions.", body = crate::error::ApiError),
+        (status = 403, description = "The caller may not request actions (`denied`), or policy denies the action (`policy_denied`): nothing is stored, only an audit event.", body = crate::error::ApiError),
+        (status = 409, description = "The idempotency key was already used for a different request.", body = crate::error::ApiError),
         (status = 500, description = "A backend port failed.", body = crate::error::ApiError),
+        (status = 503, description = "The action broker is not wired: the controller has no database.", body = crate::error::ApiError),
     )
 )]
 pub async fn create_action_request(
@@ -237,6 +245,7 @@ pub async fn create_action_request(
                 reason: request.reason,
                 origin: API_ORIGIN.to_owned(),
                 correlation_id: Some(correlation_id.to_string()),
+                idempotency_key: request.idempotency_key,
             },
             fleet_core::SystemClock::now_unix_millis(),
         )
@@ -266,6 +275,7 @@ pub async fn create_action_request(
         (status = 400, description = "The state filter is unknown.", body = crate::error::ApiError),
         (status = 403, description = "The caller may not read action requests.", body = crate::error::ApiError),
         (status = 500, description = "A backend port failed.", body = crate::error::ApiError),
+        (status = 503, description = "The action broker is not wired: the controller has no database.", body = crate::error::ApiError),
     )
 )]
 pub async fn list_action_requests(
@@ -281,7 +291,12 @@ pub async fn list_action_requests(
         .as_deref()
         .map(ActionRequestState::from_id)
         .transpose()
-        .map_err(|detail| invalid(&detail, correlation_id))?;
+        .map_err(|_| {
+            invalid(
+                "the state filter must be pending, approved, denied, expired, executing, succeeded, or failed",
+                correlation_id,
+            )
+        })?;
     let limit = params
         .limit
         .unwrap_or(DEFAULT_PAGE_LIMIT)
@@ -324,6 +339,7 @@ pub async fn list_action_requests(
         (status = 403, description = "The caller may not read action requests.", body = crate::error::ApiError),
         (status = 404, description = "The request does not exist.", body = crate::error::ApiError),
         (status = 500, description = "A backend port failed.", body = crate::error::ApiError),
+        (status = 503, description = "The action broker is not wired: the controller has no database.", body = crate::error::ApiError),
     )
 )]
 pub async fn get_action_request(
@@ -364,10 +380,11 @@ pub async fn get_action_request(
     params(("requestId" = String, Path, description = "The request's identity.")),
     responses(
         (status = 200, description = "The request was approved; it is `executing` with its `operationId`, or `failed` with the reason.", body = Resource<ActionRequestDto>),
-        (status = 403, description = "The caller may not approve, or policy now denies the action.", body = crate::error::ApiError),
+        (status = 403, description = "The caller may not approve (`denied`), or policy now denies the action (`policy_denied`): the request ends `denied`.", body = crate::error::ApiError),
         (status = 404, description = "The request does not exist.", body = crate::error::ApiError),
         (status = 409, description = "The request is not pending: it was decided, expired, or another decision won.", body = crate::error::ApiError),
         (status = 500, description = "A backend port failed.", body = crate::error::ApiError),
+        (status = 503, description = "The action broker is not wired: the controller has no database.", body = crate::error::ApiError),
     )
 )]
 pub async fn approve_action_request(
@@ -410,6 +427,7 @@ pub async fn approve_action_request(
         (status = 404, description = "The request does not exist.", body = crate::error::ApiError),
         (status = 409, description = "The request is not pending: it was decided, expired, or another decision won.", body = crate::error::ApiError),
         (status = 500, description = "A backend port failed.", body = crate::error::ApiError),
+        (status = 503, description = "The action broker is not wired: the controller has no database.", body = crate::error::ApiError),
     )
 )]
 pub async fn deny_action_request(

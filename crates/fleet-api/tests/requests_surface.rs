@@ -43,10 +43,13 @@ async fn state(
     let dir = tempfile::tempdir().unwrap();
     let store = Store::open(&dir.path().join("fleet.db")).await.unwrap();
     let pool = store.pool().clone();
-    let operations = Arc::new(Operations::new(
-        Arc::new(OperationRepository::new(pool.clone())),
-        Arc::new(AuditSink::new(pool.clone())),
-    ));
+    let operations = Arc::new(
+        Operations::new(
+            Arc::new(OperationRepository::new(pool.clone())),
+            Arc::new(AuditSink::new(pool.clone())),
+        )
+        .with_brokered_kinds(["noop".to_owned()]),
+    );
     let mut registry = ActionRegistry::new();
     registry.register(Arc::new(NoopAction { risk })).unwrap();
     let broker = Broker::new(
@@ -184,9 +187,42 @@ async fn auto_and_deny_classes_answer_what_policy_did() {
 
     let (_dir, deny) = state(RiskClass::Deny, Arc::new(Permit)).await;
     let (status, body) = call(&deny, "POST", "/requests", Some(create_body())).await;
-    assert_eq!(status, StatusCode::CREATED, "{body}");
-    assert_eq!(body["data"]["state"], "denied");
-    assert_eq!(body["data"]["terminal"], true);
+    assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
+    assert_eq!(body["code"], "policy_denied");
+    // Nothing was stored.
+    let (status, body) = call(&deny, "GET", "/requests", None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(body["items"].as_array().unwrap().is_empty(), "{body}");
+}
+
+#[tokio::test]
+async fn an_idempotency_key_returns_the_same_request_and_brokered_kinds_leave_the_generic_route() {
+    let (_dir, state) = state(RiskClass::Approve, Arc::new(Permit)).await;
+    let mut body = create_body();
+    body["idempotencyKey"] = serde_json::json!("retry-1");
+    let (status, first) = call(&state, "POST", "/requests", Some(body.clone())).await;
+    assert_eq!(status, StatusCode::CREATED, "{first}");
+    let (status, again) = call(&state, "POST", "/requests", Some(body.clone())).await;
+    assert_eq!(status, StatusCode::CREATED, "{again}");
+    assert_eq!(first["data"]["id"], again["data"]["id"]);
+    body["target"] = serde_json::json!("another-target");
+    let (status, _) = call(&state, "POST", "/requests", Some(body)).await;
+    assert_eq!(status, StatusCode::CONFLICT);
+    // An unknown state filter is refused without being echoed.
+    let (status, error) = call(&state, "GET", "/requests?state=echo-me", None).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert!(!error.to_string().contains("echo-me"), "{error}");
+    // The noop kind belongs to the registered action: the generic surface
+    // refuses it.
+    let (status, error) = call(
+        &state,
+        "POST",
+        "/operations",
+        Some(serde_json::json!({ "kind": "noop" })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{error}");
+    assert!(error.to_string().contains("POST /requests"), "{error}");
 }
 
 #[tokio::test]

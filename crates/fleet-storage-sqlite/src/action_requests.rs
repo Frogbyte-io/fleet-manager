@@ -49,6 +49,7 @@ fn row_to_request(row: &sqlx::sqlite::SqliteRow) -> Result<ActionRequest, String
         operation_id: row.get("operation_id"),
         failure: row.get("failure"),
         correlation_id: row.get("correlation_id"),
+        idempotency_key: row.get("idempotency_key"),
         created_at: row.get("created_at"),
         expires_at: row.get("expires_at"),
         updated_at: row.get("updated_at"),
@@ -67,8 +68,8 @@ impl ActionRequestPort for ActionRequestRepository {
             "INSERT INTO action_requests \
              (id, requester, origin, action_id, target, parameters_json, risk_class, reason, \
               state, decided_by, decided_at, decision_note, operation_id, failure, \
-              correlation_id, created_at, expires_at, updated_at) \
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)",
+              correlation_id, idempotency_key, created_at, expires_at, updated_at) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19)",
         )
         .bind(&request.id)
         .bind(&request.requester)
@@ -85,6 +86,7 @@ impl ActionRequestPort for ActionRequestRepository {
         .bind(&request.operation_id)
         .bind(&request.failure)
         .bind(&request.correlation_id)
+        .bind(&request.idempotency_key)
         .bind(request.created_at)
         .bind(request.expires_at)
         .bind(request.updated_at)
@@ -95,6 +97,33 @@ impl ActionRequestPort for ActionRequestRepository {
         tx.commit()
             .await
             .map_err(|error| format!("action request insert failed: {error}"))
+    }
+
+    async fn record_audit(&self, audit: &AuditIntent) -> Result<(), String> {
+        let mut tx = self
+            .pool
+            .begin_with("BEGIN IMMEDIATE")
+            .await
+            .map_err(|error| format!("action request audit failed: {error}"))?;
+        append_intent_tx(&mut tx, audit).await?;
+        tx.commit()
+            .await
+            .map_err(|error| format!("action request audit failed: {error}"))
+    }
+
+    async fn find_by_idempotency(
+        &self,
+        requester: &str,
+        key: &str,
+    ) -> Result<Option<ActionRequest>, String> {
+        sqlx::query("SELECT * FROM action_requests WHERE requester = ?1 AND idempotency_key = ?2")
+            .bind(requester)
+            .bind(key)
+            .fetch_optional(&self.pool)
+            .await
+            .map_err(|error| format!("action request read failed: {error}"))?
+            .map(|row| row_to_request(&row))
+            .transpose()
     }
 
     async fn get(&self, id: &str) -> Result<Option<ActionRequest>, String> {

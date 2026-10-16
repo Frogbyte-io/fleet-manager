@@ -550,6 +550,8 @@ pub enum ReasonId {
     OutOfScope,
     /// The presented delegated credential is expired or revoked.
     CredentialInactive,
+    /// The action broker's risk class for the action is `deny`.
+    RiskClassDeny,
 }
 
 impl ReasonId {
@@ -564,6 +566,7 @@ impl ReasonId {
             ReasonId::ActionNotDelegated => "policy.action_not_delegated",
             ReasonId::OutOfScope => "policy.out_of_scope",
             ReasonId::CredentialInactive => "policy.credential_inactive",
+            ReasonId::RiskClassDeny => "policy.risk_class_deny",
         }
     }
 }

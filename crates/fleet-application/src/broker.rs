@@ -54,8 +54,10 @@ use fleet_core::{
 };
 
 use crate::audit::{AuditIntent, AuditMetadata};
-use crate::authz::{AccessRequest, Authorizer, Decision, Permission, authorize};
-use crate::operation::{NewOperation, OperationUseCaseError, Operations};
+use crate::authz::{AccessRequest, Authorizer, Decision, Permission, ReasonId, authorize};
+use crate::operation::{
+    BROKER_IDEMPOTENCY_PREFIX, NewOperation, OperationUseCaseError, Operations, PortFailure,
+};
 
 /// The default time a request may wait for a decision: one day.
 pub const DEFAULT_REQUEST_TTL_SECONDS: u64 = 24 * 60 * 60;
@@ -77,6 +79,8 @@ pub const MAX_TARGET_LEN: usize = 256;
 pub const MAX_REASON_LEN: usize = 1000;
 /// The longest action id.
 pub const MAX_ACTION_ID_LEN: usize = 96;
+/// The longest idempotency key.
+pub const MAX_IDEMPOTENCY_KEY_LEN: usize = 128;
 /// The longest origin label.
 pub const MAX_ORIGIN_LEN: usize = 64;
 /// How deep parameters may nest.
@@ -129,6 +133,8 @@ pub struct ActionRequest {
     pub failure: Option<String>,
     /// The correlation identity of the request that made it.
     pub correlation_id: Option<String>,
+    /// The requester's idempotency key, when one was given. Never served.
+    pub idempotency_key: Option<String>,
     /// When it was made (epoch milliseconds).
     pub created_at: i64,
     /// When an undecided request expires (epoch milliseconds).
@@ -169,6 +175,25 @@ pub trait ActionRequestPort: fmt::Debug + Send + Sync {
     ///
     /// Fails when the store refuses; neither the row nor the event is kept.
     async fn insert(&self, request: &ActionRequest, audit: &AuditIntent) -> Result<(), String>;
+
+    /// Appends an audit event with no state change: a request refused by
+    /// policy leaves no row, only this.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the store refuses; the event is not kept.
+    async fn record_audit(&self, audit: &AuditIntent) -> Result<(), String>;
+
+    /// The requester's request made with this idempotency key, when any.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the store errors.
+    async fn find_by_idempotency(
+        &self,
+        requester: &str,
+        key: &str,
+    ) -> Result<Option<ActionRequest>, String>;
 
     /// Reads one request.
     ///
@@ -211,6 +236,10 @@ pub trait ActionRequestPort: fmt::Debug + Send + Sync {
 pub trait ProviderAction: fmt::Debug + Send + Sync {
     /// The action's stable id (`<provider>.<noun>.<verb>`).
     fn id(&self) -> &str;
+
+    /// The operation kind this action creates. The generic operation surface
+    /// refuses it, so the action is the only way to run it.
+    fn operation_kind(&self) -> &str;
 
     /// The default risk class, before any operator override.
     fn risk_class(&self) -> RiskClass;
@@ -265,6 +294,15 @@ impl ActionRegistry {
     #[must_use]
     pub fn get(&self, id: &str) -> Option<&Arc<dyn ProviderAction>> {
         self.actions.get(id)
+    }
+
+    /// The operation kinds the registered actions create, deduplicated.
+    #[must_use]
+    pub fn operation_kinds(&self) -> std::collections::BTreeSet<String> {
+        self.actions
+            .values()
+            .map(|action| action.operation_kind().to_owned())
+            .collect()
     }
 
     /// The registered ids, in order.
@@ -391,6 +429,9 @@ pub struct NewActionRequest {
     pub origin: String,
     /// The correlation identity of the request.
     pub correlation_id: Option<String>,
+    /// A key making a retry return the request already made, scoped to the
+    /// requester.
+    pub idempotency_key: Option<String>,
 }
 
 /// A broker use-case failure.
@@ -417,8 +458,8 @@ pub enum BrokerError {
         /// What happened, safe to print.
         detail: String,
     },
-    /// Policy now denies the action; the request stays pending until it
-    /// expires.
+    /// Policy denies the action (ADR 0016): at creation nothing is stored and
+    /// only an audit event is kept; at approval the request ends `denied`.
     PolicyDenied {
         /// The action.
         action_id: String,
@@ -487,13 +528,19 @@ impl Broker {
     }
 
     /// Records a request and applies policy: `auto` starts the operation as
-    /// the requester, `approve` leaves it pending, `deny` records it denied.
-    /// The returned request shows which.
+    /// the requester, `approve` leaves it pending, and `deny` is refused with
+    /// [`BrokerError::PolicyDenied`] and an audit event, storing nothing. The
+    /// returned request shows which of the first two happened.
+    ///
+    /// A request carrying an idempotency key is scoped to its requester: a
+    /// retry with the same key and the same content returns the request
+    /// already made; the same key with different content conflicts.
     ///
     /// # Errors
     ///
     /// Fails on denial, an unknown action, invalid or credential-like input,
-    /// or a backend failure.
+    /// a policy denial, or a backend failure.
+    #[allow(clippy::too_many_lines)]
     pub async fn create(
         &self,
         authorizer: &dyn Authorizer,
@@ -501,6 +548,13 @@ impl Broker {
         new: NewActionRequest,
         now: i64,
     ) -> Result<ActionRequest, BrokerError> {
+        // The id is checked before it is used as the authorization resource,
+        // and no error echoes caller input.
+        if !valid_action_id(&new.action_id) {
+            return Err(BrokerError::Invalid {
+                detail: "the actionId is not a valid action id".to_owned(),
+            });
+        }
         authorize(
             authorizer,
             AccessRequest {
@@ -514,16 +568,36 @@ impl Broker {
             .registry
             .get(&new.action_id)
             .ok_or_else(|| BrokerError::Invalid {
-                detail: format!("the action {:?} is not offered", new.action_id),
+                detail: "the action is not offered by this controller".to_owned(),
             })?
             .clone();
-        validate_text("target", &new.target, MAX_TARGET_LEN)?;
-        validate_text("reason", &new.reason, MAX_REASON_LEN)?;
-        validate_text("origin", &new.origin, MAX_ORIGIN_LEN)?;
+        validate_text("target", &new.target, MAX_TARGET_LEN, false)?;
+        validate_text("reason", &new.reason, MAX_REASON_LEN, true)?;
+        validate_text("origin", &new.origin, MAX_ORIGIN_LEN, false)?;
+        validate_idempotency_key(new.idempotency_key.as_deref())?;
         let parameters = check_parameters(new.parameters)?;
         action
             .validate(&new.target, &parameters)
             .map_err(|detail| BrokerError::Invalid { detail })?;
+
+        if let Some(key) = new.idempotency_key.as_deref()
+            && let Some(existing) = self
+                .requests
+                .find_by_idempotency(principal_id, key)
+                .await
+                .map_err(backend("action requests"))?
+        {
+            return self
+                .replay(
+                    authorizer,
+                    existing,
+                    &new.action_id,
+                    &new.target,
+                    &parameters,
+                    now,
+                )
+                .await;
+        }
 
         let risk_class = self.settings.effective_risk(action.as_ref());
         let (state, decided_by, decided_at) = match risk_class {
@@ -555,10 +629,32 @@ impl Broker {
             operation_id: None,
             failure: None,
             correlation_id: new.correlation_id,
+            idempotency_key: new.idempotency_key,
             created_at: now,
             expires_at: now.saturating_add(self.settings.request_ttl_millis),
             updated_at: now,
         };
+        if risk_class == RiskClass::Deny {
+            // ADR 0016: a denied action never becomes a record to approve
+            // or to read around; the refusal is an audit event only.
+            let mut audit = audit_intent(
+                principal_id,
+                Permission::ActionRequest.id(),
+                &request,
+                None,
+                ActionRequestState::Denied,
+                &[],
+            )?;
+            audit.resource = None;
+            audit.decision = Decision::deny(ReasonId::RiskClassDeny);
+            self.requests
+                .record_audit(&audit)
+                .await
+                .map_err(backend("action requests"))?;
+            return Err(BrokerError::PolicyDenied {
+                action_id: request.action_id,
+            });
+        }
         let audit = audit_intent(
             principal_id,
             Permission::ActionRequest.id(),
@@ -567,24 +663,65 @@ impl Broker {
             state,
             &[],
         )?;
-        self.requests
-            .insert(&request, &audit)
-            .await
-            .map_err(backend("action requests"))?;
+        if let Err(detail) = self.requests.insert(&request, &audit).await {
+            // A concurrent retry with the same key may have won the unique
+            // index: that request is the answer.
+            if let Some(key) = request.idempotency_key.as_deref()
+                && let Ok(Some(existing)) =
+                    self.requests.find_by_idempotency(principal_id, key).await
+            {
+                return self
+                    .replay(
+                        authorizer,
+                        existing,
+                        &request.action_id,
+                        &request.target,
+                        &request.parameters,
+                        now,
+                    )
+                    .await;
+            }
+            return Err(BrokerError::Backend {
+                context: "action requests",
+                detail,
+            });
+        }
         if state == ActionRequestState::Approved {
-            return self
-                .start(authorizer, principal_id, request.clone(), now)
-                .await;
+            return self.start(authorizer, request, now).await;
         }
         Ok(request)
     }
 
+    /// The answer to a retried creation: the request already made, when the
+    /// retry asks for the same thing.
+    async fn replay(
+        &self,
+        authorizer: &dyn Authorizer,
+        existing: ActionRequest,
+        action_id: &str,
+        target: &str,
+        parameters: &serde_json::Value,
+        now: i64,
+    ) -> Result<ActionRequest, BrokerError> {
+        if existing.action_id != action_id
+            || existing.target != target
+            || &existing.parameters != parameters
+        {
+            return Err(BrokerError::Conflict {
+                state: existing.state,
+                detail: "the idempotency key was already used for a different request".to_owned(),
+            });
+        }
+        self.reconcile(authorizer, existing, now).await
+    }
+
     /// Lists requests, newest first, after bringing each up to date (expiry
-    /// and operation outcome).
+    /// and operation outcome). A request that cannot be brought up to date
+    /// is listed as stored rather than failing the page.
     ///
     /// # Errors
     ///
-    /// Fails on denial or a backend failure.
+    /// Fails on denial or a backend failure of the listing itself.
     pub async fn list(
         &self,
         authorizer: &dyn Authorizer,
@@ -612,7 +749,10 @@ impl Broker {
             .map_err(backend("action requests"))?;
         let mut out = Vec::with_capacity(stored.len());
         for request in stored {
-            let request = self.reconcile(request, now).await?;
+            let request = match self.reconcile(authorizer, request.clone(), now).await {
+                Ok(reconciled) => reconciled,
+                Err(_) => request,
+            };
             if state.is_none_or(|wanted| wanted == request.state) {
                 out.push(request);
             }
@@ -642,20 +782,21 @@ impl Broker {
         )
         .map_err(BrokerError::Denied)?;
         let request = self.load(id).await?;
-        self.reconcile(request, now).await
+        self.reconcile(authorizer, request, now).await
     }
 
-    /// Approves a pending request and starts its operation as the approver,
-    /// whose authorization is checked again by the operation path. Of
-    /// concurrent approvals exactly one succeeds; the others get
+    /// Approves a pending request and starts its operation. The approver
+    /// needs `action.approve` for the request's action; the operation is then
+    /// created on the brokered route, not the generic one. Of concurrent
+    /// approvals exactly one succeeds; the others get
     /// [`BrokerError::Conflict`].
     ///
     /// # Errors
     ///
     /// Fails on denial, an unknown id, a request that is not pending (or
-    /// expired), an action policy now denies, or a backend failure. A
-    /// request whose operation cannot be created is returned `failed`, not
-    /// as an error: the approval happened.
+    /// expired), an action policy now denies (the request is then denied by
+    /// policy), or a backend failure. A request whose operation cannot be
+    /// created is returned `failed`, not as an error: the approval happened.
     pub async fn approve(
         &self,
         authorizer: &dyn Authorizer,
@@ -663,27 +804,42 @@ impl Broker {
         id: &str,
         now: i64,
     ) -> Result<ActionRequest, BrokerError> {
-        authorize(
-            authorizer,
-            AccessRequest {
-                principal_id,
-                action: Permission::ActionApprove,
-                resource: Some(id),
-            },
-        )
-        .map_err(BrokerError::Denied)?;
-        let request = self.load(id).await?;
-        let request = self.reconcile(request, now).await?;
+        let request = self
+            .authorize_decision(authorizer, principal_id, id, Permission::ActionApprove)
+            .await?;
+        let request = self.reconcile(authorizer, request, now).await?;
         require_pending(&request)?;
         // Policy may have changed since the request was made; a denial now
-        // wins over an approval.
+        // wins over an approval, and the request ends denied by policy.
         let current =
             self.registry
                 .get(&request.action_id)
                 .ok_or_else(|| BrokerError::Invalid {
-                    detail: format!("the action {:?} is no longer offered", request.action_id),
+                    detail: "the action is no longer offered by this controller".to_owned(),
                 })?;
         if self.settings.effective_risk(current.as_ref()) == RiskClass::Deny {
+            let update = TransitionUpdate {
+                from: ActionRequestState::Pending,
+                to: ActionRequestState::Denied,
+                decided_by: Some(POLICY_DENY.to_owned()),
+                decision_note: Some("policy denies this action".to_owned()),
+                operation_id: None,
+                failure: None,
+                at: now,
+                require_unexpired: false,
+            };
+            let audit = audit_intent(
+                SYSTEM_ACTOR,
+                "action.policy_deny",
+                &request,
+                Some(ActionRequestState::Pending),
+                ActionRequestState::Denied,
+                &[("attemptedBy", principal_id)],
+            )?;
+            self.requests
+                .transition(&request.id, &update, &audit)
+                .await
+                .map_err(backend("action requests"))?;
             return Err(BrokerError::PolicyDenied {
                 action_id: request.action_id,
             });
@@ -697,7 +853,7 @@ impl Broker {
                 now,
             )
             .await?;
-        self.start(authorizer, principal_id, approved, now).await
+        self.start(authorizer, approved, now).await
     }
 
     /// Denies a pending request. The optional note is scrubbed.
@@ -714,23 +870,16 @@ impl Broker {
         note: Option<&str>,
         now: i64,
     ) -> Result<ActionRequest, BrokerError> {
-        authorize(
-            authorizer,
-            AccessRequest {
-                principal_id,
-                action: Permission::ActionDeny,
-                resource: Some(id),
-            },
-        )
-        .map_err(BrokerError::Denied)?;
+        let request = self
+            .authorize_decision(authorizer, principal_id, id, Permission::ActionDeny)
+            .await?;
         let note = note
             .map(|note| {
-                validate_text("note", note, MAX_REASON_LEN)?;
+                validate_text("note", note, MAX_REASON_LEN, true)?;
                 Ok::<_, BrokerError>(note.to_owned())
             })
             .transpose()?;
-        let request = self.load(id).await?;
-        let request = self.reconcile(request, now).await?;
+        let request = self.reconcile(authorizer, request, now).await?;
         require_pending(&request)?;
         self.decide(
             &request,
@@ -742,13 +891,48 @@ impl Broker {
         .await
     }
 
+    /// Loads the request a decision concerns and authorizes the decision
+    /// against its action id. A caller refused for an unknown request is
+    /// refused the same way as for a known one it may not decide.
+    async fn authorize_decision(
+        &self,
+        authorizer: &dyn Authorizer,
+        principal_id: &str,
+        id: &str,
+        permission: Permission,
+    ) -> Result<ActionRequest, BrokerError> {
+        let found = self
+            .requests
+            .get(id)
+            .await
+            .map_err(backend("action requests"))?;
+        authorize(
+            authorizer,
+            AccessRequest {
+                principal_id,
+                action: permission,
+                // An unknown request is authorized against the id the caller
+                // gave, so it is refused or reported missing like any other.
+                resource: Some(
+                    found
+                        .as_ref()
+                        .map_or(id, |request| request.action_id.as_str()),
+                ),
+            },
+        )
+        .map_err(BrokerError::Denied)?;
+        found.ok_or_else(|| BrokerError::NotFound {
+            what: "the action request".to_owned(),
+        })
+    }
+
     async fn load(&self, id: &str) -> Result<ActionRequest, BrokerError> {
         self.requests
             .get(id)
             .await
             .map_err(backend("action requests"))?
             .ok_or_else(|| BrokerError::NotFound {
-                what: format!("action request {id}"),
+                what: "the action request".to_owned(),
             })
     }
 
@@ -796,19 +980,30 @@ impl Broker {
         // The compare-and-set lost: another decision, or the deadline, got
         // there first.
         let current = self.load(&request.id).await?;
-        let current = self.reconcile(current, now).await?;
+        let current = self.latest(current, now).await;
         Err(BrokerError::Conflict {
             state: current.state,
             detail: "another decision was made first".to_owned(),
         })
     }
 
-    /// Creates the operation of an approved request and links it. A request
-    /// whose operation cannot be created is failed, with the reason.
+    /// The principal whose authorization the operation runs under: the
+    /// approver, or the requester when policy approved the request.
+    fn executing_principal(request: &ActionRequest) -> &str {
+        match request.decided_by.as_deref() {
+            Some(decider) if !decider.starts_with("policy:") => decider,
+            _ => &request.requester,
+        }
+    }
+
+    /// Creates the operation of an approved request on the brokered route
+    /// and links it. A request whose operation cannot be created is failed,
+    /// with the reason. The idempotency key is the request id, so running
+    /// this again (a slow start racing the stuck-request recovery) returns
+    /// the same operation rather than a second one.
     async fn start(
         &self,
         authorizer: &dyn Authorizer,
-        principal_id: &str,
         request: ActionRequest,
         now: i64,
     ) -> Result<ActionRequest, BrokerError> {
@@ -829,9 +1024,23 @@ impl Broker {
                     .await;
             }
         };
-        new.idempotency_key = Some(format!("action-request:{}", request.id));
+        if new.kind != action.operation_kind() {
+            return self
+                .fail(
+                    &request,
+                    "the action built an operation of a kind it does not declare",
+                    now,
+                )
+                .await;
+        }
+        new.idempotency_key = Some(format!("{BROKER_IDEMPOTENCY_PREFIX}{}", request.id));
         new.correlation_id.clone_from(&request.correlation_id);
-        let operation = match self.operations.create(authorizer, principal_id, &new).await {
+        let principal = Self::executing_principal(&request).to_owned();
+        let operation = match self
+            .operations
+            .create_brokered(authorizer, &principal, &new)
+            .await
+        {
             Ok(operation) => operation,
             Err(OperationUseCaseError::Denied(decision)) => {
                 return self
@@ -855,6 +1064,17 @@ impl Broker {
                     .await;
             }
         };
+        // The key is the request's, but an operation that already held it
+        // must be the one this request would have made.
+        if operation.kind != new.kind || operation.payload_json != new.payload_json {
+            return self
+                .fail(
+                    &request,
+                    "the idempotency key already belongs to a different operation",
+                    now,
+                )
+                .await;
+        }
         let update = TransitionUpdate {
             from: ActionRequestState::Approved,
             to: ActionRequestState::Executing,
@@ -947,9 +1167,31 @@ impl Broker {
         }
     }
 
+    /// The request as it stands now, as far as it can be brought up to date
+    /// without an authorizer: used after a lost decision, where only the
+    /// state is reported.
+    async fn latest(&self, request: ActionRequest, now: i64) -> ActionRequest {
+        if request.state == ActionRequestState::Pending
+            && action_request_deadline_passed(request.expires_at, now)
+            && let Ok(expired) = self
+                .finish(
+                    &request,
+                    ActionRequestState::Expired,
+                    None,
+                    "action.expire",
+                    now,
+                )
+                .await
+        {
+            return expired;
+        }
+        request
+    }
+
     /// Brings a request up to date with time and with its operation.
     async fn reconcile(
         &self,
+        authorizer: &dyn Authorizer,
         request: ActionRequest,
         now: i64,
     ) -> Result<ActionRequest, BrokerError> {
@@ -972,21 +1214,32 @@ impl Broker {
                         .decided_at
                         .is_some_and(|at| now.saturating_sub(at) > APPROVED_STUCK_GRACE_MILLIS) =>
             {
-                self.fail(
-                    &request,
-                    "the controller stopped before the operation was created; request it again",
-                    now,
-                )
-                .await
+                // The controller may have stopped between the approval and
+                // the operation, or the operation may exist but be unlinked.
+                // Creating it again with the same idempotency key returns the
+                // existing operation or makes it; only a failure to do either
+                // fails the request, so a live operation is never orphaned.
+                self.start(authorizer, request, now).await
             }
             ActionRequestState::Executing => {
                 let Some(operation_id) = request.operation_id.clone() else {
                     return Ok(request);
                 };
-                // A lookup that fails leaves the request as it is: the next
-                // read tries again.
-                let Ok(state) = self.operations.get_state(&operation_id).await else {
-                    return Ok(request);
+                let state = match self.operations.get_state(&operation_id).await {
+                    Ok(state) => state,
+                    Err(PortFailure::NotFound { .. }) => {
+                        // An operation that cannot be found will never finish:
+                        // give a restart or a slow read its grace, then fail.
+                        if now.saturating_sub(request.updated_at) > APPROVED_STUCK_GRACE_MILLIS {
+                            return self
+                                .fail(&request, "the operation record could not be found", now)
+                                .await;
+                        }
+                        return Ok(request);
+                    }
+                    // A lookup that fails otherwise leaves the request as it
+                    // is: the next read tries again.
+                    Err(_) => return Ok(request),
                 };
                 match state.as_str() {
                     "succeeded" => {
@@ -1063,7 +1316,30 @@ fn audit_intent(
     })
 }
 
-fn validate_text(name: &str, value: &str, max: usize) -> Result<(), BrokerError> {
+/// A bounded printable-ASCII key; the error never echoes it.
+fn validate_idempotency_key(key: Option<&str>) -> Result<(), BrokerError> {
+    let Some(key) = key else {
+        return Ok(());
+    };
+    if key.is_empty()
+        || key.len() > MAX_IDEMPOTENCY_KEY_LEN
+        || !key.chars().all(|c| c.is_ascii_graphic())
+    {
+        return Err(BrokerError::Invalid {
+            detail: format!(
+                "the idempotency key must be 1 to {MAX_IDEMPOTENCY_KEY_LEN} printable ASCII characters"
+            ),
+        });
+    }
+    Ok(())
+}
+
+fn validate_text(
+    name: &str,
+    value: &str,
+    max: usize,
+    allow_newline: bool,
+) -> Result<(), BrokerError> {
     let invalid = |detail: String| BrokerError::Invalid { detail };
     if value.trim().is_empty() {
         return Err(invalid(format!("the {name} must not be empty")));
@@ -1073,7 +1349,10 @@ fn validate_text(name: &str, value: &str, max: usize) -> Result<(), BrokerError>
             "the {name} must be at most {max} characters"
         )));
     }
-    if value.chars().any(|c| c.is_control() && c != '\n') {
+    if value
+        .chars()
+        .any(|c| c.is_control() && !(allow_newline && c == '\n'))
+    {
         return Err(invalid(format!(
             "the {name} must not contain control characters"
         )));
@@ -1161,8 +1440,10 @@ fn has_secret_shape(value: &serde_json::Value) -> bool {
 }
 
 /// A trivial provider action for tests of the broker and its adapters. It
-/// runs the `noop` operation kind. It is never registered by the
-/// controller; real actions arrive with their providers.
+/// runs the `noop` operation kind. It exists only in tests (the
+/// `test-support` feature, enabled by dev-dependencies) and is never
+/// registered by the controller; real actions arrive with their providers.
+#[cfg(any(test, feature = "test-support"))]
 pub mod test_support {
     use super::{ActionRequest, ProviderAction};
     use crate::operation::NewOperation;
@@ -1181,6 +1462,10 @@ pub mod test_support {
     impl ProviderAction for NoopAction {
         fn id(&self) -> &str {
             NOOP_ACTION_ID
+        }
+
+        fn operation_kind(&self) -> &'static str {
+            "noop"
         }
 
         fn risk_class(&self) -> RiskClass {
@@ -1323,10 +1608,12 @@ mod tests {
 
     #[test]
     fn text_fields_are_bounded_and_secret_free() {
-        assert!(validate_text("target", "app-1", 10).is_ok());
-        assert!(validate_text("target", " ", 10).is_err());
-        assert!(validate_text("target", "abcdefghijk", 10).is_err());
-        assert!(validate_text("target", "a\u{7}b", 10).is_err());
-        assert!(validate_text("reason", "use https://u:fakepw1@h/x", 100).is_err());
+        assert!(validate_text("target", "app-1", 10, false).is_ok());
+        assert!(validate_text("target", " ", 10, false).is_err());
+        assert!(validate_text("target", "abcdefghijk", 10, false).is_err());
+        assert!(validate_text("target", "a\u{7}b", 10, false).is_err());
+        assert!(validate_text("target", "a\nb", 10, false).is_err());
+        assert!(validate_text("reason", "a\nb", 10, true).is_ok());
+        assert!(validate_text("reason", "use https://u:fakepw1@h/x", 100, true).is_err());
     }
 }
