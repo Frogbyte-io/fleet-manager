@@ -146,6 +146,12 @@ fn run_serve(mut config: fleet_config::ControllerConfig) -> ExitCode {
                                 secret_store.clone(),
                             ),
                         ));
+                        node_services.external_accounts = Some(
+                            fleet_controller::external_accounts_store::compose_external_accounts(
+                                store.pool(),
+                                secret_store.clone(),
+                            ),
+                        );
                         Some(node_services)
                     }
                     Err(error) => {

@@ -925,6 +925,45 @@ export interface CreateEnrollmentTokenRequest {
 }
 
 /**
+ * The provider kinds an account may belong to.
+ */
+export type ExternalProviderKindDto = typeof ExternalProviderKindDto[keyof typeof ExternalProviderKindDto];
+
+
+export const ExternalProviderKindDto = {
+  coolify: 'coolify',
+  cloudflare: 'cloudflare',
+} as const;
+
+/**
+ * The create-account request. The token is write-only.
+ */
+export interface CreateExternalAccountRequest {
+  /**
+     * The Cloudflare account id, for account-owned tokens.
+     * @nullable
+     */
+  accountId?: string | null;
+  /**
+     * The API base URL; Cloudflare defaults to its public API, Coolify
+     * needs the instance URL.
+     * @nullable
+     */
+  baseUrl?: string | null;
+  /** The provider kind. */
+  kind: ExternalProviderKindDto;
+  /** The operator-facing label, unique within the kind. */
+  label: string;
+  /**
+     * Free-form notes.
+     * @nullable
+     */
+  notes?: string | null;
+  /** The API token (write-only). */
+  token: string;
+}
+
+/**
  * A pool creation request.
  */
 export interface CreateLabPoolRequest {
@@ -1540,6 +1579,66 @@ export interface ExtendLeaseRequest {
      * @minimum 0
      */
   bySeconds: number;
+}
+
+/**
+ * The classified outcome of a probe.
+ */
+export type ProbeStatusDto = typeof ProbeStatusDto[keyof typeof ProbeStatusDto];
+
+
+export const ProbeStatusDto = {
+  ok: 'ok',
+  unreachable: 'unreachable',
+  unauthorized: 'unauthorized',
+  insufficient_permission: 'insufficient_permission',
+} as const;
+
+/**
+ * The latest probe of an account.
+ */
+export interface ExternalProbeDto {
+  /** When the probe ran (epoch millis). */
+  checkedAt: number;
+  /** A short, redacted explanation. */
+  detail: string;
+  /** Permissions the token was seen to hold. */
+  granted: string[];
+  /** Permissions Fleet needs that the token was seen to lack. */
+  missing: string[];
+  /** The classification. */
+  status: ProbeStatusDto;
+  /**
+     * Permissions the probe did not verify: it never calls a route that
+     * could change state, so their state is unknown.
+     */
+  unverified: string[];
+}
+
+/**
+ * One external provider account. The token is never here.
+ */
+export interface ExternalAccountDto {
+  /**
+     * The provider-side account id (Cloudflare account-owned tokens).
+     * @nullable
+     */
+  accountId?: string | null;
+  /** The provider's API base URL. */
+  baseUrl: string;
+  /** When the account was created (epoch millis). */
+  createdAt: number;
+  /** The account's identity. */
+  id: string;
+  /** The provider kind. */
+  kind: ExternalProviderKindDto;
+  /** The operator-facing label, unique within the kind. */
+  label: string;
+  lastProbe?: null | ExternalProbeDto;
+  /** Free-form operator notes. */
+  notes: string;
+  /** When the account last changed (epoch millis). */
+  updatedAt: number;
 }
 
 /**
@@ -2933,6 +3032,45 @@ export type PageDesiredResourceDtoItemsItem = {
 export interface PageDesiredResourceDto {
   /** The items on this page, in the endpoint's documented order. */
   items: PageDesiredResourceDtoItemsItem[];
+  /** Where this page sits in the result set. */
+  page: PageInfo;
+}
+
+/**
+ * One external provider account. The token is never here.
+ */
+export type PageExternalAccountDtoItemsItem = {
+  /**
+     * The provider-side account id (Cloudflare account-owned tokens).
+     * @nullable
+     */
+  accountId?: string | null;
+  /** The provider's API base URL. */
+  baseUrl: string;
+  /** When the account was created (epoch millis). */
+  createdAt: number;
+  /** The account's identity. */
+  id: string;
+  /** The provider kind. */
+  kind: ExternalProviderKindDto;
+  /** The operator-facing label, unique within the kind. */
+  label: string;
+  lastProbe?: null | ExternalProbeDto;
+  /** Free-form operator notes. */
+  notes: string;
+  /** When the account last changed (epoch millis). */
+  updatedAt: number;
+};
+
+/**
+ * A page of resources.
+ *
+ * The concrete schema for a list endpoint appears when that endpoint does;
+ * [`PageInfo`] is the part of the shape that is fixed for every one of them.
+ */
+export interface PageExternalAccountDto {
+  /** The items on this page, in the endpoint's documented order. */
+  items: PageExternalAccountDtoItemsItem[];
   /** Where this page sits in the result set. */
   page: PageInfo;
 }
@@ -5252,6 +5390,43 @@ export interface ResourceEnrollmentTokenCreatedDto {
 }
 
 /**
+ * One external provider account. The token is never here.
+ */
+export type ResourceExternalAccountDtoData = {
+  /**
+     * The provider-side account id (Cloudflare account-owned tokens).
+     * @nullable
+     */
+  accountId?: string | null;
+  /** The provider's API base URL. */
+  baseUrl: string;
+  /** When the account was created (epoch millis). */
+  createdAt: number;
+  /** The account's identity. */
+  id: string;
+  /** The provider kind. */
+  kind: ExternalProviderKindDto;
+  /** The operator-facing label, unique within the kind. */
+  label: string;
+  lastProbe?: null | ExternalProbeDto;
+  /** Free-form operator notes. */
+  notes: string;
+  /** When the account last changed (epoch millis). */
+  updatedAt: number;
+};
+
+/**
+ * A single resource.
+ *
+ * The payload is nested under `data` so that later top-level fields are an
+ * additive change rather than a breaking one.
+ */
+export interface ResourceExternalAccountDto {
+  /** One external provider account. The token is never here. */
+  data: ResourceExternalAccountDtoData;
+}
+
+/**
  * Safe build provenance and outcome; credentials and work paths are excluded.
  */
 export type ResourceImageBuildDtoData = {
@@ -7092,6 +7267,37 @@ export interface TailnetStatusDto {
 }
 
 /**
+ * The update-account request. Absent fields are left alone.
+ */
+export interface UpdateExternalAccountRequest {
+  /**
+     * A new Cloudflare account id; an empty string clears it.
+     * @nullable
+     */
+  accountId?: string | null;
+  /**
+     * A new base URL.
+     * @nullable
+     */
+  baseUrl?: string | null;
+  /**
+     * A new label.
+     * @nullable
+     */
+  label?: string | null;
+  /**
+     * New notes.
+     * @nullable
+     */
+  notes?: string | null;
+  /**
+     * A replacement API token (write-only).
+     * @nullable
+     */
+  token?: string | null;
+}
+
+/**
  * The update-project request.
  */
 export interface UpdateProjectRequest {
@@ -7171,6 +7377,22 @@ cursor?: string | null;
  * @nullable
  */
 limit?: number | null;
+};
+
+export type ListExternalAccountsParams = {
+/**
+ * Restrict to one provider kind.
+ */
+kind?: ExternalProviderKindDto;
+/**
+ * The maximum number of accounts to return.
+ * @minimum 0
+ */
+limit?: number;
+/**
+ * The opaque cursor: the last account id of the previous page.
+ */
+cursor?: string;
 };
 
 export type ListImageBuildsParams = {
@@ -8469,6 +8691,395 @@ const res = await fetch(getStoreDesiredSourceCredentialUrl(),
 
   const data: storeDesiredSourceCredentialResponse['data'] = body ? JSON.parse(body) : {}
   return { data, status: res.status, headers: res.headers } as storeDesiredSourceCredentialResponse
+}
+
+
+
+export type listExternalAccountsResponse200 = {
+  data: PageExternalAccountDto
+  status: 200
+}
+
+export type listExternalAccountsResponse403 = {
+  data: ApiError
+  status: 403
+}
+
+export type listExternalAccountsResponseSuccess = (listExternalAccountsResponse200) & {
+  headers: Headers;
+};
+export type listExternalAccountsResponseError = (listExternalAccountsResponse403) & {
+  headers: Headers;
+};
+
+export type listExternalAccountsResponse = (listExternalAccountsResponseSuccess | listExternalAccountsResponseError)
+
+export const getListExternalAccountsUrl = (params?: ListExternalAccountsParams,) => {
+  const normalizedParams = new URLSearchParams();
+
+  Object.entries(params || {}).forEach(([key, value]) => {
+
+    if (value !== undefined) {
+      normalizedParams.append(key, value === null ? 'null' : String(value))
+    }
+  });
+
+  const stringifiedParams = normalizedParams.toString();
+
+  return stringifiedParams.length > 0 ? `/api/v1/external-accounts?${stringifiedParams}` : `/api/v1/external-accounts`
+}
+
+/**
+ * # Errors
+ *
+ * Returns the public error envelope on refusal or backend failure.
+ * @summary Lists external provider accounts.
+ */
+export const listExternalAccounts = async (params?: ListExternalAccountsParams, options?: RequestInit): Promise<listExternalAccountsResponse> => {
+
+  const res = await fetch(getListExternalAccountsUrl(params),
+  {
+    ...options,
+    method: 'GET'
+
+
+  }
+)
+
+
+  const body = [204, 205, 304].includes(res.status) ? null : await res.text();
+
+  const data: listExternalAccountsResponse['data'] = body ? JSON.parse(body) : {}
+  return { data, status: res.status, headers: res.headers } as listExternalAccountsResponse
+}
+
+
+
+export type createExternalAccountResponse201 = {
+  data: ResourceExternalAccountDto
+  status: 201
+}
+
+export type createExternalAccountResponse400 = {
+  data: ApiError
+  status: 400
+}
+
+export type createExternalAccountResponse403 = {
+  data: ApiError
+  status: 403
+}
+
+export type createExternalAccountResponse409 = {
+  data: ApiError
+  status: 409
+}
+
+export type createExternalAccountResponseSuccess = (createExternalAccountResponse201) & {
+  headers: Headers;
+};
+export type createExternalAccountResponseError = (createExternalAccountResponse400 | createExternalAccountResponse403 | createExternalAccountResponse409) & {
+  headers: Headers;
+};
+
+export type createExternalAccountResponse = (createExternalAccountResponseSuccess | createExternalAccountResponseError)
+
+export const getCreateExternalAccountUrl = () => {
+
+
+
+
+  return `/api/v1/external-accounts`
+}
+
+/**
+ * # Errors
+ *
+ * Returns the public error envelope on refusal, conflict, or backend
+ * failure.
+ * @summary Registers an account and stores its token.
+ */
+export const createExternalAccount = async (createExternalAccountRequest: CreateExternalAccountRequest, options?: RequestInit): Promise<createExternalAccountResponse> => {
+
+    const getHeaders = (h?: NonNullable<RequestInit['headers']>): Record<string, string | readonly string[]> => {
+    if (!h) return {};
+    if (h instanceof Headers) return Object.fromEntries(h.entries());
+    if (Array.isArray(h)) return Object.fromEntries(h);
+    return h;
+  };
+const res = await fetch(getCreateExternalAccountUrl(),
+  {
+    ...options,
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...getHeaders(options?.headers) },
+    body: JSON.stringify(createExternalAccountRequest)
+  }
+)
+
+
+  const body = [204, 205, 304].includes(res.status) ? null : await res.text();
+
+  const data: createExternalAccountResponse['data'] = body ? JSON.parse(body) : {}
+  return { data, status: res.status, headers: res.headers } as createExternalAccountResponse
+}
+
+
+
+export type getExternalAccountResponse200 = {
+  data: ResourceExternalAccountDto
+  status: 200
+}
+
+export type getExternalAccountResponse403 = {
+  data: ApiError
+  status: 403
+}
+
+export type getExternalAccountResponse404 = {
+  data: ApiError
+  status: 404
+}
+
+export type getExternalAccountResponseSuccess = (getExternalAccountResponse200) & {
+  headers: Headers;
+};
+export type getExternalAccountResponseError = (getExternalAccountResponse403 | getExternalAccountResponse404) & {
+  headers: Headers;
+};
+
+export type getExternalAccountResponse = (getExternalAccountResponseSuccess | getExternalAccountResponseError)
+
+export const getGetExternalAccountUrl = (accountId: string,) => {
+
+
+
+
+  return `/api/v1/external-accounts/${accountId}`
+}
+
+/**
+ * # Errors
+ *
+ * Returns the public error envelope on refusal or an unknown account.
+ * @summary Reads one external provider account.
+ */
+export const getExternalAccount = async (accountId: string, options?: RequestInit): Promise<getExternalAccountResponse> => {
+
+  const res = await fetch(getGetExternalAccountUrl(accountId),
+  {
+    ...options,
+    method: 'GET'
+
+
+  }
+)
+
+
+  const body = [204, 205, 304].includes(res.status) ? null : await res.text();
+
+  const data: getExternalAccountResponse['data'] = body ? JSON.parse(body) : {}
+  return { data, status: res.status, headers: res.headers } as getExternalAccountResponse
+}
+
+
+
+export type deleteExternalAccountResponse204 = {
+  data: void
+  status: 204
+}
+
+export type deleteExternalAccountResponse403 = {
+  data: ApiError
+  status: 403
+}
+
+export type deleteExternalAccountResponse404 = {
+  data: ApiError
+  status: 404
+}
+
+export type deleteExternalAccountResponseSuccess = (deleteExternalAccountResponse204) & {
+  headers: Headers;
+};
+export type deleteExternalAccountResponseError = (deleteExternalAccountResponse403 | deleteExternalAccountResponse404) & {
+  headers: Headers;
+};
+
+export type deleteExternalAccountResponse = (deleteExternalAccountResponseSuccess | deleteExternalAccountResponseError)
+
+export const getDeleteExternalAccountUrl = (accountId: string,) => {
+
+
+
+
+  return `/api/v1/external-accounts/${accountId}`
+}
+
+/**
+ * # Errors
+ *
+ * Returns the public error envelope on refusal, an unknown account, or a
+ * backend failure.
+ * @summary Removes an account and its token.
+ */
+export const deleteExternalAccount = async (accountId: string, options?: RequestInit): Promise<deleteExternalAccountResponse> => {
+
+  const res = await fetch(getDeleteExternalAccountUrl(accountId),
+  {
+    ...options,
+    method: 'DELETE'
+
+
+  }
+)
+
+
+  const body = [204, 205, 304].includes(res.status) ? null : await res.text();
+
+  const data: deleteExternalAccountResponse['data'] = body ? JSON.parse(body) : undefined
+  return { data, status: res.status, headers: res.headers } as deleteExternalAccountResponse
+}
+
+
+
+export type updateExternalAccountResponse200 = {
+  data: ResourceExternalAccountDto
+  status: 200
+}
+
+export type updateExternalAccountResponse400 = {
+  data: ApiError
+  status: 400
+}
+
+export type updateExternalAccountResponse403 = {
+  data: ApiError
+  status: 403
+}
+
+export type updateExternalAccountResponse404 = {
+  data: ApiError
+  status: 404
+}
+
+export type updateExternalAccountResponse409 = {
+  data: ApiError
+  status: 409
+}
+
+export type updateExternalAccountResponseSuccess = (updateExternalAccountResponse200) & {
+  headers: Headers;
+};
+export type updateExternalAccountResponseError = (updateExternalAccountResponse400 | updateExternalAccountResponse403 | updateExternalAccountResponse404 | updateExternalAccountResponse409) & {
+  headers: Headers;
+};
+
+export type updateExternalAccountResponse = (updateExternalAccountResponseSuccess | updateExternalAccountResponseError)
+
+export const getUpdateExternalAccountUrl = (accountId: string,) => {
+
+
+
+
+  return `/api/v1/external-accounts/${accountId}`
+}
+
+/**
+ * # Errors
+ *
+ * Returns the public error envelope on refusal, an unknown account, a
+ * conflict, or a malformed request.
+ * @summary Updates an account; a supplied token replaces the stored one.
+ */
+export const updateExternalAccount = async (accountId: string,
+    updateExternalAccountRequest: UpdateExternalAccountRequest, options?: RequestInit): Promise<updateExternalAccountResponse> => {
+
+    const getHeaders = (h?: NonNullable<RequestInit['headers']>): Record<string, string | readonly string[]> => {
+    if (!h) return {};
+    if (h instanceof Headers) return Object.fromEntries(h.entries());
+    if (Array.isArray(h)) return Object.fromEntries(h);
+    return h;
+  };
+const res = await fetch(getUpdateExternalAccountUrl(accountId),
+  {
+    ...options,
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json', ...getHeaders(options?.headers) },
+    body: JSON.stringify(updateExternalAccountRequest)
+  }
+)
+
+
+  const body = [204, 205, 304].includes(res.status) ? null : await res.text();
+
+  const data: updateExternalAccountResponse['data'] = body ? JSON.parse(body) : {}
+  return { data, status: res.status, headers: res.headers } as updateExternalAccountResponse
+}
+
+
+
+export type probeExternalAccountResponse200 = {
+  data: ResourceExternalAccountDto
+  status: 200
+}
+
+export type probeExternalAccountResponse403 = {
+  data: ApiError
+  status: 403
+}
+
+export type probeExternalAccountResponse404 = {
+  data: ApiError
+  status: 404
+}
+
+export type probeExternalAccountResponse409 = {
+  data: ApiError
+  status: 409
+}
+
+export type probeExternalAccountResponseSuccess = (probeExternalAccountResponse200) & {
+  headers: Headers;
+};
+export type probeExternalAccountResponseError = (probeExternalAccountResponse403 | probeExternalAccountResponse404 | probeExternalAccountResponse409) & {
+  headers: Headers;
+};
+
+export type probeExternalAccountResponse = (probeExternalAccountResponseSuccess | probeExternalAccountResponseError)
+
+export const getProbeExternalAccountUrl = (accountId: string,) => {
+
+
+
+
+  return `/api/v1/external-accounts/${accountId}/probe`
+}
+
+/**
+ * # Errors
+ *
+ * Returns the public error envelope on refusal, an unknown account, or a
+ * missing stored token.
+ * @summary Probes an account with its stored token and records the classified
+result. An unreachable or refusing service is a successful probe whose
+status says so.
+ */
+export const probeExternalAccount = async (accountId: string, options?: RequestInit): Promise<probeExternalAccountResponse> => {
+
+  const res = await fetch(getProbeExternalAccountUrl(accountId),
+  {
+    ...options,
+    method: 'POST'
+
+
+  }
+)
+
+
+  const body = [204, 205, 304].includes(res.status) ? null : await res.text();
+
+  const data: probeExternalAccountResponse['data'] = body ? JSON.parse(body) : {}
+  return { data, status: res.status, headers: res.headers } as probeExternalAccountResponse
 }
 
 

@@ -10,6 +10,7 @@ mod action_request;
 mod build_address;
 mod difference;
 mod error;
+mod external_account;
 mod id;
 mod image;
 mod lab;
@@ -36,6 +37,12 @@ pub use build_address::{
 };
 pub use difference::{DifferenceSet, DifferenceState, FieldDifference, compare_field};
 pub use error::{ErrorCode, FleetError, ParseErrorCodeError, PublicError, RetryClass};
+pub use external_account::{
+    AccountFieldError, ExternalProviderKind, MAX_ACCOUNT_LABEL_LEN, MAX_ACCOUNT_NOTES_LEN,
+    MAX_BASE_URL_LEN, MAX_PROBE_DETAIL_LEN, MAX_TOKEN_SECRET_LEN, ParseProviderKindError,
+    ProbeReport, ProbeStatus, base_url_is_loopback, base_url_origin, bound_detail,
+    normalize_base_url, validate_label, validate_notes, validate_scope_id,
+};
 pub use id::{CorrelationId, IdGenerator, ParseIdError, ResourceId, UuidV7Generator};
 
 /// Tailscale Serve identity header names that may be recorded as audit evidence.
