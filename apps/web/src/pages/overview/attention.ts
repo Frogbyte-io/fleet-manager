@@ -4,6 +4,7 @@
 
 import type {
   ActionRequestDto,
+  RegistryEntryDto,
   AssociatedGuestDto,
   DomainObservationViewDto,
   AuditEventDto,
@@ -21,6 +22,7 @@ import type { RouteLocationRaw } from 'vue-router'
 import { driftView } from '../drift/drift'
 import { pinState } from '../images/images'
 import type { AccountView } from '../proxmox/proxmox'
+import { formatMicros, relativeDays, serviceRows, upcomingRenewals } from '../registry/services/services'
 
 export type Severity = 'err' | 'warn' | 'info'
 
@@ -36,6 +38,7 @@ export type AttentionSource =
   | 'template-pin'
   | 'drift'
   | 'domain'
+  | 'service-renewal'
 
 export interface AttentionRow {
   key: string
@@ -318,11 +321,33 @@ export function domainRows(views: Pick<DomainObservationViewDto, 'key' | 'warnin
       severity: top.severity === 'err' ? 'err' : top.severity === 'warn' ? 'warn' : 'info',
       title: `Domain ${view.key} needs attention`,
       detail: `${top.message}${extra > 0 ? ` (${extra} more)` : ''}`,
-      to: { path: '/registry', query: { type: 'domain', entry: view.key } },
+      to: { path: '/registry/domains', query: { open: view.key } },
       at: now,
     })
   }
   return rows
+}
+
+/** Renewals of third-party services at most this many days away are flagged. */
+export const SERVICE_RENEWAL_WINDOW_DAYS = 14
+
+/**
+ * Services renewing within two weeks, one row per service. Passed renewal
+ * dates stay off the queue; the Services view flags them.
+ */
+export function serviceRenewalRows(entries: RegistryEntryDto[], now = Date.now()): AttentionRow[] {
+  return upcomingRenewals(serviceRows(entries, now), SERVICE_RENEWAL_WINDOW_DAYS).filter(r => r.state !== 'overdue').map(({ row, days }) => {
+    const cost = row.cost ? ` (${formatMicros(row.cost.micros, row.cost.currency)}${row.period === 'monthly' ? ' / month' : row.period === 'yearly' ? ' / year' : ''})` : ''
+    return {
+      key: `service-renewal:${row.key}`,
+      source: 'service-renewal' as const,
+      severity: 'warn' as const,
+      title: `${row.name} renews ${relativeDays(days)}`,
+      detail: `Renews ${row.renewal}${cost}.`,
+      to: { path: '/registry/services', query: { entry: row.key } },
+      at: now,
+    }
+  })
 }
 
 const SEVERITY_ORDER: Record<Severity, number> = { err: 0, warn: 1, info: 2 }
