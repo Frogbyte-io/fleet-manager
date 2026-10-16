@@ -32,7 +32,18 @@ enum CreateRoute {
     Generic,
     /// The kind's dedicated route, which already validated and authorized it.
     Dedicated,
+    /// The action broker (FM-1040): the broker authorized the decision
+    /// (`action.request` under policy for `auto`, `action.approve` for an
+    /// approval) and a provider action built the operation. The caller needs
+    /// no `operation.create`, so a delegated principal can request an action
+    /// and never create its operation directly. Kinds that other dedicated
+    /// routes own stay refused.
+    Brokered,
 }
+
+/// The idempotency-key prefix the broker owns. The generic surface refuses
+/// it, so a caller cannot occupy the key a request's operation will use.
+pub const BROKER_IDEMPOTENCY_PREFIX: &str = "action-request:";
 
 /// The kinds of operation the public API accepts. Until providers and nodes
 /// teach the controller their own kinds, the vocabulary is deliberately tiny:
@@ -573,6 +584,7 @@ pub struct Operations {
     pool_members: Option<Arc<dyn PoolMemberLookup>>,
     lease_owners: Option<Arc<dyn LeaseOwnerLookup>>,
     pub(crate) events: Option<Arc<crate::events::EventHub>>,
+    brokered_kinds: std::collections::BTreeSet<String>,
 }
 
 /// The stable reason a destroy or snapshot delete of a Lab pool member is
@@ -687,6 +699,7 @@ impl Operations {
             pool_members: None,
             lease_owners: None,
             events: None,
+            brokered_kinds: std::collections::BTreeSet::new(),
         }
     }
 
@@ -704,6 +717,7 @@ impl Operations {
             pool_members: None,
             lease_owners: None,
             events: Some(events),
+            brokered_kinds: std::collections::BTreeSet::new(),
         }
     }
 
@@ -721,6 +735,7 @@ impl Operations {
             pool_members: None,
             lease_owners: None,
             events: None,
+            brokered_kinds: std::collections::BTreeSet::new(),
         }
     }
 
@@ -739,6 +754,7 @@ impl Operations {
             pool_members: None,
             lease_owners: None,
             events: Some(events),
+            brokered_kinds: std::collections::BTreeSet::new(),
         }
     }
 
@@ -747,6 +763,15 @@ impl Operations {
     #[must_use]
     pub fn with_pool_members(mut self, pool_members: Arc<dyn PoolMemberLookup>) -> Self {
         self.pool_members = Some(pool_members);
+        self
+    }
+
+    /// Declares the operation kinds provider actions own (FM-1040). The
+    /// generic surface refuses them: they are created only by the broker,
+    /// after a request and a decision.
+    #[must_use]
+    pub fn with_brokered_kinds(mut self, kinds: impl IntoIterator<Item = String>) -> Self {
+        self.brokered_kinds = kinds.into_iter().collect();
         self
     }
 
@@ -892,6 +917,32 @@ impl Operations {
         new: &NewOperation,
     ) -> Result<Operation, OperationUseCaseError> {
         self.create_inner(authorizer, principal_id, new, CreateRoute::Generic)
+            .await
+    }
+
+    /// Creates the operation of a brokered action request. This is the
+    /// broker's entry point: it is `pub` only because the broker's
+    /// integration tests live in other crates, and nothing else should call
+    /// it. It refuses any kind no provider action has declared (see
+    /// [`Operations::with_brokered_kinds`]), so it cannot become a second
+    /// generic route. The broker has
+    /// already authorized the decision (`action.request` under policy, or
+    /// `action.approve`), so this route does not require `operation.create`:
+    /// a delegated principal can request an action and never create its
+    /// operation itself. Kinds with their own dedicated routes are refused,
+    /// and the machine-scoped permissions of a kind still apply.
+    ///
+    /// # Errors
+    ///
+    /// Fails on denial of a kind's own permission, an invalid operation, or a
+    /// backend failure.
+    pub async fn create_brokered(
+        &self,
+        authorizer: &dyn Authorizer,
+        principal_id: &str,
+        new: &NewOperation,
+    ) -> Result<Operation, OperationUseCaseError> {
+        self.create_inner(authorizer, principal_id, new, CreateRoute::Brokered)
             .await
     }
 
@@ -1194,17 +1245,44 @@ impl Operations {
         new: &NewOperation,
         route: CreateRoute,
     ) -> Result<Operation, OperationUseCaseError> {
-        // The kind is the resource, so a policy can allow a principal to
-        // queue the Lab kinds its routes queue without the generic surface.
-        authorize(
-            authorizer,
-            AccessRequest {
-                principal_id,
-                action: Permission::OperationCreate,
-                resource: Some(&new.kind),
-            },
-        )
-        .map_err(OperationUseCaseError::Denied)?;
+        if route == CreateRoute::Brokered && !self.brokered_kinds.contains(&new.kind) {
+            return Err(OperationUseCaseError::Invalid {
+                detail: "the brokered route creates only kinds a provider action declares"
+                    .to_owned(),
+            });
+        }
+        if route != CreateRoute::Brokered {
+            // The kind is the resource, so a policy can allow a principal to
+            // queue the Lab kinds its routes queue without the generic
+            // surface. The brokered route is authorized by the broker's
+            // decision instead.
+            authorize(
+                authorizer,
+                AccessRequest {
+                    principal_id,
+                    action: Permission::OperationCreate,
+                    resource: Some(&new.kind),
+                },
+            )
+            .map_err(OperationUseCaseError::Denied)?;
+            if self.brokered_kinds.contains(&new.kind) {
+                return Err(OperationUseCaseError::Invalid {
+                    detail: "this kind is run through an action request; POST /requests instead"
+                        .to_owned(),
+                });
+            }
+            if new
+                .idempotency_key
+                .as_deref()
+                .is_some_and(|key| key.starts_with(BROKER_IDEMPOTENCY_PREFIX))
+            {
+                return Err(OperationUseCaseError::Invalid {
+                    detail: format!(
+                        "idempotency keys starting with {BROKER_IDEMPOTENCY_PREFIX} are reserved"
+                    ),
+                });
+            }
+        }
 
         if !CREATABLE_KINDS.contains(&new.kind.as_str()) {
             return Err(OperationUseCaseError::Invalid {
@@ -1382,35 +1460,35 @@ impl Operations {
             }
         } else if new.kind == "lab.exec" {
             // Authorized by `create_lab_exec` against its lease.
-            if route == CreateRoute::Generic {
+            if route != CreateRoute::Dedicated {
                 return Err(OperationUseCaseError::Invalid {
                     detail: "lab.exec runs through the lease exec route".to_owned(),
                 });
             }
         } else if new.kind == "lab.exec_detach" {
             // Authorized by `create_lab_exec_detach` against its lease.
-            if route == CreateRoute::Generic {
+            if route != CreateRoute::Dedicated {
                 return Err(OperationUseCaseError::Invalid {
                     detail: "lab.exec_detach runs through the lease detached exec route".to_owned(),
                 });
             }
         } else if new.kind == "lab.collect" {
             // Authorized by `create_lab_collect` against its lease.
-            if route == CreateRoute::Generic {
+            if route != CreateRoute::Dedicated {
                 return Err(OperationUseCaseError::Invalid {
                     detail: "lab.collect runs through the lease artifacts route".to_owned(),
                 });
             }
         } else if new.kind == "lab.put" {
             // Authorized by `create_lab_put` against its lease.
-            if route == CreateRoute::Generic {
+            if route != CreateRoute::Dedicated {
                 return Err(OperationUseCaseError::Invalid {
                     detail: "lab.put runs through the lease files route".to_owned(),
                 });
             }
         } else if new.kind == crate::lab_pool::FILL_KIND {
             // Authorized by `create_lab_pool_fill` against its pool.
-            if route == CreateRoute::Generic {
+            if route != CreateRoute::Dedicated {
                 return Err(OperationUseCaseError::Invalid {
                     detail: "lab.pool.fill is queued by filling a Lab pool, not created directly"
                         .to_owned(),
@@ -1418,14 +1496,14 @@ impl Operations {
             }
         } else if new.kind == "lab.cleanup" {
             // Authorized by `create_lab_cleanup` against its lease.
-            if route == CreateRoute::Generic {
+            if route != CreateRoute::Dedicated {
                 return Err(OperationUseCaseError::Invalid {
                     detail: "lab.cleanup is queued by releasing a lease, not created directly"
                         .to_owned(),
                 });
             }
         } else if new.kind == "lab.provision" {
-            if route == CreateRoute::Generic {
+            if route != CreateRoute::Dedicated {
                 return Err(OperationUseCaseError::Invalid {
                     detail: "lab.provision must use the dedicated lease provisioning route"
                         .to_owned(),

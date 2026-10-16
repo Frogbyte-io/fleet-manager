@@ -12,6 +12,7 @@
 //! local-filesystem constraint.
 #![warn(missing_docs)]
 
+pub mod action_requests;
 pub mod audit;
 pub mod build_addresses;
 pub mod credentials;
@@ -33,6 +34,7 @@ pub mod skill_catalog;
 pub mod skills;
 pub mod source;
 
+pub use action_requests::ActionRequestRepository;
 pub use audit::{AuditLedger, AuditSink};
 pub use build_addresses::BuildAddressRepository;
 pub use credentials::CredentialRepository;
