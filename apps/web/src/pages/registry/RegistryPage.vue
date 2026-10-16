@@ -7,6 +7,7 @@ import { Skeleton } from '@/components/ui/skeleton'
 
 import { errorMessage } from '../machine/api'
 import EntryDrawer from './components/EntryDrawer.vue'
+import RegistryTabs from './components/RegistryTabs.vue'
 import ValueView from './components/ValueView.vue'
 import { cellValue, columnDefs, fieldDefs, renderValue } from './registry'
 import { useRegistryEntries, useRegistryTypes } from './useRegistry'
@@ -92,6 +93,7 @@ const loading = computed(() => types.isLoading.value || (!!typeName.value && ent
     <h1 class="fc-h1">
       Registry
     </h1>
+    <RegistryTabs active="all" />
 
     <div
       v-if="types.error.value"

@@ -192,7 +192,14 @@ Contents:
 ### Registry (FM-1015)
 - Read-only, generic over any Registry type (built-in or repository-defined): type switcher, table whose columns come from the type's fields, search (`q`), tag filter. State is in the URL (`?type&q&tag&entry`).
 - Detail drawer: typed field values (dates with relative hint, money, booleans, links, lists), links, notes, relations both ways (entries, machines, projects), the revision it was read at, and a **View source at revision** link (commit-pinned; the API reports no branch) built from the desired-source remote + commit + `sourcePath` for GitHub/GitLab-style hosts (credentials never shown). The source path and a copyable `fleetctl registry set` command are always shown beside it.
-- Empty states explain the `fleetctl registry set/validate/publish` workflow. Editing in the UI is a non-goal; domain/service-specific views are FM-1021.
+- Empty states explain the `fleetctl registry set/validate/publish` workflow. Editing in the UI is a non-goal. The page carries view tabs: All entries, Domains, Services (FM-1021).
+
+### Registry: Domains and Services (FM-1021)
+- Sub-routes `/registry/domains` and `/registry/services`, built on the FM-1015 helpers and drawer; read-only.
+- **Domains**: each domain entry joined with its latest RDAP/DNS observation (`GET /registry/observations`): registrar, DNS host, where it points (apex and `www` A/AAAA/CNAME), expiry with warning states (expired; within 30 days, `err` within 7, the API's urgent threshold). The expiry is the observed RDAP date when present, else the recorded one (as the API does), with the recorded date shown beside it and the `expires` drift badge carrying any mismatch, auto-renew, and per-field drift badges. A row expands to the Fleet Git vs lookup values, the API's warnings, related entries, and the `fleetctl registry set` command for the suggested patch (the same text as `fleetctl registry suggest`, with a copy button). If observations cannot be read the view degrades to what Fleet Git records. `?open=<fqdn>` expands a row (the Overview links there).
+- **Services**: vendor, plan, cost, renewal, hosting; cost totals per currency (monthly plans, yearly plans, and the converted per-month and per-year figures, labelled as such; `other` periods and entries without a usable cost are excluded and counted; currencies are never converted); upcoming renewals within 60 days, with dates passed by at most 30 days flagged as stale.
+- Relations link to Registry entries, machines, and Proxmox guests. Running services (FM-1031) are not linked yet: the controller has no running-service API, so those relations render as plain text; `RelationLinks.vue` is the one place a link gets added later.
+- Overview: domain rows link to `/registry/domains?open=<fqdn>`; a service renewing within 14 days adds a `service-renewal` row (passed dates stay off the queue; no notice when the `service` type or revision is missing).
 
 ### Operations & Audit
 - Operations: filterable list, detail with SSE event stream/log, cancel, and blocked-approval handling.
