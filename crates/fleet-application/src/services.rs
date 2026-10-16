@@ -14,8 +14,18 @@
 //!   tag `coolify-server:<server-uuid>`. Then the server's address against
 //!   the machine's addresses (its SSH endpoint hosts and its `network/ipv*`
 //!   capability facts; a tailnet-onboarded machine's endpoint host is its
-//!   tailnet address). More than one candidate is reported as `ambiguous`
-//!   with the candidates, never guessed.
+//!   tailnet address). Addresses compare in canonical form ([`address_key`]:
+//!   zone ids stripped, IPv4-mapped IPv6 folded to IPv4). Loopback,
+//!   unspecified, and link-local addresses, `localhost`, and
+//!   `host.docker.internal` are never matched by value, so the machine that
+//!   runs Coolify itself (whose own server entry is usually one of those)
+//!   needs the explicit tag or container evidence. The SSH inventory records
+//!   only the first `hostname -I` address, so a machine reachable on a
+//!   second address is matched only through its endpoint host or the tag.
+//!   Ambiguity is judged against *all* machines, not just the ones the
+//!   caller may read: more candidates than the caller can see is reported
+//!   `ambiguous` with the readable candidates and a `hidden_candidates`
+//!   count. When the machine input was not read, placement is `unknown`.
 //! * **Docker container to Coolify resource.** Coolify labels the
 //!   containers it manages with `coolify.applicationUuid`,
 //!   `coolify.serviceUuid`, or `coolify.databaseUuid` (Coolify's
@@ -25,9 +35,11 @@
 //!   other container is its own `docker` service. A container is also
 //!   evidence of the machine a resource runs on.
 //! * **Resource to server.** Coolify's list endpoints do not name a
-//!   resource's server, so it is derived: container evidence, then the
-//!   server named by the resource's latest deployment, then the only
-//!   server of the account.
+//!   resource's server, so it is derived, and `server_basis` says how:
+//!   container evidence, then the server named by the resource's newest
+//!   deployment (skipped when the deployments class is stale or
+//!   truncated), then the only server of the account (only while the
+//!   resource's own class is fresh).
 //! * **Registry.** An explicit `hosted-on` relation to `coolify:<uuid>`,
 //!   and any `domain` entry whose fqdn equals a Coolify FQDN host or is a
 //!   parent domain of it (`example.com` matches `www.example.com`).
@@ -156,9 +168,11 @@ impl ServiceState {
     pub fn from_coolify(status: &str) -> Self {
         let status = status.trim().to_ascii_lowercase();
         let head = status.split(':').next().unwrap_or_default();
+        let health = status.split(':').nth(1).unwrap_or_default();
         match head {
-            "running" if status.contains("unhealthy") => Self::Degraded,
-            "running" => Self::Running,
+            // `running:unknown` (no health check) says nothing about health.
+            "running" if health == "unhealthy" => Self::Degraded,
+            "running" if health.is_empty() || health == "healthy" => Self::Running,
             "degraded" | "restarting" => Self::Degraded,
             "exited" | "stopped" | "created" | "paused" | "dead" => Self::Stopped,
             _ => Self::Unknown,
@@ -300,10 +314,14 @@ pub struct ServiceMachine {
     pub name: String,
     /// The derived connectivity state.
     pub status: MachineStatus,
-    /// The machine's known addresses, lowercase.
+    /// The machine's known addresses in canonical form ([`address_key`]).
     pub addresses: Vec<String>,
     /// The machine's tags.
     pub tags: Vec<String>,
+    /// Whether the caller may read this machine. Unreadable machines still
+    /// count toward ambiguity (so a caller's visibility never turns an
+    /// ambiguous match into a confident one) but are never named.
+    pub readable: bool,
 }
 
 /// A reference to a machine.
@@ -373,8 +391,10 @@ pub struct Placement {
     pub basis: Option<MatchBasis>,
     /// The machine, when matched.
     pub machine: Option<MachineRef>,
-    /// The candidates, when ambiguous.
+    /// The candidates the caller may read, when ambiguous.
     pub candidates: Vec<MachineRef>,
+    /// How many further candidates the caller may not read.
+    pub hidden_candidates: usize,
 }
 
 impl Placement {
@@ -384,6 +404,33 @@ impl Placement {
             basis: None,
             machine: None,
             candidates: Vec::new(),
+            hidden_candidates: 0,
+        }
+    }
+}
+
+/// How a Coolify resource's server was derived.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ServerBasis {
+    /// The server named by the resource's newest deployment.
+    Deployment,
+    /// The server matched to the machine its container was seen on.
+    Container,
+    /// The account has exactly one server.
+    SoleServer,
+    /// Not determined.
+    Unknown,
+}
+
+impl ServerBasis {
+    /// The stable wire id.
+    #[must_use]
+    pub const fn id(self) -> &'static str {
+        match self {
+            Self::Deployment => "deployment",
+            Self::Container => "container",
+            Self::SoleServer => "sole_server",
+            Self::Unknown => "unknown",
         }
     }
 }
@@ -503,6 +550,8 @@ pub struct RunningService {
     pub coolify: Option<CoolifyRef>,
     /// The Coolify server, when known.
     pub server: Option<ServerRef>,
+    /// How the server was derived.
+    pub server_basis: ServerBasis,
     /// The Fleet machine placement.
     pub placement: Placement,
     /// The containers observed for it.
@@ -532,8 +581,10 @@ pub struct AmbiguousServer {
     pub server: ServerRef,
     /// What the match rested on.
     pub basis: MatchBasis,
-    /// The machines that fit.
+    /// The machines that fit and that the caller may read.
     pub candidates: Vec<MachineRef>,
+    /// How many further machines fit that the caller may not read.
+    pub hidden_candidates: usize,
 }
 
 /// The state of one input of the read model.
@@ -547,7 +598,7 @@ pub enum InputState {
     /// The caller may not read it; it is left out.
     Denied,
     /// Reading it failed; it is left out.
-    Unavailable(String),
+    Unavailable(&'static str),
 }
 
 impl InputState {
@@ -640,8 +691,13 @@ pub struct JoinInput {
     pub now: i64,
     /// The Coolify accounts the caller may read.
     pub accounts: Vec<AccountInput>,
-    /// The machines the caller may read.
+    /// Every machine, each flagged with whether the caller may read it;
+    /// empty with `machines_read` false when the machine input was not read.
     pub machines: Vec<ServiceMachine>,
+    /// Whether the machine input was read. When it was not (denied or
+    /// unavailable) no placement is attempted and every one is `unknown`,
+    /// never `unmatched`.
+    pub machines_read: bool,
     /// The container observations of those machines.
     pub containers: Vec<MachineContainers>,
     /// The Registry entries, when the caller may read them.
@@ -660,7 +716,9 @@ pub struct JoinOutput {
 struct ServerMatch {
     state: MatchState,
     basis: Option<MatchBasis>,
+    /// The readable candidates.
     candidates: Vec<MachineRef>,
+    hidden: usize,
 }
 
 fn machine_ref(machine: &ServiceMachine) -> MachineRef {
@@ -670,47 +728,54 @@ fn machine_ref(machine: &ServiceMachine) -> MachineRef {
     }
 }
 
-fn match_server(server: &CoolifyServer, machines: &[ServiceMachine]) -> ServerMatch {
+fn match_server(server: &CoolifyServer, input: &JoinInput) -> ServerMatch {
+    if !input.machines_read {
+        return ServerMatch {
+            state: MatchState::Unknown,
+            basis: None,
+            candidates: Vec::new(),
+            hidden: 0,
+        };
+    }
     let tag = format!(
         "{SERVER_LINK_TAG_PREFIX}{}",
         server.uuid.to_ascii_lowercase()
     );
-    let tagged: Vec<MachineRef> = machines
+    let mut fits: Vec<&ServiceMachine> = input
+        .machines
         .iter()
         .filter(|machine| machine.tags.iter().any(|t| t.to_ascii_lowercase() == tag))
-        .map(machine_ref)
         .collect();
-    let (candidates, basis) = if tagged.is_empty() {
-        let address = normalize_host(&server.address);
-        let by_address: Vec<MachineRef> = if address.is_empty() {
-            Vec::new()
-        } else {
-            machines
+    let mut basis = MatchBasis::ExplicitTag;
+    if fits.is_empty() {
+        basis = MatchBasis::Address;
+        if let Some(address) = address_key(&server.address) {
+            fits = input
+                .machines
                 .iter()
                 .filter(|machine| machine.addresses.contains(&address))
-                .map(machine_ref)
-                .collect()
-        };
-        (by_address, MatchBasis::Address)
-    } else {
-        (tagged, MatchBasis::ExplicitTag)
+                .collect();
+        }
+    }
+    let candidates: Vec<MachineRef> = fits
+        .iter()
+        .filter(|machine| machine.readable)
+        .map(|machine| machine_ref(machine))
+        .collect();
+    let hidden = fits.len() - candidates.len();
+    let state = match fits.len() {
+        0 => MatchState::Unmatched,
+        // A single machine the caller cannot read is not a match they can
+        // see; it is not "unmatched" either.
+        1 if hidden == 1 => MatchState::Unknown,
+        1 => MatchState::Matched,
+        _ => MatchState::Ambiguous,
     };
-    match candidates.len() {
-        0 => ServerMatch {
-            state: MatchState::Unmatched,
-            basis: None,
-            candidates,
-        },
-        1 => ServerMatch {
-            state: MatchState::Matched,
-            basis: Some(basis),
-            candidates,
-        },
-        _ => ServerMatch {
-            state: MatchState::Ambiguous,
-            basis: Some(basis),
-            candidates,
-        },
+    ServerMatch {
+        state,
+        basis: (state != MatchState::Unmatched).then_some(basis),
+        candidates,
+        hidden,
     }
 }
 
@@ -732,6 +797,40 @@ pub fn normalize_host(text: &str) -> String {
         host = host.split(':').next().unwrap_or_default();
     }
     host.trim_end_matches('.').to_ascii_lowercase()
+}
+
+/// The canonical form of an address for matching a Coolify server to a
+/// machine, or `None` when the address must not be matched by value.
+///
+/// IP literals lose any zone id and compare in canonical form (an
+/// IPv4-mapped IPv6 address becomes the IPv4 address). Loopback,
+/// unspecified, and link-local addresses, `localhost`, and
+/// `host.docker.internal` are never matched: they name "this host" from
+/// whoever's point of view, so they identify nothing. The machine that runs
+/// Coolify itself therefore needs the explicit `coolify-server:<uuid>` tag
+/// (or container evidence).
+#[must_use]
+pub fn address_key(text: &str) -> Option<String> {
+    let normalized = normalize_host(text);
+    let host = normalized.split('%').next().unwrap_or_default();
+    if host.is_empty() {
+        return None;
+    }
+    if let Ok(ip) = host.parse::<std::net::IpAddr>() {
+        let ip = ip.to_canonical();
+        let link_local = match ip {
+            std::net::IpAddr::V4(v4) => v4.is_link_local(),
+            std::net::IpAddr::V6(v6) => v6.is_unicast_link_local(),
+        };
+        if ip.is_loopback() || ip.is_unspecified() || link_local {
+            return None;
+        }
+        return Some(ip.to_string());
+    }
+    if host == "localhost" || host.ends_with(".localhost") || host == "host.docker.internal" {
+        return None;
+    }
+    Some(host.to_owned())
 }
 
 struct Resource<'a> {
@@ -896,13 +995,25 @@ fn machine_staleness(status: MachineStatus) -> Option<&'static str> {
 #[must_use]
 #[allow(clippy::too_many_lines)]
 pub fn join(input: &JoinInput) -> JoinOutput {
-    let machines_by_id: BTreeMap<&str, &ServiceMachine> =
-        input.machines.iter().map(|m| (m.id.as_str(), m)).collect();
+    // Only machines the caller may read are ever named or have containers.
+    let machines_by_id: BTreeMap<&str, &ServiceMachine> = input
+        .machines
+        .iter()
+        .filter(|m| m.readable)
+        .map(|m| (m.id.as_str(), m))
+        .collect();
     let observed_at: BTreeMap<&str, Option<i64>> = input
         .containers
         .iter()
         .map(|c| (c.machine_id.as_str(), c.observed_at))
         .collect();
+    let containers_stale = |machine_id: &str| {
+        observed_at
+            .get(machine_id)
+            .copied()
+            .flatten()
+            .is_none_or(|at| input.now.saturating_sub(at) > CONTAINER_STALE_AFTER_MS)
+    };
 
     // Container evidence: resource uuid -> (machine id, container).
     let mut by_uuid: BTreeMap<String, Vec<(&str, &ObservedContainer)>> = BTreeMap::new();
@@ -927,7 +1038,7 @@ pub fn join(input: &JoinInput) -> JoinOutput {
             .servers
             .items
             .iter()
-            .map(|server| (server, match_server(server, &input.machines)))
+            .map(|server| (server, match_server(server, input)))
             .collect();
         for (server, matched) in &server_matches {
             if matched.state == MatchState::Ambiguous
@@ -938,17 +1049,25 @@ pub fn join(input: &JoinInput) -> JoinOutput {
                     server: server_ref(server),
                     basis,
                     candidates: matched.candidates.clone(),
+                    hidden_candidates: matched.hidden,
                 });
             }
         }
-        let sole_server = (snapshot.servers.items.len() == 1
-            && !snapshot.servers.truncated
-            && !snapshot.servers.is_stale(input.now))
-        .then(|| &snapshot.servers.items[0]);
-        let stale_class = |kind: ServiceKind| match kind {
+        let servers_stale = snapshot.servers.is_stale(input.now);
+        let deployments_usable =
+            !snapshot.deployments.is_stale(input.now) && !snapshot.deployments.truncated;
+        let sole_server =
+            (snapshot.servers.items.len() == 1 && !snapshot.servers.truncated && !servers_stale)
+                .then(|| &snapshot.servers.items[0]);
+        let class_stale = |kind: ServiceKind| match kind {
             ServiceKind::Application => snapshot.applications.is_stale(input.now),
             ServiceKind::Service => snapshot.services.is_stale(input.now),
             _ => snapshot.databases.is_stale(input.now),
+        };
+        let class_truncated = |kind: ServiceKind| match kind {
+            ServiceKind::Application => snapshot.applications.truncated,
+            ServiceKind::Service => snapshot.services.truncated,
+            _ => snapshot.databases.truncated,
         };
 
         for resource in resources(snapshot) {
@@ -966,27 +1085,26 @@ pub fn join(input: &JoinInput) -> JoinOutput {
             }
             let evidence_machines: BTreeSet<&str> = evidence.iter().map(|(m, _)| *m).collect();
 
-            // The server: a resource's own server is not in Coolify's list
-            // answers, so derive it.
-            let mut server: Option<&(&CoolifyServer, ServerMatch)> = None;
-            if resource.kind == ServiceKind::Application {
-                let deployed_on = snapshot
-                    .deployments
-                    .items
-                    .iter()
-                    .filter(|d| d.application_uuid.as_deref() == Some(resource.uuid))
-                    .find_map(|d| d.server_name.as_deref());
-                if let Some(name) = deployed_on {
-                    let named: Vec<_> = server_matches
+            // The newest deployment serves both the last-deploy field and
+            // the server heuristic.
+            let newest = (resource.kind == ServiceKind::Application)
+                .then(|| {
+                    snapshot
+                        .deployments
+                        .items
                         .iter()
-                        .filter(|(s, _)| s.name == name)
-                        .collect();
-                    if named.len() == 1 {
-                        server = Some(named[0]);
-                    }
-                }
-            }
-            if server.is_none() && evidence_machines.len() == 1 {
+                        .filter(|d| d.application_uuid.as_deref() == Some(resource.uuid))
+                        .max_by(|a, b| {
+                            (&a.created_at, &a.updated_at).cmp(&(&b.created_at, &b.updated_at))
+                        })
+                })
+                .flatten();
+
+            // The server: a resource's own server is not in Coolify's list
+            // answers, so derive it from the best evidence available.
+            let mut server: Option<&(&CoolifyServer, ServerMatch)> = None;
+            let mut server_basis = ServerBasis::Unknown;
+            if evidence_machines.len() == 1 {
                 let machine_id = evidence_machines.iter().next().copied().unwrap_or_default();
                 let on_machine: Vec<_> = server_matches
                     .iter()
@@ -997,22 +1115,39 @@ pub fn join(input: &JoinInput) -> JoinOutput {
                     .collect();
                 if on_machine.len() == 1 {
                     server = Some(on_machine[0]);
+                    server_basis = ServerBasis::Container;
                 }
             }
             if server.is_none()
+                && deployments_usable
+                && let Some(name) = newest.and_then(|d| d.server_name.as_deref())
+            {
+                let named: Vec<_> = server_matches
+                    .iter()
+                    .filter(|(s, _)| s.name == name)
+                    .collect();
+                if named.len() == 1 {
+                    server = Some(named[0]);
+                    server_basis = ServerBasis::Deployment;
+                }
+            }
+            if server.is_none()
+                && !class_stale(resource.kind)
+                && !class_truncated(resource.kind)
                 && let Some(sole) = sole_server
             {
                 server = server_matches.iter().find(|(s, _)| s.uuid == sole.uuid);
+                server_basis = ServerBasis::SoleServer;
             }
 
             let placement = if evidence_machines.len() == 1 {
                 let id = evidence_machines.iter().next().copied().unwrap_or_default();
-                let machine = machines_by_id.get(id).map(|m| machine_ref(m));
                 Placement {
                     state: MatchState::Matched,
                     basis: Some(MatchBasis::Container),
-                    machine,
+                    machine: machines_by_id.get(id).map(|m| machine_ref(m)),
                     candidates: Vec::new(),
+                    hidden_candidates: 0,
                 }
             } else if evidence_machines.len() > 1 {
                 Placement {
@@ -1023,6 +1158,7 @@ pub fn join(input: &JoinInput) -> JoinOutput {
                         .iter()
                         .filter_map(|id| machines_by_id.get(id).map(|m| machine_ref(m)))
                         .collect(),
+                    hidden_candidates: 0,
                 }
             } else if let Some((_, matched)) = server {
                 Placement {
@@ -1035,20 +1171,25 @@ pub fn join(input: &JoinInput) -> JoinOutput {
                     } else {
                         Vec::new()
                     },
+                    hidden_candidates: matched.hidden,
                 }
             } else {
                 Placement::unknown()
             };
 
-            let state = match resource.status {
+            let mut state = match resource.status {
                 Some(status) => ServiceState::from_coolify(status),
                 None if !containers.is_empty() => worst(&containers),
                 None => ServiceState::Unknown,
             };
 
             let mut reasons = Vec::new();
-            if stale_class(resource.kind) {
+            let coolify_stale = class_stale(resource.kind);
+            if coolify_stale {
                 reasons.push(format!("coolify_{}_stale", class_name(resource.kind)));
+            }
+            if server.is_some() && servers_stale {
+                reasons.push("coolify_servers_stale".to_owned());
             }
             if resource.details_stale {
                 reasons.push("fqdns_stale".to_owned());
@@ -1059,14 +1200,19 @@ pub fn join(input: &JoinInput) -> JoinOutput {
             {
                 reasons.push(reason.to_owned());
             }
-            if evidence_machines.iter().any(|id| {
-                observed_at
-                    .get(id)
-                    .copied()
-                    .flatten()
-                    .is_none_or(|at| input.now.saturating_sub(at) > CONTAINER_STALE_AFTER_MS)
-            }) {
+            let containers_are_stale = evidence_machines.iter().any(|id| containers_stale(id));
+            if containers_are_stale {
                 reasons.push("containers_stale".to_owned());
+            }
+            // Stale Coolify state against fresh container state: the
+            // containers are the newer observation.
+            if coolify_stale
+                && !containers.is_empty()
+                && !containers_are_stale
+                && worst(&containers) != state
+            {
+                state = worst(&containers);
+                reasons.push("state_conflict".to_owned());
             }
 
             let project = resource.environment_id.and_then(|id| {
@@ -1080,25 +1226,13 @@ pub fn join(input: &JoinInput) -> JoinOutput {
             if !containers.is_empty() {
                 sources.push(ServiceSource::Docker);
             }
-            let last_deploy = (resource.kind == ServiceKind::Application)
-                .then(|| {
-                    snapshot
-                        .deployments
-                        .items
-                        .iter()
-                        .filter(|d| d.application_uuid.as_deref() == Some(resource.uuid))
-                        .max_by(|a, b| {
-                            (&a.created_at, &a.updated_at).cmp(&(&b.created_at, &b.updated_at))
-                        })
-                        .map(|d| LastDeploy {
-                            deployment_uuid: d.deployment_uuid.clone(),
-                            status: d.status.clone(),
-                            commit: d.commit.clone(),
-                            at: d.updated_at.clone().or_else(|| d.created_at.clone()),
-                            stale: snapshot.deployments.is_stale(input.now),
-                        })
-                })
-                .flatten();
+            let last_deploy = newest.map(|d| LastDeploy {
+                deployment_uuid: d.deployment_uuid.clone(),
+                status: d.status.clone(),
+                commit: d.commit.clone(),
+                at: d.updated_at.clone().or_else(|| d.created_at.clone()),
+                stale: snapshot.deployments.is_stale(input.now),
+            });
             let base = account.base_url.trim_end_matches('/');
             out.services.push(RunningService {
                 id: format!("coolify:{}:{}", account.id, resource.uuid),
@@ -1117,6 +1251,7 @@ pub fn join(input: &JoinInput) -> JoinOutput {
                     detail: resource.detail.clone(),
                 }),
                 server: server.map(|(s, _)| server_ref(s)),
+                server_basis,
                 placement,
                 containers,
                 fqdns: resource.fqdns.to_vec(),
@@ -1143,10 +1278,7 @@ pub fn join(input: &JoinInput) -> JoinOutput {
             if let Some(reason) = machine_staleness(known.status) {
                 reasons.push(reason.to_owned());
             }
-            if machine
-                .observed_at
-                .is_none_or(|at| input.now.saturating_sub(at) > CONTAINER_STALE_AFTER_MS)
-            {
+            if containers_stale(&machine.machine_id) {
                 reasons.push("containers_stale".to_owned());
             }
             out.services.push(RunningService {
@@ -1157,11 +1289,13 @@ pub fn join(input: &JoinInput) -> JoinOutput {
                 state: reference.state,
                 coolify: None,
                 server: None,
+                server_basis: ServerBasis::Unknown,
                 placement: Placement {
                     state: MatchState::Matched,
                     basis: None,
                     machine: Some(machine_ref(known)),
                     candidates: Vec::new(),
+                    hidden_candidates: 0,
                 },
                 containers: vec![reference],
                 fqdns: Vec::new(),
@@ -1224,7 +1358,7 @@ pub enum InputError {
     /// The caller may not read it.
     Denied(Decision),
     /// Reading failed.
-    Unavailable(String),
+    Unavailable,
 }
 
 /// The machine input of the read model.
@@ -1264,22 +1398,18 @@ pub trait ServiceRegistry: fmt::Debug + Send + Sync {
 pub fn machine_addresses(view: &crate::machine::MachineView) -> Vec<String> {
     let mut addresses = BTreeSet::new();
     for endpoint in &view.endpoints {
-        if endpoint.kind == EndpointKind::Ssh {
-            let host = normalize_host(&endpoint.reference);
-            if !host.is_empty() {
-                addresses.insert(host);
-            }
+        if endpoint.kind == EndpointKind::Ssh
+            && let Some(key) = address_key(&endpoint.reference)
+        {
+            addresses.insert(key);
         }
     }
     for fact in &view.capabilities {
         if fact.namespace == "network"
             && fact.name.starts_with("ipv")
-            && let Some(value) = &fact.value
+            && let Some(key) = fact.value.as_deref().and_then(address_key)
         {
-            let host = normalize_host(value);
-            if !host.is_empty() {
-                addresses.insert(host);
-            }
+            addresses.insert(key);
         }
     }
     addresses.into_iter().collect()
@@ -1307,14 +1437,14 @@ impl ServiceMachines for Machines {
                     crate::machine::MachineUseCaseError::Denied(decision) => {
                         InputError::Denied(decision)
                     }
-                    other => InputError::Unavailable(other.to_string()),
+                    _ => InputError::Unavailable,
                 })?;
             let full = page.len() >= MACHINE_PAGE as usize;
             cursor = page.last().map(|view| view.id.clone());
             for view in page {
-                // Per-machine decision: a machine the caller may not read
-                // is not part of their view.
-                let allowed = authorize(
+                // Per-machine decision. A machine the caller may not read
+                // is kept, flagged, so it still counts toward ambiguity.
+                let readable = authorize(
                     authorizer,
                     AccessRequest {
                         principal_id: &principal.id,
@@ -1323,15 +1453,14 @@ impl ServiceMachines for Machines {
                     },
                 )
                 .is_ok();
-                if allowed {
-                    out.push(ServiceMachine {
-                        addresses: machine_addresses(&view),
-                        id: view.id,
-                        name: view.name,
-                        status: view.machine_status,
-                        tags: view.tags,
-                    });
-                }
+                out.push(ServiceMachine {
+                    addresses: machine_addresses(&view),
+                    id: view.id,
+                    name: view.name,
+                    status: view.machine_status,
+                    tags: view.tags,
+                    readable,
+                });
             }
             if !full || out.len() >= MAX_MACHINES {
                 break;
@@ -1364,7 +1493,7 @@ impl ServiceRegistry for RegistryReadModel {
                     crate::project::ProjectUseCaseError::Denied(decision) => {
                         InputError::Denied(decision)
                     }
-                    other => InputError::Unavailable(other.to_string()),
+                    _ => InputError::Unavailable,
                 })?;
             let mut page = answered.value;
             let more = i64::try_from(page.len()).unwrap_or(i64::MAX) > REGISTRY_PAGE;
@@ -1498,7 +1627,7 @@ impl RunningServices {
                 InputState::Denied
             }
             Ok(_) => match self.accounts.list().await {
-                Err(detail) => InputState::Unavailable(detail),
+                Err(_) => InputState::Unavailable("the Coolify accounts could not be read"),
                 Ok(accounts) => {
                     let accounts: Vec<_> = accounts
                         .into_iter()
@@ -1507,7 +1636,7 @@ impl RunningServices {
                     if accounts.is_empty() {
                         InputState::NotConfigured
                     } else {
-                        let mut failure = None;
+                        let mut failure = false;
                         for account in accounts {
                             match self.observations.load(&account.id).await {
                                 Ok(snapshot) => {
@@ -1518,10 +1647,14 @@ impl RunningServices {
                                     ));
                                     input.accounts.push(AccountInput { account, snapshot });
                                 }
-                                Err(detail) => failure = Some(detail),
+                                Err(_) => failure = true,
                             }
                         }
-                        failure.map_or(InputState::Available, InputState::Unavailable)
+                        if failure {
+                            InputState::Unavailable("Coolify observations could not be read")
+                        } else {
+                            InputState::Available
+                        }
                     }
                 }
             },
@@ -1531,13 +1664,16 @@ impl RunningServices {
         let machines = match self.machines.machines(authorizer, principal, now).await {
             Ok(machines) => {
                 input.machines = machines;
+                input.machines_read = true;
                 InputState::Available
             }
             Err(InputError::Denied(decision)) => {
                 denial.get_or_insert(decision);
                 InputState::Denied
             }
-            Err(InputError::Unavailable(detail)) => InputState::Unavailable(detail),
+            Err(InputError::Unavailable) => {
+                InputState::Unavailable("the machines could not be read")
+            }
         };
 
         // Containers of the machines the caller may read.
@@ -1546,7 +1682,12 @@ impl RunningServices {
         } else if machines != InputState::Available {
             machines.clone()
         } else {
-            let ids: Vec<String> = input.machines.iter().map(|m| m.id.clone()).collect();
+            let ids: Vec<String> = input
+                .machines
+                .iter()
+                .filter(|m| m.readable)
+                .map(|m| m.id.clone())
+                .collect();
             match self.containers.observed(&ids).await {
                 Ok(found) => {
                     input.containers = found
@@ -1555,7 +1696,7 @@ impl RunningServices {
                         .collect();
                     InputState::Available
                 }
-                Err(detail) => InputState::Unavailable(detail),
+                Err(_) => InputState::Unavailable("container observations could not be read"),
             }
         };
 
@@ -1571,7 +1712,9 @@ impl RunningServices {
                     denial.get_or_insert(decision);
                     InputState::Denied
                 }
-                Err(InputError::Unavailable(detail)) => InputState::Unavailable(detail),
+                Err(InputError::Unavailable) => {
+                    InputState::Unavailable("the Registry could not be read")
+                }
             },
         };
 
@@ -1718,6 +1861,7 @@ mod tests {
             status: MachineStatus::Connected,
             addresses: vec![address.to_owned()],
             tags: tags.iter().map(|t| (*t).to_owned()).collect(),
+            readable: true,
         }
     }
 
@@ -1743,6 +1887,7 @@ mod tests {
     fn input(snapshot: Option<CoolifySnapshot>) -> JoinInput {
         JoinInput {
             now: NOW,
+            machines_read: true,
             accounts: vec![AccountInput {
                 account: account(),
                 snapshot: snapshot.map(|s| (s, NOW)),
@@ -1812,6 +1957,7 @@ mod tests {
     fn docker_only_containers_are_their_own_services() {
         let mut join_input = JoinInput {
             now: NOW,
+            machines_read: true,
             machines: vec![machine("m1", "10.0.0.9", &[])],
             containers: vec![on("m1", vec![container("c1", "redis", None)])],
             ..JoinInput::default()
@@ -2019,6 +2165,276 @@ mod tests {
         assert_eq!(
             ServiceState::from_docker("running", "Up (unhealthy)"),
             ServiceState::Degraded
+        );
+    }
+
+    #[test]
+    fn suffix_attacks_and_urls_do_not_link_domains() {
+        let mut join_input = input(Some(snapshot(
+            vec![server("s1", "local", "10.0.0.9")],
+            vec![app(
+                "a1",
+                "web",
+                &[
+                    "https://app.example.com:8443/path?x=1",
+                    "https://example.com.evil.net",
+                ],
+            )],
+        )));
+        join_input.registry = vec![
+            entry("domain", "example.com", vec![]),
+            entry("domain", "notexample.com", vec![]),
+            entry("domain", "evil.net", vec![]),
+        ];
+        let out = join(&join_input);
+        let keys: Vec<_> = out.services[0]
+            .registry
+            .iter()
+            .map(|l| (l.key.as_str(), l.host.as_deref().unwrap()))
+            .collect();
+        // `example.com` matches the port-and-path URL's host and
+        // `evil.net` is a real parent of the second host, but `notexample.com`
+        // matches nothing and `example.com` does not match
+        // `example.com.evil.net`.
+        assert!(
+            keys.contains(&("example.com", "app.example.com")),
+            "{keys:?}"
+        );
+        assert!(
+            keys.contains(&("evil.net", "example.com.evil.net")),
+            "{keys:?}"
+        );
+        assert!(
+            !keys.iter().any(|(k, _)| *k == "notexample.com"),
+            "{keys:?}"
+        );
+        assert_eq!(keys.len(), 2, "{keys:?}");
+    }
+
+    #[test]
+    fn addresses_compare_canonically_and_never_by_loopback() {
+        assert_eq!(address_key("::ffff:10.0.0.9").as_deref(), Some("10.0.0.9"));
+        assert_eq!(
+            address_key("[2001:DB8:0:0:0:0:0:1]:22").as_deref(),
+            Some("2001:db8::1")
+        );
+        assert_eq!(
+            address_key("2001:db8::1%eth0").as_deref(),
+            Some("2001:db8::1")
+        );
+        assert_eq!(
+            address_key("root@Box.Example.:22").as_deref(),
+            Some("box.example")
+        );
+        for refused in [
+            "127.0.0.1",
+            "::1",
+            "0.0.0.0",
+            "::",
+            "169.254.1.1",
+            "fe80::1%eth0",
+            "[fe80::1]:22",
+            "::ffff:127.0.0.1",
+            "localhost",
+            "app.localhost",
+            "host.docker.internal",
+            "",
+        ] {
+            assert_eq!(address_key(refused), None, "{refused}");
+        }
+        // A Coolify server whose address is the local host matches no
+        // machine by address, even when a machine records the same name.
+        let mut join_input = input(Some(snapshot(
+            vec![server("s1", "local", "host.docker.internal")],
+            vec![app("a1", "web", &[])],
+        )));
+        join_input.machines = vec![machine("m1", "host.docker.internal", &[])];
+        assert_eq!(
+            join(&join_input).services[0].placement.state,
+            MatchState::Unmatched
+        );
+    }
+
+    #[test]
+    fn a_hidden_duplicate_keeps_the_match_ambiguous() {
+        let mut join_input = input(Some(snapshot(
+            vec![server("s1", "local", "10.0.0.9")],
+            vec![app("a1", "web", &[])],
+        )));
+        let mut hidden = machine("m2", "10.0.0.9", &[]);
+        hidden.readable = false;
+        join_input.machines = vec![machine("m1", "10.0.0.9", &[]), hidden];
+        let out = join(&join_input);
+        let web = &out.services[0];
+        assert_eq!(web.placement.state, MatchState::Ambiguous);
+        assert!(web.placement.machine.is_none());
+        assert_eq!(web.placement.candidates.len(), 1);
+        assert_eq!(web.placement.candidates[0].id, "m1");
+        assert_eq!(web.placement.hidden_candidates, 1);
+        assert_eq!(out.ambiguous_servers[0].hidden_candidates, 1);
+        // The hidden machine is never named.
+        assert!(!format!("{out:?}").contains("name-m2"));
+    }
+
+    #[test]
+    fn a_single_unreadable_match_is_unknown_and_a_denied_input_is_unknown() {
+        let mut join_input = input(Some(snapshot(
+            vec![server("s1", "local", "10.0.0.9")],
+            vec![app("a1", "web", &[])],
+        )));
+        let mut hidden = machine("m1", "10.0.0.9", &[]);
+        hidden.readable = false;
+        join_input.machines = vec![hidden];
+        let placement = join(&join_input).services[0].placement.clone();
+        assert_eq!(placement.state, MatchState::Unknown);
+        assert_eq!(placement.hidden_candidates, 1);
+        assert!(placement.machine.is_none());
+
+        // Machine input not read: unknown, not unmatched.
+        join_input.machines.clear();
+        join_input.machines_read = false;
+        let out = join(&join_input);
+        assert_eq!(out.services[0].placement.state, MatchState::Unknown);
+        assert!(out.ambiguous_servers.is_empty());
+    }
+
+    #[test]
+    fn server_basis_and_deployment_use_the_newest_deployment() {
+        let mut snap = snapshot(
+            vec![
+                server("s1", "alpha", "10.0.0.1"),
+                server("s2", "beta", "10.0.0.2"),
+            ],
+            vec![app("a1", "web", &[])],
+        );
+        let deployment = |uuid: &str, on: &str, at: &str| CoolifyDeployment {
+            deployment_uuid: uuid.to_owned(),
+            application_uuid: Some("a1".to_owned()),
+            server_name: Some(on.to_owned()),
+            status: "finished".to_owned(),
+            created_at: Some(at.to_owned()),
+            ..CoolifyDeployment::default()
+        };
+        snap.deployments = fresh(vec![
+            deployment("old", "alpha", "2026-01-01T00:00:00Z"),
+            deployment("new", "beta", "2026-02-01T00:00:00Z"),
+        ]);
+        let out = join(&input(Some(snap.clone())));
+        let web = &out.services[0];
+        assert_eq!(web.server_basis, ServerBasis::Deployment);
+        assert_eq!(web.server.as_ref().unwrap().uuid, "s2");
+        assert_eq!(web.last_deploy.as_ref().unwrap().deployment_uuid, "new");
+
+        // A stale deployments class is not used to place the resource, and
+        // with two servers there is no sole-server fallback either.
+        snap.deployments.failure = Some(ClassFailure {
+            kind: FailureKind::Unreachable,
+            detail: "x".to_owned(),
+        });
+        let web = &join(&input(Some(snap.clone()))).services[0];
+        assert_eq!(web.server_basis, ServerBasis::Unknown);
+        assert!(web.server.is_none());
+        assert!(web.last_deploy.as_ref().unwrap().stale);
+
+        // Truncated deployments are skipped as well.
+        snap.deployments.failure = None;
+        snap.deployments.truncated = true;
+        let web = &join(&input(Some(snap))).services[0];
+        assert_eq!(web.server_basis, ServerBasis::Unknown);
+    }
+
+    #[test]
+    fn a_sole_server_needs_a_fresh_resource_class() {
+        let mut snap = snapshot(
+            vec![server("s1", "local", "10.0.0.9")],
+            vec![app("a1", "web", &[])],
+        );
+        let web = join(&input(Some(snap.clone()))).services[0].clone();
+        assert_eq!(web.server_basis, ServerBasis::SoleServer);
+        snap.applications.failure = Some(ClassFailure {
+            kind: FailureKind::Unreachable,
+            detail: "x".to_owned(),
+        });
+        let web = &join(&input(Some(snap))).services[0];
+        assert_eq!(web.server_basis, ServerBasis::Unknown);
+        assert!(web.server.is_none());
+    }
+
+    #[test]
+    fn stale_servers_and_conflicting_state_are_flagged() {
+        let mut snap = snapshot(
+            vec![server("s1", "local", "10.0.0.9")],
+            vec![app("a1", "web", &[])],
+        );
+        let timeout = || ClassFailure {
+            kind: FailureKind::Timeout,
+            detail: "x".to_owned(),
+        };
+        snap.servers.failure = Some(timeout());
+        snap.applications.failure = Some(timeout());
+        let mut join_input = input(Some(snap));
+        join_input.machines = vec![machine("m1", "10.0.0.9", &[])];
+        let mut stopped = container(
+            "c1",
+            "a1-1",
+            CoolifyLabels::from_labels([("coolify.applicationUuid", "a1")]),
+        );
+        stopped.state = "exited".to_owned();
+        join_input.containers = vec![on("m1", vec![stopped])];
+        let web = &join(&join_input).services[0];
+        // Coolify's stale "running:healthy" loses to the fresh container.
+        assert_eq!(web.state, ServiceState::Stopped);
+        let reasons = &web.stale_reasons;
+        assert!(
+            reasons.contains(&"state_conflict".to_owned()),
+            "{reasons:?}"
+        );
+        assert!(
+            reasons.contains(&"coolify_applications_stale".to_owned()),
+            "{reasons:?}"
+        );
+    }
+
+    #[test]
+    fn stale_servers_are_flagged_when_placement_used_them() {
+        let mut snap = snapshot(
+            vec![server("s1", "local", "10.0.0.9")],
+            vec![app("a1", "web", &[])],
+        );
+        snap.servers.failure = Some(ClassFailure {
+            kind: FailureKind::Timeout,
+            detail: "x".to_owned(),
+        });
+        // Servers stale: the sole-server fallback is off, so no server and
+        // no reason; with a deployment naming the server it is used and
+        // flagged.
+        snap.deployments = fresh(vec![CoolifyDeployment {
+            deployment_uuid: "d".to_owned(),
+            application_uuid: Some("a1".to_owned()),
+            server_name: Some("local".to_owned()),
+            created_at: Some("2026-01-01T00:00:00Z".to_owned()),
+            ..CoolifyDeployment::default()
+        }]);
+        let web = &join(&input(Some(snap))).services[0];
+        assert_eq!(web.server_basis, ServerBasis::Deployment);
+        assert!(
+            web.stale_reasons
+                .contains(&"coolify_servers_stale".to_owned()),
+            "{:?}",
+            web.stale_reasons
+        );
+    }
+
+    #[test]
+    fn running_unknown_is_not_running() {
+        assert_eq!(
+            ServiceState::from_coolify("running:unknown"),
+            ServiceState::Unknown
+        );
+        assert_eq!(ServiceState::from_coolify("running"), ServiceState::Running);
+        assert_eq!(
+            ServiceState::from_coolify("running:healthy"),
+            ServiceState::Running
         );
     }
 }

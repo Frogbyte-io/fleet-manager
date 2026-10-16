@@ -59,8 +59,11 @@ pub struct ServicePlacementDto {
     pub basis: Option<String>,
     /// The machine, when matched.
     pub machine: Option<ServiceMachineRefDto>,
-    /// The candidate machines, when ambiguous; none is chosen.
+    /// The candidate machines the caller may read, when ambiguous; none is
+    /// chosen.
     pub candidates: Vec<ServiceMachineRefDto>,
+    /// How many further candidates the caller may not read.
+    pub hidden_candidates: usize,
 }
 
 impl From<&Placement> for ServicePlacementDto {
@@ -70,6 +73,7 @@ impl From<&Placement> for ServicePlacementDto {
             basis: placement.basis.map(|basis| basis.id().to_owned()),
             machine: placement.machine.as_ref().map(Into::into),
             candidates: placement.candidates.iter().map(Into::into).collect(),
+            hidden_candidates: placement.hidden_candidates,
         }
     }
 }
@@ -237,6 +241,9 @@ pub struct RunningServiceDto {
     pub coolify: Option<ServiceCoolifyDto>,
     /// The Coolify server, when known.
     pub server: Option<ServiceServerDto>,
+    /// How the server was derived: `deployment`, `container`,
+    /// `sole_server`, or `unknown`.
+    pub server_basis: String,
     /// The Fleet machine placement.
     pub placement: ServicePlacementDto,
     /// The containers observed for it.
@@ -270,6 +277,7 @@ impl From<&RunningService> for RunningServiceDto {
             state: service.state.id().to_owned(),
             coolify: service.coolify.as_ref().map(Into::into),
             server: service.server.as_ref().map(Into::into),
+            server_basis: service.server_basis.id().to_owned(),
             placement: (&service.placement).into(),
             containers: service.containers.iter().map(Into::into).collect(),
             fqdns: service.fqdns.clone(),
@@ -292,8 +300,10 @@ pub struct AmbiguousServerDto {
     pub server: ServiceServerDto,
     /// `explicit_tag` or `address`.
     pub basis: String,
-    /// The machines that fit; none is chosen.
+    /// The machines that fit and that the caller may read; none is chosen.
     pub candidates: Vec<ServiceMachineRefDto>,
+    /// How many further machines fit that the caller may not read.
+    pub hidden_candidates: usize,
 }
 
 impl From<&AmbiguousServer> for AmbiguousServerDto {
@@ -303,6 +313,7 @@ impl From<&AmbiguousServer> for AmbiguousServerDto {
             server: (&item.server).into(),
             basis: item.basis.id().to_owned(),
             candidates: item.candidates.iter().map(Into::into).collect(),
+            hidden_candidates: item.hidden_candidates,
         }
     }
 }
@@ -314,7 +325,8 @@ pub struct InputStateDto {
     /// `available`, `not_configured`, `denied`, or `unavailable`. A denied
     /// or unavailable input is left out of the answer.
     pub state: String,
-    /// Why it was unavailable.
+    /// A fixed, caller-safe sentence when the input was unavailable; never
+    /// a backend error.
     pub detail: Option<String>,
 }
 
@@ -323,7 +335,7 @@ impl From<&InputState> for InputStateDto {
         Self {
             state: state.id().to_owned(),
             detail: match state {
-                InputState::Unavailable(detail) => Some(detail.clone()),
+                InputState::Unavailable(detail) => Some((*detail).to_owned()),
                 _ => None,
             },
         }
@@ -442,6 +454,26 @@ fn invalid(detail: &str, correlation_id: CorrelationId) -> ApiErrorResponse {
     ApiError::new(&public, correlation_id).with_status(StatusCode::BAD_REQUEST)
 }
 
+/// The page after `cursor` (exclusive) of services already ordered by id,
+/// and the cursor of the next page when more follow.
+fn page_of<'a>(
+    services: &'a [RunningService],
+    cursor: Option<&str>,
+    limit: u32,
+) -> (Vec<&'a RunningService>, Option<String>) {
+    let bound = usize::try_from(limit).unwrap_or(usize::MAX);
+    let mut rest: Vec<&RunningService> = services
+        .iter()
+        .filter(|service| cursor.is_none_or(|cursor| service.id.as_str() > cursor))
+        .collect();
+    let more = rest.len() > bound;
+    rest.truncate(bound);
+    let next = more
+        .then(|| rest.last().map(|service| service.id.clone()))
+        .flatten();
+    (rest, next)
+}
+
 fn use_case(
     extension: Option<Extension<Arc<RunningServices>>>,
     correlation_id: CorrelationId,
@@ -533,18 +565,9 @@ pub async fn list_running_services(
         .list(state.authorizer.as_ref(), &principal, &filter)
         .await
         .map_err(|error| map_error(&error, correlation_id))?;
-    let bound = usize::try_from(limit).unwrap_or(usize::MAX);
-    let mut rest: Vec<&RunningService> = view.services.iter().collect();
-    if let Some(cursor) = params.cursor.as_deref() {
-        rest.retain(|service| service.id.as_str() > cursor);
-    }
-    let more = rest.len() > bound;
-    rest.truncate(bound);
-    let next_cursor = more
-        .then(|| rest.last().map(|service| service.id.clone()))
-        .flatten();
+    let (items, next_cursor) = page_of(&view.services, params.cursor.as_deref(), limit);
     Ok(Json(ServicesPage {
-        items: rest.into_iter().map(Into::into).collect(),
+        items: items.into_iter().map(Into::into).collect(),
         page: PageInfo { next_cursor, limit },
         ambiguous_servers: view.ambiguous_servers.iter().map(Into::into).collect(),
         coverage: (&view.coverage).into(),
@@ -588,4 +611,94 @@ pub async fn get_running_service(
         service: (&service).into(),
         coverage: (&coverage).into(),
     })))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use fleet_application::services::{Placement, ServerBasis, ServiceKind, ServiceState};
+
+    fn service(id: &str) -> RunningService {
+        RunningService {
+            id: id.to_owned(),
+            name: id.to_owned(),
+            kind: ServiceKind::Container,
+            sources: vec![ServiceSource::Docker],
+            state: ServiceState::Running,
+            coolify: None,
+            server: None,
+            server_basis: ServerBasis::Unknown,
+            placement: Placement {
+                state: fleet_application::services::MatchState::Unknown,
+                basis: None,
+                machine: None,
+                candidates: Vec::new(),
+                hidden_candidates: 0,
+            },
+            containers: Vec::new(),
+            fqdns: Vec::new(),
+            last_deploy: None,
+            registry: Vec::new(),
+            deep_link: None,
+            stale: false,
+            stale_reasons: Vec::new(),
+        }
+    }
+
+    fn ids(items: &[&RunningService]) -> Vec<String> {
+        items.iter().map(|s| s.id.clone()).collect()
+    }
+
+    #[test]
+    fn pages_walk_the_whole_list_by_cursor() {
+        let all: Vec<_> = ["a", "b", "c", "d", "e"].into_iter().map(service).collect();
+        let (first, next) = page_of(&all, None, 2);
+        assert_eq!(ids(&first), ["a", "b"]);
+        assert_eq!(next.as_deref(), Some("b"));
+        let (second, next) = page_of(&all, next.as_deref(), 2);
+        assert_eq!(ids(&second), ["c", "d"]);
+        assert_eq!(next.as_deref(), Some("d"));
+        let (last, next) = page_of(&all, next.as_deref(), 2);
+        assert_eq!(ids(&last), ["e"]);
+        assert_eq!(next, None);
+    }
+
+    #[test]
+    fn an_exact_fit_has_no_next_page_and_an_unknown_cursor_resumes_after_it() {
+        let all: Vec<_> = ["a", "b", "c"].into_iter().map(service).collect();
+        let (page, next) = page_of(&all, None, 3);
+        assert_eq!(
+            (ids(&page), next),
+            (vec!["a".into(), "b".into(), "c".into()], None)
+        );
+        // A cursor naming a service that has since gone resumes after it.
+        let (page, next) = page_of(&all, Some("aa"), 5);
+        assert_eq!((ids(&page), next), (vec!["b".into(), "c".into()], None));
+        let (page, _) = page_of(&all, Some("zzz"), 5);
+        assert!(page.is_empty());
+        let (page, _) = page_of(&[], None, 5);
+        assert!(page.is_empty());
+    }
+
+    #[test]
+    fn unavailable_inputs_report_only_the_fixed_sentence() {
+        let dto = InputStateDto::from(&InputState::Unavailable("the machines could not be read"));
+        assert_eq!(dto.state, "unavailable");
+        assert_eq!(
+            dto.detail.as_deref(),
+            Some("the machines could not be read")
+        );
+        assert_eq!(InputStateDto::from(&InputState::Denied).detail, None);
+    }
+
+    #[test]
+    fn the_dto_carries_server_basis_and_hidden_candidates() {
+        let mut item = service("x");
+        item.server_basis = ServerBasis::SoleServer;
+        item.placement.hidden_candidates = 2;
+        let dto = RunningServiceDto::from(&item);
+        let json = serde_json::to_value(&dto).unwrap();
+        assert_eq!(json["serverBasis"], "sole_server");
+        assert_eq!(json["placement"]["hiddenCandidates"], 2);
+    }
 }

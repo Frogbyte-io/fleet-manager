@@ -162,6 +162,7 @@ impl ServiceMachines for Machines {
             status: MachineStatus::Connected,
             addresses: vec!["10.0.0.9".to_owned()],
             tags: Vec::new(),
+            readable: true,
         }])
     }
 }
@@ -302,4 +303,88 @@ async fn without_a_docker_store_the_coverage_says_so_and_filters_apply() {
         .get(&Deny(vec![]), &principal(), "coolify:acc1:zzz")
         .await;
     assert!(matches!(missing, Err(ServicesError::NotFound)));
+}
+
+/// Denies `machine.read` on one machine only, like a per-machine policy.
+#[derive(Debug)]
+struct DenyMachine(&'static str);
+
+impl Authorizer for DenyMachine {
+    fn decide(&self, request: AccessRequest<'_>) -> Decision {
+        if request.action == Permission::MachineRead && request.resource == Some(self.0) {
+            Decision::deny(ReasonId::UnknownPrincipal)
+        } else {
+            Decision::allow()
+        }
+    }
+}
+
+/// Two machines on the same address, flagged by the per-machine decision.
+#[derive(Debug)]
+struct TwinMachines;
+
+#[async_trait]
+impl ServiceMachines for TwinMachines {
+    async fn machines(
+        &self,
+        authorizer: &dyn Authorizer,
+        principal: &ActingPrincipal,
+        _: i64,
+    ) -> Result<Vec<ServiceMachine>, InputError> {
+        let mut out = Vec::new();
+        for id in ["m1", "m2"] {
+            let readable = fleet_application::authz::authorize(
+                authorizer,
+                AccessRequest {
+                    principal_id: &principal.id,
+                    action: Permission::MachineRead,
+                    resource: Some(id),
+                },
+            )
+            .is_ok();
+            out.push(ServiceMachine {
+                id: id.to_owned(),
+                name: format!("box-{id}"),
+                status: MachineStatus::Connected,
+                addresses: vec!["10.0.0.9".to_owned()],
+                tags: Vec::new(),
+                readable,
+            });
+        }
+        Ok(out)
+    }
+}
+
+#[tokio::test]
+async fn per_machine_denial_does_not_turn_a_duplicate_into_a_match() {
+    let twins = RunningServices::new(
+        Arc::new(Accounts),
+        Arc::new(Observations),
+        Arc::new(TwinMachines),
+        Arc::new(NoContainerObservations),
+        None,
+    );
+    let view = twins
+        .list(&DenyMachine("m2"), &principal(), &ServiceFilter::default())
+        .await
+        .unwrap();
+    let web = &view.services[0];
+    assert_eq!(web.placement.state.id(), "ambiguous");
+    assert!(web.placement.machine.is_none());
+    assert_eq!(web.placement.candidates.len(), 1);
+    assert_eq!(web.placement.hidden_candidates, 1);
+    assert_eq!(view.ambiguous_servers[0].hidden_candidates, 1);
+}
+
+#[tokio::test]
+async fn a_denied_machine_input_leaves_placement_unknown() {
+    let view = use_case(Arc::new(NoContainerObservations))
+        .list(
+            &Deny(vec![Permission::MachineRead]),
+            &principal(),
+            &ServiceFilter::default(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(view.services[0].placement.state.id(), "unknown");
 }

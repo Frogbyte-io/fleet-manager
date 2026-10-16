@@ -34,6 +34,7 @@ pub mod proxmox_exec;
 pub mod proxmox_store;
 pub mod proxmox_tasks_store;
 pub mod ready;
+pub mod registry_enrich;
 pub mod skills;
 pub mod source;
 pub mod source_poller;
@@ -393,8 +394,22 @@ fn api_state(
             lab,
             desired: Some(std::sync::Arc::new({
                 let desired = compose_desired_source(&pool);
-                match git_credentials {
+                let desired = match git_credentials {
                     Some(credentials) => desired.with_credentials(credentials),
+                    None => desired,
+                };
+                // FM-1020: the domain lookup enricher. `main` refuses to
+                // start on a malformed setting, so the fallback only
+                // serves test composition.
+                let enricher = desired.registry().cloned().and_then(|registry| {
+                    registry_enrich::compose_domain_enricher(
+                        &pool,
+                        registry,
+                        registry_enrich::enrich_settings_from_env().unwrap_or_default(),
+                    )
+                });
+                match enricher {
+                    Some(enricher) => desired.with_domain_enricher(enricher),
                     None => desired,
                 }
             })),

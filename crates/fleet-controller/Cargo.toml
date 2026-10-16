@@ -27,6 +27,8 @@ fleet-provider-coolify = { path = "../providers/fleet-provider-coolify" }
 fleet-provider-cloudflare = { path = "../providers/fleet-provider-cloudflare" }
 fleet-provider-proxmox = { path = "../providers/fleet-provider-proxmox" }
 fleet-provider-packer = { path = "../providers/fleet-provider-packer" }
+fleet-provider-rdap = { path = "../providers/fleet-provider-rdap" }
+fleet-provider-dns = { path = "../providers/fleet-provider-dns" }
 fleet-secrets = { version = "0.1.0", path = "../fleet-secrets" }
 fleet-storage-sqlite = { version = "0.1.0", path = "../fleet-storage-sqlite" }
 futures-util = "0.3.31"

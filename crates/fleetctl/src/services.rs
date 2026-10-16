@@ -216,6 +216,25 @@ fn coverage_lines(coverage: &Value) -> Vec<String> {
     lines
 }
 
+/// Renders the answer to `action`; a Docker-only listing against a
+/// controller with no container observations says why it is empty.
+pub(crate) fn render_for(action: &ServicesAction, value: &Value) -> String {
+    let mut text = render(value);
+    let docker_only = matches!(
+        action,
+        ServicesAction::List { source: Some(source), .. } if source == "docker"
+    );
+    if docker_only && value["coverage"]["containers"]["state"].as_str() == Some("not_configured") {
+        if !text.is_empty() {
+            text.push('\n');
+        }
+        text.push_str(
+            "hint: this controller stores no Docker container observations yet, so --source docker lists nothing",
+        );
+    }
+    text
+}
+
 /// Renders a list page or one service as human text.
 pub(crate) fn render(value: &Value) -> String {
     if let Some(items) = value.get("items").and_then(Value::as_array) {
@@ -378,5 +397,29 @@ mod tests {
         );
         assert!(text.contains("containers: not_configured"), "{text}");
         assert!(text.contains("registry: denied"), "{text}");
+    }
+
+    #[test]
+    fn a_docker_listing_without_container_observations_says_why() {
+        let page = json!({
+            "items": [], "page": {"nextCursor": null, "limit": 50},
+            "coverage": {"containers": {"state": "not_configured"}}
+        });
+        let docker = ServicesAction::List {
+            source: Some("docker".to_owned()),
+            machine: None,
+            query: None,
+            limit: None,
+            cursor: None,
+        };
+        assert!(render_for(&docker, &page).contains("hint: this controller stores no Docker"));
+        let all = ServicesAction::List {
+            source: None,
+            machine: None,
+            query: None,
+            limit: None,
+            cursor: None,
+        };
+        assert!(!render_for(&all, &page).contains("hint:"));
     }
 }

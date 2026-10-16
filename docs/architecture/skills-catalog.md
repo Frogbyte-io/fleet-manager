@@ -40,3 +40,5 @@ Every `fleetctl` command in the skill is covered by a snapshot test in the
 `fleetctl` crate, so the skill cannot document a command the CLI no longer
 accepts.
 
+
+The skill also carries a Registry section (lookup with `fleetctl registry find/get`, edits through `set`/`relate`/`validate`/`publish` following `registry.changeMode`, and the no-secrets rule with `loginAt`). Its version is the content digest, so editing it needs no manual version or digest bump.
