@@ -1,6 +1,8 @@
 use std::{path::PathBuf, process::ExitCode};
 
-use fleet_schema::{generated_schema_path, generated_schema_text, validate_paths};
+use fleet_schema::{
+    generated_schema_path, generated_schema_text, registry::RegistryContext, validate_paths_report,
+};
 
 const USAGE: &str =
     "Usage:\n  fleet-schema generate [--check]\n  fleet-schema validate <file.yaml>...";
@@ -19,14 +21,19 @@ fn run(args: &[String]) -> Result<(), ExitCode> {
         [command, check] if command == "generate" && check == "--check" => write_schema(true),
         [command, paths @ ..] if command == "validate" && !paths.is_empty() => {
             let paths = paths.iter().map(PathBuf::from).collect::<Vec<_>>();
-            let diagnostics = validate_paths(&paths).map_err(|error| {
-                eprintln!("[FM_SCHEMA_IO] {error}");
-                ExitCode::FAILURE
-            })?;
-            if diagnostics.is_empty() {
+            let report =
+                validate_paths_report(&paths, &RegistryContext::default()).map_err(|error| {
+                    eprintln!("[FM_SCHEMA_IO] {error}");
+                    ExitCode::FAILURE
+                })?;
+            // Warnings are reported but never fail the command.
+            for warning in &report.warnings {
+                eprintln!("warning: {warning}");
+            }
+            if report.errors.is_empty() {
                 Ok(())
             } else {
-                for diagnostic in diagnostics {
+                for diagnostic in &report.errors {
                     eprintln!("{diagnostic}");
                 }
                 Err(ExitCode::FAILURE)

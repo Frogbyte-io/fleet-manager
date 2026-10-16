@@ -1,0 +1,8 @@
+apiVersion: fleet.frogbyte.io/v1alpha1
+kind: RegistryEntry
+metadata:
+  id: 01890f3e-9b4a-7cc2-98c3-d24e8f58c002
+  name: vendor-a
+spec:
+  type: no-such-type
+  fields: { slug: aptabase }

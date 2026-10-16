@@ -34,7 +34,7 @@ spec:
     dnsHost:     { type: string }
     expires:     { type: date }
     autoRenew:   { type: boolean }
-    loginAt:     { type: string, description: "Where the login lives, e.g. '1Password: Webhuset'" }
+    loginAt:     { type: string, description: "Where the login lives, e.g. '1Password (Webhuset vault)'" }
   relations: [hosted-on, used-by, billed-to]
 ---
 apiVersion: fleet.frogbyte.io/v1alpha1
