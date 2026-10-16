@@ -93,6 +93,19 @@ Findings: OAuth clients support scoped API access and one-hour access tokens; th
 
 Decision: use a least-privilege OAuth integration for tailnet device discovery and optional ephemeral/tagged Lab onboarding. Store the client secret as a Fleet secret. Do not use long-lived API keys, reusable auth keys by default, Tailscale identity as Fleet node auth, or assume all users have a tailnet.
 
+### Coolify
+
+Sources: [API reference](https://coolify.io/docs/api-reference/authorization), [token permissions](https://coolify.io/docs/api-reference/permissions), `openapi.json` and the `app/Http/Controllers/Api` controllers of [coollabsio/coolify](https://github.com/coollabsio/coolify) at tag v4.4.6 (latest release when FM-1030 was researched, 2026-10-16). License: Apache-2.0 (the repository `LICENSE` and the GitHub license metadata agree). Fleet only calls the HTTP API; it does not link, vendor, or redistribute Coolify code.
+
+Findings (API version range: `/api/v1`, verified against v4.4.6; the probe and discovery routes below exist unchanged on the v4 line, and per-route 404s are reported per class rather than failing a run):
+
+- Bearer tokens carry the abilities `read`, `read:sensitive`, `write`, `deploy`, and `root`, and are scoped to one team. Without `read:sensitive`, Coolify hides secret-bearing fields. With it, list answers add environment variable values, database passwords and connection URLs, raw Compose files, and deployment logs.
+- The list routes Fleet reads are `GET /servers`, `/projects`, `/projects/{uuid}/environments`, `/applications`, `/services`, `/services/{uuid}/applications` (service hostnames), `/databases`, `/deployments` (queued and in-progress only), and `/deployments/applications/{uuid}?skip&take` (history). Only the last is paginated; the others return the full array. Projects do not embed environments, and applications, services, and databases refer to an environment by its numeric id.
+- The OpenAPI schemas for databases (`list-databases`) and resources are documented as "very complex, will be implemented later", so the database shape is taken from `DatabasesController` and translated tolerantly (the engine falls back to the image name).
+- `GET /enable` and `GET /deploy` reach mutating handlers before v4.2.0, so Fleet never requests them (or any route that is not in the list above).
+
+Decision: discovery (FM-1030, `fleet-provider-coolify`) is GET-only over a closed route set with a `read` token, never follows redirects, bounds time and size, and translates through a field allow-list so nothing Coolify may hide behind `read:sensitive` is stored even if the token holds that ability. Contract fixtures in the repository are synthetic, written from the v4.4.6 schemas; recording scrubbed fixtures from a real instance is an operator step (the ignored `capture` test), pending at the time of writing. Mutations (deploy, restart) are brokered separately and are out of scope here.
+
 ### GitHub
 
 Sources: [GitHub App authentication](https://docs.github.com/en/apps/creating-github-apps/authenticating-with-a-github-app), [user access tokens and web/device flows](https://docs.github.com/en/apps/creating-github-apps/authenticating-with-a-github-app/generating-a-user-access-token-for-a-github-app), [create repository API](https://docs.github.com/en/rest/repos/repos#create-a-repository-for-the-authenticated-user), [contents API](https://docs.github.com/en/rest/repos/contents#create-or-update-file-contents).

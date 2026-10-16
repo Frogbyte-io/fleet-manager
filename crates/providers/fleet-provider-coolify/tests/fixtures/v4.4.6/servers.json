@@ -1,0 +1,50 @@
+[
+  {
+    "id": 0,
+    "uuid": "srvlocal0000000000001",
+    "name": "localhost",
+    "description": "This is the server where Coolify is running on.",
+    "ip": "host.docker.internal",
+    "user": "root",
+    "port": 22,
+    "proxy": {
+      "type": "TRAEFIK",
+      "status": "running"
+    },
+    "proxy_type": "TRAEFIK",
+    "high_disk_usage_notification_sent": false,
+    "unreachable_notification_sent": false,
+    "unreachable_count": 0,
+    "validation_logs": null,
+    "log_drain_notification_sent": false,
+    "swarm_cluster": null,
+    "settings": {
+      "id": 1,
+      "is_reachable": true,
+      "is_usable": true,
+      "server_id": 0
+    }
+  },
+  {
+    "id": 1,
+    "uuid": "srvedge00000000000002",
+    "name": "edge-1",
+    "description": "",
+    "ip": "198.51.100.7",
+    "user": "root",
+    "port": 22,
+    "proxy": {
+      "type": "CADDY"
+    },
+    "proxy_type": "CADDY",
+    "unreachable_count": 3,
+    "validation_logs": null,
+    "swarm_cluster": null,
+    "settings": {
+      "id": 2,
+      "is_reachable": false,
+      "is_usable": false,
+      "server_id": 1
+    }
+  }
+]

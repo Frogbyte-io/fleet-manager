@@ -1,0 +1,7 @@
+[
+  {
+    "id": 3,
+    "name": "minio",
+    "fqdn": "https://s3.example.test,https://console.s3.example.test"
+  }
+]

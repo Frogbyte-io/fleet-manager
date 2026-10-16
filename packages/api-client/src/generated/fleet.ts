@@ -820,6 +820,325 @@ export interface ConfirmProxmoxFingerprintRequest {
 }
 
 /**
+ * A deployed application.
+ */
+export interface CoolifyApplicationDto {
+  /**
+     * The build pack.
+     * @nullable
+     */
+  buildPack?: string | null;
+  /**
+     * When Coolify created it.
+     * @nullable
+     */
+  createdAt?: string | null;
+  /** The description. */
+  description: string;
+  /**
+     * The image reference of an image application.
+     * @nullable
+     */
+  dockerImage?: string | null;
+  /**
+     * The numeric environment id.
+     * @nullable
+     */
+  environmentId?: number | null;
+  /** The public hostnames and URLs. */
+  fqdns: string[];
+  /**
+     * The source branch.
+     * @nullable
+     */
+  gitBranch?: string | null;
+  /**
+     * The source repository, credentials removed.
+     * @nullable
+     */
+  gitRepository?: string | null;
+  /** The name. */
+  name: string;
+  /** Coolify's status, such as `running:healthy`. */
+  status: string;
+  /**
+     * When Coolify last changed it.
+     * @nullable
+     */
+  updatedAt?: string | null;
+  /** Coolify's identity. */
+  uuid: string;
+}
+
+/**
+ * A classified, credential-free failure of one resource class.
+ */
+export interface CoolifyFailureDto {
+  /** A short explanation; never a token, URL, or response body. */
+  detail: string;
+  /**
+     * `unauthorized`, `insufficient_permission`, `not_found`,
+     * `unreachable`, `timeout`, or `invalid_response`.
+     */
+  kind: string;
+}
+
+/**
+ * The observation state of one resource class.
+ */
+export interface CoolifyClassDto {
+  /** When the latest attempt ran (epoch millis). */
+  attemptedAt: number;
+  /**
+     * `servers`, `projects`, `applications`, `services`, `databases`, or
+     * `deployments`.
+     */
+  class: string;
+  failure?: null | CoolifyFailureDto;
+  /**
+     * How many items the snapshot holds for the class.
+     * @minimum 0
+     */
+  itemCount: number;
+  /**
+     * When the items were last listed successfully; absent when never.
+     * @nullable
+     */
+  observedAt?: number | null;
+  /** Why the latest attempt was only partial. */
+  partial: CoolifyFailureDto[];
+  /**
+     * Whether the items are stale: the latest attempt failed, the class was
+     * never listed, or the last success is old.
+     */
+  stale: boolean;
+}
+
+/**
+ * A managed database. No credentials or connection URLs.
+ */
+export interface CoolifyDatabaseDto {
+  /** The description. */
+  description: string;
+  /**
+     * The engine, such as `postgresql`.
+     * @nullable
+     */
+  engine?: string | null;
+  /**
+     * The numeric environment id.
+     * @nullable
+     */
+  environmentId?: number | null;
+  /**
+     * The image reference.
+     * @nullable
+     */
+  image?: string | null;
+  /**
+     * Whether the database is exposed on a public port.
+     * @nullable
+     */
+  isPublic?: boolean | null;
+  /** The name. */
+  name: string;
+  /**
+     * The public port.
+     * @nullable
+     */
+  publicPort?: number | null;
+  /** Coolify's status. */
+  status: string;
+  /** Coolify's identity. */
+  uuid: string;
+}
+
+/**
+ * One deployment of an application. No logs.
+ */
+export interface CoolifyDeploymentDto {
+  /**
+     * The application's name.
+     * @nullable
+     */
+  applicationName?: string | null;
+  /**
+     * The application's identity, when known.
+     * @nullable
+     */
+  applicationUuid?: string | null;
+  /**
+     * The commit.
+     * @nullable
+     */
+  commit?: string | null;
+  /**
+     * The first line of the commit message.
+     * @nullable
+     */
+  commitMessage?: string | null;
+  /**
+     * When it was queued.
+     * @nullable
+     */
+  createdAt?: string | null;
+  /** Coolify's identity. */
+  deploymentUuid: string;
+  /**
+     * Whether the API started it.
+     * @nullable
+     */
+  isApi?: boolean | null;
+  /**
+     * Whether a webhook started it.
+     * @nullable
+     */
+  isWebhook?: boolean | null;
+  /**
+     * The pull request number for preview deployments.
+     * @nullable
+     */
+  pullRequestId?: number | null;
+  /**
+     * The server's name.
+     * @nullable
+     */
+  serverName?: string | null;
+  /** `queued`, `in_progress`, `finished`, `failed`, or `cancelled`. */
+  status: string;
+  /**
+     * When it last changed.
+     * @nullable
+     */
+  updatedAt?: string | null;
+}
+
+/**
+ * An environment of a project.
+ */
+export interface CoolifyEnvironmentDto {
+  /** The description. */
+  description: string;
+  /** Coolify's numeric environment id. */
+  id: number;
+  /** The name. */
+  name: string;
+}
+
+/**
+ * A project with its environments.
+ */
+export interface CoolifyProjectDto {
+  /** The description. */
+  description: string;
+  /** The environments. */
+  environments: CoolifyEnvironmentDto[];
+  /** The name. */
+  name: string;
+  /** Coolify's identity. */
+  uuid: string;
+}
+
+/**
+ * A Coolify server.
+ */
+export interface CoolifyServerDto {
+  /** The address Coolify connects to. */
+  address: string;
+  /** The description. */
+  description: string;
+  /** The name. */
+  name: string;
+  /**
+     * The proxy kind, when set.
+     * @nullable
+     */
+  proxyType?: string | null;
+  /**
+     * Whether Coolify considers it reachable.
+     * @nullable
+     */
+  reachable?: boolean | null;
+  /**
+     * Whether Coolify considers it usable.
+     * @nullable
+     */
+  usable?: boolean | null;
+  /** Coolify's identity. */
+  uuid: string;
+}
+
+/**
+ * A one-click or Compose service.
+ */
+export interface CoolifyServiceDto {
+  /**
+     * When Coolify created it.
+     * @nullable
+     */
+  createdAt?: string | null;
+  /** The description. */
+  description: string;
+  /**
+     * The numeric environment id.
+     * @nullable
+     */
+  environmentId?: number | null;
+  /** The public hostnames of its applications. */
+  fqdns: string[];
+  /** The name. */
+  name: string;
+  /**
+     * The one-click service type.
+     * @nullable
+     */
+  serviceType?: string | null;
+  /**
+     * Coolify's status, when the list reports one.
+     * @nullable
+     */
+  status?: string | null;
+  /**
+     * When Coolify last changed it.
+     * @nullable
+     */
+  updatedAt?: string | null;
+  /** Coolify's identity. */
+  uuid: string;
+}
+
+/**
+ * The stamped, stale-aware Coolify snapshot of one account.
+ */
+export interface CoolifyObservationDto {
+  /** The account the snapshot belongs to. */
+  accountId: string;
+  /** Applications. */
+  applications: CoolifyApplicationDto[];
+  /** The per-class state: stamps, staleness, and failures. */
+  classes: CoolifyClassDto[];
+  /** Databases. */
+  databases: CoolifyDatabaseDto[];
+  /** Recent deployments, newest first. */
+  deployments: CoolifyDeploymentDto[];
+  /** The time staleness was evaluated against (epoch millis). */
+  evaluatedAt: number;
+  /** Projects with their environments. */
+  projects: CoolifyProjectDto[];
+  /** When the snapshot was last written (epoch millis). */
+  recordedAt: number;
+  /** Servers. */
+  servers: CoolifyServerDto[];
+  /** Services. */
+  services: CoolifyServiceDto[];
+  /**
+     * The Coolify version last seen.
+     * @nullable
+     */
+  version?: string | null;
+}
+
+/**
  * One Fleet machine a tailnet device may be.
  */
 export interface CorrelationCandidateDto {
@@ -5156,6 +5475,48 @@ export interface ResourceClearedBuildAddressDto {
 }
 
 /**
+ * The stamped, stale-aware Coolify snapshot of one account.
+ */
+export type ResourceCoolifyObservationDtoData = {
+  /** The account the snapshot belongs to. */
+  accountId: string;
+  /** Applications. */
+  applications: CoolifyApplicationDto[];
+  /** The per-class state: stamps, staleness, and failures. */
+  classes: CoolifyClassDto[];
+  /** Databases. */
+  databases: CoolifyDatabaseDto[];
+  /** Recent deployments, newest first. */
+  deployments: CoolifyDeploymentDto[];
+  /** The time staleness was evaluated against (epoch millis). */
+  evaluatedAt: number;
+  /** Projects with their environments. */
+  projects: CoolifyProjectDto[];
+  /** When the snapshot was last written (epoch millis). */
+  recordedAt: number;
+  /** Servers. */
+  servers: CoolifyServerDto[];
+  /** Services. */
+  services: CoolifyServiceDto[];
+  /**
+     * The Coolify version last seen.
+     * @nullable
+     */
+  version?: string | null;
+};
+
+/**
+ * A single resource.
+ *
+ * The payload is nested under `data` so that later top-level fields are an
+ * additive change rather than a breaking one.
+ */
+export interface ResourceCoolifyObservationDto {
+  /** The stamped, stale-aware Coolify snapshot of one account. */
+  data: ResourceCoolifyObservationDtoData;
+}
+
+/**
  * A credential's metadata. The token and its hash are never part of it.
  */
 export type ResourceCredentialDtoData = {
@@ -9014,6 +9375,142 @@ const res = await fetch(getUpdateExternalAccountUrl(accountId),
 
   const data: updateExternalAccountResponse['data'] = body ? JSON.parse(body) : {}
   return { data, status: res.status, headers: res.headers } as updateExternalAccountResponse
+}
+
+
+
+export type discoverCoolifyAccountResponse200 = {
+  data: ResourceCoolifyObservationDto
+  status: 200
+}
+
+export type discoverCoolifyAccountResponse400 = {
+  data: ApiError
+  status: 400
+}
+
+export type discoverCoolifyAccountResponse403 = {
+  data: ApiError
+  status: 403
+}
+
+export type discoverCoolifyAccountResponse404 = {
+  data: ApiError
+  status: 404
+}
+
+export type discoverCoolifyAccountResponse409 = {
+  data: ApiError
+  status: 409
+}
+
+export type discoverCoolifyAccountResponseSuccess = (discoverCoolifyAccountResponse200) & {
+  headers: Headers;
+};
+export type discoverCoolifyAccountResponseError = (discoverCoolifyAccountResponse400 | discoverCoolifyAccountResponse403 | discoverCoolifyAccountResponse404 | discoverCoolifyAccountResponse409) & {
+  headers: Headers;
+};
+
+export type discoverCoolifyAccountResponse = (discoverCoolifyAccountResponseSuccess | discoverCoolifyAccountResponseError)
+
+export const getDiscoverCoolifyAccountUrl = (accountId: string,) => {
+
+
+
+
+  return `/api/v1/external-accounts/${accountId}/coolify/discover`
+}
+
+/**
+ * # Errors
+ *
+ * Returns the public error envelope on refusal, an unknown or non-Coolify
+ * account, or a missing stored token.
+ * @summary Runs a read-only discovery of a Coolify account and records the
+snapshot. An unreachable or refusing Coolify is a successful run whose
+per-class state says so; the previous items stay, marked stale.
+ */
+export const discoverCoolifyAccount = async (accountId: string, options?: RequestInit): Promise<discoverCoolifyAccountResponse> => {
+
+  const res = await fetch(getDiscoverCoolifyAccountUrl(accountId),
+  {
+    ...options,
+    method: 'POST'
+
+
+  }
+)
+
+
+  const body = [204, 205, 304].includes(res.status) ? null : await res.text();
+
+  const data: discoverCoolifyAccountResponse['data'] = body ? JSON.parse(body) : {}
+  return { data, status: res.status, headers: res.headers } as discoverCoolifyAccountResponse
+}
+
+
+
+export type getCoolifyObservationsResponse200 = {
+  data: ResourceCoolifyObservationDto
+  status: 200
+}
+
+export type getCoolifyObservationsResponse400 = {
+  data: ApiError
+  status: 400
+}
+
+export type getCoolifyObservationsResponse403 = {
+  data: ApiError
+  status: 403
+}
+
+export type getCoolifyObservationsResponse404 = {
+  data: ApiError
+  status: 404
+}
+
+export type getCoolifyObservationsResponseSuccess = (getCoolifyObservationsResponse200) & {
+  headers: Headers;
+};
+export type getCoolifyObservationsResponseError = (getCoolifyObservationsResponse400 | getCoolifyObservationsResponse403 | getCoolifyObservationsResponse404) & {
+  headers: Headers;
+};
+
+export type getCoolifyObservationsResponse = (getCoolifyObservationsResponseSuccess | getCoolifyObservationsResponseError)
+
+export const getGetCoolifyObservationsUrl = (accountId: string,) => {
+
+
+
+
+  return `/api/v1/external-accounts/${accountId}/coolify/observations`
+}
+
+/**
+ * # Errors
+ *
+ * Returns the public error envelope on refusal, an unknown or non-Coolify
+ * account, or when no discovery has run yet.
+ * @summary Reads the cached Coolify snapshot of an account, with per-class stamps
+and staleness evaluated now.
+ */
+export const getCoolifyObservations = async (accountId: string, options?: RequestInit): Promise<getCoolifyObservationsResponse> => {
+
+  const res = await fetch(getGetCoolifyObservationsUrl(accountId),
+  {
+    ...options,
+    method: 'GET'
+
+
+  }
+)
+
+
+  const body = [204, 205, 304].includes(res.status) ? null : await res.text();
+
+  const data: getCoolifyObservationsResponse['data'] = body ? JSON.parse(body) : {}
+  return { data, status: res.status, headers: res.headers } as getCoolifyObservationsResponse
 }
 
 

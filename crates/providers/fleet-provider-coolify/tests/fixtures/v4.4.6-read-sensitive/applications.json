@@ -1,0 +1,112 @@
+[
+  {
+    "id": 1,
+    "uuid": "appweb000000000001",
+    "name": "web",
+    "description": null,
+    "fqdn": "https://shop.example.test,https://www.shop.example.test",
+    "git_commit_sha": "HEAD",
+    "docker_registry_image_name": null,
+    "docker_registry_image_tag": null,
+    "build_pack": "nixpacks",
+    "ports_exposes": "3000",
+    "status": "running:healthy",
+    "environment_id": 1,
+    "destination_type": "App\\Models\\StandaloneDocker",
+    "destination_id": 1,
+    "source_id": 1,
+    "private_key_id": 2,
+    "created_at": "2026-01-15T10:00:00.000000Z",
+    "updated_at": "2026-01-15T10:00:00.000000Z",
+    "deleted_at": null,
+    "git_repository": "example-org/shop",
+    "git_branch": "main",
+    "docker_compose_raw": "services:\n  db:\n    environment:\n      PASSWORD: SENTINEL-SECRET-compose",
+    "manual_webhook_secret_github": "SENTINEL-SECRET-wh",
+    "http_basic_auth_password": "SENTINEL-SECRET-basic",
+    "http_basic_auth_username": "SENTINEL-SECRET-user",
+    "custom_labels": "SENTINEL-SECRET-labels",
+    "environment_variables": [
+      {
+        "key": "API_KEY",
+        "value": "SENTINEL-SECRET-env",
+        "real_value": "SENTINEL-SECRET-env"
+      }
+    ],
+    "git_full_url": "https://x-access-token:SENTINEL-SECRET-url@example.test/o/r.git",
+    "dockerfile": "RUN echo SENTINEL-SECRET-dockerfile"
+  },
+  {
+    "id": 2,
+    "uuid": "appstack000000000002",
+    "name": "stack",
+    "description": null,
+    "fqdn": null,
+    "git_commit_sha": "HEAD",
+    "docker_registry_image_name": null,
+    "docker_registry_image_tag": null,
+    "build_pack": "dockercompose",
+    "ports_exposes": "3000",
+    "status": "running:unhealthy",
+    "environment_id": 2,
+    "destination_type": "App\\Models\\StandaloneDocker",
+    "destination_id": 1,
+    "source_id": 1,
+    "private_key_id": 2,
+    "created_at": "2026-01-15T10:00:00.000000Z",
+    "updated_at": "2026-01-15T10:00:00.000000Z",
+    "deleted_at": null,
+    "docker_compose_domains": "{\"web\": {\"domain\": \"https://stack.example.test\"}, \"admin\": {\"domain\": \"https://admin.stack.example.test\"}}",
+    "git_repository": "example-org/stack",
+    "git_branch": "release",
+    "docker_compose_raw": "services:\n  db:\n    environment:\n      PASSWORD: SENTINEL-SECRET-compose",
+    "manual_webhook_secret_github": "SENTINEL-SECRET-wh",
+    "http_basic_auth_password": "SENTINEL-SECRET-basic",
+    "http_basic_auth_username": "SENTINEL-SECRET-user",
+    "custom_labels": "SENTINEL-SECRET-labels",
+    "environment_variables": [
+      {
+        "key": "API_KEY",
+        "value": "SENTINEL-SECRET-env",
+        "real_value": "SENTINEL-SECRET-env"
+      }
+    ],
+    "git_full_url": "https://x-access-token:SENTINEL-SECRET-url@example.test/o/r.git",
+    "dockerfile": "RUN echo SENTINEL-SECRET-dockerfile"
+  },
+  {
+    "id": 3,
+    "uuid": "applegacy000000000003",
+    "name": "legacy",
+    "description": null,
+    "fqdn": null,
+    "git_commit_sha": "HEAD",
+    "docker_registry_image_name": "ghcr.io/example-org/legacy",
+    "docker_registry_image_tag": "1.4.2",
+    "build_pack": "dockerimage",
+    "ports_exposes": "3000",
+    "status": "exited:unhealthy",
+    "environment_id": 3,
+    "destination_type": "App\\Models\\StandaloneDocker",
+    "destination_id": 1,
+    "source_id": 1,
+    "private_key_id": 2,
+    "created_at": "2026-01-15T10:00:00.000000Z",
+    "updated_at": "2026-01-15T10:00:00.000000Z",
+    "deleted_at": null,
+    "docker_compose_raw": "services:\n  db:\n    environment:\n      PASSWORD: SENTINEL-SECRET-compose",
+    "manual_webhook_secret_github": "SENTINEL-SECRET-wh",
+    "http_basic_auth_password": "SENTINEL-SECRET-basic",
+    "http_basic_auth_username": "SENTINEL-SECRET-user",
+    "custom_labels": "SENTINEL-SECRET-labels",
+    "environment_variables": [
+      {
+        "key": "API_KEY",
+        "value": "SENTINEL-SECRET-env",
+        "real_value": "SENTINEL-SECRET-env"
+      }
+    ],
+    "git_full_url": "https://x-access-token:SENTINEL-SECRET-url@example.test/o/r.git",
+    "dockerfile": "RUN echo SENTINEL-SECRET-dockerfile"
+  }
+]

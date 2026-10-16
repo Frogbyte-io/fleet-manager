@@ -1,4 +1,5 @@
-//! The Coolify provider: a token health probe (FM-1001).
+//! The Coolify provider: a token health probe (FM-1001) and read-only
+//! resource discovery (FM-1030, see [`discovery`]).
 //!
 //! Coolify's API tokens carry abilities (`read`, `write`, `deploy`,
 //! `read:sensitive`, `root`; see <https://coolify.io/docs/api-reference/permissions>),
@@ -30,6 +31,12 @@
 //! `read:sensitive` and `root` abilities are not probed either. The token
 //! is sent only as a bearer header and never appears in any returned value.
 #![warn(missing_docs)]
+
+pub mod discovery;
+pub mod scrub;
+mod translate;
+
+pub use discovery::{CoolifyHttpSource, discover};
 
 use std::error::Error as _;
 use std::time::Duration;
@@ -138,10 +145,13 @@ fn classify(status: u16, body: &str) -> ProbeReport {
     }
 }
 
-/// A Coolify version string: starts with a digit, then letters, digits,
+/// A Coolify version string: optionally `v`, then a digit, then letters, digits,
 /// `.`, `-`, or `+`, at most 40 characters. `/version` answers plain text.
 fn looks_like_version(body: &str) -> bool {
+    // Coolify's OpenAPI example for `/version` is `v4.0.0`; the running
+    // service answers without the `v`. Both are versions.
     let text = body.trim().trim_matches('"');
+    let text = text.strip_prefix('v').unwrap_or(text);
     !text.is_empty()
         && text.len() <= 40
         && text.starts_with(|c: char| c.is_ascii_digit())

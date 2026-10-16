@@ -233,7 +233,10 @@ fn accounts_or_error(
     })
 }
 
-fn map_error(error: &ExternalAccountError, correlation_id: CorrelationId) -> ApiErrorResponse {
+pub(crate) fn map_error(
+    error: &ExternalAccountError,
+    correlation_id: CorrelationId,
+) -> ApiErrorResponse {
     let (status, code, retry): (StatusCode, &str, RetryClass) = match error {
         ExternalAccountError::Denied(_) => (StatusCode::FORBIDDEN, "denied", RetryClass::Never),
         ExternalAccountError::NotFound { .. } => {

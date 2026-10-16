@@ -152,6 +152,12 @@ fn run_serve(mut config: fleet_config::ControllerConfig) -> ExitCode {
                                 secret_store.clone(),
                             ),
                         );
+                        node_services.coolify_discovery = Some(
+                            fleet_controller::external_accounts_store::compose_coolify_discovery(
+                                store.pool(),
+                                secret_store.clone(),
+                            ),
+                        );
                         Some(node_services)
                     }
                     Err(error) => {

@@ -1,0 +1,41 @@
+{
+  "count": 2,
+  "deployments": [
+    {
+      "id": 11,
+      "application_id": 1,
+      "deployment_uuid": "depactive00000000011",
+      "pull_request_id": 0,
+      "commit": "9f1c2a3b4d5e6f708192a3b4c5d6e7f801234567",
+      "status": "in_progress",
+      "is_webhook": true,
+      "is_api": false,
+      "created_at": "2026-01-16T09:00:00.000000Z",
+      "updated_at": "2026-01-16T09:01:00.000000Z",
+      "server_id": 0,
+      "application_name": "web",
+      "server_name": "localhost",
+      "commit_message": "Fix checkout rounding\n\nLonger body that is not kept.",
+      "logs": "[{\"output\": \"password=SENTINEL-SECRET-log\"}]",
+      "configuration_snapshot": "SENTINEL-SECRET-snap"
+    },
+    {
+      "id": 9,
+      "application_id": 1,
+      "deployment_uuid": "depfinished0000000009",
+      "pull_request_id": 0,
+      "commit": "0a1b2c3d4e5f60718293a4b5c6d7e8f901234567",
+      "status": "finished",
+      "is_webhook": false,
+      "is_api": true,
+      "created_at": "2026-01-14T09:00:00.000000Z",
+      "updated_at": "2026-01-14T09:03:00.000000Z",
+      "server_id": 0,
+      "application_name": "web",
+      "server_name": "localhost",
+      "commit_message": "Bump dependencies",
+      "logs": "[{\"output\": \"password=SENTINEL-SECRET-log\"}]",
+      "configuration_snapshot": "SENTINEL-SECRET-snap"
+    }
+  ]
+}
