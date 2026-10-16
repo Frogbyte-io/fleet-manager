@@ -153,6 +153,12 @@ pub enum Permission {
     /// snapshot delete, clone, template conversion, or remote task
     /// cancellation. A mutation: it changes or destroys guest state.
     ProxmoxDestructive,
+    /// List external provider accounts (Coolify, Cloudflare) and their
+    /// last probe results. A read, but a topology-revealing one.
+    ExternalAccountRead,
+    /// Create, update, probe, or remove an external provider account. A
+    /// mutation: it stores, replaces, removes, or uses a credential.
+    ExternalAccountConfig,
     /// List and read image recipes and their published versions. A read,
     /// but a build-infrastructure-revealing one.
     ImagesRead,
@@ -282,6 +288,8 @@ impl Permission {
         Permission::ProxmoxConfig,
         Permission::ProxmoxOperate,
         Permission::ProxmoxDestructive,
+        Permission::ExternalAccountRead,
+        Permission::ExternalAccountConfig,
         Permission::ImagesRead,
         Permission::ImagesConfig,
         Permission::LabRead,
@@ -356,6 +364,8 @@ impl Permission {
             Permission::ProxmoxConfig => "proxmox.config",
             Permission::ProxmoxOperate => "proxmox.operate",
             Permission::ProxmoxDestructive => "proxmox.destructive",
+            Permission::ExternalAccountRead => "external_account.read",
+            Permission::ExternalAccountConfig => "external_account.config",
             Permission::ImagesRead => "images.read",
             Permission::ImagesConfig => "images.config",
             Permission::LabRead => "lab.read",
@@ -439,6 +449,8 @@ impl Permission {
             | Permission::ProxmoxConfig
             | Permission::ProxmoxOperate
             | Permission::ProxmoxDestructive
+            | Permission::ExternalAccountRead
+            | Permission::ExternalAccountConfig
             | Permission::ImagesConfig
             | Permission::LabConfig
             | Permission::LabProvision
@@ -486,6 +498,8 @@ impl Permission {
             | Permission::ProxmoxConfig
             | Permission::ProxmoxOperate
             | Permission::ProxmoxDestructive
+            | Permission::ExternalAccountRead
+            | Permission::ExternalAccountConfig
             | Permission::ImagesRead
             | Permission::ImagesConfig
             | Permission::LabRead
