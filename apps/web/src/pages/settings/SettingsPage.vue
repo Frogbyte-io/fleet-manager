@@ -25,6 +25,7 @@ import DiagnosticsSection from './sections/DiagnosticsSection.vue'
 import FleetdSection from './sections/FleetdSection.vue'
 import GapSection from './sections/GapSection.vue'
 import IntegrationsSection from './sections/IntegrationsSection.vue'
+import ProviderAccountsSection from './sections/ProviderAccountsSection.vue'
 import SecuritySection from './sections/SecuritySection.vue'
 import SettingsLoading from './sections/SettingsLoading.vue'
 
@@ -262,6 +263,7 @@ void load()
           :tailnet="tailnet"
           :tailnet-unavailable="tailnetUnavailable"
         />
+        <ProviderAccountsSection v-else-if="section === 'provider-accounts'" />
         <FleetdSection
           v-else-if="section === 'fleetd'"
           :machines="machines"
