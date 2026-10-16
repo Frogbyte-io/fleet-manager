@@ -24,6 +24,7 @@ import { useOperationsList } from '../operations/useOperations'
 import { usePendingRequests } from '../requests/useRequests'
 import { isFingerprintMismatch } from '../proxmox/proxmox'
 import { useProxmox } from '../proxmox/useProxmox'
+import { useRegistryEntries } from '../registry/useRegistry'
 
 import {
   activity,
@@ -37,6 +38,7 @@ import {
   operationRows,
   proxmoxRows,
   requestRows,
+  serviceRenewalRows,
   sortAttention,
   templatePinRows,
 } from './attention'
@@ -111,6 +113,8 @@ export function useOverview() {
     // Lookups run on the controller's schedule; no event announces them.
     refetchInterval: 5 * 60_000,
   })
+  // Services renewing soon (FM-1021); shares the Services view's cache entry.
+  const services = useRegistryEntries('service', '')
   const operations = useOperationsList()
   const requests = usePendingRequests()
   const proxmox = useProxmox()
@@ -157,6 +161,7 @@ export function useOverview() {
       ...templatePinRows(images.templates.data.value ?? [], images.versions.value),
       ...driftRows(drift.query.data.value?.items ?? []),
       ...domainRows(domains.data.value ?? []),
+      ...serviceRenewalRows(services.data.value?.items ?? [], now.value),
     ])
   })
 
@@ -173,6 +178,7 @@ export function useOverview() {
     proxmox.accounts.error.value && 'Proxmox accounts',
     drift.query.error.value && 'skill drift',
     domains.error.value && 'domain observations',
+    services.error.value && 'service renewals',
     images.leases.error.value && 'Lab leases',
     orphanAudit.error.value && 'Lab orphan reports',
     // Audit pages run oldest first, so a cut read misses the newest reports.

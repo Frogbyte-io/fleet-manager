@@ -5,6 +5,7 @@ import type { OperationDto } from '@frogbyte-io/fleet-api-client'
 import {
   activity,
   domainRows,
+  serviceRenewalRows,
   driftRows,
   EXPIRING_WINDOW_MS,
   kpis,
@@ -201,9 +202,27 @@ describe('kpis and activity', () => {
       { key: 'drift.example', warnings: [{ code: 'expiry_changed', severity: 'info', message: 'Expiry changed.' }] },
     ])
     expect(rows.map(r => [r.key, r.source, r.severity, r.to])).toEqual([
-      ['domain:soon.example', 'domain', 'err', { path: '/registry', query: { type: 'domain', entry: 'soon.example' } }],
-      ['domain:drift.example', 'domain', 'info', { path: '/registry', query: { type: 'domain', entry: 'drift.example' } }],
+      ['domain:soon.example', 'domain', 'err', { path: '/registry/domains', query: { open: 'soon.example' } }],
+      ['domain:drift.example', 'domain', 'info', { path: '/registry/domains', query: { open: 'drift.example' } }],
     ])
     expect(rows[0]!.detail).toBe('Auto-renew is off and the domain expires in 4 days. (1 more)')
+  })
+
+  it('flags services renewing within two weeks and ones whose renewal date has passed', () => {
+    const now = Date.UTC(2026, 9, 16, 12)
+    const service = (key: string, fields: Record<string, unknown>) => ({ id: key, key, name: key, type: 'service', fields, links: [], relations: [], tags: [] })
+    const rows = serviceRenewalRows([
+      service('far', { name: 'Far', renewal: '2027-01-01' }),
+      service('soon', { name: 'Soon', renewal: '2026-10-20', cost: '9.00 EUR', billingPeriod: 'monthly' }),
+      service('late', { name: 'Late', renewal: '2026-10-01' }),
+      service('none', { name: 'None' }),
+    ], now)
+    expect(rows.map(r => [r.key, r.severity, r.to])).toEqual([
+      ['service-renewal:late', 'info', { path: '/registry/services', query: { entry: 'late' } }],
+      ['service-renewal:soon', 'warn', { path: '/registry/services', query: { entry: 'soon' } }],
+    ])
+    expect(rows[1]!.title).toBe('Soon renews in 4 days')
+    expect(rows[1]!.detail).toContain('€9.00 / month')
+    expect(rows[0]!.title).toBe('Late: renewal date has passed')
   })
 })
