@@ -6,10 +6,8 @@ import { RouterLink } from 'vue-router'
 import { targetLink } from '../registry'
 
 // An entry's outgoing relations as links. Registry entries, machines, and
-// Proxmox guests link to their page; targets without a page stay plain text.
-// This is also where running services (FM-1031) will link once the controller
-// has a running-service API: `targetLink` gains a `service` branch and nothing
-// else here changes.
+// Proxmox guests link to their page, and a Coolify resource links to the running
+// service that carries its uuid (FM-1032); targets without a page stay plain text.
 const props = defineProps<{ relations: RegistryRelationDto[], machineIds: ReadonlyMap<string, string> }>()
 
 const items = computed(() => props.relations.map(r => ({ relation: r.type, link: targetLink(r.target, props.machineIds) })))

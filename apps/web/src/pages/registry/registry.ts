@@ -222,6 +222,9 @@ export function targetLink(target: TargetRef, machineIds: ReadonlyMap<string, st
     }
     case 'proxmoxGuest':
       return { to: { path: '/proxmox' }, label, classLabel }
+    // A Coolify resource uuid opens the running service that carries it.
+    case 'coolify':
+      return { to: { path: '/services', query: { uuid: target.reference } }, label, classLabel }
     default:
       return { to: null, label, classLabel }
   }
