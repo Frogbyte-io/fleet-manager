@@ -1508,10 +1508,26 @@ export interface RdapObservationDto {
 export interface DomainObservationDto {
   /** The public DNS data. */
   dns: DnsObservationDto;
-  /** When the lookups finished (epoch milliseconds). */
+  /**
+     * Consecutive attempts with a failed half.
+     * @minimum 0
+     */
+  failures: number;
+  /**
+     * The latest attempt's failure, when a half failed.
+     * @nullable
+     */
+  lastError?: string | null;
+  /** When the latest lookup attempt finished (epoch milliseconds). */
   observedAt: number;
   /** The public registration data. */
   rdap: RdapObservationDto;
+  /**
+     * When the data of a half that now fails to refresh was last good
+     * (epoch milliseconds); set only while old data is being kept.
+     * @nullable
+     */
+  staleSince?: number | null;
 }
 
 /**
@@ -1590,6 +1606,9 @@ export const WarningCodeDto = {
   expiry_changed: 'expiry_changed',
   expiring: 'expiring',
   auto_renew_off_expiring: 'auto_renew_off_expiring',
+  stale_observation: 'stale_observation',
+  rdap_not_found: 'rdap_not_found',
+  lookup_failing: 'lookup_failing',
 } as const;
 
 /**

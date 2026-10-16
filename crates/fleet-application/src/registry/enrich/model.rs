@@ -107,12 +107,86 @@ pub struct DnsObservation {
 /// the entry in SQLite; they never rewrite Fleet Git (ADR 0016).
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct DomainObservation {
-    /// When the lookups finished, in epoch milliseconds.
+    /// When the latest lookup attempt finished, in epoch milliseconds.
     pub observed_at: i64,
+    /// The latest attempt's failure, when a half failed. The half itself
+    /// keeps the last good data when there was any (see `stale_since`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_error: Option<String>,
+    /// When the data of a half that now fails to refresh was last good
+    /// (epoch milliseconds). Set only while old data is being kept.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stale_since: Option<i64>,
+    /// Consecutive attempts with a failed half; zero after a clean one.
+    #[serde(default)]
+    pub failures: u32,
     /// The public registration data.
     pub rdap: RdapObservation,
     /// The public DNS data.
     pub dns: DnsObservation,
+}
+
+impl DomainObservation {
+    /// Whether the latest attempt succeeded in both halves and shows no
+    /// kept-over data. Only a settled observation counts as fresh for the
+    /// sweep; anything else is retried at the next one.
+    #[must_use]
+    pub fn is_settled(&self) -> bool {
+        self.stale_since.is_none()
+            && self.failures == 0
+            && self.rdap.status != RdapStatus::Error
+            && self.dns.status != DnsStatus::Error
+    }
+
+    /// Combines a fresh attempt with the previous observation. A half that
+    /// failed this time keeps the previous half's data when that was good,
+    /// so one outage does not erase what was known; the observation is then
+    /// marked stale (`stale_since` is when the kept data was last good) and
+    /// carries the error. A half that failed with nothing good to keep is
+    /// recorded as the failure it is.
+    #[must_use]
+    pub fn merged_with(mut self, previous: Option<&Self>) -> Self {
+        let mut errors = Vec::new();
+        if self.rdap.status == RdapStatus::Error {
+            errors.push(
+                self.rdap
+                    .detail
+                    .clone()
+                    .unwrap_or_else(|| "the RDAP lookup failed".to_owned()),
+            );
+        }
+        if self.dns.status == DnsStatus::Error {
+            errors.push(
+                self.dns
+                    .detail
+                    .clone()
+                    .unwrap_or_else(|| "the DNS lookup failed".to_owned()),
+            );
+        }
+        if errors.is_empty() {
+            return self;
+        }
+        self.failures = previous.map_or(0, |p| p.failures).saturating_add(1);
+        self.last_error = Some(errors.join("; "));
+        if let Some(previous) = previous {
+            // `stale_since` is when the kept data was last good: the
+            // earlier marker when the data was already being kept.
+            let good_at = previous.stale_since.unwrap_or(previous.observed_at);
+            let mut kept = false;
+            if self.rdap.status == RdapStatus::Error && previous.rdap.status == RdapStatus::Ok {
+                self.rdap = previous.rdap.clone();
+                kept = true;
+            }
+            if self.dns.status == DnsStatus::Error && previous.dns.status == DnsStatus::Ok {
+                self.dns = previous.dns.clone();
+                kept = true;
+            }
+            if kept {
+                self.stale_since = Some(good_at);
+            }
+        }
+        self
+    }
 }
 
 /// How one field's recorded value compares with the observation.
@@ -170,6 +244,13 @@ pub enum WarningCode {
     Expiring,
     /// The domain expires within the window and auto-renew is off.
     AutoRenewOffExpiring,
+    /// The data shown is old: the latest lookup failed, or no lookup
+    /// succeeded for more than twice the sweep interval.
+    StaleObservation,
+    /// The registry reports the domain is not registered.
+    RdapNotFound,
+    /// Lookups have failed several times in a row.
+    LookupFailing,
 }
 
 /// One derived warning.

@@ -11890,6 +11890,7 @@
         "description": "One public lookup result for a domain entry. Recorded in the\ncontroller's database; never written to Fleet Git.",
         "required": [
           "observedAt",
+          "failures",
           "rdap",
           "dns"
         ],
@@ -11898,14 +11899,35 @@
             "$ref": "#/components/schemas/DnsObservationDto",
             "description": "The public DNS data."
           },
+          "failures": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Consecutive attempts with a failed half.",
+            "minimum": 0
+          },
+          "lastError": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The latest attempt's failure, when a half failed."
+          },
           "observedAt": {
             "type": "integer",
             "format": "int64",
-            "description": "When the lookups finished (epoch milliseconds)."
+            "description": "When the latest lookup attempt finished (epoch milliseconds)."
           },
           "rdap": {
             "$ref": "#/components/schemas/RdapObservationDto",
             "description": "The public registration data."
+          },
+          "staleSince": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "When the data of a half that now fails to refresh was last good\n(epoch milliseconds); set only while old data is being kept."
           }
         }
       },
@@ -22976,7 +22998,10 @@
           "dns_host_mismatch",
           "expiry_changed",
           "expiring",
-          "auto_renew_off_expiring"
+          "auto_renew_off_expiring",
+          "stale_observation",
+          "rdap_not_found",
+          "lookup_failing"
         ]
       }
     }

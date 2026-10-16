@@ -20,6 +20,9 @@ fn today() -> i64 {
 fn observation(registrar: Option<&str>, expires: Option<&str>, ns: &[&str]) -> DomainObservation {
     DomainObservation {
         observed_at: NOW,
+        last_error: None,
+        stale_since: None,
+        failures: 0,
         rdap: RdapObservation {
             status: RdapStatus::Ok,
             server: Some("https://rdap.example/".to_owned()),
@@ -78,23 +81,118 @@ fn registrar_names_match_across_legal_suffixes_and_punctuation() {
     assert!(!registrars_match("Hostinger", "Webhuset AS"));
 }
 
+fn ns(names: &[&str]) -> Vec<String> {
+    names.iter().map(|n| (*n).to_owned()).collect()
+}
+
 #[test]
-fn dns_hosts_match_by_name_or_known_alias() {
-    let ns = |names: &[&str]| names.iter().map(|n| (*n).to_owned()).collect::<Vec<_>>();
-    assert!(dns_host_matches(
-        "Cloudflare",
-        &ns(&["elliott.ns.cloudflare.com"])
+fn dns_hosts_match_whole_labels_by_name_or_known_alias() {
+    assert_eq!(
+        dns_host_matches("Cloudflare", &ns(&["elliott.ns.cloudflare.com"])),
+        Some(true)
+    );
+    assert_eq!(
+        dns_host_matches("Cloudflare DNS", &ns(&["elliott.ns.cloudflare.com"])),
+        Some(true)
+    );
+    assert_eq!(
+        dns_host_matches("Hostinger", &ns(&["ns1.dns-parking.com"])),
+        Some(true)
+    );
+    assert_eq!(
+        dns_host_matches("GoDaddy", &ns(&["ns01.domaincontrol.com"])),
+        Some(true)
+    );
+    assert_eq!(
+        dns_host_matches("Domeneshop", &ns(&["ns.hyp.net", "ns2.hyp.net"])),
+        Some(true)
+    );
+    assert_eq!(
+        dns_host_matches("AWS", &ns(&["ns-123.awsdns-45.com"])),
+        Some(true)
+    );
+    assert_eq!(
+        dns_host_matches("Route 53", &ns(&["ns-9.awsdns-01.org"])),
+        Some(true)
+    );
+    assert_eq!(
+        dns_host_matches("Cloudflare", &ns(&["ns1.dns-parking.com"])),
+        Some(false)
+    );
+}
+
+#[test]
+fn dns_host_words_never_match_inside_a_label() {
+    // "aws" is three letters: only the alias applies, and only to awsdns.
+    assert_eq!(
+        dns_host_matches(
+            "aws",
+            &ns(&["ns1.laws.example.net", "ns2.jaws.example.net"])
+        ),
+        Some(false)
+    );
+    // A word is not matched as a substring of a longer label.
+    assert_eq!(
+        dns_host_matches("Cloudflare", &ns(&["ns1.notcloudflare.example.net"])),
+        Some(false)
+    );
+    assert_eq!(
+        dns_host_matches("Hosting Provider", &ns(&["ns1.example.net"])),
+        None
+    );
+}
+
+#[test]
+fn generic_dns_host_values_are_unknown() {
+    for value in [
+        "registrar",
+        "Same as registrar",
+        "same as registrar",
+        "n/a",
+        "",
+        "-",
+    ] {
+        assert_eq!(
+            dns_host_matches(value, &ns(&["ns1.example.net"])),
+            None,
+            "{value:?}"
+        );
+    }
+    let fields = json!({"fqdn": "example.com", "dnsHost": "same as registrar"});
+    let seen = observation(None, None, &["ns1.example.net"]);
+    let result = assess(&fields, Some(&seen), today(), 30);
+    assert_eq!(diff_of(&result, "dnsHost").state, FieldState::Unknown);
+    assert!(result.warnings.is_empty());
+}
+
+#[test]
+fn registrar_aliases_cover_rebrands() {
+    assert!(registrars_match("Route 53", "Amazon Registrar, Inc."));
+    assert!(registrars_match(
+        "Google Domains",
+        "Squarespace Domains LLC"
     ));
-    assert!(dns_host_matches("Hostinger", &ns(&["ns1.dns-parking.com"])));
-    assert!(dns_host_matches(
-        "GoDaddy",
-        &ns(&["ns01.domaincontrol.com"])
-    ));
-    assert!(!dns_host_matches(
-        "Cloudflare",
-        &ns(&["ns1.dns-parking.com"])
-    ));
-    assert!(!dns_host_matches("", &ns(&["ns1.dns-parking.com"])));
+    assert!(!registrars_match("Google Domains", "Namecheap, Inc."));
+    assert!(!registrars_match("Route 53", "Squarespace Domains LLC"));
+    // A mismatch the aliases do not excuse is still a warning.
+    let fields = json!({"fqdn": "example.com", "registrar": "Porkbun"});
+    let seen = observation(Some("Squarespace Domains LLC"), None, &[]);
+    let result = assess(&fields, Some(&seen), today(), 30);
+    assert_eq!(result.warnings[0].severity, Severity::Warn);
+}
+
+#[test]
+fn impossible_dates_are_not_dates() {
+    assert_eq!(days_from_date("2027-02-29"), None);
+    assert_eq!(days_from_date("2027-04-31"), None);
+    assert_eq!(days_from_date("2027-00-10"), None);
+    assert_eq!(days_from_date("2027-06-00"), None);
+    assert!(
+        days_from_date("2028-02-29").is_some(),
+        "2028 is a leap year"
+    );
+    assert_eq!(days_from_date("2100-02-29"), None, "2100 is not");
+    assert!(days_from_date("2000-02-29").is_some(), "2000 is");
 }
 
 #[test]
@@ -188,6 +286,7 @@ fn nameservers_that_do_not_match_dns_host_warn() {
     let result = assess(&fields, Some(&seen), today(), 30);
     assert_eq!(diff_of(&result, "dnsHost").state, FieldState::Changed);
     assert_eq!(codes(&result), [WarningCode::DnsHostMismatch]);
+    assert_eq!(result.warnings[0].severity, Severity::Info);
     // A provider's name cannot be derived from its servers.
     assert!(result.suggestion.iter().all(|s| s.field != "dnsHost"));
 }
@@ -818,7 +917,7 @@ async fn sweep_skips_fresh_observations_audits_once_and_prunes_removed_entries()
     let intents = rig.audit.intents.lock().unwrap();
     assert_eq!(intents.len(), 1);
     assert_eq!(intents[0].resource, None);
-    assert_eq!(intents[0].actor, "system");
+    assert_eq!(intents[0].actor, crate::skill_catalog::CONTROLLER_ACTOR);
 }
 
 #[tokio::test]
@@ -906,4 +1005,207 @@ fn malformed_settings_are_refused_by_name() {
         let error = EnrichSettings::from_env_values(interval, window).unwrap_err();
         assert!(error.contains(needle), "{error}");
     }
+}
+
+// ---- failures, staleness, health ----
+
+fn failed_rdap() -> Result<RdapAnswer, RdapFailure> {
+    Err(RdapFailure::Failed(
+        "the server could not be reached".to_owned(),
+    ))
+}
+
+#[tokio::test]
+async fn a_failed_lookup_keeps_the_last_good_data_and_marks_it_stale() {
+    let server = "https://rdap.verisign.com/";
+    let rig = rig(
+        vec![entry(
+            "example.com",
+            json!({"fqdn": "example.com", "registrar": "Porkbun"}),
+        )],
+        RdapStub::default().with("example.com", server, Ok(com_answer())),
+        DnsStub::default().with("example.com", DnsKind::Ns, &["a.ns.cloudflare.com"]),
+        Duration::ZERO,
+    );
+    let good = rig
+        .enricher
+        .refresh(&Allow, "a", None, "example.com")
+        .await
+        .unwrap();
+    assert!(good.observation.as_ref().unwrap().is_settled());
+
+    // The next attempt fails: the earlier registrar and expiry survive.
+    rig.rdap
+        .answers
+        .lock()
+        .unwrap()
+        .insert("example.com".to_owned(), (server.to_owned(), failed_rdap()));
+    let view = rig
+        .enricher
+        .refresh(&Allow, "a", None, "example.com")
+        .await
+        .unwrap();
+    let kept = view.observation.unwrap();
+    assert_eq!(kept.rdap.status, RdapStatus::Ok);
+    assert_eq!(kept.rdap.registrar.as_deref(), Some("Porkbun LLC"));
+    assert_eq!(kept.rdap.expires.as_deref(), Some("2027-08-13"));
+    assert_eq!(kept.stale_since, Some(NOW));
+    assert_eq!(kept.failures, 1);
+    assert!(
+        kept.last_error
+            .as_deref()
+            .unwrap()
+            .contains("could not be reached")
+    );
+    assert!(!kept.is_settled());
+    assert!(codes(&view.assessment).contains(&WarningCode::StaleObservation));
+    // And what was stored is the merged observation.
+    assert_eq!(rig.store.get("example.com").await.unwrap().unwrap(), kept);
+
+    // Recovery clears the marks.
+    rig.rdap.answers.lock().unwrap().insert(
+        "example.com".to_owned(),
+        (server.to_owned(), Ok(com_answer())),
+    );
+    let healed = rig
+        .enricher
+        .refresh(&Allow, "a", None, "example.com")
+        .await
+        .unwrap();
+    let healed = healed.observation.unwrap();
+    assert!(healed.is_settled() && healed.last_error.is_none());
+}
+
+#[tokio::test]
+async fn a_failure_with_nothing_good_to_keep_is_recorded_as_the_failure() {
+    let rig = rig(
+        vec![entry("example.com", json!({"fqdn": "example.com"}))],
+        RdapStub::default().with("example.com", "https://rdap.verisign.com/", failed_rdap()),
+        DnsStub::default(),
+        Duration::ZERO,
+    );
+    let view = rig
+        .enricher
+        .refresh(&Allow, "a", None, "example.com")
+        .await
+        .unwrap();
+    let observed = view.observation.unwrap();
+    assert_eq!(observed.rdap.status, RdapStatus::Error);
+    assert_eq!(observed.stale_since, None);
+    assert_eq!(observed.failures, 1);
+}
+
+#[tokio::test]
+async fn an_unsettled_observation_is_not_fresh_for_the_sweep() {
+    let server = "https://rdap.verisign.com/";
+    let rig = rig(
+        vec![entry("example.com", json!({"fqdn": "example.com"}))],
+        RdapStub::default().with("example.com", server, failed_rdap()),
+        DnsStub::default(),
+        Duration::ZERO,
+    );
+    // A just-recorded failure (age ~0) is retried by the next sweep...
+    let mut failed = observation(None, None, &[]);
+    failed.rdap = RdapObservation::empty(RdapStatus::Error, "down");
+    failed.failures = 1;
+    rig.store.save("example.com", &failed).await.unwrap();
+    let report = rig
+        .enricher
+        .sweep(&Allow, "system", Some(Duration::from_hours(24)))
+        .await
+        .unwrap();
+    assert_eq!((report.observed, report.fresh), (1, 0));
+    // ...while a settled one of the same age is skipped.
+    rig.store
+        .save("example.com", &observation(None, None, &[]))
+        .await
+        .unwrap();
+    let report = rig
+        .enricher
+        .sweep(&Allow, "system", Some(Duration::from_hours(24)))
+        .await
+        .unwrap();
+    assert_eq!((report.observed, report.fresh), (0, 1));
+}
+
+#[test]
+fn health_warnings_cover_not_found_persistent_failure_and_age() {
+    let fields = json!({"fqdn": "example.com"});
+    let context = |now: i64, stale: Option<i64>| diff::AssessContext {
+        today: diff::days_from_millis(now),
+        window_days: 30,
+        now_millis: now,
+        stale_after_millis: stale,
+    };
+    let mut gone = observation(None, None, &[]);
+    gone.rdap = RdapObservation::empty(RdapStatus::NotFound, "unregistered");
+    let result = diff::assess_with(&fields, Some(&gone), &context(NOW, None));
+    assert_eq!(codes(&result), [WarningCode::RdapNotFound]);
+    assert_eq!(result.warnings[0].severity, Severity::Warn);
+
+    let mut failing = observation(None, None, &[]);
+    failing.failures = 3;
+    failing.last_error = Some("down".to_owned());
+    let result = diff::assess_with(&fields, Some(&failing), &context(NOW, None));
+    assert_eq!(codes(&result), [WarningCode::LookupFailing]);
+    failing.failures = 2;
+    assert!(
+        diff::assess_with(&fields, Some(&failing), &context(NOW, None))
+            .warnings
+            .is_empty()
+    );
+
+    // Older than twice the interval is stale; within it is not; off is never.
+    let day = 86_400_000;
+    let old = observation(None, None, &[]);
+    let later = NOW + 3 * day;
+    let result = diff::assess_with(&fields, Some(&old), &context(later, Some(2 * day)));
+    assert_eq!(codes(&result), [WarningCode::StaleObservation]);
+    assert_eq!(result.warnings[0].severity, Severity::Info);
+    assert!(
+        diff::assess_with(&fields, Some(&old), &context(NOW + day, Some(2 * day)))
+            .warnings
+            .is_empty()
+    );
+    assert!(
+        diff::assess_with(&fields, Some(&old), &context(later, None))
+            .warnings
+            .is_empty()
+    );
+}
+
+#[tokio::test]
+async fn sweep_forgets_nothing_when_the_directory_is_empty_and_audits_as_the_controller() {
+    let rig = rig(
+        vec![],
+        RdapStub::default(),
+        DnsStub::default(),
+        Duration::ZERO,
+    );
+    rig.store
+        .save("kept.com", &observation(None, None, &[]))
+        .await
+        .unwrap();
+    rig.enricher.sweep(&Allow, "system", None).await.unwrap();
+    assert!(rig.store.get("kept.com").await.unwrap().is_some());
+
+    let rig = rig_with_one_domain();
+    rig.enricher
+        .sweep(&Allow, "anonymous-lan-admin", None)
+        .await
+        .unwrap();
+    let intents = rig.audit.intents.lock().unwrap();
+    assert_eq!(intents[0].actor, crate::skill_catalog::CONTROLLER_ACTOR);
+    let facts: std::collections::BTreeMap<_, _> = intents[0].metadata.entries().collect();
+    assert_eq!(facts["authorizedAs"], "anonymous-lan-admin");
+    assert_eq!(facts["trigger"], "scheduled");
+}
+
+fn rig_with_one_domain() -> Rig {
+    rig(
+        vec![entry("a.com", json!({"fqdn": "a.com"}))],
+        RdapStub::default().with("a.com", "https://rdap.verisign.com/", Ok(com_answer())),
+        DnsStub::default(),
+        Duration::ZERO,
+    )
 }

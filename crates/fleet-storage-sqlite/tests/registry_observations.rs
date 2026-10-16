@@ -7,6 +7,9 @@ use fleet_storage_sqlite::{ObservationRepository, Store};
 fn observation(at: i64, registrar: &str) -> DomainObservation {
     DomainObservation {
         observed_at: at,
+        last_error: None,
+        stale_since: None,
+        failures: 0,
         rdap: RdapObservation {
             status: RdapStatus::Ok,
             server: Some("https://rdap.example/".to_owned()),

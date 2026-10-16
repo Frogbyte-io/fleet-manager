@@ -65,6 +65,8 @@ pub const DEFAULT_RDAP_GAP: Duration = Duration::from_secs(2);
 /// The longest an on-demand lookup waits for its rate-limit slot before it
 /// is refused instead.
 const MAX_SLOT_WAIT: Duration = Duration::from_secs(30);
+/// The longest the DNS half of one lookup may take in total.
+const DNS_BUDGET: Duration = Duration::from_secs(20);
 /// Entries read per directory page.
 const DIRECTORY_PAGE: i64 = 200;
 /// The longest detail text recorded in an observation.
@@ -438,12 +440,18 @@ impl DomainEnricher {
     }
 
     fn view(&self, entry: &DomainEntry, observation: Option<DomainObservation>) -> DomainView {
-        let today = diff::days_from_millis((self.clock)());
-        let assessment = diff::assess(
+        let now = (self.clock)();
+        let stale_after = (!self.settings.interval.is_zero())
+            .then(|| i64::try_from(self.settings.interval.as_millis() * 2).unwrap_or(i64::MAX));
+        let assessment = diff::assess_with(
             &entry.fields,
             observation.as_ref(),
-            today,
-            i64::from(self.settings.expiry_window_days),
+            &diff::AssessContext {
+                today: diff::days_from_millis(now),
+                window_days: i64::from(self.settings.expiry_window_days),
+                now_millis: now,
+                stale_after_millis: stale_after,
+            },
         );
         DomainView {
             key: entry.key.clone(),
@@ -581,10 +589,7 @@ impl DomainEnricher {
             .map_err(backend("registry_observe_audit"))?;
         let fqdn = entry_fqdn(&entry);
         let observation = self.observe(&fqdn, true).await?;
-        self.store
-            .save(&entry.key, &observation)
-            .await
-            .map_err(backend("registry_observation"))?;
+        let observation = self.record(&entry.key, observation).await?;
         Ok(self.view(&entry, Some(observation)))
     }
 
@@ -626,12 +631,15 @@ impl DomainEnricher {
                 break;
             }
         }
+        // An observation that is not settled (a failed half, or data kept
+        // stale) does not count as fresh: the next sweep retries it.
         let existing: std::collections::HashMap<String, i64> = self
             .store
             .list()
             .await
             .map_err(backend("registry_observation"))?
             .into_iter()
+            .filter(|(_, observation)| observation.is_settled())
             .map(|(key, observation)| {
                 (
                     crate::registry::normalize_key(&key),
@@ -664,7 +672,9 @@ impl DomainEnricher {
         }
         self.audit
             .record_intent(&AuditIntent {
-                actor: principal_id.to_owned(),
+                // As for registry auto-activation: the controller acts,
+                // and `authorizedAs` records what the authorizer decided on.
+                actor: crate::skill_catalog::CONTROLLER_ACTOR.to_owned(),
                 action: Permission::RegistryObserve.id().to_owned(),
                 resource: None,
                 decision,
@@ -672,7 +682,11 @@ impl DomainEnricher {
                 operation_id: None,
                 metadata: Self::audit_metadata(
                     "registry_observe_sweep",
-                    &[("domains", &due.len().to_string())],
+                    &[
+                        ("trigger", "scheduled"),
+                        ("authorizedAs", principal_id),
+                        ("domains", &due.len().to_string()),
+                    ],
                 )?,
             })
             .await
@@ -683,7 +697,7 @@ impl DomainEnricher {
                 report.failed += 1;
                 continue;
             };
-            if self.store.save(&entry.key, &observation).await.is_ok() {
+            if self.record(&entry.key, observation).await.is_ok() {
                 report.observed += 1;
             } else {
                 report.failed += 1;
@@ -693,7 +707,32 @@ impl DomainEnricher {
         Ok(report)
     }
 
+    /// Stores a fresh observation, keeping the last good data of a half
+    /// that failed this time (see [`DomainObservation::merged_with`]).
+    async fn record(
+        &self,
+        key: &str,
+        fresh: DomainObservation,
+    ) -> Result<DomainObservation, ProjectUseCaseError> {
+        let previous = self
+            .store
+            .get(key)
+            .await
+            .map_err(backend("registry_observation"))?;
+        let merged = fresh.merged_with(previous.as_ref());
+        self.store
+            .save(key, &merged)
+            .await
+            .map_err(backend("registry_observation"))?;
+        Ok(merged)
+    }
+
     async fn prune(&self, entries: &[DomainEntry]) {
+        // An empty directory is more likely an unreadable or switched
+        // revision than a registry with no domains: forget nothing.
+        if entries.is_empty() {
+            return;
+        }
         let keep: Vec<String> = entries.iter().map(|entry| entry.key.clone()).collect();
         // Best effort: a stale row is ignored on read and pruned next time.
         let _ = self.store.retain(&keep).await;
@@ -705,9 +744,21 @@ impl DomainEnricher {
         refuse_long_waits: bool,
     ) -> Result<DomainObservation, ProjectUseCaseError> {
         let rdap = self.observe_rdap(fqdn, refuse_long_waits).await?;
-        let dns = self.observe_dns(fqdn).await;
+        // Seven queries against a slow resolver must not hold a request
+        // open for minutes.
+        let dns = tokio::time::timeout(DNS_BUDGET, self.observe_dns(fqdn))
+            .await
+            .unwrap_or_else(|_| DnsObservation {
+                status: DnsStatus::Error,
+                apex: DnsRecords::default(),
+                www: DnsRecords::default(),
+                detail: Some("the DNS lookups took too long".to_owned()),
+            });
         Ok(DomainObservation {
             observed_at: (self.clock)(),
+            last_error: None,
+            stale_since: None,
+            failures: 0,
             rdap,
             dns,
         })
@@ -731,15 +782,18 @@ impl DomainEnricher {
                 return Ok(RdapObservation::empty(RdapStatus::Error, bounded(&detail)));
             }
         };
-        let wait = self.limiter.lock().await.reserve(&server, Instant::now());
-        if refuse_long_waits && wait > MAX_SLOT_WAIT {
-            return Err(ProjectUseCaseError::Backend {
+        let max_wait = refuse_long_waits.then_some(MAX_SLOT_WAIT);
+        let wait = self
+            .limiter
+            .lock()
+            .await
+            .try_reserve(&server, Instant::now(), max_wait)
+            .map_err(|_| ProjectUseCaseError::Backend {
                 context: "registry_observe_rate_limited",
                 detail: format!(
                     "the RDAP server {server} is being queried at its rate limit; retry shortly"
                 ),
-            });
-        }
+            })?;
         if !wait.is_zero() {
             tokio::time::sleep(wait).await;
         }

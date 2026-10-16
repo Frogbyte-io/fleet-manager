@@ -765,8 +765,15 @@ pub struct DnsObservationDto {
 #[derive(Clone, Debug, Serialize, ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct DomainObservationDto {
-    /// When the lookups finished (epoch milliseconds).
+    /// When the latest lookup attempt finished (epoch milliseconds).
     pub observed_at: i64,
+    /// The latest attempt's failure, when a half failed.
+    pub last_error: Option<String>,
+    /// When the data of a half that now fails to refresh was last good
+    /// (epoch milliseconds); set only while old data is being kept.
+    pub stale_since: Option<i64>,
+    /// Consecutive attempts with a failed half.
+    pub failures: u32,
     /// The public registration data.
     pub rdap: RdapObservationDto,
     /// The public DNS data.
@@ -831,6 +838,13 @@ pub enum WarningCodeDto {
     Expiring,
     /// The domain expires within the window and auto-renew is off.
     AutoRenewOffExpiring,
+    /// The data shown is old: the latest lookup failed, or none succeeded
+    /// for more than twice the sweep interval.
+    StaleObservation,
+    /// The registry reports the domain is not registered.
+    RdapNotFound,
+    /// Lookups have failed several times in a row.
+    LookupFailing,
 }
 
 /// One derived warning.
@@ -908,6 +922,9 @@ fn observation_dto(observation: DomainObservation) -> DomainObservationDto {
     };
     DomainObservationDto {
         observed_at: observation.observed_at,
+        last_error: observation.last_error,
+        stale_since: observation.stale_since,
+        failures: observation.failures,
         rdap: RdapObservationDto {
             status: match observation.rdap.status {
                 RdapStatus::Ok => RdapStatusDto::Ok,
@@ -966,6 +983,9 @@ fn view_dto(view: DomainView) -> DomainObservationViewDto {
                     WarningCode::ExpiryChanged => WarningCodeDto::ExpiryChanged,
                     WarningCode::Expiring => WarningCodeDto::Expiring,
                     WarningCode::AutoRenewOffExpiring => WarningCodeDto::AutoRenewOffExpiring,
+                    WarningCode::StaleObservation => WarningCodeDto::StaleObservation,
+                    WarningCode::RdapNotFound => WarningCodeDto::RdapNotFound,
+                    WarningCode::LookupFailing => WarningCodeDto::LookupFailing,
                 },
                 severity: match warning.severity {
                     Severity::Info => SeverityDto::Info,

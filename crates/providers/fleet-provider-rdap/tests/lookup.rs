@@ -222,3 +222,64 @@ async fn http_failures_are_classified() {
         Err(RdapError::Malformed(_))
     ));
 }
+
+const TWO_SERVERS: &[u8] =
+    br#"{"services":[[["xx"],["https://one.example/","https://two.example/"]]]}"#;
+
+#[tokio::test]
+async fn another_listed_server_is_tried_when_the_first_fails() {
+    let replay = Arc::new(Replay::default());
+    replay.answer(IANA_BOOTSTRAP_URL, 200, TWO_SERVERS);
+    replay.fail(
+        "https://one.example/domain/a.xx",
+        "the server could not be reached",
+    );
+    replay.answer("https://two.example/domain/a.xx", 200, COM);
+    let rdap = RdapClient::new(replay.clone());
+    let record = rdap.query("https://one.example/", "a.xx").await.unwrap();
+    assert_eq!(record.expires.as_deref(), Some("2027-08-13T04:00:00Z"));
+
+    // A 5xx also falls through; a 404 from the first server is final.
+    replay.answer("https://one.example/domain/b.xx", 503, b"");
+    replay.answer("https://two.example/domain/b.xx", 200, COM);
+    assert!(rdap.query("https://one.example/", "b.xx").await.is_ok());
+    replay.answer("https://one.example/domain/c.xx", 404, b"");
+    replay.answer("https://two.example/domain/c.xx", 200, COM);
+    assert_eq!(
+        rdap.query("https://one.example/", "c.xx").await,
+        Err(RdapError::NotFound)
+    );
+    // When every server fails, the first server's error is reported.
+    replay.fail("https://one.example/domain/d.xx", "the request timed out");
+    replay.fail("https://two.example/domain/d.xx", "the request failed");
+    assert_eq!(
+        rdap.query("https://one.example/", "d.xx").await,
+        Err(RdapError::Transport("the request timed out".to_owned()))
+    );
+}
+
+#[tokio::test]
+async fn a_failed_bootstrap_fetch_is_remembered_briefly() {
+    let replay = Arc::new(Replay::default());
+    replay.fail(IANA_BOOTSTRAP_URL, "the server could not be reached");
+    let rdap = RdapClient::new(replay.clone());
+    assert!(rdap.server_for("a.com").await.is_err());
+    assert!(rdap.server_for("b.com").await.is_err());
+    assert_eq!(replay.count(IANA_BOOTSTRAP_URL), 1);
+}
+
+#[test]
+fn odd_shapes_are_skipped_not_fatal() {
+    let body = br#"{
+        "status": "active",
+        "events": [{"eventAction": 7}, {"eventAction": "expiration"},
+                   "junk", {"eventAction": "expiration", "eventDate": "2030-05-06T00:00:00Z"}],
+        "entities": [{"roles": "registrar"}, {"roles": ["registrar"], "vcardArray": ["vcard", [["fn", {}, "text", "Odd Registrar"]]]}],
+        "nameservers": [{"ldhName": 5}, {"ldhName": "NS1.Example.NET."}, null]
+    }"#;
+    let record = parse_domain(body).unwrap();
+    assert_eq!(record.statuses, ["active"]);
+    assert_eq!(record.expires.as_deref(), Some("2030-05-06T00:00:00Z"));
+    assert_eq!(record.registrar.as_deref(), Some("Odd Registrar"));
+    assert_eq!(record.nameservers, ["ns1.example.net"]);
+}

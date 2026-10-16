@@ -19,6 +19,18 @@
 //! entities, notices, links) is ignored and never stored, so personal data
 //! in a response does not reach Fleet.
 //!
+//! A lookup is for a registrable domain (`example.com`, `example.co.uk`),
+//! which is what Registry `domain` entries hold. RDAP servers answer for
+//! the registrable name, not for `www.example.com`; the provider sends the
+//! name it is given and does not reduce subdomains (that needs the public
+//! suffix list, which Fleet does not carry). A subdomain is reported by the
+//! registry as not found.
+//!
+//! When a TLD lists several RDAP servers and the first fails (transport
+//! error or HTTP 5xx), the others are tried. Those fallback hosts, and any
+//! host a server redirects to, are not covered by the caller's per-server
+//! rate limiter, which keys on the first server only.
+//!
 //! The network sits behind [`RdapTransport`] so tests replay recorded
 //! fixtures. The bootstrap file is cached with a TTL and a stale copy is
 //! served when a refresh fails.
@@ -76,7 +88,9 @@ impl ReqwestRdapTransport {
             .timeout(REQUEST_TIMEOUT)
             .user_agent("fleet-controller (registry domain observations)")
             .redirect(reqwest::redirect::Policy::custom(|attempt| {
-                if attempt.previous().len() >= 3 || attempt.url().scheme() != "https" {
+                if attempt.previous().len() >= 3 {
+                    attempt.error("too many redirects")
+                } else if attempt.url().scheme() != "https" {
                     attempt.stop()
                 } else {
                     attempt.follow()
@@ -196,15 +210,20 @@ impl Bootstrap {
         Ok(Self { services })
     }
 
-    /// The base URL of the server for a TLD, when one exists.
+    /// The base URL of the preferred server for a TLD, when one exists.
     #[must_use]
     pub fn server_for_tld(&self, tld: &str) -> Option<&str> {
+        self.servers_for_tld(tld).first().map(String::as_str)
+    }
+
+    /// Every HTTPS server the file lists for a TLD, in its order.
+    #[must_use]
+    pub fn servers_for_tld(&self, tld: &str) -> &[String] {
         let tld = tld.to_ascii_lowercase();
         self.services
             .iter()
             .find(|(tlds, urls)| !urls.is_empty() && tlds.contains(&tld))
-            .and_then(|(_, urls)| urls.first())
-            .map(String::as_str)
+            .map_or(&[][..], |(_, urls)| urls.as_slice())
     }
 
     /// How many TLDs the file maps.
@@ -228,97 +247,79 @@ pub struct DomainRecord {
     pub nameservers: Vec<String>,
 }
 
-#[derive(Deserialize)]
-struct DomainObject {
-    #[serde(default)]
-    status: Vec<String>,
-    #[serde(default)]
-    events: Vec<Event>,
-    #[serde(default)]
-    entities: Vec<Entity>,
-    #[serde(default)]
-    nameservers: Vec<Nameserver>,
-}
-
-#[derive(Deserialize)]
-struct Event {
-    #[serde(rename = "eventAction", default)]
-    action: String,
-    #[serde(rename = "eventDate", default)]
-    date: String,
-}
-
-#[derive(Deserialize)]
-struct Entity {
-    #[serde(default)]
-    roles: Vec<String>,
-    #[serde(rename = "vcardArray", default)]
-    vcard: serde_json::Value,
-    #[serde(default)]
-    entities: Vec<Entity>,
-}
-
-#[derive(Deserialize)]
-struct Nameserver {
-    #[serde(rename = "ldhName", default)]
-    ldh_name: String,
-}
-
 /// Parses an RFC 9083 domain object.
+///
+/// Reading is lenient: a field of an unexpected shape is skipped, not
+/// fatal. `status` may be a single string; events without a string action
+/// or date, entities without roles, and malformed nameservers are ignored.
 ///
 /// # Errors
 ///
-/// Fails when the body is not a JSON object shaped like a domain.
+/// Fails when the body is not a JSON object.
 pub fn parse_domain(bytes: &[u8]) -> Result<DomainRecord, String> {
-    let object: DomainObject = serde_json::from_slice(bytes)
+    let value: serde_json::Value = serde_json::from_slice(bytes)
         .map_err(|_| "the body is not an RDAP domain object".to_owned())?;
-    let expires = object
-        .events
-        .iter()
-        .find(|event| event.action.eq_ignore_ascii_case("expiration"))
-        .map(|event| event.date.trim().to_owned())
-        .filter(|date| !date.is_empty());
-    let mut statuses: Vec<String> = object
-        .status
-        .into_iter()
-        .map(|status| status.trim().to_owned())
-        .filter(|status| !status.is_empty())
-        .collect();
+    let object = value
+        .as_object()
+        .ok_or_else(|| "the body is not an RDAP domain object".to_owned())?;
+    let items = |name: &str| -> Vec<&serde_json::Value> {
+        match object.get(name) {
+            Some(serde_json::Value::Array(items)) => items.iter().collect(),
+            _ => Vec::new(),
+        }
+    };
+    let expires = items("events").into_iter().find_map(|event| {
+        let action = event.get("eventAction")?.as_str()?;
+        let date = event.get("eventDate")?.as_str()?.trim();
+        (action.eq_ignore_ascii_case("expiration") && !date.is_empty()).then(|| date.to_owned())
+    });
+    let mut statuses: Vec<String> = match object.get("status") {
+        Some(serde_json::Value::Array(items)) => items
+            .iter()
+            .filter_map(|status| status.as_str())
+            .map(|status| status.trim().to_owned())
+            .collect(),
+        Some(serde_json::Value::String(status)) => vec![status.trim().to_owned()],
+        _ => Vec::new(),
+    };
+    statuses.retain(|status| !status.is_empty());
     statuses.sort();
     statuses.dedup();
-    let mut nameservers: Vec<String> = object
-        .nameservers
-        .iter()
-        .map(|ns| {
-            ns.ldh_name
-                .trim()
-                .trim_end_matches('.')
-                .to_ascii_lowercase()
-        })
+    let mut nameservers: Vec<String> = items("nameservers")
+        .into_iter()
+        .filter_map(|ns| ns.get("ldhName")?.as_str())
+        .map(|name| name.trim().trim_end_matches('.').to_ascii_lowercase())
         .filter(|name| !name.is_empty())
         .collect();
     nameservers.sort();
     nameservers.dedup();
     Ok(DomainRecord {
-        registrar: registrar_name(&object.entities),
+        registrar: registrar_name(&items("entities")),
         expires,
         statuses,
         nameservers,
     })
 }
 
-fn registrar_name(entities: &[Entity]) -> Option<String> {
+fn registrar_name(entities: &[&serde_json::Value]) -> Option<String> {
     for entity in entities {
-        if entity
-            .roles
-            .iter()
-            .any(|role| role.eq_ignore_ascii_case("registrar"))
-            && let Some(name) = vcard_fn(&entity.vcard)
-        {
+        let is_registrar = entity
+            .get("roles")
+            .and_then(serde_json::Value::as_array)
+            .is_some_and(|roles| {
+                roles
+                    .iter()
+                    .filter_map(serde_json::Value::as_str)
+                    .any(|role| role.eq_ignore_ascii_case("registrar"))
+            });
+        if is_registrar && let Some(name) = entity.get("vcardArray").and_then(vcard_fn) {
             return Some(name);
         }
-        if let Some(name) = registrar_name(&entity.entities) {
-            return Some(name);
+        if let Some(serde_json::Value::Array(nested)) = entity.get("entities") {
+            let nested: Vec<&serde_json::Value> = nested.iter().collect();
+            if let Some(name) = registrar_name(&nested) {
+                return Some(name);
+            }
         }
     }
     None
@@ -362,8 +363,18 @@ pub struct RdapClient {
     transport: Arc<dyn RdapTransport>,
     bootstrap_url: String,
     ttl: Duration,
-    cache: Mutex<Option<(Instant, Arc<Bootstrap>)>>,
+    cache: Mutex<Cache>,
 }
+
+#[derive(Debug, Default)]
+struct Cache {
+    good: Option<(Instant, Arc<Bootstrap>)>,
+    failure: Option<(Instant, RdapError)>,
+}
+
+/// How long a failed bootstrap fetch is remembered, so a sweep over many
+/// domains does not repeat a doomed request for each of them.
+const FAILURE_MEMORY: Duration = Duration::from_secs(30);
 
 impl RdapClient {
     /// A client over the IANA bootstrap file.
@@ -373,7 +384,7 @@ impl RdapClient {
             transport,
             bootstrap_url: IANA_BOOTSTRAP_URL.to_owned(),
             ttl: BOOTSTRAP_TTL,
-            cache: Mutex::new(None),
+            cache: Mutex::new(Cache::default()),
         }
     }
 
@@ -393,7 +404,7 @@ impl RdapClient {
     pub fn with_seed(self, bytes: &[u8]) -> Result<Self, String> {
         let bootstrap = Bootstrap::parse(bytes)?;
         if let Ok(mut cache) = self.cache.lock() {
-            *cache = Some((Instant::now(), Arc::new(bootstrap)));
+            cache.good = Some((Instant::now(), Arc::new(bootstrap)));
         }
         Ok(self)
     }
@@ -404,12 +415,19 @@ impl RdapClient {
                 .cache
                 .lock()
                 .map_err(|_| RdapError::Transport("the bootstrap cache is poisoned".to_owned()))?;
-            match cache.as_ref() {
+            match cache.good.as_ref() {
                 Some((at, bootstrap)) if at.elapsed() < self.ttl => {
                     return Ok(bootstrap.clone());
                 }
                 Some((_, bootstrap)) => Some(bootstrap.clone()),
-                None => None,
+                None => {
+                    if let Some((at, error)) = &cache.failure
+                        && at.elapsed() < FAILURE_MEMORY
+                    {
+                        return Err(error.clone());
+                    }
+                    None
+                }
             }
         };
         let fetched = self
@@ -430,13 +448,19 @@ impl RdapClient {
             Ok(bootstrap) => {
                 let bootstrap = Arc::new(bootstrap);
                 if let Ok(mut cache) = self.cache.lock() {
-                    *cache = Some((Instant::now(), bootstrap.clone()));
+                    cache.good = Some((Instant::now(), bootstrap.clone()));
+                    cache.failure = None;
                 }
                 Ok(bootstrap)
             }
             // A stale copy beats no answer: the file changes rarely.
             Err(_) if stale.is_some() => Ok(stale.unwrap_or_default()),
-            Err(error) => Err(error),
+            Err(error) => {
+                if let Ok(mut cache) = self.cache.lock() {
+                    cache.failure = Some((Instant::now(), error.clone()));
+                }
+                Err(error)
+            }
         }
     }
 
@@ -453,14 +477,40 @@ impl RdapClient {
         Ok(bootstrap.server_for_tld(&tld).map(str::to_owned))
     }
 
-    /// Queries `server` for `domain`.
+    /// Queries `server` for `domain`; when that fails with a transport
+    /// error or HTTP 5xx, tries the TLD's other listed servers.
     ///
     /// # Errors
     ///
     /// Fails on an invalid name, a transport failure, a 404, a refusal,
-    /// or an unreadable answer.
+    /// or an unreadable answer (the first server's, when all fail).
     pub async fn query(&self, server: &str, domain: &str) -> Result<DomainRecord, RdapError> {
         let name = ldh_name(domain)?;
+        let first = self.query_one(server, &name).await;
+        let retryable = matches!(
+            &first,
+            Err(RdapError::Transport(_) | RdapError::Refused { status: 500..=599 })
+        );
+        if !retryable {
+            return first;
+        }
+        let tld = name.rsplit('.').next().unwrap_or_default();
+        if let Ok(bootstrap) = self.bootstrap().await {
+            for other in bootstrap.servers_for_tld(tld) {
+                if other.trim_end_matches('/') == server.trim_end_matches('/') {
+                    continue;
+                }
+                match self.query_one(other, &name).await {
+                    Ok(record) => return Ok(record),
+                    Err(RdapError::NotFound) => return Err(RdapError::NotFound),
+                    Err(_) => {}
+                }
+            }
+        }
+        first
+    }
+
+    async fn query_one(&self, server: &str, name: &str) -> Result<DomainRecord, RdapError> {
         let url = format!("{}/domain/{name}", server.trim_end_matches('/'));
         let response = self
             .transport
