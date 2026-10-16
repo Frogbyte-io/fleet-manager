@@ -9039,6 +9039,185 @@
         }
       }
     },
+    "/api/v1/services": {
+      "get": {
+        "tags": [
+          "services"
+        ],
+        "summary": "Lists running services: Coolify resources joined with Docker\ncontainers on Fleet machines and with Registry entries, ordered by id.\nInputs the caller may not read are left out and reported in `coverage`.",
+        "description": "# Errors\n\nReturns the public error envelope on a malformed filter, or when the\ncaller may read none of the inputs.",
+        "operationId": "listRunningServices",
+        "parameters": [
+          {
+            "name": "source",
+            "in": "query",
+            "description": "Only services observed by this source: `coolify` or `docker`.",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          {
+            "name": "machine",
+            "in": "query",
+            "description": "Only services placed on this machine id.",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          {
+            "name": "q",
+            "in": "query",
+            "description": "Only services whose name or hostname contains this text\n(case-insensitive).",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          {
+            "name": "cursor",
+            "in": "query",
+            "description": "Opaque cursor returned as the previous page's `nextCursor`.",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "description": "Requested page size, clamped to the API maximum.",
+            "required": false,
+            "schema": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "int32",
+              "minimum": 0
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "A page of running services.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ServicesPage"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "A filter or the cursor is malformed.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The caller may read none of the inputs.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The surface is not wired.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/services/{serviceId}": {
+      "get": {
+        "tags": [
+          "services"
+        ],
+        "summary": "Reads one running service by id.",
+        "description": "# Errors\n\nReturns the public error envelope on refusal or when no such service is\nin the caller's view.",
+        "operationId": "getRunningService",
+        "parameters": [
+          {
+            "name": "serviceId",
+            "in": "path",
+            "description": "The service id, as the list returns it.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The service.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Resource_ServiceDetailDto"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The caller may read none of the inputs.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such service in the caller's view.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The surface is not wired.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/skills/catalog": {
       "get": {
         "tags": [
@@ -9737,6 +9916,53 @@
   },
   "components": {
     "schemas": {
+      "AccountCoverageDto": {
+        "type": "object",
+        "description": "One Coolify account's observation state.",
+        "required": [
+          "accountId",
+          "label",
+          "observed",
+          "staleClasses",
+          "truncatedClasses"
+        ],
+        "properties": {
+          "accountId": {
+            "type": "string",
+            "description": "The account."
+          },
+          "label": {
+            "type": "string",
+            "description": "Its label."
+          },
+          "observed": {
+            "type": "boolean",
+            "description": "Whether a discovery was ever recorded."
+          },
+          "recordedAt": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "When the snapshot was recorded (epoch millis)."
+          },
+          "staleClasses": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "The resource classes that are stale."
+          },
+          "truncatedClasses": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "The resource classes cut to fit the snapshot bound; services of\nthese classes may be missing."
+          }
+        }
+      },
       "ActionRequestDto": {
         "type": "object",
         "description": "An action request.",
@@ -9867,6 +10093,37 @@
           "machine": {
             "$ref": "#/components/schemas/MachineDto",
             "description": "The registered machine, redacted per the caller's permissions."
+          }
+        }
+      },
+      "AmbiguousServerDto": {
+        "type": "object",
+        "description": "A Coolify server that matched more than one machine.",
+        "required": [
+          "accountId",
+          "server",
+          "basis",
+          "candidates"
+        ],
+        "properties": {
+          "accountId": {
+            "type": "string",
+            "description": "The account."
+          },
+          "basis": {
+            "type": "string",
+            "description": "`explicit_tag` or `address`."
+          },
+          "candidates": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ServiceMachineRefDto"
+            },
+            "description": "The machines that fit; none is chosen."
+          },
+          "server": {
+            "$ref": "#/components/schemas/ServiceServerDto",
+            "description": "The server."
           }
         }
       },
@@ -13004,6 +13261,26 @@
           "user": {
             "type": "string",
             "description": "The SSH login user on the target machine."
+          }
+        }
+      },
+      "InputStateDto": {
+        "type": "object",
+        "description": "The state of one input of the read model.",
+        "required": [
+          "state"
+        ],
+        "properties": {
+          "detail": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Why it was unavailable."
+          },
+          "state": {
+            "type": "string",
+            "description": "`available`, `not_configured`, `denied`, or `unavailable`. A denied\nor unavailable input is left out of the answer."
           }
         }
       },
@@ -21906,6 +22183,33 @@
           }
         }
       },
+      "Resource_ServiceDetailDto": {
+        "type": "object",
+        "description": "A single resource.\n\nThe payload is nested under `data` so that later top-level fields are an\nadditive change rather than a breaking one.",
+        "required": [
+          "data"
+        ],
+        "properties": {
+          "data": {
+            "type": "object",
+            "description": "One service and what its answer was built from.",
+            "required": [
+              "service",
+              "coverage"
+            ],
+            "properties": {
+              "coverage": {
+                "$ref": "#/components/schemas/ServicesCoverageDto",
+                "description": "What the answer was built from."
+              },
+              "service": {
+                "$ref": "#/components/schemas/RunningServiceDto",
+                "description": "The service."
+              }
+            }
+          }
+        }
+      },
       "Resource_SkillsSnapshotDto": {
         "type": "object",
         "description": "A single resource.\n\nThe payload is nested under `data` so that later top-level fields are an\nadditive change rather than a breaking one.",
@@ -22059,6 +22363,124 @@
           }
         },
         "additionalProperties": false
+      },
+      "RunningServiceDto": {
+        "type": "object",
+        "description": "One running service.",
+        "required": [
+          "id",
+          "name",
+          "kind",
+          "sources",
+          "state",
+          "placement",
+          "containers",
+          "fqdns",
+          "registry",
+          "stale",
+          "staleReasons"
+        ],
+        "properties": {
+          "containers": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ServiceContainerDto"
+            },
+            "description": "The containers observed for it."
+          },
+          "coolify": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/ServiceCoolifyDto",
+                "description": "The Coolify identity, for Coolify resources."
+              }
+            ]
+          },
+          "deepLink": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "A link into the Coolify UI (the project page)."
+          },
+          "fqdns": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "The public hostnames, as Coolify reports them."
+          },
+          "id": {
+            "type": "string",
+            "description": "The stable id: `coolify:<account>:<uuid>` or `docker:<machine>:<name>`."
+          },
+          "kind": {
+            "type": "string",
+            "description": "`application`, `service`, `database`, or `container`."
+          },
+          "lastDeploy": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/ServiceDeployDto",
+                "description": "The latest known deployment, for applications."
+              }
+            ]
+          },
+          "name": {
+            "type": "string",
+            "description": "The display name."
+          },
+          "placement": {
+            "$ref": "#/components/schemas/ServicePlacementDto",
+            "description": "The Fleet machine placement."
+          },
+          "registry": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ServiceRegistryLinkDto"
+            },
+            "description": "The related Registry entries."
+          },
+          "server": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/ServiceServerDto",
+                "description": "The Coolify server, when known."
+              }
+            ]
+          },
+          "sources": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Where it was observed: `coolify`, `docker`, or both."
+          },
+          "stale": {
+            "type": "boolean",
+            "description": "Whether any input behind this service is stale."
+          },
+          "staleReasons": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Why: `coolify_<class>_stale`, `fqdns_stale`, `machine_offline`,\n`machine_stale`, `containers_stale`."
+          },
+          "state": {
+            "type": "string",
+            "description": "`running`, `degraded`, `stopped`, or `unknown`."
+          }
+        }
       },
       "SaveCatalogRequest": {
         "type": "object",
@@ -22251,6 +22673,343 @@
           "reference": {
             "type": "string",
             "description": "The secret reference id."
+          }
+        }
+      },
+      "ServiceContainerDto": {
+        "type": "object",
+        "description": "A container of a service.",
+        "required": [
+          "machineId",
+          "id",
+          "name",
+          "image",
+          "state",
+          "status"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "description": "The container id."
+          },
+          "image": {
+            "type": "string",
+            "description": "The image."
+          },
+          "machineId": {
+            "type": "string",
+            "description": "The machine it runs on."
+          },
+          "name": {
+            "type": "string",
+            "description": "The container name."
+          },
+          "state": {
+            "type": "string",
+            "description": "`running`, `degraded`, `stopped`, or `unknown`."
+          },
+          "status": {
+            "type": "string",
+            "description": "The human status text."
+          }
+        }
+      },
+      "ServiceCoolifyDto": {
+        "type": "object",
+        "description": "The Coolify identity of a service.",
+        "required": [
+          "accountId",
+          "accountLabel",
+          "uuid"
+        ],
+        "properties": {
+          "accountId": {
+            "type": "string",
+            "description": "The account the resource was discovered through."
+          },
+          "accountLabel": {
+            "type": "string",
+            "description": "The account's label."
+          },
+          "detail": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The image, build pack, service type, or engine."
+          },
+          "environmentName": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The environment name."
+          },
+          "projectName": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The project name."
+          },
+          "projectUuid": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The project uuid, when resolved."
+          },
+          "status": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Coolify's raw status string."
+          },
+          "uuid": {
+            "type": "string",
+            "description": "The resource uuid."
+          }
+        }
+      },
+      "ServiceDeployDto": {
+        "type": "object",
+        "description": "The latest known deployment of an application.",
+        "required": [
+          "deploymentUuid",
+          "status",
+          "stale"
+        ],
+        "properties": {
+          "at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "When it last changed, as Coolify reports it."
+          },
+          "commit": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The commit."
+          },
+          "deploymentUuid": {
+            "type": "string",
+            "description": "The deployment uuid."
+          },
+          "stale": {
+            "type": "boolean",
+            "description": "Whether the deployments observation is stale."
+          },
+          "status": {
+            "type": "string",
+            "description": "Coolify's deployment status."
+          }
+        }
+      },
+      "ServiceDetailDto": {
+        "type": "object",
+        "description": "One service and what its answer was built from.",
+        "required": [
+          "service",
+          "coverage"
+        ],
+        "properties": {
+          "coverage": {
+            "$ref": "#/components/schemas/ServicesCoverageDto",
+            "description": "What the answer was built from."
+          },
+          "service": {
+            "$ref": "#/components/schemas/RunningServiceDto",
+            "description": "The service."
+          }
+        }
+      },
+      "ServiceMachineRefDto": {
+        "type": "object",
+        "description": "A machine reference.",
+        "required": [
+          "id",
+          "name"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "description": "The machine's identity."
+          },
+          "name": {
+            "type": "string",
+            "description": "The machine's name."
+          }
+        }
+      },
+      "ServicePlacementDto": {
+        "type": "object",
+        "description": "Where a service sits on Fleet machines.",
+        "required": [
+          "state",
+          "candidates"
+        ],
+        "properties": {
+          "basis": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The evidence: `explicit_tag`, `address`, or `container`."
+          },
+          "candidates": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ServiceMachineRefDto"
+            },
+            "description": "The candidate machines, when ambiguous; none is chosen."
+          },
+          "machine": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/ServiceMachineRefDto",
+                "description": "The machine, when matched."
+              }
+            ]
+          },
+          "state": {
+            "type": "string",
+            "description": "`matched`, `ambiguous`, `unmatched`, or `unknown`."
+          }
+        }
+      },
+      "ServiceRegistryLinkDto": {
+        "type": "object",
+        "description": "A Registry entry related to a service.",
+        "required": [
+          "type",
+          "key",
+          "link"
+        ],
+        "properties": {
+          "host": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The service hostname a domain match went through."
+          },
+          "key": {
+            "type": "string",
+            "description": "The entry's key."
+          },
+          "link": {
+            "type": "string",
+            "description": "`hosted_on` (an explicit relation) or `domain_match` (a domain entry\nwhose fqdn equals or is a parent of a service hostname)."
+          },
+          "type": {
+            "type": "string",
+            "description": "The entry's type."
+          }
+        }
+      },
+      "ServiceServerDto": {
+        "type": "object",
+        "description": "A Coolify server.",
+        "required": [
+          "uuid",
+          "name",
+          "address"
+        ],
+        "properties": {
+          "address": {
+            "type": "string",
+            "description": "The address Coolify connects to."
+          },
+          "name": {
+            "type": "string",
+            "description": "The server's name."
+          },
+          "uuid": {
+            "type": "string",
+            "description": "The server's uuid."
+          }
+        }
+      },
+      "ServicesCoverageDto": {
+        "type": "object",
+        "description": "What the answer was built from.",
+        "required": [
+          "coolify",
+          "accounts",
+          "machines",
+          "containers",
+          "registry"
+        ],
+        "properties": {
+          "accounts": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/AccountCoverageDto"
+            },
+            "description": "Per-account detail."
+          },
+          "containers": {
+            "$ref": "#/components/schemas/InputStateDto",
+            "description": "Docker container observations (not stored until M5 lands)."
+          },
+          "coolify": {
+            "$ref": "#/components/schemas/InputStateDto",
+            "description": "Coolify observations."
+          },
+          "machines": {
+            "$ref": "#/components/schemas/InputStateDto",
+            "description": "Fleet machines."
+          },
+          "registry": {
+            "$ref": "#/components/schemas/InputStateDto",
+            "description": "The Registry."
+          }
+        }
+      },
+      "ServicesPage": {
+        "type": "object",
+        "description": "A page of running services.",
+        "required": [
+          "items",
+          "page",
+          "ambiguousServers",
+          "coverage",
+          "evaluatedAt"
+        ],
+        "properties": {
+          "ambiguousServers": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/AmbiguousServerDto"
+            },
+            "description": "Coolify servers that matched more than one machine."
+          },
+          "coverage": {
+            "$ref": "#/components/schemas/ServicesCoverageDto",
+            "description": "What the answer was built from."
+          },
+          "evaluatedAt": {
+            "type": "integer",
+            "format": "int64",
+            "description": "The read time (epoch millis)."
+          },
+          "items": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/RunningServiceDto"
+            },
+            "description": "The services, ordered by id."
+          },
+          "page": {
+            "$ref": "#/components/schemas/PageInfo",
+            "description": "Where this page sits in the result set."
           }
         }
       },
@@ -23226,6 +23985,10 @@
     {
       "name": "registry",
       "description": "The descriptive Registry of the active desired revision: types, entries, and relations. Read-only; edits are commits to the Fleet repository."
+    },
+    {
+      "name": "services",
+      "description": "Running services: Coolify resources joined with Docker containers on Fleet machines and with Registry entries. Read-only; inputs the caller may not read are left out and reported in the coverage."
     },
     {
       "name": "operations",

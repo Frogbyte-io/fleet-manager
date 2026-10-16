@@ -42,6 +42,7 @@ pub mod proxmox_tasks;
 pub mod ready;
 pub mod registry;
 pub mod requests;
+pub mod services;
 pub mod skill_catalog;
 pub mod skills;
 pub mod system;
@@ -186,6 +187,20 @@ pub const API_BASE_PATH: &str = "/api/v1";
         coolify::CoolifyServiceDto,
         coolify::CoolifyDatabaseDto,
         coolify::CoolifyDeploymentDto,
+        services::ServicesPage,
+        services::ServiceDetailDto,
+        services::RunningServiceDto,
+        services::ServiceMachineRefDto,
+        services::ServicePlacementDto,
+        services::ServiceServerDto,
+        services::ServiceCoolifyDto,
+        services::ServiceContainerDto,
+        services::ServiceDeployDto,
+        services::ServiceRegistryLinkDto,
+        services::AmbiguousServerDto,
+        services::InputStateDto,
+        services::AccountCoverageDto,
+        services::ServicesCoverageDto,
         external_accounts::CreateExternalAccountRequest,
         external_accounts::UpdateExternalAccountRequest,
         external_accounts::ExternalAccountDto,
@@ -252,6 +267,7 @@ pub const API_BASE_PATH: &str = "/api/v1";
         (name = "audit", description = "Authorized, metadata-only audit event queries."),
         (name = "desired", description = "The active desired-state revision and its validated, non-secret resources. Read-only; activation is an operation."),
         (name = "registry", description = "The descriptive Registry of the active desired revision: types, entries, and relations. Read-only; edits are commits to the Fleet repository."),
+        (name = "services", description = "Running services: Coolify resources joined with Docker containers on Fleet machines and with Registry entries. Read-only; inputs the caller may not read are left out and reported in the coverage."),
         (name = "operations", description = "Durable operations: accepted remote work."),
         (name = "requests", description = "The action broker (ADR 0016): agents request typed provider actions; policy or a person approves them; approved requests run as durable operations. Before authenticated identities, policy is a guardrail keyed on risk class, not a security boundary."),
         (name = "credentials", description = "Delegated, scoped, short-lived credentials for CI and agents (ADR 0011). The token is returned once at issue time and is never listed or audited."),
@@ -414,6 +430,8 @@ pub fn api(state: Arc<operations::ApiState>) -> (Router, utoipa::openapi::OpenAp
                 .routes(routes!(external_accounts::probe_external_account))
                 .routes(routes!(coolify::discover_coolify_account))
                 .routes(routes!(coolify::get_coolify_observations))
+                .routes(routes!(services::list_running_services))
+                .routes(routes!(services::get_running_service))
                 .routes(routes!(proxmox::delete_proxmox_account))
                 .routes(routes!(proxmox::observe_proxmox_fingerprint))
                 .routes(routes!(proxmox::confirm_proxmox_fingerprint))

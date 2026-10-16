@@ -163,3 +163,27 @@ pub fn compose_coolify_discovery(
         Arc::new(fleet_storage_sqlite::AuditSink::new(pool.clone())),
     ))
 }
+
+/// Composes the running-services read model (FM-1031) over the account and
+/// observation tables, the machines use case, and the Registry read model.
+/// It reads cached observations only: no token is loaded and no provider
+/// is called. Docker container observations do not exist until M5, so the
+/// placeholder port reports them as not configured.
+#[must_use]
+pub fn compose_running_services(
+    pool: &sqlx::SqlitePool,
+    machines: Arc<fleet_application::machine::Machines>,
+    registry: Option<Arc<fleet_application::registry::RegistryReadModel>>,
+) -> Arc<fleet_application::services::RunningServices> {
+    Arc::new(fleet_application::services::RunningServices::new(
+        Arc::new(fleet_storage_sqlite::ExternalAccountRepository::new(
+            pool.clone(),
+        )),
+        Arc::new(fleet_storage_sqlite::CoolifyObservationRepository::new(
+            pool.clone(),
+        )),
+        machines,
+        Arc::new(fleet_application::services::NoContainerObservations),
+        registry.map(|registry| registry as Arc<dyn fleet_application::services::ServiceRegistry>),
+    ))
+}
