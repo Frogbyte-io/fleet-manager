@@ -194,10 +194,21 @@ fleetctl registry publish -m "example.com DNS moved to Cloudflare"
   its own file first.
 - **`validate`** prints each diagnostic as `location [FM_SCHEMA_...] message`
   (JSON: `valid`, `files`, `errors`, `warnings`) and exits 1 on any error. It
-  needs no controller and no token.
+  needs no controller and no token. The file set is what Git would carry
+  (`git ls-files --cached --others --exclude-standard`, `*.yaml` only), so
+  ignored files and `.git` never count; a symlink named `*.yaml` is refused,
+  as the controller does not follow symlinks.
+- **Case and file names.** Keys are unique case-insensitively (FM-1010's
+  `FM_SCHEMA_REGISTRY_DUPLICATE_KEY` compares them lowercased), and so is
+  lookup: `domain/Example.com` finds `domain/example.com`. A new file name is
+  the lowercased key, with a `_` after a stem Windows reserves (`con`, `aux`,
+  `nul`, `prn`, `com1`-`com9`, `lpt1`-`lpt9`), for example `con_.yaml`. An
+  existing file is matched case-insensitively too, so two spellings can never
+  create two files. An unparsable YAML file stops an edit instead of being
+  skipped.
 - **`publish -m <message>`** validates the tree, refuses staged changes that
-  are not Registry content (anything under `fleet/registry/`, or a `.yaml` file
-  holding only Registry documents), commits only the Registry paths, then
+  are not Registry content (a `.yaml` file holding only Registry documents),
+  commits only the Registry paths, then
   follows `registry.changeMode`, read from the controller (`--change-mode
   direct|pull-request` overrides it, and is needed when the controller is not
   reachable). In `direct` mode it pushes to the default branch and the
@@ -205,7 +216,21 @@ fleetctl registry publish -m "example.com DNS moved to Cloudflare"
   it, and opens a pull request with `gh pr create` when `gh` is installed,
   otherwise it prints the compare URL (remote credentials are never printed).
   The default branch comes from `origin/HEAD`, or `--base`. It never asks for or
-  passes a token: authentication is your Git and `gh` configuration.
+  passes a token: authentication is your Git and `gh` configuration, and
+  prompts are disabled (`GIT_TERMINAL_PROMPT=0`, and SSH `BatchMode=yes` unless
+  you set `GIT_SSH_COMMAND`).
+  - Only `.yaml` files holding nothing but Registry documents are staged. Any
+    other file under `fleet/registry/` (a `.txt`, an `.env`) makes the publish
+    refuse and list it.
+  - If the push fails, the commit stays local: the error shows the last lines
+    of Git's output and says `committed locally as <sha>; nothing was pushed;
+    fix and run git push`. Running `publish` again, with no new changes, pushes
+    the waiting commits.
+  - Direct mode (and a pull request branch cut from the default branch) refuses
+    when `origin/<base>..HEAD` already holds commits that change non-Registry
+    files, and reports how many commits and which files.
+  - `--base` and `--branch` must be valid branch names, and `--branch` must
+    differ from the default branch.
 
 ### Editing trade-off
 

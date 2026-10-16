@@ -93,12 +93,26 @@ impl EntryRef {
     /// The conventional path: `fleet/registry/<type>/<key>.yaml`, with the
     /// key lowercased so two spellings cannot collide on a case-insensitive
     /// file system.
+    ///
+    /// A stem Windows reserves (`con`, `aux`, `nul`, `prn`, `com1`-`com9`,
+    /// `lpt1`-`lpt9`, with or without an extension) gets a `_` after its
+    /// first segment, so the file can be created on every platform.
     fn path(&self) -> String {
-        format!(
-            "{REGISTRY_DIR}/{}/{}.yaml",
-            self.entry_type,
-            self.key.to_ascii_lowercase()
-        )
+        let key = self.key.to_ascii_lowercase();
+        let (head, tail) = key
+            .split_once('.')
+            .map_or((key.as_str(), None), |(head, tail)| (head, Some(tail)));
+        let reserved = matches!(head, "con" | "aux" | "nul" | "prn")
+            || (head.len() == 4
+                && (head.starts_with("com") || head.starts_with("lpt"))
+                && head.as_bytes()[3].is_ascii_digit()
+                && head.as_bytes()[3] != b'0');
+        let stem = match (reserved, tail) {
+            (true, Some(tail)) => format!("{head}_.{tail}"),
+            (true, None) => format!("{head}_"),
+            (false, _) => key.clone(),
+        };
+        format!("{REGISTRY_DIR}/{}/{stem}.yaml", self.entry_type)
     }
 
     /// The `metadata.name` slug (`domain-example-com`).
@@ -191,9 +205,11 @@ fn locate(
     };
     let mut found: Option<Located> = None;
     for (index, file) in files.iter().enumerate() {
-        let Ok(documents) = tree::parse_documents(&file.text) else {
-            continue;
-        };
+        // An unparsable file may hold the very entry being edited; never
+        // guess past it.
+        let documents = tree::parse_documents(&file.text).map_err(|why| CliError {
+            message: format!("{} cannot be read: {why}; fix it first", file.rel),
+        })?;
         let count = documents.len();
         for document in documents {
             let matches = document.get("kind").and_then(Value::as_str) == Some("RegistryEntry")
@@ -289,6 +305,14 @@ fn parse_field(name: &str, field: &RegistryFieldSpec, raw: &str) -> Result<Value
             Ok(Value::Array(items))
         }
         other => scalar(other.scalar().unwrap_or(RegistryScalarType::String), raw),
+    }
+}
+
+/// A target with a Registry reference lowercased, for comparison.
+fn normalized_target(target: &Value) -> Value {
+    match target.get("registry").and_then(Value::as_str) {
+        Some(reference) => json!({ "registry": reference.to_ascii_lowercase() }),
+        None => target.clone(),
     }
 }
 
@@ -389,11 +413,17 @@ fn apply_change(
             remove,
         } => {
             let mut list = string_list(spec, "relations");
-            let wanted = json!({"type": relation, "target": target});
+            // Relations are the same when the type and the normalized target
+            // are: a Registry reference is compared case-insensitively, like
+            // keys are.
+            let same = |item: &Value| {
+                item.get("type").and_then(Value::as_str) == Some(relation.as_str())
+                    && item.get("target").map(normalized_target) == Some(normalized_target(target))
+            };
             if *remove {
-                list.retain(|item| *item != wanted);
-            } else if !list.contains(&wanted) {
-                list.push(wanted);
+                list.retain(|item| !same(item));
+            } else if !list.iter().any(same) {
+                list.push(json!({"type": relation, "target": target}));
             }
             spec.insert("relations".to_owned(), Value::Array(list));
         }
@@ -694,14 +724,26 @@ fn write_file(root: &Path, rel: &str, text: &str) -> Result<(), CliError> {
 
 /// Refuses an edit that would introduce a validation error, comparing the
 /// whole tree before and after, and returns the new warnings.
-fn check_tree(files: &[SourceFile], after: &[SourceFile]) -> Result<Vec<String>, CliError> {
+fn check_tree(
+    files: &[SourceFile],
+    after: &[SourceFile],
+    edited: &str,
+) -> Result<Vec<String>, CliError> {
     let before = tree::validate(files);
     let result = tree::validate(after);
     let known_errors: BTreeSet<_> = before.errors.iter().collect();
+    // A credential diagnostic in the edited file is never "already there":
+    // an edit must not leave one behind, whatever the tree looked like
+    // before.
+    let own = format!("{edited}#");
     let new_errors: Vec<String> = result
         .errors
         .iter()
-        .filter(|error| !known_errors.contains(error))
+        .filter(|error| {
+            !known_errors.contains(error)
+                || (error.code == "FM_SCHEMA_SEMANTIC_CREDENTIAL_VALUE"
+                    && error.location.starts_with(&own))
+        })
         .map(ToString::to_string)
         .collect();
     if !new_errors.is_empty() {
@@ -773,7 +815,7 @@ pub(super) fn apply(
         ),
         None => {
             let rel = reference.path();
-            if files.iter().any(|file| file.rel == rel) {
+            if files.iter().any(|file| file.rel.eq_ignore_ascii_case(&rel)) {
                 return Err(CliError {
                     message: format!(
                         "{rel} already holds a different document; resolve it before adding {reference}"
@@ -803,7 +845,14 @@ pub(super) fn apply(
             text: text.clone(),
         }),
     }
-    let warnings = check_tree(&files, &after)?;
+    let mut warnings = check_tree(&files, &after, &rel)?;
+    if formatting == "canonical" {
+        warnings.insert(
+            0,
+            "the file was rewritten in the canonical layout; its comments could not be kept"
+                .to_owned(),
+        );
+    }
     write_file(root, &rel, &text)?;
     Ok(Outcome {
         path: rel,

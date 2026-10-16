@@ -606,3 +606,464 @@ fn read_commands_target_the_registry_api() {
     assert!(fleetctl::parse(&args(&["registry", "set", "domain/x", "--bogus", "1"])).is_err());
     assert!(fleetctl::parse(&args(&["registry", "publish"])).is_err());
 }
+
+fn entry_yaml(id_tail: &str, name: &str, fqdn: &str, extra: &str) -> String {
+    format!(
+        "apiVersion: fleet.frogbyte.io/v1alpha1\nkind: RegistryEntry\nmetadata:\n  id: 01890f3e-9b4a-7cc2-98c3-d24e8f58d{id_tail}\n  name: {name}\nspec:\n  type: domain\n  fields:\n    fqdn: {fqdn}\n{extra}"
+    )
+}
+
+fn write(work: &Path, rel: &str, text: &str) {
+    let path = work.join(rel);
+    fs::create_dir_all(path.parent().unwrap()).unwrap();
+    fs::write(path, text).unwrap();
+}
+
+#[cfg(unix)]
+fn install_hook(remote: &Path, script: &str) {
+    use std::os::unix::fs::PermissionsExt as _;
+    let hook = remote.join("hooks/pre-receive");
+    fs::write(&hook, script).unwrap();
+    fs::set_permissions(&hook, fs::Permissions::from_mode(0o755)).unwrap();
+}
+
+#[cfg(unix)]
+#[test]
+fn a_rejected_push_keeps_the_commit_says_so_and_a_rerun_pushes_it() {
+    let (_temp, work, remote) = repo();
+    install_hook(
+        &remote,
+        "#!/bin/sh\necho 'policy: pushes are closed' >&2\nexit 1\n",
+    );
+    run(
+        &work,
+        None,
+        None,
+        &[
+            "registry",
+            "set",
+            "domain/example.com",
+            "--field",
+            "registrar=Webhuset",
+        ],
+    );
+    let direct = [
+        "registry",
+        "publish",
+        "-m",
+        "example.com",
+        "--change-mode",
+        "direct",
+    ];
+    let failed = run(&work, None, None, &direct);
+    assert_ne!(failed.code, 0);
+    assert!(
+        failed.stderr.contains("policy: pushes are closed"),
+        "{}",
+        failed.stderr
+    );
+    assert!(
+        failed.stderr.contains("committed locally as "),
+        "{}",
+        failed.stderr
+    );
+    assert!(
+        failed
+            .stderr
+            .contains("nothing was pushed; fix and run `git push`"),
+        "{}",
+        failed.stderr
+    );
+    let local = git(&work, &["rev-parse", "HEAD"]);
+    assert_ne!(git(&remote, &["rev-parse", "main"]), local);
+
+    // With the remote fixed, publishing again pushes the waiting commit.
+    fs::remove_file(remote.join("hooks/pre-receive")).unwrap();
+    let again = run(
+        &work,
+        None,
+        None,
+        &[
+            "--output",
+            "json",
+            "registry",
+            "publish",
+            "-m",
+            "again",
+            "--change-mode",
+            "direct",
+        ],
+    );
+    assert_eq!(again.code, 0, "{}{}", again.stdout, again.stderr);
+    let result: Value = serde_json::from_str(&again.stdout).unwrap();
+    assert_eq!(result["committed"], false);
+    assert_eq!(result["pushedExisting"], 1);
+    assert_eq!(git(&remote, &["rev-parse", "main"]), local);
+}
+
+#[test]
+fn direct_mode_refuses_to_push_local_non_registry_commits() {
+    let (_temp, work, remote) = repo();
+    fs::write(work.join("code.txt"), "not registry\n").unwrap();
+    git(&work, &["add", "code.txt"]);
+    git(&work, &["commit", "-m", "unrelated"]);
+    run(
+        &work,
+        None,
+        None,
+        &[
+            "registry",
+            "set",
+            "domain/example.com",
+            "--field",
+            "registrar=Webhuset",
+        ],
+    );
+    let out = run(
+        &work,
+        None,
+        None,
+        &["registry", "publish", "-m", "x", "--change-mode", "direct"],
+    );
+    assert_ne!(out.code, 0);
+    assert!(
+        out.stderr.contains("1 commit(s) ahead of origin/main"),
+        "{}",
+        out.stderr
+    );
+    assert!(out.stderr.contains("code.txt"), "{}", out.stderr);
+    // Nothing was committed or pushed by the refused publish.
+    assert!(!git(&work, &["log", "--oneline"]).contains("x\n"));
+    assert_ne!(
+        git(&remote, &["rev-parse", "main"]),
+        git(&work, &["rev-parse", "HEAD"])
+    );
+}
+
+#[test]
+fn a_credential_already_in_the_file_is_never_left_in_place() {
+    let (_temp, work, _) = repo();
+    let secret = "api_key=0123456789abcdef0123456789abcdef";
+    let text = entry_yaml(
+        "001",
+        "domain-example-com",
+        "example.com",
+        &format!("  notes: \"{secret}\"\n"),
+    );
+    write(&work, "fleet/registry/domain/example.com.yaml", &text);
+    let out = run(
+        &work,
+        None,
+        None,
+        &[
+            "registry",
+            "set",
+            "domain/example.com",
+            "--field",
+            "registrar=Webhuset",
+        ],
+    );
+    assert_ne!(out.code, 0);
+    assert!(
+        out.stderr.contains("FM_SCHEMA_SEMANTIC_CREDENTIAL_VALUE"),
+        "{}",
+        out.stderr
+    );
+    assert!(!out.stderr.contains("0123456789abcdef"));
+    assert_eq!(fs::read_to_string(entry_path(&work)).unwrap(), text);
+    // Removing it is allowed.
+    let fixed = run(
+        &work,
+        None,
+        None,
+        &["registry", "unset", "domain/example.com", "--notes"],
+    );
+    assert_eq!(fixed.code, 0, "{}{}", fixed.stdout, fixed.stderr);
+}
+
+#[test]
+fn publish_refuses_files_under_the_registry_dir_that_are_not_registry_yaml() {
+    let (_temp, work, _) = repo();
+    run(
+        &work,
+        None,
+        None,
+        &[
+            "registry",
+            "set",
+            "domain/example.com",
+            "--field",
+            "registrar=Webhuset",
+        ],
+    );
+    write(&work, "fleet/registry/domain/.env", "TOKEN=x\n");
+    write(&work, "fleet/registry/notes.txt", "hello\n");
+    let out = run(
+        &work,
+        None,
+        None,
+        &["registry", "publish", "-m", "x", "--change-mode", "direct"],
+    );
+    assert_ne!(out.code, 0);
+    assert!(
+        out.stderr.contains(".env") && out.stderr.contains("notes.txt"),
+        "{}",
+        out.stderr
+    );
+    assert!(out.stderr.contains("not Registry YAML"), "{}", out.stderr);
+    assert!(!git(&work, &["log", "--oneline"]).contains("x\n"));
+}
+
+#[test]
+fn publish_validates_branch_and_base_names() {
+    let (_temp, work, _) = repo();
+    run(
+        &work,
+        None,
+        None,
+        &[
+            "registry",
+            "set",
+            "domain/example.com",
+            "--field",
+            "registrar=Webhuset",
+        ],
+    );
+    let same = run(
+        &work,
+        None,
+        None,
+        &[
+            "registry",
+            "publish",
+            "-m",
+            "x",
+            "--change-mode",
+            "pull-request",
+            "--branch",
+            "main",
+        ],
+    );
+    assert!(same.stderr.contains("must differ"), "{}", same.stderr);
+    let bad = run(
+        &work,
+        None,
+        None,
+        &[
+            "registry",
+            "publish",
+            "-m",
+            "x",
+            "--change-mode",
+            "pull-request",
+            "--base",
+            "bad..name",
+        ],
+    );
+    assert!(
+        bad.stderr.contains("--base is not a valid branch name"),
+        "{}",
+        bad.stderr
+    );
+}
+
+#[test]
+fn a_multi_document_file_is_refused_for_editing() {
+    let (_temp, work, _) = repo();
+    let one = entry_yaml("001", "domain-example-com", "example.com", "");
+    let two = entry_yaml("002", "domain-other-com", "other.com", "");
+    write(
+        &work,
+        "fleet/registry/domain/both.yaml",
+        &format!("{one}---\n{two}"),
+    );
+    let out = run(
+        &work,
+        None,
+        None,
+        &[
+            "registry",
+            "set",
+            "domain/other.com",
+            "--field",
+            "registrar=X",
+        ],
+    );
+    assert_ne!(out.code, 0);
+    assert!(out.stderr.contains("several documents"), "{}", out.stderr);
+}
+
+#[test]
+fn an_unparsable_yaml_file_stops_an_edit() {
+    let (_temp, work, _) = repo();
+    write(&work, "fleet/registry/domain/broken.yaml", "a: [unclosed\n");
+    let out = run(
+        &work,
+        None,
+        None,
+        &["registry", "set", "domain/example.com"],
+    );
+    assert_ne!(out.code, 0);
+    assert!(
+        out.stderr.contains("broken.yaml cannot be read"),
+        "{}",
+        out.stderr
+    );
+}
+
+#[test]
+fn a_flow_style_file_falls_back_to_the_canonical_layout_and_warns() {
+    let (_temp, work, _) = repo();
+    let text = "# keep me\napiVersion: fleet.frogbyte.io/v1alpha1\nkind: RegistryEntry\nmetadata: { id: 01890f3e-9b4a-7cc2-98c3-d24e8f58d001, name: domain-example-com }\nspec:\n  type: domain\n  fields: {\n    fqdn: example.com,\n    registrar: Webhuset\n  }\n";
+    write(&work, "fleet/registry/domain/example.com.yaml", text);
+    let out = run(
+        &work,
+        None,
+        None,
+        &[
+            "--output",
+            "json",
+            "registry",
+            "set",
+            "domain/example.com",
+            "--field",
+            "dnsHost=Cloudflare",
+        ],
+    );
+    assert_eq!(out.code, 0, "{}{}", out.stdout, out.stderr);
+    let result: Value = serde_json::from_str(&out.stdout).unwrap();
+    assert_eq!(result["formatting"], "canonical", "{result}");
+    assert!(
+        result["warnings"][0]
+            .as_str()
+            .unwrap()
+            .contains("canonical layout"),
+        "{result}"
+    );
+    let after = fs::read_to_string(entry_path(&work)).unwrap();
+    assert!(
+        after.contains("dnsHost: Cloudflare") && after.contains("registrar: Webhuset"),
+        "{after}"
+    );
+    assert!(!after.contains("keep me"));
+    assert_eq!(run(&work, None, None, &["registry", "validate"]).code, 0);
+}
+
+#[test]
+fn relations_dedupe_case_insensitively_and_reserved_stems_are_suffixed() {
+    let (_temp, work, _) = repo();
+    run(
+        &work,
+        None,
+        None,
+        &["registry", "set", "domain/example.com"],
+    );
+    run(
+        &work,
+        None,
+        None,
+        &["registry", "set", "service/aptabase", "--field", "name=A"],
+    );
+    run(
+        &work,
+        None,
+        None,
+        &[
+            "registry",
+            "relate",
+            "domain/example.com",
+            "used-by",
+            "service/aptabase",
+        ],
+    );
+    let again = run(
+        &work,
+        None,
+        None,
+        &[
+            "registry",
+            "relate",
+            "domain/example.com",
+            "used-by",
+            "service/Aptabase",
+        ],
+    );
+    assert!(again.stdout.contains("up to date"), "{}", again.stdout);
+    let con = run(
+        &work,
+        None,
+        None,
+        &["--output", "json", "registry", "set", "domain/con"],
+    );
+    assert_eq!(con.code, 0, "{}{}", con.stdout, con.stderr);
+    assert!(work.join("fleet/registry/domain/con_.yaml").exists());
+    // The same key in another case finds the same entry, not a new file.
+    let upper = run(
+        &work,
+        None,
+        None,
+        &["registry", "set", "domain/Example.com"],
+    );
+    assert!(upper.stdout.contains("up to date"), "{}", upper.stdout);
+}
+
+#[cfg(unix)]
+#[test]
+fn validate_reads_the_git_file_set_and_refuses_symlinks() {
+    let (_temp, work, _) = repo();
+    // An ignored invalid file is outside the set; an untracked one is in.
+    fs::write(work.join(".gitignore"), "ignored.yaml\n").unwrap();
+    fs::write(work.join("ignored.yaml"), "kind: nope\n").unwrap();
+    assert_eq!(run(&work, None, None, &["registry", "validate"]).code, 0);
+    fs::write(work.join("untracked.yaml"), "kind: nope\n").unwrap();
+    assert_eq!(run(&work, None, None, &["registry", "validate"]).code, 1);
+    fs::remove_file(work.join("untracked.yaml")).unwrap();
+    std::os::unix::fs::symlink("README.md", work.join("link.yaml")).unwrap();
+    let out = run(&work, None, None, &["registry", "validate"]);
+    assert_ne!(out.code, 0);
+    assert!(out.stderr.contains("symlink"), "{}", out.stderr);
+}
+
+#[cfg(unix)]
+#[test]
+fn a_failing_gh_reports_the_pushed_branch() {
+    let (temp, work, remote) = repo();
+    let bin = temp.path().join("bin");
+    fs::create_dir_all(&bin).unwrap();
+    stub_gh(&bin, "#!/bin/sh\necho 'gh: no auth' >&2\nexit 1\n");
+    run(
+        &work,
+        None,
+        None,
+        &[
+            "registry",
+            "set",
+            "domain/example.com",
+            "--field",
+            "registrar=Webhuset",
+        ],
+    );
+    let out = run(
+        &work,
+        Some(&bin),
+        None,
+        &[
+            "registry",
+            "publish",
+            "-m",
+            "Add it",
+            "--change-mode",
+            "pull-request",
+        ],
+    );
+    assert_ne!(out.code, 0);
+    assert!(
+        out.stderr
+            .contains("was pushed, but the pull request was not opened"),
+        "{}",
+        out.stderr
+    );
+    assert!(out.stderr.contains("gh: no auth"), "{}", out.stderr);
+    let branches = git(&remote, &["branch", "--list", "registry/*"]);
+    assert!(branches.contains("registry/add-it-"), "{branches}");
+}

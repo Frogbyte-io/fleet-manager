@@ -674,11 +674,6 @@ fn changed_text(reference: &EntryRef, outcome: &edit::Outcome) -> String {
     } else {
         format!("{reference} is already up to date ({})", outcome.path)
     };
-    if outcome.formatting == "canonical" {
-        text.push_str(
-            "\nnote: the file was rewritten in the canonical layout; its comments could not be kept",
-        );
-    }
     for warning in &outcome.warnings {
         text.push_str("\nwarning: ");
         text.push_str(warning);
@@ -780,6 +775,16 @@ fn render_publish(result: &Value) -> String {
         result["mode"].as_str().unwrap_or("?"),
         result["branch"].as_str().unwrap_or("?")
     )];
+    if let Some(count) = result["pushedExisting"].as_u64().filter(|count| *count > 0) {
+        lines.push(format!(
+            "{count} commit(s) that were already local {} pushed with it",
+            if result["committed"] == Value::Bool(true) {
+                "were"
+            } else {
+                "are"
+            }
+        ));
+    }
     if let Some(url) = result["pullRequest"].as_str() {
         lines.push(format!("pull request: {url}"));
     } else if let Some(url) = result["compareUrl"].as_str() {

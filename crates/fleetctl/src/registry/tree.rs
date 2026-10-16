@@ -23,10 +23,6 @@ use crate::CliError;
 /// The directory Registry entries live in by convention.
 pub(super) const REGISTRY_DIR: &str = "fleet/registry";
 
-/// Directory depth the file walk refuses to pass; a Fleet repository is
-/// shallow, and this bounds a pathological tree.
-const MAX_DEPTH: usize = 32;
-
 /// One YAML file of the checkout.
 #[derive(Clone, Debug)]
 pub(super) struct SourceFile {
@@ -61,62 +57,79 @@ pub(super) fn discover(repo: Option<&Path>) -> Result<PathBuf, CliError> {
     })
 }
 
-/// Reads every `*.yaml` file under the checkout, sorted by path.
+/// Reads every `*.yaml` file of the checkout, sorted by path.
+///
+/// The file set is what Git would carry: tracked files plus untracked files
+/// that are not ignored (`git ls-files --cached --others
+/// --exclude-standard`), so ignored build output and `.git` never count and
+/// an edit is validated exactly as it would be committed. A symlink named
+/// `*.yaml` is refused, as the controller never follows one.
 pub(super) fn load(root: &Path) -> Result<Vec<SourceFile>, CliError> {
-    let mut files = Vec::new();
-    walk(root, root, 0, &mut files)?;
-    files.sort_by(|a, b| a.rel.cmp(&b.rel));
-    Ok(files)
-}
-
-fn walk(
-    root: &Path,
-    directory: &Path,
-    depth: usize,
-    files: &mut Vec<SourceFile>,
-) -> Result<(), CliError> {
-    if depth > MAX_DEPTH {
+    let output = std::process::Command::new("git")
+        .arg("-C")
+        .arg(root)
+        .args([
+            "ls-files",
+            "-z",
+            "--cached",
+            "--others",
+            "--exclude-standard",
+        ])
+        .stdin(std::process::Stdio::null())
+        .output()
+        .map_err(|error| CliError {
+            message: format!("git could not be run: {error}"),
+        })?;
+    if !output.status.success() {
         return Err(CliError {
-            message: format!("the checkout is nested deeper than {MAX_DEPTH} directories"),
+            message: "git ls-files failed; is this a Git checkout?".to_owned(),
         });
     }
-    let entries = std::fs::read_dir(directory).map_err(|error| CliError {
-        message: format!("{} is not readable: {error}", directory.display()),
-    })?;
-    for entry in entries.flatten() {
-        let path = entry.path();
-        // `file_type` does not follow symlinks, so a link can neither loop
-        // the walk nor pull in a file from outside the checkout.
-        let Ok(kind) = entry.file_type() else {
-            continue;
-        };
-        if kind.is_dir() {
-            if entry.file_name() != ".git" {
-                walk(root, &path, depth + 1, files)?;
-            }
-        } else if kind.is_file()
-            && path
+    let mut files = Vec::new();
+    let mut seen = std::collections::BTreeSet::new();
+    for rel in String::from_utf8_lossy(&output.stdout)
+        .split('\0')
+        .filter(|rel| {
+            // Exactly `yaml`, like the controller's file collection.
+            Path::new(rel)
                 .extension()
                 .is_some_and(|extension| extension == "yaml")
-        {
-            let rel = relative(root, &path);
-            let text = std::fs::read_to_string(&path).map_err(|error| CliError {
-                message: format!("{rel} is not readable UTF-8 text: {error}"),
-            })?;
-            files.push(SourceFile { rel, text });
+        })
+    {
+        if !seen.insert(rel.to_owned()) {
+            continue;
         }
+        let path = root.join(rel);
+        let metadata = match std::fs::symlink_metadata(&path) {
+            Ok(metadata) => metadata,
+            // Tracked but deleted in the working tree.
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => {
+                return Err(CliError {
+                    message: format!("{rel} is not readable: {error}"),
+                });
+            }
+        };
+        if metadata.file_type().is_symlink() {
+            return Err(CliError {
+                message: format!(
+                    "{rel} is a symlink; the controller does not follow symlinks, so replace it with a regular file"
+                ),
+            });
+        }
+        if !metadata.is_file() {
+            continue;
+        }
+        let text = std::fs::read_to_string(&path).map_err(|error| CliError {
+            message: format!("{rel} is not readable UTF-8 text: {error}"),
+        })?;
+        files.push(SourceFile {
+            rel: rel.to_owned(),
+            text,
+        });
     }
-    Ok(())
-}
-
-/// The checkout-relative path with `/` separators.
-pub(super) fn relative(root: &Path, path: &Path) -> String {
-    path.strip_prefix(root)
-        .unwrap_or(path)
-        .components()
-        .map(|part| part.as_os_str().to_string_lossy().into_owned())
-        .collect::<Vec<_>>()
-        .join("/")
+    files.sort_by(|a, b| a.rel.cmp(&b.rel));
+    Ok(files)
 }
 
 /// The strict YAML input policy the controller applies.

@@ -3790,6 +3790,7 @@ pub fn run(invocation: &Invocation) -> Result<String, CliError> {
 /// # Errors
 ///
 /// As [`run`].
+#[allow(clippy::too_many_lines)]
 pub fn run_with_exit(invocation: &Invocation) -> Result<(String, u8), CliError> {
     // Help never builds a client: no request can leave the process.
     if let Command::Help { text } = &invocation.command {
