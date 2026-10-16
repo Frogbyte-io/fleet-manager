@@ -86,3 +86,58 @@ async fn snapshot_resources_record_and_return_their_source_path() {
     );
     assert_eq!(resources[1].source_path, None);
 }
+
+#[tokio::test]
+async fn a_repeat_fetch_backfills_only_missing_paths_and_snapshots_stay_immutable() {
+    let directory = tempfile::tempdir().unwrap();
+    let store = Store::open(&directory.path().join("controller.sqlite"))
+        .await
+        .unwrap();
+    let source = SourceRepository::new(store.pool().clone());
+    let active = revision("dddd");
+    let record = |path: Option<&str>, name: &str| DesiredResourceRecord {
+        kind: "RegistryEntry".to_owned(),
+        id: "e-1".to_owned(),
+        name: name.to_owned(),
+        spec: serde_json::json!({}),
+        source_path: path.map(str::to_owned),
+    };
+    source
+        .record_valid_revision(&active, &[record(None, "one")])
+        .await
+        .unwrap();
+    source.activate_serialized(&active).await.unwrap();
+    let cache = RegistryRepository::new(store.pool().clone());
+    let state = CacheState {
+        revision: active.clone(),
+        builtin_fingerprint: "f".to_owned(),
+    };
+    assert!(
+        cache
+            .replace_cache(&state, &RegistryProjection::default())
+            .await
+            .unwrap()
+    );
+
+    // The repeat fetch supplies the path: it fills the NULL and drops the stale cache.
+    source
+        .record_valid_revision(&active, &[record(Some("a/one.yaml"), "one")])
+        .await
+        .unwrap();
+    let held = source.active_resources(None, None, 10).await.unwrap();
+    assert_eq!(held[0].source_path.as_deref(), Some("a/one.yaml"));
+    assert!(cache.cache_state().await.unwrap().is_none());
+
+    // A later fetch cannot overwrite a recorded path or change content.
+    source
+        .record_valid_revision(&active, &[record(Some("b/other.yaml"), "renamed")])
+        .await
+        .unwrap();
+    let held = source.active_resources(None, None, 10).await.unwrap();
+    assert_eq!(held[0].source_path.as_deref(), Some("a/one.yaml"));
+    assert_eq!(held[0].name, "one");
+    let direct = sqlx::query("UPDATE source_revision_resources SET name = 'x'")
+        .execute(store.pool())
+        .await;
+    assert!(direct.is_err(), "content stays append-only");
+}

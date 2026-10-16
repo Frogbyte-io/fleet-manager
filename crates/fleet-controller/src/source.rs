@@ -360,7 +360,6 @@ async fn complete_failed(
         .map_err(|error| error.to_string())
 }
 
-/// Collects YAML files under a root, as relative paths.
 /// The document's path relative to the worktree, with `/` separators; a
 /// path outside the worktree (never expected) yields none rather than
 /// leaking an absolute host path into the snapshot.
@@ -377,6 +376,7 @@ fn repository_relative(root: &std::path::Path, path: &std::path::Path) -> Option
     (!joined.is_empty() && joined.len() <= 1024).then_some(joined)
 }
 
+/// Collects YAML files under a root, as relative paths.
 fn collect_yaml(
     _root: &std::path::Path,
     base: &std::path::Path,

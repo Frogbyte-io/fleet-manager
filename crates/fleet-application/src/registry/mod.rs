@@ -14,6 +14,7 @@
 mod projection;
 
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use serde::Serialize;
 use sha2::{Digest as _, Sha256};
@@ -32,6 +33,9 @@ const REBUILD_PAGE: i64 = 500;
 /// The most resources of one kind a rebuild reads; a revision beyond this
 /// is refused rather than silently truncated.
 const REBUILD_MAX: usize = 50_000;
+/// How long a failed rebuild of a revision is remembered before a read
+/// tries again.
+const FAILURE_MEMORY: Duration = Duration::from_secs(5);
 
 /// A type Fleet ships. The spec has the `RegistryType` spec's shape.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -143,12 +147,34 @@ impl RegistryTarget {
     }
 }
 
+/// The case-insensitive form of an entry key. Keys are unique regardless of
+/// case (FM-1010), so lookups, joins, and cursors use this form while the
+/// key as written is kept for display.
+#[must_use]
+pub fn normalize_key(key: &str) -> String {
+    key.to_lowercase()
+}
+
 /// Splits `<type>/<key>`; both halves must be non-empty and the key must
 /// not itself contain a slash (the validator guarantees it never does).
 #[must_use]
 pub fn split_entry_ref(reference: &str) -> Option<(&str, &str)> {
     let (entry_type, key) = reference.split_once('/')?;
     (!entry_type.is_empty() && !key.is_empty() && !key.contains('/')).then_some((entry_type, key))
+}
+
+impl RegistryTarget {
+    /// The reference in comparison form: a `registry` reference is
+    /// case-insensitive (it names an entry), every other class compares
+    /// as recorded.
+    #[must_use]
+    pub fn normalized_reference(&self) -> String {
+        if self.class == "registry" {
+            normalize_key(&self.reference)
+        } else {
+            self.reference.clone()
+        }
+    }
 }
 
 /// One relation of an entry.
@@ -383,6 +409,18 @@ pub struct RegistryReadModel {
     source: Arc<dyn SourcePort>,
     builtins: Vec<BuiltinRegistryType>,
     fingerprint: String,
+    /// Held across a rebuild (single-flight) and holding the last
+    /// failure for [`FAILURE_MEMORY`].
+    failure: Arc<tokio::sync::Mutex<Option<RebuildFailure>>>,
+}
+
+/// A remembered rebuild failure.
+#[derive(Debug)]
+struct RebuildFailure {
+    revision: ActiveRevision,
+    at: Instant,
+    context: &'static str,
+    detail: String,
 }
 
 fn backend(context: &'static str) -> impl Fn(String) -> ProjectUseCaseError {
@@ -398,6 +436,7 @@ impl RegistryReadModel {
             source,
             builtins: Vec::new(),
             fingerprint: fingerprint(&[]),
+            failure: Arc::new(tokio::sync::Mutex::new(None)),
         }
     }
 
@@ -412,48 +451,94 @@ impl RegistryReadModel {
     }
 
     /// Rebuilds the cache from the active revision's snapshot and returns
-    /// that revision. Called after activation and rollback; also the
-    /// repair path when the cache is stale.
+    /// that revision. Called after activation and rollback. Rebuilds are
+    /// single-flight: concurrent callers queue behind one another.
     ///
     /// # Errors
     ///
     /// Fails when the backend errors or the revision is too large.
     pub async fn refresh(&self) -> Result<Option<ActiveRevision>, ProjectUseCaseError> {
+        let mut failure = self.failure.lock().await;
+        self.rebuild(&mut failure).await
+    }
+
+    /// One rebuild under the single-flight lock; records or clears the
+    /// negative-cache entry.
+    async fn rebuild(
+        &self,
+        failure: &mut Option<RebuildFailure>,
+    ) -> Result<Option<ActiveRevision>, ProjectUseCaseError> {
+        match self.derive_and_store().await {
+            Ok(revision) => {
+                *failure = None;
+                Ok(revision)
+            }
+            Err((revision, error)) => {
+                if let (Some(revision), ProjectUseCaseError::Backend { context, detail }) =
+                    (revision, &error)
+                {
+                    *failure = Some(RebuildFailure {
+                        revision,
+                        at: Instant::now(),
+                        context,
+                        detail: detail.clone(),
+                    });
+                }
+                Err(error)
+            }
+        }
+    }
+
+    async fn derive_and_store(
+        &self,
+    ) -> Result<Option<ActiveRevision>, (Option<ActiveRevision>, ProjectUseCaseError)> {
         // A concurrent activation can move the revision under a rebuild;
         // the store refuses the stale write and the loop re-reads.
+        let mut last = None;
         for _ in 0..4 {
             let Some(revision) = self
                 .source
                 .active_revision()
                 .await
-                .map_err(backend("registry_revision"))?
+                .map_err(|detail| (None, backend("registry_revision")(detail)))?
             else {
                 return Ok(None);
             };
-            let types = self.read_kind("RegistryType").await?;
-            let entries = self.read_kind("RegistryEntry").await?;
-            let projection = derive(&self.builtins, &types, &entries);
-            let state = CacheState {
-                revision: revision.clone(),
-                builtin_fingerprint: self.fingerprint.clone(),
-            };
-            if self
-                .cache
-                .replace_cache(&state, &projection)
-                .await
-                .map_err(backend("registry_rebuild"))?
-            {
-                return Ok(Some(revision));
+            last = Some(revision.clone());
+            // The named revision's snapshot, never "the active" join: an
+            // A to B to A flip between pages cannot mix revisions.
+            let attempt = async {
+                let types = self.read_kind(&revision, "RegistryType").await?;
+                let entries = self.read_kind(&revision, "RegistryEntry").await?;
+                let projection = derive(&self.builtins, &types, &entries);
+                let state = CacheState {
+                    revision: revision.clone(),
+                    builtin_fingerprint: self.fingerprint.clone(),
+                };
+                self.cache
+                    .replace_cache(&state, &projection)
+                    .await
+                    .map_err(backend("registry_rebuild"))
+            }
+            .await;
+            match attempt {
+                Ok(true) => return Ok(Some(revision)),
+                Ok(false) => {}
+                Err(error) => return Err((Some(revision), error)),
             }
         }
-        Err(ProjectUseCaseError::Backend {
-            context: "registry_rebuild",
-            detail: "the active revision kept changing during the rebuild".to_owned(),
-        })
+        Err((
+            last,
+            ProjectUseCaseError::Backend {
+                context: "registry_rebuild",
+                detail: "the active revision kept changing during the rebuild".to_owned(),
+            },
+        ))
     }
 
     async fn read_kind(
         &self,
+        revision: &ActiveRevision,
         kind: &str,
     ) -> Result<Vec<DesiredResourceRecord>, ProjectUseCaseError> {
         let mut all = Vec::new();
@@ -461,7 +546,7 @@ impl RegistryReadModel {
         loop {
             let page = self
                 .source
-                .active_resources(Some(kind), after.as_deref(), REBUILD_PAGE)
+                .snapshot_resources(revision, Some(kind), after.as_deref(), REBUILD_PAGE)
                 .await
                 .map_err(backend("registry_snapshot"))?;
             let done = i64::try_from(page.len()).unwrap_or(i64::MAX) < REBUILD_PAGE;
@@ -470,7 +555,10 @@ impl RegistryReadModel {
             if all.len() > REBUILD_MAX {
                 return Err(ProjectUseCaseError::Backend {
                     context: "registry_snapshot",
-                    detail: format!("the revision holds more than {REBUILD_MAX} {kind} resources"),
+                    detail: format!(
+                        "the revision holds more than {REBUILD_MAX} {kind} resources, \
+                         which the Registry read model refuses to cache"
+                    ),
                 });
             }
             if done || after.is_none() {
@@ -479,7 +567,20 @@ impl RegistryReadModel {
         }
     }
 
-    /// The revision the cache serves, rebuilding when it is stale.
+    async fn current(&self, active: &ActiveRevision) -> Result<bool, ProjectUseCaseError> {
+        let state = self
+            .cache
+            .cache_state()
+            .await
+            .map_err(backend("registry_state"))?;
+        Ok(state.is_some_and(|state| {
+            state.revision == *active && state.builtin_fingerprint == self.fingerprint
+        }))
+    }
+
+    /// The revision the cache serves, rebuilding when it is stale. The
+    /// rebuild is single-flight, and a failed rebuild of a revision is
+    /// remembered briefly so reads do not each repeat it.
     async fn fresh(&self) -> Result<Option<ActiveRevision>, ProjectUseCaseError> {
         let active = self
             .source
@@ -489,17 +590,24 @@ impl RegistryReadModel {
         let Some(active) = active else {
             return Ok(None);
         };
-        let state = self
-            .cache
-            .cache_state()
-            .await
-            .map_err(backend("registry_state"))?;
-        if state.is_some_and(|state| {
-            state.revision == active && state.builtin_fingerprint == self.fingerprint
-        }) {
+        if self.current(&active).await? {
             return Ok(Some(active));
         }
-        self.refresh().await
+        let mut failure = self.failure.lock().await;
+        // Another reader may have rebuilt while this one waited.
+        if self.current(&active).await? {
+            return Ok(Some(active));
+        }
+        if let Some(known) = failure.as_ref()
+            && known.revision == active
+            && known.at.elapsed() < FAILURE_MEMORY
+        {
+            return Err(ProjectUseCaseError::Backend {
+                context: known.context,
+                detail: known.detail.clone(),
+            });
+        }
+        self.rebuild(&mut failure).await
     }
 
     fn allow(authorizer: &dyn Authorizer, principal_id: &str) -> Result<(), ProjectUseCaseError> {

@@ -113,6 +113,21 @@ pub trait SourcePort: std::fmt::Debug + Send + Sync {
         after: Option<&str>,
         limit: i64,
     ) -> Result<Vec<DesiredResourceRecord>, String>;
+    /// The resources of one NAMED revision's snapshot, ordered by identity:
+    /// at most `limit` after the `after` identity, optionally of one kind.
+    /// Unlike [`active_resources`](Self::active_resources) it cannot mix
+    /// two revisions when the active one changes between pages.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the backend errors.
+    async fn snapshot_resources(
+        &self,
+        revision: &ActiveRevision,
+        kind: Option<&str>,
+        after: Option<&str>,
+        limit: i64,
+    ) -> Result<Vec<DesiredResourceRecord>, String>;
     /// The configured desired-source remote, when one is set.
     ///
     /// # Errors
@@ -976,6 +991,15 @@ mod tests {
                 snapshot_held: held.is_some(),
                 kind_counts,
             }))
+        }
+        async fn snapshot_resources(
+            &self,
+            _revision: &ActiveRevision,
+            _kind: Option<&str>,
+            _after: Option<&str>,
+            _limit: i64,
+        ) -> Result<Vec<DesiredResourceRecord>, String> {
+            Ok(Vec::new())
         }
         async fn active_resources(
             &self,

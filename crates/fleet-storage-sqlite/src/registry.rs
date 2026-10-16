@@ -9,7 +9,7 @@ use sqlx::{QueryBuilder, Sqlite, SqlitePool};
 use fleet_application::registry::{
     CacheState, EntryCursor, ReferenceCursor, RegistryCachePort, RegistryEntryFilter,
     RegistryEntryRecord, RegistryProjection, RegistryReference, RegistryRelationRecord,
-    RegistryTarget, RegistryTypeRecord, TypeOrigin,
+    RegistryTarget, RegistryTypeRecord, TypeOrigin, normalize_key,
 };
 use fleet_application::source::ActiveRevision;
 
@@ -25,30 +25,54 @@ impl RegistryRepository {
     pub fn new(pool: SqlitePool) -> Self {
         Self { pool }
     }
+}
 
-    async fn relations_of(
-        &self,
-        entry_type: &str,
-        key: &str,
-    ) -> Result<Vec<RegistryRelationRecord>, String> {
-        let rows: Vec<(String, String, String)> = sqlx::query_as(
-            "SELECT relation_type, target_class, target_ref FROM registry_relations \
-             WHERE entry_type = ?1 AND entry_key = ?2 \
-             ORDER BY relation_type, target_class, target_ref",
-        )
-        .bind(entry_type)
-        .bind(key)
-        .fetch_all(&self.pool)
-        .await
-        .map_err(|error| format!("the registry relation read failed: {error}"))?;
-        Ok(rows
-            .into_iter()
-            .map(|(relation_type, class, reference)| RegistryRelationRecord {
-                relation_type,
-                target: RegistryTarget { class, reference },
-            })
-            .collect())
+/// Loads the relations of every row in ONE query on the caller's
+/// connection (inside its read transaction), so a page's entries and
+/// relations come from the same snapshot of the cache.
+async fn attach_relations(
+    conn: &mut sqlx::SqliteConnection,
+    rows: Vec<EntryRow>,
+) -> Result<Vec<RegistryEntryRecord>, String> {
+    let mut by_entry: std::collections::HashMap<(String, String), Vec<RegistryRelationRecord>> =
+        std::collections::HashMap::new();
+    if !rows.is_empty() {
+        let mut query: QueryBuilder<Sqlite> = QueryBuilder::new(
+            "SELECT entry_type, entry_key_norm, relation_type, target_class, target_ref \
+             FROM registry_relations WHERE (entry_type, entry_key_norm) IN (VALUES ",
+        );
+        let mut separated = query.separated(", ");
+        for row in &rows {
+            separated.push("(");
+            separated.push_bind_unseparated(&row.0);
+            separated.push_unseparated(", ");
+            separated.push_bind_unseparated(normalize_key(&row.1));
+            separated.push_unseparated(")");
+        }
+        query.push(") ORDER BY relation_type, target_class, target_ref_norm");
+        let found: Vec<(String, String, String, String, String)> = query
+            .build_query_as()
+            .fetch_all(&mut *conn)
+            .await
+            .map_err(|error| format!("the registry relation read failed: {error}"))?;
+        for (entry_type, key_norm, relation_type, class, reference) in found {
+            by_entry
+                .entry((entry_type, key_norm))
+                .or_default()
+                .push(RegistryRelationRecord {
+                    relation_type,
+                    target: RegistryTarget { class, reference },
+                });
+        }
     }
+    rows.into_iter()
+        .map(|row| {
+            let relations = by_entry
+                .remove(&(row.0.clone(), normalize_key(&row.1)))
+                .unwrap_or_default();
+            entry_from(row, relations)
+        })
+        .collect()
 }
 
 type EntryRow = (
@@ -100,12 +124,13 @@ async fn insert_entry(
 ) -> Result<(), String> {
     let write = |error: sqlx::Error| format!("the registry cache write failed: {error}");
     sqlx::query(
-        "INSERT INTO registry_entries (entry_type, entry_key, resource_id, name, \
-         fields_json, tags_json, links_json, notes, source_path, search_text) \
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+        "INSERT INTO registry_entries (entry_type, entry_key, entry_key_norm, resource_id, \
+         name, fields_json, tags_json, links_json, notes, source_path, search_text) \
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
     )
     .bind(&entry.entry_type)
     .bind(&entry.key)
+    .bind(normalize_key(&entry.key))
     .bind(&entry.resource_id)
     .bind(&entry.name)
     .bind(entry.fields.to_string())
@@ -119,11 +144,11 @@ async fn insert_entry(
     .map_err(write)?;
     for tag in &entry.tags {
         sqlx::query(
-            "INSERT OR IGNORE INTO registry_entry_tags (entry_type, entry_key, tag) \
+            "INSERT OR IGNORE INTO registry_entry_tags (entry_type, entry_key_norm, tag) \
              VALUES (?1, ?2, ?3)",
         )
         .bind(&entry.entry_type)
-        .bind(&entry.key)
+        .bind(normalize_key(&entry.key))
         .bind(tag)
         .execute(&mut *tx)
         .await
@@ -132,14 +157,15 @@ async fn insert_entry(
     for relation in &entry.relations {
         sqlx::query(
             "INSERT OR IGNORE INTO registry_relations \
-             (entry_type, entry_key, relation_type, target_class, target_ref) \
-             VALUES (?1, ?2, ?3, ?4, ?5)",
+             (entry_type, entry_key_norm, relation_type, target_class, target_ref, \
+              target_ref_norm) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
         )
         .bind(&entry.entry_type)
-        .bind(&entry.key)
+        .bind(normalize_key(&entry.key))
         .bind(&relation.relation_type)
         .bind(&relation.target.class)
         .bind(&relation.target.reference)
+        .bind(relation.target.normalized_reference())
         .execute(&mut *tx)
         .await
         .map_err(write)?;
@@ -305,7 +331,8 @@ impl RegistryCachePort for RegistryRepository {
             query
                 .push(
                     " AND EXISTS (SELECT 1 FROM registry_entry_tags t \
-                     WHERE t.entry_type = e.entry_type AND t.entry_key = e.entry_key AND t.tag = ",
+                     WHERE t.entry_type = e.entry_type AND t.entry_key_norm = e.entry_key_norm \
+                     AND t.tag = ",
                 )
                 .push_bind(tag)
                 .push(")");
@@ -322,12 +349,12 @@ impl RegistryCachePort for RegistryRepository {
             query
                 .push(
                     " AND EXISTS (SELECT 1 FROM registry_relations r \
-                     WHERE r.entry_type = e.entry_type AND r.entry_key = e.entry_key \
+                     WHERE r.entry_type = e.entry_type AND r.entry_key_norm = e.entry_key_norm \
                      AND r.target_class = ",
                 )
                 .push_bind(&target.class)
-                .push(" AND r.target_ref = ")
-                .push_bind(&target.reference);
+                .push(" AND r.target_ref_norm = ")
+                .push_bind(target.normalized_reference());
             if let Some(relation) = &filter.relation {
                 query.push(" AND r.relation_type = ").push_bind(relation);
             }
@@ -335,26 +362,27 @@ impl RegistryCachePort for RegistryRepository {
         }
         if let Some(cursor) = after {
             query
-                .push(" AND (e.entry_type, e.entry_key) > (")
+                .push(" AND (e.entry_type, e.entry_key_norm) > (")
                 .push_bind(&cursor.entry_type)
                 .push(", ")
-                .push_bind(&cursor.key)
+                .push_bind(normalize_key(&cursor.key))
                 .push(")");
         }
         query
-            .push(" ORDER BY e.entry_type, e.entry_key LIMIT ")
+            .push(" ORDER BY e.entry_type, e.entry_key_norm LIMIT ")
             .push_bind(limit);
+        // One read transaction: the page and its relations are one snapshot.
+        let mut tx = self
+            .pool
+            .begin()
+            .await
+            .map_err(|error| format!("the registry read failed: {error}"))?;
         let rows: Vec<EntryRow> = query
             .build_query_as()
-            .fetch_all(&self.pool)
+            .fetch_all(&mut *tx)
             .await
             .map_err(|error| format!("the registry entry read failed: {error}"))?;
-        let mut entries = Vec::with_capacity(rows.len());
-        for row in rows {
-            let relations = self.relations_of(&row.0, &row.1).await?;
-            entries.push(entry_from(row, relations)?);
-        }
-        Ok(entries)
+        attach_relations(&mut tx, rows).await
     }
 
     async fn get_entry(
@@ -362,21 +390,23 @@ impl RegistryCachePort for RegistryRepository {
         entry_type: &str,
         key: &str,
     ) -> Result<Option<RegistryEntryRecord>, String> {
+        let mut tx = self
+            .pool
+            .begin()
+            .await
+            .map_err(|error| format!("the registry read failed: {error}"))?;
         let row: Option<EntryRow> = sqlx::query_as(concat!(
             entry_select!(),
-            " WHERE e.entry_type = ?1 AND e.entry_key = ?2"
+            " WHERE e.entry_type = ?1 AND e.entry_key_norm = ?2"
         ))
         .bind(entry_type)
-        .bind(key)
-        .fetch_optional(&self.pool)
+        .bind(normalize_key(key))
+        .fetch_optional(&mut *tx)
         .await
         .map_err(|error| format!("the registry entry read failed: {error}"))?;
         match row {
             None => Ok(None),
-            Some(row) => {
-                let relations = self.relations_of(&row.0, &row.1).await?;
-                entry_from(row, relations).map(Some)
-            }
+            Some(row) => Ok(attach_relations(&mut tx, vec![row]).await?.pop()),
         }
     }
 
@@ -388,30 +418,31 @@ impl RegistryCachePort for RegistryRepository {
         limit: i64,
     ) -> Result<Vec<RegistryReference>, String> {
         let mut query: QueryBuilder<Sqlite> = QueryBuilder::new(
-            "SELECT r.relation_type, r.entry_type, r.entry_key, e.name, e.source_path \
+            "SELECT r.relation_type, r.entry_type, e.entry_key, e.name, e.source_path \
              FROM registry_relations r \
-             JOIN registry_entries e ON e.entry_type = r.entry_type AND e.entry_key = r.entry_key \
+             JOIN registry_entries e \
+               ON e.entry_type = r.entry_type AND e.entry_key_norm = r.entry_key_norm \
              WHERE r.target_class = ",
         );
         query
             .push_bind(&target.class)
-            .push(" AND r.target_ref = ")
-            .push_bind(&target.reference);
+            .push(" AND r.target_ref_norm = ")
+            .push_bind(target.normalized_reference());
         if let Some(relation) = relation {
             query.push(" AND r.relation_type = ").push_bind(relation);
         }
         if let Some(cursor) = after {
             query
-                .push(" AND (r.entry_type, r.entry_key, r.relation_type) > (")
+                .push(" AND (r.entry_type, r.entry_key_norm, r.relation_type) > (")
                 .push_bind(&cursor.entry_type)
                 .push(", ")
-                .push_bind(&cursor.key)
+                .push_bind(normalize_key(&cursor.key))
                 .push(", ")
                 .push_bind(&cursor.relation_type)
                 .push(")");
         }
         query
-            .push(" ORDER BY r.entry_type, r.entry_key, r.relation_type LIMIT ")
+            .push(" ORDER BY r.entry_type, r.entry_key_norm, r.relation_type LIMIT ")
             .push_bind(limit);
         let rows: Vec<(String, String, String, String, Option<String>)> = query
             .build_query_as()

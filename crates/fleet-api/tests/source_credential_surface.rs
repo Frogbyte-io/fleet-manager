@@ -104,6 +104,15 @@ impl SourcePort for Port {
     async fn active_summary(&self) -> Result<Option<ActiveSummary>, String> {
         Ok(None)
     }
+    async fn snapshot_resources(
+        &self,
+        _revision: &ActiveRevision,
+        _kind: Option<&str>,
+        _after: Option<&str>,
+        _limit: i64,
+    ) -> Result<Vec<DesiredResourceRecord>, String> {
+        Ok(Vec::new())
+    }
     async fn active_resources(
         &self,
         _kind: Option<&str>,

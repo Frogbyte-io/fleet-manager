@@ -110,6 +110,15 @@ impl SourcePort for Source {
                 .collect(),
         }))
     }
+    async fn snapshot_resources(
+        &self,
+        _revision: &ActiveRevision,
+        _kind: Option<&str>,
+        _after: Option<&str>,
+        _limit: i64,
+    ) -> Result<Vec<DesiredResourceRecord>, String> {
+        Ok(Vec::new())
+    }
     async fn active_resources(
         &self,
         kind: Option<&str>,

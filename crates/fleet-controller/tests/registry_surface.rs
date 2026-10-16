@@ -19,8 +19,9 @@ use tower::ServiceExt as _;
 const TYPE: &str = "apiVersion: fleet.frogbyte.io/v1alpha1\nkind: RegistryType\nmetadata:\n  id: 01890f3e-9b4a-7cc2-98c3-d24e8f58d001\n  name: vendor\nspec:\n  displayName: Vendor\n  key: slug\n  fields:\n    slug: { type: string, required: true }\n    plan: { type: string }\n  relations: [used-by, hosted-on]\n";
 
 fn entry(suffix: &str, slug: &str, extra: &str) -> String {
+    let lower = slug.to_lowercase();
     format!(
-        "apiVersion: fleet.frogbyte.io/v1alpha1\nkind: RegistryEntry\nmetadata:\n  id: 01890f3e-9b4a-7cc2-98c3-d24e8f58d{suffix}\n  name: vendor-{slug}\nspec:\n  type: vendor\n  fields: {{ slug: {slug}, plan: Pro }}\n{extra}"
+        "apiVersion: fleet.frogbyte.io/v1alpha1\nkind: RegistryEntry\nmetadata:\n  id: 01890f3e-9b4a-7cc2-98c3-d24e8f58d{suffix}\n  name: vendor-{lower}\nspec:\n  type: vendor\n  fields: {{ slug: {slug}, plan: Pro }}\n{extra}"
     )
 }
 
@@ -196,20 +197,20 @@ fn revision_one() -> Vec<(&'static str, String)> {
             "fleet/registry/vendor/aptabase.yaml",
             entry(
                 "101",
-                "aptabase",
+                "AptaBase",
                 "  tags: [analytics, eu]\n  notes: Self-hosted analytics\n  relations:\n    - { type: hosted-on, target: { machine: build-1 } }\n    - { type: used-by, target: { registry: vendor/posthog } }\n",
             ),
         ),
         (
             "fleet/registry/vendor/posthog.yaml",
-            entry("102", "posthog", "  tags: [analytics]\n"),
+            entry("102", "PostHog", "  tags: [analytics]\n"),
         ),
         (
             "fleet/registry/vendor/resend.yaml",
             entry(
                 "103",
                 "resend",
-                "  relations:\n    - { type: used-by, target: { registry: vendor/posthog } }\n",
+                "  relations:\n    - { type: used-by, target: { registry: vendor/PostHog } }\n",
             ),
         ),
     ]
@@ -243,18 +244,28 @@ async fn the_registry_follows_activation_replacement_and_rollback() {
     // Types carry counts; entries carry the revision and their file path.
     let types = harness.get("/registry/types").await;
     assert_eq!(types["revision"]["commitSha"], first);
-    assert_eq!(types["items"][0]["name"], "vendor");
-    assert_eq!(types["items"][0]["origin"], "repository");
-    assert_eq!(types["items"][0]["entryCount"], 3);
+    let type_of = |name: &str| {
+        types["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|item| item["name"] == name)
+            .unwrap_or_else(|| panic!("type {name} missing: {types}"))
+            .clone()
+    };
+    assert_eq!(type_of("domain")["origin"], "builtin");
+    assert_eq!(type_of("service")["origin"], "builtin");
+    assert_eq!(type_of("vendor")["origin"], "repository");
+    assert_eq!(type_of("vendor")["entryCount"], 3);
     assert_eq!(
-        types["items"][0]["sourcePath"],
+        type_of("vendor")["sourcePath"],
         "fleet/registry/types/vendor.yaml"
     );
     let all = harness.get("/registry/entries").await;
     assert_eq!(all["revision"]["commitSha"], first);
     assert_eq!(
         keys(&all),
-        ["vendor/aptabase", "vendor/posthog", "vendor/resend"]
+        ["vendor/AptaBase", "vendor/PostHog", "vendor/resend"]
     );
     assert_eq!(
         all["items"][0]["sourcePath"],
@@ -264,15 +275,15 @@ async fn the_registry_follows_activation_replacement_and_rollback() {
     // Filters.
     assert_eq!(
         keys(&harness.get("/registry/entries?tag=analytics").await),
-        ["vendor/aptabase", "vendor/posthog"]
+        ["vendor/AptaBase", "vendor/PostHog"]
     );
     assert_eq!(
         keys(&harness.get("/registry/entries?tag=eu").await),
-        ["vendor/aptabase"]
+        ["vendor/AptaBase"]
     );
     assert_eq!(
         keys(&harness.get("/registry/entries?q=SELF-HOSTED").await),
-        ["vendor/aptabase"]
+        ["vendor/AptaBase"]
     );
     assert_eq!(
         keys(&harness.get("/registry/entries?q=%25").await),
@@ -290,10 +301,10 @@ async fn the_registry_follows_activation_replacement_and_rollback() {
     assert_eq!(
         keys(
             &harness
-                .get("/registry/entries?target=registry:vendor/posthog")
+                .get("/registry/entries?target=registry:vendor/POSTHOG")
                 .await
         ),
-        ["vendor/aptabase", "vendor/resend"]
+        ["vendor/AptaBase", "vendor/resend"]
     );
     assert_eq!(
         keys(
@@ -310,12 +321,12 @@ async fn the_registry_follows_activation_replacement_and_rollback() {
                 .get("/registry/entries?target=machine:build-1")
                 .await
         ),
-        ["vendor/aptabase"]
+        ["vendor/AptaBase"]
     );
 
     // Cursor pagination walks the whole set without repeats.
     let page_one = harness.get("/registry/entries?limit=2").await;
-    assert_eq!(keys(&page_one), ["vendor/aptabase", "vendor/posthog"]);
+    assert_eq!(keys(&page_one), ["vendor/AptaBase", "vendor/PostHog"]);
     let cursor = page_one["page"]["nextCursor"].as_str().unwrap().to_owned();
     let page_two = harness
         .get(&format!("/registry/entries?limit=2&cursor={cursor}"))
@@ -323,10 +334,54 @@ async fn the_registry_follows_activation_replacement_and_rollback() {
     assert_eq!(keys(&page_two), ["vendor/resend"]);
     assert!(page_two["page"]["nextCursor"].is_null());
 
-    // One entry, with its relations and the revision.
-    let one = harness.get("/registry/entries/vendor/aptabase").await;
+    // A cursor composes with every filter.
+    let tagged = harness.get("/registry/entries?tag=analytics&limit=1").await;
+    assert_eq!(keys(&tagged), ["vendor/AptaBase"]);
+    let cursor = tagged["page"]["nextCursor"].as_str().unwrap().to_owned();
+    assert_eq!(
+        keys(
+            &harness
+                .get(&format!(
+                    "/registry/entries?tag=analytics&limit=1&cursor={cursor}"
+                ))
+                .await
+        ),
+        ["vendor/PostHog"]
+    );
+    let queried = harness.get("/registry/entries?q=pro&limit=1").await;
+    let cursor = queried["page"]["nextCursor"].as_str().unwrap().to_owned();
+    assert_eq!(
+        keys(
+            &harness
+                .get(&format!("/registry/entries?q=pro&limit=1&cursor={cursor}"))
+                .await
+        ),
+        ["vendor/PostHog"]
+    );
+    let targeted = harness
+        .get("/registry/entries?target=registry:vendor/posthog&limit=1")
+        .await;
+    assert_eq!(keys(&targeted), ["vendor/AptaBase"]);
+    let cursor = targeted["page"]["nextCursor"].as_str().unwrap().to_owned();
+    assert_eq!(
+        keys(
+            &harness
+                .get(&format!(
+                    "/registry/entries?target=registry:vendor/posthog&limit=1&cursor={cursor}"
+                ))
+                .await
+        ),
+        ["vendor/resend"]
+    );
+
+    // One entry, with its relations and the revision. Lookup ignores case.
+    let one = harness.get("/registry/entries/vendor/APTABASE").await;
     assert_eq!(one["revision"]["commitSha"], first);
-    assert_eq!(one["data"]["fields"]["slug"], "aptabase");
+    assert_eq!(one["data"]["fields"]["slug"], "AptaBase");
+    assert_eq!(
+        one["data"]["key"], "AptaBase",
+        "the key is returned as written"
+    );
     assert_eq!(one["data"]["relations"][0]["type"], "hosted-on");
     assert_eq!(one["data"]["relations"][0]["target"]["class"], "machine");
     let (status, _) = harness
@@ -336,7 +391,7 @@ async fn the_registry_follows_activation_replacement_and_rollback() {
 
     // Reverse relations: for an entry and for a Fleet resource.
     let pointing = harness
-        .get("/registry/entries/vendor/posthog/referenced-by")
+        .get("/registry/entries/vendor/POSTHOG/referenced-by")
         .await;
     assert_eq!(pointing["revision"]["commitSha"], first);
     let pointing_keys: Vec<_> = pointing["items"]
@@ -352,12 +407,12 @@ async fn the_registry_follows_activation_replacement_and_rollback() {
         .collect();
     assert_eq!(
         pointing_keys,
-        [("aptabase", "used-by"), ("resend", "used-by")]
+        [("AptaBase", "used-by"), ("resend", "used-by")]
     );
     let by_machine = harness
         .get("/registry/references?target=machine:build-1")
         .await;
-    assert_eq!(by_machine["items"][0]["entryKey"], "aptabase");
+    assert_eq!(by_machine["items"][0]["entryKey"], "AptaBase");
     assert_eq!(by_machine["items"][0]["relation"], "hosted-on");
     assert_eq!(
         by_machine["items"][0]["sourcePath"],
@@ -370,7 +425,7 @@ async fn the_registry_follows_activation_replacement_and_rollback() {
     let ref_cursor = first_ref["page"]["nextCursor"].as_str().unwrap();
     let second_ref = harness
         .get(&format!(
-            "/registry/references?target=registry:vendor/posthog&limit=1&cursor={ref_cursor}"
+            "/registry/references?target=registry:vendor/PostHog&limit=1&cursor={ref_cursor}"
         ))
         .await;
     assert_eq!(second_ref["items"][0]["entryKey"], "resend");
@@ -455,4 +510,169 @@ async fn reading_the_registry_needs_the_registry_read_permission() {
         let (status, body) = harness.call("GET", path, None).await;
         assert_eq!(status, StatusCode::FORBIDDEN, "{path}: {body}");
     }
+}
+
+#[tokio::test]
+async fn a_changed_builtin_set_rebuilds_the_cache_on_the_next_read() {
+    use fleet_application::registry::{BuiltinRegistryType, RegistryReadModel};
+
+    let dir = tempfile::tempdir().unwrap();
+    let repo = dir.path().join("desired");
+    let harness = harness(dir.path(), Arc::new(fleet_auth::LanAllowAllAuthorizer)).await;
+    let sha = commit(&repo, &revision_one());
+    harness
+        .call(
+            "PUT",
+            "/desired/source",
+            Some(serde_json::json!({"remote": repo.to_str().unwrap()})),
+        )
+        .await;
+    harness.publish(&sha).await;
+    // Populate the cache with the controller's own built-in set.
+    harness.get("/registry/types").await;
+
+    let model = |builtins: Vec<BuiltinRegistryType>| {
+        RegistryReadModel::new(
+            Arc::new(fleet_storage_sqlite::RegistryRepository::new(
+                harness.store.pool().clone(),
+            )),
+            Arc::new(fleet_storage_sqlite::SourceRepository::new(
+                harness.store.pool().clone(),
+            )),
+        )
+        .with_builtin_types(builtins)
+    };
+    let names = |types: Vec<fleet_application::registry::RegistryTypeRecord>| {
+        types
+            .into_iter()
+            .map(|record| record.name)
+            .collect::<Vec<_>>()
+    };
+    let extra = BuiltinRegistryType {
+        name: "extra".to_owned(),
+        spec: serde_json::json!({
+            "displayName": "Extra", "key": "slug", "fields": {"slug": {"type": "string", "required": true}}
+        }),
+    };
+    let mut set = fleet_controller::builtin_registry_types();
+    set.push(extra);
+    let authorizer = fleet_auth::LanAllowAllAuthorizer;
+    let answered = model(set)
+        .list_types(&authorizer, fleet_auth::LAN_PRINCIPAL_ID)
+        .await
+        .unwrap();
+    assert!(names(answered.value).contains(&"extra".to_owned()));
+
+    // Back to the shipped set: the fingerprint differs again, so it rebuilds.
+    let answered = model(fleet_controller::builtin_registry_types())
+        .list_types(&authorizer, fleet_auth::LAN_PRINCIPAL_ID)
+        .await
+        .unwrap();
+    assert!(!names(answered.value).contains(&"extra".to_owned()));
+}
+
+#[tokio::test]
+async fn a_failing_rebuild_is_shared_and_remembered_instead_of_repeated() {
+    use fleet_application::registry::{
+        CacheState, EntryCursor, ReferenceCursor, RegistryCachePort, RegistryEntryFilter,
+        RegistryEntryRecord, RegistryProjection, RegistryReadModel, RegistryReference,
+        RegistryTarget, RegistryTypeRecord,
+    };
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    #[derive(Debug)]
+    struct Failing {
+        replaced: AtomicUsize,
+    }
+    #[async_trait::async_trait]
+    impl RegistryCachePort for Failing {
+        async fn cache_state(&self) -> Result<Option<CacheState>, String> {
+            Ok(None)
+        }
+        async fn replace_cache(
+            &self,
+            _: &CacheState,
+            _: &RegistryProjection,
+        ) -> Result<bool, String> {
+            self.replaced.fetch_add(1, Ordering::SeqCst);
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            Err("the cache store is unavailable".to_owned())
+        }
+        async fn list_types(&self) -> Result<Vec<RegistryTypeRecord>, String> {
+            Ok(Vec::new())
+        }
+        async fn list_entries(
+            &self,
+            _: &RegistryEntryFilter,
+            _: Option<&EntryCursor>,
+            _: i64,
+        ) -> Result<Vec<RegistryEntryRecord>, String> {
+            Ok(Vec::new())
+        }
+        async fn get_entry(&self, _: &str, _: &str) -> Result<Option<RegistryEntryRecord>, String> {
+            Ok(None)
+        }
+        async fn list_references(
+            &self,
+            _: &RegistryTarget,
+            _: Option<&str>,
+            _: Option<&ReferenceCursor>,
+            _: i64,
+        ) -> Result<Vec<RegistryReference>, String> {
+            Ok(Vec::new())
+        }
+    }
+
+    let dir = tempfile::tempdir().unwrap();
+    let repo = dir.path().join("desired");
+    let harness = harness(dir.path(), Arc::new(fleet_auth::LanAllowAllAuthorizer)).await;
+    let sha = commit(&repo, &revision_one());
+    harness
+        .call(
+            "PUT",
+            "/desired/source",
+            Some(serde_json::json!({"remote": repo.to_str().unwrap()})),
+        )
+        .await;
+    harness.publish(&sha).await;
+
+    let cache = Arc::new(Failing {
+        replaced: AtomicUsize::new(0),
+    });
+    let model = Arc::new(RegistryReadModel::new(
+        cache.clone(),
+        Arc::new(fleet_storage_sqlite::SourceRepository::new(
+            harness.store.pool().clone(),
+        )),
+    ));
+    let mut readers = Vec::new();
+    for _ in 0..8 {
+        let model = model.clone();
+        readers.push(tokio::spawn(async move {
+            model
+                .list_types(
+                    &fleet_auth::LanAllowAllAuthorizer,
+                    fleet_auth::LAN_PRINCIPAL_ID,
+                )
+                .await
+        }));
+    }
+    for reader in readers {
+        let error = reader.await.unwrap().unwrap_err().to_string();
+        assert!(error.contains("unavailable"), "{error}");
+    }
+    assert!(
+        model
+            .list_types(
+                &fleet_auth::LanAllowAllAuthorizer,
+                fleet_auth::LAN_PRINCIPAL_ID
+            )
+            .await
+            .is_err()
+    );
+    assert_eq!(
+        cache.replaced.load(Ordering::SeqCst),
+        1,
+        "concurrent and repeated reads share one failed rebuild"
+    );
 }

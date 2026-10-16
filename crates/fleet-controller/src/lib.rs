@@ -183,16 +183,20 @@ pub fn compose_onboarding(
 /// The Registry types Fleet ships, as the read model takes them. The
 /// source is the validator's built-in set, so the types the validator lets
 /// entries use and the types the read model lists cannot differ.
+///
+/// # Panics
+///
+/// Panics if a built-in spec cannot be serialized; the specs are plain
+/// data, so this would be a programming error caught by every test run.
 #[must_use]
 pub fn builtin_registry_types() -> Vec<fleet_application::registry::BuiltinRegistryType> {
     fleet_schema::registry::RegistryContext::default()
         .builtin_types
         .into_iter()
-        .filter_map(|builtin| {
-            Some(fleet_application::registry::BuiltinRegistryType {
-                name: builtin.name,
-                spec: serde_json::to_value(builtin.spec).ok()?,
-            })
+        .map(|builtin| fleet_application::registry::BuiltinRegistryType {
+            spec: serde_json::to_value(&builtin.spec)
+                .expect("a built-in Registry type spec is plain data and always serializes"),
+            name: builtin.name,
         })
         .collect()
 }

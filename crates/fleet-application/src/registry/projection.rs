@@ -85,7 +85,7 @@ pub fn derive(
         // Keys are unique per type in a valid revision; if one ever
         // repeats, the lowest resource identity wins, deterministically.
         projected
-            .entry((entry_type.to_owned(), key))
+            .entry((entry_type.to_owned(), super::normalize_key(&key)))
             .and_modify(|held| {
                 if record.resource_id < held.resource_id {
                     *held = record.clone();
@@ -188,8 +188,8 @@ fn relations(spec: &Value) -> Vec<RegistryRelationRecord> {
         }
         if seen.insert((
             relation_type.to_owned(),
-            target.clone().class,
-            target.reference.clone(),
+            target.class.clone(),
+            target.normalized_reference(),
         )) {
             found.push(RegistryRelationRecord {
                 relation_type: relation_type.to_owned(),
