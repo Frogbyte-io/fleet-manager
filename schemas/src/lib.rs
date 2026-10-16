@@ -14,6 +14,7 @@ use schemars::{JsonSchema, schema_for};
 use serde::{Deserialize, Serialize};
 pub mod kinds;
 pub mod registry;
+pub mod registry_builtin;
 
 use serde_json::Value;
 use serde_saphyr::options::{DuplicateKeyPolicy, MergeKeyPolicy};

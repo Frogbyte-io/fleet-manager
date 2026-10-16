@@ -1,0 +1,43 @@
+apiVersion: fleet.frogbyte.io/v1alpha1
+kind: RegistryEntry
+metadata:
+  id: 01890f3e-9b4a-7cc2-98c3-d24e8f58c001
+  name: domain-builtin-example-org
+spec:
+  type: domain
+  fields:
+    fqdn: example.org
+    registrar: Porkbun
+    registrarAccount: ops
+    dnsHost: Cloudflare
+    nameservers: [ns1.example.org, ns2.example.org]
+    expires: "2027-06-30"
+    autoRenew: true
+    loginAt: 1Password (Webhuset vault)
+  tags: [client-x]
+  relations:
+    - { type: used-by, target: { registry: service/plausible } }
+---
+apiVersion: fleet.frogbyte.io/v1alpha1
+kind: RegistryEntry
+metadata:
+  id: 01890f3e-9b4a-7cc2-98c3-d24e8f58c002
+  name: service-builtin-plausible
+spec:
+  type: service
+  fields:
+    slug: plausible
+    name: Plausible Analytics
+    vendor: Plausible
+    purpose: Privacy-friendly web analytics.
+    plan: Growth
+    cost: 19.00 EUR
+    billingPeriod: monthly
+    billingOwner: Frogbyte
+    renewal: "2027-01-15"
+    hostingProvider: Hetzner
+    region: eu-central
+    loginAt: 1Password (Webhuset vault)
+    url: https://plausible.example.org
+  relations:
+    - { type: hosted-on, target: { machine: example-host } }
