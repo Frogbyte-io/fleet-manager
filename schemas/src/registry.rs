@@ -28,8 +28,10 @@ pub struct BuiltinRegistryType {
     pub spec: RegistryTypeSpec,
 }
 
-/// What validation knows beyond the candidate revision.
-#[derive(Clone, Debug, Default)]
+/// What validation knows beyond the candidate revision. `default()` carries
+/// Fleet's built-in types ([`crate::registry_builtin`]), so every caller that
+/// does not build a context resolves `domain` and `service`.
+#[derive(Clone, Debug)]
 pub struct RegistryContext {
     /// Built-in types. Entries may use them; redefining one is an error.
     pub builtin_types: Vec<BuiltinRegistryType>,
@@ -45,6 +47,15 @@ pub struct RegistryContext {
     /// target must name a defined or built-in type (an error), and a
     /// missing entry of such a type is a warning.
     pub known_targets: BTreeMap<String, BTreeSet<String>>,
+}
+
+impl Default for RegistryContext {
+    fn default() -> Self {
+        Self {
+            builtin_types: crate::registry_builtin::builtin_registry_types(),
+            known_targets: BTreeMap::new(),
+        }
+    }
 }
 
 const MAX_STRING: usize = 512;
