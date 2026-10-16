@@ -6,6 +6,7 @@
 
 #![warn(missing_docs)]
 
+mod action_request;
 mod build_address;
 mod difference;
 mod error;
@@ -23,6 +24,11 @@ mod source;
 mod time;
 mod value;
 
+pub use action_request::{
+    ACTION_REQUEST_STATES, ActionRequestState, InvalidActionTransition, RiskClass,
+    action_request_deadline_passed, can_transition_action_request,
+    validate_action_request_transition,
+};
 pub use build_address::{
     BUILD_ADDRESS_REASONS, BuildAddressPool, BuildAddressPoolError, MAX_BUILD_ADDRESS_DNS_SERVERS,
     MAX_BUILD_ADDRESS_POOL_SIZE, REASON_ALLOCATION_FAILED, REASON_AUDIT_FAILED,

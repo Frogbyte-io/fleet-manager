@@ -20,6 +20,7 @@ serde = { version = "1.0.229", features = ["derive"] }
 workspace = true
 
 [dev-dependencies]
+fleet-application = { path = "../fleet-application", features = ["test-support"] }
 fleet-auth = { path = "../fleet-auth" }
 tempfile = "3.27.0"
 tokio = { version = "1.53.1", features = ["macros", "rt-multi-thread"] }

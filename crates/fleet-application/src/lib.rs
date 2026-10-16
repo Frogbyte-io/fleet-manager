@@ -7,6 +7,7 @@
 pub mod apply;
 pub mod audit;
 pub mod authz;
+pub mod broker;
 pub mod catalog_installs;
 pub mod composition;
 pub mod credentials;

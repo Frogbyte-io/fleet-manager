@@ -60,6 +60,12 @@ fn run_serve(mut config: fleet_config::ControllerConfig) -> ExitCode {
             return ExitCode::FAILURE;
         }
     }
+    // A mistyped action-broker setting stops startup: silently falling back
+    // would run an action under a different risk class than the operator set.
+    if let Err(error) = fleet_controller::broker_settings_from_env() {
+        eprintln!("fleet-controller: refusing to start: {error}");
+        return ExitCode::FAILURE;
+    }
     let settings = Settings {
         listen: config.listen,
         tailscale_serve_listen: config.tailscale_serve_listen,
@@ -158,14 +164,16 @@ fn run_serve(mut config: fleet_config::ControllerConfig) -> ExitCode {
         };
         // The worker drives durable operations to their terminal states; it
         // drains when shutdown fires, before the server.
-        let worker_operations =
-            std::sync::Arc::new(fleet_application::operation::Operations::new_with_events(
+        let worker_operations = std::sync::Arc::new(
+            fleet_application::operation::Operations::new_with_events(
                 std::sync::Arc::new(fleet_storage_sqlite::OperationRepository::new(
                     store.pool().clone(),
                 )),
                 std::sync::Arc::new(fleet_storage_sqlite::AuditSink::new(store.pool().clone())),
                 events.clone(),
-            ));
+            )
+            .with_brokered_kinds(fleet_controller::brokered_operation_kinds()),
+        );
         let (worker_shutdown, worker_shutdown_rx) = tokio::sync::oneshot::channel::<()>();
         let (image_sweep_shutdown, image_sweep_shutdown_rx) = tokio::sync::oneshot::channel::<()>();
         // FM-721: Lab artifact bytes live in the configured directory; the

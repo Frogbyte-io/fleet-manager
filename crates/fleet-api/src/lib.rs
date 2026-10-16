@@ -39,6 +39,7 @@ pub mod proxmox;
 pub mod proxmox_privileges;
 pub mod proxmox_tasks;
 pub mod ready;
+pub mod requests;
 pub mod skill_catalog;
 pub mod skills;
 pub mod system;
@@ -230,6 +231,7 @@ pub const API_BASE_PATH: &str = "/api/v1";
         (name = "audit", description = "Authorized, metadata-only audit event queries."),
         (name = "desired", description = "The active desired-state revision and its validated, non-secret resources. Read-only; activation is an operation."),
         (name = "operations", description = "Durable operations: accepted remote work."),
+        (name = "requests", description = "The action broker (ADR 0016): agents request typed provider actions; policy or a person approves them; approved requests run as durable operations. Before authenticated identities, policy is a guardrail keyed on risk class, not a security boundary."),
         (name = "credentials", description = "Delegated, scoped, short-lived credentials for CI and agents (ADR 0011). The token is returned once at issue time and is never listed or audited."),
         (
             name = "machines",
@@ -412,6 +414,13 @@ pub fn api(state: Arc<operations::ApiState>) -> (Router, utoipa::openapi::OpenAp
                     credentials::issue_credential
                 ))
                 .routes(routes!(credentials::revoke_credential))
+                .routes(routes!(
+                    requests::create_action_request,
+                    requests::list_action_requests
+                ))
+                .routes(routes!(requests::get_action_request))
+                .routes(routes!(requests::approve_action_request))
+                .routes(routes!(requests::deny_action_request))
                 .routes(routes!(lab::list_lab_templates, lab::create_lab_template))
                 .routes(routes!(lab::get_lab_template))
                 .routes(routes!(lab::update_lab_template))
