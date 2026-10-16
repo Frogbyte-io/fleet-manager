@@ -7,6 +7,12 @@
 //! filters the answer), and the staleness rules live in the application's
 //! `RunningServices`. The use case arrives as a request extension set by
 //! the controller.
+//!
+//! FM-1033 adds two Coolify routes beside the reads: `POST
+//! /services/{id}/actions/{verb}` files a brokered lifecycle request (the
+//! risk class decides whether it runs or waits for a person), and `GET
+//! /services/{id}/logs` tails the newest deployment's log, bounded and
+//! redacted. Both are adapters over `CoolifyLifecycle`.
 
 use std::str::FromStr as _;
 use std::sync::Arc;
@@ -15,6 +21,10 @@ use axum::{
     Extension, Json,
     extract::{Path, Query, State},
     http::StatusCode,
+};
+use fleet_application::coolify::lifecycle::{
+    CoolifyLifecycle, LifecycleError, LifecycleFailureClass, LifecycleRequest, LifecycleVerb,
+    LogTail,
 };
 use fleet_application::services::{
     AccountCoverage, AmbiguousServer, ContainerRef, CoolifyRef, Coverage, InputState, LastDeploy,
@@ -611,6 +621,269 @@ pub async fn get_running_service(
         service: (&service).into(),
         coverage: (&coverage).into(),
     })))
+}
+
+/// What to say when filing a lifecycle action on a service.
+#[derive(Debug, Default, Deserialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct ServiceActionBody {
+    /// Why, for the approver (at most 1000 characters).
+    #[serde(default)]
+    pub reason: String,
+    /// A key making a retry return the request already made (scoped to the
+    /// caller).
+    #[serde(default)]
+    pub idempotency_key: Option<String>,
+}
+
+/// A deployment log tail: bounded, redacted, never stored.
+#[derive(Clone, Debug, Serialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct ServiceLogsDto {
+    /// The deployment the lines belong to.
+    pub deployment_uuid: String,
+    /// Coolify's deployment status.
+    pub deployment_status: String,
+    /// The log lines, oldest first, after redaction.
+    pub lines: Vec<String>,
+    /// Whether earlier lines were cut to fit the bounds.
+    pub truncated: bool,
+    /// Whether redaction changed any line.
+    pub redacted: bool,
+}
+
+impl From<LogTail> for ServiceLogsDto {
+    fn from(tail: LogTail) -> Self {
+        Self {
+            deployment_uuid: tail.deployment_uuid,
+            deployment_status: tail.deployment_status,
+            lines: tail.lines,
+            truncated: tail.truncated,
+            redacted: tail.redacted,
+        }
+    }
+}
+
+fn lifecycle_or_error(
+    extension: Option<Extension<Arc<CoolifyLifecycle>>>,
+    correlation_id: CorrelationId,
+) -> Result<Arc<CoolifyLifecycle>, ApiErrorResponse> {
+    extension
+        .map(|Extension(lifecycle)| lifecycle)
+        .ok_or_else(|| {
+            let public = PublicError::new(
+                ErrorCode::from_str("services_unavailable").expect("valid error code"),
+                "the Coolify action surface is not wired; the controller needs its database and secret store",
+                RetryClass::Backoff,
+            );
+            ApiError::new(&public, correlation_id).with_status(StatusCode::SERVICE_UNAVAILABLE)
+        })
+}
+
+fn map_lifecycle_error(error: &LifecycleError, correlation_id: CorrelationId) -> ApiErrorResponse {
+    if let LifecycleError::Broker(broker) = error {
+        return crate::requests::map_broker_error(broker, correlation_id);
+    }
+    let (status, code, retry) = match error {
+        LifecycleError::Denied(_) => (StatusCode::FORBIDDEN, "denied", RetryClass::Never),
+        LifecycleError::Invalid { .. } => (
+            StatusCode::BAD_REQUEST,
+            "invalid_request",
+            RetryClass::Never,
+        ),
+        LifecycleError::NotFound { .. } => (StatusCode::NOT_FOUND, "not_found", RetryClass::Never),
+        LifecycleError::Provider(failure) => match failure.class {
+            LifecycleFailureClass::Permission => (
+                StatusCode::FORBIDDEN,
+                "provider_permission",
+                RetryClass::Never,
+            ),
+            LifecycleFailureClass::NotFound => {
+                (StatusCode::NOT_FOUND, "not_found", RetryClass::Never)
+            }
+            LifecycleFailureClass::RateLimited => (
+                StatusCode::TOO_MANY_REQUESTS,
+                "rate_limited",
+                RetryClass::Backoff,
+            ),
+            LifecycleFailureClass::Unsupported => (
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "provider_unsupported",
+                RetryClass::Never,
+            ),
+            LifecycleFailureClass::Invalid => (
+                StatusCode::BAD_REQUEST,
+                "invalid_request",
+                RetryClass::Never,
+            ),
+            LifecycleFailureClass::Auth | LifecycleFailureClass::Unavailable => (
+                StatusCode::BAD_GATEWAY,
+                "provider_unavailable",
+                RetryClass::Backoff,
+            ),
+        },
+        LifecycleError::Backend { .. } | LifecycleError::Broker(_) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "internal",
+            RetryClass::Backoff,
+        ),
+    };
+    let message = match error {
+        LifecycleError::Backend { .. } => {
+            "the request could not be completed; the detail is in the controller log".to_owned()
+        }
+        other => other.to_string(),
+    };
+    let public = PublicError::new(
+        ErrorCode::from_str(code).expect("valid error code"),
+        message,
+        retry,
+    );
+    ApiError::new(&public, correlation_id).with_status(status)
+}
+
+/// Files a lifecycle action (`start`, `stop`, `restart`, or `redeploy`) on a
+/// Coolify service as a brokered action request. `restart`, `redeploy`, and
+/// `start` run at once; `stop` waits for a person to approve it. The
+/// resource must be in the account's latest Coolify observation. The answer
+/// is the action request; follow it at `/requests/{id}` and its operation at
+/// `/operations/{id}`, whose result records the status observed after the
+/// call.
+///
+/// # Errors
+///
+/// Returns the public error envelope on refusal, an unknown service or verb,
+/// or a broker refusal.
+#[utoipa::path(
+    post,
+    path = "/services/{serviceId}/actions/{verb}",
+    tag = "services",
+    operation_id = "requestServiceAction",
+    params(
+        ("serviceId" = String, Path, description = "A Coolify service id, `coolify:<account>:<uuid>`, as the list returns it."),
+        ("verb" = String, Path, description = "start, stop, restart, or redeploy (applications only).")
+    ),
+    request_body = ServiceActionBody,
+    responses(
+        (status = 201, description = "The action request was recorded; its state shows what policy did.", body = Resource<crate::requests::ActionRequestDto>),
+        (status = 400, description = "The service id, the verb, or a field is invalid.", body = ApiError),
+        (status = 403, description = "The caller may not do this, or policy denies the action.", body = ApiError),
+        (status = 404, description = "No such resource in the account's latest observation.", body = ApiError),
+        (status = 409, description = "The idempotency key was already used for a different request.", body = ApiError),
+        (status = 503, description = "The surface is not wired.", body = ApiError),
+    )
+)]
+pub async fn request_service_action(
+    State(state): State<Arc<crate::operations::ApiState>>,
+    principal: Option<Extension<crate::ActingPrincipal>>,
+    Extension(correlation_id): Extension<CorrelationId>,
+    lifecycle: Option<Extension<Arc<CoolifyLifecycle>>>,
+    Path((service_id, verb)): Path<(String, String)>,
+    body: Result<Json<ServiceActionBody>, axum::extract::rejection::JsonRejection>,
+) -> Result<
+    (
+        StatusCode,
+        Json<Resource<crate::requests::ActionRequestDto>>,
+    ),
+    ApiErrorResponse,
+> {
+    let lifecycle = lifecycle_or_error(lifecycle, correlation_id)?;
+    let broker = crate::requests::broker_or_error(&state, correlation_id)?;
+    let principal = crate::operations::principal_or_error(principal, correlation_id)?;
+    let verb = LifecycleVerb::from_id(&verb).ok_or_else(|| {
+        invalid(
+            "the verb must be start, stop, restart, or redeploy",
+            correlation_id,
+        )
+    })?;
+    let Json(body) = body.map_err(|_| {
+        invalid(
+            "the request body must be JSON with an optional reason and idempotencyKey",
+            correlation_id,
+        )
+    })?;
+    let reason = if body.reason.trim().is_empty() {
+        format!("{} {service_id}", verb.id())
+    } else {
+        body.reason
+    };
+    let created = lifecycle
+        .request_action(
+            &broker,
+            state.authorizer.as_ref(),
+            &principal,
+            LifecycleRequest {
+                service_id,
+                verb,
+                reason,
+                origin: "api".to_owned(),
+                correlation_id: Some(correlation_id.to_string()),
+                idempotency_key: body.idempotency_key,
+            },
+            fleet_core::SystemClock::now_unix_millis(),
+        )
+        .await
+        .map_err(|error| map_lifecycle_error(&error, correlation_id))?;
+    Ok((StatusCode::CREATED, Json(Resource::new(created.into()))))
+}
+
+/// Query parameters of the log tail.
+#[derive(Clone, Debug, Default, Deserialize, utoipa::IntoParams)]
+pub struct ServiceLogsParams {
+    /// A deployment uuid; the newest deployment when absent.
+    pub deployment: Option<String>,
+    /// How many trailing lines to return (default 200, at most 1000).
+    pub lines: Option<usize>,
+}
+
+/// Tails the log of a Coolify application's deployment, bounded in lines
+/// and bytes and redacted before it is returned; it is never stored.
+/// Coolify returns deployment logs only to a token with the `read:sensitive`
+/// ability, so an account whose token lacks it answers 403 with
+/// `provider_permission`. Needs `external_account.config` on the account.
+///
+/// # Errors
+///
+/// Returns the public error envelope on refusal, a service that is not a
+/// known application, or a provider failure.
+#[utoipa::path(
+    get,
+    path = "/services/{serviceId}/logs",
+    tag = "services",
+    operation_id = "getServiceLogs",
+    params(
+        ("serviceId" = String, Path, description = "A Coolify application id, `coolify:<account>:<uuid>`."),
+        ServiceLogsParams
+    ),
+    responses(
+        (status = 200, description = "The redacted log tail.", body = Resource<ServiceLogsDto>),
+        (status = 400, description = "The service is not an application or a parameter is invalid.", body = ApiError),
+        (status = 403, description = "The caller may not read logs (`denied`), or the Coolify token lacks read:sensitive (`provider_permission`).", body = ApiError),
+        (status = 404, description = "No such service, or it has no deployment.", body = ApiError),
+        (status = 503, description = "The surface is not wired.", body = ApiError),
+    )
+)]
+pub async fn get_service_logs(
+    State(state): State<Arc<crate::operations::ApiState>>,
+    principal: Option<Extension<crate::ActingPrincipal>>,
+    Extension(correlation_id): Extension<CorrelationId>,
+    lifecycle: Option<Extension<Arc<CoolifyLifecycle>>>,
+    Path(service_id): Path<String>,
+    Query(params): Query<ServiceLogsParams>,
+) -> Result<Json<Resource<ServiceLogsDto>>, ApiErrorResponse> {
+    let lifecycle = lifecycle_or_error(lifecycle, correlation_id)?;
+    let principal = crate::operations::principal_or_error(principal, correlation_id)?;
+    let tail = lifecycle
+        .logs(
+            state.authorizer.as_ref(),
+            &principal,
+            &service_id,
+            params.deployment.as_deref(),
+            params.lines,
+        )
+        .await
+        .map_err(|error| map_lifecycle_error(&error, correlation_id))?;
+    Ok(Json(Resource::new(tail.into())))
 }
 
 #[cfg(test)]

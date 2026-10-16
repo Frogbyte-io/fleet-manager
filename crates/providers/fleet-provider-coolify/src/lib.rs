@@ -33,10 +33,12 @@
 #![warn(missing_docs)]
 
 pub mod discovery;
+pub mod lifecycle;
 pub mod scrub;
 mod translate;
 
 pub use discovery::{CoolifyHttpSource, Limits, discover, discover_with};
+pub use lifecycle::CoolifyHttpLifecycle;
 
 use std::error::Error as _;
 use std::time::Duration;

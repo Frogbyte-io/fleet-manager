@@ -167,6 +167,11 @@ fn run_serve(mut config: fleet_config::ControllerConfig) -> ExitCode {
                                 secret_store.clone(),
                             ),
                         );
+                        node_services.coolify_lifecycle =
+                            Some(fleet_controller::coolify_exec::compose_coolify_lifecycle(
+                                store.pool(),
+                                secret_store.clone(),
+                            ));
                         Some(node_services)
                     }
                     Err(error) => {
@@ -923,6 +928,25 @@ fn run_serve(mut config: fleet_config::ControllerConfig) -> ExitCode {
                         store.pool().clone(),
                     )),
                 ));
+            // FM-1033: the brokered Coolify lifecycle kind runs through the
+            // lifecycle use cases.
+            let with_lab: std::sync::Arc<dyn fleet_application::worker::OperationExecutor> =
+                match services
+                    .as_ref()
+                    .and_then(|services| services.coolify_lifecycle.clone())
+                {
+                    Some(lifecycle) => std::sync::Arc::new(
+                        fleet_controller::coolify_exec::CoolifyLifecycleDispatch::new(
+                            with_lab,
+                            std::sync::Arc::new(
+                                fleet_controller::coolify_exec::CoolifyLifecycleExecutor::new(
+                                    lifecycle,
+                                ),
+                            ),
+                        ),
+                    ),
+                    None => with_lab,
+                };
             match &services {
                 Some(services) => {
                     let node_machines: std::sync::Arc<dyn fleet_application::machine::MachinePort> =

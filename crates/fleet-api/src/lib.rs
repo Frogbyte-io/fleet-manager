@@ -215,6 +215,8 @@ pub const API_BASE_PATH: &str = "/api/v1";
         services::InputStateDto,
         services::AccountCoverageDto,
         services::ServicesCoverageDto,
+        services::ServiceActionBody,
+        services::ServiceLogsDto,
         external_accounts::CreateExternalAccountRequest,
         external_accounts::UpdateExternalAccountRequest,
         external_accounts::ExternalAccountDto,
@@ -449,6 +451,8 @@ pub fn api(state: Arc<operations::ApiState>) -> (Router, utoipa::openapi::OpenAp
                 .routes(routes!(coolify::get_coolify_observations))
                 .routes(routes!(services::list_running_services))
                 .routes(routes!(services::get_running_service))
+                .routes(routes!(services::request_service_action))
+                .routes(routes!(services::get_service_logs))
                 .routes(routes!(proxmox::delete_proxmox_account))
                 .routes(routes!(proxmox::observe_proxmox_fingerprint))
                 .routes(routes!(proxmox::confirm_proxmox_fingerprint))

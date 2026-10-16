@@ -26,6 +26,8 @@
 //! and after. Reading the cached snapshot needs `external_account.read`.
 #![warn(missing_docs)]
 
+pub mod lifecycle;
+
 use std::fmt;
 use std::sync::Arc;
 

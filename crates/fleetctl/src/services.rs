@@ -3,9 +3,13 @@
 //! per-input authorization, and the staleness rules are the controller's.
 //! `--output json` prints the controller's answer unchanged.
 
-use serde_json::Value;
+use std::fmt::Write as _;
+use std::time::Duration;
 
-use crate::{CliError, Command, Output, RequestShape, usage};
+use serde_json::{Value, json};
+
+use crate::requests::{Outcome, outcome_body, parse_wait_approval, wait_for_outcome};
+use crate::{CliError, Command, Invocation, Output, RequestShape, usage};
 
 /// One `services` subcommand.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -28,15 +32,38 @@ pub enum ServicesAction {
         /// The service id, as `list` prints it.
         id: String,
     },
+    /// File a lifecycle action on a Coolify service (FM-1033).
+    Action {
+        /// `start`, `stop`, `restart`, or `redeploy`.
+        verb: String,
+        /// The service id.
+        id: String,
+        /// Why, for the approver.
+        reason: Option<String>,
+        /// A key making a retry return the request already made.
+        idempotency_key: Option<String>,
+        /// Wait this long for the request to reach an outcome.
+        wait: Option<Duration>,
+    },
+    /// Tail a Coolify application's deployment log (FM-1033).
+    Logs {
+        /// The service id.
+        id: String,
+        /// A deployment uuid; the newest when absent.
+        deployment: Option<String>,
+        /// How many trailing lines.
+        lines: Option<u32>,
+    },
 }
 
 /// Parses `services list|get ...`.
+#[allow(clippy::too_many_lines)]
 pub(crate) fn parse(rest: &[&str], output: &mut Output) -> Result<Command, CliError> {
     let Some((verb, args)) = rest.split_first() else {
         return Err(CliError { message: usage() });
     };
     let (id, flags) = match *verb {
-        "get" => {
+        "get" | "start" | "stop" | "restart" | "redeploy" | "logs" => {
             let Some((id, flags)) = args.split_first() else {
                 return Err(CliError { message: usage() });
             };
@@ -54,8 +81,18 @@ pub(crate) fn parse(rest: &[&str], output: &mut Output) -> Result<Command, CliEr
     let mut query = None;
     let mut limit = None;
     let mut cursor = None;
+    let mut reason = None;
+    let mut idempotency_key = None;
+    let mut wait = None;
+    let mut deployment = None;
+    let mut lines = None;
+    let lifecycle = matches!(*verb, "start" | "stop" | "restart" | "redeploy");
     let mut flags = flags.iter().copied();
     while let Some(flag) = flags.next() {
+        if lifecycle && let Some(duration) = parse_wait_approval("--wait-approval", flag)? {
+            wait = Some(duration);
+            continue;
+        }
         let mut value = |name: &str| {
             flags
                 .next()
@@ -87,6 +124,19 @@ pub(crate) fn parse(rest: &[&str], output: &mut Output) -> Result<Command, CliEr
                     message: format!("--limit must be a number, not {raw:?}"),
                 })?);
             }
+            ("start" | "stop" | "restart" | "redeploy", "--reason") => {
+                reason = Some(value("reason")?);
+            }
+            ("start" | "stop" | "restart" | "redeploy", "--idempotency-key") => {
+                idempotency_key = Some(value("idempotency-key")?);
+            }
+            ("logs", "--deployment") => deployment = Some(value("deployment")?),
+            ("logs", "--lines") => {
+                let raw = value("lines")?;
+                lines = Some(raw.parse().map_err(|_| CliError {
+                    message: format!("--lines must be a number, not {raw:?}"),
+                })?);
+            }
             (_, other) => {
                 return Err(CliError {
                     message: format!("unknown flag {other:?}; see the usage below\n\n{}", usage()),
@@ -103,6 +153,18 @@ pub(crate) fn parse(rest: &[&str], output: &mut Output) -> Result<Command, CliEr
             cursor,
         },
         ("get", Some(id)) => ServicesAction::Get { id },
+        ("start" | "stop" | "restart" | "redeploy", Some(id)) => ServicesAction::Action {
+            verb: (*verb).to_owned(),
+            id,
+            reason,
+            idempotency_key,
+            wait,
+        },
+        ("logs", Some(id)) => ServicesAction::Logs {
+            id,
+            deployment,
+            lines,
+        },
         _ => return Err(CliError { message: usage() }),
     };
     Ok(Command::Services(action))
@@ -136,7 +198,91 @@ pub(crate) fn request(action: &ServicesAction) -> RequestShape {
             Vec::new(),
             None,
         ),
+        ServicesAction::Action {
+            verb,
+            id,
+            reason,
+            idempotency_key,
+            ..
+        } => {
+            let mut body = json!({ "reason": reason.clone().unwrap_or_default() });
+            if let Some(key) = idempotency_key {
+                body["idempotencyKey"] = json!(key);
+            }
+            (
+                reqwest::Method::POST,
+                format!("/api/v1/services/{}/actions/{}", encode(id), encode(verb)),
+                Vec::new(),
+                Some(body),
+            )
+        }
+        ServicesAction::Logs {
+            id,
+            deployment,
+            lines,
+        } => (
+            reqwest::Method::GET,
+            format!("/api/v1/services/{}/logs", encode(id)),
+            deployment
+                .iter()
+                .map(|v| ("deployment", v.clone()))
+                .chain(lines.iter().map(|v| ("lines", v.to_string())))
+                .collect(),
+            None,
+        ),
     }
+}
+
+/// After an action request was filed, waits for its outcome when asked and
+/// answers the value to render and the exit code. Without a wait the filed
+/// request is the answer (exit 0): it is durable, and `requests get <id>
+/// --wait` follows it later. With a wait the answer is
+/// `{outcome, request, result}`, where `result` is the operation's result
+/// (including the status observed after the call).
+///
+/// # Errors
+///
+/// Fails when a read is refused or the controller keeps not answering.
+pub(crate) fn finish_action(
+    client: &reqwest::blocking::Client,
+    invocation: &Invocation,
+    created: &Value,
+    wait: Option<Duration>,
+) -> Result<(Value, u8), CliError> {
+    let request = created.get("data").unwrap_or(created);
+    let Some(bound) = wait else {
+        return Ok((request.clone(), 0));
+    };
+    let id = request["id"].as_str().ok_or_else(|| CliError {
+        message: "the controller's answer carried no request id".to_owned(),
+    })?;
+    let (outcome, request) = wait_for_outcome(client, invocation, id, bound)?;
+    let mut answer = outcome_body(outcome, &request);
+    if outcome == Outcome::Executed
+        && let Some(operation_id) = request["operationId"].as_str()
+    {
+        let read = crate::send_classified(
+            client,
+            invocation,
+            reqwest::Method::GET,
+            &format!("/api/v1/operations/{}", encode(operation_id)),
+            &[],
+            None,
+            uuid::Uuid::now_v7().to_string(),
+            None,
+            Some(Duration::from_secs(30)),
+        );
+        if let Ok(operation) = read {
+            let data = operation.get("data").unwrap_or(&operation);
+            if let Some(result) = data["resultJson"]
+                .as_str()
+                .and_then(|text| serde_json::from_str::<Value>(text).ok())
+            {
+                answer["result"] = result;
+            }
+        }
+    }
+    Ok((answer, outcome.exit_code()))
 }
 
 /// Percent-encodes one path segment: only unreserved characters pass.
@@ -219,6 +365,11 @@ fn coverage_lines(coverage: &Value) -> Vec<String> {
 /// Renders the answer to `action`; a Docker-only listing against a
 /// controller with no container observations says why it is empty.
 pub(crate) fn render_for(action: &ServicesAction, value: &Value) -> String {
+    match action {
+        ServicesAction::Action { .. } => return render_action(value),
+        ServicesAction::Logs { .. } => return render_logs(value),
+        _ => {}
+    }
     let mut text = render(value);
     let docker_only = matches!(
         action,
@@ -233,6 +384,68 @@ pub(crate) fn render_for(action: &ServicesAction, value: &Value) -> String {
         );
     }
     text
+}
+
+/// Renders a filed request or a wait's answer, with the operation result
+/// (status before and after) when there is one.
+fn render_action(value: &Value) -> String {
+    let mut text = crate::requests::render(value);
+    let result = &value["result"];
+    if result.is_object() {
+        let field = |name: &str| text_of(&result[name]);
+        let _ = write!(
+            text,
+            "\n  result: {} ({} -> {}{})",
+            field("outcome"),
+            field("previousStatus"),
+            field("observedStatus"),
+            if result["settled"].as_bool() == Some(false) {
+                ", not settled yet"
+            } else {
+                ""
+            }
+        );
+        if let Some(deployment) = result["deploymentUuid"].as_str() {
+            let _ = write!(
+                text,
+                "\n  deployment: {} (fleetctl services logs <id> --deployment {})",
+                clean(deployment),
+                clean(deployment)
+            );
+        }
+    }
+    text
+}
+
+/// Renders a log tail: the lines, then one note when anything was cut or
+/// redacted. The lines are server text, so control characters are flattened.
+fn render_logs(value: &Value) -> String {
+    let data = value.get("data").unwrap_or(value);
+    let mut lines: Vec<String> = data["lines"]
+        .as_array()
+        .map(|lines| lines.iter().filter_map(Value::as_str).map(clean).collect())
+        .unwrap_or_default();
+    let mut notes = Vec::new();
+    if data["truncated"].as_bool() == Some(true) {
+        notes.push("earlier lines were cut");
+    }
+    if data["redacted"].as_bool() == Some(true) {
+        notes.push("credentials were redacted");
+    }
+    if lines.is_empty() {
+        lines.push("(no log lines)".to_owned());
+    }
+    lines.push(format!(
+        "-- deployment {} ({}){}",
+        text_of(&data["deploymentUuid"]),
+        text_of(&data["deploymentStatus"]),
+        if notes.is_empty() {
+            String::new()
+        } else {
+            format!("; {}", notes.join(", "))
+        }
+    ));
+    lines.join("\n")
 }
 
 /// Renders a list page or one service as human text.

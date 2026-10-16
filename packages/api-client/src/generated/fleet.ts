@@ -7674,6 +7674,33 @@ export interface ResourceServiceDetailDto {
 }
 
 /**
+ * A deployment log tail: bounded, redacted, never stored.
+ */
+export type ResourceServiceLogsDtoData = {
+  /** Coolify's deployment status. */
+  deploymentStatus: string;
+  /** The deployment the lines belong to. */
+  deploymentUuid: string;
+  /** The log lines, oldest first, after redaction. */
+  lines: string[];
+  /** Whether redaction changed any line. */
+  redacted: boolean;
+  /** Whether earlier lines were cut to fit the bounds. */
+  truncated: boolean;
+};
+
+/**
+ * A single resource.
+ *
+ * The payload is nested under `data` so that later top-level fields are an
+ * additive change rather than a breaking one.
+ */
+export interface ResourceServiceLogsDto {
+  /** A deployment log tail: bounded, redacted, never stored. */
+  data: ResourceServiceLogsDtoData;
+}
+
+/**
  * One machine's observed skill inventory.
  */
 export type ResourceSkillsSnapshotDtoData = {
@@ -7882,6 +7909,20 @@ export interface SaveRecipeRequest {
 }
 
 /**
+ * What to say when filing a lifecycle action on a service.
+ */
+export interface ServiceActionBody {
+  /**
+     * A key making a retry return the request already made (scoped to the
+     * caller).
+     * @nullable
+     */
+  idempotencyKey?: string | null;
+  /** Why, for the approver (at most 1000 characters). */
+  reason?: string;
+}
+
+/**
  * One service and what its answer was built from.
  */
 export interface ServiceDetailDto {
@@ -7889,6 +7930,22 @@ export interface ServiceDetailDto {
   coverage: ServicesCoverageDto;
   /** The service. */
   service: RunningServiceDto;
+}
+
+/**
+ * A deployment log tail: bounded, redacted, never stored.
+ */
+export interface ServiceLogsDto {
+  /** Coolify's deployment status. */
+  deploymentStatus: string;
+  /** The deployment the lines belong to. */
+  deploymentUuid: string;
+  /** The log lines, oldest first, after redaction. */
+  lines: string[];
+  /** Whether redaction changed any line. */
+  redacted: boolean;
+  /** Whether earlier lines were cut to fit the bounds. */
+  truncated: boolean;
 }
 
 /**
@@ -8786,6 +8843,20 @@ cursor?: string | null;
  * @nullable
  */
 limit?: number | null;
+};
+
+export type GetServiceLogsParams = {
+/**
+ * A deployment uuid; the newest deployment when absent.
+ * @nullable
+ */
+deployment?: string | null;
+/**
+ * How many trailing lines to return (default 200, at most 1000).
+ * @minimum 0
+ * @nullable
+ */
+lines?: number | null;
 };
 
 export type ListSkillCatalogParams = {
@@ -17937,6 +18008,177 @@ export const getRunningService = async (serviceId: string, options?: RequestInit
 
   const data: getRunningServiceResponse['data'] = body ? JSON.parse(body) : {}
   return { data, status: res.status, headers: res.headers } as getRunningServiceResponse
+}
+
+
+
+export type requestServiceActionResponse201 = {
+  data: ResourceActionRequestDto
+  status: 201
+}
+
+export type requestServiceActionResponse400 = {
+  data: ApiError
+  status: 400
+}
+
+export type requestServiceActionResponse403 = {
+  data: ApiError
+  status: 403
+}
+
+export type requestServiceActionResponse404 = {
+  data: ApiError
+  status: 404
+}
+
+export type requestServiceActionResponse409 = {
+  data: ApiError
+  status: 409
+}
+
+export type requestServiceActionResponse503 = {
+  data: ApiError
+  status: 503
+}
+
+export type requestServiceActionResponseSuccess = (requestServiceActionResponse201) & {
+  headers: Headers;
+};
+export type requestServiceActionResponseError = (requestServiceActionResponse400 | requestServiceActionResponse403 | requestServiceActionResponse404 | requestServiceActionResponse409 | requestServiceActionResponse503) & {
+  headers: Headers;
+};
+
+export type requestServiceActionResponse = (requestServiceActionResponseSuccess | requestServiceActionResponseError)
+
+export const getRequestServiceActionUrl = (serviceId: string,
+    verb: string,) => {
+
+
+
+
+  return `/api/v1/services/${serviceId}/actions/${verb}`
+}
+
+/**
+ * # Errors
+ *
+ * Returns the public error envelope on refusal, an unknown service or verb,
+ * or a broker refusal.
+ * @summary Files a lifecycle action (`start`, `stop`, `restart`, or `redeploy`) on a
+Coolify service as a brokered action request. `restart`, `redeploy`, and
+`start` run at once; `stop` waits for a person to approve it. The
+resource must be in the account's latest Coolify observation. The answer
+is the action request; follow it at `/requests/{id}` and its operation at
+`/operations/{id}`, whose result records the status observed after the
+call.
+ */
+export const requestServiceAction = async (serviceId: string,
+    verb: string,
+    serviceActionBody: ServiceActionBody, options?: RequestInit): Promise<requestServiceActionResponse> => {
+
+    const getHeaders = (h?: NonNullable<RequestInit['headers']>): Record<string, string | readonly string[]> => {
+    if (!h) return {};
+    if (h instanceof Headers) return Object.fromEntries(h.entries());
+    if (Array.isArray(h)) return Object.fromEntries(h);
+    return h;
+  };
+const res = await fetch(getRequestServiceActionUrl(serviceId,verb),
+  {
+    ...options,
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...getHeaders(options?.headers) },
+    body: JSON.stringify(serviceActionBody)
+  }
+)
+
+
+  const body = [204, 205, 304].includes(res.status) ? null : await res.text();
+
+  const data: requestServiceActionResponse['data'] = body ? JSON.parse(body) : {}
+  return { data, status: res.status, headers: res.headers } as requestServiceActionResponse
+}
+
+
+
+export type getServiceLogsResponse200 = {
+  data: ResourceServiceLogsDto
+  status: 200
+}
+
+export type getServiceLogsResponse400 = {
+  data: ApiError
+  status: 400
+}
+
+export type getServiceLogsResponse403 = {
+  data: ApiError
+  status: 403
+}
+
+export type getServiceLogsResponse404 = {
+  data: ApiError
+  status: 404
+}
+
+export type getServiceLogsResponse503 = {
+  data: ApiError
+  status: 503
+}
+
+export type getServiceLogsResponseSuccess = (getServiceLogsResponse200) & {
+  headers: Headers;
+};
+export type getServiceLogsResponseError = (getServiceLogsResponse400 | getServiceLogsResponse403 | getServiceLogsResponse404 | getServiceLogsResponse503) & {
+  headers: Headers;
+};
+
+export type getServiceLogsResponse = (getServiceLogsResponseSuccess | getServiceLogsResponseError)
+
+export const getGetServiceLogsUrl = (serviceId: string,
+    params?: GetServiceLogsParams,) => {
+  const normalizedParams = new URLSearchParams();
+
+  Object.entries(params || {}).forEach(([key, value]) => {
+
+    if (value !== undefined) {
+      normalizedParams.append(key, value === null ? 'null' : String(value))
+    }
+  });
+
+  const stringifiedParams = normalizedParams.toString();
+
+  return stringifiedParams.length > 0 ? `/api/v1/services/${serviceId}/logs?${stringifiedParams}` : `/api/v1/services/${serviceId}/logs`
+}
+
+/**
+ * # Errors
+ *
+ * Returns the public error envelope on refusal, a service that is not a
+ * known application, or a provider failure.
+ * @summary Tails the log of a Coolify application's deployment, bounded in lines
+and bytes and redacted before it is returned; it is never stored.
+Coolify returns deployment logs only to a token with the `read:sensitive`
+ability, so an account whose token lacks it answers 403 with
+`provider_permission`. Needs `external_account.config` on the account.
+ */
+export const getServiceLogs = async (serviceId: string,
+    params?: GetServiceLogsParams, options?: RequestInit): Promise<getServiceLogsResponse> => {
+
+  const res = await fetch(getGetServiceLogsUrl(serviceId,params),
+  {
+    ...options,
+    method: 'GET'
+
+
+  }
+)
+
+
+  const body = [204, 205, 304].includes(res.status) ? null : await res.text();
+
+  const data: getServiceLogsResponse['data'] = body ? JSON.parse(body) : {}
+  return { data, status: res.status, headers: res.headers } as getServiceLogsResponse
 }
 
 
