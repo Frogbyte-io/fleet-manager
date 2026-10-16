@@ -19,6 +19,7 @@ import { errorMessage, unwrap } from '../../machine/api'
 import CopyFleetctl from '../../machine/components/CopyFleetctl.vue'
 import OperationStatus from '../../machine/components/OperationStatus.vue'
 import { desiredFetchCommand, desiredRevisionCommand, desiredSourceSetCommand } from '../../machine/fleetctl'
+import RegistrySettings from './RegistrySettings.vue'
 
 // Fleet Git as the desired-state source (FM-409): the remote, the active
 // revision, fetching a candidate, and moving between recorded revisions.
@@ -209,6 +210,8 @@ function dismiss() {
         :command="desiredSourceSetCommand(remoteDraft)"
       />
     </div>
+
+    <RegistrySettings />
 
     <!-- Active revision -->
     <div class="space-y-2">
