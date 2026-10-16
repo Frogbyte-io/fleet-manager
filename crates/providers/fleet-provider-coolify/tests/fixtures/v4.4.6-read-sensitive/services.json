@@ -1,0 +1,33 @@
+[
+  {
+    "id": 1,
+    "uuid": "svcplausible000000001",
+    "name": "plausible",
+    "environment_id": 1,
+    "server_id": 0,
+    "description": "Analytics",
+    "destination_type": "App\\Models\\StandaloneDocker",
+    "destination_id": 1,
+    "service_type": "plausible-analytics",
+    "status": "running:healthy",
+    "created_at": "2026-01-15T10:00:00.000000Z",
+    "updated_at": "2026-01-15T10:00:00.000000Z",
+    "deleted_at": null,
+    "docker_compose_raw": "x: SENTINEL-SECRET-svc",
+    "docker_compose": "x: SENTINEL-SECRET-svc2"
+  },
+  {
+    "id": 2,
+    "uuid": "svcminio0000000000002",
+    "name": "minio",
+    "environment_id": 3,
+    "server_id": 0,
+    "description": null,
+    "service_type": "minio",
+    "created_at": "2026-01-15T10:00:00.000000Z",
+    "updated_at": "2026-01-15T10:00:00.000000Z",
+    "deleted_at": null,
+    "docker_compose_raw": "x: SENTINEL-SECRET-svc",
+    "docker_compose": "x: SENTINEL-SECRET-svc2"
+  }
+]

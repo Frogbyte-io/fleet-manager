@@ -1,0 +1,15 @@
+[
+  {
+    "id": 1,
+    "name": "plausible",
+    "fqdn": "https://stats.example.test",
+    "image": "plausible/analytics:v2",
+    "status": "running:healthy"
+  },
+  {
+    "id": 2,
+    "name": "clickhouse",
+    "fqdn": null,
+    "image": "clickhouse/clickhouse-server:24"
+  }
+]

@@ -42,6 +42,37 @@ pub struct StoredProbe {
     pub checked_at: i64,
 }
 
+/// Per-account async locks. An account's endpoint and its token are two
+/// stores, so anything that reads both (a probe, a discovery) or replaces
+/// them (an update, a delete) holds the account's lock across it: a reader
+/// can never pair a new endpoint with the old token, so the old token never
+/// reaches a new origin.
+#[derive(Debug, Default)]
+pub struct AccountLocks {
+    locks: std::sync::Mutex<std::collections::HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
+}
+
+impl AccountLocks {
+    /// The process-wide table every account use case shares.
+    #[must_use]
+    pub fn global() -> &'static Self {
+        static GLOBAL: std::sync::OnceLock<AccountLocks> = std::sync::OnceLock::new();
+        GLOBAL.get_or_init(Self::default)
+    }
+
+    /// Waits for and takes the lock of one account.
+    pub async fn lock(&self, account_id: &str) -> tokio::sync::OwnedMutexGuard<()> {
+        let lock = {
+            let mut locks = self
+                .locks
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            locks.entry(account_id.to_owned()).or_default().clone()
+        };
+        lock.lock_owned().await
+    }
+}
+
 /// One configured external provider account. The credential is a
 /// reference: the value lives in the encrypted store.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -109,6 +140,19 @@ pub struct UpdateExternalAccount {
     pub scope_id: Option<String>,
     /// New notes.
     pub notes: Option<String>,
+}
+
+impl ExternalAccount {
+    /// A policy the stored record breaks, if any. Today: `https_required`,
+    /// an http base URL that is not a literal loopback address. Such an
+    /// account is never probed or discovered (the token would travel in
+    /// clear); editing its base URL to https (with a new token, since the
+    /// scheme is part of the origin) clears it.
+    #[must_use]
+    pub fn policy_violation(&self) -> Option<&'static str> {
+        (self.base_url.starts_with("http://") && !base_url_is_loopback(&self.base_url))
+            .then_some("https_required")
+    }
 }
 
 /// The account record port: durable account state.
@@ -452,6 +496,9 @@ impl ExternalAccounts {
         if let Some(token) = new_token {
             validate_token(token)?;
         }
+        // Held to the end, restore included: no probe or discovery can read
+        // the new endpoint with the old token in between.
+        let _account_lock = AccountLocks::global().lock(id).await;
         let current = self.require_account(id).await?;
         let scope = match patch.scope_id.as_deref() {
             Some("") => None,
@@ -555,6 +602,7 @@ impl ExternalAccounts {
             Permission::ExternalAccountConfig,
             Some(id),
         )?;
+        let _account_lock = AccountLocks::global().lock(id).await;
         let account = self.require_account(id).await?;
         self.audit(
             principal,
@@ -607,15 +655,26 @@ impl ExternalAccounts {
             Permission::ExternalAccountConfig,
             Some(id),
         )?;
-        let account = self.require_account(id).await?;
-        let token = self
-            .credentials
-            .load(id)
-            .await
-            .map_err(ExternalAccountError::Credentials)?
-            .ok_or_else(|| ExternalAccountError::NoSecret {
-                account: account.label.clone(),
-            })?;
+        // The endpoint and the token are read together under the account
+        // lock, so they always belong to the same state of the account.
+        let (account, token) = {
+            let _account_lock = AccountLocks::global().lock(id).await;
+            let account = self.require_account(id).await?;
+            if account.policy_violation().is_some() {
+                return Err(invalid(
+                    "the base URL uses http; the token is only sent over https (edit the account to use https)",
+                ));
+            }
+            let token = self
+                .credentials
+                .load(id)
+                .await
+                .map_err(ExternalAccountError::Credentials)?
+                .ok_or_else(|| ExternalAccountError::NoSecret {
+                    account: account.label.clone(),
+                })?;
+            (account, token)
+        };
         self.audit(
             principal,
             Some(id),
@@ -736,13 +795,10 @@ fn normalized(
     validate_label(label).map_err(|error| invalid(error.to_string()))?;
     validate_notes(notes).map_err(|error| invalid(error.to_string()))?;
     let base_url = normalize_base_url(base_url).map_err(|error| invalid(error.to_string()))?;
-    // The Cloudflare token travels as a bearer header: https only, except
-    // for a loopback address (a local stub).
-    if kind == ExternalProviderKind::Cloudflare
-        && !base_url.starts_with("https://")
-        && !base_url_is_loopback(&base_url)
-    {
-        return Err(invalid("a cloudflare base URL must use https"));
+    // The token travels as a bearer header: https only, except for a
+    // literal loopback address (a local stub). Both kinds.
+    if !base_url.starts_with("https://") && !base_url_is_loopback(&base_url) {
+        return Err(invalid(format!("a {kind} base URL must use https")));
     }
     if let Some(scope) = scope_id {
         if kind != ExternalProviderKind::Cloudflare {

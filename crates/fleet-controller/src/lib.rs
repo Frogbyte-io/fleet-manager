@@ -91,6 +91,9 @@ pub struct NodeServices {
     /// The external provider account use cases (FM-1001); set by the binary
     /// once the secret store is open, absent otherwise.
     pub external_accounts: Option<Arc<fleet_application::external_accounts::ExternalAccounts>>,
+    /// The Coolify read discovery use cases (FM-1030); set with the
+    /// external accounts, absent otherwise.
+    pub coolify_discovery: Option<Arc<fleet_application::coolify::CoolifyDiscovery>>,
 }
 
 fn event_hub_for_services(
@@ -156,6 +159,7 @@ pub fn compose_node_services_with_events(
     NodeServices {
         git_credentials: None,
         external_accounts: None,
+        coolify_discovery: None,
         nodes,
         gateway,
         events,
@@ -616,7 +620,12 @@ fn build_router_for_caller(
     ));
     let credentials = api_state.credentials.clone();
     let external_accounts = services.and_then(|services| services.external_accounts.clone());
+    let coolify_discovery = services.and_then(|services| services.coolify_discovery.clone());
     let mut api_router = fleet_api::router(api_state.clone());
+    if let Some(coolify_discovery) = coolify_discovery {
+        // The Coolify discovery surface (FM-1030), same shape.
+        api_router = api_router.layer(axum::Extension(coolify_discovery));
+    }
     if let Some(external_accounts) = external_accounts {
         // The external accounts surface (FM-1001) takes its use cases as a
         // request extension, so the shared API state stays untouched.

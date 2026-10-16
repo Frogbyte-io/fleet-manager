@@ -767,9 +767,12 @@ dependencies = [
 name = "fleet-provider-coolify"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
+ "fleet-application",
  "fleet-core",
  "reqwest",
  "serde_json",
+ "tempfile",
  "tokio",
 ]
 

@@ -179,6 +179,7 @@ impl AuditPort for Audit {
 }
 
 struct Rig {
+    accounts: Arc<Accounts>,
     service: ExternalAccounts,
     credentials: Arc<Credentials>,
     prober: Arc<Prober>,
@@ -192,9 +193,11 @@ fn rig(status: ProbeStatus) -> Rig {
         seen: Mutex::default(),
     });
     let audit = Arc::new(Audit::default());
+    let accounts = Arc::new(Accounts::default());
     Rig {
+        accounts: accounts.clone(),
         service: ExternalAccounts::new(
-            Arc::new(Accounts::default()),
+            accounts,
             credentials.clone(),
             prober.clone(),
             audit.clone(),
@@ -748,4 +751,112 @@ async fn a_failed_credential_write_restores_the_previous_origin() {
         credentials.load(&account.id).await.unwrap().as_deref(),
         Some(TOKEN)
     );
+}
+
+#[tokio::test]
+async fn coolify_requires_https_except_on_literal_loopback() {
+    let rig = rig(ProbeStatus::Ok);
+    let allow = Deny(vec![]);
+    let coolify_at = |url: &str| CreateExternalAccount {
+        kind: ExternalProviderKind::Coolify,
+        label: "deploy".to_owned(),
+        base_url: Some(url.to_owned()),
+        scope_id: None,
+        notes: None,
+    };
+    for url in [
+        "http://coolify.example.test",
+        "http://localhost.example.test",
+    ] {
+        let error = rig
+            .service
+            .create(&allow, &principal(), coolify_at(url), TOKEN)
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("https"), "{url}: {error}");
+    }
+    rig.service
+        .create(
+            &allow,
+            &principal(),
+            coolify_at("http://127.0.0.1:9"),
+            TOKEN,
+        )
+        .await
+        .expect("a loopback stub");
+}
+
+#[tokio::test]
+async fn a_legacy_http_account_is_not_probed_and_reports_the_policy_violation() {
+    let rig = rig(ProbeStatus::Ok);
+    let allow = Deny(vec![]);
+    let account = rig
+        .service
+        .create(&allow, &principal(), coolify("legacy"), TOKEN)
+        .await
+        .unwrap();
+    assert_eq!(account.policy_violation(), None);
+    // An account stored before the https rule: put the http URL straight
+    // into the record port.
+    rig.accounts
+        .update(
+            &account.id,
+            &NewExternalAccount {
+                kind: ExternalProviderKind::Coolify,
+                label: account.label.clone(),
+                base_url: "http://coolify.example.test".to_owned(),
+                scope_id: None,
+                notes: String::new(),
+            },
+            false,
+        )
+        .await
+        .unwrap();
+    let stored = rig
+        .service
+        .get(&allow, &principal(), &account.id)
+        .await
+        .unwrap();
+    assert_eq!(stored.policy_violation(), Some("https_required"));
+    let error = rig
+        .service
+        .probe(&allow, &principal(), &account.id)
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(error, ExternalAccountError::Invalid { .. }),
+        "{error}"
+    );
+    assert!(
+        rig.prober.seen.lock().unwrap().is_empty(),
+        "the token must not be handed to a prober for an http account"
+    );
+}
+
+#[tokio::test]
+async fn a_probe_waits_for_an_update_in_flight_so_the_token_never_meets_a_new_origin() {
+    let rig = rig(ProbeStatus::Ok);
+    let allow = Deny(vec![]);
+    let account = rig
+        .service
+        .create(&allow, &principal(), coolify("locked"), TOKEN)
+        .await
+        .unwrap();
+    // Simulate an update holding the account lock mid-way.
+    let guard = fleet_application::external_accounts::AccountLocks::global()
+        .lock(&account.id)
+        .await;
+    let blocked = tokio::time::timeout(
+        std::time::Duration::from_millis(100),
+        rig.service.probe(&allow, &principal(), &account.id),
+    )
+    .await;
+    assert!(blocked.is_err(), "the probe must wait for the lock");
+    assert!(rig.prober.seen.lock().unwrap().is_empty());
+    drop(guard);
+    rig.service
+        .probe(&allow, &principal(), &account.id)
+        .await
+        .expect("the probe runs once the lock is free");
+    assert_eq!(rig.prober.seen.lock().unwrap().len(), 1);
 }
