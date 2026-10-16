@@ -62,7 +62,9 @@ impl SystemResolver {
     /// Fails when the system resolver configuration cannot be read.
     pub fn new() -> Result<Self, DnsError> {
         let resolver = TokioResolver::builder_tokio()
-            .map_err(|_| DnsError::Failed("the system resolver configuration is unreadable".to_owned()))?
+            .map_err(|_| {
+                DnsError::Failed("the system resolver configuration is unreadable".to_owned())
+            })?
             .build()
             .map_err(|_| DnsError::Failed("the resolver could not start".to_owned()))?;
         Ok(Self { resolver })

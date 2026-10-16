@@ -170,9 +170,8 @@ fn observed_registrar(observation: &DomainObservation) -> Option<&str> {
 fn state_of(recorded: bool, observed: bool, agrees: impl FnOnce() -> bool) -> FieldState {
     match (recorded, observed) {
         (true, true) if agrees() => FieldState::InSync,
-        (false, false) => FieldState::Unknown,
-        (false, true) | (true, true) => FieldState::Changed,
-        (true, false) => FieldState::Unknown,
+        (_, true) => FieldState::Changed,
+        (_, false) => FieldState::Unknown,
     }
 }
 
@@ -186,6 +185,7 @@ fn state_of(recorded: bool, observed: bool, agrees: impl FnOnce() -> bool) -> Fi
 /// expiry rules still run on the recorded date, so a domain that is about to
 /// lapse is reported even before its first lookup.
 #[must_use]
+#[allow(clippy::too_many_lines)]
 pub fn assess(
     fields: &Value,
     observation: Option<&DomainObservation>,
@@ -202,7 +202,12 @@ pub fn assess(
     let state = state_of(
         recorded_registrar.is_some(),
         seen_registrar.is_some(),
-        || registrars_match(recorded_registrar.unwrap_or(""), seen_registrar.unwrap_or("")),
+        || {
+            registrars_match(
+                recorded_registrar.unwrap_or(""),
+                seen_registrar.unwrap_or(""),
+            )
+        },
     );
     diffs.push(FieldDiff {
         field: "registrar",
@@ -215,7 +220,9 @@ pub fn assess(
             warnings.push(Warning {
                 code: WarningCode::RegistrarMismatch,
                 severity: Severity::Warn,
-                message: format!("The registry lists the registrar as {seen}, but the entry says {recorded}."),
+                message: format!(
+                    "The registry lists the registrar as {seen}, but the entry says {recorded}."
+                ),
             });
         }
         if let Some(seen) = seen_registrar {
@@ -243,7 +250,9 @@ pub fn assess(
             warnings.push(Warning {
                 code: WarningCode::ExpiryChanged,
                 severity: Severity::Info,
-                message: format!("The registry lists the expiry as {seen}, but the entry says {recorded}."),
+                message: format!(
+                    "The registry lists the expiry as {seen}, but the entry says {recorded}."
+                ),
             });
         }
         if let Some(seen) = &seen_expiry {
@@ -271,7 +280,8 @@ pub fn assess(
             warnings.push(Warning {
                 code: WarningCode::NameserversMismatch,
                 severity: Severity::Warn,
-                message: "The delegated nameservers differ from the entry's nameservers.".to_owned(),
+                message: "The delegated nameservers differ from the entry's nameservers."
+                    .to_owned(),
             });
         }
         if let Some(seen) = &seen_ns {
@@ -320,12 +330,10 @@ pub fn assess(
         .map(|day| day - today)
         .filter(|days| *days <= window_days)
     {
-        let when = if days_left < 0 {
-            format!("expired {} days ago", -days_left)
-        } else if days_left == 0 {
-            "expires today".to_owned()
-        } else {
-            format!("expires in {days_left} days")
+        let when = match days_left.cmp(&0) {
+            std::cmp::Ordering::Less => format!("expired {} days ago", -days_left),
+            std::cmp::Ordering::Equal => "expires today".to_owned(),
+            std::cmp::Ordering::Greater => format!("expires in {days_left} days"),
         };
         let severity = if days_left <= URGENT_DAYS {
             Severity::Err

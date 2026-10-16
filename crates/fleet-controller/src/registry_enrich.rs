@@ -87,10 +87,13 @@ impl DnsPort for DnsAdapter {
             DnsKind::Aaaa => Kind::Aaaa,
             DnsKind::Cname => Kind::Cname,
         };
-        resolver.query(name, kind).await.map_err(|error| match error {
-            DnsError::NameDoesNotExist => DnsFailure::NameDoesNotExist,
-            DnsError::Failed(detail) => DnsFailure::Failed(detail),
-        })
+        resolver
+            .query(name, kind)
+            .await
+            .map_err(|error| match error {
+                DnsError::NameDoesNotExist => DnsFailure::NameDoesNotExist,
+                DnsError::Failed(detail) => DnsFailure::Failed(detail),
+            })
     }
 }
 
@@ -164,7 +167,11 @@ pub async fn run_sweeper(
             () = tokio::time::sleep(wait) => {}
         }
         wait = interval;
-        let sweep = enricher.sweep(&authorizer, fleet_auth::LAN_PRINCIPAL_ID, Some(interval / 2));
+        let sweep = enricher.sweep(
+            &authorizer,
+            fleet_auth::LAN_PRINCIPAL_ID,
+            Some(interval / 2),
+        );
         let result = tokio::select! {
             () = &mut shutdown => return,
             result = sweep => result,

@@ -17,13 +17,13 @@ use axum::{
     http::StatusCode,
 };
 use fleet_application::project::ProjectUseCaseError;
-use fleet_application::registry::{
-    Answered, EntryCursor, ReferenceCursor, RegistryEntryFilter, RegistryEntryRecord,
-    RegistryReadModel, RegistryReference, RegistryTarget, RegistryTypeRecord, TARGET_CLASSES,
-};
 use fleet_application::registry::enrich::{
     DOMAIN_TYPE, DnsRecords, DnsStatus, DomainEnricher, DomainObservation, DomainView, FieldState,
     RdapStatus, Severity, WarningCode,
+};
+use fleet_application::registry::{
+    Answered, EntryCursor, ReferenceCursor, RegistryEntryFilter, RegistryEntryRecord,
+    RegistryReadModel, RegistryReference, RegistryTarget, RegistryTypeRecord, TARGET_CLASSES,
 };
 use fleet_core::{CorrelationId, ErrorCode, PublicError, RetryClass};
 use serde::{Deserialize, Serialize};
@@ -1001,7 +1001,10 @@ fn domain_only(entry_type: &str, correlation_id: CorrelationId) -> Result<(), Ap
 
 /// Maps an enrichment failure; a refused rate-limit slot is a 429 with the
 /// reason, any other backend failure stays generic.
-fn map_enrich_error(error: &ProjectUseCaseError, correlation_id: CorrelationId) -> ApiErrorResponse {
+fn map_enrich_error(
+    error: &ProjectUseCaseError,
+    correlation_id: CorrelationId,
+) -> ApiErrorResponse {
     if let ProjectUseCaseError::Backend {
         context: "registry_observe_rate_limited",
         detail,

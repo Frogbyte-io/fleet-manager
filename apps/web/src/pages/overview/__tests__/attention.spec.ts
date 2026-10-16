@@ -4,6 +4,7 @@ import type { OperationDto } from '@frogbyte-io/fleet-api-client'
 
 import {
   activity,
+  domainRows,
   driftRows,
   EXPIRING_WINDOW_MS,
   kpis,
@@ -175,5 +176,24 @@ describe('kpis and activity', () => {
     )
     expect(feed.map(i => [i.key, i.tone])).toEqual([['audit:a1', 'err'], ['op:op-1', 'info']])
     expect(feed[0]!.detail).toBe('me · denied')
+  })
+
+  it('raises one row per domain with a warning, carrying the most serious one', () => {
+    const rows = domainRows([
+      { key: 'ok.example', warnings: [] },
+      {
+        key: 'soon.example',
+        warnings: [
+          { code: 'auto_renew_off_expiring', severity: 'err', message: 'Auto-renew is off and the domain expires in 4 days.' },
+          { code: 'registrar_mismatch', severity: 'warn', message: 'The registry lists the registrar as X.' },
+        ],
+      },
+      { key: 'drift.example', warnings: [{ code: 'expiry_changed', severity: 'info', message: 'Expiry changed.' }] },
+    ])
+    expect(rows.map(r => [r.key, r.source, r.severity, r.to])).toEqual([
+      ['domain:soon.example', 'domain', 'err', { path: '/registry', query: { type: 'domain', entry: 'soon.example' } }],
+      ['domain:drift.example', 'domain', 'info', { path: '/registry', query: { type: 'domain', entry: 'drift.example' } }],
+    ])
+    expect(rows[0]!.detail).toBe('Auto-renew is off and the domain expires in 4 days. (1 more)')
   })
 })

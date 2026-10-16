@@ -32,7 +32,7 @@ use serde::Deserialize;
 /// The IANA DNS bootstrap file.
 pub const IANA_BOOTSTRAP_URL: &str = "https://data.iana.org/rdap/dns.json";
 /// How long a fetched bootstrap file is trusted before the next refresh.
-pub const BOOTSTRAP_TTL: Duration = Duration::from_secs(24 * 60 * 60);
+pub const BOOTSTRAP_TTL: Duration = Duration::from_hours(24);
 /// How long one request may take.
 pub const REQUEST_TIMEOUT: Duration = Duration::from_secs(15);
 /// The most response bytes read from one answer.
@@ -149,11 +149,10 @@ pub enum RdapError {
 impl std::fmt::Display for RdapError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::Transport(detail) => write!(f, "{detail}"),
             Self::NotFound => write!(f, "the registry reports no such domain"),
             Self::Refused { status } => write!(f, "the RDAP server answered HTTP {status}"),
             Self::Malformed(detail) => write!(f, "unreadable RDAP answer: {detail}"),
-            Self::InvalidName(detail) => write!(f, "{detail}"),
+            Self::Transport(detail) | Self::InvalidName(detail) => write!(f, "{detail}"),
         }
     }
 }
@@ -185,7 +184,9 @@ impl Bootstrap {
             .into_iter()
             .map(|(tlds, urls)| {
                 (
-                    tlds.into_iter().map(|tld| tld.to_ascii_lowercase()).collect(),
+                    tlds.into_iter()
+                        .map(|tld| tld.to_ascii_lowercase())
+                        .collect(),
                     urls.into_iter()
                         .filter(|url| url.starts_with("https://"))
                         .collect(),
@@ -288,7 +289,12 @@ pub fn parse_domain(bytes: &[u8]) -> Result<DomainRecord, String> {
     let mut nameservers: Vec<String> = object
         .nameservers
         .iter()
-        .map(|ns| ns.ldh_name.trim().trim_end_matches('.').to_ascii_lowercase())
+        .map(|ns| {
+            ns.ldh_name
+                .trim()
+                .trim_end_matches('.')
+                .to_ascii_lowercase()
+        })
         .filter(|name| !name.is_empty())
         .collect();
     nameservers.sort();

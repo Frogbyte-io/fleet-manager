@@ -8,6 +8,8 @@
 //! patch that would bring the entry in line. It never writes: the patch is
 //! for a person or agent to apply in a Fleet Git checkout and publish.
 
+use std::fmt::Write as _;
+
 use serde_json::Value;
 
 use crate::{CliError, Command, Output, RequestShape, usage};
@@ -157,11 +159,12 @@ pub(crate) fn render(value: &Value) -> String {
     } else {
         let mut command = format!("fleetctl registry set domain/{key}");
         for field in &suggestion {
-            command.push_str(&format!(
+            let _ = write!(
+                command,
                 " --field {}={}",
                 field["field"].as_str().unwrap_or("?"),
                 shell_word(&field_text(&field["value"]))
-            ));
+            );
         }
         lines.push(String::new());
         lines.push("apply in a Fleet Git checkout, then publish:".to_owned());
@@ -179,8 +182,11 @@ mod tests {
     #[test]
     fn parses_a_domain_address_and_output() {
         let mut output = Output::Text;
-        let command = parse(&["suggest", "domain/example.com", "--output", "json"], &mut output)
-            .unwrap();
+        let command = parse(
+            &["suggest", "domain/example.com", "--output", "json"],
+            &mut output,
+        )
+        .unwrap();
         assert_eq!(
             command,
             Command::Registry(RegistryAction::Suggest {
@@ -213,7 +219,10 @@ mod tests {
             key: "example.com".to_owned(),
         });
         assert_eq!(method, reqwest::Method::GET);
-        assert_eq!(path, "/api/v1/registry/entries/domain/example.com/observations");
+        assert_eq!(
+            path,
+            "/api/v1/registry/entries/domain/example.com/observations"
+        );
         assert!(query.is_empty() && body.is_none());
     }
 

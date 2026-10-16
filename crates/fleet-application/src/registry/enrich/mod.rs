@@ -102,9 +102,9 @@ impl EnrichSettings {
     pub fn from_env_values(interval: Option<&str>, window: Option<&str>) -> Result<Self, String> {
         let interval = match present_value(interval) {
             None => DEFAULT_INTERVAL_SECONDS,
-            Some(value) => value
-                .parse::<u64>()
-                .map_err(|_| format!("{INTERVAL_VAR} must be a number of seconds (0 turns it off)"))?,
+            Some(value) => value.parse::<u64>().map_err(|_| {
+                format!("{INTERVAL_VAR} must be a number of seconds (0 turns it off)")
+            })?,
         };
         if interval != 0 && interval < MIN_INTERVAL_SECONDS {
             return Err(format!(
@@ -118,7 +118,9 @@ impl EnrichSettings {
                 .map_err(|_| format!("{WINDOW_VAR} must be a number of days"))?,
         };
         if window == 0 || window > MAX_WINDOW_DAYS {
-            return Err(format!("{WINDOW_VAR} must be between 1 and {MAX_WINDOW_DAYS}"));
+            return Err(format!(
+                "{WINDOW_VAR} must be between 1 and {MAX_WINDOW_DAYS}"
+            ));
         }
         Ok(Self {
             interval: Duration::from_secs(interval),
@@ -630,7 +632,12 @@ impl DomainEnricher {
             .await
             .map_err(backend("registry_observation"))?
             .into_iter()
-            .map(|(key, observation)| (crate::registry::normalize_key(&key), observation.observed_at))
+            .map(|(key, observation)| {
+                (
+                    crate::registry::normalize_key(&key),
+                    observation.observed_at,
+                )
+            })
             .collect();
         let now = (self.clock)();
         let due: Vec<&DomainEntry> = entries

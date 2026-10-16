@@ -111,6 +111,10 @@ API-token providers outside Proxmox share one account registry (FM-1001; `crates
 - **Endpoint safety:** Cloudflare base URLs must use https (a loopback address is allowed for local stubs). Changing an account's base URL scheme, host, or port requires a new token in the same request, so a stored token is never sent to an origin it was not given for. Labels and notes the credential scrubber would change are refused.
 - **Out of scope here:** Coolify and Cloudflare resource discovery (FM-1030, FM-1042).
 
+## Public lookups: RDAP and DNS (FM-1020)
+
+`fleet-provider-rdap` and `fleet-provider-dns` are credential-free providers for the Registry domain enricher (see [desired-state.md](desired-state.md)). RDAP uses the IANA bootstrap registry and HTTPS only, with bounded bodies and redirects; DNS uses hickory-resolver (MIT OR Apache-2.0) over the system resolver. Failures are fixed, credential-free categories. Provider types are translated in the controller adapters (`registry_enrich.rs`), not leaked into the application.
+
 ## Recipes and custom actions
 
 Recipes are data interpreted by a built-in node runner, not providers and not a plugin SDK. A proposed schema includes:

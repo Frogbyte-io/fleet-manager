@@ -17,11 +17,7 @@ fn today() -> i64 {
     diff::days_from_millis(NOW)
 }
 
-fn observation(
-    registrar: Option<&str>,
-    expires: Option<&str>,
-    ns: &[&str],
-) -> DomainObservation {
+fn observation(registrar: Option<&str>, expires: Option<&str>, ns: &[&str]) -> DomainObservation {
     DomainObservation {
         observed_at: NOW,
         rdap: RdapObservation {
@@ -57,10 +53,16 @@ fn codes(assessment: &Assessment) -> Vec<WarningCode> {
 fn dates_convert_to_day_numbers() {
     assert_eq!(days_from_date("1970-01-01"), Some(0));
     assert_eq!(days_from_date("2000-03-01"), Some(11_017));
-    assert_eq!(days_from_date("2027-08-13T04:00:00Z"), days_from_date("2027-08-13"));
+    assert_eq!(
+        days_from_date("2027-08-13T04:00:00Z"),
+        days_from_date("2027-08-13")
+    );
     assert_eq!(days_from_date("2027-13-01"), None);
     assert_eq!(days_from_date("soon"), None);
-    assert_eq!(date_part("2027-08-13T04:00:00Z").as_deref(), Some("2027-08-13"));
+    assert_eq!(
+        date_part("2027-08-13T04:00:00Z").as_deref(),
+        Some("2027-08-13")
+    );
     assert_eq!(today(), days_from_date("2026-10-14").unwrap());
 }
 
@@ -68,7 +70,10 @@ fn dates_convert_to_day_numbers() {
 fn registrar_names_match_across_legal_suffixes_and_punctuation() {
     assert!(registrars_match("GoDaddy", "GoDaddy.com, LLC"));
     assert!(registrars_match("Webhuset", "Webhuset AS"));
-    assert!(registrars_match("Sikt", "SIKT - KUNNSKAPSSEKTORENS TJENESTELEVERANDØR"));
+    assert!(registrars_match(
+        "Sikt",
+        "SIKT - KUNNSKAPSSEKTORENS TJENESTELEVERANDØR"
+    ));
     assert!(!registrars_match("Porkbun", "Namecheap, Inc."));
     assert!(!registrars_match("Hostinger", "Webhuset AS"));
 }
@@ -76,10 +81,19 @@ fn registrar_names_match_across_legal_suffixes_and_punctuation() {
 #[test]
 fn dns_hosts_match_by_name_or_known_alias() {
     let ns = |names: &[&str]| names.iter().map(|n| (*n).to_owned()).collect::<Vec<_>>();
-    assert!(dns_host_matches("Cloudflare", &ns(&["elliott.ns.cloudflare.com"])));
+    assert!(dns_host_matches(
+        "Cloudflare",
+        &ns(&["elliott.ns.cloudflare.com"])
+    ));
     assert!(dns_host_matches("Hostinger", &ns(&["ns1.dns-parking.com"])));
-    assert!(dns_host_matches("GoDaddy", &ns(&["ns01.domaincontrol.com"])));
-    assert!(!dns_host_matches("Cloudflare", &ns(&["ns1.dns-parking.com"])));
+    assert!(dns_host_matches(
+        "GoDaddy",
+        &ns(&["ns01.domaincontrol.com"])
+    ));
+    assert!(!dns_host_matches(
+        "Cloudflare",
+        &ns(&["ns1.dns-parking.com"])
+    ));
     assert!(!dns_host_matches("", &ns(&["ns1.dns-parking.com"])));
 }
 
@@ -116,7 +130,11 @@ fn a_changed_registrar_warns_and_is_suggested() {
 #[test]
 fn a_field_the_entry_lacks_is_changed_and_suggested_without_a_warning() {
     let fields = json!({"fqdn": "example.com"});
-    let seen = observation(Some("Webhuset AS"), Some("2028-01-01"), &["ns1.example.net"]);
+    let seen = observation(
+        Some("Webhuset AS"),
+        Some("2028-01-01"),
+        &["ns1.example.net"],
+    );
     let result = assess(&fields, Some(&seen), today(), 30);
     assert_eq!(diff_of(&result, "registrar").state, FieldState::Changed);
     assert_eq!(diff_of(&result, "expires").state, FieldState::Changed);
@@ -182,7 +200,10 @@ fn expiry_inside_the_window_warns_and_urgent_expiry_is_an_error() {
     assert_eq!(result.warnings[0].severity, Severity::Warn);
 
     let urgent = json!({"fqdn": "example.com", "expires": "2026-10-18"}); // 4 days
-    assert_eq!(assess(&urgent, None, today(), 30).warnings[0].severity, Severity::Err);
+    assert_eq!(
+        assess(&urgent, None, today(), 30).warnings[0].severity,
+        Severity::Err
+    );
 
     let lapsed = json!({"fqdn": "example.com", "expires": "2026-10-01"});
     let result = assess(&lapsed, None, today(), 30);
@@ -192,7 +213,10 @@ fn expiry_inside_the_window_warns_and_urgent_expiry_is_an_error() {
     let far = json!({"fqdn": "example.com", "expires": "2027-10-01"});
     assert!(assess(&far, None, today(), 30).warnings.is_empty());
     // The window is configurable.
-    assert_eq!(codes(&assess(&far, None, today(), 400)), [WarningCode::Expiring]);
+    assert_eq!(
+        codes(&assess(&far, None, today(), 400)),
+        [WarningCode::Expiring]
+    );
 }
 
 #[test]
@@ -201,7 +225,10 @@ fn auto_renew_off_while_expiring_is_its_own_warning() {
     let result = assess(&fields, None, today(), 30);
     assert_eq!(codes(&result), [WarningCode::AutoRenewOffExpiring]);
     let renewing = json!({"fqdn": "example.com", "expires": "2026-11-03", "autoRenew": true});
-    assert_eq!(codes(&assess(&renewing, None, today(), 30)), [WarningCode::Expiring]);
+    assert_eq!(
+        codes(&assess(&renewing, None, today(), 30)),
+        [WarningCode::Expiring]
+    );
     // Auto-renew off but nowhere near expiry is not a warning.
     let distant = json!({"fqdn": "example.com", "expires": "2028-11-03", "autoRenew": false});
     assert!(assess(&distant, None, today(), 30).warnings.is_empty());
@@ -225,7 +252,10 @@ fn warnings_are_ordered_most_serious_first() {
     let result = assess(&fields, Some(&seen), today(), 30);
     assert_eq!(
         codes(&result),
-        [WarningCode::AutoRenewOffExpiring, WarningCode::RegistrarMismatch]
+        [
+            WarningCode::AutoRenewOffExpiring,
+            WarningCode::RegistrarMismatch
+        ]
     );
 }
 
@@ -288,10 +318,12 @@ impl DomainDirectory for Directory {
     }
 }
 
+type StubAnswer = (String, Result<RdapAnswer, RdapFailure>);
+
 #[derive(Debug, Default)]
 struct RdapStub {
     /// fqdn -> (server, answer); a missing fqdn has no RDAP.
-    answers: Mutex<HashMap<String, (String, Result<RdapAnswer, RdapFailure>)>>,
+    answers: Mutex<HashMap<String, StubAnswer>>,
     queries: Mutex<Vec<(std::time::Instant, String)>>,
 }
 
@@ -391,7 +423,10 @@ impl ObservationStore for Store {
             .collect())
     }
     async fn retain(&self, keep: &[String]) -> Result<(), String> {
-        self.rows.lock().unwrap().retain(|key, _| keep.contains(key));
+        self.rows
+            .lock()
+            .unwrap()
+            .retain(|key, _| keep.contains(key));
         Ok(())
     }
 }
@@ -486,13 +521,20 @@ fn com_answer() -> RdapAnswer {
 
 #[tokio::test]
 async fn refresh_records_rdap_and_dns_and_audits_before_looking_up() {
-    let rdap = RdapStub::default().with("example.com", "https://rdap.verisign.com/", Ok(com_answer()));
+    let rdap = RdapStub::default().with(
+        "example.com",
+        "https://rdap.verisign.com/",
+        Ok(com_answer()),
+    );
     let dns = DnsStub::default()
         .with("example.com", DnsKind::Ns, &["a.ns.cloudflare.com"])
         .with("example.com", DnsKind::A, &["93.184.216.34"])
         .with("www.example.com", DnsKind::Cname, &["example.com"]);
     let rig = rig(
-        vec![entry("example.com", json!({"fqdn": "example.com", "registrar": "Porkbun"}))],
+        vec![entry(
+            "example.com",
+            json!({"fqdn": "example.com", "registrar": "Porkbun"}),
+        )],
         rdap,
         dns,
         Duration::ZERO,
@@ -547,11 +589,17 @@ async fn a_tld_without_rdap_reports_unavailable_not_an_error() {
 #[tokio::test]
 async fn rdap_failures_and_unregistered_names_are_recorded_as_observations() {
     let rdap = RdapStub::default()
-        .with("gone.com", "https://rdap.verisign.com/", Err(RdapFailure::NotFound))
+        .with(
+            "gone.com",
+            "https://rdap.verisign.com/",
+            Err(RdapFailure::NotFound),
+        )
         .with(
             "busy.com",
             "https://rdap.verisign.com/",
-            Err(RdapFailure::Failed("the RDAP server answered HTTP 429".to_owned())),
+            Err(RdapFailure::Failed(
+                "the RDAP server answered HTTP 429".to_owned(),
+            )),
         );
     let dns = DnsStub {
         missing: vec!["gone.com".to_owned()],
@@ -566,11 +614,19 @@ async fn rdap_failures_and_unregistered_names_are_recorded_as_observations() {
         dns,
         Duration::ZERO,
     );
-    let gone = rig.enricher.refresh(&Allow, "a", None, "gone.com").await.unwrap();
+    let gone = rig
+        .enricher
+        .refresh(&Allow, "a", None, "gone.com")
+        .await
+        .unwrap();
     let gone = gone.observation.unwrap();
     assert_eq!(gone.rdap.status, RdapStatus::NotFound);
     assert_eq!(gone.dns.status, DnsStatus::NotFound);
-    let busy = rig.enricher.refresh(&Allow, "a", None, "busy.com").await.unwrap();
+    let busy = rig
+        .enricher
+        .refresh(&Allow, "a", None, "busy.com")
+        .await
+        .unwrap();
     let busy = busy.observation.unwrap();
     assert_eq!(busy.rdap.status, RdapStatus::Error);
     assert!(busy.rdap.detail.unwrap().contains("429"));
@@ -588,13 +644,21 @@ async fn a_missing_www_does_not_make_the_name_not_found() {
         dns,
         Duration::ZERO,
     );
-    let view = rig.enricher.refresh(&Allow, "a", None, "example.com").await.unwrap();
+    let view = rig
+        .enricher
+        .refresh(&Allow, "a", None, "example.com")
+        .await
+        .unwrap();
     assert_eq!(view.observation.unwrap().dns.status, DnsStatus::Ok);
 }
 
 #[tokio::test]
 async fn refresh_without_the_observe_permission_does_nothing() {
-    let rdap = RdapStub::default().with("example.com", "https://rdap.verisign.com/", Ok(com_answer()));
+    let rdap = RdapStub::default().with(
+        "example.com",
+        "https://rdap.verisign.com/",
+        Ok(com_answer()),
+    );
     let rig = rig(
         vec![entry("example.com", json!({"fqdn": "example.com"}))],
         rdap,
@@ -603,7 +667,12 @@ async fn refresh_without_the_observe_permission_does_nothing() {
     );
     let error = rig
         .enricher
-        .refresh(&Without(Permission::RegistryObserve), "bob", None, "example.com")
+        .refresh(
+            &Without(Permission::RegistryObserve),
+            "bob",
+            None,
+            "example.com",
+        )
         .await
         .unwrap_err();
     assert!(matches!(error, ProjectUseCaseError::Denied(_)));
@@ -611,11 +680,12 @@ async fn refresh_without_the_observe_permission_does_nothing() {
     assert!(rig.rdap.queries.lock().unwrap().is_empty());
     assert!(rig.store.rows.lock().unwrap().is_empty());
     // Reading is a different permission and still works.
-    assert!(rig
-        .enricher
-        .get(&Without(Permission::RegistryObserve), "bob", "example.com")
-        .await
-        .is_ok());
+    assert!(
+        rig.enricher
+            .get(&Without(Permission::RegistryObserve), "bob", "example.com")
+            .await
+            .is_ok()
+    );
     let blind = rig
         .enricher
         .get(&Without(Permission::RegistryRead), "bob", "example.com")
@@ -626,8 +696,17 @@ async fn refresh_without_the_observe_permission_does_nothing() {
 
 #[tokio::test]
 async fn refresh_of_an_unknown_entry_is_not_found() {
-    let rig = rig(vec![], RdapStub::default(), DnsStub::default(), Duration::ZERO);
-    let error = rig.enricher.refresh(&Allow, "a", None, "nope.com").await.unwrap_err();
+    let rig = rig(
+        vec![],
+        RdapStub::default(),
+        DnsStub::default(),
+        Duration::ZERO,
+    );
+    let error = rig
+        .enricher
+        .refresh(&Allow, "a", None, "nope.com")
+        .await
+        .unwrap_err();
     assert!(matches!(error, ProjectUseCaseError::NotFound { .. }));
 }
 
@@ -673,11 +752,21 @@ async fn an_on_demand_lookup_refuses_to_queue_behind_a_long_backlog() {
         Duration::from_secs(40),
     );
     // The first lookup takes the free slot; the next would wait 40 s.
-    rig.enricher.refresh(&Allow, "a", None, "a.com").await.unwrap();
-    let error = rig.enricher.refresh(&Allow, "a", None, "b.com").await.unwrap_err();
+    rig.enricher
+        .refresh(&Allow, "a", None, "a.com")
+        .await
+        .unwrap();
+    let error = rig
+        .enricher
+        .refresh(&Allow, "a", None, "b.com")
+        .await
+        .unwrap_err();
     assert!(matches!(
         error,
-        ProjectUseCaseError::Backend { context: "registry_observe_rate_limited", .. }
+        ProjectUseCaseError::Backend {
+            context: "registry_observe_rate_limited",
+            ..
+        }
     ));
     assert_eq!(rig.rdap.queries.lock().unwrap().len(), 1);
 }
@@ -710,7 +799,7 @@ async fn sweep_skips_fresh_observations_audits_once_and_prunes_removed_entries()
 
     let report = rig
         .enricher
-        .sweep(&Allow, "system", Some(Duration::from_secs(86_400)))
+        .sweep(&Allow, "system", Some(Duration::from_hours(24)))
         .await
         .unwrap();
     assert_eq!(
@@ -754,7 +843,10 @@ async fn list_marks_domains_needing_attention_even_before_their_first_lookup() {
     let rig = rig(
         vec![
             entry("a.com", json!({"fqdn": "a.com", "expires": "2027-01-01"})),
-            entry("b.com", json!({"fqdn": "b.com", "expires": "2026-10-20", "autoRenew": false})),
+            entry(
+                "b.com",
+                json!({"fqdn": "b.com", "expires": "2026-10-20", "autoRenew": false}),
+            ),
             entry("c.com", json!({"fqdn": "c.com", "registrar": "Porkbun"})),
         ],
         RdapStub::default(),
@@ -765,20 +857,35 @@ async fn list_marks_domains_needing_attention_even_before_their_first_lookup() {
         .save("c.com", &observation(Some("Namecheap"), None, &[]))
         .await
         .unwrap();
-    let all = rig.enricher.list(&Allow, "a", false, None, 10).await.unwrap();
+    let all = rig
+        .enricher
+        .list(&Allow, "a", false, None, 10)
+        .await
+        .unwrap();
     assert_eq!(all.len(), 3);
-    let attention = rig.enricher.list(&Allow, "a", true, None, 10).await.unwrap();
+    let attention = rig
+        .enricher
+        .list(&Allow, "a", true, None, 10)
+        .await
+        .unwrap();
     let keys: Vec<_> = attention.iter().map(|v| v.key.as_str()).collect();
     assert_eq!(keys, ["b.com", "c.com"]);
     // Paging: after the first, limit one.
-    let page = rig.enricher.list(&Allow, "a", true, Some("b.com"), 1).await.unwrap();
+    let page = rig
+        .enricher
+        .list(&Allow, "a", true, Some("b.com"), 1)
+        .await
+        .unwrap();
     assert_eq!(page[0].key, "c.com");
 }
 
 #[test]
 fn settings_parse_the_environment_values() {
     let defaults = EnrichSettings::from_env_values(None, Some("")).unwrap();
-    assert_eq!(defaults.interval, Duration::from_secs(DEFAULT_INTERVAL_SECONDS));
+    assert_eq!(
+        defaults.interval,
+        Duration::from_secs(DEFAULT_INTERVAL_SECONDS)
+    );
     assert_eq!(defaults.expiry_window_days, DEFAULT_WINDOW_DAYS);
     let tuned = EnrichSettings::from_env_values(Some("3600"), Some("60")).unwrap();
     assert_eq!(tuned.interval, Duration::from_secs(3600));

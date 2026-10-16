@@ -80,13 +80,12 @@ impl ObservationStore for ObservationRepository {
     async fn retain(&self, keep: &[String]) -> Result<(), String> {
         let keep: Vec<String> = keep.iter().map(|key| normalize_key(key)).collect();
         let mut tx = self.pool.begin().await.map_err(|error| error.to_string())?;
-        let stored: Vec<(String,)> = sqlx::query_as(
-            "SELECT entry_key_norm FROM registry_observations WHERE entry_type = ?",
-        )
-        .bind(DOMAIN_TYPE)
-        .fetch_all(&mut *tx)
-        .await
-        .map_err(|error| error.to_string())?;
+        let stored: Vec<(String,)> =
+            sqlx::query_as("SELECT entry_key_norm FROM registry_observations WHERE entry_type = ?")
+                .bind(DOMAIN_TYPE)
+                .fetch_all(&mut *tx)
+                .await
+                .map_err(|error| error.to_string())?;
         let gone: Vec<String> = stored
             .into_iter()
             .map(|(key,)| key)
@@ -94,9 +93,8 @@ impl ObservationStore for ObservationRepository {
             .collect();
         // Chunked so a large set stays under SQLite's bound-parameter limit.
         for chunk in gone.chunks(200) {
-            let mut query: QueryBuilder<Sqlite> = QueryBuilder::new(
-                "DELETE FROM registry_observations WHERE entry_type = ",
-            );
+            let mut query: QueryBuilder<Sqlite> =
+                QueryBuilder::new("DELETE FROM registry_observations WHERE entry_type = ");
             query.push_bind(DOMAIN_TYPE);
             query.push(" AND entry_key_norm IN (");
             let mut separated = query.separated(", ");

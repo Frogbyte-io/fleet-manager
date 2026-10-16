@@ -4,6 +4,7 @@
 
 import type {
   AssociatedGuestDto,
+  DomainObservationViewDto,
   AuditEventDto,
   LabTemplateDto,
   LeaseDetailDto,
@@ -32,6 +33,7 @@ export type AttentionSource =
   | 'lease-expiring'
   | 'template-pin'
   | 'drift'
+  | 'domain'
 
 export interface AttentionRow {
   key: string
@@ -274,6 +276,33 @@ export function templatePinRows(
       detail: { unknown: 'It pins an image version Fleet does not know.', superseded: 'It pins a version its recipe no longer promotes.', unpromoted: 'It pins a version that was never promoted.' }[pin.reason],
       to: { path: '/images', query: { select: `template:${template.id}` } },
       at: 0,
+    })
+  }
+  return rows
+}
+
+/**
+ * Domains whose public RDAP/DNS lookups or recorded expiry need a person
+ * (FM-1020): expiring, auto-renew off, or drifted from Fleet Git. One row
+ * per domain, carrying its most serious warning; the Registry page shows
+ * the rest. Informational drift (a changed expiry after a renewal) alone
+ * stays out of the queue unless nothing more serious exists.
+ */
+export function domainRows(views: Pick<DomainObservationViewDto, 'key' | 'warnings'>[], now = 0): AttentionRow[] {
+  const rows: AttentionRow[] = []
+  for (const view of views) {
+    const top = view.warnings[0]
+    if (!top)
+      continue
+    const extra = view.warnings.length - 1
+    rows.push({
+      key: `domain:${view.key}`,
+      source: 'domain',
+      severity: top.severity === 'err' ? 'err' : top.severity === 'warn' ? 'warn' : 'info',
+      title: `Domain ${view.key} needs attention`,
+      detail: `${top.message}${extra > 0 ? ` (${extra} more)` : ''}`,
+      to: { path: '/registry', query: { type: 'domain', entry: view.key } },
+      at: now,
     })
   }
   return rows

@@ -156,7 +156,12 @@ async fn lookup_resolves_the_server_through_the_bootstrap_and_queries_it() {
 async fn a_tld_without_rdap_is_unavailable_not_an_error() {
     let replay = Arc::new(Replay::default());
     let outcome = client(&replay).lookup("example.de").await.unwrap();
-    assert_eq!(outcome, Lookup::Unavailable { tld: "de".to_owned() });
+    assert_eq!(
+        outcome,
+        Lookup::Unavailable {
+            tld: "de".to_owned()
+        }
+    );
     // No RDAP request was made, only the bootstrap fetch.
     assert_eq!(replay.requests.lock().unwrap().len(), 1);
 }
@@ -202,11 +207,7 @@ async fn http_failures_are_classified() {
         rdap.query(server, "gone.com").await,
         Err(RdapError::NotFound)
     );
-    replay.answer(
-        "https://rdap.verisign.com/com/v1/domain/busy.com",
-        429,
-        b"",
-    );
+    replay.answer("https://rdap.verisign.com/com/v1/domain/busy.com", 429, b"");
     assert_eq!(
         rdap.query(server, "busy.com").await,
         Err(RdapError::Refused { status: 429 })
