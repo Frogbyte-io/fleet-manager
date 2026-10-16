@@ -200,7 +200,7 @@ async fn records_are_listed_by_name_and_type() {
     assert_eq!(records[0].ttl, 300);
     let target = seen.lock().expect("seen")[0].target.clone();
     assert!(target.starts_with(&format!("/client/v4/zones/{ZONE}/dns_records?")));
-    assert!(target.contains("name=www.example.com"));
+    assert!(target.contains("name.exact=www.example.com"), "{target}");
     assert!(target.contains("type=A"));
 }
 
@@ -255,7 +255,7 @@ async fn create_update_and_delete_use_the_documented_methods_and_bodies() {
     assert_eq!(body["content"], "198.51.100.9");
     assert_eq!(body["ttl"], 300);
     assert_eq!(body["proxied"], false);
-    assert_eq!(seen[1].method, "PUT");
+    assert_eq!(seen[1].method, "PATCH");
     assert_eq!(
         seen[1].target,
         format!("/client/v4/zones/{ZONE}/dns_records/{RECORD}")
@@ -263,6 +263,14 @@ async fn create_update_and_delete_use_the_documented_methods_and_bodies() {
     let body: Value = serde_json::from_str(&seen[1].body).expect("json body");
     assert_eq!(body["priority"], 10);
     assert!(body.get("proxied").is_none(), "MX is never proxied");
+    // A PATCH names only what changes, so a record's comment, tags, and
+    // settings are left as they are.
+    for untouched in ["comment", "tags", "settings"] {
+        assert!(
+            body.get(untouched).is_none(),
+            "{untouched} must not be sent"
+        );
+    }
     assert_eq!(seen[2].method, "DELETE");
     // No request body or response ever carries the token.
     assert!(seen.iter().all(|s| !s.body.contains(TOKEN)));

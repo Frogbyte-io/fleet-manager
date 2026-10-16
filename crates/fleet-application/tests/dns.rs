@@ -7,7 +7,7 @@ use async_trait::async_trait;
 use fleet_application::authz::{AccessRequest, Authorizer, Decision, Permission, ReasonId};
 use fleet_application::dns::{
     ChangeParameters, Dns, DnsCredentials, DnsError, DnsFailure, DnsFailureClass, DnsGateway,
-    DnsObservation, DnsObservationPort, DnsRecord, DnsZone, Plan, PlanOp,
+    DnsObservation, DnsObservationPort, DnsRecord, DnsZone, Plan, PlanOp, plan_delete, plan_upsert,
 };
 use fleet_application::external_accounts::{
     ExternalAccount, ExternalAccountPort, ExternalCredentialStore, NewExternalAccount, StoredProbe,
@@ -123,6 +123,8 @@ struct Script {
     delete: Mutex<Option<DnsFailure>>,
     writes: Mutex<Vec<String>>,
     reads: Mutex<usize>,
+    zone_calls: Mutex<usize>,
+    zone_id: Mutex<Option<String>>,
 }
 
 #[async_trait]
@@ -132,7 +134,17 @@ impl DnsGateway for Script {
         _: &DnsCredentials,
         _: Option<&str>,
     ) -> Result<Vec<DnsZone>, DnsFailure> {
-        panic!("the gateway must not be called");
+        *self.zone_calls.lock().unwrap() += 1;
+        Ok(vec![DnsZone {
+            id: self
+                .zone_id
+                .lock()
+                .unwrap()
+                .clone()
+                .unwrap_or_else(|| "zone1".to_owned()),
+            name: "example.com".to_owned(),
+            status: "active".to_owned(),
+        }])
     }
     async fn list_records(
         &self,
@@ -208,19 +220,11 @@ fn record(id: &str, content: &str, ttl: u32) -> DnsRecord {
 }
 
 fn create_payload(content: &str) -> String {
-    let after = DnsRecord {
+    let desired = DnsRecord {
         id: None,
         ..record("x", content, 300)
     };
-    payload(
-        content,
-        Plan {
-            operation: PlanOp::Create,
-            before: None,
-            after: Some(after),
-            changes: Vec::new(),
-        },
-    )
+    payload(content, plan_upsert(&[], &desired, None).unwrap())
 }
 
 fn payload(content: &str, preview: Plan) -> String {
@@ -260,9 +264,9 @@ async fn reads_and_changes_need_dns_read_and_never_reach_the_provider_without_it
         .await,
         Err(DnsError::Denied(_))
     ));
-    // Nothing was read from the provider (the scripted gateway panics on
-    // zone listing and counts record reads).
+    // Nothing was read from the provider.
     assert_eq!(*script.reads.lock().unwrap(), 0);
+    assert_eq!(*script.zone_calls.lock().unwrap(), 0);
 }
 
 #[tokio::test]
@@ -313,12 +317,14 @@ async fn a_write_that_does_not_stick_fails_verification() {
 #[tokio::test]
 async fn a_delete_that_does_not_stick_fails_verification_and_a_gone_record_is_a_success() {
     let before = record("r1", "203.0.113.9", 300);
-    let plan = Plan {
-        operation: PlanOp::Delete,
-        before: Some(before.clone()),
-        after: None,
-        changes: Vec::new(),
-    };
+    let plan = plan_delete(
+        std::slice::from_ref(&before),
+        "A",
+        "www.example.com",
+        "203.0.113.9",
+        None,
+    );
+    assert_eq!(plan.operation, PlanOp::Delete);
     let script = Arc::new(Script::default());
     *script.lists.lock().unwrap() = vec![vec![before.clone()]];
     let error = dns(&script)
@@ -370,6 +376,19 @@ async fn a_malformed_or_foreign_payload_is_refused_before_any_provider_call() {
         .await
         .expect_err("a forged preview");
     assert!(error.contains("preview"), "{error}");
+    assert_eq!(*script.reads.lock().unwrap(), 0);
+    assert!(script.writes.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn a_zone_id_that_is_not_the_named_zone_changes_nothing() {
+    let script = Arc::new(Script::default());
+    *script.zone_id.lock().unwrap() = Some("another-zone".to_owned());
+    let error = dns(&script)
+        .execute("dns.record.upsert", &create_payload("203.0.113.9"))
+        .await
+        .expect_err("a forged zone id");
+    assert!(error.contains("zone id"), "{error}");
     assert_eq!(*script.reads.lock().unwrap(), 0);
     assert!(script.writes.lock().unwrap().is_empty());
 }

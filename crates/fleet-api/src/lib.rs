@@ -194,6 +194,8 @@ pub const API_BASE_PATH: &str = "/api/v1";
         dns::AccountZonesDto,
         dns::CreateDnsChangeRequest,
         dns::DnsChangeKind,
+        dns::DnsObservationDto,
+        dns::DnsObservationsDto,
         dns::DnsRecordDto,
         dns::DnsRecordsDto,
         dns::DnsZoneDto,
@@ -479,6 +481,7 @@ pub fn api(state: Arc<operations::ApiState>) -> (Router, utoipa::openapi::OpenAp
                 ))
                 .routes(routes!(dns::list_dns_zones))
                 .routes(routes!(dns::list_dns_records))
+                .routes(routes!(dns::list_dns_observations))
                 .routes(routes!(dns::create_dns_change))
                 .routes(routes!(requests::get_action_request))
                 .routes(routes!(requests::approve_action_request))

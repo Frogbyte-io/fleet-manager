@@ -116,7 +116,7 @@ Decision: the web controller uses GitHub App web authorization; the headless CLI
 
 ### Cloudflare DNS
 
-Sources: [DNS records API](https://developers.cloudflare.com/api/resources/dns/subresources/records/) (list, create, update with `PUT`, delete), [zones list](https://developers.cloudflare.com/api/resources/zones/methods/list/), [API token permissions](https://developers.cloudflare.com/fundamentals/api/reference/permissions/), [API rate limits](https://developers.cloudflare.com/fundamentals/api/reference/limits/) (1200 requests per five minutes per user).
+Sources: [DNS records API](https://developers.cloudflare.com/api/resources/dns/subresources/records/) (list, create, update with `PATCH`, delete), [zones list](https://developers.cloudflare.com/api/resources/zones/methods/list/), [API token permissions](https://developers.cloudflare.com/fundamentals/api/reference/permissions/), [API rate limits](https://developers.cloudflare.com/fundamentals/api/reference/limits/) (1200 requests per five minutes per user).
 
 Findings: every answer is the `{ success, errors: [{ code, message }], result, result_info }` envelope; lists paginate with `page` and `per_page` and report `result_info.total_pages`; a `429` carries `Retry-After`. A scoped API token (Zone:Read, DNS:Edit on chosen zones) is enough; no global API key is needed. A name can hold several records of a type (A, AAAA, TXT, MX), so a record is not identified by name and type alone. Cloudflare reports `TXT` content in quotes. Fleet's contract fixtures are adapted from the documented examples, because no live token was available when FM-1042 was written; an ignored capture test records scrubbed fixtures from a real account.
 

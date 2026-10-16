@@ -29,6 +29,26 @@ use tower::ServiceExt as _;
 
 const TOKEN: &str = "cf-end-to-end-dns-token-0001";
 const ZONE_ID: &str = "023e105f4ecef8ad9ca31a8372d0c353";
+/// A TXT value shaped like a credential that someone left in DNS.
+const LEAKED: &str = "api_key=Zx81QwErTy93LkJhGf62Mn40";
+
+fn dkim() -> String {
+    format!(
+        "v=DKIM1; k=rsa; p={}",
+        "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEA".repeat(10)
+    )
+}
+
+/// The DKIM value as Cloudflare shows a long TXT: quoted 255-byte strings.
+fn split_dkim() -> String {
+    let value = dkim();
+    value
+        .as_bytes()
+        .chunks(255)
+        .map(|chunk| format!("\"{}\"", String::from_utf8_lossy(chunk)))
+        .collect::<Vec<_>>()
+        .join(" ")
+}
 
 // ---------------------------------------------------------------------
 // A stateful Cloudflare stub.
@@ -43,6 +63,7 @@ struct Rec {
     ttl: u64,
     proxied: bool,
     priority: Option<u64>,
+    comment: Option<String>,
 }
 
 impl Rec {
@@ -60,6 +81,10 @@ impl Rec {
         });
         if let Some(priority) = self.priority {
             value["priority"] = json!(priority);
+        }
+        if let Some(comment) = &self.comment {
+            value["comment"] = json!(comment);
+            value["tags"] = json!(["managed-by-hand"]);
         }
         value
     }
@@ -83,6 +108,7 @@ fn rec(id: &str, record_type: &str, name: &str, content: &str, ttl: u64) -> Rec 
         ttl,
         proxied: false,
         priority: None,
+        comment: None,
     }
 }
 
@@ -133,7 +159,7 @@ fn handle(cloud: &mut Cloud, method: &str, target: &str, body: &str) -> (u16, St
             let list: Vec<Value> = cloud
                 .records
                 .iter()
-                .filter(|r| filter("name").is_none_or(|name| name == r.name))
+                .filter(|r| filter("name.exact").is_none_or(|name| name == r.name))
                 .filter(|r| filter("type").is_none_or(|kind| kind == r.record_type))
                 .map(Rec::json)
                 .collect();
@@ -149,7 +175,14 @@ fn handle(cloud: &mut Cloud, method: &str, target: &str, body: &str) -> (u16, St
                 ttl: input["ttl"].as_u64().unwrap_or(1),
                 proxied: input["proxied"].as_bool().unwrap_or(false),
                 priority: input["priority"].as_u64(),
+                comment: None,
             };
+            if new.record_type == "CNAME" && cloud.records.iter().any(|r| r.name == new.name) {
+                return (
+                    400,
+                    error_body(81054, "A CNAME record cannot coexist with other records."),
+                );
+            }
             if cloud.records.iter().any(|r| {
                 r.record_type == new.record_type && r.name == new.name && r.content == new.content
             }) {
@@ -163,15 +196,24 @@ fn handle(cloud: &mut Cloud, method: &str, target: &str, body: &str) -> (u16, St
             cloud.records.push(new);
             (200, answer)
         }
-        ("PUT", ["zones", ZONE_ID, "dns_records", id]) => {
+        ("PATCH", ["zones", ZONE_ID, "dns_records", id]) => {
             let input: Value = serde_json::from_str(body).unwrap_or_default();
             let Some(existing) = cloud.records.iter_mut().find(|r| r.id == *id) else {
                 return (404, error_body(81044, "Record does not exist."));
             };
-            existing.content = input["content"].as_str().unwrap_or_default().to_owned();
-            existing.ttl = input["ttl"].as_u64().unwrap_or(1);
-            existing.proxied = input["proxied"].as_bool().unwrap_or(false);
-            existing.priority = input["priority"].as_u64();
+            // PATCH changes only the fields sent: the comment and tags stay.
+            if let Some(content) = input["content"].as_str() {
+                existing.content = content.to_owned();
+            }
+            if let Some(ttl) = input["ttl"].as_u64() {
+                existing.ttl = ttl;
+            }
+            if let Some(proxied) = input["proxied"].as_bool() {
+                existing.proxied = proxied;
+            }
+            if input.get("priority").is_some() {
+                existing.priority = input["priority"].as_u64();
+            }
             (200, envelope(&existing.json()))
         }
         ("DELETE", ["zones", ZONE_ID, "dns_records", id]) => {
@@ -323,8 +365,27 @@ impl Harness {
         let cloud: Shared = Arc::new(Mutex::new(Cloud {
             records: vec![
                 rec("rec-www-1", "A", "www.example.com", "203.0.113.1", 300),
-                rec("rec-www-2", "A", "www.example.com", "203.0.113.2", 300),
+                Rec {
+                    comment: Some("moved by hand".to_owned()),
+                    ..rec("rec-www-2", "A", "www.example.com", "203.0.113.2", 300)
+                },
                 rec("rec-txt", "TXT", "example.com", "v=spf1 -all", 1),
+                Rec {
+                    priority: Some(10),
+                    ..rec("rec-mx-1", "MX", "example.com", "mail.example.net", 300)
+                },
+                Rec {
+                    priority: Some(20),
+                    ..rec("rec-mx-2", "MX", "example.com", "mail.example.net", 300)
+                },
+                rec(
+                    "rec-split",
+                    "TXT",
+                    "k1._domainkey.example.com",
+                    &split_dkim(),
+                    1,
+                ),
+                rec("rec-leak", "TXT", "leak.example.com", LEAKED, 1),
             ],
             next: 100,
             log: Vec::new(),
@@ -394,7 +455,7 @@ impl Harness {
     fn upsert(content: &str) -> Value {
         json!({
             "operation": "upsert", "name": "www.example.com", "type": "A",
-            "content": content, "ttl": 600, "reason": "move www to the new host"
+            "content": content, "ttl": 600, "add": true, "reason": "move www to the new host"
         })
     }
 
@@ -533,12 +594,14 @@ async fn a_change_is_previewed_approved_executed_and_verified() {
         let updated = cloud.records.iter().find(|r| r.id == "rec-www-2").unwrap();
         assert_eq!(updated.content, "203.0.113.9");
         assert_eq!(updated.ttl, 600);
-        // The write was a PUT, followed by a read for verification.
+        // PATCH leaves what Fleet did not send: the comment survives.
+        assert_eq!(updated.comment.as_deref(), Some("moved by hand"));
+        // The write was a PATCH, followed by a read for verification.
         assert!(
             cloud
                 .log
                 .iter()
-                .any(|l| l == "PUT /zones/023e105f4ecef8ad9ca31a8372d0c353/dns_records/rec-www-2")
+                .any(|l| l == "PATCH /zones/023e105f4ecef8ad9ca31a8372d0c353/dns_records/rec-www-2")
         );
         assert!(cloud.log.last().unwrap().starts_with("GET"));
     }
@@ -779,7 +842,7 @@ async fn invalid_and_credential_like_changes_are_refused_before_anything_is_stor
     // credential rule, like any other parameter.
     let (status, answer) = harness
         .change(json!({
-            "operation": "upsert", "name": "example.com", "type": "TXT",
+            "operation": "upsert", "name": "example.com", "type": "TXT", "add": true,
             "content": "api_key=Zx81QwErTy93LkJhGf62Mn40", "reason": "x"
         }))
         .await;
@@ -787,27 +850,38 @@ async fn invalid_and_credential_like_changes_are_refused_before_anything_is_stor
     assert!(answer["message"].as_str().unwrap().contains("credential"));
     let (status, answer) = harness
         .change(json!({
-            "operation": "upsert", "name": "example.com", "type": "TXT",
+            "operation": "upsert", "name": "example.com", "type": "TXT", "add": true,
             "content": "-----BEGIN PRIVATE KEY-----MIIEvQIBADANBgkqhkiG9w0BAQEFAASC", "reason": "x"
         }))
         .await;
     assert_eq!(status, StatusCode::BAD_REQUEST, "{answer}");
 
-    // `mailto:user@host` is shaped like URL credentials, so a DMARC `rua`
-    // is refused by the same rule (documented limitation).
-    let (status, _) = harness
+    // A DMARC `rua=mailto:` address is not a credential, but credential
+    // shapes around it still are.
+    let (status, answer) = harness
         .change(json!({
             "operation": "upsert", "name": "_dmarc.example.com", "type": "TXT",
-            "content": "v=DMARC1; p=reject; rua=mailto:d@example.com", "reason": "x"
+            "content": "v=DMARC1; p=none; rua=mailto:a@example.com,mailto:b@example.org!10m",
+            "reason": "x"
         }))
         .await;
-    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(status, StatusCode::CREATED, "{answer}");
+    for content in [
+        "v=DMARC1; p=none; rua=mailto:user:pw@host",
+        "v=DMARC1; x=mailto:a@b,user:pw@host",
+        "https://u:p@h.example.com/x",
+    ] {
+        let (status, answer) = harness
+            .change(json!({
+                "operation": "upsert", "name": "_dmarc2.example.com", "type": "TXT",
+                "content": content, "reason": "x"
+            }))
+            .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{content}: {answer}");
+    }
 
     // Ordinary TXT policies and DKIM public keys are accepted.
-    let dkim = format!(
-        "v=DKIM1; k=rsa; p={}",
-        "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEA".repeat(4)
-    );
+    let dkim = dkim();
     for content in [
         "v=spf1 include:_spf.example.net ~all",
         "v=DMARC1; p=reject; pct=100; adkim=s",
@@ -815,16 +889,16 @@ async fn invalid_and_credential_like_changes_are_refused_before_anything_is_stor
     ] {
         let (status, answer) = harness
             .change(json!({
-                "operation": "upsert", "name": "example.com", "type": "TXT",
+                "operation": "upsert", "name": "example.com", "type": "TXT", "add": true,
                 "content": content, "reason": "mail policy"
             }))
             .await;
         assert_eq!(status, StatusCode::CREATED, "{content}: {answer}");
     }
 
-    // Only the three accepted TXT requests exist; no write happened.
+    // Only the four accepted TXT requests exist; no write happened.
     let (_, listed) = harness.call("GET", "/requests", None).await;
-    assert_eq!(listed["items"].as_array().unwrap().len(), 3);
+    assert_eq!(listed["items"].as_array().unwrap().len(), 4);
     assert_eq!(harness.writes(), 0);
 }
 
@@ -856,4 +930,480 @@ async fn provider_failures_are_classified_at_the_api() {
     // A name is required, and no account of another kind is ever used.
     let (status, _) = harness.call("GET", "/dns/records", None).await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
+}
+
+/// A request filed through `/dns/changes`, then its parameters as a caller
+/// who skips the DNS route would post them to `/requests`.
+fn raw_request(parameters: &Value, target: &str, action: &str) -> Value {
+    json!({
+        "actionId": action, "target": target,
+        "parameters": parameters, "reason": "hand-made"
+    })
+}
+
+#[tokio::test]
+async fn forged_previews_and_zone_bindings_are_refused_on_the_generic_route() {
+    let harness = Harness::new().await;
+    let (_, filed) = harness
+        .change(json!({
+            "operation": "upsert", "name": "www.example.com", "type": "A",
+            "content": "203.0.113.9", "ttl": 600, "replaces": "203.0.113.2", "reason": "x"
+        }))
+        .await;
+    let base = filed["data"]["parameters"].clone();
+
+    // The shown changes must be the difference of the two records shown.
+    let mut forged = base.clone();
+    forged["preview"]["changes"] = json!([{"field": "ttl", "from": 300, "to": 301}]);
+    let (status, answer) = harness
+        .call(
+            "POST",
+            "/requests",
+            Some(raw_request(
+                &forged,
+                "www.example.com A",
+                "dns.record.upsert",
+            )),
+        )
+        .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{answer}");
+    let mut empty = base.clone();
+    empty["preview"]["changes"] = json!([]);
+    let (status, _) = harness
+        .call(
+            "POST",
+            "/requests",
+            Some(raw_request(
+                &empty,
+                "www.example.com A",
+                "dns.record.upsert",
+            )),
+        )
+        .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+
+    // A zone id that is not the named zone's: accepted as a request, but the
+    // executor refuses it before reading or writing anything.
+    let mut wrong_zone = base.clone();
+    wrong_zone["zoneId"] = json!("aaaabbbbccccddddeeeeffff00001111");
+    let (status, answer) = harness
+        .call(
+            "POST",
+            "/requests",
+            Some(raw_request(
+                &wrong_zone,
+                "www.example.com A",
+                "dns.record.upsert",
+            )),
+        )
+        .await;
+    assert_eq!(status, StatusCode::CREATED, "{answer}");
+    let done = harness
+        .approve_and_run(answer["data"]["id"].as_str().unwrap())
+        .await;
+    assert_eq!(done["operation"]["state"], "failed", "{done}");
+    assert!(
+        done["operation"]["errorJson"]
+            .as_str()
+            .unwrap()
+            .contains("zone id"),
+        "{done}"
+    );
+    assert_eq!(harness.writes(), 0);
+    let cloud = harness.cloud.lock().unwrap();
+    assert!(
+        !cloud.log.iter().any(|line| line.contains("aaaabbbb")),
+        "nothing was addressed to the forged zone"
+    );
+}
+
+#[tokio::test]
+async fn omitted_values_keep_what_the_record_has_and_a_new_value_must_be_asked_for() {
+    let harness = Harness::new().await;
+    // No ttl and no proxied: the record's own values are kept, and the
+    // stored parameters say so explicitly.
+    let (status, filed) = harness
+        .change(json!({
+            "operation": "upsert", "name": "www.example.com", "type": "A",
+            "content": "203.0.113.60", "replaces": "203.0.113.1", "reason": "x"
+        }))
+        .await;
+    assert_eq!(status, StatusCode::CREATED, "{filed}");
+    assert_eq!(filed["data"]["parameters"]["ttl"], 300);
+    assert_eq!(filed["data"]["parameters"]["proxied"], false);
+    assert_eq!(filed["data"]["parameters"]["preview"]["after"]["ttl"], 300);
+    let changed: Vec<&str> = filed["data"]["parameters"]["preview"]["changes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|change| change["field"].as_str().unwrap())
+        .collect();
+    assert_eq!(changed, ["content"]);
+
+    // A proxied record stays proxied (and keeps its automatic TTL).
+    harness.cloud.lock().unwrap().records.push(Rec {
+        proxied: true,
+        ..rec("rec-prox", "A", "app.example.com", "203.0.113.70", 1)
+    });
+    let (_, filed) = harness
+        .change(json!({
+            "operation": "upsert", "name": "app.example.com", "type": "A",
+            "content": "203.0.113.71", "replaces": "203.0.113.70", "reason": "x"
+        }))
+        .await;
+    assert_eq!(filed["data"]["parameters"]["proxied"], true);
+    assert_eq!(filed["data"]["parameters"]["ttl"], 1);
+
+    // A second value is not added by accident: the name already has records.
+    let (status, answer) = harness
+        .change(json!({
+            "operation": "upsert", "name": "www.example.com", "type": "A",
+            "content": "203.0.113.61", "ttl": 300, "reason": "x"
+        }))
+        .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{answer}");
+    let message = answer["message"].as_str().unwrap();
+    assert!(
+        message.contains("replaces") && message.contains("add"),
+        "{message}"
+    );
+    assert!(message.contains("203.0.113.1"), "{message}");
+    // Asked for, it is added, and the preview lists what stays beside it.
+    let (status, added) = harness
+        .change(json!({
+            "operation": "upsert", "name": "www.example.com", "type": "A",
+            "content": "203.0.113.61", "ttl": 300, "add": true, "reason": "x"
+        }))
+        .await;
+    assert_eq!(status, StatusCode::CREATED, "{added}");
+    let others = added["data"]["parameters"]["preview"]["others"]
+        .as_array()
+        .unwrap();
+    assert_eq!(others.len(), 2);
+    // `add` and `replaces` together are a contradiction.
+    let (status, _) = harness
+        .change(json!({
+            "operation": "upsert", "name": "www.example.com", "type": "A",
+            "content": "203.0.113.62", "add": true, "replaces": "203.0.113.1", "reason": "x"
+        }))
+        .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn a_long_txt_shown_as_character_strings_is_the_same_record() {
+    let harness = Harness::new().await;
+    assert!(dkim().len() > 400);
+    // The zone holds the value as quoted 255-byte strings; asking for it
+    // unsplit changes nothing.
+    let (status, answer) = harness
+        .change(json!({
+            "operation": "upsert", "name": "k1._domainkey.example.com", "type": "TXT",
+            "content": dkim(), "ttl": 1, "reason": "x"
+        }))
+        .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{answer}");
+    assert!(
+        answer["message"]
+            .as_str()
+            .unwrap()
+            .contains("nothing to change")
+    );
+    // And it is deletable by the unsplit text.
+    let (status, filed) = harness
+        .change(json!({
+            "operation": "delete", "name": "k1._domainkey.example.com", "type": "TXT",
+            "content": dkim(), "reason": "rotate the key"
+        }))
+        .await;
+    assert_eq!(status, StatusCode::CREATED, "{filed}");
+    let done = harness
+        .approve_and_run(filed["data"]["id"].as_str().unwrap())
+        .await;
+    assert_eq!(done["request"]["state"], "succeeded", "{done}");
+    assert_eq!(harness.record_count("k1._domainkey.example.com", "TXT"), 0);
+}
+
+#[tokio::test]
+async fn a_failing_account_stops_the_zone_search_instead_of_falling_to_a_parent() {
+    let harness = Harness::new().await;
+    // A second account whose token the provider refuses.
+    let (status, _) = harness
+        .call(
+            "POST",
+            "/external-accounts",
+            Some(json!({
+                "kind": "cloudflare", "label": "broken",
+                "baseUrl": harness.base_url, "token": "a-token-the-stub-refuses-0003"
+            })),
+        )
+        .await;
+    assert_eq!(status, StatusCode::CREATED);
+    let (status, body) = harness
+        .call("GET", "/dns/records?name=www.sub.example.com", None)
+        .await;
+    assert_eq!(status, StatusCode::BAD_GATEWAY, "{body}");
+    assert_eq!(body["code"], "dns_provider_auth");
+    let (status, body) = harness
+        .change(json!({
+            "operation": "upsert", "name": "www.sub.example.com", "type": "A",
+            "content": "203.0.113.5", "reason": "x"
+        }))
+        .await;
+    assert_eq!(status, StatusCode::BAD_GATEWAY, "{body}");
+    // Naming the working account is how to proceed.
+    let (status, _) = harness
+        .call("GET", "/dns/records?name=www.example.com&account=dns", None)
+        .await;
+    assert_eq!(status, StatusCode::OK);
+}
+
+#[tokio::test]
+async fn a_retry_with_the_same_idempotency_key_returns_the_request_before_reading_the_zone() {
+    let harness = Harness::new().await;
+    let body = json!({
+        "operation": "upsert", "name": "www.example.com", "type": "A",
+        "content": "203.0.113.9", "ttl": 600, "replaces": "203.0.113.2",
+        "reason": "x", "idempotencyKey": "move-www-1"
+    });
+    let (status, first) = harness.change(body.clone()).await;
+    assert_eq!(status, StatusCode::CREATED, "{first}");
+    let id = first["data"]["id"].as_str().unwrap().to_owned();
+    let (status, second) = harness.change(body.clone()).await;
+    assert_eq!(status, StatusCode::CREATED);
+    assert_eq!(second["data"]["id"], id);
+
+    // After it ran, the zone is as asked and a fresh preview would say
+    // "nothing to change"; the retry still returns the request, and no
+    // provider read happens for it.
+    let done = harness.approve_and_run(&id).await;
+    assert_eq!(done["request"]["state"], "succeeded", "{done}");
+    let reads_before = harness.cloud.lock().unwrap().log.len();
+    let (status, third) = harness.change(body.clone()).await;
+    assert_eq!(status, StatusCode::CREATED, "{third}");
+    assert_eq!(third["data"]["id"], id);
+    assert_eq!(third["data"]["state"], "succeeded");
+    assert_eq!(harness.cloud.lock().unwrap().log.len(), reads_before);
+
+    // The same key for a different change is a conflict.
+    let mut other = body;
+    other["content"] = json!("203.0.113.99");
+    let (status, _) = harness.change(other).await;
+    assert_eq!(status, StatusCode::CONFLICT);
+}
+
+#[tokio::test]
+async fn observations_are_readable_and_attach_to_the_nearest_registered_domain() {
+    let harness = Harness::new().await;
+    let dir = harness._dir.path().to_path_buf();
+    let repo = dir.join("desired");
+    std::fs::create_dir_all(repo.join("fleet/registry/domain")).unwrap();
+    git(&repo, &["init", "--quiet"]);
+    std::fs::write(
+        repo.join("fleet/registry/domain/example.com.yaml"),
+        DOMAIN_ENTRY,
+    )
+    .unwrap();
+    // A registered subdomain, written with capitals.
+    let sub = DOMAIN_ENTRY
+        .replace("domain-example-com", "domain-sub-example-com")
+        .replace("d201", "d202")
+        .replace("fqdn: example.com", "fqdn: Sub.Example.com");
+    std::fs::write(repo.join("fleet/registry/domain/sub.example.com.yaml"), sub).unwrap();
+    git(&repo, &["add", "-A"]);
+    git(&repo, &["commit", "--quiet", "-m", "registry"]);
+    let sha = git(&repo, &["rev-parse", "HEAD"]);
+    harness
+        .call(
+            "PUT",
+            "/desired/source",
+            Some(json!({"remote": repo.to_str().unwrap()})),
+        )
+        .await;
+    let (_, accepted) = harness
+        .call("POST", "/desired/fetch", Some(json!({"commitSha": sha})))
+        .await;
+    let id = harness.run_source(&accepted).await;
+    let (_, fetched) = harness
+        .call("GET", &format!("/operations/{id}"), None)
+        .await;
+    assert_eq!(fetched["data"]["state"], "succeeded", "{fetched}");
+    let result: Value =
+        serde_json::from_str(fetched["data"]["resultJson"].as_str().unwrap()).unwrap();
+    let digest = result["contentDigest"].as_str().unwrap().to_owned();
+    let (_, accepted) = harness
+        .call(
+            "POST",
+            "/desired/activate",
+            Some(json!({"commitSha": sha, "contentDigest": digest})),
+        )
+        .await;
+    let id = harness.run_source(&accepted).await;
+    let (_, activated) = harness
+        .call("GET", &format!("/operations/{id}"), None)
+        .await;
+    assert_eq!(activated["data"]["state"], "succeeded", "{activated}");
+
+    harness.cloud.lock().unwrap().records.push(rec(
+        "rec-deep",
+        "A",
+        "x.sub.example.com",
+        "203.0.113.80",
+        300,
+    ));
+    let (status, body) = harness
+        .call("GET", "/dns/records?name=x.sub.example.com", None)
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    // The intermediate label wins over the apex, and the key is as written.
+    assert_eq!(body["data"]["registryEntry"], "domain/Sub.Example.com");
+
+    let (status, observed) = harness
+        .call("GET", "/dns/observations?name=X.Sub.Example.com.", None)
+        .await;
+    assert_eq!(status, StatusCode::OK, "{observed}");
+    assert_eq!(observed["data"]["name"], "x.sub.example.com");
+    let first = &observed["data"]["observations"][0];
+    assert_eq!(first["registryEntry"], "domain/Sub.Example.com");
+    assert_eq!(first["zoneName"], "example.com");
+    assert_eq!(first["records"][0]["content"], "203.0.113.80");
+    // Reading observations calls nothing at the provider.
+    let calls = harness.cloud.lock().unwrap().log.len();
+    harness
+        .call("GET", "/dns/observations?name=x.sub.example.com", None)
+        .await;
+    assert_eq!(harness.cloud.lock().unwrap().log.len(), calls);
+    let (status, _) = harness.call("GET", "/dns/observations", None).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn a_credential_shaped_txt_can_be_deleted_without_the_request_storing_it() {
+    let harness = Harness::new().await;
+    // Reading shows what is in DNS, which is public.
+    let (_, read) = harness
+        .call("GET", "/dns/records?name=leak.example.com", None)
+        .await;
+    assert_eq!(read["data"]["records"][0]["content"], LEAKED);
+    let (status, filed) = harness
+        .change(json!({
+            "operation": "delete", "name": "leak.example.com", "type": "TXT",
+            "content": LEAKED, "reason": "a leaked key sits in DNS; remove it"
+        }))
+        .await;
+    assert_eq!(status, StatusCode::CREATED, "{filed}");
+    let parameters = filed["data"]["parameters"].to_string();
+    assert!(!parameters.contains("Zx81Qw"), "{parameters}");
+    assert!(
+        filed["data"]["parameters"]["preview"]["before"]["content"]
+            .as_str()
+            .unwrap()
+            .starts_with("[credential-shaped sha256:")
+    );
+    let done = harness
+        .approve_and_run(filed["data"]["id"].as_str().unwrap())
+        .await;
+    assert_eq!(done["request"]["state"], "succeeded", "{done}");
+    assert_eq!(harness.record_count("leak.example.com", "TXT"), 0);
+    assert!(!harness.stored_text().await.contains("Zx81Qw"));
+
+    // Replacing it with a clean value works the same way.
+    harness.cloud.lock().unwrap().records.push(rec(
+        "rec-leak-2",
+        "TXT",
+        "leak2.example.com",
+        LEAKED,
+        1,
+    ));
+    let (status, filed) = harness
+        .change(json!({
+            "operation": "upsert", "name": "leak2.example.com", "type": "TXT",
+            "content": "rotated", "replaces": LEAKED, "ttl": 1, "reason": "x"
+        }))
+        .await;
+    assert_eq!(status, StatusCode::CREATED, "{filed}");
+    assert!(!filed["data"].to_string().contains("Zx81Qw"));
+    let done = harness
+        .approve_and_run(filed["data"]["id"].as_str().unwrap())
+        .await;
+    assert_eq!(done["request"]["state"], "succeeded", "{done}");
+    assert!(!harness.stored_text().await.contains("Zx81Qw"));
+}
+
+#[tokio::test]
+async fn an_mx_record_is_identified_by_its_priority_for_delete() {
+    let harness = Harness::new().await;
+    let delete = |priority: Option<u64>| {
+        let mut body = json!({
+            "operation": "delete", "name": "example.com", "type": "MX",
+            "content": "mail.example.net", "reason": "x"
+        });
+        if let Some(priority) = priority {
+            body["priority"] = json!(priority);
+        }
+        body
+    };
+    // Two records share the host; a delete must say which.
+    let (status, _) = harness.change(delete(None)).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    let (status, filed) = harness.change(delete(Some(20))).await;
+    assert_eq!(status, StatusCode::CREATED, "{filed}");
+    assert_eq!(
+        filed["data"]["parameters"]["preview"]["before"]["priority"],
+        20
+    );
+    assert_eq!(
+        filed["data"]["parameters"]["preview"]["others"][0]["priority"],
+        10
+    );
+    let done = harness
+        .approve_and_run(filed["data"]["id"].as_str().unwrap())
+        .await;
+    assert_eq!(done["request"]["state"], "succeeded", "{done}");
+    let cloud = harness.cloud.lock().unwrap();
+    assert!(cloud.records.iter().any(|r| r.id == "rec-mx-1"));
+    assert!(!cloud.records.iter().any(|r| r.id == "rec-mx-2"));
+}
+
+#[tokio::test]
+async fn a_cname_beside_other_records_fails_as_a_provider_conflict() {
+    let harness = Harness::new().await;
+    let (status, filed) = harness
+        .change(json!({
+            "operation": "upsert", "name": "www.example.com", "type": "CNAME",
+            "content": "target.example.net", "ttl": 300, "reason": "x"
+        }))
+        .await;
+    assert_eq!(status, StatusCode::CREATED, "{filed}");
+    let done = harness
+        .approve_and_run(filed["data"]["id"].as_str().unwrap())
+        .await;
+    assert_eq!(done["operation"]["state"], "failed", "{done}");
+    assert_eq!(done["request"]["state"], "failed", "{done}");
+    let error = done["operation"]["errorJson"].as_str().unwrap();
+    assert!(error.contains("conflict"), "{error}");
+    assert_eq!(harness.record_count("www.example.com", "CNAME"), 0);
+}
+
+#[tokio::test]
+async fn the_dns_kinds_cannot_be_created_through_the_generic_operations_route() {
+    let harness = Harness::new().await;
+    for kind in ["dns.record.upsert", "dns.record.delete"] {
+        let (status, answer) = harness
+            .call(
+                "POST",
+                "/operations",
+                Some(json!({"kind": kind, "payloadJson": "{}"})),
+            )
+            .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{kind}: {answer}");
+        assert!(
+            answer["message"]
+                .as_str()
+                .unwrap()
+                .contains("action request"),
+            "{answer}"
+        );
+    }
+    assert_eq!(harness.writes(), 0);
 }

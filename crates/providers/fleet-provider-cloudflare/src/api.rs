@@ -3,7 +3,7 @@
 //! Primary sources:
 //! <https://developers.cloudflare.com/api/resources/zones/methods/list/> and
 //! <https://developers.cloudflare.com/api/resources/dns/subresources/records/>
-//! (list, create, update with `PUT`, delete). Every answer is the envelope
+//! (list, create, update with `PATCH`, delete). Every answer is the envelope
 //! `{ success, errors: [{ code, message }], result, result_info }`.
 //!
 //! # Behaviour
@@ -23,6 +23,7 @@
 
 use std::time::Duration;
 
+use fleet_core::SensitiveString;
 use serde::Deserialize;
 use serde_json::{Value, json};
 
@@ -180,7 +181,7 @@ struct Envelope {
 pub struct CloudflareClient {
     http: reqwest::Client,
     base_url: String,
-    token: String,
+    token: SensitiveString,
     retry_wait_cap: Duration,
 }
 
@@ -203,7 +204,7 @@ impl CloudflareClient {
         Ok(Self {
             http,
             base_url: base_url.trim_end_matches('/').to_owned(),
-            token: token.to_owned(),
+            token: SensitiveString::new(token),
             retry_wait_cap: MAX_RETRY_WAIT,
         })
     }
@@ -243,7 +244,7 @@ impl CloudflareClient {
     ) -> Result<Vec<Record>, ApiError> {
         let mut query: Query = vec![("per_page", "100".to_owned())];
         if let Some(name) = name {
-            query.push(("name", name.to_owned()));
+            query.push(("name.exact", name.to_owned()));
         }
         if let Some(record_type) = record_type {
             query.push(("type", record_type.to_owned()));
@@ -273,7 +274,8 @@ impl CloudflareClient {
         record_of(result)
     }
 
-    /// Replaces a record (`PUT`).
+    /// Updates a record with `PATCH`, which changes only the fields sent and
+    /// leaves the record's comment, tags, and settings as they are.
     ///
     /// # Errors
     ///
@@ -286,7 +288,7 @@ impl CloudflareClient {
     ) -> Result<Record, ApiError> {
         let result = self
             .call(
-                reqwest::Method::PUT,
+                reqwest::Method::PATCH,
                 &format!(
                     "/zones/{}/dns_records/{}",
                     segment(zone_id)?,
@@ -388,7 +390,7 @@ impl CloudflareClient {
             let mut request = self
                 .http
                 .request(method.clone(), format!("{}{path}", self.base_url))
-                .bearer_auth(&self.token)
+                .bearer_auth(self.token.expose())
                 .header("Accept", "application/json")
                 .query(query);
             if let Some(body) = &body {

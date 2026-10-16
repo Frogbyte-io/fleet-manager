@@ -16,8 +16,8 @@ use axum::{
     http::StatusCode,
 };
 use fleet_application::dns::{
-    AccountZones, ChangeKind, ChangeRequest, Dns, DnsError, DnsFailureClass, DnsRecord, DnsZone,
-    RecordsView,
+    AccountZones, ChangeKind, ChangeRequest, Dns, DnsError, DnsFailureClass, DnsObservation,
+    DnsRecord, DnsZone, RecordsView,
 };
 use fleet_core::{CorrelationId, ErrorCode, PublicError, RetryClass};
 use serde::{Deserialize, Serialize};
@@ -361,6 +361,106 @@ pub async fn list_dns_records(
     Ok(Json(Resource::new(view.into())))
 }
 
+/// The records last observed at a name through one Cloudflare account.
+#[derive(Clone, Debug, Serialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct DnsObservationDto {
+    /// The account that answered.
+    pub account_id: String,
+    /// The zone's provider id.
+    pub zone_id: String,
+    /// The zone's apex name.
+    pub zone_name: String,
+    /// The name the records are at.
+    pub name: String,
+    /// The `domain/<key>` Registry entry the records attached to, when the
+    /// Registry had one when they were read.
+    pub registry_entry: Option<String>,
+    /// The records.
+    pub records: Vec<DnsRecordDto>,
+    /// When they were read (epoch milliseconds).
+    pub observed_at: i64,
+}
+
+impl From<DnsObservation> for DnsObservationDto {
+    fn from(observation: DnsObservation) -> Self {
+        Self {
+            account_id: observation.account_id,
+            zone_id: observation.zone_id,
+            zone_name: observation.zone_name,
+            name: observation.name,
+            registry_entry: observation.registry_entry,
+            records: observation.records.into_iter().map(Into::into).collect(),
+            observed_at: observation.observed_at,
+        }
+    }
+}
+
+/// The stored observations of one name.
+#[derive(Clone, Debug, Serialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct DnsObservationsDto {
+    /// The name asked about.
+    pub name: String,
+    /// One entry per account and zone that was read, newest first.
+    pub observations: Vec<DnsObservationDto>,
+}
+
+/// Query parameters of the observations read.
+#[derive(Debug, Deserialize)]
+pub struct ListObservationsParams {
+    name: Option<String>,
+}
+
+/// Reads the records last observed at a name through Cloudflare, without
+/// calling Cloudflare. These are the zone's own records as Fleet last read
+/// them (what a change would act on); the public resolver observations of
+/// the domain enricher are kept apart under `/registry`.
+///
+/// # Errors
+///
+/// Returns the public error envelope on refusal or a missing or malformed
+/// name.
+#[utoipa::path(
+    get,
+    path = "/dns/observations",
+    tag = "dns",
+    operation_id = "listDnsObservations",
+    params(("name" = String, Query, description = "The fully qualified name.")),
+    responses(
+        (status = 200, description = "The stored observations of the name.", body = Resource<DnsObservationsDto>),
+        (status = 400, description = "The name is missing or malformed.", body = crate::error::ApiError),
+        (status = 403, description = "The caller may not read DNS.", body = crate::error::ApiError),
+        (status = 503, description = "The DNS surface is not wired.", body = crate::error::ApiError),
+    )
+)]
+pub async fn list_dns_observations(
+    State(state): State<Arc<crate::operations::ApiState>>,
+    principal: Option<Extension<crate::ActingPrincipal>>,
+    Extension(correlation_id): Extension<CorrelationId>,
+    dns: Option<Extension<Arc<Dns>>>,
+    Query(params): Query<ListObservationsParams>,
+) -> Result<Json<Resource<DnsObservationsDto>>, ApiErrorResponse> {
+    let dns = dns_or_error(dns, correlation_id)?;
+    let principal = crate::operations::principal_or_error(principal, correlation_id)?;
+    let name = params.name.as_deref().ok_or_else(|| {
+        map_error(
+            &DnsError::Invalid {
+                detail: "the name query parameter is required".to_owned(),
+            },
+            correlation_id,
+        )
+    })?;
+    let observations = dns
+        .observations(state.authorizer.as_ref(), &principal.id, name)
+        .await
+        .map_err(|error| map_error(&error, correlation_id))?;
+    Ok(Json(Resource::new(DnsObservationsDto {
+        name: name.trim().trim_end_matches('.').to_ascii_lowercase(),
+        observations: observations.into_iter().map(Into::into).collect(),
+    })))
+}
+
 /// Which change.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, ToSchema)]
 #[serde(rename_all = "snake_case")]
@@ -393,10 +493,15 @@ pub struct CreateDnsChangeRequest {
     /// The MX preference. Upsert only.
     #[serde(default)]
     pub priority: Option<u16>,
-    /// The existing value an upsert replaces; without it a new value is
-    /// added (A, AAAA, TXT, MX), and a CNAME replaces its single value.
+    /// The existing value an upsert replaces. A CNAME replaces its single
+    /// value without it.
     #[serde(default)]
     pub replaces: Option<String>,
+    /// Add another value beside the records already at the name (A, AAAA,
+    /// TXT, MX). Without `replaces` or `add`, an upsert of a multi-value
+    /// type is refused while the name already has records of that type.
+    #[serde(default)]
+    pub add: bool,
     /// The Cloudflare account (id or label), when several hold the zone.
     #[serde(default)]
     pub account: Option<String>,
@@ -473,6 +578,7 @@ pub async fn create_dns_change(
                 proxied: request.proxied,
                 priority: request.priority,
                 replaces: request.replaces,
+                add: request.add,
                 account: request.account,
                 reason: request.reason,
                 origin: API_ORIGIN.to_owned(),

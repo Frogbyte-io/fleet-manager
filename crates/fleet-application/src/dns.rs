@@ -424,16 +424,66 @@ pub fn normalize_content(record_type: &str, content: &str) -> String {
             .parse::<Ipv6Addr>()
             .map_or_else(|_| content.trim().to_owned(), |ip| ip.to_string()),
         "CNAME" | "MX" | "NS" => lower_name(content),
-        "TXT" => {
-            let trimmed = content.trim();
-            if trimmed.len() >= 2 && trimmed.starts_with('"') && trimmed.ends_with('"') {
-                trimmed[1..trimmed.len() - 1].to_owned()
-            } else {
-                trimmed.to_owned()
-            }
-        }
+        "TXT" => txt_text(content),
         _ => content.trim().to_owned(),
     }
+}
+
+/// The text of a TXT value. A value that starts with a quote is DNS
+/// presentation format: one or more quoted character-strings separated by
+/// white space, with `\"`, `\\` and `\DDD` (decimal) escapes. Their
+/// concatenation is the text, so a long value split into 255-byte strings
+/// compares equal to the same value unsplit. Anything that does not parse
+/// that way (or does not start with a quote) is the text as it is, trimmed.
+#[must_use]
+pub fn txt_text(content: &str) -> String {
+    let trimmed = content.trim();
+    if !trimmed.starts_with('"') {
+        return trimmed.to_owned();
+    }
+    parse_character_strings(trimmed).unwrap_or_else(|| trimmed.to_owned())
+}
+
+fn parse_character_strings(text: &str) -> Option<String> {
+    let mut bytes: Vec<u8> = Vec::new();
+    let mut chars = text.chars().peekable();
+    let mut strings = 0;
+    loop {
+        while chars.peek().is_some_and(|c| c.is_whitespace()) {
+            chars.next();
+        }
+        match chars.next() {
+            None => break,
+            Some('"') => strings += 1,
+            Some(_) => return None,
+        }
+        loop {
+            match chars.next()? {
+                '"' => break,
+                '\\' => {
+                    let escaped = chars.next()?;
+                    if escaped.is_ascii_digit() {
+                        let second = chars.next().filter(char::is_ascii_digit)?;
+                        let third = chars.next().filter(char::is_ascii_digit)?;
+                        let value = u32::from(escaped as u8 - b'0') * 100
+                            + u32::from(second as u8 - b'0') * 10
+                            + u32::from(third as u8 - b'0');
+                        bytes.push(u8::try_from(value).ok()?);
+                    } else {
+                        let mut buffer = [0_u8; 4];
+                        bytes.extend_from_slice(escaped.encode_utf8(&mut buffer).as_bytes());
+                    }
+                }
+                other => {
+                    let mut buffer = [0_u8; 4];
+                    bytes.extend_from_slice(other.encode_utf8(&mut buffer).as_bytes());
+                }
+            }
+        }
+    }
+    (strings > 0)
+        .then(|| String::from_utf8(bytes).ok())
+        .flatten()
 }
 
 /// Normalizes a record read from the provider so it compares with a desired
@@ -532,6 +582,12 @@ pub fn build_desired(desired: &DesiredRecord) -> Result<DnsRecord, String> {
                     "TXT content is limited to {MAX_TXT_BYTES} bytes through Fleet"
                 ));
             }
+            if text.starts_with('"') {
+                return Err(
+                    "TXT content must not start with a quote once unquoted; unquote or escape it"
+                        .to_owned(),
+                );
+            }
             if text.chars().any(char::is_control) {
                 return Err("TXT content must not contain control characters".to_owned());
             }
@@ -600,15 +656,21 @@ pub struct FieldChange {
 pub struct Plan {
     /// What would happen.
     pub operation: PlanOp,
-    /// The record as it is now.
+    /// The record as it is now. A value shaped like a credential is shown as
+    /// a marker with its SHA-256 digest (see [`protect_content`]).
     #[serde(default)]
     pub before: Option<DnsRecord>,
     /// The record as it would be.
     #[serde(default)]
     pub after: Option<DnsRecord>,
-    /// The fields that differ.
+    /// The fields that differ. The action refuses a preview whose fields are
+    /// not the difference of `before` and `after`.
     #[serde(default)]
     pub changes: Vec<FieldChange>,
+    /// The other records that stay at the same name and type after the
+    /// change, so an approver sees what a new value is added beside.
+    #[serde(default)]
+    pub others: Vec<DnsRecord>,
 }
 
 fn diff(before: Option<&DnsRecord>, after: Option<&DnsRecord>) -> Vec<FieldChange> {
@@ -654,6 +716,92 @@ fn diff(before: Option<&DnsRecord>, after: Option<&DnsRecord>) -> Vec<FieldChang
     }
 }
 
+/// The difference a preview of `before` and `after` must carry, in the form
+/// it has after a trip through JSON (a null value reads back as absent).
+fn expected_changes(before: Option<&DnsRecord>, after: Option<&DnsRecord>) -> Vec<FieldChange> {
+    serde_json::to_value(diff(before, after))
+        .and_then(serde_json::from_value)
+        .unwrap_or_default()
+}
+
+fn slot<'a>(current: &'a [DnsRecord], record_type: &str, name: &str) -> Vec<&'a DnsRecord> {
+    current
+        .iter()
+        .filter(|record| record.record_type == record_type && record.name == name)
+        .collect()
+}
+
+fn others_of(slot: &[&DnsRecord], target: Option<&DnsRecord>) -> Vec<DnsRecord> {
+    slot.iter()
+        .filter(|record| target.is_none_or(|target| record.id != target.id))
+        .map(|record| (*record).clone())
+        .collect()
+}
+
+/// Finds the existing record an upsert acts on: the one whose content
+/// matches (for an MX record, with the same priority when several share the
+/// content), else the one `replaces` names, else (for the single-value
+/// CNAME) the only record. `None` means a new record is added.
+///
+/// # Errors
+///
+/// Returns a caller-safe reason when `replaces` names a record that is not
+/// there, or the request is ambiguous.
+pub fn find_target<'a>(
+    current: &'a [DnsRecord],
+    record_type: &str,
+    name: &str,
+    content: &str,
+    priority: Option<u16>,
+    replaces: Option<&str>,
+) -> Result<Option<&'a DnsRecord>, String> {
+    let same_slot = slot(current, record_type, name);
+    let replaces = replaces
+        .map(|value| normalize_content(record_type, value))
+        .filter(|value| !value.is_empty());
+    let exact: Vec<&DnsRecord> = same_slot
+        .iter()
+        .filter(|record| record.content == content)
+        .copied()
+        .collect();
+    let exact = match exact.as_slice() {
+        [] => None,
+        [only] => Some(*only),
+        several => Some(
+            *several
+                .iter()
+                .find(|record| record.priority == priority)
+                .ok_or_else(|| {
+                    "several records share that content with other priorities; name the priority"
+                        .to_owned()
+                })?,
+        ),
+    };
+    if let Some(exact) = exact {
+        if replaces.as_ref().is_some_and(|value| value != content) {
+            return Err(
+                "the desired content already exists as a record, so `replaces` names a different record than the one that matches"
+                    .to_owned(),
+            );
+        }
+        return Ok(Some(exact));
+    }
+    if let Some(replaces) = &replaces {
+        let found = same_slot.iter().find(|record| &record.content == replaces);
+        return found.map(|record| Some(*record)).ok_or_else(|| {
+            format!("the record to replace ({record_type} {replaces}) is not in the zone")
+        });
+    }
+    if record_type == "CNAME" {
+        return match same_slot.as_slice() {
+            [] => Ok(None),
+            [only] => Ok(Some(*only)),
+            _ => Err("the name has several CNAME records; name the one to replace".to_owned()),
+        };
+    }
+    Ok(None)
+}
+
 /// Plans an upsert against the (normalized) records currently at the
 /// desired name and type.
 ///
@@ -666,56 +814,25 @@ pub fn plan_upsert(
     desired: &DnsRecord,
     replaces: Option<&str>,
 ) -> Result<Plan, String> {
-    let same_slot: Vec<&DnsRecord> = current
-        .iter()
-        .filter(|record| record.record_type == desired.record_type && record.name == desired.name)
-        .collect();
-    let exact = same_slot
-        .iter()
-        .find(|record| record.content == desired.content);
-    let replaces = replaces
-        .map(|value| normalize_content(&desired.record_type, value))
-        .filter(|value| !value.is_empty());
-    let target: Option<&DnsRecord> = if let Some(exact) = exact {
-        if replaces
-            .as_ref()
-            .is_some_and(|value| *value != exact.content)
-        {
-            return Err(
-                "the desired content already exists as a record, so `replaces` names a different record than the one that matches"
-                    .to_owned(),
-            );
-        }
-        Some(*exact)
-    } else if let Some(replaces) = &replaces {
-        let found = same_slot.iter().find(|record| &record.content == replaces);
-        Some(*found.ok_or_else(|| {
-            format!(
-                "the record to replace ({} {replaces}) is not in the zone",
-                desired.record_type
-            )
-        })?)
-    } else if desired.record_type == "CNAME" {
-        match same_slot.as_slice() {
-            [] => None,
-            [only] => Some(*only),
-            _ => {
-                return Err(
-                    "the name has several CNAME records; name the one to replace".to_owned(),
-                );
-            }
-        }
-    } else {
-        None
-    };
+    let target = find_target(
+        current,
+        &desired.record_type,
+        &desired.name,
+        &desired.content,
+        desired.priority,
+        replaces,
+    )?;
+    let same_slot = slot(current, &desired.record_type, &desired.name);
+    let others = others_of(&same_slot, target);
     Ok(match target {
         None => {
             let after = desired.clone();
             Plan {
                 operation: PlanOp::Create,
-                changes: diff(None, Some(&after)),
+                changes: expected_changes(None, Some(&after)),
                 before: None,
                 after: Some(after),
+                others,
             }
         }
         Some(found) => {
@@ -727,40 +844,87 @@ pub fn plan_upsert(
                     before: Some(found.clone()),
                     after: Some(found.clone()),
                     changes: Vec::new(),
+                    others,
                 }
             } else {
                 Plan {
                     operation: PlanOp::Update,
-                    changes: diff(Some(found), Some(&after)),
+                    changes: expected_changes(Some(found), Some(&after)),
                     before: Some(found.clone()),
                     after: Some(after),
+                    others,
                 }
             }
         }
     })
 }
 
-/// Plans a delete of the record with this (normalized) content.
+/// Plans a delete of the record with this (normalized) content; for an MX
+/// record the priority is part of its identity.
 #[must_use]
-pub fn plan_delete(current: &[DnsRecord], record_type: &str, name: &str, content: &str) -> Plan {
+pub fn plan_delete(
+    current: &[DnsRecord],
+    record_type: &str,
+    name: &str,
+    content: &str,
+    priority: Option<u16>,
+) -> Plan {
     let content = normalize_content(record_type, content);
-    let found = current.iter().find(|record| {
-        record.record_type == record_type && record.name == name && record.content == content
-    });
+    let same_slot = slot(current, record_type, name);
+    let found = same_slot
+        .iter()
+        .find(|record| {
+            record.content == content && (priority.is_none() || record.priority == priority)
+        })
+        .copied();
     match found {
         Some(found) => Plan {
             operation: PlanOp::Delete,
-            changes: diff(Some(found), None),
+            changes: expected_changes(Some(found), None),
             before: Some(found.clone()),
             after: None,
+            others: others_of(&same_slot, Some(found)),
         },
         None => Plan {
             operation: PlanOp::AlreadyAbsent,
             before: None,
             after: None,
             changes: Vec::new(),
+            others: others_of(&same_slot, None),
         },
     }
+}
+
+/// The start of the stand-in for a stored value that has a credential's
+/// shape.
+pub const CREDENTIAL_MARKER: &str = "[credential-shaped sha256:";
+
+/// Stands in for a value that has the shape of a credential: a fixed marker
+/// and the SHA-256 digest of the value, never the value. A TXT record can
+/// hold a leaked secret, and Fleet must still be able to delete it without
+/// storing it in a request. Records read for a change are protected the same
+/// way before they are planned against, so a change names such a record by
+/// its digest and the executor matches the zone's record by digest too.
+#[must_use]
+pub fn protect_content(content: &str) -> String {
+    use sha2::{Digest as _, Sha256};
+    use std::fmt::Write as _;
+    if content.starts_with(CREDENTIAL_MARKER)
+        || !crate::broker::credential_like(&json!({ "content": content }))
+    {
+        return content.to_owned();
+    }
+    let mut marker = String::from(CREDENTIAL_MARKER);
+    for byte in Sha256::digest(content.as_bytes()) {
+        let _ = write!(marker, "{byte:02x}");
+    }
+    marker.push(']');
+    marker
+}
+
+fn protect_record(mut record: DnsRecord) -> DnsRecord {
+    record.content = protect_content(&record.content);
+    record
 }
 
 // ---------------------------------------------------------------------
@@ -896,6 +1060,7 @@ impl ProviderAction for DnsRecordAction {
     }
 }
 
+#[allow(clippy::too_many_lines)]
 fn validate_parameters(params: &ChangeParameters, upsert: bool) -> Result<(), String> {
     for (label, value) in [
         ("accountId", &params.account_id),
@@ -948,12 +1113,17 @@ fn validate_parameters(params: &ChangeParameters, upsert: bool) -> Result<(), St
             _ => return Err("the preview's current record does not fit its operation".to_owned()),
         }
     } else {
-        if params.ttl.is_some()
-            || params.proxied.is_some()
-            || params.priority.is_some()
-            || params.replaces.is_some()
-        {
-            return Err("a delete carries only the record's name, type, and content".to_owned());
+        if params.ttl.is_some() || params.proxied.is_some() || params.replaces.is_some() {
+            return Err(
+                "a delete carries only the record's name, type, content, and (MX) priority"
+                    .to_owned(),
+            );
+        }
+        if record_type != "MX" && params.priority.is_some() {
+            return Err("only an MX record has a priority".to_owned());
+        }
+        if record_type == "MX" && params.priority.is_none() {
+            return Err("deleting an MX record names its priority".to_owned());
         }
         if normalize_content(&params.record_type, &params.content) != params.content
             || params.content.is_empty()
@@ -968,9 +1138,30 @@ fn validate_parameters(params: &ChangeParameters, upsert: bool) -> Result<(), St
         if before.content != params.content
             || before.name != params.name
             || before.record_type != params.record_type
+            || before.priority != params.priority
             || params.preview.after.is_some()
         {
             return Err("the preview does not match the parameters".to_owned());
+        }
+    }
+    // The fields an approver reads are the difference of the two records
+    // shown, not text the requester chose.
+    if params.preview.changes
+        != expected_changes(
+            params.preview.before.as_ref(),
+            params.preview.after.as_ref(),
+        )
+    {
+        return Err("the preview's changes are not the difference of its records".to_owned());
+    }
+    for record in params
+        .preview
+        .before
+        .iter()
+        .chain(params.preview.after.iter())
+    {
+        if record.name != params.name || record.record_type != params.record_type {
+            return Err("the preview shows a record of another name or type".to_owned());
         }
     }
     Ok(())
@@ -1099,6 +1290,9 @@ pub struct ChangeRequest {
     pub priority: Option<u16>,
     /// The existing value to replace (upsert).
     pub replaces: Option<String>,
+    /// Add another value beside the records already at the name (upsert of
+    /// a multi-value type).
+    pub add: bool,
     /// An account id or label, when several accounts could hold the zone.
     pub account: Option<String>,
     /// Why, for the approver.
@@ -1286,17 +1480,17 @@ impl Dns {
     ) -> Result<ResolvedZone, DnsError> {
         let fqdn = normalize_hostname(fqdn, true).map_err(invalid)?;
         let accounts = self.cloudflare_accounts(account_hint).await?;
-        let mut last_failure: Option<DnsFailure> = None;
         let labels: Vec<&str> = fqdn.split('.').collect();
         // The most specific candidate first; a bare TLD is never a zone.
         for start in 0..labels.len().saturating_sub(1) {
             let candidate = labels[start..].join(".");
             let mut hits: Vec<(ExternalAccount, DnsCredentials, DnsZone)> = Vec::new();
+            let mut level_failure: Option<DnsFailure> = None;
             for account in &accounts {
                 let credentials = match self.credentials_for(account).await {
                     Ok(credentials) => credentials,
                     Err(DnsError::Invalid { detail }) => {
-                        last_failure = Some(DnsFailure::new(DnsFailureClass::Auth, detail));
+                        level_failure.get_or_insert(DnsFailure::new(DnsFailureClass::Auth, detail));
                         continue;
                     }
                     Err(other) => return Err(other),
@@ -1314,8 +1508,16 @@ impl Dns {
                             hits.push((account.clone(), credentials, zone));
                         }
                     }
-                    Err(failure) => last_failure = Some(failure),
+                    Err(failure) => {
+                        level_failure.get_or_insert(failure);
+                    }
                 }
+            }
+            // An account that could not answer might hold this very zone, so
+            // the search stops here with its failure: falling through to a
+            // parent zone could aim a change at the wrong zone.
+            if let Some(failure) = level_failure {
+                return Err(DnsError::Provider(failure));
             }
             if hits.len() > 1 {
                 return Err(DnsError::Conflict {
@@ -1333,12 +1535,9 @@ impl Dns {
                 });
             }
         }
-        match last_failure {
-            Some(failure) => Err(DnsError::Provider(failure)),
-            None => Err(DnsError::NotFound {
-                what: format!("a Cloudflare zone for {fqdn}"),
-            }),
-        }
+        Err(DnsError::NotFound {
+            what: format!("a Cloudflare zone for {fqdn}"),
+        })
     }
 
     async fn read_records(
@@ -1355,6 +1554,22 @@ impl Dns {
             record_type,
         )
         .await
+    }
+
+    /// The records at a name as a change plans against them: a value shaped
+    /// like a credential is replaced by its digest marker.
+    async fn read_protected(
+        &self,
+        resolved: &ResolvedZone,
+        name: &str,
+        record_type: Option<&str>,
+    ) -> Result<Vec<DnsRecord>, DnsFailure> {
+        Ok(self
+            .read_records(resolved, name, record_type)
+            .await?
+            .into_iter()
+            .map(protect_record)
+            .collect())
     }
 
     /// Reads the records at a name and records them as an observation beside
@@ -1425,9 +1640,11 @@ impl Dns {
         })
     }
 
-    /// The `domain/<key>` entry that matches the name or its zone, when the
-    /// Registry is wired and has one. A caller who may not read the Registry
-    /// sees no match, not an error.
+    /// The `domain/<key>` entry that matches the name, when the Registry is
+    /// wired and has one: the name itself, then each parent label up to the
+    /// zone apex, so a registered subdomain wins over the apex. The key is
+    /// returned as the entry writes it. A caller who may not read the
+    /// Registry sees no match, not an error.
     async fn matching_entry(
         &self,
         authorizer: &dyn Authorizer,
@@ -1436,28 +1653,82 @@ impl Dns {
         zone_name: &str,
     ) -> Option<String> {
         let registry = self.registry.as_ref()?;
-        // The name itself first (a registered subdomain), then the apex.
-        let ordered = if name == zone_name {
-            vec![zone_name]
-        } else {
-            vec![name, zone_name]
-        };
-        for key in ordered {
-            if registry
-                .get_entry(authorizer, principal_id, "domain", key)
+        let mut candidate = name;
+        loop {
+            if let Ok(found) = registry
+                .get_entry(authorizer, principal_id, "domain", candidate)
                 .await
-                .is_ok()
             {
-                return Some(format!("domain/{key}"));
+                return Some(format!("domain/{}", found.value.key));
+            }
+            if candidate == zone_name {
+                return None;
+            }
+            candidate = candidate.split_once('.').map(|(_, parent)| parent)?;
+            // A name outside the zone has no registered parent in it.
+            if !(candidate == zone_name || candidate.ends_with(&format!(".{zone_name}"))) {
+                return None;
             }
         }
-        None
+    }
+
+    /// The records last observed at a name through Cloudflare, newest first.
+    /// These are Cloudflare's own records of the zone (what Fleet would
+    /// change), stored apart from the public resolver observations the
+    /// domain enricher (FM-1020) keeps beside the same Registry entry.
+    ///
+    /// # Errors
+    ///
+    /// Fails on denial, a malformed name, or a backend failure.
+    pub async fn observations(
+        &self,
+        authorizer: &dyn Authorizer,
+        principal_id: &str,
+        fqdn: &str,
+    ) -> Result<Vec<DnsObservation>, DnsError> {
+        Self::require_read(authorizer, principal_id)?;
+        let name = normalize_hostname(fqdn, true).map_err(invalid)?;
+        self.observations
+            .for_name(&name)
+            .await
+            .map_err(|detail| DnsError::Backend {
+                context: "dns observations",
+                detail,
+            })
+    }
+
+    /// The request already made with the caller's idempotency key, when it
+    /// is for the same change; a key reused for a different change is a
+    /// conflict.
+    fn replay(existing: ActionRequest, change: &ChangeRequest) -> Result<ActionRequest, DnsError> {
+        let action = match change.kind {
+            ChangeKind::Upsert => UPSERT_ACTION,
+            ChangeKind::Delete => DELETE_ACTION,
+        };
+        let record_type = normalize_change_type(&change.record_type).map_err(invalid)?;
+        let name = normalize_hostname(&change.name, true).map_err(invalid)?;
+        let content = protect_content(&normalize_content(&record_type, &change.content));
+        let stored = &existing.parameters;
+        if existing.action_id != action
+            || stored["name"] != name
+            || stored["type"] != record_type
+            || stored["content"] != content
+        {
+            return Err(DnsError::Broker(BrokerError::Conflict {
+                state: existing.state,
+                detail: "the idempotency key was already used for a different request".to_owned(),
+            }));
+        }
+        Ok(existing)
     }
 
     /// Computes the preview of a change and submits it to the broker as an
     /// action request. The preview is stored in the request's parameters, so
     /// the approver and the executor share one account and zone with the
     /// requester.
+    ///
+    /// A retry with the requester's idempotency key returns the request
+    /// already made before anything is read from the provider.
     ///
     /// # Errors
     ///
@@ -1473,35 +1744,75 @@ impl Dns {
         now: i64,
     ) -> Result<ActionRequest, DnsError> {
         Self::require_read(authorizer, principal_id)?;
+        if let Some(key) = change.idempotency_key.as_deref()
+            && let Some(existing) = broker
+                .existing_for_key(authorizer, principal_id, key, now)
+                .await
+                .map_err(DnsError::Broker)?
+        {
+            return Self::replay(existing, &change);
+        }
         let record_type = normalize_change_type(&change.record_type).map_err(invalid)?;
         let resolved = self
             .resolve_zone(&change.name, change.account.as_deref())
             .await?;
         let name = normalize_record_name(&change.name, &resolved.zone.name).map_err(invalid)?;
         let current = self
-            .read_records(&resolved, &name, Some(&record_type))
+            .read_protected(&resolved, &name, Some(&record_type))
             .await
             .map_err(DnsError::Provider)?;
         let (action_id, params) = match change.kind {
             ChangeKind::Upsert => {
+                if change.add && change.replaces.is_some() {
+                    return Err(invalid("`add` and `replaces` cannot be used together"));
+                }
+                let content = normalize_content(&record_type, &change.content);
+                let replaces = change
+                    .replaces
+                    .as_deref()
+                    .map(|value| protect_content(&normalize_content(&record_type, value)));
+                // Values the caller left out keep what the record has now.
+                let target = find_target(
+                    &current,
+                    &record_type,
+                    &name,
+                    &content,
+                    change.priority,
+                    replaces.as_deref(),
+                )
+                .map_err(invalid)?;
                 let desired = build_desired(&DesiredRecord {
                     record_type: record_type.clone(),
                     name: name.clone(),
                     content: change.content.clone(),
-                    ttl: change.ttl,
-                    proxied: change.proxied,
-                    priority: change.priority,
+                    ttl: change.ttl.or_else(|| target.map(|found| found.ttl)),
+                    proxied: change.proxied.or_else(|| target.map(|found| found.proxied)),
+                    priority: change
+                        .priority
+                        .or_else(|| target.and_then(|found| found.priority)),
                 })
                 .map_err(invalid)?;
-                let replaces = change
-                    .replaces
-                    .as_deref()
-                    .map(|value| normalize_content(&record_type, value));
                 let plan = plan_upsert(&current, &desired, replaces.as_deref()).map_err(invalid)?;
                 if plan.operation == PlanOp::Unchanged {
                     return Err(invalid(
                         "the record already matches; there is nothing to change",
                     ));
+                }
+                if plan.operation == PlanOp::Create
+                    && !change.add
+                    && !plan.others.is_empty()
+                    && record_type != "CNAME"
+                {
+                    let shown: Vec<String> = plan
+                        .others
+                        .iter()
+                        .map(|other| other.content.clone())
+                        .collect();
+                    return Err(invalid(format!(
+                        "{name} already has {} {record_type} record(s) ({}); pass `replaces` to change one, or `add` to add another value",
+                        shown.len(),
+                        shown.join(", ")
+                    )));
                 }
                 (
                     UPSERT_ACTION,
@@ -1523,12 +1834,18 @@ impl Dns {
             ChangeKind::Delete => {
                 if change.ttl.is_some()
                     || change.proxied.is_some()
-                    || change.priority.is_some()
                     || change.replaces.is_some()
+                    || change.add
                 {
                     return Err(invalid(
-                        "a delete names only the record's name, type, and content",
+                        "a delete names only the record's name, type, content, and (MX) priority",
                     ));
+                }
+                if record_type == "MX" && change.priority.is_none() {
+                    return Err(invalid("deleting an MX record names its priority"));
+                }
+                if record_type != "MX" && change.priority.is_some() {
+                    return Err(invalid("only an MX record has a priority"));
                 }
                 let content = normalize_content(&record_type, &change.content);
                 if content.is_empty() {
@@ -1536,7 +1853,10 @@ impl Dns {
                         "a delete names the content of the record to remove",
                     ));
                 }
-                let plan = plan_delete(&current, &record_type, &name, &content);
+                // A leaked secret held in a TXT record can be deleted by its
+                // digest without the request ever storing it.
+                let content = protect_content(&content);
+                let plan = plan_delete(&current, &record_type, &name, &content, change.priority);
                 if plan.operation == PlanOp::AlreadyAbsent {
                     return Err(DnsError::NotFound {
                         what: format!("the record {name} {record_type} with that content"),
@@ -1553,7 +1873,7 @@ impl Dns {
                         content,
                         ttl: None,
                         proxied: None,
-                        priority: None,
+                        priority: change.priority,
                         replaces: None,
                         preview: plan,
                     },
@@ -1614,6 +1934,23 @@ impl Dns {
             .map_err(|error| error.to_string())?;
         let gateway = self.gateway.as_ref();
         let zone = params.zone_id.as_str();
+        // The ids in the payload are the requester's; the zone id must be
+        // the id of the zone the payload names, in this account, and active.
+        // Nothing is read or written before that holds.
+        let named = gateway
+            .list_zones(&credentials, Some(&params.zone_name))
+            .await
+            .map_err(|failure| failure.to_string())?;
+        if !named.iter().any(|candidate| {
+            candidate.id == params.zone_id
+                && lower_name(&candidate.name) == params.zone_name
+                && candidate.status == "active"
+        }) {
+            return Err(
+                "the zone id does not belong to the named zone in this account, or the zone is not active; nothing was changed"
+                    .to_owned(),
+            );
+        }
         let read = || async {
             read_records(
                 gateway,
@@ -1623,6 +1960,7 @@ impl Dns {
                 Some(&params.record_type),
             )
             .await
+            .map(|records| records.into_iter().map(protect_record).collect::<Vec<_>>())
             .map_err(|failure| failure.to_string())
         };
         let current = read().await?;
@@ -1633,7 +1971,13 @@ impl Dns {
             (plan, Some(desired))
         } else {
             (
-                plan_delete(&current, &params.record_type, &params.name, &params.content),
+                plan_delete(
+                    &current,
+                    &params.record_type,
+                    &params.name,
+                    &params.content,
+                    params.priority,
+                ),
                 None,
             )
         };
@@ -1712,7 +2056,9 @@ impl Dns {
         let (outcome, record) = if let Some(desired) = &desired {
             let found = after
                 .iter()
-                .find(|record| record.content == desired.content)
+                .find(|record| {
+                    record.content == desired.content && record.priority == desired.priority
+                })
                 .filter(|record| {
                     let mut with_id = desired.clone();
                     with_id.id.clone_from(&record.id);
@@ -1731,8 +2077,10 @@ impl Dns {
                 Some(found),
             )
         } else {
+            let gone = normalize_content(&params.record_type, &params.content);
             if after.iter().any(|record| {
-                record.content == normalize_content(&params.record_type, &params.content)
+                record.content == gone
+                    && (params.priority.is_none() || record.priority == params.priority)
             }) {
                 return Err(
                     "verification failed: the record is still present after the delete".to_owned(),
@@ -1949,10 +2297,10 @@ mod tests {
     #[test]
     fn a_delete_plans_by_content_and_is_idempotent() {
         let current = vec![record("TXT", "v=spf1 -all", 300)];
-        let plan = plan_delete(&current, "TXT", "www.example.com", "\"v=spf1 -all\"");
+        let plan = plan_delete(&current, "TXT", "www.example.com", "\"v=spf1 -all\"", None);
         assert_eq!(plan.operation, PlanOp::Delete);
         assert_eq!(plan.changes.len(), 3);
-        let gone = plan_delete(&[], "TXT", "www.example.com", "v=spf1 -all");
+        let gone = plan_delete(&[], "TXT", "www.example.com", "v=spf1 -all", None);
         assert_eq!(gone.operation, PlanOp::AlreadyAbsent);
     }
 
@@ -1990,6 +2338,7 @@ mod tests {
                 changes: diff(None, Some(&desired)),
                 before: None,
                 after: Some(desired),
+                others: Vec::new(),
             },
         }
     }
@@ -2048,5 +2397,109 @@ mod tests {
         let second = action.operation(&request).unwrap();
         assert_eq!(first.payload_json, second.payload_json);
         assert_eq!(first.kind, UPSERT_ACTION);
+    }
+
+    #[test]
+    fn txt_values_compare_as_dns_character_strings() {
+        let long = format!(
+            "v=DKIM1; k=rsa; p={}",
+            "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8A".repeat(12)
+        );
+        assert!(long.len() > 380);
+        // Split into 255-byte strings the way a provider shows them.
+        let (first, second) = long.split_at(255);
+        let split = format!("\"{first}\" \"{second}\"");
+        assert_eq!(txt_text(&split), long);
+        assert_eq!(
+            normalize_content("TXT", &long),
+            normalize_content("TXT", &split)
+        );
+        // Escapes and quotes inside a string.
+        assert_eq!(txt_text(r#""a\"b\\c\065""#), "a\"b\\cA");
+        // Not presentation format: kept as written.
+        assert_eq!(txt_text("  v=spf1 -all "), "v=spf1 -all");
+        assert_eq!(txt_text("\"unterminated"), "\"unterminated");
+        // A split record and the unsplit desired value are the same record.
+        let remote = normalize_remote(DnsRecord {
+            content: split,
+            ..record("TXT", "x", 1)
+        });
+        let desired = build_desired(&DesiredRecord {
+            record_type: "TXT".to_owned(),
+            name: "www.example.com".to_owned(),
+            content: long,
+            ttl: Some(1),
+            proxied: None,
+            priority: None,
+        })
+        .unwrap();
+        let plan = plan_upsert(&[remote], &desired, None).unwrap();
+        assert_eq!(plan.operation, PlanOp::Unchanged);
+    }
+
+    #[test]
+    fn mx_identity_includes_the_priority_for_delete() {
+        let mx = |id: &str, priority: u16| DnsRecord {
+            id: Some(id.to_owned()),
+            record_type: "MX".to_owned(),
+            name: "www.example.com".to_owned(),
+            content: "mail.example.net".to_owned(),
+            ttl: 300,
+            proxied: false,
+            priority: Some(priority),
+        };
+        let current = vec![mx("a", 10), mx("b", 20)];
+        let plan = plan_delete(
+            &current,
+            "MX",
+            "www.example.com",
+            "mail.example.net",
+            Some(20),
+        );
+        assert_eq!(plan.before.unwrap().id.as_deref(), Some("b"));
+        assert_eq!(plan.others.len(), 1);
+        let gone = plan_delete(
+            &current,
+            "MX",
+            "www.example.com",
+            "mail.example.net",
+            Some(30),
+        );
+        assert_eq!(gone.operation, PlanOp::AlreadyAbsent);
+    }
+
+    #[test]
+    fn a_credential_shaped_value_is_stored_as_its_digest() {
+        let secret = "api_key=Zx81QwErTy93LkJhGf62Mn40";
+        let marker = protect_content(secret);
+        assert!(marker.starts_with(CREDENTIAL_MARKER), "{marker}");
+        assert!(!marker.contains("Zx81"));
+        // Stable, and itself safe to store.
+        assert_eq!(marker, protect_content(secret));
+        assert_eq!(protect_content(&marker), marker);
+        assert!(!crate::broker::credential_like(
+            &json!({ "content": marker })
+        ));
+        assert_eq!(protect_content("v=spf1 -all"), "v=spf1 -all");
+    }
+
+    #[test]
+    fn a_preview_whose_changes_are_not_the_difference_is_refused() {
+        let action = DnsRecordAction::upsert();
+        let mut params = upsert_params();
+        params.preview.changes = vec![FieldChange {
+            field: "content".to_owned(),
+            from: None,
+            to: Some(json!("something else")),
+        }];
+        let value = serde_json::to_value(&params).unwrap();
+        assert!(action.validate("www.example.com A", &value).is_err());
+        // A record of another name in the preview is refused too.
+        let mut params = upsert_params();
+        if let Some(after) = params.preview.after.as_mut() {
+            after.name = "other.example.com".to_owned();
+        }
+        let value = serde_json::to_value(&params).unwrap();
+        assert!(action.validate("www.example.com A", &value).is_err());
     }
 }

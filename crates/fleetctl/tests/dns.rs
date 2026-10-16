@@ -499,3 +499,139 @@ fn a_refused_change_is_a_cli_error_with_the_controllers_reason() {
         error.message
     );
 }
+
+#[test]
+fn add_no_proxied_priority_and_observations_parse_and_send() {
+    let invocation = parse(&[
+        "dns",
+        "set",
+        "www.example.com",
+        "--type",
+        "A",
+        "--content",
+        "203.0.113.9",
+        "--add",
+        "--no-proxied",
+    ])
+    .unwrap();
+    let fleetctl::Command::Dns(DnsAction::Change { add, proxied, .. }) = invocation.command else {
+        panic!("a change");
+    };
+    assert!(add);
+    assert_eq!(proxied, Some(false));
+    // A delete names an MX record's priority.
+    let invocation = parse(&[
+        "dns",
+        "delete",
+        "example.com",
+        "--type",
+        "MX",
+        "--content",
+        "mail.example.net",
+        "--priority",
+        "20",
+    ])
+    .unwrap();
+    let fleetctl::Command::Dns(DnsAction::Change { priority, .. }) = invocation.command else {
+        panic!("a change");
+    };
+    assert_eq!(priority, Some(20));
+    // --add belongs to set only.
+    assert!(
+        parse(&[
+            "dns",
+            "delete",
+            "x.example.com",
+            "--type",
+            "A",
+            "--content",
+            "1.2.3.4",
+            "--add"
+        ])
+        .is_err()
+    );
+
+    let observed = json!({"data": {
+        "name": "www.example.com",
+        "observations": [{
+            "accountId": "acc1", "zoneId": "z1", "zoneName": "example.com",
+            "name": "www.example.com", "registryEntry": "domain/example.com",
+            "records": [{"id": "r1", "type": "A", "name": "www.example.com", "content": "203.0.113.1", "ttl": 300, "proxied": false}],
+            "observedAt": 5
+        }]
+    }})
+    .to_string();
+    let controller = Controller::start(vec![("GET /api/v1/dns/observations", 200, observed)]);
+    let (text, exit) = run(
+        &controller,
+        &["dns", "observations", "www.example.com", "--output", "text"],
+    )
+    .unwrap();
+    assert_eq!(exit, 0);
+    assert!(text.contains("registry domain/example.com"), "{text}");
+    assert!(text.contains("203.0.113.1"), "{text}");
+    assert!(controller.seen()[0].line.contains("name=www.example.com"));
+}
+
+#[test]
+fn wait_approval_reports_a_failed_or_stale_change_with_exit_one() {
+    let controller = Controller::start(vec![
+        ("POST /api/v1/dns/changes", 201, request("pending", None)),
+        (
+            "GET /api/v1/requests/req-1",
+            200,
+            request("failed", Some("op-1")),
+        ),
+    ]);
+    let (text, exit) = run(
+        &controller,
+        &[
+            "dns",
+            "set",
+            "www.example.com",
+            "--type",
+            "A",
+            "--content",
+            "203.0.113.9",
+            "--wait-approval=30s",
+            "--output",
+            "json",
+        ],
+    )
+    .unwrap();
+    assert_eq!(exit, 1, "{text}");
+    let answer: Value = serde_json::from_str(&text).unwrap();
+    assert_eq!(answer["outcome"], "failed");
+    assert_eq!(answer["request"]["state"], "failed");
+    assert!(
+        answer.get("result").is_none(),
+        "no result for a failed change"
+    );
+    // The text form says so too.
+    let controller = Controller::start(vec![
+        ("POST /api/v1/dns/changes", 201, request("pending", None)),
+        (
+            "GET /api/v1/requests/req-1",
+            200,
+            request("failed", Some("op-1")),
+        ),
+    ]);
+    let (text, exit) = run(
+        &controller,
+        &[
+            "dns",
+            "delete",
+            "www.example.com",
+            "--type",
+            "A",
+            "--content",
+            "203.0.113.2",
+            "--wait-approval=30s",
+            "--output",
+            "text",
+        ],
+    )
+    .unwrap();
+    assert_eq!(exit, 1);
+    assert!(text.contains("outcome: failed"), "{text}");
+}

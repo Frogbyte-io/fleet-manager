@@ -47,6 +47,11 @@ pub enum DnsAction {
         /// The account (id or label), when several hold the zone.
         account: Option<String>,
     },
+    /// Read the records last observed at a name through Cloudflare.
+    Observations {
+        /// The fully qualified name.
+        name: String,
+    },
     /// Request a change.
     Change {
         /// Set or delete.
@@ -65,6 +70,8 @@ pub enum DnsAction {
         priority: Option<u16>,
         /// The existing value a set replaces.
         replaces: Option<String>,
+        /// Add another value beside the records already at the name.
+        add: bool,
         /// The account (id or label).
         account: Option<String>,
         /// Why, for the approver.
@@ -84,7 +91,7 @@ pub(crate) fn parse(rest: &[&str], output: &mut Output) -> Result<Command, CliEr
     };
     let (name, flags): (Option<String>, &[&str]) = match *verb {
         "zones" => (None, args),
-        "records" | "set" | "delete" => {
+        "records" | "observations" | "set" | "delete" => {
             let Some((name, flags)) = args.split_first() else {
                 return Err(CliError { message: usage() });
             };
@@ -102,6 +109,7 @@ pub(crate) fn parse(rest: &[&str], output: &mut Output) -> Result<Command, CliEr
     let mut proxied = None;
     let mut priority = None;
     let mut replaces = None;
+    let mut add = false;
     let mut account = None;
     let mut reason = None;
     let mut idempotency_key = None;
@@ -114,8 +122,12 @@ pub(crate) fn parse(rest: &[&str], output: &mut Output) -> Result<Command, CliEr
             wait = Some(duration);
             continue;
         }
-        if *verb == "set" && flag == "--proxied" {
-            proxied = Some(true);
+        if *verb == "set" && matches!(flag, "--proxied" | "--no-proxied") {
+            proxied = Some(flag == "--proxied");
+            continue;
+        }
+        if *verb == "set" && flag == "--add" {
+            add = true;
             continue;
         }
         let mut value = |name: &str| {
@@ -148,7 +160,7 @@ pub(crate) fn parse(rest: &[&str], output: &mut Output) -> Result<Command, CliEr
             ("records" | "set" | "delete", "--type") => record_type = Some(value("type")?),
             ("set" | "delete", "--content") => content = Some(value("content")?),
             ("set", "--ttl") => ttl = Some(number("ttl", value("ttl")?)?),
-            ("set", "--priority") => {
+            ("set" | "delete", "--priority") => {
                 let raw = value("priority")?;
                 priority = Some(
                     u16::try_from(number("priority", raw)?).map_err(|_| CliError {
@@ -170,6 +182,7 @@ pub(crate) fn parse(rest: &[&str], output: &mut Output) -> Result<Command, CliEr
     }
     let action = match (*verb, name) {
         ("zones", _) => DnsAction::Zones { account },
+        ("observations", Some(name)) => DnsAction::Observations { name },
         ("records", Some(name)) => DnsAction::Records {
             name,
             record_type,
@@ -192,6 +205,7 @@ pub(crate) fn parse(rest: &[&str], output: &mut Output) -> Result<Command, CliEr
                 proxied,
                 priority,
                 replaces,
+                add,
                 account,
                 reason: reason.unwrap_or_else(|| DEFAULT_REASON.to_owned()),
                 idempotency_key,
@@ -228,6 +242,12 @@ pub(crate) fn request(action: &DnsAction) -> RequestShape {
                 .collect(),
             None,
         ),
+        DnsAction::Observations { name } => (
+            reqwest::Method::GET,
+            "/api/v1/dns/observations".to_owned(),
+            vec![("name", name.clone())],
+            None,
+        ),
         DnsAction::Change {
             kind,
             name,
@@ -237,6 +257,7 @@ pub(crate) fn request(action: &DnsAction) -> RequestShape {
             proxied,
             priority,
             replaces,
+            add,
             account,
             reason,
             idempotency_key,
@@ -252,6 +273,9 @@ pub(crate) fn request(action: &DnsAction) -> RequestShape {
                 "content": content,
                 "reason": reason,
             });
+            if *add {
+                body["add"] = json!(true);
+            }
             for (key, value) in [
                 ("ttl", ttl.map(|value| json!(value))),
                 ("proxied", proxied.map(|value| json!(value))),
@@ -371,6 +395,9 @@ fn preview_lines(preview: &Value) -> Vec<String> {
     if !preview["after"].is_null() {
         lines.push(format!("    then: {}", record_line(&preview["after"])));
     }
+    for other in preview["others"].as_array().into_iter().flatten() {
+        lines.push(format!("    stays: {}", record_line(other)));
+    }
     lines
 }
 
@@ -399,6 +426,31 @@ pub(crate) fn render(value: &Value) -> String {
         }
         if lines.is_empty() {
             return "(no Cloudflare accounts)".to_owned();
+        }
+        return lines.join("\n");
+    }
+    if let Some(observations) = value["observations"].as_array() {
+        let mut lines = vec![format!("observations of {}", text_of(&value["name"]))];
+        if observations.is_empty() {
+            lines.push("(none; read the name with `dns records` first)".to_owned());
+        }
+        for observation in observations {
+            lines.push(format!(
+                "zone {} (account {}), read {}{}",
+                text_of(&observation["zoneName"]),
+                text_of(&observation["accountId"]),
+                text_of(&observation["observedAt"]),
+                observation["registryEntry"]
+                    .as_str()
+                    .map_or_else(String::new, |entry| format!(", registry {}", clean(entry))),
+            ));
+            lines.extend(
+                observation["records"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .map(|record| format!("  {}", record_line(record))),
+            );
         }
         return lines.join("\n");
     }
