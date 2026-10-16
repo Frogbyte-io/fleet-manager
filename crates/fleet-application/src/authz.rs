@@ -210,6 +210,19 @@ pub enum Permission {
     /// risky like [`Permission::LabArtifacts`]. A delegated credential reads
     /// its own owner's handles only.
     LabExecRead,
+    /// Ask the action broker to run a provider action (FM-1040). The
+    /// resource is the action id. A mutation: it records a durable request
+    /// and, for `auto` actions, starts the operation.
+    ActionRequest,
+    /// Approve a pending action request. Separate from
+    /// [`Permission::ActionRequest`] so a requester is never an approver by
+    /// default. A mutation: it starts the provider operation.
+    ActionApprove,
+    /// Deny a pending action request. Separate from
+    /// [`Permission::ActionApprove`]. A mutation.
+    ActionDeny,
+    /// List and read action requests, with their scrubbed parameters.
+    ActionRead,
 }
 
 impl Permission {
@@ -279,6 +292,10 @@ impl Permission {
         Permission::LabLeaseProvision,
         Permission::LabPut,
         Permission::LabExecRead,
+        Permission::ActionRequest,
+        Permission::ActionApprove,
+        Permission::ActionDeny,
+        Permission::ActionRead,
     ];
 
     /// The stable action id, as recorded in decisions and audit events.
@@ -347,6 +364,10 @@ impl Permission {
             Permission::LabLeaseProvision => "lab.lease.provision",
             Permission::LabPut => "lab.put",
             Permission::LabExecRead => "lab.exec.read",
+            Permission::ActionRequest => "action.request",
+            Permission::ActionApprove => "action.approve",
+            Permission::ActionDeny => "action.deny",
+            Permission::ActionRead => "action.read",
         }
     }
 
@@ -367,7 +388,8 @@ impl Permission {
             | Permission::ImagesRead
             | Permission::LabRead
             | Permission::LabLeaseRead
-            | Permission::LabArtifactRead => false,
+            | Permission::LabArtifactRead
+            | Permission::ActionRead => false,
             Permission::MachineReadSensitive
             | Permission::OperationCreate
             | Permission::OperationCancel
@@ -417,7 +439,10 @@ impl Permission {
             | Permission::LabTemplateUse
             | Permission::LabLeaseProvision
             | Permission::LabPut
-            | Permission::LabExecRead => true,
+            | Permission::LabExecRead
+            | Permission::ActionRequest
+            | Permission::ActionApprove
+            | Permission::ActionDeny => true,
         }
     }
 
@@ -454,7 +479,8 @@ impl Permission {
             | Permission::CredentialRead
             | Permission::CredentialIssue
             | Permission::LabLeaseRead
-            | Permission::LabArtifactRead => false,
+            | Permission::LabArtifactRead
+            | Permission::ActionRead => false,
             Permission::MachineReadSensitive
             | Permission::OperationCancel
             | Permission::SecretRead
@@ -488,7 +514,10 @@ impl Permission {
             | Permission::LabTemplateUse
             | Permission::LabLeaseProvision
             | Permission::LabPut
-            | Permission::LabExecRead => true,
+            | Permission::LabExecRead
+            | Permission::ActionRequest
+            | Permission::ActionApprove
+            | Permission::ActionDeny => true,
         }
     }
 }

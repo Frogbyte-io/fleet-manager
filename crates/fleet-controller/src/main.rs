@@ -60,6 +60,12 @@ fn run_serve(mut config: fleet_config::ControllerConfig) -> ExitCode {
             return ExitCode::FAILURE;
         }
     }
+    // A mistyped action-broker setting stops startup: silently falling back
+    // would run an action under a different risk class than the operator set.
+    if let Err(error) = fleet_controller::broker_settings_from_env() {
+        eprintln!("fleet-controller: refusing to start: {error}");
+        return ExitCode::FAILURE;
+    }
     let settings = Settings {
         listen: config.listen,
         tailscale_serve_listen: config.tailscale_serve_listen,

@@ -60,6 +60,18 @@ Until authenticated identities are in use, the requester and approver are both `
 
 Registry resources in Fleet Git (ADR 0016) have no secret value type. Validation runs the credential scrubber over every value and rejects matches; a field may say where a login lives, never what it is.
 
+## Action broker (ADR 0016)
+
+Agents do not hold provider credentials. They `POST /requests` to ask the controller to run a typed provider action (`action.request`, resource = action id), and Fleet runs it with credentials only it holds. A request is a durable SQLite record (`action_requests`) with its requester, origin, target, scrubbed parameters, risk class, reason, decider, and linked operation. Its states are `pending -> approved | denied | expired -> executing -> succeeded | failed`; the transitions are a pure rule in `fleet-core`, and each one is a compare-and-set committed with its audit event, so of concurrent approvals exactly one executes.
+
+- **Policy.** Each provider action declares a risk class: `auto` (runs on request), `approve` (waits for a person), or `deny` (recorded as denied). `FLEET_ACTION_POLICY=action.id=class,...` raises or lowers a class per action id; a malformed value stops startup. `FLEET_ACTION_REQUEST_TTL_SECONDS` (default 86400, 60 to 604800) bounds how long a request waits for a decision.
+- **Approve and deny are separate permissions** from request and from each other (`action.approve`, `action.deny`; `action.read` lists and reads). Approval re-checks authorization: the approver's principal creates the operation through `Operations::create`, so `operation.create` and the kind's own permission apply. An `auto` request runs as its requester. The approver or policy is recorded on the request.
+- **Execution is an ordinary durable operation** (ADR 0008) whose idempotency key is the request id. The request follows the operation to `succeeded` or `failed`.
+- **Expiry is lazy.** It is evaluated when a request is read or decided, not by a sweeper. It is a pure function of the stored deadline, so a restart cannot leave a request approvable past it, and the approve and deny statements re-check the deadline themselves. The `expired` transition is audited when first observed.
+- **No secrets.** Parameters are structured. A request whose parameters (or target, or reason) the shared redaction helpers would change, or that has a secret-named key, is refused with a 400 that does not echo the value. Parameters are stored and served, and never audited.
+
+**Before M8 this policy is a guardrail keyed on risk class, not a security boundary.** Every caller of the trusted-LAN listener is `anonymous-lan-admin` and holds `action.approve` as well as `action.request`, so it can approve its own request. The policy protects against an agent's mistakes (a mistyped redeploy, a DNS change made without a person looking), not against a hostile caller on the network. Per-agent scoping arrives with delegated credentials (ADR 0011): a delegated principal will be allowed to request and never to approve, which the deny-by-default delegated catalog already enforces for every action it does not list.
+
 ## Authorization
 
 Authorization is centralized in the application layer and answers principal/action/resource/context. The trusted-LAN policy explicitly permits the full vocabulary to `anonymous-lan-admin`; authenticated mode later becomes deny-by-default with explicit forbids overriding permits. HTTP route checks and hidden UI controls are defense-in-depth, not the decision point.
@@ -76,6 +88,7 @@ Initial permission vocabulary includes:
 - `secrets.use` (provider- and purpose-scoped), never a general `secrets.read` for agents
 - `audit.read`, `fleet.policy.admin`, `fleet.admin`
 - `events.read` (payload-free fleet change notifications)
+- `action.request`, `action.approve`, `action.deny`, `action.read` (the action broker)
 
 Future bindings can scope resources by ID, project, provider account, machine group/tag, environment classification, owner, TTL, and resource ceilings. Do not build an ad-hoc expression language. M1 implements the authorization port and explicit trusted-LAN policy; evaluate an embedded engine only when authenticated or multi-user deployment requires concrete policies.
 

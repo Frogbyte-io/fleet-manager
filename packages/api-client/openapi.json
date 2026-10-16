@@ -7472,6 +7472,376 @@
         }
       }
     },
+    "/api/v1/requests": {
+      "get": {
+        "tags": [
+          "requests"
+        ],
+        "summary": "Lists action requests, newest first, optionally only those in one state\n(for the approver's inbox: `state=pending`). Expiry and the outcome of an\nexecuting request's operation are applied as they are read.",
+        "description": "# Errors\n\nReturns the public error envelope on refusal or a malformed filter.",
+        "operationId": "listActionRequests",
+        "parameters": [
+          {
+            "name": "state",
+            "in": "query",
+            "description": "Only requests in this state: pending, approved, denied, expired, executing, succeeded, or failed.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "description": "The maximum number of requests to return (default 50, at most 200).",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int32",
+              "minimum": 0
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The newest requests.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Page_ActionRequestDto"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The state filter is unknown.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The caller may not read action requests.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "A backend port failed.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "requests"
+        ],
+        "summary": "Asks Fleet to run a provider action. The action's risk class decides\nwhat happens next: `auto` starts the operation at once (the response is\n`executing` with its `operationId`), `approve` records the request as\n`pending` until a person approves or denies it before `expiresAt`, and\n`deny` records it as `denied`. The response always states which.",
+        "description": "# Errors\n\nReturns the public error envelope on refusal, an unknown action, or\ninvalid or credential-like input.",
+        "operationId": "createActionRequest",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateActionRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "description": "The request was recorded; its state shows what policy did.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Resource_ActionRequestDto"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The action is unknown, a field is invalid, or the parameters look like a credential.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The caller may not request actions.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "A backend port failed.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/requests/{requestId}": {
+      "get": {
+        "tags": [
+          "requests"
+        ],
+        "summary": "Reads one action request.",
+        "description": "# Errors\n\nReturns the public error envelope on refusal or an unknown id.",
+        "operationId": "getActionRequest",
+        "parameters": [
+          {
+            "name": "requestId",
+            "in": "path",
+            "description": "The request's identity.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The request.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Resource_ActionRequestDto"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The caller may not read action requests.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "The request does not exist.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "A backend port failed.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/requests/{requestId}/approve": {
+      "post": {
+        "tags": [
+          "requests"
+        ],
+        "summary": "Approves a pending request and starts its operation. The approver is\nrecorded, and their authorization is checked again when the operation is\ncreated. Of concurrent approvals exactly one succeeds; the rest get 409.\nAn approval whose operation cannot be created answers 200 with the\nrequest `failed` and the reason.",
+        "description": "# Errors\n\nReturns the public error envelope on refusal, an unknown id, or a request\nthat is no longer pending.",
+        "operationId": "approveActionRequest",
+        "parameters": [
+          {
+            "name": "requestId",
+            "in": "path",
+            "description": "The request's identity.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The request was approved; it is `executing` with its `operationId`, or `failed` with the reason.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Resource_ActionRequestDto"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The caller may not approve, or policy now denies the action.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "The request does not exist.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The request is not pending: it was decided, expired, or another decision won.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "A backend port failed.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/requests/{requestId}/deny": {
+      "post": {
+        "tags": [
+          "requests"
+        ],
+        "summary": "Denies a pending request, with an optional note.",
+        "description": "# Errors\n\nReturns the public error envelope on refusal, an unknown id, or a request\nthat is no longer pending.",
+        "operationId": "denyActionRequest",
+        "parameters": [
+          {
+            "name": "requestId",
+            "in": "path",
+            "description": "The request's identity.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "description": "An optional note.",
+          "content": {
+            "application/json": {
+              "schema": {
+                "oneOf": [
+                  {
+                    "type": "null"
+                  },
+                  {
+                    "$ref": "#/components/schemas/DenyActionRequest"
+                  }
+                ]
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "The request was denied.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Resource_ActionRequestDto"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The note is invalid.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The caller may not deny requests.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "The request does not exist.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The request is not pending: it was decided, expired, or another decision won.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "A backend port failed.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/skills/catalog": {
       "get": {
         "tags": [
@@ -8170,6 +8540,118 @@
   },
   "components": {
     "schemas": {
+      "ActionRequestDto": {
+        "type": "object",
+        "description": "An action request.",
+        "required": [
+          "id",
+          "requester",
+          "origin",
+          "actionId",
+          "target",
+          "parameters",
+          "riskClass",
+          "reason",
+          "state",
+          "terminal",
+          "createdAt",
+          "expiresAt",
+          "updatedAt"
+        ],
+        "properties": {
+          "actionId": {
+            "type": "string",
+            "description": "The provider action's id."
+          },
+          "createdAt": {
+            "type": "integer",
+            "format": "int64",
+            "description": "When it was made (epoch milliseconds)."
+          },
+          "decidedAt": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "When it was decided (epoch milliseconds)."
+          },
+          "decidedBy": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Who approved or denied it: a principal, `policy:auto`, or\n`policy:deny`."
+          },
+          "decisionNote": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "A denier's note."
+          },
+          "expiresAt": {
+            "type": "integer",
+            "format": "int64",
+            "description": "When an undecided request expires (epoch milliseconds)."
+          },
+          "failure": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Why it failed."
+          },
+          "id": {
+            "type": "string",
+            "description": "The request's identity."
+          },
+          "operationId": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The durable operation that executes it, once created. Poll it at\n`/operations/{id}`."
+          },
+          "origin": {
+            "type": "string",
+            "description": "Where the request came from (`api`)."
+          },
+          "parameters": {
+            "type": "object",
+            "description": "The structured, secret-free parameters."
+          },
+          "reason": {
+            "type": "string",
+            "description": "Why the requester wants it."
+          },
+          "requester": {
+            "type": "string",
+            "description": "The principal that asked."
+          },
+          "riskClass": {
+            "type": "string",
+            "description": "The effective risk class when the request was made: `auto` (ran\nwithout a decision), `approve` (waits for a person), or `deny`\n(refused by policy)."
+          },
+          "state": {
+            "type": "string",
+            "description": "`pending`, `approved`, `denied`, `expired`, `executing`,\n`succeeded`, or `failed`."
+          },
+          "target": {
+            "type": "string",
+            "description": "What the action acts on."
+          },
+          "terminal": {
+            "type": "boolean",
+            "description": "Whether the state will never change."
+          },
+          "updatedAt": {
+            "type": "integer",
+            "format": "int64",
+            "description": "The last change (epoch milliseconds)."
+          }
+        }
+      },
       "AddedMachineDto": {
         "type": "object",
         "description": "The outcome of an add: the new machine plus the duplicates that were\nwarned about.",
@@ -9267,6 +9749,33 @@
           }
         }
       },
+      "CreateActionRequest": {
+        "type": "object",
+        "description": "What to ask for.",
+        "required": [
+          "actionId",
+          "target",
+          "reason"
+        ],
+        "properties": {
+          "actionId": {
+            "type": "string",
+            "description": "The provider action's id, for example `coolify.application.redeploy`."
+          },
+          "parameters": {
+            "type": "object",
+            "description": "Structured parameters the action defines (an object of at most 8\nKiB). They must be secret-free: Fleet holds provider credentials and\nrefuses a request whose parameters look like one."
+          },
+          "reason": {
+            "type": "string",
+            "description": "Why, for the approver (at most 1000 characters)."
+          },
+          "target": {
+            "type": "string",
+            "description": "What the action acts on, in the provider's terms (at most 256\ncharacters)."
+          }
+        }
+      },
       "CreateEnrollmentTokenRequest": {
         "type": "object",
         "description": "The create-enrollment-token request.",
@@ -9562,6 +10071,19 @@
               "type": "string"
             },
             "description": "Allowed Lab template version ids."
+          }
+        }
+      },
+      "DenyActionRequest": {
+        "type": "object",
+        "description": "An optional note with a denial.",
+        "properties": {
+          "note": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Why it was denied (at most 1000 characters)."
           }
         }
       },
@@ -12260,6 +12782,136 @@
               "null"
             ],
             "description": "Cursor for the next page, or `null` on the last page."
+          }
+        }
+      },
+      "Page_ActionRequestDto": {
+        "type": "object",
+        "description": "A page of resources.\n\nThe concrete schema for a list endpoint appears when that endpoint does;\n[`PageInfo`] is the part of the shape that is fixed for every one of them.",
+        "required": [
+          "items",
+          "page"
+        ],
+        "properties": {
+          "items": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "description": "An action request.",
+              "required": [
+                "id",
+                "requester",
+                "origin",
+                "actionId",
+                "target",
+                "parameters",
+                "riskClass",
+                "reason",
+                "state",
+                "terminal",
+                "createdAt",
+                "expiresAt",
+                "updatedAt"
+              ],
+              "properties": {
+                "actionId": {
+                  "type": "string",
+                  "description": "The provider action's id."
+                },
+                "createdAt": {
+                  "type": "integer",
+                  "format": "int64",
+                  "description": "When it was made (epoch milliseconds)."
+                },
+                "decidedAt": {
+                  "type": [
+                    "integer",
+                    "null"
+                  ],
+                  "format": "int64",
+                  "description": "When it was decided (epoch milliseconds)."
+                },
+                "decidedBy": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "description": "Who approved or denied it: a principal, `policy:auto`, or\n`policy:deny`."
+                },
+                "decisionNote": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "description": "A denier's note."
+                },
+                "expiresAt": {
+                  "type": "integer",
+                  "format": "int64",
+                  "description": "When an undecided request expires (epoch milliseconds)."
+                },
+                "failure": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "description": "Why it failed."
+                },
+                "id": {
+                  "type": "string",
+                  "description": "The request's identity."
+                },
+                "operationId": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "description": "The durable operation that executes it, once created. Poll it at\n`/operations/{id}`."
+                },
+                "origin": {
+                  "type": "string",
+                  "description": "Where the request came from (`api`)."
+                },
+                "parameters": {
+                  "type": "object",
+                  "description": "The structured, secret-free parameters."
+                },
+                "reason": {
+                  "type": "string",
+                  "description": "Why the requester wants it."
+                },
+                "requester": {
+                  "type": "string",
+                  "description": "The principal that asked."
+                },
+                "riskClass": {
+                  "type": "string",
+                  "description": "The effective risk class when the request was made: `auto` (ran\nwithout a decision), `approve` (waits for a person), or `deny`\n(refused by policy)."
+                },
+                "state": {
+                  "type": "string",
+                  "description": "`pending`, `approved`, `denied`, `expired`, `executing`,\n`succeeded`, or `failed`."
+                },
+                "target": {
+                  "type": "string",
+                  "description": "What the action acts on."
+                },
+                "terminal": {
+                  "type": "boolean",
+                  "description": "Whether the state will never change."
+                },
+                "updatedAt": {
+                  "type": "integer",
+                  "format": "int64",
+                  "description": "The last change (epoch milliseconds)."
+                }
+              }
+            },
+            "description": "The items on this page, in the endpoint's documented order."
+          },
+          "page": {
+            "$ref": "#/components/schemas/PageInfo",
+            "description": "Where this page sits in the result set."
           }
         }
       },
@@ -15735,6 +16387,127 @@
               "null"
             ],
             "description": "The ssh login user (`git` in `git@host:path`); null for http(s)."
+          }
+        }
+      },
+      "Resource_ActionRequestDto": {
+        "type": "object",
+        "description": "A single resource.\n\nThe payload is nested under `data` so that later top-level fields are an\nadditive change rather than a breaking one.",
+        "required": [
+          "data"
+        ],
+        "properties": {
+          "data": {
+            "type": "object",
+            "description": "An action request.",
+            "required": [
+              "id",
+              "requester",
+              "origin",
+              "actionId",
+              "target",
+              "parameters",
+              "riskClass",
+              "reason",
+              "state",
+              "terminal",
+              "createdAt",
+              "expiresAt",
+              "updatedAt"
+            ],
+            "properties": {
+              "actionId": {
+                "type": "string",
+                "description": "The provider action's id."
+              },
+              "createdAt": {
+                "type": "integer",
+                "format": "int64",
+                "description": "When it was made (epoch milliseconds)."
+              },
+              "decidedAt": {
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "int64",
+                "description": "When it was decided (epoch milliseconds)."
+              },
+              "decidedBy": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "description": "Who approved or denied it: a principal, `policy:auto`, or\n`policy:deny`."
+              },
+              "decisionNote": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "description": "A denier's note."
+              },
+              "expiresAt": {
+                "type": "integer",
+                "format": "int64",
+                "description": "When an undecided request expires (epoch milliseconds)."
+              },
+              "failure": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "description": "Why it failed."
+              },
+              "id": {
+                "type": "string",
+                "description": "The request's identity."
+              },
+              "operationId": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "description": "The durable operation that executes it, once created. Poll it at\n`/operations/{id}`."
+              },
+              "origin": {
+                "type": "string",
+                "description": "Where the request came from (`api`)."
+              },
+              "parameters": {
+                "type": "object",
+                "description": "The structured, secret-free parameters."
+              },
+              "reason": {
+                "type": "string",
+                "description": "Why the requester wants it."
+              },
+              "requester": {
+                "type": "string",
+                "description": "The principal that asked."
+              },
+              "riskClass": {
+                "type": "string",
+                "description": "The effective risk class when the request was made: `auto` (ran\nwithout a decision), `approve` (waits for a person), or `deny`\n(refused by policy)."
+              },
+              "state": {
+                "type": "string",
+                "description": "`pending`, `approved`, `denied`, `expired`, `executing`,\n`succeeded`, or `failed`."
+              },
+              "target": {
+                "type": "string",
+                "description": "What the action acts on."
+              },
+              "terminal": {
+                "type": "boolean",
+                "description": "Whether the state will never change."
+              },
+              "updatedAt": {
+                "type": "integer",
+                "format": "int64",
+                "description": "The last change (epoch milliseconds)."
+              }
+            }
           }
         }
       },
@@ -19602,6 +20375,10 @@
     {
       "name": "operations",
       "description": "Durable operations: accepted remote work."
+    },
+    {
+      "name": "requests",
+      "description": "The action broker (ADR 0016): agents request typed provider actions; policy or a person approves them; approved requests run as durable operations. Before authenticated identities, policy is a guardrail keyed on risk class, not a security boundary."
     },
     {
       "name": "credentials",
