@@ -251,6 +251,13 @@ pub trait ProviderAction: fmt::Debug + Send + Sync {
     /// Returns a caller-safe message when the request is malformed.
     fn validate(&self, target: &str, parameters: &serde_json::Value) -> Result<(), String>;
 
+    /// The parameters as an idempotent replay compares them: an action drops
+    /// display-only fields (a resource name that discovery may rename between
+    /// retries). The default compares everything.
+    fn comparable_parameters(&self, parameters: &serde_json::Value) -> serde_json::Value {
+        parameters.clone()
+    }
+
     /// The durable operation that carries out an approved request. The
     /// broker sets the idempotency key and correlation id.
     ///
@@ -777,10 +784,15 @@ impl Broker {
         parameters: &serde_json::Value,
         now: i64,
     ) -> Result<ActionRequest, BrokerError> {
-        if existing.action_id != action_id
-            || existing.target != target
-            || &existing.parameters != parameters
-        {
+        // An action may leave display-only fields out of the comparison.
+        let same_parameters = match self.registry.get(action_id) {
+            Some(action) => {
+                action.comparable_parameters(&existing.parameters)
+                    == action.comparable_parameters(parameters)
+            }
+            None => &existing.parameters == parameters,
+        };
+        if existing.action_id != action_id || existing.target != target || !same_parameters {
             return Err(BrokerError::Conflict {
                 state: existing.state,
                 detail: "the idempotency key was already used for a different request".to_owned(),

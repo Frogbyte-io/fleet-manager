@@ -301,7 +301,6 @@ pub(crate) fn request(action: &DnsAction) -> RequestShape {
     }
 }
 
-
 /// Server-supplied text for a terminal: control characters become spaces.
 fn clean(text: &str) -> String {
     text.chars()

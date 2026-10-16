@@ -248,6 +248,20 @@ impl std::error::Error for LifecycleFailure {}
 pub struct LifecycleAck {
     /// The deployment uuid, when Coolify queued a deployment.
     pub deployment_uuid: Option<String>,
+    /// Coolify's own `message` for the call (scrubbed and bounded), when it
+    /// gave one. For an application start or restart that queued nothing it
+    /// says why.
+    pub message: Option<String>,
+}
+
+/// A resource as read back: its status string and numeric id.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct ResourceState {
+    /// Coolify's status string (`running:healthy`, `exited`, ...).
+    pub status: String,
+    /// Coolify's numeric id, when the answer carried one (deployments refer
+    /// to an application by it).
+    pub id: Option<i64>,
 }
 
 /// One deployment as read for its log.
@@ -259,6 +273,17 @@ pub struct RawDeployment {
     /// The raw `logs` value (a JSON-encoded array of entries), present only
     /// when the token may read sensitive values.
     pub logs: Option<String>,
+    /// The numeric id of the application the deployment belongs to.
+    pub application_id: Option<i64>,
+}
+
+/// Whether a deployment status is final.
+#[must_use]
+pub fn deployment_terminal(status: &str) -> bool {
+    matches!(
+        status,
+        "finished" | "failed" | "cancelled" | "cancelled-by-user"
+    )
 }
 
 /// The mutating Coolify client port. The provider crate implements it; it
@@ -302,7 +327,7 @@ pub trait CoolifyLifecyclePort: fmt::Debug + Send + Sync {
         token: &SensitiveString,
         resource: LifecycleResource,
         uuid: &str,
-    ) -> Result<String, LifecycleFailure>;
+    ) -> Result<ResourceState, LifecycleFailure>;
 
     /// The newest deployment uuid of an application, if it has one.
     ///
@@ -489,6 +514,16 @@ impl ProviderAction for CoolifyLifecycleAction {
         Ok(())
     }
 
+    fn comparable_parameters(&self, parameters: &Value) -> Value {
+        // The name is for the approver; a replay is the same request when the
+        // account, kind, and uuid agree (the action id carries the verb).
+        let mut comparable = parameters.clone();
+        if let Some(object) = comparable.as_object_mut() {
+            object.remove("name");
+        }
+        comparable
+    }
+
     fn operation(&self, request: &ActionRequest) -> Result<NewOperation, String> {
         let parameters: LifecycleParameters = serde_json::from_value(request.parameters.clone())
             .map_err(|_| "the request parameters are not a lifecycle request".to_owned())?;
@@ -593,7 +628,8 @@ pub struct LifecycleRequest {
 #[serde(rename_all = "camelCase")]
 pub struct LifecycleOutcome {
     /// `started`, `stopped`, `restarted`, `redeploy_queued`, `start_queued`,
-    /// or `unchanged`.
+    /// `skipped` (Coolify queued nothing for an application start or
+    /// restart; see `message`), or `unchanged`.
     pub outcome: String,
     /// The verb.
     pub verb: String,
@@ -605,11 +641,19 @@ pub struct LifecycleOutcome {
     pub previous_status: String,
     /// The status read after the call.
     pub observed_status: String,
-    /// Whether the observed status shows the expected state.
+    /// Whether the end state was verified: the deployment finished, or a
+    /// stop or a service/database start shows its expected status. A restart
+    /// of a service or database cannot be verified and is never settled.
     pub settled: bool,
-    /// The deployment Coolify queued, when it did.
+    /// The deployment Coolify queued, when it did (confirmed by reading it).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub deployment_uuid: Option<String>,
+    /// That deployment's last observed status.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub deployment_status: Option<String>,
+    /// Coolify's own message for the call, scrubbed and bounded.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
 }
 
 /// One deployment's log, bounded and redacted.
@@ -837,11 +881,19 @@ impl CoolifyLifecycle {
     /// Runs an approved request: the operation executor calls this with the
     /// operation's payload.
     ///
+    /// The request may have been filed through the generic `POST /requests`
+    /// route, which cannot check anything against Coolify, so everything the
+    /// approver read is checked again here against the account's latest
+    /// observation: the uuid must be known, and its kind and name must still
+    /// be the ones in the request. Anything else fails with "re-file".
+    ///
     /// # Errors
     ///
-    /// Fails with a caller-safe reason: a malformed payload, a gone
-    /// account or resource, an unsupported Coolify version, a provider
-    /// failure.
+    /// Fails with a caller-safe reason: a malformed payload, a request that no
+    /// longer matches the observation, a gone account or resource, an
+    /// unsupported Coolify version, a provider failure, or a deployment
+    /// Coolify did not confirm.
+    #[allow(clippy::too_many_lines)]
     pub async fn execute(&self, kind: &str, payload: &str) -> Result<LifecycleOutcome, String> {
         if kind != LIFECYCLE_KIND {
             return Err(format!("{kind} is not a Coolify lifecycle operation"));
@@ -856,6 +908,26 @@ impl CoolifyLifecycle {
         if !verb.allowed_for(params.resource_kind) {
             return Err("the verb is not offered for the resource kind".to_owned());
         }
+        let resource = params.resource_kind;
+        let uuid = params.uuid.as_str();
+        // What the approver read must still be true.
+        let (observed_kind, observed_name) = self
+            .observed_resource(&params.account_id, uuid)
+            .await
+            .map_err(|error| match error {
+                LifecycleError::NotFound { .. } => {
+                    "the resource is not in the account's latest Coolify observation; run discovery and re-file the request"
+                        .to_owned()
+                }
+                LifecycleError::Backend { context, .. } => format!("{context} failed"),
+                other => other.to_string(),
+            })?;
+        if observed_kind != resource || bounded_name(&observed_name) != params.name {
+            return Err(
+                "the request no longer matches the latest Coolify observation (the resource's kind or name differs); nothing was changed, so re-file the request"
+                    .to_owned(),
+            );
+        }
         let (account, token) =
             self.resolve(&params.account_id)
                 .await
@@ -868,8 +940,6 @@ impl CoolifyLifecycle {
         let version = self.port.version(base, &token).await.map_err(provider)?;
         check_version(&version).map_err(provider)?;
 
-        let resource = params.resource_kind;
-        let uuid = params.uuid.as_str();
         // The resource must still exist; a gone resource is not retried.
         let previous = self
             .port
@@ -880,7 +950,8 @@ impl CoolifyLifecycle {
                     "the resource no longer exists in Coolify; nothing was changed".to_owned()
                 }
                 _ => failure.to_string(),
-            })?;
+            })?
+            .status;
         let previous_state = coarse_state(&previous);
         let unchanged = match verb {
             LifecycleVerb::Stop => previous_state == Coarse::Stopped,
@@ -896,6 +967,8 @@ impl CoolifyLifecycle {
             observed_status: previous,
             settled: true,
             deployment_uuid: None,
+            deployment_status: None,
+            message: None,
         };
         if unchanged {
             return Ok(result);
@@ -905,31 +978,91 @@ impl CoolifyLifecycle {
             .run(base, &token, resource, uuid, verb)
             .await
             .map_err(provider)?;
-        result.deployment_uuid = ack.deployment_uuid;
-        let outcome = match (verb, resource) {
-            (LifecycleVerb::Stop, _) => "stopped",
-            (LifecycleVerb::Restart, _) => "restarted",
-            (LifecycleVerb::Redeploy, _) => "redeploy_queued",
-            (LifecycleVerb::Start, LifecycleResource::Application) => "start_queued",
-            (LifecycleVerb::Start, _) => "started",
+        result.message = ack.message.clone();
+        let says = ack
+            .message
+            .as_deref()
+            .map(|m| format!(" (Coolify said: {m})"))
+            .unwrap_or_default();
+        // A redeploy that queued nothing is a failure: Coolify answers HTTP
+        // 200 with the reason in `message` for an unauthorized resource, a
+        // full queue, or a deployment already queued.
+        if verb == LifecycleVerb::Redeploy && ack.deployment_uuid.is_none() {
+            return Err(format!("Coolify did not queue a deployment{says}"));
+        }
+        let outcome = match (verb, resource, ack.deployment_uuid.is_some()) {
+            (LifecycleVerb::Stop, _, _) => "stopped",
+            (LifecycleVerb::Redeploy, _, _) => "redeploy_queued",
+            // An application start or restart that queued no deployment was
+            // skipped by Coolify (for example one is already queued).
+            (
+                LifecycleVerb::Start | LifecycleVerb::Restart,
+                LifecycleResource::Application,
+                false,
+            ) => "skipped",
+            (LifecycleVerb::Restart, _, _) => "restarted",
+            (LifecycleVerb::Start, LifecycleResource::Application, true) => "start_queued",
+            (LifecycleVerb::Start, _, _) => "started",
         };
         outcome.clone_into(&mut result.outcome);
-        // Read the resource again, a bounded number of times, until it shows
-        // the expected state.
-        let expected = if verb == LifecycleVerb::Stop {
-            Coarse::Stopped
-        } else {
-            Coarse::Running
-        };
         result.settled = false;
+        if outcome == "skipped" {
+            // Nothing was started by this request; report the status as it is.
+            if let Ok(state) = self.port.status(base, &token, resource, uuid).await {
+                result.observed_status = state.status;
+            }
+            return Ok(result);
+        }
+        if let Some(deployment) = ack.deployment_uuid {
+            // Coolify's answer names a deployment: confirm it exists, then
+            // follow its status (bounded).
+            let mut seen = self
+                .port
+                .deployment(base, &token, &deployment)
+                .await
+                .map_err(|failure| {
+                    format!(
+                        "Coolify named deployment {deployment} but it could not be confirmed ({})",
+                        failure.class.id()
+                    )
+                })?;
+            result.deployment_uuid = Some(deployment.clone());
+            let mut polls = 0;
+            while !deployment_terminal(&seen.status) && polls < self.settle.attempts {
+                polls += 1;
+                if !self.settle.interval.is_zero() {
+                    tokio::time::sleep(self.settle.interval).await;
+                }
+                match self.port.deployment(base, &token, &deployment).await {
+                    Ok(next) => seen = next,
+                    Err(_) => break,
+                }
+            }
+            let status = scrub_status(&seen.status);
+            result.settled = status == "finished";
+            result.deployment_status = Some(status);
+            if let Ok(state) = self.port.status(base, &token, resource, uuid).await {
+                result.observed_status = state.status;
+            }
+            return Ok(result);
+        }
+        // No deployment: read the resource again, a bounded number of times,
+        // until it shows the expected state. Only a stop and a service or
+        // database start have an end state to verify; a restart's "running"
+        // is the same before and after, so it is never reported settled.
+        let expected = match verb {
+            LifecycleVerb::Stop => Some(Coarse::Stopped),
+            LifecycleVerb::Start => Some(Coarse::Running),
+            _ => None,
+        };
         for _ in 0..self.settle.attempts {
             if !self.settle.interval.is_zero() {
                 tokio::time::sleep(self.settle.interval).await;
             }
             match self.port.status(base, &token, resource, uuid).await {
-                Ok(status) => {
-                    result.settled = coarse_state(&status) == expected;
-                    result.observed_status = status;
+                Ok(state) => {
+                    result.settled = expected == Some(coarse_state(&state.status));
+                    result.observed_status = state.status;
                     if result.settled {
                         break;
                     }
@@ -945,13 +1078,15 @@ impl CoolifyLifecycle {
     }
 
     /// Tails the log of an application's deployment: the newest one, or the
-    /// named one. Bounded, redacted, never stored.
+    /// named one, which must belong to this application. Bounded, redacted,
+    /// never stored.
     ///
     /// # Errors
     ///
     /// Fails on denial, an unknown service, a service that is not an
-    /// application, a token without `read:sensitive` (reported plainly), or
-    /// a provider failure.
+    /// application, a deployment of another application, a token without
+    /// `read:sensitive` (reported plainly), a log in a shape Fleet does not
+    /// recognize (nothing is returned), or a provider failure.
     pub async fn logs(
         &self,
         authorizer: &dyn Authorizer,
@@ -964,7 +1099,8 @@ impl CoolifyLifecycle {
             invalid("the service id must be a Coolify service (coolify:<account>:<uuid>)")
         })?;
         // Reading logs sends the account's token and returns text from the
-        // deployment's build: the same privilege as running discovery.
+        // deployment's build: the same privilege as running discovery, so it
+        // needs `external_account.config` on the account, consistently.
         Self::require(
             authorizer,
             principal,
@@ -987,16 +1123,19 @@ impl CoolifyLifecycle {
         }
         let (account, token) = self.resolve(account_id).await?;
         let base = account.base_url.as_str();
-        self.audit(
-            principal,
-            account_id,
-            "coolify_logs_read",
-            &[("uuid", uuid)],
-        )
-        .await?;
         let provider = LifecycleError::Provider;
         let version = self.port.version(base, &token).await.map_err(provider)?;
         check_version(&version).map_err(LifecycleError::Provider)?;
+        // The application's own id, to check the deployment against.
+        let application_id = self
+            .port
+            .status(base, &token, LifecycleResource::Application, uuid)
+            .await
+            .map_err(LifecycleError::Provider)?
+            .id
+            .ok_or_else(|| {
+                invalid("Coolify did not report the application's id, so a deployment cannot be matched to it")
+            })?;
         let deployment_uuid = match deployment {
             Some(deployment) => deployment.to_owned(),
             None => self
@@ -1008,18 +1147,37 @@ impl CoolifyLifecycle {
                     what: "a deployment of this application".to_owned(),
                 })?,
         };
+        self.audit(
+            principal,
+            account_id,
+            "coolify_logs_read",
+            &[("uuid", uuid), ("deployment", &deployment_uuid)],
+        )
+        .await?;
         let raw = self
             .port
             .deployment(base, &token, &deployment_uuid)
             .await
             .map_err(LifecycleError::Provider)?;
+        // Fail closed: a deployment of another application (or one Coolify
+        // does not attribute) is never shown through this service.
+        if raw.application_id != Some(application_id) {
+            return Err(invalid(
+                "that deployment does not belong to this application",
+            ));
+        }
         let Some(logs) = raw.logs else {
             return Err(LifecycleError::Provider(LifecycleFailure::new(
                 LifecycleFailureClass::Permission,
-                "Coolify returns deployment logs only to a token with the read:sensitive ability (and deploy for actions); give the account's token that ability or read the log in Coolify",
+                "Coolify returns deployment logs only to a token with the read:sensitive ability; give the account's token that ability or read the log in Coolify",
             )));
         };
-        let mut tail = tail_logs(&logs, wanted, MAX_LOG_BYTES);
+        let mut tail = tail_logs(&logs, wanted, MAX_LOG_BYTES).map_err(|detail| {
+            LifecycleError::Provider(LifecycleFailure::new(
+                LifecycleFailureClass::Invalid,
+                detail,
+            ))
+        })?;
         tail.deployment_uuid = deployment_uuid;
         tail.deployment_status = scrub_status(&raw.status);
         Ok(tail)
@@ -1115,31 +1273,47 @@ pub fn scrub_status(status: &str) -> String {
         .collect()
 }
 
-/// Turns Coolify's `logs` value (a JSON array of entries, usually carried as
-/// a JSON-encoded string) into a bounded, redacted tail. Hidden entries are
-/// dropped; entries without text are skipped; a value that is not the
-/// documented shape is treated as plain text.
-#[must_use]
-pub fn tail_logs(raw: &str, max_lines: usize, max_bytes: usize) -> LogTail {
-    let mut text = String::new();
-    let parsed: Option<Value> = serde_json::from_str(raw).ok();
+/// Turns Coolify's `logs` value into a bounded, redacted tail.
+///
+/// The value is a JSON array of entries (`output`, `hidden`, ...), usually
+/// carried as a JSON-encoded string. Hidden entries are dropped and entries
+/// without text are skipped. Any other shape fails closed: no raw text is
+/// returned, because it could not be attributed to entries and so could not
+/// be filtered.
+///
+/// Redaction recognizes credential shapes (Authorization and bearer headers,
+/// `key=value` secret pairs, URL credentials, private-key blocks). A secret
+/// that a build step prints as ordinary text, such as a build variable echoed
+/// by a script, has no shape and is not detectable; that residual risk is why
+/// reading logs needs `external_account.config` and is audited.
+///
+/// # Errors
+///
+/// Returns a caller-safe reason when the shape is not the documented one.
+pub fn tail_logs(raw: &str, max_lines: usize, max_bytes: usize) -> Result<LogTail, String> {
+    const UNKNOWN: &str = "the deployment log is not in a shape Fleet recognizes, so nothing is returned; read it in Coolify";
+    let parsed: Value = serde_json::from_str(raw).map_err(|_| UNKNOWN.to_owned())?;
     let entries = match parsed {
-        Some(Value::String(inner)) => serde_json::from_str::<Value>(&inner).ok(),
+        Value::String(inner) => {
+            serde_json::from_str::<Value>(&inner).map_err(|_| UNKNOWN.to_owned())?
+        }
         other => other,
     };
-    match entries {
-        Some(Value::Array(entries)) => {
-            for entry in &entries {
-                if entry.get("hidden").and_then(Value::as_bool) == Some(true) {
-                    continue;
-                }
-                if let Some(output) = entry.get("output").and_then(Value::as_str) {
-                    text.push_str(output);
-                    text.push('\n');
-                }
-            }
+    let Value::Array(entries) = entries else {
+        return Err(UNKNOWN.to_owned());
+    };
+    let mut text = String::new();
+    for entry in &entries {
+        if !entry.is_object() {
+            return Err(UNKNOWN.to_owned());
         }
-        _ => text.push_str(raw),
+        if entry.get("hidden").and_then(Value::as_bool) == Some(true) {
+            continue;
+        }
+        if let Some(output) = entry.get("output").and_then(Value::as_str) {
+            text.push_str(output);
+            text.push('\n');
+        }
     }
     // Strip terminal escapes and flatten control characters first so a
     // colour code cannot split a credential from its name, then redact.
@@ -1173,13 +1347,13 @@ pub fn tail_logs(raw: &str, max_lines: usize, max_bytes: usize) -> LogTail {
         *first = first[cut..].to_owned();
         truncated = true;
     }
-    LogTail {
+    Ok(LogTail {
         deployment_uuid: String::new(),
         deployment_status: String::new(),
         lines: kept,
         truncated,
         redacted,
-    }
+    })
 }
 
 #[cfg(test)]
@@ -1246,16 +1420,20 @@ mod tests {
         ]);
         // Coolify carries the array as a JSON-encoded string.
         let raw = serde_json::to_string(&entries.to_string()).unwrap();
-        let tail = tail_logs(&raw, 10, MAX_LOG_BYTES);
+        let tail = tail_logs(&raw, 10, MAX_LOG_BYTES).unwrap();
         let text = tail.lines.join("\n");
         assert!(!text.contains("secret internal step"));
         assert!(!text.contains("abcdef0123456789abcdef0123456789"), "{text}");
         assert!(text.contains("building") && text.contains("done"));
         assert!(tail.redacted && !tail.truncated);
-        let short = tail_logs(&raw, 1, MAX_LOG_BYTES);
+        let short = tail_logs(&raw, 1, MAX_LOG_BYTES).unwrap();
         assert_eq!(short.lines.len(), 1);
         assert!(short.truncated);
-        let tiny = tail_logs(&raw, 10, 12);
+        let tiny = tail_logs(&raw, 10, 12).unwrap();
+        // An unknown shape fails closed instead of returning raw text.
+        assert!(tail_logs("plain text with token=abc", 10, 100).is_err());
+        assert!(tail_logs("{\"logs\": []}", 10, 100).is_err());
+        assert!(tail_logs("[\"just a string\"]", 10, 100).is_err());
         assert!(tiny.truncated);
         assert!(tiny.lines.iter().map(|l| l.len() + 1).sum::<usize>() <= 13);
     }

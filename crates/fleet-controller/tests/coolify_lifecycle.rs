@@ -27,6 +27,8 @@ const APP: &str = "appweb000000000001";
 const SVC: &str = "svcplausible000000001";
 const DB: &str = "dbpostgres00000000001";
 const DEPLOYMENT: &str = "dep0000000000000001";
+/// A deployment of some other application.
+const OTHER_DEPLOYMENT: &str = "dep0000000000000999";
 
 #[derive(Default)]
 struct Coolify {
@@ -36,6 +38,23 @@ struct Coolify {
     sensitive: bool,
     /// Every request as `METHOD target`.
     log: Vec<String>,
+    /// Answer every lifecycle call with Coolify's missing-ability 403.
+    forbid_deploy: bool,
+    /// Answer application start, restart, and deploy with HTTP 200 and a
+    /// message but no deployment (what Coolify does when it skips).
+    skip_apps: bool,
+    /// Serve a log in a shape Fleet does not recognize.
+    bad_logs: bool,
+    /// Report the application under another name.
+    renamed: bool,
+}
+
+fn numeric_id(uuid: &str) -> u32 {
+    match uuid {
+        APP => 1,
+        SVC => 2,
+        _ => 3,
+    }
 }
 
 type Shared = Arc<Mutex<Coolify>>;
@@ -62,7 +81,7 @@ fn respond(state: &mut Coolify, method: &str, target: &str) -> (u16, String) {
         ("GET", ["servers" | "projects" | "deployments"]) => (200, "[]".to_owned()),
         ("GET", ["applications"]) => (
             200,
-            json!([{"uuid": APP, "name": "web", "status": state.statuses[APP], "environment_id": 1,
+            json!([{"uuid": APP, "name": if state.renamed { "web-renamed" } else { "web" }, "status": state.statuses[APP], "environment_id": 1,
                     "fqdn": "https://shop.example.test", "build_pack": "nixpacks"}])
             .to_string(),
         ),
@@ -80,7 +99,10 @@ fn respond(state: &mut Coolify, method: &str, target: &str) -> (u16, String) {
         ),
         ("GET", ["applications" | "services" | "databases", uuid]) => {
             match status_of(state, uuid) {
-                Some(status) => (200, json!({"uuid": uuid, "status": status}).to_string()),
+                Some(status) => (
+                    200,
+                    json!({"id": numeric_id(uuid), "uuid": uuid, "status": status}).to_string(),
+                ),
                 None => (404, json!({"message": "Resource not found."}).to_string()),
             }
         }
@@ -90,9 +112,23 @@ fn respond(state: &mut Coolify, method: &str, target: &str) -> (u16, String) {
             json!({"message": "This endpoint has changed to a POST request."}).to_string(),
         ),
         ("POST", [family @ ("applications" | "services" | "databases"), uuid, verb]) => {
-            let _ = family;
+            if state.forbid_deploy {
+                return (
+                    403,
+                    json!({"message": "You are not allowed to perform this action. Missing required permissions: deploy"})
+                        .to_string(),
+                );
+            }
             if !state.statuses.contains_key(*uuid) {
                 return (404, json!({"message": "Resource not found."}).to_string());
+            }
+            let application = *family == "applications" && *verb != "stop";
+            if application && state.skip_apps {
+                return (
+                    200,
+                    json!({"message": "Deployment is already queued for this application."})
+                        .to_string(),
+                );
             }
             let next = match *verb {
                 "stop" => "exited",
@@ -100,10 +136,14 @@ fn respond(state: &mut Coolify, method: &str, target: &str) -> (u16, String) {
                 _ => return (404, json!({"message": "Not found."}).to_string()),
             };
             state.statuses.insert((*uuid).to_owned(), next.to_owned());
-            (
-                200,
-                json!({"message": "Request queued.", "deployment_uuid": DEPLOYMENT}).to_string(),
-            )
+            if application {
+                return (
+                    200,
+                    json!({"message": "Deployment request queued.", "deployment_uuid": DEPLOYMENT})
+                        .to_string(),
+                );
+            }
+            (200, json!({"message": "Request queued."}).to_string())
         }
         ("POST", ["deploy"]) => {
             let uuid = target
@@ -111,8 +151,22 @@ fn respond(state: &mut Coolify, method: &str, target: &str) -> (u16, String) {
                 .nth(1)
                 .and_then(|rest| rest.split('&').next())
                 .unwrap_or_default();
+            if state.forbid_deploy {
+                return (
+                    403,
+                    json!({"message": "Missing required permissions: deploy"}).to_string(),
+                );
+            }
             if !state.statuses.contains_key(uuid) {
                 return (404, json!({"message": "No resources found."}).to_string());
+            }
+            if state.skip_apps {
+                return (
+                    200,
+                    json!({"deployments": [{"message": "Deployment is already queued for this application.",
+                        "resource_uuid": uuid}]})
+                    .to_string(),
+                );
             }
             (
                 200,
@@ -126,10 +180,15 @@ fn respond(state: &mut Coolify, method: &str, target: &str) -> (u16, String) {
             json!({"count": 1, "deployments": [{"deployment_uuid": DEPLOYMENT, "status": "finished"}]})
                 .to_string(),
         ),
-        ("GET", ["deployments", uuid]) if *uuid == DEPLOYMENT => {
-            let mut body = json!({"deployment_uuid": DEPLOYMENT, "status": "finished"});
+        ("GET", ["deployments", uuid]) if *uuid == DEPLOYMENT || *uuid == OTHER_DEPLOYMENT => {
+            let owner = if *uuid == DEPLOYMENT { "1" } else { "999" };
+            let mut body = json!({"deployment_uuid": uuid, "status": "finished", "application_id": owner});
             if state.sensitive {
-                body["logs"] = json!(logs_value());
+                body["logs"] = if state.bad_logs {
+                    json!("this is plain text, not the documented entries; token=abcdefghijklmnop")
+                } else {
+                    json!(logs_value())
+                };
             }
             (200, body.to_string())
         }
@@ -223,6 +282,10 @@ impl Rig {
             ]),
             sensitive: true,
             log: Vec::new(),
+            forbid_deploy: false,
+            skip_apps: false,
+            bad_logs: false,
+            renamed: false,
         }));
         let base = stub_coolify(coolify.clone()).await;
         let dist = tempfile::tempdir().unwrap();
@@ -661,4 +724,305 @@ async fn discovery_still_sends_only_gets() {
             .all(|line| line.starts_with("GET")),
         "discovery sent a non-GET request"
     );
+}
+
+/// Files a request, approves it when policy asks, runs it, and returns the
+/// request and the operation as the API serves them.
+async fn file_and_run(rig: &Rig, uuid: &str, verb: &str) -> (Value, Value, Value) {
+    let (status, filed) = rig.act(uuid, verb).await;
+    assert_eq!(status, 201, "{verb} {uuid}: {filed}");
+    let id = filed["data"]["id"].as_str().unwrap().to_owned();
+    if filed["data"]["state"] == "pending" {
+        let (status, approved) = raw(
+            rig.address,
+            "POST",
+            &format!("/api/v1/requests/{id}/approve"),
+            None,
+        )
+        .await;
+        assert_eq!(status, 200, "{approved}");
+    }
+    let (request, operation) = rig.run(&id).await;
+    (filed["data"].clone(), request, operation)
+}
+
+#[tokio::test]
+async fn every_action_round_trips_through_the_broker() {
+    let rig = Rig::new().await;
+    // (resource, verb, risk class, the request the stub must have seen)
+    let table: [(&str, &str, &str, String); 10] = [
+        (
+            APP,
+            "start",
+            "auto",
+            format!("POST /api/v1/applications/{APP}/start"),
+        ),
+        (
+            APP,
+            "restart",
+            "auto",
+            format!("POST /api/v1/applications/{APP}/restart"),
+        ),
+        (
+            APP,
+            "redeploy",
+            "auto",
+            format!("POST /api/v1/deploy?uuid={APP}&force=false"),
+        ),
+        (
+            APP,
+            "stop",
+            "approve",
+            format!("POST /api/v1/applications/{APP}/stop?docker_cleanup=false"),
+        ),
+        (
+            SVC,
+            "start",
+            "auto",
+            format!("POST /api/v1/services/{SVC}/start"),
+        ),
+        (
+            SVC,
+            "restart",
+            "auto",
+            format!("POST /api/v1/services/{SVC}/restart"),
+        ),
+        (
+            SVC,
+            "stop",
+            "approve",
+            format!("POST /api/v1/services/{SVC}/stop?docker_cleanup=false"),
+        ),
+        (
+            DB,
+            "start",
+            "auto",
+            format!("POST /api/v1/databases/{DB}/start"),
+        ),
+        (
+            DB,
+            "restart",
+            "auto",
+            format!("POST /api/v1/databases/{DB}/restart"),
+        ),
+        (
+            DB,
+            "stop",
+            "approve",
+            format!("POST /api/v1/databases/{DB}/stop?docker_cleanup=false"),
+        ),
+    ];
+    for (uuid, verb, risk, route) in table {
+        // A start needs something stopped to start.
+        let status = if verb == "start" {
+            "exited"
+        } else {
+            "running:healthy"
+        };
+        rig.coolify
+            .lock()
+            .unwrap()
+            .statuses
+            .insert(uuid.to_owned(), status.to_owned());
+        rig.coolify.lock().unwrap().log.clear();
+        let (filed, request, operation) = file_and_run(&rig, uuid, verb).await;
+        assert_eq!(
+            filed["actionId"],
+            format!("coolify.{}.{verb}", kind_of(uuid))
+        );
+        assert_eq!(filed["riskClass"], risk, "{verb} {uuid}");
+        assert_eq!(
+            request["state"], "succeeded",
+            "{verb} {uuid}: {request} {operation}"
+        );
+        assert_eq!(
+            rig.requests_to(&route).len(),
+            1,
+            "{verb} {uuid}: expected {route}"
+        );
+        let result = result_of(&operation);
+        assert_eq!(result["verb"], verb);
+        assert_eq!(result["resourceKind"], kind_of(uuid));
+        // Only a restart of a service or database cannot be verified.
+        let verifiable = !(verb == "restart" && uuid != APP);
+        assert_eq!(result["settled"], verifiable, "{verb} {uuid}: {result}");
+        if uuid == APP && verb != "stop" {
+            assert_eq!(result["deploymentUuid"], DEPLOYMENT);
+            assert_eq!(result["deploymentStatus"], "finished");
+        }
+    }
+}
+
+fn kind_of(uuid: &str) -> &'static str {
+    match uuid {
+        APP => "application",
+        SVC => "service",
+        _ => "database",
+    }
+}
+
+#[tokio::test]
+async fn a_token_without_deploy_fails_the_operation_with_the_ability_named() {
+    let rig = Rig::new().await;
+    rig.coolify.lock().unwrap().forbid_deploy = true;
+    let (_, request, operation) = file_and_run(&rig, APP, "restart").await;
+    assert_eq!(request["state"], "failed", "{request} {operation}");
+    assert_eq!(operation["state"], "failed");
+    let text = operation.to_string();
+    assert!(text.contains("deploy ability"), "{text}");
+    assert!(!text.contains(TOKEN));
+}
+
+#[tokio::test]
+async fn a_skipped_application_start_says_skipped_and_a_redeploy_that_queues_nothing_fails() {
+    let rig = Rig::new().await;
+    rig.coolify.lock().unwrap().skip_apps = true;
+    let (_, request, operation) = file_and_run(&rig, APP, "restart").await;
+    assert_eq!(request["state"], "succeeded", "{request} {operation}");
+    let result = result_of(&operation);
+    assert_eq!(result["outcome"], "skipped", "{result}");
+    assert_eq!(result["settled"], false);
+    assert!(
+        result["message"]
+            .as_str()
+            .unwrap()
+            .contains("already queued"),
+        "{result}"
+    );
+    assert!(result.get("deploymentUuid").is_none());
+
+    let (_, request, operation) = file_and_run(&rig, APP, "redeploy").await;
+    assert_eq!(request["state"], "failed", "{request} {operation}");
+    let text = operation.to_string();
+    assert!(
+        text.contains("did not queue a deployment") && text.contains("already queued"),
+        "{text}"
+    );
+}
+
+#[tokio::test]
+async fn the_generic_request_route_cannot_spoof_what_the_approver_reads() {
+    let rig = Rig::new().await;
+    let generic = |uuid: &str, name: &str| {
+        json!({
+            "actionId": "coolify.application.restart",
+            "target": rig.id(uuid),
+            "reason": "generic route",
+            "parameters": {"accountId": rig.account, "resourceKind": "application",
+                           "uuid": uuid, "name": name}
+        })
+    };
+    // A spoofed name: filed (the generic route cannot check Coolify), but
+    // nothing runs.
+    let (status, filed) = raw(
+        rig.address,
+        "POST",
+        "/api/v1/requests",
+        Some(generic(APP, "definitely-not-web")),
+    )
+    .await;
+    assert_eq!(status, 201, "{filed}");
+    let (request, operation) = rig.run(filed["data"]["id"].as_str().unwrap()).await;
+    assert_eq!(request["state"], "failed", "{request} {operation}");
+    assert!(operation.to_string().contains("re-file"), "{operation}");
+    // An unknown uuid.
+    let (status, filed) = raw(
+        rig.address,
+        "POST",
+        "/api/v1/requests",
+        Some(generic("nosuchresource0001", "web")),
+    )
+    .await;
+    assert_eq!(status, 201, "{filed}");
+    let (request, operation) = rig.run(filed["data"]["id"].as_str().unwrap()).await;
+    assert_eq!(request["state"], "failed", "{request} {operation}");
+    assert!(operation.to_string().contains("re-file"), "{operation}");
+    // A kind that is not the resource's kind.
+    let mut wrong = generic(APP, "web");
+    wrong["actionId"] = json!("coolify.database.restart");
+    wrong["parameters"]["resourceKind"] = json!("database");
+    let (_, filed) = raw(rig.address, "POST", "/api/v1/requests", Some(wrong)).await;
+    let (request, _) = rig.run(filed["data"]["id"].as_str().unwrap()).await;
+    assert_eq!(request["state"], "failed");
+    assert!(
+        rig.requests_to("POST").is_empty(),
+        "nothing was sent to Coolify"
+    );
+}
+
+#[tokio::test]
+async fn the_generic_operations_surface_refuses_the_lifecycle_kind() {
+    let rig = Rig::new().await;
+    let (status, body) = raw(
+        rig.address,
+        "POST",
+        "/api/v1/operations",
+        Some(json!({
+            "kind": "coolify.lifecycle",
+            "payloadJson": json!({"accountId": rig.account, "resourceKind": "application",
+                "uuid": APP, "name": "web", "verb": "stop"}).to_string()
+        })),
+    )
+    .await;
+    assert!((400..500).contains(&status), "{status} {body}");
+    assert!(body.to_string().contains("action request"), "{body}");
+    assert!(rig.requests_to("POST").is_empty());
+}
+
+#[tokio::test]
+async fn a_retry_with_the_same_key_is_the_same_request_even_if_discovery_renamed_the_resource() {
+    let rig = Rig::new().await;
+    let body = json!({"reason": "retry", "idempotencyKey": "key-1"});
+    let path = format!("/api/v1/services/{}/actions/stop", rig.id(APP));
+    let (status, first) = raw(rig.address, "POST", &path, Some(body.clone())).await;
+    assert_eq!(status, 201, "{first}");
+    rig.coolify.lock().unwrap().renamed = true;
+    rig.discover().await;
+    let (status, second) = raw(rig.address, "POST", &path, Some(body)).await;
+    assert_eq!(status, 201, "{second}");
+    assert_eq!(first["data"]["id"], second["data"]["id"]);
+    // A different resource under the same key is still a conflict.
+    let other = format!("/api/v1/services/{}/actions/stop", rig.id(SVC));
+    let (status, _) = raw(
+        rig.address,
+        "POST",
+        &other,
+        Some(json!({"reason": "retry", "idempotencyKey": "key-1"})),
+    )
+    .await;
+    assert_eq!(status, 409);
+}
+
+#[tokio::test]
+async fn a_deployment_of_another_application_and_an_unknown_log_shape_are_refused() {
+    let rig = Rig::new().await;
+    let path = format!("/api/v1/services/{}/logs", rig.id(APP));
+    let (status, body) = raw(
+        rig.address,
+        "GET",
+        &format!("{path}?deployment={OTHER_DEPLOYMENT}"),
+        None,
+    )
+    .await;
+    assert_eq!(status, 400, "{body}");
+    assert!(body.to_string().contains("does not belong"), "{body}");
+    assert!(!body.to_string().contains("Starting deployment"));
+    // The application's own deployment, named explicitly, is fine.
+    let (status, body) = raw(
+        rig.address,
+        "GET",
+        &format!("{path}?deployment={DEPLOYMENT}"),
+        None,
+    )
+    .await;
+    assert_eq!(status, 200, "{body}");
+    // The audit event names the deployment.
+    assert!(rig.stored_text().await.contains(DEPLOYMENT));
+
+    // Fail closed on a shape Fleet does not recognize: no raw text.
+    rig.coolify.lock().unwrap().bad_logs = true;
+    let (status, body) = raw(rig.address, "GET", &path, None).await;
+    assert_eq!(status, 400, "{body}");
+    assert!(!body.to_string().contains("abcdefghijklmnop"), "{body}");
+    assert!(body.to_string().contains("nothing is returned"), "{body}");
 }

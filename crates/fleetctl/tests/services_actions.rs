@@ -373,3 +373,49 @@ fn logs_print_the_lines_and_say_what_was_cut() {
         "GET /api/v1/services/coolify%3Aacc1%3Aappweb0001/logs?lines=20 HTTP/1.1"
     );
 }
+
+#[test]
+fn an_unreadable_result_is_reported_as_a_warning_not_hidden() {
+    // The request executed, but the operation (and so its result) cannot be
+    // read: the answer keeps the outcome and says why there is no result.
+    let controller = Controller::start(vec![
+        (
+            "POST /api/v1/services/",
+            201,
+            request("coolify.application.restart", "executing", Some("op-1")),
+        ),
+        (
+            "GET /api/v1/requests/req-1",
+            200,
+            request("coolify.application.restart", "succeeded", Some("op-1")),
+        ),
+        (
+            "GET /api/v1/operations/op-1",
+            500,
+            json!({"error": {"code": "internal", "message": "boom"}}).to_string(),
+        ),
+    ]);
+    let (text, exit) = run(
+        &controller,
+        &[
+            "services",
+            "restart",
+            SERVICE,
+            "--wait-approval=5s",
+            "--output",
+            "json",
+        ],
+    )
+    .unwrap();
+    assert_eq!(exit, 0, "the request did execute");
+    let answer: Value = serde_json::from_str(&text).unwrap();
+    assert_eq!(answer["outcome"], "executed");
+    assert!(answer.get("result").is_none());
+    assert!(
+        answer["resultWarning"]
+            .as_str()
+            .unwrap()
+            .contains("could not be read"),
+        "{answer}"
+    );
+}

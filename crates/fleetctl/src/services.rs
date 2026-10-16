@@ -233,7 +233,6 @@ pub(crate) fn request(action: &ServicesAction) -> RequestShape {
     }
 }
 
-
 /// Percent-encodes one path segment: only unreserved characters pass.
 fn encode(segment: &str) -> String {
     use std::fmt::Write as _;
@@ -339,6 +338,9 @@ pub(crate) fn render_for(action: &ServicesAction, value: &Value) -> String {
 /// (status before and after) when there is one.
 fn render_action(value: &Value) -> String {
     let mut text = crate::requests::render(value);
+    if let Some(warning) = value["resultWarning"].as_str() {
+        let _ = write!(text, "\n  warning: {}", clean(warning));
+    }
     let result = &value["result"];
     if result.is_object() {
         let field = |name: &str| text_of(&result[name]);

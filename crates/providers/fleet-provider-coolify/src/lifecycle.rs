@@ -10,7 +10,8 @@
 //!
 //! | call | request | ability |
 //! | --- | --- | --- |
-//! | start, stop, restart | `POST /{applications,services,databases}/{uuid}/{start,stop,restart}` | `deploy` |
+//! | start, restart | `POST /{applications,services,databases}/{uuid}/{start,restart}` | `deploy` |
+//! | stop | `POST /{applications,services,databases}/{uuid}/stop?docker_cleanup=false` | `deploy` |
 //! | application redeploy | `POST /deploy?uuid={uuid}&force=false` | `deploy` |
 //! | status re-read | `GET /{applications,services,databases}/{uuid}` | `read` |
 //! | newest deployment | `GET /deployments/applications/{uuid}?skip=0&take=1` | `read` |
@@ -29,7 +30,7 @@ use std::time::Duration;
 use async_trait::async_trait;
 use fleet_application::coolify::lifecycle::{
     CoolifyLifecyclePort, LifecycleAck, LifecycleFailure, LifecycleFailureClass, LifecycleResource,
-    LifecycleVerb, RawDeployment,
+    LifecycleVerb, RawDeployment, ResourceState,
 };
 use fleet_core::SensitiveString;
 use serde_json::Value;
@@ -45,6 +46,8 @@ const SMALL_BODY: usize = 256 * 1024;
 const DEPLOYMENT_BODY: usize = 16 * 1024 * 1024;
 /// The longest `Retry-After` reported, in seconds.
 const MAX_RETRY_AFTER: u64 = 3600;
+/// The longest Coolify message kept.
+const MAX_MESSAGE: usize = 200;
 
 /// The only requests this client sends.
 #[derive(Clone, Copy, Debug)]
@@ -101,13 +104,25 @@ impl Route<'_> {
                 format!("{base}/{}/{}", family(*resource), safe_id(uuid)?)
             }
             Self::Lifecycle(resource, uuid, verb) => {
-                let verb = match verb {
+                let tail = match verb {
                     LifecycleVerb::Start => "start",
                     LifecycleVerb::Stop => "stop",
                     LifecycleVerb::Restart => "restart",
                     LifecycleVerb::Redeploy => return None,
                 };
-                format!("{base}/{}/{}/{verb}", family(*resource), safe_id(uuid)?)
+                // A stop leaves the server's disk cleanup to Coolify's own
+                // schedule: the API default (`true`) would also run a docker
+                // cleanup, which is more than a stop.
+                let query = if matches!(verb, LifecycleVerb::Stop) {
+                    "?docker_cleanup=false"
+                } else {
+                    ""
+                };
+                format!(
+                    "{base}/{}/{}/{tail}{query}",
+                    family(*resource),
+                    safe_id(uuid)?
+                )
             }
             Self::Deploy(uuid) => format!("{base}/deploy?uuid={}&force=false", safe_id(uuid)?),
             Self::LatestDeployment(uuid) => format!(
@@ -295,6 +310,32 @@ fn deployment_uuid_of(value: &Value) -> Option<String> {
     direct.or(nested).and_then(safe_id).map(str::to_owned)
 }
 
+/// Coolify's own `message` for a call, scrubbed and bounded.
+fn message_of_answer(value: &Value) -> Option<String> {
+    let text = value.get("message").and_then(Value::as_str).or_else(|| {
+        value
+            .get("deployments")
+            .and_then(Value::as_array)
+            .and_then(|items| items.first())
+            .and_then(|item| item.get("message"))
+            .and_then(Value::as_str)
+    })?;
+    let clean: String = fleet_core::scrub_failure_detail(text)
+        .chars()
+        .take(MAX_MESSAGE)
+        .collect();
+    (!clean.is_empty()).then_some(clean)
+}
+
+/// A numeric id Coolify may carry as a number or a string.
+fn id_of(value: Option<&Value>) -> Option<i64> {
+    match value? {
+        Value::Number(number) => number.as_i64(),
+        Value::String(text) => text.trim().parse().ok(),
+        _ => None,
+    }
+}
+
 #[async_trait]
 impl CoolifyLifecyclePort for CoolifyHttpLifecycle {
     async fn version(
@@ -336,6 +377,7 @@ impl CoolifyLifecyclePort for CoolifyHttpLifecycle {
         let value = json_of(&text).unwrap_or(Value::Null);
         Ok(LifecycleAck {
             deployment_uuid: deployment_uuid_of(&value),
+            message: message_of_answer(&value),
         })
     }
 
@@ -345,7 +387,7 @@ impl CoolifyLifecyclePort for CoolifyHttpLifecycle {
         token: &SensitiveString,
         resource: LifecycleResource,
         uuid: &str,
-    ) -> Result<String, LifecycleFailure> {
+    ) -> Result<ResourceState, LifecycleFailure> {
         let text = send(
             base_url,
             token,
@@ -354,10 +396,13 @@ impl CoolifyLifecyclePort for CoolifyHttpLifecycle {
         )
         .await?;
         let value = json_of(&text)?;
-        Ok(value
-            .get("status")
-            .and_then(Value::as_str)
-            .map_or_else(|| "unknown".to_owned(), str::to_owned))
+        Ok(ResourceState {
+            status: value
+                .get("status")
+                .and_then(Value::as_str)
+                .map_or_else(|| "unknown".to_owned(), str::to_owned),
+            id: id_of(value.get("id")),
+        })
     }
 
     async fn latest_deployment(
@@ -416,6 +461,7 @@ impl CoolifyLifecyclePort for CoolifyHttpLifecycle {
                 .unwrap_or_default()
                 .to_owned(),
             logs,
+            application_id: id_of(value.get("application_id")),
         })
     }
 }

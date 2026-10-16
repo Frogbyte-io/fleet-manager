@@ -83,10 +83,16 @@ fn the_route_set_is_closed_and_lifecycle_routes_are_post() {
             (LifecycleResource::Database, "databases"),
         ] {
             let route = Route::Lifecycle(resource, "abc123", verb);
+            // A stop never asks Coolify for a docker cleanup (its default).
+            let query = if tail == "stop" {
+                "?docker_cleanup=false"
+            } else {
+                ""
+            };
             assert_eq!(route.method(), reqwest::Method::POST);
             assert_eq!(
                 route.path().as_deref(),
-                Some(format!("/api/v1/{family}/abc123/{tail}").as_str())
+                Some(format!("/api/v1/{family}/abc123/{tail}{query}").as_str())
             );
         }
     }
@@ -195,7 +201,7 @@ async fn each_verb_sends_one_post_with_the_bearer_and_reads_the_deployment() {
     assert_eq!(seen.len(), 3, "{seen:?}");
     assert!(seen[0].starts_with("POST /api/v1/applications/app001/start "));
     assert!(seen[1].starts_with("POST /api/v1/deploy?uuid=app001&force=false "));
-    assert!(seen[2].starts_with("POST /api/v1/services/svc001/stop "));
+    assert!(seen[2].starts_with("POST /api/v1/services/svc001/stop?docker_cleanup=false "));
     assert!(seen.iter().all(|line| {
         line.to_ascii_lowercase()
             .contains(&format!("bearer {TOKEN}").to_ascii_lowercase())
@@ -281,14 +287,17 @@ async fn version_status_and_deployment_reads() {
     *canned.lock().unwrap() = (
         200,
         String::new(),
-        r#"{"uuid":"app001","status":"running:healthy","env":"SENTINEL"}"#.to_owned(),
+        r#"{"id":7,"uuid":"app001","status":"running:healthy","env":"SENTINEL"}"#.to_owned(),
     );
     assert_eq!(
         client
             .status(&base, &token(), LifecycleResource::Application, "app001")
             .await
             .unwrap(),
-        "running:healthy"
+        fleet_application::coolify::lifecycle::ResourceState {
+            status: "running:healthy".to_owned(),
+            id: Some(7)
+        }
     );
 
     *canned.lock().unwrap() = (
@@ -322,10 +331,11 @@ async fn version_status_and_deployment_reads() {
     *canned.lock().unwrap() = (
         200,
         String::new(),
-        r#"{"deployment_uuid":"dep009","status":"finished"}"#.to_owned(),
+        r#"{"deployment_uuid":"dep009","status":"finished","application_id":"7"}"#.to_owned(),
     );
     let hidden = client.deployment(&base, &token(), "dep009").await.unwrap();
     assert_eq!(hidden.status, "finished");
+    assert_eq!(hidden.application_id, Some(7));
     assert!(hidden.logs.is_none());
     *canned.lock().unwrap() = (
         200,
@@ -342,5 +352,56 @@ async fn version_status_and_deployment_reads() {
             .unwrap()
             .iter()
             .all(|line| line.starts_with("GET "))
+    );
+}
+
+#[tokio::test]
+async fn coolifys_message_is_surfaced_and_a_skipped_or_unauthorized_200_queues_nothing() {
+    let canned = canned(
+        200,
+        "",
+        r#"{"message":"Deployment is already queued for this application; token=abcdef0123456789abcdef0123456789"}"#,
+    );
+    let (base, _) = stub(canned.clone()).await;
+    let client = CoolifyHttpLifecycle;
+    // An application start that Coolify skipped: HTTP 200, no deployment.
+    let skipped = client
+        .run(
+            &base,
+            &token(),
+            LifecycleResource::Application,
+            "app001",
+            LifecycleVerb::Start,
+        )
+        .await
+        .unwrap();
+    assert!(skipped.deployment_uuid.is_none());
+    let message = skipped.message.unwrap();
+    assert!(message.contains("already queued"), "{message}");
+    assert!(
+        !message.contains("abcdef0123456789abcdef0123456789"),
+        "{message}"
+    );
+    // /deploy answers HTTP 200 with the reason when the token may not deploy.
+    *canned.lock().unwrap() = (
+        200,
+        String::new(),
+        r#"{"deployments":[{"message":"Unauthorized to deploy this application.","resource_uuid":"app001"}]}"#
+            .to_owned(),
+    );
+    let unauthorized = client
+        .run(
+            &base,
+            &token(),
+            LifecycleResource::Application,
+            "app001",
+            LifecycleVerb::Redeploy,
+        )
+        .await
+        .unwrap();
+    assert!(unauthorized.deployment_uuid.is_none());
+    assert_eq!(
+        unauthorized.message.as_deref(),
+        Some("Unauthorized to deploy this application.")
     );
 }

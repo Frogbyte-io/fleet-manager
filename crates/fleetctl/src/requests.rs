@@ -472,8 +472,7 @@ pub(crate) fn finish_filed_request(
                 {
                     Some(result) => answer["result"] = result,
                     None => {
-                        answer["resultWarning"] =
-                            json!("the operation carried no readable result");
+                        answer["resultWarning"] = json!("the operation carried no readable result");
                     }
                 }
             }
