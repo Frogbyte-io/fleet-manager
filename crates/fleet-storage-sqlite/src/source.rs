@@ -85,6 +85,77 @@ impl fleet_application::source::SourcePort for SourceRepository {
         Ok(revision.clone())
     }
 
+    async fn activate_if_active(
+        &self,
+        expected: Option<&ActiveRevision>,
+        revision: &ActiveRevision,
+        require_auto_activate: bool,
+    ) -> Result<fleet_application::source::CasOutcome, String> {
+        use fleet_application::source::CasOutcome;
+        // One BEGIN IMMEDIATE section: the check and the write cannot be
+        // interleaved with another activation.
+        let mut tx = self
+            .pool
+            .begin_with("BEGIN IMMEDIATE")
+            .await
+            .map_err(|error| format!("the activation lock failed: {error}"))?;
+        let active: Option<(String, String)> =
+            sqlx::query_as("SELECT commit_sha, content_digest FROM source_active_revision LIMIT 1")
+                .fetch_optional(&mut *tx)
+                .await
+                .map_err(|error| format!("the active revision read failed: {error}"))?;
+        let unchanged = match (&active, expected) {
+            (None, None) => true,
+            (Some((commit, digest)), Some(expected)) => {
+                *commit == expected.commit_sha && *digest == expected.content_digest
+            }
+            _ => false,
+        };
+        if !unchanged {
+            return Ok(CasOutcome::ActiveChanged);
+        }
+        if require_auto_activate {
+            // Read inside the serialized section, immediately before the
+            // write: a setting turned off meanwhile wins.
+            let setting: Option<(String,)> = sqlx::query_as(
+                "SELECT value FROM controller_settings WHERE key = 'registry.autoActivate'",
+            )
+            .fetch_optional(&mut *tx)
+            .await
+            .map_err(|error| format!("the setting read failed: {error}"))?;
+            if setting.is_some_and(|(value,)| value != "true") {
+                return Ok(CasOutcome::AutoActivateOff);
+            }
+            let hold: Option<(String,)> = sqlx::query_as(
+                "SELECT value FROM controller_settings WHERE key = 'registry.autoActivateHold'",
+            )
+            .fetch_optional(&mut *tx)
+            .await
+            .map_err(|error| format!("the setting read failed: {error}"))?;
+            if hold.is_some_and(|(value,)| value == "held") {
+                return Ok(CasOutcome::Held);
+            }
+        }
+        sqlx::query(
+            "INSERT INTO source_active_revision (singleton, commit_sha, content_digest, activated_at) \
+             VALUES ('active', ?1, ?2, ?3) \
+             ON CONFLICT(singleton) DO UPDATE SET \
+             commit_sha = excluded.commit_sha, \
+             content_digest = excluded.content_digest, \
+             activated_at = excluded.activated_at",
+        )
+        .bind(&revision.commit_sha)
+        .bind(&revision.content_digest)
+        .bind(fleet_core::SystemClock::now_unix_millis())
+        .execute(&mut *tx)
+        .await
+        .map_err(|error| format!("the active revision write failed: {error}"))?;
+        tx.commit()
+            .await
+            .map_err(|error| format!("the activation commit failed: {error}"))?;
+        Ok(CasOutcome::Activated)
+    }
+
     async fn record_valid_revision(
         &self,
         revision: &ActiveRevision,
@@ -322,4 +393,45 @@ fn resource_from(
             .map_err(|error| format!("a stored resource spec is corrupt: {error}"))?,
         source_path,
     })
+}
+
+#[async_trait::async_trait]
+impl fleet_application::source::FetchActivityPort for SourceRepository {
+    async fn fetch_in_flight(&self) -> Result<bool, String> {
+        let row: Option<(i64,)> = sqlx::query_as(
+            "SELECT 1 FROM operations WHERE kind = 'source.fetch' \
+             AND state IN ('pending', 'running', 'cancelling') LIMIT 1",
+        )
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(|error| format!("the fetch activity read failed: {error}"))?;
+        Ok(row.is_some())
+    }
+}
+
+#[async_trait::async_trait]
+impl fleet_application::source::SettingsPort for SourceRepository {
+    async fn get(&self, key: &str) -> Result<Option<String>, String> {
+        let row: Option<(String,)> =
+            sqlx::query_as("SELECT value FROM controller_settings WHERE key = ?1")
+                .bind(key)
+                .fetch_optional(&self.pool)
+                .await
+                .map_err(|error| format!("the setting read failed: {error}"))?;
+        Ok(row.map(|(value,)| value))
+    }
+
+    async fn set(&self, key: &str, value: &str) -> Result<(), String> {
+        sqlx::query(
+            "INSERT INTO controller_settings (key, value, updated_at) VALUES (?1, ?2, ?3) \
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at",
+        )
+        .bind(key)
+        .bind(value)
+        .bind(fleet_core::SystemClock::now_unix_millis())
+        .execute(&self.pool)
+        .await
+        .map_err(|error| format!("the setting write failed: {error}"))?;
+        Ok(())
+    }
 }

@@ -134,7 +134,7 @@ fn every_catalog_action_has_a_unique_stable_id_and_a_risk_ruling() {
     assert!(Permission::MachineReadSensitive.is_risky());
     assert!(!Permission::SystemRead.is_risky());
     // The catalog is the complete vocabulary the adapter permits.
-    assert_eq!(Permission::ALL.len(), 70); // includes registry.read, registry.observe, the action broker actions (request, approve, deny, read), external_account.read/config, lab.exec.read, lab.put, events.read, skills.modify, machine.link.guest, lab.exec, lab.artifacts, the credential actions, and the delegated Lab loop actions
+    assert_eq!(Permission::ALL.len(), 71); // includes registry.read, registry.observe, source.settings, the action broker actions (request, approve, deny, read), external_account.read/config, lab.exec.read, lab.put, events.read, skills.modify, machine.link.guest, lab.exec, lab.artifacts, the credential actions, and the delegated Lab loop actions
 }
 
 #[test]

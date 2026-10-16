@@ -97,6 +97,14 @@ impl SourcePort for Source {
     ) -> Result<ActiveRevision, String> {
         unimplemented!("the read surface never writes")
     }
+    async fn activate_if_active(
+        &self,
+        _expected: Option<&ActiveRevision>,
+        _revision: &ActiveRevision,
+        _require_auto_activate: bool,
+    ) -> Result<fleet_application::source::CasOutcome, String> {
+        unimplemented!("the read surface never writes")
+    }
     async fn active_summary(&self) -> Result<Option<ActiveSummary>, String> {
         Ok(self.active.then(|| ActiveSummary {
             revision: ActiveRevision {

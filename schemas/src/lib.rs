@@ -338,6 +338,30 @@ pub fn parse_resources(sources: &[SourceDocument]) -> Result<Vec<ParsedResource>
     Ok(resources)
 }
 
+/// The `kind` of every document in one YAML text, without validating the
+/// documents (a Registry entry may name a type defined in another file, so a
+/// file read alone cannot be validated). Used to classify a changed file;
+/// activation still validates the whole candidate.
+///
+/// # Errors
+///
+/// Fails when the text is not parseable YAML documents.
+pub fn document_kinds(yaml: &str) -> Result<Vec<String>, String> {
+    let documents: Vec<Value> =
+        serde_saphyr::from_multiple_with_options(yaml, strict_yaml_options())
+            .map_err(|_| "the file could not be parsed".to_owned())?;
+    Ok(documents
+        .iter()
+        .map(|document| {
+            document
+                .get("kind")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_owned()
+        })
+        .collect())
+}
+
 /// Reads the paths and parses them like [`parse_resources`].
 ///
 /// # Errors

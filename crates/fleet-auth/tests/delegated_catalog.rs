@@ -149,6 +149,7 @@ fn the_named_refusals_of_the_issue_are_refused() {
         (Permission::ExternalAccountConfig, None),
         (Permission::TailnetConfig, None),
         (Permission::SourceActivate, None),
+        (Permission::SourceSettings, None),
         // administering Fleet and its credentials
         (Permission::NodeEnroll, Some("machine-1")),
         (Permission::AuditRead, None),

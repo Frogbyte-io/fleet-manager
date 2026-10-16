@@ -135,6 +135,10 @@ pub enum Permission {
     /// Activate a validated candidate as the desired revision. A
     /// mutation: it changes what Fleet converges machines toward.
     SourceActivate,
+    /// Change the desired-state controller settings (Registry
+    /// auto-activation and change mode). A mutation: auto-activation
+    /// decides whether a revision goes live without a human.
+    SourceSettings,
     /// List Proxmox accounts and their discovery snapshots, and observe a
     /// host's certificate fingerprint. A read, but a
     /// topology-revealing one.
@@ -285,6 +289,7 @@ impl Permission {
         Permission::ApplyExecute,
         Permission::SourceFetch,
         Permission::SourceActivate,
+        Permission::SourceSettings,
         Permission::ProxmoxRead,
         Permission::ProxmoxConfig,
         Permission::ProxmoxOperate,
@@ -361,6 +366,7 @@ impl Permission {
             Permission::ApplyExecute => "apply.execute",
             Permission::SourceFetch => "source.fetch",
             Permission::SourceActivate => "source.activate",
+            Permission::SourceSettings => "source.settings",
             Permission::ProxmoxRead => "proxmox.read",
             Permission::ProxmoxConfig => "proxmox.config",
             Permission::ProxmoxOperate => "proxmox.operate",
@@ -446,6 +452,7 @@ impl Permission {
             | Permission::ApplyExecute
             | Permission::SourceFetch
             | Permission::SourceActivate
+            | Permission::SourceSettings
             | Permission::ProxmoxRead
             | Permission::ProxmoxConfig
             | Permission::ProxmoxOperate
@@ -495,6 +502,7 @@ impl Permission {
             | Permission::ProjectsCreate
             | Permission::SourceFetch
             | Permission::SourceActivate
+            | Permission::SourceSettings
             | Permission::ProxmoxRead
             | Permission::ProxmoxConfig
             | Permission::ProxmoxOperate
