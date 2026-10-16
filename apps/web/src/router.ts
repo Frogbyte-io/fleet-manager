@@ -51,6 +51,11 @@ export const routes: RouteRecordRaw[] = [
     meta: { title: 'Operations', group: 'Control' },
   },
   {
+    path: '/requests',
+    component: () => import('./pages/requests/RequestsPage.vue'),
+    meta: { title: 'Approval inbox', group: 'Control' },
+  },
+  {
     path: '/settings',
     component: () => import('./pages/settings/SettingsPage.vue'),
     meta: { title: 'Settings', group: 'Control' },

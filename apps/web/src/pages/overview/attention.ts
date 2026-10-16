@@ -3,6 +3,7 @@
 // No Vue imports, so every source is unit-tested directly.
 
 import type {
+  ActionRequestDto,
   AssociatedGuestDto,
   AuditEventDto,
   LabTemplateDto,
@@ -27,6 +28,7 @@ export type AttentionSource =
   | 'lease-cleanup'
   | 'lab-orphan'
   | 'operation-blocked'
+  | 'request-pending'
   | 'proxmox-trust'
   | 'onboarding'
   | 'lease-expiring'
@@ -223,6 +225,21 @@ export function operationRows(operations: Pick<OperationDto, 'id' | 'kind' | 'st
       detail: blockedDetail(o),
       to: { path: '/operations', query: { op: o.id } },
       at: o.updatedAt,
+    }))
+}
+
+/** Action requests waiting for a person's decision (the approval inbox). */
+export function requestRows(requests: Pick<ActionRequestDto, 'id' | 'actionId' | 'target' | 'requester' | 'reason' | 'state' | 'createdAt'>[]): AttentionRow[] {
+  return requests
+    .filter(r => r.state === 'pending')
+    .map(r => ({
+      key: `request:${r.id}`,
+      source: 'request-pending',
+      severity: 'warn',
+      title: `${r.actionId} on ${r.target} awaits approval`,
+      detail: `${r.requester} asks: ${r.reason}`,
+      to: { path: '/requests', query: { request: r.id } },
+      at: r.createdAt,
     }))
 }
 

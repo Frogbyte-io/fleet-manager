@@ -358,7 +358,8 @@ fn api_state(
             // `main` refuses to start on a malformed setting, so the
             // fallback only serves test composition.
             broker_settings_from_env().unwrap_or_default(),
-        );
+        )
+        .with_events(events.clone());
         return fleet_api::operations::ApiState {
             operations,
             authorizer,

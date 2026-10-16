@@ -1270,3 +1270,62 @@ async fn lists_are_newest_first_filtered_and_bounded() {
         .unwrap_err();
     assert!(matches!(missing, BrokerError::NotFound { .. }));
 }
+
+#[tokio::test]
+async fn each_committed_change_publishes_a_payload_free_request_event() {
+    use fleet_application::events::{EventHub, EventKind};
+
+    let world = World::new(RiskClass::Approve).await;
+    let hub = Arc::new(EventHub::new(16));
+    let mut registry = ActionRegistry::new();
+    registry
+        .register(Arc::new(NoopAction {
+            risk: RiskClass::Approve,
+        }))
+        .unwrap();
+    let broker = Broker::new(
+        world.requests.clone(),
+        Arc::new(registry),
+        world.use_cases.clone(),
+        BrokerSettings::default(),
+    )
+    .with_events(hub.clone());
+    let mut live = hub.subscribe(None).receiver;
+    let kinds = |live: &mut tokio::sync::broadcast::Receiver<_>| {
+        let mut seen = Vec::new();
+        while let Ok(event) = live.try_recv() {
+            let event: fleet_application::events::FleetEvent = event;
+            seen.push(event.kind);
+        }
+        seen
+    };
+
+    let request = broker
+        .create(&Permit, REQUESTER, World::new_request(), NOW)
+        .await
+        .unwrap();
+    assert_eq!(kinds(&mut live), [EventKind::RequestChanged]);
+
+    // Reading publishes nothing; a decision publishes for each transition
+    // it commits (approved, then executing).
+    broker
+        .get(&Permit, APPROVER, &request.id, NOW + 1)
+        .await
+        .unwrap();
+    assert!(kinds(&mut live).is_empty());
+    broker
+        .approve(&Permit, APPROVER, &request.id, NOW + 2)
+        .await
+        .unwrap();
+    assert_eq!(
+        kinds(&mut live),
+        [EventKind::RequestChanged, EventKind::RequestChanged]
+    );
+
+    // A decision that loses publishes nothing.
+    broker
+        .deny(&Permit, APPROVER, &request.id, None, NOW + 3)
+        .await
+        .unwrap_err();
+    assert!(kinds(&mut live).is_empty());
+}

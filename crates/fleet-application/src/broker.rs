@@ -502,6 +502,63 @@ fn backend(context: &'static str) -> impl Fn(String) -> BrokerError {
     move |detail| BrokerError::Backend { context, detail }
 }
 
+/// Decorates the request store so each committed change (a new request or a
+/// won transition) publishes a payload-free `request.changed` notification.
+/// Publishing follows the commit, so a client that refetches sees the change.
+#[derive(Debug)]
+struct PublishingPort {
+    inner: Arc<dyn ActionRequestPort>,
+    events: Arc<crate::events::EventHub>,
+}
+
+#[async_trait]
+impl ActionRequestPort for PublishingPort {
+    async fn insert(&self, request: &ActionRequest, audit: &AuditIntent) -> Result<(), String> {
+        self.inner.insert(request, audit).await?;
+        self.events
+            .publish(crate::events::EventKind::RequestChanged);
+        Ok(())
+    }
+
+    async fn record_audit(&self, audit: &AuditIntent) -> Result<(), String> {
+        self.inner.record_audit(audit).await
+    }
+
+    async fn find_by_idempotency(
+        &self,
+        requester: &str,
+        key: &str,
+    ) -> Result<Option<ActionRequest>, String> {
+        self.inner.find_by_idempotency(requester, key).await
+    }
+
+    async fn get(&self, id: &str) -> Result<Option<ActionRequest>, String> {
+        self.inner.get(id).await
+    }
+
+    async fn list(
+        &self,
+        state: Option<ActionRequestState>,
+        limit: u32,
+    ) -> Result<Vec<ActionRequest>, String> {
+        self.inner.list(state, limit).await
+    }
+
+    async fn transition(
+        &self,
+        id: &str,
+        update: &TransitionUpdate,
+        audit: &AuditIntent,
+    ) -> Result<Option<ActionRequest>, String> {
+        let updated = self.inner.transition(id, update, audit).await?;
+        if updated.is_some() {
+            self.events
+                .publish(crate::events::EventKind::RequestChanged);
+        }
+        Ok(updated)
+    }
+}
+
 /// The action broker use cases.
 #[derive(Debug)]
 pub struct Broker {
@@ -526,6 +583,17 @@ impl Broker {
             operations,
             settings,
         }
+    }
+
+    /// Publishes `request.changed` (payload-free) after each committed
+    /// request change, so the console's inbox updates live.
+    #[must_use]
+    pub fn with_events(mut self, events: Arc<crate::events::EventHub>) -> Self {
+        self.requests = Arc::new(PublishingPort {
+            inner: self.requests,
+            events,
+        });
+        self
     }
 
     /// The registered action ids, for diagnostics.
