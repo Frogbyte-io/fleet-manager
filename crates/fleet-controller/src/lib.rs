@@ -180,6 +180,43 @@ pub fn compose_onboarding(
     )
 }
 
+/// The Registry types Fleet ships, as the read model takes them. The
+/// source is the validator's built-in set, so the types the validator lets
+/// entries use and the types the read model lists cannot differ.
+#[must_use]
+pub fn builtin_registry_types() -> Vec<fleet_application::registry::BuiltinRegistryType> {
+    fleet_schema::registry::RegistryContext::default()
+        .builtin_types
+        .into_iter()
+        .filter_map(|builtin| {
+            Some(fleet_application::registry::BuiltinRegistryType {
+                name: builtin.name,
+                spec: serde_json::to_value(builtin.spec).ok()?,
+            })
+        })
+        .collect()
+}
+
+/// Composes the desired-source use cases over the store, with the Registry
+/// read model attached so its cache follows every activation and rollback
+/// (FM-1012). The API surface and the source executor must share this
+/// composition: the executor performs the activation, the API serves the
+/// reads.
+#[must_use]
+pub fn compose_desired_source(db: &SqlitePool) -> fleet_application::source::DesiredSource {
+    let source = std::sync::Arc::new(fleet_storage_sqlite::SourceRepository::new(db.clone()));
+    let registry = fleet_application::registry::RegistryReadModel::new(
+        std::sync::Arc::new(fleet_storage_sqlite::RegistryRepository::new(db.clone())),
+        source.clone(),
+    )
+    .with_builtin_types(builtin_registry_types());
+    fleet_application::source::DesiredSource::new(
+        source,
+        std::sync::Arc::new(fleet_storage_sqlite::AuditSink::new(db.clone())),
+    )
+    .with_registry(std::sync::Arc::new(registry))
+}
+
 /// Composes the server-side planning use cases (FM-407) over the store: the
 /// active desired revision, the machine's observations, and the skill
 /// catalog that supplies the built-in default's pinned version.
@@ -295,10 +332,7 @@ fn api_state(
             images,
             lab,
             desired: Some(std::sync::Arc::new({
-                let desired = fleet_application::source::DesiredSource::new(
-                    std::sync::Arc::new(fleet_storage_sqlite::SourceRepository::new(pool.clone())),
-                    std::sync::Arc::new(fleet_storage_sqlite::AuditSink::new(pool.clone())),
-                );
+                let desired = compose_desired_source(&pool);
                 match git_credentials {
                     Some(credentials) => desired.with_credentials(credentials),
                     None => desired,

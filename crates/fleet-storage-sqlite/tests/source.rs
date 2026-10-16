@@ -14,6 +14,7 @@ fn resource(kind: &str, id: &str) -> DesiredResourceRecord {
         id: id.to_owned(),
         name: format!("{id}-name"),
         spec: serde_json::json!({ "note": id }),
+        source_path: None,
     }
 }
 

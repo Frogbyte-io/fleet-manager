@@ -132,8 +132,8 @@ impl fleet_application::source::SourcePort for SourceRepository {
             for resource in resources {
                 sqlx::query(
                     "INSERT INTO source_revision_resources \
-                     (commit_sha, content_digest, resource_id, kind, name, spec_json) \
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                     (commit_sha, content_digest, resource_id, kind, name, spec_json, source_path) \
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
                 )
                 .bind(&revision.commit_sha)
                 .bind(&revision.content_digest)
@@ -141,6 +141,7 @@ impl fleet_application::source::SourcePort for SourceRepository {
                 .bind(&resource.kind)
                 .bind(&resource.name)
                 .bind(resource.spec.to_string())
+                .bind(resource.source_path.as_deref())
                 .execute(&mut *tx)
                 .await
                 .map_err(|error| format!("the resource write failed: {error}"))?;
@@ -235,8 +236,8 @@ impl fleet_application::source::SourcePort for SourceRepository {
         after: Option<&str>,
         limit: i64,
     ) -> Result<Vec<DesiredResourceRecord>, String> {
-        let rows: Vec<(String, String, String, String)> = sqlx::query_as(
-            "SELECT r.kind, r.resource_id, r.name, r.spec_json \
+        let rows: Vec<(String, String, String, String, Option<String>)> = sqlx::query_as(
+            "SELECT r.kind, r.resource_id, r.name, r.spec_json, r.source_path \
              FROM source_revision_resources r \
              JOIN source_active_revision a \
                ON a.commit_sha = r.commit_sha AND a.content_digest = r.content_digest \
@@ -250,13 +251,14 @@ impl fleet_application::source::SourcePort for SourceRepository {
         .await
         .map_err(|error| format!("the resource read failed: {error}"))?;
         rows.into_iter()
-            .map(|(kind, id, name, spec_json)| {
+            .map(|(kind, id, name, spec_json, source_path)| {
                 Ok(DesiredResourceRecord {
                     kind,
                     id,
                     name,
                     spec: serde_json::from_str(&spec_json)
                         .map_err(|error| format!("a stored resource spec is corrupt: {error}"))?,
+                    source_path,
                 })
             })
             .collect()

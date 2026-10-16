@@ -192,6 +192,10 @@ impl SourceExecutor {
                                         id: resource.id,
                                         name: resource.name,
                                         spec: resource.spec,
+                                        source_path: repository_relative(
+                                            &candidate.worktree,
+                                            &resource.source_path,
+                                        ),
                                     },
                                 )
                                 .collect();
@@ -357,6 +361,22 @@ async fn complete_failed(
 }
 
 /// Collects YAML files under a root, as relative paths.
+/// The document's path relative to the worktree, with `/` separators; a
+/// path outside the worktree (never expected) yields none rather than
+/// leaking an absolute host path into the snapshot.
+fn repository_relative(root: &std::path::Path, path: &std::path::Path) -> Option<String> {
+    let relative = path.strip_prefix(root).ok()?;
+    let parts: Option<Vec<&str>> = relative
+        .components()
+        .map(|component| match component {
+            std::path::Component::Normal(part) => part.to_str(),
+            _ => None,
+        })
+        .collect();
+    let joined = parts?.join("/");
+    (!joined.is_empty() && joined.len() <= 1024).then_some(joined)
+}
+
 fn collect_yaml(
     _root: &std::path::Path,
     base: &std::path::Path,

@@ -121,6 +121,7 @@ impl Harness {
                     id: "p-db".to_owned(),
                     name: "p-db".to_owned(),
                     spec: serde_json::json!({"skillId": "db", "scope": {"type": "all"}, "deployTo": ["codex"], "denyAgents": []}),
+                    source_path: None,
                 }],
             )
             .await

@@ -446,13 +446,8 @@ fn run_serve(mut config: fleet_config::ControllerConfig) -> ExitCode {
                     std::sync::Arc::new({
                         let executor = fleet_controller::source::SourceExecutor::new(
                             config.data_dir.join("git-source"),
-                            std::sync::Arc::new(fleet_application::source::DesiredSource::new(
-                                std::sync::Arc::new(fleet_storage_sqlite::SourceRepository::new(
-                                    store.pool().clone(),
-                                )),
-                                std::sync::Arc::new(fleet_storage_sqlite::AuditSink::new(
-                                    store.pool().clone(),
-                                )),
+                            std::sync::Arc::new(fleet_controller::compose_desired_source(
+                                store.pool(),
                             )),
                         );
                         match &secrets {

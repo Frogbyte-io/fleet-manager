@@ -84,6 +84,7 @@ fn preset(
         id: id.to_owned(),
         name: id.to_owned(),
         spec: serde_json::json!({"skillId": skill, "scope": scope, "deployTo": deploy_to, "denyAgents": []}),
+        source_path: None,
     }
 }
 
@@ -565,6 +566,7 @@ fn record(kind: &str, name: &str, spec: serde_json::Value) -> DesiredResourceRec
         id: format!("{kind}-{name}"),
         name: name.to_owned(),
         spec,
+        source_path: None,
     }
 }
 
