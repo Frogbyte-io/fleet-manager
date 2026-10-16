@@ -101,6 +101,14 @@ impl SourcePort for Port {
     ) -> Result<ActiveRevision, String> {
         Ok(revision.clone())
     }
+    async fn activate_if_active(
+        &self,
+        _expected: Option<&ActiveRevision>,
+        _revision: &ActiveRevision,
+        _require_auto_activate: bool,
+    ) -> Result<fleet_application::source::CasOutcome, String> {
+        Ok(fleet_application::source::CasOutcome::ActiveChanged)
+    }
     async fn active_summary(&self) -> Result<Option<ActiveSummary>, String> {
         Ok(None)
     }

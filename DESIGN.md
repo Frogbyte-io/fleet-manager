@@ -201,7 +201,7 @@ The old sticky nav + hero is gone. The shell is sidebar + topbar + page.
   name. Groups with mono uppercase labels:
   - (no label) Overview
   - **Infrastructure**: Fleet, Proxmox, Tailnet, Containers
-  - **Work**: Projects, Skills, Lab, Images
+  - **Work**: Projects, Skills, Lab, Images, Registry
   - **Control**: Operations, Audit log, Settings
   Right-aligned mono counts; the Operations count uses the gradient badge
   when running/blocked > 0. Footer: controller readiness dot + version + a

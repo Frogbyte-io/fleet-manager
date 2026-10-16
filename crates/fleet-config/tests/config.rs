@@ -331,6 +331,7 @@ fn validation_creates_the_state_directory() {
         data_dir: state.clone(),
         master_key_file: None,
         lab_sweep_interval_seconds: 60,
+        desired_fetch_interval_seconds: 0,
         lab_artifacts_dir: dir.path().join("lab-artifacts"),
         lab_artifact_retention_seconds: fleet_config::DEFAULT_LAB_ARTIFACT_RETENTION_SECONDS,
         lab_artifact_max_bytes: fleet_config::DEFAULT_LAB_ARTIFACT_MAX_BYTES,
@@ -357,6 +358,7 @@ fn an_uncreatable_state_directory_fails_validation() {
         data_dir: blocker.join("state"),
         master_key_file: None,
         lab_sweep_interval_seconds: 60,
+        desired_fetch_interval_seconds: 0,
         lab_artifacts_dir: dir.path().join("lab-artifacts"),
         lab_artifact_retention_seconds: fleet_config::DEFAULT_LAB_ARTIFACT_RETENTION_SECONDS,
         lab_artifact_max_bytes: fleet_config::DEFAULT_LAB_ARTIFACT_MAX_BYTES,
@@ -379,6 +381,7 @@ fn a_missing_master_key_file_fails_validation() {
         data_dir: dir.path().join("state"),
         master_key_file: Some(dir.path().join("absent_key")),
         lab_sweep_interval_seconds: 60,
+        desired_fetch_interval_seconds: 0,
         lab_artifacts_dir: dir.path().join("lab-artifacts"),
         lab_artifact_retention_seconds: fleet_config::DEFAULT_LAB_ARTIFACT_RETENTION_SECONDS,
         lab_artifact_max_bytes: fleet_config::DEFAULT_LAB_ARTIFACT_MAX_BYTES,
@@ -401,6 +404,7 @@ fn a_directory_as_master_key_path_is_not_a_file() {
         data_dir: dir.path().join("state"),
         master_key_file: Some(dir.path().to_path_buf()),
         lab_sweep_interval_seconds: 60,
+        desired_fetch_interval_seconds: 0,
         lab_artifacts_dir: dir.path().join("lab-artifacts"),
         lab_artifact_retention_seconds: fleet_config::DEFAULT_LAB_ARTIFACT_RETENTION_SECONDS,
         lab_artifact_max_bytes: fleet_config::DEFAULT_LAB_ARTIFACT_MAX_BYTES,
@@ -429,6 +433,7 @@ fn a_group_or_world_readable_master_key_file_is_unsafe() {
             data_dir: dir.path().join("state"),
             master_key_file: Some(key.clone()),
             lab_sweep_interval_seconds: 60,
+            desired_fetch_interval_seconds: 0,
             lab_artifacts_dir: dir.path().join("lab-artifacts"),
             lab_artifact_retention_seconds: fleet_config::DEFAULT_LAB_ARTIFACT_RETENTION_SECONDS,
             lab_artifact_max_bytes: fleet_config::DEFAULT_LAB_ARTIFACT_MAX_BYTES,
@@ -455,6 +460,7 @@ fn a_group_or_world_readable_master_key_file_is_unsafe() {
         data_dir: dir.path().join("state"),
         master_key_file: Some(key),
         lab_sweep_interval_seconds: 60,
+        desired_fetch_interval_seconds: 0,
         lab_artifacts_dir: dir.path().join("lab-artifacts"),
         lab_artifact_retention_seconds: fleet_config::DEFAULT_LAB_ARTIFACT_RETENTION_SECONDS,
         lab_artifact_max_bytes: fleet_config::DEFAULT_LAB_ARTIFACT_MAX_BYTES,
@@ -490,6 +496,7 @@ fn no_diagnostic_surface_contains_secret_material() {
         data_dir: dir.path().join("state"),
         master_key_file: Some(key.clone()),
         lab_sweep_interval_seconds: 60,
+        desired_fetch_interval_seconds: 0,
         lab_artifacts_dir: dir.path().join("lab-artifacts"),
         lab_artifact_retention_seconds: fleet_config::DEFAULT_LAB_ARTIFACT_RETENTION_SECONDS,
         lab_artifact_max_bytes: fleet_config::DEFAULT_LAB_ARTIFACT_MAX_BYTES,
@@ -563,6 +570,43 @@ fn the_lab_sweep_interval_defaults_and_layers() {
     )
     .unwrap();
     assert_eq!(overridden.lab_sweep_interval_seconds, 15);
+}
+
+#[test]
+fn the_periodic_desired_fetch_is_off_by_default_and_has_a_floor() {
+    let config = fleet_config::load(None, &|_| None).unwrap();
+    assert_eq!(config.desired_fetch_interval_seconds, 0);
+    assert!(
+        config
+            .summary()
+            .contains("desired_fetch_interval_seconds = 0 (off)")
+    );
+    let on = fleet_config::load(
+        None,
+        &env_of(&[(fleet_config::DESIRED_FETCH_INTERVAL_VAR, "120")]),
+    )
+    .unwrap();
+    assert_eq!(on.desired_fetch_interval_seconds, 120);
+    for bad in ["5", "soon", "-1"] {
+        let result = fleet_config::load(
+            None,
+            &env_of(&[(fleet_config::DESIRED_FETCH_INTERVAL_VAR, bad)]),
+        );
+        assert!(
+            matches!(
+                result,
+                Err(fleet_config::ConfigError::DesiredFetchIntervalInvalid { .. })
+            ),
+            "{bad}"
+        );
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let file = write_config(
+        dir.path(),
+        &format!("{VALID_FILE}desired_fetch_interval_seconds = 300\n"),
+    );
+    let from_file = fleet_config::load(Some(&file), &none_env).unwrap();
+    assert_eq!(from_file.desired_fetch_interval_seconds, 300);
 }
 
 #[test]
@@ -680,6 +724,7 @@ fn validation_refuses_zero_lab_artifact_bounds() {
             data_dir: dir.path().join("state"),
             master_key_file: None,
             lab_sweep_interval_seconds: 60,
+            desired_fetch_interval_seconds: 0,
             lab_artifacts_dir: dir.path().join("lab-artifacts"),
             lab_artifact_retention_seconds: retention,
             lab_artifact_max_bytes: max_bytes,

@@ -91,6 +91,11 @@ export const routes: RouteRecordRaw[] = [
     meta: { title: 'Images', group: 'Work' },
   },
   {
+    path: '/registry',
+    component: () => import('./pages/registry/RegistryPage.vue'),
+    meta: { title: 'Registry', group: 'Work' },
+  },
+  {
     path: '/audit',
     component: () => import('./pages/audit/AuditPage.vue'),
     meta: { title: 'Audit log', group: 'Control' },
