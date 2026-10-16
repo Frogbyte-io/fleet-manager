@@ -21,6 +21,10 @@ use fleet_application::registry::{
     Answered, EntryCursor, ReferenceCursor, RegistryEntryFilter, RegistryEntryRecord,
     RegistryReadModel, RegistryReference, RegistryTarget, RegistryTypeRecord, TARGET_CLASSES,
 };
+use fleet_application::registry::enrich::{
+    DOMAIN_TYPE, DnsRecords, DnsStatus, DomainEnricher, DomainObservation, DomainView, FieldState,
+    RdapStatus, Severity, WarningCode,
+};
 use fleet_core::{CorrelationId, ErrorCode, PublicError, RetryClass};
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
@@ -658,4 +662,488 @@ async fn references(
         items: items.into_iter().map(reference_dto).collect(),
         page: PageInfo { next_cursor, limit },
     }))
+}
+
+// ---------------------------------------------------------------------------
+// Domain observations (FM-1020)
+
+fn enricher(
+    state: &ApiState,
+    correlation_id: CorrelationId,
+) -> Result<Arc<DomainEnricher>, ApiErrorResponse> {
+    state
+        .desired
+        .as_ref()
+        .and_then(|desired| desired.domain_enricher().cloned())
+        .ok_or_else(|| {
+            let public = PublicError::new(
+                ErrorCode::from_str("registry_unavailable").expect("valid error code"),
+                "the domain lookup enricher is not wired; the controller needs its database",
+                RetryClass::Backoff,
+            );
+            ApiError::new(&public, correlation_id).with_status(StatusCode::SERVICE_UNAVAILABLE)
+        })
+}
+
+/// The status of the RDAP half of an observation.
+#[derive(Clone, Copy, Debug, Serialize, ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum RdapStatusDto {
+    /// A server answered with a domain object.
+    Ok,
+    /// No RDAP service covers the TLD. A normal answer, not a failure.
+    Unavailable,
+    /// The registry reports the domain is not registered.
+    NotFound,
+    /// The lookup failed.
+    Error,
+}
+
+/// The RDAP half of a domain observation.
+#[derive(Clone, Debug, Serialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct RdapObservationDto {
+    /// How the lookup ended.
+    pub status: RdapStatusDto,
+    /// The RDAP server's base URL, when one was resolved.
+    pub server: Option<String>,
+    /// The registrar's name as the registry reports it.
+    pub registrar: Option<String>,
+    /// The expiry as a calendar date (`YYYY-MM-DD`). Some ccTLD registries
+    /// do not publish one.
+    pub expires: Option<String>,
+    /// The EPP status values.
+    pub statuses: Vec<String>,
+    /// The nameservers the registry lists.
+    pub nameservers: Vec<String>,
+    /// Why, for `unavailable`, `not_found`, and `error`.
+    pub detail: Option<String>,
+}
+
+/// Records of each type at one DNS name.
+#[derive(Clone, Debug, Serialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct DnsRecordsDto {
+    /// NS values (meaningful at the apex).
+    pub ns: Vec<String>,
+    /// A values.
+    pub a: Vec<String>,
+    /// AAAA values.
+    pub aaaa: Vec<String>,
+    /// CNAME values.
+    pub cname: Vec<String>,
+}
+
+/// The status of the DNS half of an observation.
+#[derive(Clone, Copy, Debug, Serialize, ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum DnsStatusDto {
+    /// Every query answered (possibly with no records).
+    Ok,
+    /// The apex does not exist.
+    NotFound,
+    /// At least one query failed; the answers that arrived are kept.
+    Error,
+}
+
+/// The DNS half of a domain observation.
+#[derive(Clone, Debug, Serialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct DnsObservationDto {
+    /// How the lookup ended.
+    pub status: DnsStatusDto,
+    /// Records at the apex.
+    pub apex: DnsRecordsDto,
+    /// Records at `www.<apex>`.
+    pub www: DnsRecordsDto,
+    /// Why, for `not_found` and `error`.
+    pub detail: Option<String>,
+}
+
+/// One public lookup result for a domain entry. Recorded in the
+/// controller's database; never written to Fleet Git.
+#[derive(Clone, Debug, Serialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct DomainObservationDto {
+    /// When the lookups finished (epoch milliseconds).
+    pub observed_at: i64,
+    /// The public registration data.
+    pub rdap: RdapObservationDto,
+    /// The public DNS data.
+    pub dns: DnsObservationDto,
+}
+
+/// How a field's recorded value compares with the observation.
+#[derive(Clone, Copy, Debug, Serialize, ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum FieldStateDto {
+    /// Both sides have a value and they agree.
+    InSync,
+    /// The observation differs from the recorded value or supplies one the
+    /// entry lacks.
+    Changed,
+    /// Nothing to compare: no observation of the field, or no value on
+    /// either side.
+    Unknown,
+}
+
+/// The difference for one entry field.
+#[derive(Clone, Debug, Serialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct FieldDiffDto {
+    /// `registrar`, `expires`, `nameservers`, or `dnsHost`.
+    pub field: String,
+    /// The comparison.
+    pub state: FieldStateDto,
+    /// What the entry (Fleet Git) records.
+    #[schema(value_type = Option<Object>)]
+    pub recorded: Option<serde_json::Value>,
+    /// What the lookups saw.
+    #[schema(value_type = Option<Object>)]
+    pub observed: Option<serde_json::Value>,
+}
+
+/// How serious a warning is.
+#[derive(Clone, Copy, Debug, Serialize, ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum SeverityDto {
+    /// Worth knowing.
+    Info,
+    /// Needs a person soon.
+    Warn,
+    /// Needs a person now.
+    Err,
+}
+
+/// The derived warning rules.
+#[derive(Clone, Copy, Debug, Serialize, ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum WarningCodeDto {
+    /// The registry's registrar is not the recorded one.
+    RegistrarMismatch,
+    /// The delegated nameservers are not the recorded ones.
+    NameserversMismatch,
+    /// The nameservers do not belong to the recorded `dnsHost`.
+    DnsHostMismatch,
+    /// The registry's expiry is not the recorded one.
+    ExpiryChanged,
+    /// The domain expires within the window, or already has.
+    Expiring,
+    /// The domain expires within the window and auto-renew is off.
+    AutoRenewOffExpiring,
+}
+
+/// One derived warning.
+#[derive(Clone, Debug, Serialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct DomainWarningDto {
+    /// Which rule fired.
+    pub code: WarningCodeDto,
+    /// How serious it is.
+    pub severity: SeverityDto,
+    /// A sentence for people.
+    pub message: String,
+}
+
+/// One suggested field value.
+#[derive(Clone, Debug, Serialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct SuggestedFieldDto {
+    /// The entry field.
+    pub field: String,
+    /// The suggested value, in the field's type (a string, or a list of
+    /// strings for `nameservers`).
+    #[schema(value_type = Object)]
+    pub value: serde_json::Value,
+}
+
+/// A domain entry's latest observation compared with the entry.
+#[derive(Clone, Debug, Serialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct DomainObservationViewDto {
+    /// The entry's key (`domain/<key>`).
+    pub key: String,
+    /// The latest observation, or null before the first lookup.
+    pub observation: Option<DomainObservationDto>,
+    /// Per-field comparison, in a stable order.
+    pub diffs: Vec<FieldDiffDto>,
+    /// Derived warnings, most serious first. These feed the Overview's
+    /// needs-attention queue.
+    pub warnings: Vec<DomainWarningDto>,
+    /// The field changes that would bring the entry in line with the
+    /// observation. A person or agent applies them with
+    /// `fleetctl registry set` and publishes through Git; Fleet never
+    /// writes them.
+    pub suggestion: Vec<SuggestedFieldDto>,
+}
+
+/// A page of domain observation views.
+#[derive(Clone, Debug, Serialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct DomainObservationPage {
+    /// The views, ordered by key.
+    pub items: Vec<DomainObservationViewDto>,
+    /// Where this page sits in the result set.
+    pub page: PageInfo,
+}
+
+/// Filters, cursor, and bound for the observation list.
+#[derive(Clone, Debug, Default, Deserialize, utoipa::IntoParams)]
+#[serde(rename_all = "camelCase")]
+pub struct DomainObservationsParams {
+    /// Only domains with at least one warning.
+    pub attention: Option<bool>,
+    /// Opaque cursor returned as the previous page's `nextCursor`.
+    pub cursor: Option<String>,
+    /// Requested page size, clamped to the API maximum.
+    pub limit: Option<u32>,
+}
+
+fn observation_dto(observation: DomainObservation) -> DomainObservationDto {
+    let records = |records: DnsRecords| DnsRecordsDto {
+        ns: records.ns,
+        a: records.a,
+        aaaa: records.aaaa,
+        cname: records.cname,
+    };
+    DomainObservationDto {
+        observed_at: observation.observed_at,
+        rdap: RdapObservationDto {
+            status: match observation.rdap.status {
+                RdapStatus::Ok => RdapStatusDto::Ok,
+                RdapStatus::Unavailable => RdapStatusDto::Unavailable,
+                RdapStatus::NotFound => RdapStatusDto::NotFound,
+                RdapStatus::Error => RdapStatusDto::Error,
+            },
+            server: observation.rdap.server,
+            registrar: observation.rdap.registrar,
+            expires: observation.rdap.expires,
+            statuses: observation.rdap.statuses,
+            nameservers: observation.rdap.nameservers,
+            detail: observation.rdap.detail,
+        },
+        dns: DnsObservationDto {
+            status: match observation.dns.status {
+                DnsStatus::Ok => DnsStatusDto::Ok,
+                DnsStatus::NotFound => DnsStatusDto::NotFound,
+                DnsStatus::Error => DnsStatusDto::Error,
+            },
+            apex: records(observation.dns.apex),
+            www: records(observation.dns.www),
+            detail: observation.dns.detail,
+        },
+    }
+}
+
+fn view_dto(view: DomainView) -> DomainObservationViewDto {
+    DomainObservationViewDto {
+        key: view.key,
+        observation: view.observation.map(observation_dto),
+        diffs: view
+            .assessment
+            .diffs
+            .into_iter()
+            .map(|diff| FieldDiffDto {
+                field: diff.field.to_owned(),
+                state: match diff.state {
+                    FieldState::InSync => FieldStateDto::InSync,
+                    FieldState::Changed => FieldStateDto::Changed,
+                    FieldState::Unknown => FieldStateDto::Unknown,
+                },
+                recorded: diff.recorded,
+                observed: diff.observed,
+            })
+            .collect(),
+        warnings: view
+            .assessment
+            .warnings
+            .into_iter()
+            .map(|warning| DomainWarningDto {
+                code: match warning.code {
+                    WarningCode::RegistrarMismatch => WarningCodeDto::RegistrarMismatch,
+                    WarningCode::NameserversMismatch => WarningCodeDto::NameserversMismatch,
+                    WarningCode::DnsHostMismatch => WarningCodeDto::DnsHostMismatch,
+                    WarningCode::ExpiryChanged => WarningCodeDto::ExpiryChanged,
+                    WarningCode::Expiring => WarningCodeDto::Expiring,
+                    WarningCode::AutoRenewOffExpiring => WarningCodeDto::AutoRenewOffExpiring,
+                },
+                severity: match warning.severity {
+                    Severity::Info => SeverityDto::Info,
+                    Severity::Warn => SeverityDto::Warn,
+                    Severity::Err => SeverityDto::Err,
+                },
+                message: warning.message,
+            })
+            .collect(),
+        suggestion: view
+            .assessment
+            .suggestion
+            .into_iter()
+            .map(|field| SuggestedFieldDto {
+                field: field.field.to_owned(),
+                value: field.value,
+            })
+            .collect(),
+    }
+}
+
+/// Only `domain` entries are observed.
+fn domain_only(entry_type: &str, correlation_id: CorrelationId) -> Result<(), ApiErrorResponse> {
+    if entry_type == DOMAIN_TYPE {
+        Ok(())
+    } else {
+        Err(invalid(
+            "observations exist only for domain entries",
+            correlation_id,
+        ))
+    }
+}
+
+/// Maps an enrichment failure; a refused rate-limit slot is a 429 with the
+/// reason, any other backend failure stays generic.
+fn map_enrich_error(error: &ProjectUseCaseError, correlation_id: CorrelationId) -> ApiErrorResponse {
+    if let ProjectUseCaseError::Backend {
+        context: "registry_observe_rate_limited",
+        detail,
+    } = error
+    {
+        let public = PublicError::new(
+            ErrorCode::from_str("rate_limited").expect("valid error code"),
+            detail.clone(),
+            RetryClass::Backoff,
+        );
+        return ApiError::new(&public, correlation_id).with_status(StatusCode::TOO_MANY_REQUESTS);
+    }
+    crate::projects::map_project_error(error, correlation_id)
+}
+
+/// Lists the observations of domain entries, compared with the entries,
+/// ordered by key. With `attention=true`, only domains with a warning:
+/// the feed of the Overview's needs-attention queue.
+///
+/// # Errors
+///
+/// Returns an API error when the cursor is malformed, or authentication,
+/// authorization, or storage fails.
+#[utoipa::path(get, path = "/registry/observations", tag = "registry", operation_id = "listDomainObservations", params(DomainObservationsParams), responses(
+        (status = 200, body = DomainObservationPage),
+        (status = 400, description = "The cursor is malformed.", body = ApiError),
+        (status = 403, description = "The caller may not read the Registry.", body = ApiError),
+        (status = 500, description = "The request could not be completed.", body = ApiError),
+        (status = 503, description = "The enricher is not wired.", body = ApiError),
+    ))]
+pub async fn list_domain_observations(
+    State(state): State<Arc<ApiState>>,
+    acting: Option<Extension<crate::ActingPrincipal>>,
+    Extension(correlation_id): Extension<CorrelationId>,
+    Query(params): Query<DomainObservationsParams>,
+) -> Result<Json<DomainObservationPage>, ApiErrorResponse> {
+    let acting = principal(acting, correlation_id)?;
+    let limit = page_limit(params.limit);
+    let after = params
+        .cursor
+        .as_deref()
+        .map(|cursor| {
+            fleet_application::registry::split_entry_ref(cursor)
+                .filter(|(entry_type, _)| *entry_type == DOMAIN_TYPE)
+                .map(|(_, key)| key.to_owned())
+                .ok_or_else(|| {
+                    invalid(
+                        "the cursor is not one this endpoint returned",
+                        correlation_id,
+                    )
+                })
+        })
+        .transpose()?;
+    let bound = usize::try_from(limit).unwrap_or(usize::MAX);
+    let found = enricher(&state, correlation_id)?
+        .list(
+            state.authorizer.as_ref(),
+            &acting.id,
+            params.attention.unwrap_or(false),
+            after.as_deref(),
+            bound.saturating_add(1),
+        )
+        .await
+        .map_err(|error| map_enrich_error(&error, correlation_id))?;
+    let (items, next_cursor) = paginate(found, limit, |view| format!("{DOMAIN_TYPE}/{}", view.key));
+    Ok(Json(DomainObservationPage {
+        items: items.into_iter().map(view_dto).collect(),
+        page: PageInfo { next_cursor, limit },
+    }))
+}
+
+/// Reads one domain entry's latest observation and its comparison with the
+/// entry.
+///
+/// # Errors
+///
+/// Returns an API error when the entry does not exist or is not a domain,
+/// or authentication, authorization, or storage fails.
+#[utoipa::path(get, path = "/registry/entries/{type}/{key}/observations", tag = "registry", operation_id = "getDomainObservation", params(
+        ("type" = String, Path, description = "The entry's type name; only `domain`."),
+        ("key" = String, Path, description = "The entry's natural key."),
+    ), responses(
+        (status = 200, body = DomainObservationViewDto),
+        (status = 400, description = "The entry is not a domain.", body = ApiError),
+        (status = 403, description = "The caller may not read the Registry.", body = ApiError),
+        (status = 404, description = "No such entry in the active revision.", body = ApiError),
+        (status = 500, description = "The request could not be completed.", body = ApiError),
+        (status = 503, description = "The enricher is not wired.", body = ApiError),
+    ))]
+pub async fn get_domain_observation(
+    State(state): State<Arc<ApiState>>,
+    acting: Option<Extension<crate::ActingPrincipal>>,
+    Extension(correlation_id): Extension<CorrelationId>,
+    Path((entry_type, key)): Path<(String, String)>,
+) -> Result<Json<DomainObservationViewDto>, ApiErrorResponse> {
+    let acting = principal(acting, correlation_id)?;
+    domain_only(&entry_type, correlation_id)?;
+    let view = enricher(&state, correlation_id)?
+        .get(state.authorizer.as_ref(), &acting.id, &key)
+        .await
+        .map_err(|error| map_enrich_error(&error, correlation_id))?;
+    Ok(Json(view_dto(view)))
+}
+
+/// Looks the domain up now (RDAP and DNS) and records the observation. A
+/// mutation of observations, never of Fleet Git: authorized as
+/// `registry.observe` and audited.
+///
+/// # Errors
+///
+/// Returns an API error when the entry does not exist or is not a domain,
+/// the caller may not observe, the RDAP server's rate-limit slot is not
+/// available soon (429), or storage fails. A lookup that fails is recorded
+/// in the returned observation, not reported as an error.
+#[utoipa::path(post, path = "/registry/entries/{type}/{key}/observations/refresh", tag = "registry", operation_id = "refreshDomainObservation", params(
+        ("type" = String, Path, description = "The entry's type name; only `domain`."),
+        ("key" = String, Path, description = "The entry's natural key."),
+    ), responses(
+        (status = 200, body = DomainObservationViewDto),
+        (status = 400, description = "The entry is not a domain.", body = ApiError),
+        (status = 403, description = "The caller may not observe.", body = ApiError),
+        (status = 404, description = "No such entry in the active revision.", body = ApiError),
+        (status = 429, description = "The RDAP server is being queried at its rate limit.", body = ApiError),
+        (status = 500, description = "The request could not be completed.", body = ApiError),
+        (status = 503, description = "The enricher is not wired.", body = ApiError),
+    ))]
+pub async fn refresh_domain_observation(
+    State(state): State<Arc<ApiState>>,
+    acting: Option<Extension<crate::ActingPrincipal>>,
+    Extension(correlation_id): Extension<CorrelationId>,
+    Path((entry_type, key)): Path<(String, String)>,
+) -> Result<Json<DomainObservationViewDto>, ApiErrorResponse> {
+    let acting = principal(acting, correlation_id)?;
+    domain_only(&entry_type, correlation_id)?;
+    let view = enricher(&state, correlation_id)?
+        .refresh(
+            state.authorizer.as_ref(),
+            &acting.id,
+            Some(&correlation_id.to_string()),
+            &key,
+        )
+        .await
+        .map_err(|error| map_enrich_error(&error, correlation_id))?;
+    Ok(Json(view_dto(view)))
 }

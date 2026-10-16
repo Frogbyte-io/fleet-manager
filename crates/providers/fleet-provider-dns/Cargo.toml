@@ -1,0 +1,16 @@
+[package]
+name = "fleet-provider-dns"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+hickory-resolver = { version = "0.26.3", default-features = false, features = ["tokio", "system-config"] }
+
+[dev-dependencies]
+tokio = { version = "1.53.1", features = ["macros", "rt"] }
+
+[lints]
+workspace = true

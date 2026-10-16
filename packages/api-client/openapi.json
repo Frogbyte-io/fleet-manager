@@ -8068,6 +8068,200 @@
         }
       }
     },
+    "/api/v1/registry/entries/{type}/{key}/observations": {
+      "get": {
+        "tags": [
+          "registry"
+        ],
+        "summary": "Reads one domain entry's latest observation and its comparison with the\nentry.",
+        "description": "# Errors\n\nReturns an API error when the entry does not exist or is not a domain,\nor authentication, authorization, or storage fails.",
+        "operationId": "getDomainObservation",
+        "parameters": [
+          {
+            "name": "type",
+            "in": "path",
+            "description": "The entry's type name; only `domain`.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "key",
+            "in": "path",
+            "description": "The entry's natural key.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DomainObservationViewDto"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The entry is not a domain.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The caller may not read the Registry.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such entry in the active revision.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "The request could not be completed.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The enricher is not wired.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/registry/entries/{type}/{key}/observations/refresh": {
+      "post": {
+        "tags": [
+          "registry"
+        ],
+        "summary": "Looks the domain up now (RDAP and DNS) and records the observation. A\nmutation of observations, never of Fleet Git: authorized as\n`registry.observe` and audited.",
+        "description": "# Errors\n\nReturns an API error when the entry does not exist or is not a domain,\nthe caller may not observe, the RDAP server's rate-limit slot is not\navailable soon (429), or storage fails. A lookup that fails is recorded\nin the returned observation, not reported as an error.",
+        "operationId": "refreshDomainObservation",
+        "parameters": [
+          {
+            "name": "type",
+            "in": "path",
+            "description": "The entry's type name; only `domain`.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "key",
+            "in": "path",
+            "description": "The entry's natural key.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DomainObservationViewDto"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The entry is not a domain.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The caller may not observe.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such entry in the active revision.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "The RDAP server is being queried at its rate limit.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "The request could not be completed.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The enricher is not wired.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/registry/entries/{type}/{key}/referenced-by": {
       "get": {
         "tags": [
@@ -8177,6 +8371,108 @@
           },
           "503": {
             "description": "The Registry surface is not wired.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/registry/observations": {
+      "get": {
+        "tags": [
+          "registry"
+        ],
+        "summary": "Lists the observations of domain entries, compared with the entries,\nordered by key. With `attention=true`, only domains with a warning:\nthe feed of the Overview's needs-attention queue.",
+        "description": "# Errors\n\nReturns an API error when the cursor is malformed, or authentication,\nauthorization, or storage fails.",
+        "operationId": "listDomainObservations",
+        "parameters": [
+          {
+            "name": "attention",
+            "in": "query",
+            "description": "Only domains with at least one warning.",
+            "required": false,
+            "schema": {
+              "type": [
+                "boolean",
+                "null"
+              ]
+            }
+          },
+          {
+            "name": "cursor",
+            "in": "query",
+            "description": "Opaque cursor returned as the previous page's `nextCursor`.",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "description": "Requested page size, clamped to the API maximum.",
+            "required": false,
+            "schema": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "int32",
+              "minimum": 0
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DomainObservationPage"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The cursor is malformed.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The caller may not read the Registry.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "The request could not be completed.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The enricher is not wired.",
             "content": {
               "application/json": {
                 "schema": {
@@ -11388,6 +11684,201 @@
           }
         }
       },
+      "DnsObservationDto": {
+        "type": "object",
+        "description": "The DNS half of a domain observation.",
+        "required": [
+          "status",
+          "apex",
+          "www"
+        ],
+        "properties": {
+          "apex": {
+            "$ref": "#/components/schemas/DnsRecordsDto",
+            "description": "Records at the apex."
+          },
+          "detail": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Why, for `not_found` and `error`."
+          },
+          "status": {
+            "$ref": "#/components/schemas/DnsStatusDto",
+            "description": "How the lookup ended."
+          },
+          "www": {
+            "$ref": "#/components/schemas/DnsRecordsDto",
+            "description": "Records at `www.<apex>`."
+          }
+        }
+      },
+      "DnsRecordsDto": {
+        "type": "object",
+        "description": "Records of each type at one DNS name.",
+        "required": [
+          "ns",
+          "a",
+          "aaaa",
+          "cname"
+        ],
+        "properties": {
+          "a": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "A values."
+          },
+          "aaaa": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "AAAA values."
+          },
+          "cname": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "CNAME values."
+          },
+          "ns": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "NS values (meaningful at the apex)."
+          }
+        }
+      },
+      "DnsStatusDto": {
+        "type": "string",
+        "description": "The status of the DNS half of an observation.",
+        "enum": [
+          "ok",
+          "not_found",
+          "error"
+        ]
+      },
+      "DomainObservationDto": {
+        "type": "object",
+        "description": "One public lookup result for a domain entry. Recorded in the\ncontroller's database; never written to Fleet Git.",
+        "required": [
+          "observedAt",
+          "rdap",
+          "dns"
+        ],
+        "properties": {
+          "dns": {
+            "$ref": "#/components/schemas/DnsObservationDto",
+            "description": "The public DNS data."
+          },
+          "observedAt": {
+            "type": "integer",
+            "format": "int64",
+            "description": "When the lookups finished (epoch milliseconds)."
+          },
+          "rdap": {
+            "$ref": "#/components/schemas/RdapObservationDto",
+            "description": "The public registration data."
+          }
+        }
+      },
+      "DomainObservationPage": {
+        "type": "object",
+        "description": "A page of domain observation views.",
+        "required": [
+          "items",
+          "page"
+        ],
+        "properties": {
+          "items": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/DomainObservationViewDto"
+            },
+            "description": "The views, ordered by key."
+          },
+          "page": {
+            "$ref": "#/components/schemas/PageInfo",
+            "description": "Where this page sits in the result set."
+          }
+        }
+      },
+      "DomainObservationViewDto": {
+        "type": "object",
+        "description": "A domain entry's latest observation compared with the entry.",
+        "required": [
+          "key",
+          "diffs",
+          "warnings",
+          "suggestion"
+        ],
+        "properties": {
+          "diffs": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/FieldDiffDto"
+            },
+            "description": "Per-field comparison, in a stable order."
+          },
+          "key": {
+            "type": "string",
+            "description": "The entry's key (`domain/<key>`)."
+          },
+          "observation": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/DomainObservationDto",
+                "description": "The latest observation, or null before the first lookup."
+              }
+            ]
+          },
+          "suggestion": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/SuggestedFieldDto"
+            },
+            "description": "The field changes that would bring the entry in line with the\nobservation. A person or agent applies them with\n`fleetctl registry set` and publishes through Git; Fleet never\nwrites them."
+          },
+          "warnings": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/DomainWarningDto"
+            },
+            "description": "Derived warnings, most serious first. These feed the Overview's\nneeds-attention queue."
+          }
+        }
+      },
+      "DomainWarningDto": {
+        "type": "object",
+        "description": "One derived warning.",
+        "required": [
+          "code",
+          "severity",
+          "message"
+        ],
+        "properties": {
+          "code": {
+            "$ref": "#/components/schemas/WarningCodeDto",
+            "description": "Which rule fired."
+          },
+          "message": {
+            "type": "string",
+            "description": "A sentence for people."
+          },
+          "severity": {
+            "$ref": "#/components/schemas/SeverityDto",
+            "description": "How serious it is."
+          }
+        }
+      },
       "DraftEndpointDto": {
         "type": "object",
         "description": "The proposed endpoint of a draft. The user arrives redacted unless the\ncaller may read sensitive endpoint detail.",
@@ -11824,6 +12315,38 @@
         },
         "additionalProperties": false
       },
+      "FieldDiffDto": {
+        "type": "object",
+        "description": "The difference for one entry field.",
+        "required": [
+          "field",
+          "state"
+        ],
+        "properties": {
+          "field": {
+            "type": "string",
+            "description": "`registrar`, `expires`, `nameservers`, or `dnsHost`."
+          },
+          "observed": {
+            "type": [
+              "object",
+              "null"
+            ],
+            "description": "What the lookups saw."
+          },
+          "recorded": {
+            "type": [
+              "object",
+              "null"
+            ],
+            "description": "What the entry (Fleet Git) records."
+          },
+          "state": {
+            "$ref": "#/components/schemas/FieldStateDto",
+            "description": "The comparison."
+          }
+        }
+      },
       "FieldDifferenceDto": {
         "type": "object",
         "description": "One field difference, as the planner produced it.",
@@ -11862,6 +12385,15 @@
             "description": "The drift state."
           }
         }
+      },
+      "FieldStateDto": {
+        "type": "string",
+        "description": "How a field's recorded value compares with the observation.",
+        "enum": [
+          "in_sync",
+          "changed",
+          "unknown"
+        ]
       },
       "FieldViolation": {
         "type": "object",
@@ -17268,6 +17800,73 @@
         },
         "additionalProperties": false
       },
+      "RdapObservationDto": {
+        "type": "object",
+        "description": "The RDAP half of a domain observation.",
+        "required": [
+          "status",
+          "statuses",
+          "nameservers"
+        ],
+        "properties": {
+          "detail": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Why, for `unavailable`, `not_found`, and `error`."
+          },
+          "expires": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The expiry as a calendar date (`YYYY-MM-DD`). Some ccTLD registries\ndo not publish one."
+          },
+          "nameservers": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "The nameservers the registry lists."
+          },
+          "registrar": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The registrar's name as the registry reports it."
+          },
+          "server": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The RDAP server's base URL, when one was resolved."
+          },
+          "status": {
+            "$ref": "#/components/schemas/RdapStatusDto",
+            "description": "How the lookup ended."
+          },
+          "statuses": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "The EPP status values."
+          }
+        }
+      },
+      "RdapStatusDto": {
+        "type": "string",
+        "description": "The status of the RDAP half of an observation.",
+        "enum": [
+          "ok",
+          "unavailable",
+          "not_found",
+          "error"
+        ]
+      },
       "ReadyAuthDto": {
         "oneOf": [
           {
@@ -21218,6 +21817,15 @@
           }
         }
       },
+      "SeverityDto": {
+        "type": "string",
+        "description": "How serious a warning is.",
+        "enum": [
+          "info",
+          "warn",
+          "err"
+        ]
+      },
       "SkillsAuthDto": {
         "oneOf": [
           {
@@ -21972,6 +22580,24 @@
           }
         }
       },
+      "SuggestedFieldDto": {
+        "type": "object",
+        "description": "One suggested field value.",
+        "required": [
+          "field",
+          "value"
+        ],
+        "properties": {
+          "field": {
+            "type": "string",
+            "description": "The entry field."
+          },
+          "value": {
+            "type": "object",
+            "description": "The suggested value, in the field's type (a string, or a list of\nstrings for `nameservers`)."
+          }
+        }
+      },
       "SystemInfo": {
         "type": "object",
         "description": "The system view served at `/api/v1/system`.",
@@ -22142,6 +22768,18 @@
             "description": "The display name."
           }
         }
+      },
+      "WarningCodeDto": {
+        "type": "string",
+        "description": "The derived warning rules.",
+        "enum": [
+          "registrar_mismatch",
+          "nameservers_mismatch",
+          "dns_host_mismatch",
+          "expiry_changed",
+          "expiring",
+          "auto_renew_off_expiring"
+        ]
       }
     }
   },
@@ -22168,7 +22806,7 @@
     },
     {
       "name": "registry",
-      "description": "The descriptive Registry of the active desired revision: types, entries, and relations. Read-only; edits are commits to the Fleet repository."
+      "description": "The descriptive Registry of the active desired revision: types, entries, and relations. Edits are commits to the Fleet repository; the only mutation is recording public RDAP/DNS observations of domain entries."
     },
     {
       "name": "operations",

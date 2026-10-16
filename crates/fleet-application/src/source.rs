@@ -227,6 +227,7 @@ pub struct DesiredSource {
     audit: std::sync::Arc<dyn crate::operation::AuditPort>,
     credentials: Option<std::sync::Arc<dyn GitCredentialStore>>,
     registry: Option<std::sync::Arc<crate::registry::RegistryReadModel>>,
+    enricher: Option<std::sync::Arc<crate::registry::enrich::DomainEnricher>>,
 }
 
 impl DesiredSource {
@@ -241,6 +242,7 @@ impl DesiredSource {
             audit,
             credentials: None,
             registry: None,
+            enricher: None,
         }
     }
 
@@ -259,6 +261,25 @@ impl DesiredSource {
     #[must_use]
     pub fn registry(&self) -> Option<&std::sync::Arc<crate::registry::RegistryReadModel>> {
         self.registry.as_ref()
+    }
+
+    /// Attaches the domain lookup enricher (FM-1020), which the Registry
+    /// observation endpoints serve.
+    #[must_use]
+    pub fn with_domain_enricher(
+        mut self,
+        enricher: std::sync::Arc<crate::registry::enrich::DomainEnricher>,
+    ) -> Self {
+        self.enricher = Some(enricher);
+        self
+    }
+
+    /// The domain lookup enricher, when one is attached.
+    #[must_use]
+    pub fn domain_enricher(
+        &self,
+    ) -> Option<&std::sync::Arc<crate::registry::enrich::DomainEnricher>> {
+        self.enricher.as_ref()
     }
 
     /// Re-derives the Registry cache after the active revision changed.

@@ -131,6 +131,20 @@ pub const API_BASE_PATH: &str = "/api/v1";
         registry::RegistryRelationDto,
         registry::RegistryEntryDto,
         registry::RegistryReferenceDto,
+        registry::RdapStatusDto,
+        registry::RdapObservationDto,
+        registry::DnsRecordsDto,
+        registry::DnsStatusDto,
+        registry::DnsObservationDto,
+        registry::DomainObservationDto,
+        registry::FieldStateDto,
+        registry::FieldDiffDto,
+        registry::SeverityDto,
+        registry::WarningCodeDto,
+        registry::DomainWarningDto,
+        registry::SuggestedFieldDto,
+        registry::DomainObservationViewDto,
+        registry::DomainObservationPage,
         desired::RevisionRequest,
         skill_catalog::CatalogContentDto,
         skill_catalog::CatalogDto,
@@ -238,7 +252,7 @@ pub const API_BASE_PATH: &str = "/api/v1";
         (name = "events", description = "Payload-free SSE invalidation notifications."),
         (name = "audit", description = "Authorized, metadata-only audit event queries."),
         (name = "desired", description = "The active desired-state revision and its validated, non-secret resources. Read-only; activation is an operation."),
-        (name = "registry", description = "The descriptive Registry of the active desired revision: types, entries, and relations. Read-only; edits are commits to the Fleet repository."),
+        (name = "registry", description = "The descriptive Registry of the active desired revision: types, entries, and relations. Edits are commits to the Fleet repository; the only mutation is recording public RDAP/DNS observations of domain entries."),
         (name = "operations", description = "Durable operations: accepted remote work."),
         (name = "requests", description = "The action broker (ADR 0016): agents request typed provider actions; policy or a person approves them; approved requests run as durable operations. Before authenticated identities, policy is a guardrail keyed on risk class, not a security boundary."),
         (name = "credentials", description = "Delegated, scoped, short-lived credentials for CI and agents (ADR 0011). The token is returned once at issue time and is never listed or audited."),
@@ -341,6 +355,9 @@ pub fn api(state: Arc<operations::ApiState>) -> (Router, utoipa::openapi::OpenAp
                 .routes(routes!(registry::get_registry_entry))
                 .routes(routes!(registry::list_registry_entry_references))
                 .routes(routes!(registry::list_registry_references))
+                .routes(routes!(registry::list_domain_observations))
+                .routes(routes!(registry::get_domain_observation))
+                .routes(routes!(registry::refresh_domain_observation))
                 .routes(routes!(desired::get_desired_revision))
                 .routes(routes!(desired::list_desired_resources))
                 .routes(routes!(
