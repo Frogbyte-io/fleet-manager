@@ -343,7 +343,7 @@ fleetctl registry publish -m "Add service"</pre>
                       class="text-fc-faint"
                     >–</span>
                   </td>
-                  <td class="hidden px-2 py-1.5 sm:table-cell">
+                  <td class="hidden whitespace-nowrap px-2 py-1.5 sm:table-cell">
                     <span
                       v-if="row.renewal"
                       class="font-mono text-[11px]"
@@ -373,7 +373,7 @@ fleetctl registry publish -m "Add service"</pre>
                     colspan="6"
                     class="min-w-0 px-3 pb-3 pt-1"
                   >
-                    <div class="grid min-w-0 gap-4 text-[13px] md:grid-cols-2">
+                    <div class="grid w-0 min-w-full gap-4 text-[13px] md:grid-cols-2">
                       <section class="min-w-0">
                         <h3 class="fc-kicker border-b border-fc-line pb-1">
                           Details

@@ -4,6 +4,7 @@
 
 import type { RegistryEntryDto } from '@frogbyte-io/fleet-api-client'
 
+import { daysUntil } from '../dates'
 import { fieldValues } from '../registry'
 
 export type BillingPeriod = 'monthly' | 'yearly' | 'other'
@@ -43,15 +44,6 @@ function period(value: unknown): BillingPeriod | null {
 
 function text(value: unknown): string | null {
   return typeof value === 'string' && value.trim() ? value : null
-}
-
-const DAY_MS = 86_400_000
-
-function daysUntil(date: string | null, now: number): number | null {
-  const match = date ? /^(\d{4})-(\d{2})-(\d{2})$/.exec(date) : null
-  if (!match)
-    return null
-  return Math.round((Date.UTC(Number(match[1]), Number(match[2]) - 1, Number(match[3])) - Math.floor(now / DAY_MS) * DAY_MS) / DAY_MS)
 }
 
 export interface ServiceRow {
@@ -155,6 +147,8 @@ export function costTotals(rows: Pick<ServiceRow, 'cost' | 'period'>[]): CostTot
 
 /** How far ahead renewals count as upcoming. */
 export const RENEWAL_WINDOW_DAYS = 60
+/** How long a passed renewal date stays listed as stale. */
+export const OVERDUE_WINDOW_DAYS = 30
 
 export interface Renewal {
   row: ServiceRow
@@ -163,11 +157,11 @@ export interface Renewal {
   state: 'overdue' | 'soon' | 'later'
 }
 
-/** Renewals within the window or already past, soonest first. */
+/** Renewals within the window, and ones passed by at most 30 days, soonest first. */
 export function upcomingRenewals(rows: ServiceRow[], windowDays = RENEWAL_WINDOW_DAYS): Renewal[] {
   return rows
     .flatMap((row) => {
-      if (row.renewalDays === null || row.renewalDays > windowDays)
+      if (row.renewalDays === null || row.renewalDays > windowDays || row.renewalDays < -OVERDUE_WINDOW_DAYS)
         return []
       const state: Renewal['state'] = row.renewalDays < 0 ? 'overdue' : row.renewalDays <= 14 ? 'soon' : 'later'
       return [{ row, days: row.renewalDays, state }]

@@ -61,6 +61,7 @@ describe('upcomingRenewals', () => {
       entry('soon', { name: 'Soon', renewal: '2026-10-20' }),
       entry('mid', { name: 'Mid', renewal: '2026-11-20' }),
       entry('late', { name: 'Late', renewal: '2026-10-10' }),
+      entry('stale', { name: 'Stale', renewal: '2026-08-01' }),
       entry('none', { name: 'None' }),
     ], NOW)
     expect(upcomingRenewals(rows).map(r => [r.row.key, r.days, r.state])).toEqual([

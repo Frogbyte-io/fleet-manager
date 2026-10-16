@@ -208,7 +208,7 @@ describe('kpis and activity', () => {
     expect(rows[0]!.detail).toBe('Auto-renew is off and the domain expires in 4 days. (1 more)')
   })
 
-  it('flags services renewing within two weeks and ones whose renewal date has passed', () => {
+  it('flags services renewing within two weeks', () => {
     const now = Date.UTC(2026, 9, 16, 12)
     const service = (key: string, fields: Record<string, unknown>) => ({ id: key, key, name: key, type: 'service', fields, links: [], relations: [], tags: [] })
     const rows = serviceRenewalRows([
@@ -217,12 +217,11 @@ describe('kpis and activity', () => {
       service('late', { name: 'Late', renewal: '2026-10-01' }),
       service('none', { name: 'None' }),
     ], now)
+    // A passed date is the Services view's business, not the queue's.
     expect(rows.map(r => [r.key, r.severity, r.to])).toEqual([
-      ['service-renewal:late', 'info', { path: '/registry/services', query: { entry: 'late' } }],
       ['service-renewal:soon', 'warn', { path: '/registry/services', query: { entry: 'soon' } }],
     ])
-    expect(rows[1]!.title).toBe('Soon renews in 4 days')
-    expect(rows[1]!.detail).toContain('€9.00 / month')
-    expect(rows[0]!.title).toBe('Late: renewal date has passed')
+    expect(rows[0]!.title).toBe('Soon renews in 4 days')
+    expect(rows[0]!.detail).toContain('€9.00 / month')
   })
 })

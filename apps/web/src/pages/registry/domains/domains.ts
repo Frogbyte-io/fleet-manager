@@ -3,23 +3,17 @@
 
 import type { DomainObservationViewDto, DomainWarningDto, RegistryEntryDto } from '@frogbyte-io/fleet-api-client'
 
+import { daysUntil } from '../dates'
 import { fieldValues } from '../registry'
+
+export { daysUntil }
 
 export type Tone = 'err' | 'warn' | 'info' | 'ok' | 'muted'
 
-/** Days before expiry at which a domain is flagged. */
+/** Days before expiry at which a domain is flagged (the API's default window). */
 export const EXPIRY_WARN_DAYS = 30
-
-const DAY_MS = 86_400_000
-
-/** Whole days from today (UTC) to a `YYYY-MM-DD` date, or null when it does not parse. */
-export function daysUntil(date: string | null | undefined, now = Date.now()): number | null {
-  const match = date ? /^(\d{4})-(\d{2})-(\d{2})$/.exec(date) : null
-  if (!match)
-    return null
-  const at = Date.UTC(Number(match[1]), Number(match[2]) - 1, Number(match[3]))
-  return Math.round((at - Math.floor(now / DAY_MS) * DAY_MS) / DAY_MS)
-}
+/** Days before expiry at which the flag is an error (the API's urgent threshold). */
+export const EXPIRY_URGENT_DAYS = 7
 
 export interface ExpiryState {
   kind: 'expired' | 'soon' | 'ok' | 'unknown'
@@ -36,7 +30,7 @@ export function expiryState(date: string | null | undefined, now = Date.now()): 
   if (days < 0)
     return { kind: 'expired', days, tone: 'err', label: `Expired ${-days} ${unit(days)} ago` }
   if (days <= EXPIRY_WARN_DAYS)
-    return { kind: 'soon', days, tone: days <= 14 ? 'err' : 'warn', label: days === 0 ? 'Expires today' : `Expires in ${days} ${unit(days)}` }
+    return { kind: 'soon', days, tone: days <= EXPIRY_URGENT_DAYS ? 'err' : 'warn', label: days === 0 ? 'Expires today' : `Expires in ${days} ${unit(days)}` }
   return { kind: 'ok', days, tone: 'ok', label: `In ${days} days` }
 }
 
@@ -68,9 +62,13 @@ export interface DomainRow {
   registrar: string | null
   dnsHost: string | null
   autoRenew: boolean | null
-  /** The recorded expiry, else the observed one. */
+  /** The expiry the state is computed from: the observed (RDAP) date, else the recorded one (as the API does). */
   expires: string | null
   expirySource: 'recorded' | 'observed' | null
+  /** The expiry Fleet Git records. */
+  recordedExpires: string | null
+  /** Every compared field matches, some were not compared, or none were. */
+  sync: 'in_sync' | 'partial' | 'none'
   expiry: ExpiryState
   /** Whether a lookup has produced an observation for this domain. */
   observed: boolean
@@ -124,6 +122,12 @@ export function suggestCommand(key: string, suggestion: { field: string, value: 
 
 const TONE_RANK: Record<Tone, number> = { err: 0, warn: 1, info: 2, muted: 3, ok: 4 }
 
+function syncOf(diffs: { state: string }[]): 'in_sync' | 'partial' | 'none' {
+  if (!diffs.some(d => d.state === 'in_sync'))
+    return 'none'
+  return diffs.every(d => d.state === 'in_sync') ? 'in_sync' : 'partial'
+}
+
 function worse(a: Tone, b: Tone): Tone {
   return TONE_RANK[a] <= TONE_RANK[b] ? a : b
 }
@@ -132,7 +136,7 @@ export function domainRow(entry: RegistryEntryDto, view: DomainObservationViewDt
   const fields = fieldValues(entry.fields)
   const recorded = text(fields.expires)
   const observedExpiry = text(view?.observation?.rdap.expires)
-  const expires = recorded ?? observedExpiry
+  const expires = observedExpiry ?? recorded
   const expiry = expiryState(expires, now)
   const diffs = view?.diffs ?? []
   const warnings = view?.warnings ?? []
@@ -152,7 +156,9 @@ export function domainRow(entry: RegistryEntryDto, view: DomainObservationViewDt
     dnsHost: text(fields.dnsHost),
     autoRenew: typeof fields.autoRenew === 'boolean' ? fields.autoRenew : null,
     expires,
-    expirySource: recorded ? 'recorded' : observedExpiry ? 'observed' : null,
+    expirySource: observedExpiry ? 'observed' : recorded ? 'recorded' : null,
+    recordedExpires: recorded,
+    sync: syncOf(diffs),
     expiry,
     observed: !!view?.observation,
     observedAt: view?.observation?.observedAt ?? null,

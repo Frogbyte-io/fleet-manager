@@ -236,7 +236,7 @@ fleetctl registry publish -m "Add domain"</pre>
                 <td class="px-2 py-1.5">
                   <button
                     type="button"
-                    class="text-left font-mono text-fc-ink hover:underline"
+                    class="break-all text-left font-mono text-fc-ink hover:underline"
                     :aria-expanded="open.has(row.key)"
                     :aria-label="`${open.has(row.key) ? 'Hide' : 'Show'} details for ${row.key}`"
                     @click.stop="toggle(row.key)"
@@ -263,8 +263,12 @@ fleetctl registry publish -m "Add domain"</pre>
                     class="text-fc-faint"
                   >{{ row.observed ? 'no records' : 'not looked up' }}</span>
                 </td>
-                <td class="px-2 py-1.5">
+                <td class="whitespace-nowrap px-2 py-1.5">
                   <span class="font-mono text-[11px]">{{ row.expires ?? '–' }}</span>
+                  <span
+                    v-if="row.recordedExpires && row.expires !== row.recordedExpires"
+                    class="block font-mono text-[10px] text-fc-faint"
+                  >recorded {{ row.recordedExpires }}</span>
                   <span class="mt-0.5 block">
                     <ToneBadge
                       v-if="row.expiry.kind !== 'unknown'"
@@ -287,10 +291,16 @@ fleetctl registry publish -m "Add domain"</pre>
                       v-if="!row.observed"
                       tone="muted"
                     >not looked up</ToneBadge>
-                    <ToneBadge
-                      v-else-if="row.drift.length === 0 && row.warnings.length === 0 && row.autoRenew !== false"
-                      tone="ok"
-                    >in sync</ToneBadge>
+                    <template v-else-if="row.drift.length === 0 && row.warnings.length === 0 && row.autoRenew !== false">
+                      <ToneBadge
+                        v-if="row.sync === 'in_sync'"
+                        tone="ok"
+                      >in sync</ToneBadge>
+                      <ToneBadge
+                        v-else
+                        tone="muted"
+                      >{{ row.sync === 'partial' ? 'partly compared' : 'not compared' }}</ToneBadge>
+                    </template>
                   </span>
                 </td>
               </tr>
@@ -303,7 +313,7 @@ fleetctl registry publish -m "Add domain"</pre>
                   colspan="6"
                   class="min-w-0 px-3 pb-3 pt-1"
                 >
-                  <div class="grid min-w-0 gap-4 text-[13px] md:grid-cols-2">
+                  <div class="grid w-0 min-w-full gap-4 text-[13px] md:grid-cols-2">
                     <section class="min-w-0">
                       <h2 class="fc-kicker border-b border-fc-line pb-1">
                         Registration
@@ -324,7 +334,10 @@ fleetctl registry publish -m "Add domain"</pre>
                           {{ row.expires ?? '–' }}<span
                             v-if="row.expirySource === 'observed'"
                             class="text-fc-faint"
-                          > (from RDAP; not recorded)</span>
+                          > (from RDAP{{ row.recordedExpires ? '' : '; not recorded in Fleet Git' }})</span><span
+                            v-if="row.recordedExpires && row.expires !== row.recordedExpires"
+                            class="block text-fc-faint"
+                          >Fleet Git records {{ row.recordedExpires }}</span>
                         </dd>
                         <dt class="text-fc-faint">
                           Auto-renew

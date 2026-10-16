@@ -33,6 +33,8 @@ describe('expiryState', () => {
     expect(expiryState('2026-10-10', NOW)).toMatchObject({ kind: 'expired', tone: 'err', label: 'Expired 6 days ago' })
     expect(expiryState('2026-10-16', NOW)).toMatchObject({ kind: 'soon', tone: 'err', label: 'Expires today' })
     expect(expiryState('2026-10-17', NOW)).toMatchObject({ kind: 'soon', tone: 'err', label: 'Expires in 1 day' })
+    expect(expiryState('2026-10-23', NOW)).toMatchObject({ tone: 'err', days: 7 })
+    expect(expiryState('2026-10-24', NOW)).toMatchObject({ tone: 'warn', days: 8 })
     expect(expiryState('2026-11-10', NOW)).toMatchObject({ kind: 'soon', tone: 'warn', days: 25 })
     expect(expiryState('2026-11-16', NOW)).toMatchObject({ kind: 'ok', tone: 'ok', days: 31 })
     expect(expiryState(null, NOW)).toMatchObject({ kind: 'unknown', tone: 'muted' })
@@ -50,7 +52,7 @@ describe('domainRow', () => {
       { name: 'www', records: ['CNAME example.org'] },
     ])
     expect(row.nameservers).toEqual(['ns1.example.net'])
-    expect(row).toMatchObject({ observed: true, inSync: 1, tone: 'ok', command: null, expirySource: 'recorded' })
+    expect(row).toMatchObject({ observed: true, inSync: 1, tone: 'ok', command: null, expirySource: 'observed' })
   })
 
   it('reports drift with both values and the suggested set command', () => {
@@ -86,6 +88,24 @@ describe('domainRow', () => {
       observation: { ...base, rdap: { ...base.rdap, nameservers: [], expires: '2026-10-20' } },
     }), NOW)
     expect(fallback).toMatchObject({ expires: '2026-10-20', expirySource: 'observed', tone: 'err' })
+  })
+
+  it('computes expiry from the observed date when both exist, keeping the recorded one beside it', () => {
+    const base = view('e.example').observation!
+    const row = domainRow(entry('e.example', { expires: '2027-06-01' }), view('e.example', {
+      observation: { ...base, rdap: { ...base.rdap, expires: '2026-10-20' } },
+      diffs: [{ field: 'expires', state: 'changed', recorded: '2027-06-01', observed: '2026-10-20' }],
+    }), NOW)
+    expect(row).toMatchObject({ expires: '2026-10-20', expirySource: 'observed', recordedExpires: '2027-06-01', tone: 'err' })
+    expect(row.drift.map(d => d.field)).toEqual(['expires'])
+  })
+
+  it('is in sync only when something matched and nothing was left uncompared', () => {
+    const sync = (diffs: unknown[]) => domainRow(entry('f.example', {}), view('f.example', { diffs }), NOW).sync
+    expect(sync([{ field: 'registrar', state: 'in_sync' }, { field: 'expires', state: 'in_sync' }])).toBe('in_sync')
+    expect(sync([{ field: 'registrar', state: 'in_sync' }, { field: 'dnsHost', state: 'unknown' }])).toBe('partial')
+    expect(sync([{ field: 'registrar', state: 'unknown' }])).toBe('none')
+    expect(sync([])).toBe('none')
   })
 
   it('keeps DNS detail when the DNS half failed', () => {

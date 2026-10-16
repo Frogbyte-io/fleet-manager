@@ -332,21 +332,18 @@ export function domainRows(views: Pick<DomainObservationViewDto, 'key' | 'warnin
 export const SERVICE_RENEWAL_WINDOW_DAYS = 14
 
 /**
- * Services renewing soon, or whose recorded renewal date has passed (the
- * entry is then stale: it renewed or lapsed). One row per service; the
- * Services view lists every upcoming renewal.
+ * Services renewing within two weeks, one row per service. Passed renewal
+ * dates stay off the queue; the Services view flags them.
  */
 export function serviceRenewalRows(entries: RegistryEntryDto[], now = Date.now()): AttentionRow[] {
-  return upcomingRenewals(serviceRows(entries, now), SERVICE_RENEWAL_WINDOW_DAYS).map(({ row, days, state }) => {
+  return upcomingRenewals(serviceRows(entries, now), SERVICE_RENEWAL_WINDOW_DAYS).filter(r => r.state !== 'overdue').map(({ row, days }) => {
     const cost = row.cost ? ` (${formatMicros(row.cost.micros, row.cost.currency)}${row.period === 'monthly' ? ' / month' : row.period === 'yearly' ? ' / year' : ''})` : ''
     return {
       key: `service-renewal:${row.key}`,
       source: 'service-renewal' as const,
-      severity: state === 'overdue' ? 'info' as const : 'warn' as const,
-      title: state === 'overdue' ? `${row.name}: renewal date has passed` : `${row.name} renews ${relativeDays(days)}`,
-      detail: state === 'overdue'
-        ? `Recorded renewal ${row.renewal}. Update it in Fleet Git once it renewed or lapsed.`
-        : `Renews ${row.renewal}${cost}.`,
+      severity: 'warn' as const,
+      title: `${row.name} renews ${relativeDays(days)}`,
+      detail: `Renews ${row.renewal}${cost}.`,
       to: { path: '/registry/services', query: { entry: row.key } },
       at: now,
     }

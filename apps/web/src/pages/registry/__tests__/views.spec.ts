@@ -97,7 +97,7 @@ describe('Domains view', () => {
         entry('domain', 'drift.example.org', { registrar: 'GoDaddy', expires: isoDay(200), autoRenew: true }),
       ],
       [
-        observation('fine.example.org'),
+        observation('fine.example.org', { diffs: [{ field: 'registrar', state: 'in_sync', recorded: 'Webhuset', observed: 'Webhuset' }] }),
         observation('drift.example.org', {
           diffs: [{ field: 'registrar', state: 'changed', recorded: 'GoDaddy', observed: 'Webhuset' }],
           suggestion: [{ field: 'registrar', value: 'Webhuset' }],
