@@ -226,14 +226,46 @@ impl SourceExecutor {
                 digest,
                 diagnostics,
                 resources,
-            } => serde_json::json!({
-                "commitSha": digest.commit_sha,
-                "contentDigest": digest.content_digest,
-                "diagnostics": diagnostics,
-                "valid": diagnostics.is_empty(),
-                "resourceCount": resources.len(),
-            })
-            .to_string(),
+            } => {
+                // A valid candidate may qualify for Registry-only
+                // auto-activation. An invalid one never does, and a failure
+                // here never fails the fetch: the candidate stays recorded
+                // for manual activation.
+                let auto_activation = if diagnostics.is_empty() {
+                    match self
+                        .desired_source
+                        .auto_activate(
+                            &fleet_auth::LanAllowAllAuthorizer,
+                            fleet_auth::LAN_PRINCIPAL_ID,
+                            &digest,
+                            &resources,
+                            Some(&operation.id),
+                        )
+                        .await
+                    {
+                        Ok(fleet_application::source::AutoActivation::Activated {
+                            diff, ..
+                        }) => serde_json::json!({ "activated": true, "diff": diff.render() }),
+                        Ok(fleet_application::source::AutoActivation::Skipped { reason }) => {
+                            serde_json::json!({ "activated": false, "reason": reason })
+                        }
+                        Err(error) => {
+                            serde_json::json!({ "activated": false, "reason": format!("auto-activation failed: {error}") })
+                        }
+                    }
+                } else {
+                    serde_json::json!({ "activated": false, "reason": "the candidate carries validation diagnostics" })
+                };
+                serde_json::json!({
+                    "commitSha": digest.commit_sha,
+                    "contentDigest": digest.content_digest,
+                    "diagnostics": diagnostics,
+                    "valid": diagnostics.is_empty(),
+                    "resourceCount": resources.len(),
+                    "autoActivation": auto_activation,
+                })
+                .to_string()
+            }
             fleet_application::source::FetchOutcome::TransportFailed { detail } => {
                 return complete_failed(operations, &operation.id, &detail).await;
             }

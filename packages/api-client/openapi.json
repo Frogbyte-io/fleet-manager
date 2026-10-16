@@ -452,7 +452,7 @@
         "tags": [
           "desired"
         ],
-        "summary": "Fetches a commit of the configured source as a candidate.",
+        "summary": "Fetches a commit of the configured source as a candidate. This is the\nfetch-now endpoint a webhook or CI step calls after a push: post the\npushed commit's full SHA. A valid Registry-only candidate then\nactivates on its own when `registry.autoActivate` is on.",
         "description": "# Errors\n\nReturns an API error when no remote is configured, or on authentication,\nauthorization, validation, or storage failure.",
         "operationId": "fetchDesiredRevision",
         "requestBody": {
@@ -746,6 +746,128 @@
           },
           "403": {
             "description": "The caller may not activate the desired source.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The desired-state surface is not wired.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/desired/settings": {
+      "get": {
+        "tags": [
+          "desired"
+        ],
+        "summary": "Reads the Registry settings (auto-activation and change mode).",
+        "description": "# Errors\n\nReturns an API error when authentication, authorization, or storage fails.",
+        "operationId": "getRegistrySettings",
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Resource_RegistrySettingsDto"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The caller may not read the desired state.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "The request could not be completed.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The desired-state surface is not wired.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "put": {
+        "tags": [
+          "desired"
+        ],
+        "summary": "Changes the Registry settings. Authorized like activation and audited.",
+        "description": "# Errors\n\nReturns an API error when authentication, authorization, validation, or storage fails.",
+        "operationId": "updateRegistrySettings",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UpdateRegistrySettingsRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Resource_RegistrySettingsDto"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "No setting was named, or a value is not allowed.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The caller may not change the desired-state settings.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "The request could not be completed.",
             "content": {
               "application/json": {
                 "schema": {
@@ -15708,6 +15830,24 @@
           }
         }
       },
+      "RegistrySettingsDto": {
+        "type": "object",
+        "description": "The Registry controller settings. Fleet does not enforce the change\nmode (the repository host's branch protection does); `fleetctl` and the\n`fleet` skill follow it.",
+        "required": [
+          "autoActivate",
+          "changeMode"
+        ],
+        "properties": {
+          "autoActivate": {
+            "type": "boolean",
+            "description": "Whether a fetched, valid revision that changes only Registry\nresources activates without a manual step."
+          },
+          "changeMode": {
+            "type": "string",
+            "description": "How Registry edits should reach the default branch: `direct` or\n`pull-request`."
+          }
+        }
+      },
       "ReleaseLeaseRequest": {
         "type": "object",
         "description": "The release request.",
@@ -18344,6 +18484,33 @@
           }
         }
       },
+      "Resource_RegistrySettingsDto": {
+        "type": "object",
+        "description": "A single resource.\n\nThe payload is nested under `data` so that later top-level fields are an\nadditive change rather than a breaking one.",
+        "required": [
+          "data"
+        ],
+        "properties": {
+          "data": {
+            "type": "object",
+            "description": "The Registry controller settings. Fleet does not enforce the change\nmode (the repository host's branch protection does); `fleetctl` and the\n`fleet` skill follow it.",
+            "required": [
+              "autoActivate",
+              "changeMode"
+            ],
+            "properties": {
+              "autoActivate": {
+                "type": "boolean",
+                "description": "Whether a fetched, valid revision that changes only Registry\nresources activates without a manual step."
+              },
+              "changeMode": {
+                "type": "string",
+                "description": "How Registry edits should reach the default branch: `direct` or\n`pull-request`."
+              }
+            }
+          }
+        }
+      },
       "Resource_SkillsSnapshotDto": {
         "type": "object",
         "description": "A single resource.\n\nThe payload is nested under `data` so that later top-level fields are an\nadditive change rather than a breaking one.",
@@ -19575,6 +19742,27 @@
             "description": "The display name."
           }
         }
+      },
+      "UpdateRegistrySettingsRequest": {
+        "type": "object",
+        "description": "A partial change to the Registry settings; omitted fields stay.",
+        "properties": {
+          "autoActivate": {
+            "type": [
+              "boolean",
+              "null"
+            ],
+            "description": "Turns Registry-only auto-activation on or off."
+          },
+          "changeMode": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "`direct` or `pull-request`."
+          }
+        },
+        "additionalProperties": false
       }
     }
   },

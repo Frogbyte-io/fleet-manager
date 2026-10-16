@@ -309,6 +309,45 @@ impl GitSource {
         self.fetch_inner(remote, commit_sha, &auth, validate)
     }
 
+    /// Resolves the remote's `HEAD` to a full commit SHA with `git
+    /// ls-remote`, using a credential the caller resolved just in time
+    /// (the same file-based handoff as a fetch).
+    ///
+    /// # Errors
+    ///
+    /// Fails on a credential that does not fit the remote's transport, on
+    /// transport errors, and when the remote answers with no usable SHA.
+    pub fn resolve_head(
+        &self,
+        remote: &str,
+        credential: Option<&GitCredential>,
+    ) -> Result<String, String> {
+        let auth = match credential {
+            Some(credential) => {
+                if !credential.fits(remote) {
+                    return Err(CREDENTIAL_MISMATCH.to_owned());
+                }
+                Auth::prepare(&self.work_root, credential)?
+            }
+            None => Auth::none(),
+        };
+        // `--` keeps an option-looking remote from reaching git as a flag.
+        let listing = self.git_with(&["ls-remote", "--quiet", "--", remote, "HEAD"], &auth)?;
+        let sha = listing
+            .lines()
+            .next()
+            .and_then(|line| line.split_whitespace().next())
+            .unwrap_or_default();
+        if sha.len() != 40
+            || !sha
+                .chars()
+                .all(|c| c.is_ascii_digit() || ('a'..='f').contains(&c))
+        {
+            return Err("the remote did not report a HEAD commit".to_owned());
+        }
+        Ok(sha.to_owned())
+    }
+
     fn fetch_inner(
         &self,
         remote: &str,

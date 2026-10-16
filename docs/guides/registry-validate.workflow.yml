@@ -1,0 +1,61 @@
+# Example GitHub Actions workflow for a *Fleet Git repository* (the repository
+# that holds your Fleet desired state), not for the fleet-manager repository.
+# Copy it to .github/workflows/registry-validate.yml in your Fleet Git repo.
+#
+# It validates the repository's Registry (RegistryType and RegistryEntry
+# documents) on every pull request, with the same validator the controller
+# runs before it activates a revision. See docs/guides/registry-workflow.md.
+#
+# `fleetctl registry validate` is delivered by FM-1013 and is not available
+# yet; this file is written against that planned command.
+name: registry-validate
+
+on:
+  pull_request:
+    paths:
+      - '**/*.yaml'
+      - '**/*.yml'
+      - '.github/workflows/registry-validate.yml'
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: registry-validate-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  registry-validate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      # Set FLEETCTL_URL (a release binary) and FLEETCTL_SHA256 as repository
+      # variables, or replace this step with how your runners get fleetctl.
+      # The pinned digest means a changed binary fails the job instead of
+      # running.
+      - name: Install fleetctl
+        env:
+          FLEETCTL_URL: ${{ vars.FLEETCTL_URL }}
+          FLEETCTL_SHA256: ${{ vars.FLEETCTL_SHA256 }}
+        run: |
+          set -euo pipefail
+          if [ -z "${FLEETCTL_URL:-}" ] || [ -z "${FLEETCTL_SHA256:-}" ]; then
+            echo "Set the FLEETCTL_URL and FLEETCTL_SHA256 repository variables." >&2
+            exit 1
+          fi
+          curl -fsSL "$FLEETCTL_URL" -o "$RUNNER_TEMP/fleetctl"
+          echo "$FLEETCTL_SHA256  $RUNNER_TEMP/fleetctl" | sha256sum --check --strict
+          chmod +x "$RUNNER_TEMP/fleetctl"
+          echo "$RUNNER_TEMP" >> "$GITHUB_PATH"
+
+      # Offline: reads only this checkout. It needs no controller URL and no
+      # token, and none should be given to this job.
+      - name: Validate the Registry
+        run: fleetctl registry validate --output json

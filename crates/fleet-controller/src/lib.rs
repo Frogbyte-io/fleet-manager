@@ -35,6 +35,7 @@ pub mod proxmox_tasks_store;
 pub mod ready;
 pub mod skills;
 pub mod source;
+pub mod source_poller;
 pub mod tailnet_store;
 pub mod worker;
 
@@ -298,7 +299,10 @@ fn api_state(
                 let desired = fleet_application::source::DesiredSource::new(
                     std::sync::Arc::new(fleet_storage_sqlite::SourceRepository::new(pool.clone())),
                     std::sync::Arc::new(fleet_storage_sqlite::AuditSink::new(pool.clone())),
-                );
+                )
+                .with_settings(std::sync::Arc::new(
+                    fleet_storage_sqlite::SourceRepository::new(pool.clone()),
+                ));
                 match git_credentials {
                     Some(credentials) => desired.with_credentials(credentials),
                     None => desired,

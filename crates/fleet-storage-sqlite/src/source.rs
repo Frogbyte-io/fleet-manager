@@ -262,3 +262,30 @@ impl fleet_application::source::SourcePort for SourceRepository {
             .collect()
     }
 }
+
+#[async_trait::async_trait]
+impl fleet_application::source::SettingsPort for SourceRepository {
+    async fn get(&self, key: &str) -> Result<Option<String>, String> {
+        let row: Option<(String,)> =
+            sqlx::query_as("SELECT value FROM controller_settings WHERE key = ?1")
+                .bind(key)
+                .fetch_optional(&self.pool)
+                .await
+                .map_err(|error| format!("the setting read failed: {error}"))?;
+        Ok(row.map(|(value,)| value))
+    }
+
+    async fn set(&self, key: &str, value: &str) -> Result<(), String> {
+        sqlx::query(
+            "INSERT INTO controller_settings (key, value, updated_at) VALUES (?1, ?2, ?3) \
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at",
+        )
+        .bind(key)
+        .bind(value)
+        .bind(fleet_core::SystemClock::now_unix_millis())
+        .execute(&self.pool)
+        .await
+        .map_err(|error| format!("the setting write failed: {error}"))?;
+        Ok(())
+    }
+}

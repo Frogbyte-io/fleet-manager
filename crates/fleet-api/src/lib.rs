@@ -113,6 +113,8 @@ pub const API_BASE_PATH: &str = "/api/v1";
         desired::DesiredHistoryEntryDto,
         desired::DesiredSourceDto,
         desired::DesiredStatusDto,
+        desired::RegistrySettingsDto,
+        desired::UpdateRegistrySettingsRequest,
         plans::ApplyPlanRequest,
         plans::DriftCountsDto,
         plans::MachineDriftDto,
@@ -321,6 +323,10 @@ pub fn api(state: Arc<operations::ApiState>) -> (Router, utoipa::openapi::OpenAp
                     desired::configure_desired_source
                 ))
                 .routes(routes!(desired::store_desired_source_credential))
+                .routes(routes!(
+                    desired::get_registry_settings,
+                    desired::update_registry_settings
+                ))
                 .routes(routes!(desired::list_desired_history))
                 .routes(routes!(desired::fetch_desired_revision))
                 .routes(routes!(desired::activate_desired_revision))
