@@ -285,6 +285,7 @@ fn state_for(
         desired: None,
         planning: None,
         credentials: None,
+        requests: None,
     })
 }
 

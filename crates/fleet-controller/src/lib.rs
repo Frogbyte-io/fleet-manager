@@ -206,6 +206,36 @@ pub fn compose_planning(db: &SqlitePool) -> fleet_application::planning::Plannin
     )
 }
 
+/// The action broker's settings from the environment
+/// (`FLEET_ACTION_REQUEST_TTL_SECONDS`, `FLEET_ACTION_POLICY`).
+///
+/// # Errors
+///
+/// Fails on a malformed value, naming the variable.
+pub fn broker_settings_from_env() -> Result<fleet_application::broker::BrokerSettings, String> {
+    fleet_application::broker::BrokerSettings::from_env_values(
+        std::env::var(fleet_application::broker::REQUEST_TTL_VAR)
+            .ok()
+            .as_deref(),
+        std::env::var(fleet_application::broker::POLICY_VAR)
+            .ok()
+            .as_deref(),
+    )
+}
+
+/// The provider actions this controller offers through the broker. Empty
+/// until a provider registers its actions here (FM-1033, FM-1034, FM-1042).
+fn compose_action_registry() -> Arc<fleet_application::broker::ActionRegistry> {
+    Arc::new(fleet_application::broker::ActionRegistry::new())
+}
+
+/// The operation kinds provider actions own. Every `Operations` instance (the
+/// API's and the worker's) declares them so none accepts them off the broker.
+#[must_use]
+pub fn brokered_operation_kinds() -> std::collections::BTreeSet<String> {
+    compose_action_registry().operation_kinds()
+}
+
 /// Builds the API state over an opened store, or a state whose backends
 /// answer nothing when the caller has none (tests). The authorization policy
 /// is the trusted-LAN adapter in both cases.
@@ -270,8 +300,22 @@ fn api_state(
         let audit = fleet_application::audit::AuditQueries::new(std::sync::Arc::new(
             fleet_storage_sqlite::AuditLedger::new(&pool),
         ));
+        // The kinds provider actions own run only through the broker.
+        let action_registry = compose_action_registry();
+        let operations =
+            std::sync::Arc::new(operations.with_brokered_kinds(action_registry.operation_kinds()));
+        let requests = fleet_application::broker::Broker::new(
+            std::sync::Arc::new(fleet_storage_sqlite::ActionRequestRepository::new(
+                pool.clone(),
+            )),
+            action_registry,
+            operations.clone(),
+            // `main` refuses to start on a malformed setting, so the
+            // fallback only serves test composition.
+            broker_settings_from_env().unwrap_or_default(),
+        );
         return fleet_api::operations::ApiState {
-            operations: std::sync::Arc::new(operations),
+            operations,
             authorizer,
             system: std::sync::Arc::new(system),
             audit: Some(std::sync::Arc::new(audit)),
@@ -310,6 +354,7 @@ fn api_state(
             })),
             planning: Some(std::sync::Arc::new(compose_planning(&pool))),
             credentials: Some(std::sync::Arc::new(credentials)),
+            requests: Some(std::sync::Arc::new(requests)),
         };
     }
     // Without a store there is nothing to serve: the state's backends answer
@@ -335,6 +380,7 @@ fn api_state(
         desired: None,
         planning: None,
         credentials: None,
+        requests: None,
     }
 }
 

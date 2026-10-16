@@ -77,6 +77,9 @@ pub struct ApiState {
     /// The delegated credential use cases, when the controller was composed
     /// with a database; `None` only in document/test states.
     pub credentials: Option<Arc<fleet_application::credentials::Credentials>>,
+    /// The action broker (FM-1040), when the controller was composed with a
+    /// database; `None` only in document/test states.
+    pub requests: Option<Arc<fleet_application::broker::Broker>>,
 }
 
 impl std::fmt::Debug for ApiState {
@@ -100,6 +103,7 @@ impl std::fmt::Debug for ApiState {
             .field("desired", &self.desired)
             .field("planning", &self.planning)
             .field("credentials", &self.credentials)
+            .field("requests", &self.requests)
             .finish()
     }
 }
@@ -285,6 +289,7 @@ impl ApiState {
             desired: None,
             planning: None,
             credentials: None,
+            requests: None,
         }
     }
 }
