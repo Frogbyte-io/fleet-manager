@@ -254,6 +254,12 @@ pub trait ProviderAction: fmt::Debug + Send + Sync {
     /// The durable operation that carries out an approved request. The
     /// broker sets the idempotency key and correlation id.
     ///
+    /// The result must be deterministic for the same request: no
+    /// timestamps, nonces, or random ids. Recovery of a stuck approved
+    /// request builds the operation again and compares its kind and payload
+    /// with the operation already holding the idempotency key; a payload that
+    /// differs between calls would fail a request whose operation is fine.
+    ///
     /// # Errors
     ///
     /// Returns a caller-safe message when the operation cannot be built.
@@ -1001,6 +1007,7 @@ impl Broker {
     /// with the reason. The idempotency key is the request id, so running
     /// this again (a slow start racing the stuck-request recovery) returns
     /// the same operation rather than a second one.
+    #[allow(clippy::too_many_lines)]
     async fn start(
         &self,
         authorizer: &dyn Authorizer,
@@ -1033,6 +1040,14 @@ impl Broker {
                 )
                 .await;
         }
+        // Recovery rebuilds the operation and compares it, so it must be
+        // deterministic; check that cheaply in debug builds.
+        debug_assert!(
+            action
+                .operation(&request)
+                .is_ok_and(|again| again.payload_json == new.payload_json),
+            "ProviderAction::operation must be deterministic for the same request"
+        );
         new.idempotency_key = Some(format!("{BROKER_IDEMPOTENCY_PREFIX}{}", request.id));
         new.correlation_id.clone_from(&request.correlation_id);
         let principal = Self::executing_principal(&request).to_owned();

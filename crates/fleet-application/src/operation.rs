@@ -920,7 +920,12 @@ impl Operations {
             .await
     }
 
-    /// Creates the operation of a brokered action request. The broker has
+    /// Creates the operation of a brokered action request. This is the
+    /// broker's entry point: it is `pub` only because the broker's
+    /// integration tests live in other crates, and nothing else should call
+    /// it. It refuses any kind no provider action has declared (see
+    /// [`Operations::with_brokered_kinds`]), so it cannot become a second
+    /// generic route. The broker has
     /// already authorized the decision (`action.request` under policy, or
     /// `action.approve`), so this route does not require `operation.create`:
     /// a delegated principal can request an action and never create its
@@ -1240,6 +1245,12 @@ impl Operations {
         new: &NewOperation,
         route: CreateRoute,
     ) -> Result<Operation, OperationUseCaseError> {
+        if route == CreateRoute::Brokered && !self.brokered_kinds.contains(&new.kind) {
+            return Err(OperationUseCaseError::Invalid {
+                detail: "the brokered route creates only kinds a provider action declares"
+                    .to_owned(),
+            });
+        }
         if route != CreateRoute::Brokered {
             // The kind is the resource, so a policy can allow a principal to
             // queue the Lab kinds its routes queue without the generic

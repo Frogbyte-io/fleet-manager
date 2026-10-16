@@ -624,6 +624,66 @@ async fn a_delegated_requester_can_request_and_never_approve_or_use_the_generic_
 }
 
 #[tokio::test]
+async fn the_brokered_route_is_not_a_second_generic_route() {
+    let world = World::new(RiskClass::Approve).await;
+    let build = |kinds: &[&str]| {
+        Operations::new(
+            world.operations.clone(),
+            Arc::new(AuditSink::new(world.store.pool().clone())),
+        )
+        .with_brokered_kinds(kinds.iter().map(|kind| (*kind).to_owned()))
+    };
+    // A kind no action declared is refused.
+    let undeclared = build(&["noop"]);
+    let new = NewOperation {
+        kind: "ssh.exec".to_owned(),
+        ..NewOperation::default()
+    };
+    assert!(
+        undeclared
+            .create_brokered(&Permit, APPROVER, &new)
+            .await
+            .is_err()
+    );
+    // Kinds with their own dedicated routes stay refused even if declared.
+    let lab = build(&["lab.exec", "lab.provision"]);
+    for kind in ["lab.exec", "lab.provision"] {
+        let new = NewOperation {
+            kind: kind.to_owned(),
+            payload_json: Some(r#"{"leaseId":"l1"}"#.to_owned()),
+            ..NewOperation::default()
+        };
+        let error = lab
+            .create_brokered(&Permit, APPROVER, &new)
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(error, OperationUseCaseError::Invalid { .. }),
+            "{kind}: {error}"
+        );
+    }
+    // A machine-scoped kind keeps its own permission.
+    let scoped = build(&["projects.discover"]);
+    let new = NewOperation {
+        kind: "projects.discover".to_owned(),
+        payload_json: Some(r#"{"machineId":"m1"}"#.to_owned()),
+        ..NewOperation::default()
+    };
+    assert!(matches!(
+        scoped
+            .create_brokered(&Without(vec![Permission::ProjectsDiscover]), APPROVER, &new)
+            .await,
+        Err(OperationUseCaseError::Denied(_))
+    ));
+    assert!(
+        scoped
+            .create_brokered(&Without(vec![Permission::OperationCreate]), APPROVER, &new)
+            .await
+            .is_ok()
+    );
+}
+
+#[tokio::test]
 async fn the_broker_idempotency_prefix_is_reserved_on_the_generic_route() {
     let world = World::new(RiskClass::Approve).await;
     let new = NewOperation {

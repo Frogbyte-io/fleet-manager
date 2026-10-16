@@ -228,6 +228,13 @@ fn compose_action_registry() -> Arc<fleet_application::broker::ActionRegistry> {
     Arc::new(fleet_application::broker::ActionRegistry::new())
 }
 
+/// The operation kinds provider actions own. Every `Operations` instance (the
+/// API's and the worker's) declares them so none accepts them off the broker.
+#[must_use]
+pub fn brokered_operation_kinds() -> std::collections::BTreeSet<String> {
+    compose_action_registry().operation_kinds()
+}
+
 /// Builds the API state over an opened store, or a state whose backends
 /// answer nothing when the caller has none (tests). The authorization policy
 /// is the trusted-LAN adapter in both cases.
