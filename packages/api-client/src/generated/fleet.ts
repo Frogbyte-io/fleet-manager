@@ -3,6 +3,77 @@
  * Do not edit: run `pnpm --filter @frogbyte-io/fleet-api-client generate`.
  */
 /**
+ * The structured, secret-free parameters.
+ */
+export type ActionRequestDtoParameters = { [key: string]: unknown };
+
+/**
+ * An action request.
+ */
+export interface ActionRequestDto {
+  /** The provider action's id. */
+  actionId: string;
+  /** When it was made (epoch milliseconds). */
+  createdAt: number;
+  /**
+     * When it was decided (epoch milliseconds).
+     * @nullable
+     */
+  decidedAt?: number | null;
+  /**
+     * Who approved or denied it: a principal, `policy:auto`, or
+     * `policy:deny`.
+     * @nullable
+     */
+  decidedBy?: string | null;
+  /**
+     * A denier's note.
+     * @nullable
+     */
+  decisionNote?: string | null;
+  /** When an undecided request expires (epoch milliseconds). */
+  expiresAt: number;
+  /**
+     * Why it failed.
+     * @nullable
+     */
+  failure?: string | null;
+  /** The request's identity. */
+  id: string;
+  /**
+     * The durable operation that executes it, once created. Poll it at
+     * `/operations/{id}`.
+     * @nullable
+     */
+  operationId?: string | null;
+  /** Where the request came from (`api`). */
+  origin: string;
+  /** The structured, secret-free parameters. */
+  parameters: ActionRequestDtoParameters;
+  /** Why the requester wants it. */
+  reason: string;
+  /** The principal that asked. */
+  requester: string;
+  /**
+     * The effective risk class when the request was made: `auto` (ran
+     * without a decision), `approve` (waits for a person), or `deny`
+     * (refused by policy).
+     */
+  riskClass: string;
+  /**
+     * `pending`, `approved`, `denied`, `expired`, `executing`,
+     * `succeeded`, or `failed`.
+     */
+  state: string;
+  /** What the action acts on. */
+  target: string;
+  /** Whether the state will never change. */
+  terminal: boolean;
+  /** The last change (epoch milliseconds). */
+  updatedAt: number;
+}
+
+/**
  * One existing machine whose endpoint matches a draft's host and port.
  * Candidates warn; they never merge or block.
  */
@@ -807,6 +878,41 @@ export interface CorrelatedDeviceDto {
 }
 
 /**
+ * Structured parameters the action defines (an object of at most 8
+ * KiB). They must be secret-free: Fleet holds provider credentials and
+ * refuses a request whose parameters look like one.
+ */
+export type CreateActionRequestParameters = { [key: string]: unknown };
+
+/**
+ * What to ask for.
+ */
+export interface CreateActionRequest {
+  /** The provider action's id, for example `coolify.application.redeploy`. */
+  actionId: string;
+  /**
+     * A key (1 to 128 printable ASCII characters) making a retry return the
+     * request already made. It is scoped to the caller; reusing it for a
+     * different request answers 409.
+     * @nullable
+     */
+  idempotencyKey?: string | null;
+  /**
+     * Structured parameters the action defines (an object of at most 8
+     * KiB). They must be secret-free: Fleet holds provider credentials and
+     * refuses a request whose parameters look like one.
+     */
+  parameters?: CreateActionRequestParameters;
+  /** Why, for the approver (at most 1000 characters). */
+  reason: string;
+  /**
+     * What the action acts on, in the provider's terms (at most 256
+     * characters).
+     */
+  target: string;
+}
+
+/**
  * The create-enrollment-token request.
  */
 export interface CreateEnrollmentTokenRequest {
@@ -987,6 +1093,17 @@ export interface CredentialDto {
   templates: string[];
   /** Allowed Lab template version ids. */
   versions: string[];
+}
+
+/**
+ * An optional note with a denial.
+ */
+export interface DenyActionRequest {
+  /**
+     * Why it was denied (at most 1000 characters).
+     * @nullable
+     */
+  note?: string | null;
 }
 
 /**
@@ -2368,6 +2485,90 @@ export interface PageInfo {
      * @nullable
      */
   nextCursor?: string | null;
+}
+
+/**
+ * The structured, secret-free parameters.
+ */
+export type PageActionRequestDtoItemsItemParameters = { [key: string]: unknown };
+
+/**
+ * An action request.
+ */
+export type PageActionRequestDtoItemsItem = {
+  /** The provider action's id. */
+  actionId: string;
+  /** When it was made (epoch milliseconds). */
+  createdAt: number;
+  /**
+     * When it was decided (epoch milliseconds).
+     * @nullable
+     */
+  decidedAt?: number | null;
+  /**
+     * Who approved or denied it: a principal, `policy:auto`, or
+     * `policy:deny`.
+     * @nullable
+     */
+  decidedBy?: string | null;
+  /**
+     * A denier's note.
+     * @nullable
+     */
+  decisionNote?: string | null;
+  /** When an undecided request expires (epoch milliseconds). */
+  expiresAt: number;
+  /**
+     * Why it failed.
+     * @nullable
+     */
+  failure?: string | null;
+  /** The request's identity. */
+  id: string;
+  /**
+     * The durable operation that executes it, once created. Poll it at
+     * `/operations/{id}`.
+     * @nullable
+     */
+  operationId?: string | null;
+  /** Where the request came from (`api`). */
+  origin: string;
+  /** The structured, secret-free parameters. */
+  parameters: PageActionRequestDtoItemsItemParameters;
+  /** Why the requester wants it. */
+  reason: string;
+  /** The principal that asked. */
+  requester: string;
+  /**
+     * The effective risk class when the request was made: `auto` (ran
+     * without a decision), `approve` (waits for a person), or `deny`
+     * (refused by policy).
+     */
+  riskClass: string;
+  /**
+     * `pending`, `approved`, `denied`, `expired`, `executing`,
+     * `succeeded`, or `failed`.
+     */
+  state: string;
+  /** What the action acts on. */
+  target: string;
+  /** Whether the state will never change. */
+  terminal: boolean;
+  /** The last change (epoch milliseconds). */
+  updatedAt: number;
+};
+
+/**
+ * A page of resources.
+ *
+ * The concrete schema for a list endpoint appears when that endpoint does;
+ * [`PageInfo`] is the part of the shape that is fixed for every one of them.
+ */
+export interface PageActionRequestDto {
+  /** The items on this page, in the endpoint's documented order. */
+  items: PageActionRequestDtoItemsItem[];
+  /** Where this page sits in the result set. */
+  page: PageInfo;
 }
 
 /**
@@ -4592,6 +4793,88 @@ export interface RegistryTypeList {
 export interface ReleaseLeaseRequest {
   /** Whether to keep the VM out of automatic cleanup (elevated). */
   keep?: boolean;
+}
+
+/**
+ * The structured, secret-free parameters.
+ */
+export type ResourceActionRequestDtoDataParameters = { [key: string]: unknown };
+
+/**
+ * An action request.
+ */
+export type ResourceActionRequestDtoData = {
+  /** The provider action's id. */
+  actionId: string;
+  /** When it was made (epoch milliseconds). */
+  createdAt: number;
+  /**
+     * When it was decided (epoch milliseconds).
+     * @nullable
+     */
+  decidedAt?: number | null;
+  /**
+     * Who approved or denied it: a principal, `policy:auto`, or
+     * `policy:deny`.
+     * @nullable
+     */
+  decidedBy?: string | null;
+  /**
+     * A denier's note.
+     * @nullable
+     */
+  decisionNote?: string | null;
+  /** When an undecided request expires (epoch milliseconds). */
+  expiresAt: number;
+  /**
+     * Why it failed.
+     * @nullable
+     */
+  failure?: string | null;
+  /** The request's identity. */
+  id: string;
+  /**
+     * The durable operation that executes it, once created. Poll it at
+     * `/operations/{id}`.
+     * @nullable
+     */
+  operationId?: string | null;
+  /** Where the request came from (`api`). */
+  origin: string;
+  /** The structured, secret-free parameters. */
+  parameters: ResourceActionRequestDtoDataParameters;
+  /** Why the requester wants it. */
+  reason: string;
+  /** The principal that asked. */
+  requester: string;
+  /**
+     * The effective risk class when the request was made: `auto` (ran
+     * without a decision), `approve` (waits for a person), or `deny`
+     * (refused by policy).
+     */
+  riskClass: string;
+  /**
+     * `pending`, `approved`, `denied`, `expired`, `executing`,
+     * `succeeded`, or `failed`.
+     */
+  state: string;
+  /** What the action acts on. */
+  target: string;
+  /** Whether the state will never change. */
+  terminal: boolean;
+  /** The last change (epoch milliseconds). */
+  updatedAt: number;
+};
+
+/**
+ * A single resource.
+ *
+ * The payload is nested under `data` so that later top-level fields are an
+ * additive change rather than a breaking one.
+ */
+export interface ResourceActionRequestDto {
+  /** An action request. */
+  data: ResourceActionRequestDtoData;
 }
 
 /**
@@ -7176,6 +7459,18 @@ cursor?: string | null;
  * @nullable
  */
 limit?: number | null;
+};
+
+export type ListActionRequestsParams = {
+/**
+ * Only requests in this state: pending, approved, denied, expired, executing, succeeded, or failed.
+ */
+state?: string;
+/**
+ * The maximum number of requests to return (default 50, at most 200).
+ * @minimum 0
+ */
+limit?: number;
 };
 
 export type ListSkillCatalogParams = {
@@ -14892,6 +15187,399 @@ export const listRegistryTypes = async ( options?: RequestInit): Promise<listReg
 
   const data: listRegistryTypesResponse['data'] = body ? JSON.parse(body) : {}
   return { data, status: res.status, headers: res.headers } as listRegistryTypesResponse
+}
+
+
+
+export type listActionRequestsResponse200 = {
+  data: PageActionRequestDto
+  status: 200
+}
+
+export type listActionRequestsResponse400 = {
+  data: ApiError
+  status: 400
+}
+
+export type listActionRequestsResponse403 = {
+  data: ApiError
+  status: 403
+}
+
+export type listActionRequestsResponse500 = {
+  data: ApiError
+  status: 500
+}
+
+export type listActionRequestsResponse503 = {
+  data: ApiError
+  status: 503
+}
+
+export type listActionRequestsResponseSuccess = (listActionRequestsResponse200) & {
+  headers: Headers;
+};
+export type listActionRequestsResponseError = (listActionRequestsResponse400 | listActionRequestsResponse403 | listActionRequestsResponse500 | listActionRequestsResponse503) & {
+  headers: Headers;
+};
+
+export type listActionRequestsResponse = (listActionRequestsResponseSuccess | listActionRequestsResponseError)
+
+export const getListActionRequestsUrl = (params?: ListActionRequestsParams,) => {
+  const normalizedParams = new URLSearchParams();
+
+  Object.entries(params || {}).forEach(([key, value]) => {
+
+    if (value !== undefined) {
+      normalizedParams.append(key, value === null ? 'null' : String(value))
+    }
+  });
+
+  const stringifiedParams = normalizedParams.toString();
+
+  return stringifiedParams.length > 0 ? `/api/v1/requests?${stringifiedParams}` : `/api/v1/requests`
+}
+
+/**
+ * # Errors
+ *
+ * Returns the public error envelope on refusal or a malformed filter.
+ * @summary Lists action requests, newest first, optionally only those in one state
+(for the approver's inbox: `state=pending`). Expiry and the outcome of an
+executing request's operation are applied as they are read.
+ */
+export const listActionRequests = async (params?: ListActionRequestsParams, options?: RequestInit): Promise<listActionRequestsResponse> => {
+
+  const res = await fetch(getListActionRequestsUrl(params),
+  {
+    ...options,
+    method: 'GET'
+
+
+  }
+)
+
+
+  const body = [204, 205, 304].includes(res.status) ? null : await res.text();
+
+  const data: listActionRequestsResponse['data'] = body ? JSON.parse(body) : {}
+  return { data, status: res.status, headers: res.headers } as listActionRequestsResponse
+}
+
+
+
+export type createActionRequestResponse201 = {
+  data: ResourceActionRequestDto
+  status: 201
+}
+
+export type createActionRequestResponse400 = {
+  data: ApiError
+  status: 400
+}
+
+export type createActionRequestResponse403 = {
+  data: ApiError
+  status: 403
+}
+
+export type createActionRequestResponse409 = {
+  data: ApiError
+  status: 409
+}
+
+export type createActionRequestResponse500 = {
+  data: ApiError
+  status: 500
+}
+
+export type createActionRequestResponse503 = {
+  data: ApiError
+  status: 503
+}
+
+export type createActionRequestResponseSuccess = (createActionRequestResponse201) & {
+  headers: Headers;
+};
+export type createActionRequestResponseError = (createActionRequestResponse400 | createActionRequestResponse403 | createActionRequestResponse409 | createActionRequestResponse500 | createActionRequestResponse503) & {
+  headers: Headers;
+};
+
+export type createActionRequestResponse = (createActionRequestResponseSuccess | createActionRequestResponseError)
+
+export const getCreateActionRequestUrl = () => {
+
+
+
+
+  return `/api/v1/requests`
+}
+
+/**
+ * # Errors
+ *
+ * Returns the public error envelope on refusal, an unknown action, or
+ * invalid or credential-like input.
+ * @summary Asks Fleet to run a provider action. The action's risk class decides
+what happens next: `auto` starts the operation at once (the response is
+`executing` with its `operationId`), `approve` records the request as
+`pending` until a person approves or denies it before `expiresAt`, and
+`deny` records it as `denied`. The response always states which.
+ */
+export const createActionRequest = async (createActionRequestBody: CreateActionRequest, options?: RequestInit): Promise<createActionRequestResponse> => {
+
+    const getHeaders = (h?: NonNullable<RequestInit['headers']>): Record<string, string | readonly string[]> => {
+    if (!h) return {};
+    if (h instanceof Headers) return Object.fromEntries(h.entries());
+    if (Array.isArray(h)) return Object.fromEntries(h);
+    return h;
+  };
+const res = await fetch(getCreateActionRequestUrl(),
+  {
+    ...options,
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...getHeaders(options?.headers) },
+    body: JSON.stringify(createActionRequestBody)
+  }
+)
+
+
+  const body = [204, 205, 304].includes(res.status) ? null : await res.text();
+
+  const data: createActionRequestResponse['data'] = body ? JSON.parse(body) : {}
+  return { data, status: res.status, headers: res.headers } as createActionRequestResponse
+}
+
+
+
+export type getActionRequestResponse200 = {
+  data: ResourceActionRequestDto
+  status: 200
+}
+
+export type getActionRequestResponse403 = {
+  data: ApiError
+  status: 403
+}
+
+export type getActionRequestResponse404 = {
+  data: ApiError
+  status: 404
+}
+
+export type getActionRequestResponse500 = {
+  data: ApiError
+  status: 500
+}
+
+export type getActionRequestResponse503 = {
+  data: ApiError
+  status: 503
+}
+
+export type getActionRequestResponseSuccess = (getActionRequestResponse200) & {
+  headers: Headers;
+};
+export type getActionRequestResponseError = (getActionRequestResponse403 | getActionRequestResponse404 | getActionRequestResponse500 | getActionRequestResponse503) & {
+  headers: Headers;
+};
+
+export type getActionRequestResponse = (getActionRequestResponseSuccess | getActionRequestResponseError)
+
+export const getGetActionRequestUrl = (requestId: string,) => {
+
+
+
+
+  return `/api/v1/requests/${requestId}`
+}
+
+/**
+ * # Errors
+ *
+ * Returns the public error envelope on refusal or an unknown id.
+ * @summary Reads one action request.
+ */
+export const getActionRequest = async (requestId: string, options?: RequestInit): Promise<getActionRequestResponse> => {
+
+  const res = await fetch(getGetActionRequestUrl(requestId),
+  {
+    ...options,
+    method: 'GET'
+
+
+  }
+)
+
+
+  const body = [204, 205, 304].includes(res.status) ? null : await res.text();
+
+  const data: getActionRequestResponse['data'] = body ? JSON.parse(body) : {}
+  return { data, status: res.status, headers: res.headers } as getActionRequestResponse
+}
+
+
+
+export type approveActionRequestResponse200 = {
+  data: ResourceActionRequestDto
+  status: 200
+}
+
+export type approveActionRequestResponse403 = {
+  data: ApiError
+  status: 403
+}
+
+export type approveActionRequestResponse404 = {
+  data: ApiError
+  status: 404
+}
+
+export type approveActionRequestResponse409 = {
+  data: ApiError
+  status: 409
+}
+
+export type approveActionRequestResponse500 = {
+  data: ApiError
+  status: 500
+}
+
+export type approveActionRequestResponse503 = {
+  data: ApiError
+  status: 503
+}
+
+export type approveActionRequestResponseSuccess = (approveActionRequestResponse200) & {
+  headers: Headers;
+};
+export type approveActionRequestResponseError = (approveActionRequestResponse403 | approveActionRequestResponse404 | approveActionRequestResponse409 | approveActionRequestResponse500 | approveActionRequestResponse503) & {
+  headers: Headers;
+};
+
+export type approveActionRequestResponse = (approveActionRequestResponseSuccess | approveActionRequestResponseError)
+
+export const getApproveActionRequestUrl = (requestId: string,) => {
+
+
+
+
+  return `/api/v1/requests/${requestId}/approve`
+}
+
+/**
+ * # Errors
+ *
+ * Returns the public error envelope on refusal, an unknown id, or a request
+ * that is no longer pending.
+ * @summary Approves a pending request and starts its operation. The approver is
+recorded, and their authorization is checked again when the operation is
+created. Of concurrent approvals exactly one succeeds; the rest get 409.
+An approval whose operation cannot be created answers 200 with the
+request `failed` and the reason.
+ */
+export const approveActionRequest = async (requestId: string, options?: RequestInit): Promise<approveActionRequestResponse> => {
+
+  const res = await fetch(getApproveActionRequestUrl(requestId),
+  {
+    ...options,
+    method: 'POST'
+
+
+  }
+)
+
+
+  const body = [204, 205, 304].includes(res.status) ? null : await res.text();
+
+  const data: approveActionRequestResponse['data'] = body ? JSON.parse(body) : {}
+  return { data, status: res.status, headers: res.headers } as approveActionRequestResponse
+}
+
+
+
+export type denyActionRequestResponse200 = {
+  data: ResourceActionRequestDto
+  status: 200
+}
+
+export type denyActionRequestResponse400 = {
+  data: ApiError
+  status: 400
+}
+
+export type denyActionRequestResponse403 = {
+  data: ApiError
+  status: 403
+}
+
+export type denyActionRequestResponse404 = {
+  data: ApiError
+  status: 404
+}
+
+export type denyActionRequestResponse409 = {
+  data: ApiError
+  status: 409
+}
+
+export type denyActionRequestResponse500 = {
+  data: ApiError
+  status: 500
+}
+
+export type denyActionRequestResponse503 = {
+  data: ApiError
+  status: 503
+}
+
+export type denyActionRequestResponseSuccess = (denyActionRequestResponse200) & {
+  headers: Headers;
+};
+export type denyActionRequestResponseError = (denyActionRequestResponse400 | denyActionRequestResponse403 | denyActionRequestResponse404 | denyActionRequestResponse409 | denyActionRequestResponse500 | denyActionRequestResponse503) & {
+  headers: Headers;
+};
+
+export type denyActionRequestResponse = (denyActionRequestResponseSuccess | denyActionRequestResponseError)
+
+export const getDenyActionRequestUrl = (requestId: string,) => {
+
+
+
+
+  return `/api/v1/requests/${requestId}/deny`
+}
+
+/**
+ * # Errors
+ *
+ * Returns the public error envelope on refusal, an unknown id, or a request
+ * that is no longer pending.
+ * @summary Denies a pending request, with an optional note.
+ */
+export const denyActionRequest = async (requestId: string,
+    nullDenyActionRequest?: null | DenyActionRequest, options?: RequestInit): Promise<denyActionRequestResponse> => {
+
+    const getHeaders = (h?: NonNullable<RequestInit['headers']>): Record<string, string | readonly string[]> => {
+    if (!h) return {};
+    if (h instanceof Headers) return Object.fromEntries(h.entries());
+    if (Array.isArray(h)) return Object.fromEntries(h);
+    return h;
+  };
+const res = await fetch(getDenyActionRequestUrl(requestId),
+  {
+    ...options,
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...getHeaders(options?.headers) },
+    body: JSON.stringify(nullDenyActionRequest)
+  }
+)
+
+
+  const body = [204, 205, 304].includes(res.status) ? null : await res.text();
+
+  const data: denyActionRequestResponse['data'] = body ? JSON.parse(body) : {}
+  return { data, status: res.status, headers: res.headers } as denyActionRequestResponse
 }
 
 

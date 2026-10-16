@@ -214,6 +214,19 @@ pub enum Permission {
     /// (FM-1012). A read of descriptive, never-secret data: the Registry
     /// holds no credentials, so it is not risky.
     RegistryRead,
+    /// Ask the action broker to run a provider action (FM-1040). The
+    /// resource is the action id. A mutation: it records a durable request
+    /// and, for `auto` actions, starts the operation.
+    ActionRequest,
+    /// Approve a pending action request. Separate from
+    /// [`Permission::ActionRequest`] so a requester is never an approver by
+    /// default. A mutation: it starts the provider operation.
+    ActionApprove,
+    /// Deny a pending action request. Separate from
+    /// [`Permission::ActionApprove`]. A mutation.
+    ActionDeny,
+    /// List and read action requests, with their scrubbed parameters.
+    ActionRead,
 }
 
 impl Permission {
@@ -284,6 +297,10 @@ impl Permission {
         Permission::LabPut,
         Permission::LabExecRead,
         Permission::RegistryRead,
+        Permission::ActionRequest,
+        Permission::ActionApprove,
+        Permission::ActionDeny,
+        Permission::ActionRead,
     ];
 
     /// The stable action id, as recorded in decisions and audit events.
@@ -353,6 +370,10 @@ impl Permission {
             Permission::LabPut => "lab.put",
             Permission::LabExecRead => "lab.exec.read",
             Permission::RegistryRead => "registry.read",
+            Permission::ActionRequest => "action.request",
+            Permission::ActionApprove => "action.approve",
+            Permission::ActionDeny => "action.deny",
+            Permission::ActionRead => "action.read",
         }
     }
 
@@ -374,7 +395,8 @@ impl Permission {
             | Permission::LabRead
             | Permission::LabLeaseRead
             | Permission::RegistryRead
-            | Permission::LabArtifactRead => false,
+            | Permission::LabArtifactRead
+            | Permission::ActionRead => false,
             Permission::MachineReadSensitive
             | Permission::OperationCreate
             | Permission::OperationCancel
@@ -424,7 +446,10 @@ impl Permission {
             | Permission::LabTemplateUse
             | Permission::LabLeaseProvision
             | Permission::LabPut
-            | Permission::LabExecRead => true,
+            | Permission::LabExecRead
+            | Permission::ActionRequest
+            | Permission::ActionApprove
+            | Permission::ActionDeny => true,
         }
     }
 
@@ -462,7 +487,8 @@ impl Permission {
             | Permission::CredentialIssue
             | Permission::LabLeaseRead
             | Permission::RegistryRead
-            | Permission::LabArtifactRead => false,
+            | Permission::LabArtifactRead
+            | Permission::ActionRead => false,
             Permission::MachineReadSensitive
             | Permission::OperationCancel
             | Permission::SecretRead
@@ -496,7 +522,10 @@ impl Permission {
             | Permission::LabTemplateUse
             | Permission::LabLeaseProvision
             | Permission::LabPut
-            | Permission::LabExecRead => true,
+            | Permission::LabExecRead
+            | Permission::ActionRequest
+            | Permission::ActionApprove
+            | Permission::ActionDeny => true,
         }
     }
 }
@@ -529,6 +558,8 @@ pub enum ReasonId {
     OutOfScope,
     /// The presented delegated credential is expired or revoked.
     CredentialInactive,
+    /// The action broker's risk class for the action is `deny`.
+    RiskClassDeny,
 }
 
 impl ReasonId {
@@ -543,6 +574,7 @@ impl ReasonId {
             ReasonId::ActionNotDelegated => "policy.action_not_delegated",
             ReasonId::OutOfScope => "policy.out_of_scope",
             ReasonId::CredentialInactive => "policy.credential_inactive",
+            ReasonId::RiskClassDeny => "policy.risk_class_deny",
         }
     }
 }

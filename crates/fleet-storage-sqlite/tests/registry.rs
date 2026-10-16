@@ -141,3 +141,34 @@ async fn a_repeat_fetch_backfills_only_missing_paths_and_snapshots_stay_immutabl
         .await;
     assert!(direct.is_err(), "content stays append-only");
 }
+
+#[tokio::test]
+async fn the_path_trigger_refuses_overwriting_or_clearing_a_recorded_path() {
+    let directory = tempfile::tempdir().unwrap();
+    let store = Store::open(&directory.path().join("controller.sqlite"))
+        .await
+        .unwrap();
+    let source = SourceRepository::new(store.pool().clone());
+    source
+        .record_valid_revision(
+            &revision("eeee"),
+            &[DesiredResourceRecord {
+                kind: "RegistryEntry".to_owned(),
+                id: "e-1".to_owned(),
+                name: "one".to_owned(),
+                spec: serde_json::json!({}),
+                source_path: Some("a/one.yaml".to_owned()),
+            }],
+        )
+        .await
+        .unwrap();
+    for statement in [
+        "UPDATE source_revision_resources SET source_path = 'b/two.yaml'",
+        "UPDATE source_revision_resources SET source_path = NULL",
+    ] {
+        assert!(
+            sqlx::query(statement).execute(store.pool()).await.is_err(),
+            "{statement}"
+        );
+    }
+}

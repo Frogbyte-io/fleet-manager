@@ -27,6 +27,9 @@ impl RegistryRepository {
     }
 }
 
+/// Rows per relations query: two binds each, far below SQLite's limit.
+const RELATION_CHUNK: usize = 100;
+
 /// Loads the relations of every row in ONE query on the caller's
 /// connection (inside its read transaction), so a page's entries and
 /// relations come from the same snapshot of the cache.
@@ -36,13 +39,14 @@ async fn attach_relations(
 ) -> Result<Vec<RegistryEntryRecord>, String> {
     let mut by_entry: std::collections::HashMap<(String, String), Vec<RegistryRelationRecord>> =
         std::collections::HashMap::new();
-    if !rows.is_empty() {
+    // Chunked so a large page stays under SQLite's bound-parameter limit.
+    for chunk in rows.chunks(RELATION_CHUNK) {
         let mut query: QueryBuilder<Sqlite> = QueryBuilder::new(
             "SELECT entry_type, entry_key_norm, relation_type, target_class, target_ref \
              FROM registry_relations WHERE (entry_type, entry_key_norm) IN (VALUES ",
         );
         let mut separated = query.separated(", ");
-        for row in &rows {
+        for row in chunk {
             separated.push("(");
             separated.push_bind_unseparated(&row.0);
             separated.push_unseparated(", ");
