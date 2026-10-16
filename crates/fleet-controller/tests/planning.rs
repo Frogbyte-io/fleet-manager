@@ -832,3 +832,44 @@ async fn an_unmet_capability_requirement_is_reported_not_planned() {
             .all(|a| !a.difference.identity.starts_with("capability:"))
     );
 }
+
+#[tokio::test]
+async fn registry_resources_are_never_planned() {
+    let harness = harness().await;
+    harness.observe_skills(&[]).await;
+    harness.activate("empty", &[]).await;
+    let empty = harness.plan().await;
+    // Registry resources are descriptive: even a type and entry that name
+    // this very machine contribute no action or unactionable difference
+    // (ADR 0016).
+    harness
+        .activate(
+            "registry",
+            &[
+                record(
+                    "RegistryType",
+                    "vendor",
+                    serde_json::json!({
+                        "displayName": "Vendor",
+                        "key": "slug",
+                        "fields": {"slug": {"type": "string", "required": true}},
+                        "relations": ["runs-on"],
+                    }),
+                ),
+                record(
+                    "RegistryEntry",
+                    "vendor-aptabase",
+                    serde_json::json!({
+                        "type": "vendor",
+                        "fields": {"slug": "aptabase"},
+                        "relations": [{"type": "runs-on", "target": {"machine": "box"}}],
+                    }),
+                ),
+            ],
+        )
+        .await;
+    let with_registry = harness.plan().await;
+    assert!(with_registry.plan.actions.is_empty());
+    assert_eq!(with_registry.plan.actions, empty.plan.actions);
+    assert_eq!(with_registry.plan.unactionable, empty.plan.unactionable);
+}

@@ -1,0 +1,4 @@
+schemas/fixtures/invalid/registry-field-errors.yaml#document=2/spec/fields/renews [FM_SCHEMA_REGISTRY_FIELD_TYPE] the value does not match the field's type date (YYYY-MM-DD)
+schemas/fixtures/invalid/registry-field-errors.yaml#document=2/spec/fields [FM_SCHEMA_REGISTRY_MISSING_REQUIRED] the required field "plan" is missing
+schemas/fixtures/invalid/registry-field-errors.yaml#document=2/spec/relations/0/type [FM_SCHEMA_REGISTRY_RELATION_NOT_ALLOWED] the type "vendor-fixture" does not allow this relation type
+schemas/fixtures/invalid/registry-field-errors.yaml#document=2/spec/fields/color [FM_SCHEMA_REGISTRY_UNKNOWN_FIELD] the type "vendor-fixture" declares no such field

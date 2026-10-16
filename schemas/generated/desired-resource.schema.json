@@ -85,6 +85,16 @@
           "const": "PolicyBinding",
           "description": "A non-secret policy binding.",
           "type": "string"
+        },
+        {
+          "const": "RegistryType",
+          "description": "A Registry type definition (descriptive, never planned).",
+          "type": "string"
+        },
+        {
+          "const": "RegistryEntry",
+          "description": "A Registry entry (descriptive, never planned).",
+          "type": "string"
         }
       ]
     }
@@ -203,6 +213,284 @@
           "name"
         ],
         "type": "object"
+      }
+    ]
+  },
+  "$defs:RegistryFieldSpec": {
+    "additionalProperties": false,
+    "description": "One field of a `RegistryType`.",
+    "properties": {
+      "description": {
+        "default": null,
+        "description": "A short human description. Never a place for secrets.",
+        "maxLength": 400,
+        "type": [
+          "string",
+          "null"
+        ]
+      },
+      "items": {
+        "anyOf": [
+          {
+            "$ref": "#/$defs:RegistryScalarType"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null,
+        "description": "For `list`, the item type. Required for `list`, refused otherwise."
+      },
+      "required": {
+        "default": false,
+        "description": "Whether every entry must carry the field.",
+        "type": "boolean"
+      },
+      "suggestions": {
+        "default": [],
+        "description": "Suggested values for `string`, `enum`, and `list`. Not enforced.",
+        "items": {
+          "type": "string"
+        },
+        "maxItems": 64,
+        "type": "array"
+      },
+      "type": {
+        "$ref": "#/$defs:RegistryValueType",
+        "description": "The value type."
+      }
+    },
+    "required": [
+      "type"
+    ],
+    "type": "object"
+  },
+  "$defs:RegistryLink": {
+    "additionalProperties": false,
+    "description": "A link on an entry.",
+    "properties": {
+      "label": {
+        "description": "The link's label.",
+        "maxLength": 63,
+        "minLength": 1,
+        "type": "string"
+      },
+      "url": {
+        "description": "The link's URL.",
+        "maxLength": 2048,
+        "minLength": 1,
+        "type": "string"
+      }
+    },
+    "required": [
+      "label",
+      "url"
+    ],
+    "type": "object"
+  },
+  "$defs:RegistryRelation": {
+    "additionalProperties": false,
+    "description": "One relation from an entry to a target.",
+    "properties": {
+      "target": {
+        "$ref": "#/$defs:RegistryRelationTarget",
+        "description": "The target."
+      },
+      "type": {
+        "description": "The relation type, one the entry's type allows.",
+        "maxLength": 63,
+        "minLength": 1,
+        "type": "string"
+      }
+    },
+    "required": [
+      "type",
+      "target"
+    ],
+    "type": "object"
+  },
+  "$defs:RegistryRelationTarget": {
+    "description": "What a relation points at: another entry, or a Fleet-known resource.",
+    "oneOf": [
+      {
+        "additionalProperties": false,
+        "description": "Another Registry entry, as `<type>/<key>`.",
+        "properties": {
+          "registry": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "registry"
+        ],
+        "type": "object"
+      },
+      {
+        "additionalProperties": false,
+        "description": "A machine, by name.",
+        "properties": {
+          "machine": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "machine"
+        ],
+        "type": "object"
+      },
+      {
+        "additionalProperties": false,
+        "description": "A project, by name.",
+        "properties": {
+          "project": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "project"
+        ],
+        "type": "object"
+      },
+      {
+        "additionalProperties": false,
+        "description": "A Coolify resource, by its UUID.",
+        "properties": {
+          "coolify": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "coolify"
+        ],
+        "type": "object"
+      },
+      {
+        "additionalProperties": false,
+        "description": "A Proxmox guest, by its reference.",
+        "properties": {
+          "proxmoxGuest": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "proxmoxGuest"
+        ],
+        "type": "object"
+      }
+    ]
+  },
+  "$defs:RegistryScalarType": {
+    "description": "A scalar Registry value type. The set is closed on purpose: types are\ndata, not a plugin SDK and not a JSON Schema passthrough.",
+    "oneOf": [
+      {
+        "const": "string",
+        "description": "A single-line string.",
+        "type": "string"
+      },
+      {
+        "const": "text",
+        "description": "Multi-line text.",
+        "type": "string"
+      },
+      {
+        "const": "number",
+        "description": "A finite number.",
+        "type": "string"
+      },
+      {
+        "const": "boolean",
+        "description": "A boolean.",
+        "type": "string"
+      },
+      {
+        "const": "date",
+        "description": "A calendar date, `YYYY-MM-DD`.",
+        "type": "string"
+      },
+      {
+        "const": "url",
+        "description": "A URL with a scheme and host and no embedded credentials.",
+        "type": "string"
+      },
+      {
+        "const": "hostname",
+        "description": "A DNS hostname.",
+        "type": "string"
+      },
+      {
+        "const": "email",
+        "description": "An email address.",
+        "type": "string"
+      },
+      {
+        "const": "money",
+        "description": "An amount and ISO 4217 code, e.g. `12.50 USD`.",
+        "type": "string"
+      },
+      {
+        "const": "enum",
+        "description": "A string with suggested values. Suggestions guide editors; they are\nnot enforced.",
+        "type": "string"
+      }
+    ]
+  },
+  "$defs:RegistryValueType": {
+    "description": "A Registry field's value type: a scalar, or a list of one scalar type.",
+    "oneOf": [
+      {
+        "const": "string",
+        "description": "A single-line string.",
+        "type": "string"
+      },
+      {
+        "const": "text",
+        "description": "Multi-line text.",
+        "type": "string"
+      },
+      {
+        "const": "number",
+        "description": "A finite number.",
+        "type": "string"
+      },
+      {
+        "const": "boolean",
+        "description": "A boolean.",
+        "type": "string"
+      },
+      {
+        "const": "date",
+        "description": "A calendar date, `YYYY-MM-DD`.",
+        "type": "string"
+      },
+      {
+        "const": "url",
+        "description": "A URL.",
+        "type": "string"
+      },
+      {
+        "const": "hostname",
+        "description": "A DNS hostname.",
+        "type": "string"
+      },
+      {
+        "const": "email",
+        "description": "An email address.",
+        "type": "string"
+      },
+      {
+        "const": "money",
+        "description": "An amount and ISO 4217 code.",
+        "type": "string"
+      },
+      {
+        "const": "enum",
+        "description": "A string with suggested values.",
+        "type": "string"
+      },
+      {
+        "const": "list",
+        "description": "A list of values of the scalar type named by `items`.",
+        "type": "string"
       }
     ]
   },
@@ -828,6 +1116,132 @@
               "permissions"
             ],
             "title": "PolicyBindingSpec",
+            "type": "object"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "kind": {
+            "const": "RegistryType"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "spec": {
+            "additionalProperties": false,
+            "description": "The `RegistryType` spec: the shape of one kind of Registry entry.",
+            "properties": {
+              "displayName": {
+                "description": "The human-facing name.",
+                "maxLength": 63,
+                "minLength": 1,
+                "type": "string"
+              },
+              "fields": {
+                "additionalProperties": {
+                  "$ref": "#/$defs:RegistryFieldSpec"
+                },
+                "description": "The declared fields, by name.",
+                "type": "object"
+              },
+              "key": {
+                "description": "The field holding the natural key, unique per type. The field must\nbe declared and required.",
+                "maxLength": 63,
+                "minLength": 1,
+                "type": "string"
+              },
+              "relations": {
+                "default": [],
+                "description": "The relation types entries of this type may declare.",
+                "items": {
+                  "type": "string"
+                },
+                "maxItems": 32,
+                "type": "array"
+              }
+            },
+            "required": [
+              "displayName",
+              "key",
+              "fields"
+            ],
+            "title": "RegistryTypeSpec",
+            "type": "object"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "kind": {
+            "const": "RegistryEntry"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "spec": {
+            "additionalProperties": false,
+            "description": "The `RegistryEntry` spec: one described thing.",
+            "properties": {
+              "fields": {
+                "additionalProperties": true,
+                "description": "The field values, by name.",
+                "type": "object"
+              },
+              "links": {
+                "default": [],
+                "description": "Links to dashboards and documents.",
+                "items": {
+                  "$ref": "#/$defs:RegistryLink"
+                },
+                "maxItems": 32,
+                "type": "array"
+              },
+              "notes": {
+                "default": null,
+                "description": "Free-form notes.",
+                "maxLength": 4000,
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "relations": {
+                "default": [],
+                "description": "Relations to other entries or Fleet-known resources.",
+                "items": {
+                  "$ref": "#/$defs:RegistryRelation"
+                },
+                "maxItems": 64,
+                "type": "array"
+              },
+              "tags": {
+                "default": [],
+                "description": "Tags for filtering.",
+                "items": {
+                  "type": "string"
+                },
+                "maxItems": 32,
+                "type": "array"
+              },
+              "type": {
+                "description": "The `RegistryType` name.",
+                "maxLength": 63,
+                "minLength": 1,
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "fields"
+            ],
+            "title": "RegistryEntrySpec",
             "type": "object"
           }
         }

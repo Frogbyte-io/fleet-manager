@@ -327,3 +327,195 @@ pub struct Provenance {
     #[schemars(length(min = 1, max = 255))]
     pub path: String,
 }
+
+// --- Registry (FM-1010, ADR 0016) ---
+//
+// The Registry is descriptive: `RegistryType` and `RegistryEntry` are never
+// planned or applied. Values are never secrets; semantic validation runs the
+// controller's credential scrubber over every string.
+
+/// A scalar Registry value type. The set is closed on purpose: types are
+/// data, not a plugin SDK and not a JSON Schema passthrough.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum RegistryScalarType {
+    /// A single-line string.
+    String,
+    /// Multi-line text.
+    Text,
+    /// A finite number.
+    Number,
+    /// A boolean.
+    Boolean,
+    /// A calendar date, `YYYY-MM-DD`.
+    Date,
+    /// A URL with a scheme and host and no embedded credentials.
+    Url,
+    /// A DNS hostname.
+    Hostname,
+    /// An email address.
+    Email,
+    /// An amount and ISO 4217 code, e.g. `12.50 USD`.
+    Money,
+    /// A string with suggested values. Suggestions guide editors; they are
+    /// not enforced.
+    Enum,
+}
+
+/// A Registry field's value type: a scalar, or a list of one scalar type.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum RegistryValueType {
+    /// A single-line string.
+    String,
+    /// Multi-line text.
+    Text,
+    /// A finite number.
+    Number,
+    /// A boolean.
+    Boolean,
+    /// A calendar date, `YYYY-MM-DD`.
+    Date,
+    /// A URL.
+    Url,
+    /// A DNS hostname.
+    Hostname,
+    /// An email address.
+    Email,
+    /// An amount and ISO 4217 code.
+    Money,
+    /// A string with suggested values.
+    Enum,
+    /// A list of values of the scalar type named by `items`.
+    List,
+}
+
+impl RegistryValueType {
+    /// The scalar type, or `None` for a list.
+    #[must_use]
+    pub fn scalar(self) -> Option<RegistryScalarType> {
+        Some(match self {
+            Self::String => RegistryScalarType::String,
+            Self::Text => RegistryScalarType::Text,
+            Self::Number => RegistryScalarType::Number,
+            Self::Boolean => RegistryScalarType::Boolean,
+            Self::Date => RegistryScalarType::Date,
+            Self::Url => RegistryScalarType::Url,
+            Self::Hostname => RegistryScalarType::Hostname,
+            Self::Email => RegistryScalarType::Email,
+            Self::Money => RegistryScalarType::Money,
+            Self::Enum => RegistryScalarType::Enum,
+            Self::List => return None,
+        })
+    }
+}
+
+/// One field of a `RegistryType`.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct RegistryFieldSpec {
+    /// The value type.
+    #[serde(rename = "type")]
+    pub value_type: RegistryValueType,
+    /// For `list`, the item type. Required for `list`, refused otherwise.
+    #[serde(default)]
+    pub items: Option<RegistryScalarType>,
+    /// Whether every entry must carry the field.
+    #[serde(default)]
+    pub required: bool,
+    /// Suggested values for `string`, `enum`, and `list`. Not enforced.
+    #[serde(default)]
+    #[schemars(length(max = 64))]
+    pub suggestions: Vec<String>,
+    /// A short human description. Never a place for secrets.
+    #[serde(default)]
+    #[schemars(length(max = 400))]
+    pub description: Option<String>,
+}
+
+/// The `RegistryType` spec: the shape of one kind of Registry entry.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct RegistryTypeSpec {
+    /// The human-facing name.
+    #[schemars(length(min = 1, max = 63))]
+    pub display_name: String,
+    /// The field holding the natural key, unique per type. The field must
+    /// be declared and required.
+    #[schemars(length(min = 1, max = 63))]
+    pub key: String,
+    /// The declared fields, by name.
+    pub fields: std::collections::BTreeMap<String, RegistryFieldSpec>,
+    /// The relation types entries of this type may declare.
+    #[serde(default)]
+    #[schemars(length(max = 32))]
+    pub relations: Vec<String>,
+}
+
+/// A link on an entry.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct RegistryLink {
+    /// The link's label.
+    #[schemars(length(min = 1, max = 63))]
+    pub label: String,
+    /// The link's URL.
+    #[schemars(length(min = 1, max = 2048))]
+    pub url: String,
+}
+
+/// What a relation points at: another entry, or a Fleet-known resource.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub enum RegistryRelationTarget {
+    /// Another Registry entry, as `<type>/<key>`.
+    Registry(String),
+    /// A machine, by name.
+    Machine(String),
+    /// A project, by name.
+    Project(String),
+    /// A Coolify resource, by its UUID.
+    Coolify(String),
+    /// A Proxmox guest, by its reference.
+    ProxmoxGuest(String),
+}
+
+/// One relation from an entry to a target.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct RegistryRelation {
+    /// The relation type, one the entry's type allows.
+    #[serde(rename = "type")]
+    #[schemars(length(min = 1, max = 63))]
+    pub relation_type: String,
+    /// The target.
+    pub target: RegistryRelationTarget,
+}
+
+/// The `RegistryEntry` spec: one described thing.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct RegistryEntrySpec {
+    /// The `RegistryType` name.
+    #[serde(rename = "type")]
+    #[schemars(length(min = 1, max = 63))]
+    pub entry_type: String,
+    /// The field values, by name.
+    pub fields: serde_json::Map<String, serde_json::Value>,
+    /// Tags for filtering.
+    #[serde(default)]
+    #[schemars(length(max = 32))]
+    pub tags: Vec<String>,
+    /// Links to dashboards and documents.
+    #[serde(default)]
+    #[schemars(length(max = 32))]
+    pub links: Vec<RegistryLink>,
+    /// Free-form notes.
+    #[serde(default)]
+    #[schemars(length(max = 4000))]
+    pub notes: Option<String>,
+    /// Relations to other entries or Fleet-known resources.
+    #[serde(default)]
+    #[schemars(length(max = 64))]
+    pub relations: Vec<RegistryRelation>,
+}

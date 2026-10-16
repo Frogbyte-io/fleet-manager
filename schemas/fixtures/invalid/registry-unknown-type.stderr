@@ -1,0 +1,1 @@
+schemas/fixtures/invalid/registry-unknown-type.yaml#document=1/spec/type [FM_SCHEMA_REGISTRY_UNKNOWN_TYPE] no Registry type named "no-such-type" is defined or built in

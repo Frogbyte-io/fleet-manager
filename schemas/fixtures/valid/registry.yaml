@@ -1,0 +1,72 @@
+apiVersion: fleet.frogbyte.io/v1alpha1
+kind: RegistryType
+metadata:
+  id: 01890f3e-9b4a-7cc2-98c3-d24e8f58b001
+  name: domain-fixture
+spec:
+  displayName: Domain
+  key: fqdn
+  fields:
+    fqdn: { type: hostname, required: true }
+    registrar:
+      type: enum
+      suggestions: [Hostinger, Webhuset, Porkbun, GoDaddy, Cloudflare]
+    expires: { type: date }
+    autoRenew: { type: boolean }
+    cost: { type: money }
+    contact: { type: email }
+    dashboard: { type: url }
+    seats: { type: number }
+    nameservers: { type: list, items: hostname }
+    loginAt:
+      type: string
+      description: "Where the login lives, e.g. 1Password item name"
+  relations: [hosted-on, used-by]
+---
+apiVersion: fleet.frogbyte.io/v1alpha1
+kind: RegistryType
+metadata:
+  id: 01890f3e-9b4a-7cc2-98c3-d24e8f58b002
+  name: vendor-fixture
+spec:
+  displayName: Vendor
+  key: slug
+  fields:
+    slug: { type: string, required: true }
+    notes: { type: text }
+  relations: [used-by]
+---
+apiVersion: fleet.frogbyte.io/v1alpha1
+kind: RegistryEntry
+metadata:
+  id: 01890f3e-9b4a-7cc2-98c3-d24e8f58b003
+  name: domain-example-com
+spec:
+  type: domain-fixture
+  fields:
+    fqdn: example.com
+    registrar: Webhuset
+    expires: "2027-03-01"
+    autoRenew: true
+    cost: 12.50 USD
+    contact: ops@example.com
+    dashboard: https://dash.cloudflare.com/example
+    seats: 3
+    nameservers: [ns1.example.com, ns2.example.com]
+    loginAt: 1Password vault Webhuset
+  tags: [client-x]
+  links:
+    - { label: DNS, url: "https://dash.cloudflare.com/example" }
+  notes: Moved from GoDaddy in 2025.
+  relations:
+    - { type: used-by, target: { registry: vendor-fixture/aptabase } }
+    - { type: hosted-on, target: { coolify: 0192c0de-0000-7000-8000-000000000001 } }
+---
+apiVersion: fleet.frogbyte.io/v1alpha1
+kind: RegistryEntry
+metadata:
+  id: 01890f3e-9b4a-7cc2-98c3-d24e8f58b004
+  name: vendor-aptabase
+spec:
+  type: vendor-fixture
+  fields: { slug: aptabase }
