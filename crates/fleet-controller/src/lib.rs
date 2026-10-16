@@ -637,6 +637,20 @@ fn build_router_for_caller(
     let external_accounts = services.and_then(|services| services.external_accounts.clone());
     let coolify_discovery = services.and_then(|services| services.coolify_discovery.clone());
     let mut api_router = fleet_api::router(api_state.clone());
+    if let (Some(pool), Some(machines)) = (audit_db.as_ref(), api_state.machines.as_ref()) {
+        // The running-services surface (FM-1031), same shape: cached
+        // observations only, so it needs no secret store.
+        api_router = api_router.layer(axum::Extension(
+            external_accounts_store::compose_running_services(
+                pool,
+                machines.clone(),
+                api_state
+                    .desired
+                    .as_ref()
+                    .and_then(|desired| desired.registry().cloned()),
+            ),
+        ));
+    }
     if let Some(coolify_discovery) = coolify_discovery {
         // The Coolify discovery surface (FM-1030), same shape.
         api_router = api_router.layer(axum::Extension(coolify_discovery));

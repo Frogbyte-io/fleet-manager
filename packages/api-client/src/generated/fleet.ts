@@ -3,6 +3,30 @@
  * Do not edit: run `pnpm --filter @frogbyte-io/fleet-api-client generate`.
  */
 /**
+ * One Coolify account's observation state.
+ */
+export interface AccountCoverageDto {
+  /** The account. */
+  accountId: string;
+  /** Its label. */
+  label: string;
+  /** Whether a discovery was ever recorded. */
+  observed: boolean;
+  /**
+     * When the snapshot was recorded (epoch millis).
+     * @nullable
+     */
+  recordedAt?: number | null;
+  /** The resource classes that are stale. */
+  staleClasses: string[];
+  /**
+     * The resource classes cut to fit the snapshot bound; services of
+     * these classes may be missing.
+     */
+  truncatedClasses: string[];
+}
+
+/**
  * The structured, secret-free parameters.
  */
 export type ActionRequestDtoParameters = { [key: string]: unknown };
@@ -212,6 +236,47 @@ export interface AddedMachineDto {
   duplicates: DuplicateCandidateDto[];
   /** The registered machine, redacted per the caller's permissions. */
   machine: MachineDto;
+}
+
+/**
+ * A machine reference.
+ */
+export interface ServiceMachineRefDto {
+  /** The machine's identity. */
+  id: string;
+  /** The machine's name. */
+  name: string;
+}
+
+/**
+ * A Coolify server.
+ */
+export interface ServiceServerDto {
+  /** The address Coolify connects to. */
+  address: string;
+  /** The server's name. */
+  name: string;
+  /** The server's uuid. */
+  uuid: string;
+}
+
+/**
+ * A Coolify server that matched more than one machine.
+ */
+export interface AmbiguousServerDto {
+  /** The account. */
+  accountId: string;
+  /** `explicit_tag` or `address`. */
+  basis: string;
+  /** The machines that fit and that the caller may read; none is chosen. */
+  candidates: ServiceMachineRefDto[];
+  /**
+     * How many further machines fit that the caller may not read.
+     * @minimum 0
+     */
+  hiddenCandidates: number;
+  /** The server. */
+  server: ServiceServerDto;
 }
 
 /**
@@ -2383,6 +2448,23 @@ export interface ImportTailnetDeviceRequest {
   port?: number | null;
   /** The SSH login user on the target machine. */
   user: string;
+}
+
+/**
+ * The state of one input of the read model.
+ */
+export interface InputStateDto {
+  /**
+     * A fixed, caller-safe sentence when the input was unavailable; never
+     * a backend error.
+     * @nullable
+     */
+  detail?: string | null;
+  /**
+     * `available`, `not_configured`, `denied`, or `unavailable`. A denied
+     * or unavailable input is left out of the answer.
+     */
+  state: string;
 }
 
 /**
@@ -7390,6 +7472,208 @@ export interface ResourceRegistrySettingsDto {
 }
 
 /**
+ * What the answer was built from.
+ */
+export interface ServicesCoverageDto {
+  /** Per-account detail. */
+  accounts: AccountCoverageDto[];
+  /** Docker container observations (not stored until M5 lands). */
+  containers: InputStateDto;
+  /** Coolify observations. */
+  coolify: InputStateDto;
+  /** Fleet machines. */
+  machines: InputStateDto;
+  /** The Registry. */
+  registry: InputStateDto;
+}
+
+/**
+ * A container of a service.
+ */
+export interface ServiceContainerDto {
+  /** The container id. */
+  id: string;
+  /** The image. */
+  image: string;
+  /** The machine it runs on. */
+  machineId: string;
+  /** The container name. */
+  name: string;
+  /** `running`, `degraded`, `stopped`, or `unknown`. */
+  state: string;
+  /** The human status text. */
+  status: string;
+}
+
+/**
+ * The Coolify identity of a service.
+ */
+export interface ServiceCoolifyDto {
+  /** The account the resource was discovered through. */
+  accountId: string;
+  /** The account's label. */
+  accountLabel: string;
+  /**
+     * The image, build pack, service type, or engine.
+     * @nullable
+     */
+  detail?: string | null;
+  /**
+     * The environment name.
+     * @nullable
+     */
+  environmentName?: string | null;
+  /**
+     * The project name.
+     * @nullable
+     */
+  projectName?: string | null;
+  /**
+     * The project uuid, when resolved.
+     * @nullable
+     */
+  projectUuid?: string | null;
+  /**
+     * Coolify's raw status string.
+     * @nullable
+     */
+  status?: string | null;
+  /** The resource uuid. */
+  uuid: string;
+}
+
+/**
+ * The latest known deployment of an application.
+ */
+export interface ServiceDeployDto {
+  /**
+     * When it last changed, as Coolify reports it.
+     * @nullable
+     */
+  at?: string | null;
+  /**
+     * The commit.
+     * @nullable
+     */
+  commit?: string | null;
+  /** The deployment uuid. */
+  deploymentUuid: string;
+  /** Whether the deployments observation is stale. */
+  stale: boolean;
+  /** Coolify's deployment status. */
+  status: string;
+}
+
+/**
+ * Where a service sits on Fleet machines.
+ */
+export interface ServicePlacementDto {
+  /**
+     * The evidence: `explicit_tag`, `address`, or `container`.
+     * @nullable
+     */
+  basis?: string | null;
+  /**
+     * The candidate machines the caller may read, when ambiguous; none is
+     * chosen.
+     */
+  candidates: ServiceMachineRefDto[];
+  /**
+     * How many further candidates the caller may not read.
+     * @minimum 0
+     */
+  hiddenCandidates: number;
+  machine?: null | ServiceMachineRefDto;
+  /** `matched`, `ambiguous`, `unmatched`, or `unknown`. */
+  state: string;
+}
+
+/**
+ * A Registry entry related to a service.
+ */
+export interface ServiceRegistryLinkDto {
+  /**
+     * The service hostname a domain match went through.
+     * @nullable
+     */
+  host?: string | null;
+  /** The entry's key. */
+  key: string;
+  /**
+     * `hosted_on` (an explicit relation) or `domain_match` (a domain entry
+     * whose fqdn equals or is a parent of a service hostname).
+     */
+  link: string;
+  /** The entry's type. */
+  type: string;
+}
+
+/**
+ * One running service.
+ */
+export interface RunningServiceDto {
+  /** The containers observed for it. */
+  containers: ServiceContainerDto[];
+  coolify?: null | ServiceCoolifyDto;
+  /**
+     * A link into the Coolify UI (the project page).
+     * @nullable
+     */
+  deepLink?: string | null;
+  /** The public hostnames, as Coolify reports them. */
+  fqdns: string[];
+  /** The stable id: `coolify:<account>:<uuid>` or `docker:<machine>:<name>`. */
+  id: string;
+  /** `application`, `service`, `database`, or `container`. */
+  kind: string;
+  lastDeploy?: null | ServiceDeployDto;
+  /** The display name. */
+  name: string;
+  /** The Fleet machine placement. */
+  placement: ServicePlacementDto;
+  /** The related Registry entries. */
+  registry: ServiceRegistryLinkDto[];
+  server?: null | ServiceServerDto;
+  /**
+     * How the server was derived: `deployment`, `container`,
+     * `sole_server`, or `unknown`.
+     */
+  serverBasis: string;
+  /** Where it was observed: `coolify`, `docker`, or both. */
+  sources: string[];
+  /** Whether any input behind this service is stale. */
+  stale: boolean;
+  /**
+     * Why: `coolify_<class>_stale`, `fqdns_stale`, `machine_offline`,
+     * `machine_stale`, `containers_stale`.
+     */
+  staleReasons: string[];
+  /** `running`, `degraded`, `stopped`, or `unknown`. */
+  state: string;
+}
+
+/**
+ * One service and what its answer was built from.
+ */
+export type ResourceServiceDetailDtoData = {
+  /** What the answer was built from. */
+  coverage: ServicesCoverageDto;
+  /** The service. */
+  service: RunningServiceDto;
+};
+
+/**
+ * A single resource.
+ *
+ * The payload is nested under `data` so that later top-level fields are an
+ * additive change rather than a breaking one.
+ */
+export interface ResourceServiceDetailDto {
+  /** One service and what its answer was built from. */
+  data: ResourceServiceDetailDtoData;
+}
+
+/**
  * One machine's observed skill inventory.
  */
 export type ResourceSkillsSnapshotDtoData = {
@@ -7595,6 +7879,32 @@ export interface SaveRecipeRequest {
   source: string;
   /** The PVE storage pool the build writes to. */
   storagePool: string;
+}
+
+/**
+ * One service and what its answer was built from.
+ */
+export interface ServiceDetailDto {
+  /** What the answer was built from. */
+  coverage: ServicesCoverageDto;
+  /** The service. */
+  service: RunningServiceDto;
+}
+
+/**
+ * A page of running services.
+ */
+export interface ServicesPage {
+  /** Coolify servers that matched more than one machine. */
+  ambiguousServers: AmbiguousServerDto[];
+  /** What the answer was built from. */
+  coverage: ServicesCoverageDto;
+  /** The read time (epoch millis). */
+  evaluatedAt: number;
+  /** The services, ordered by id. */
+  items: RunningServiceDto[];
+  /** Where this page sits in the result set. */
+  page: PageInfo;
 }
 
 /**
@@ -8446,6 +8756,36 @@ state?: string;
  * @minimum 0
  */
 limit?: number;
+};
+
+export type ListRunningServicesParams = {
+/**
+ * Only services observed by this source: `coolify` or `docker`.
+ * @nullable
+ */
+source?: string | null;
+/**
+ * Only services placed on this machine id.
+ * @nullable
+ */
+machine?: string | null;
+/**
+ * Only services whose name or hostname contains this text
+ * (case-insensitive).
+ * @nullable
+ */
+q?: string | null;
+/**
+ * Opaque cursor returned as the previous page's `nextCursor`.
+ * @nullable
+ */
+cursor?: string | null;
+/**
+ * Requested page size, clamped to the API maximum.
+ * @minimum 0
+ * @nullable
+ */
+limit?: number | null;
 };
 
 export type ListSkillCatalogParams = {
@@ -17460,6 +17800,143 @@ const res = await fetch(getDenyActionRequestUrl(requestId),
 
   const data: denyActionRequestResponse['data'] = body ? JSON.parse(body) : {}
   return { data, status: res.status, headers: res.headers } as denyActionRequestResponse
+}
+
+
+
+export type listRunningServicesResponse200 = {
+  data: ServicesPage
+  status: 200
+}
+
+export type listRunningServicesResponse400 = {
+  data: ApiError
+  status: 400
+}
+
+export type listRunningServicesResponse403 = {
+  data: ApiError
+  status: 403
+}
+
+export type listRunningServicesResponse503 = {
+  data: ApiError
+  status: 503
+}
+
+export type listRunningServicesResponseSuccess = (listRunningServicesResponse200) & {
+  headers: Headers;
+};
+export type listRunningServicesResponseError = (listRunningServicesResponse400 | listRunningServicesResponse403 | listRunningServicesResponse503) & {
+  headers: Headers;
+};
+
+export type listRunningServicesResponse = (listRunningServicesResponseSuccess | listRunningServicesResponseError)
+
+export const getListRunningServicesUrl = (params?: ListRunningServicesParams,) => {
+  const normalizedParams = new URLSearchParams();
+
+  Object.entries(params || {}).forEach(([key, value]) => {
+
+    if (value !== undefined) {
+      normalizedParams.append(key, value === null ? 'null' : String(value))
+    }
+  });
+
+  const stringifiedParams = normalizedParams.toString();
+
+  return stringifiedParams.length > 0 ? `/api/v1/services?${stringifiedParams}` : `/api/v1/services`
+}
+
+/**
+ * # Errors
+ *
+ * Returns the public error envelope on a malformed filter, or when the
+ * caller may read none of the inputs.
+ * @summary Lists running services: Coolify resources joined with Docker
+containers on Fleet machines and with Registry entries, ordered by id.
+Inputs the caller may not read are left out and reported in `coverage`.
+ */
+export const listRunningServices = async (params?: ListRunningServicesParams, options?: RequestInit): Promise<listRunningServicesResponse> => {
+
+  const res = await fetch(getListRunningServicesUrl(params),
+  {
+    ...options,
+    method: 'GET'
+
+
+  }
+)
+
+
+  const body = [204, 205, 304].includes(res.status) ? null : await res.text();
+
+  const data: listRunningServicesResponse['data'] = body ? JSON.parse(body) : {}
+  return { data, status: res.status, headers: res.headers } as listRunningServicesResponse
+}
+
+
+
+export type getRunningServiceResponse200 = {
+  data: ResourceServiceDetailDto
+  status: 200
+}
+
+export type getRunningServiceResponse403 = {
+  data: ApiError
+  status: 403
+}
+
+export type getRunningServiceResponse404 = {
+  data: ApiError
+  status: 404
+}
+
+export type getRunningServiceResponse503 = {
+  data: ApiError
+  status: 503
+}
+
+export type getRunningServiceResponseSuccess = (getRunningServiceResponse200) & {
+  headers: Headers;
+};
+export type getRunningServiceResponseError = (getRunningServiceResponse403 | getRunningServiceResponse404 | getRunningServiceResponse503) & {
+  headers: Headers;
+};
+
+export type getRunningServiceResponse = (getRunningServiceResponseSuccess | getRunningServiceResponseError)
+
+export const getGetRunningServiceUrl = (serviceId: string,) => {
+
+
+
+
+  return `/api/v1/services/${serviceId}`
+}
+
+/**
+ * # Errors
+ *
+ * Returns the public error envelope on refusal or when no such service is
+ * in the caller's view.
+ * @summary Reads one running service by id.
+ */
+export const getRunningService = async (serviceId: string, options?: RequestInit): Promise<getRunningServiceResponse> => {
+
+  const res = await fetch(getGetRunningServiceUrl(serviceId),
+  {
+    ...options,
+    method: 'GET'
+
+
+  }
+)
+
+
+  const body = [204, 205, 304].includes(res.status) ? null : await res.text();
+
+  const data: getRunningServiceResponse['data'] = body ? JSON.parse(body) : {}
+  return { data, status: res.status, headers: res.headers } as getRunningServiceResponse
 }
 
 
