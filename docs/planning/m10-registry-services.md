@@ -1,6 +1,6 @@
 # M10 — Registry, running services, and brokered provider actions
 
-Status: planned (2026-10-12). Milestone: [M10](https://github.com/Frogbyte-io/fleet-manager/milestone/11). The plan revision and ADR are FM-1000; until it merges, this document is the proposal of record for M10.
+Status: planned (2026-10-12). Milestone: [M10](https://github.com/Frogbyte-io/fleet-manager/milestone/11). Boundaries: [ADR 0016](../adr/0016-descriptive-registry-and-action-broker.md) (FM-1000, proposed) and the M10 section of [PLAN.md](../PLAN.md).
 
 ## Goal
 
@@ -153,7 +153,7 @@ Epics B and C deliver the domain and service overview without Coolify or the bro
 ## Open questions
 
 1. Is one Coolify instance enough to start with? (FM-1001/FM-1030 assume several accounts are possible but test with one.)
-2. Default risk classes. Proposed: Registry edits need no broker; restarting or redeploying an existing app is "auto"; new deploys, env changes, and DNS changes are "approve". FM-1040 makes this configurable.
+2. *Resolved by ADR 0016 (proposed).* Default risk classes. Proposed: Registry edits need no broker; restarting or redeploying an existing app is "auto"; new deploys, env changes, and DNS changes are "approve". FM-1040 makes this configurable.
 
 ## Sources
 

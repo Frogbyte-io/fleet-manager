@@ -351,6 +351,22 @@ Exit gate: every Developer Fleet, Proxmox, and Lab workflow available in `fleetc
 
 M9 depends only on landed M1–M4, M6, and M7 contracts and may run in parallel with M6/M7 real-host acceptance.
 
+### M10 — Registry, running services, and brokered provider actions
+
+Status: planned (2026-10-12). Detailed plan and issue breakdown: [planning/m10-registry-services.md](planning/m10-registry-services.md). Boundaries: [ADR 0016](adr/0016-descriptive-registry-and-action-broker.md).
+
+Outcome: one place to answer "what do we have, where is it, what does it cost, and how does it connect", for humans and agents, and a way for agents to request provider changes without holding provider keys.
+
+- A generic, descriptive Registry in Fleet Git: `RegistryType` and `RegistryEntry` resources, built-in `domain` and `service` types, natural keys, relations, and no secrets. Registry resources are never applied.
+- Agents edit the Registry with `fleetctl registry` in a Fleet Git checkout and publish by direct push or pull request, per the `registry.changeMode` setting. Registry-only revisions auto-activate.
+- Domain enrichment from public RDAP and DNS lookups, shown as drift and suggestions; domains and third-party services are otherwise maintained by hand.
+- Running services observed from Coolify and Docker, joined with Registry entries; Coolify lifecycle, settings, and deploy-from-template actions.
+- An action broker: agents create action requests, policy keyed on risk class decides `auto`, `approve`, or `deny`, and Fleet runs approved Coolify and Cloudflare actions with credentials it holds and never returns.
+
+Exit gate: an agent finds a domain or service with `fleetctl registry find`, records a change through `fleetctl registry publish`, and sees it active without a manual step; the console shows domains, third-party services, and running services; an agent-requested DNS change runs only after approval, and no provider token appears in any output.
+
+M10 depends on M4 Fleet Git source fetch and activation, and on the M9 console. Registrar or vendor sync, Resend, and key provisioning into Frogenv are not part of it.
+
 ### Later — scale, convenience, and additional providers
 
 - Optional native desktop shell that consumes the public API and offers local editor/terminal handoff; no core logic.
@@ -377,13 +393,14 @@ M0 Foundation
        M3 project readiness ------------------------+
        minimal profile/template contracts ----------+
   M1-M4 + M6 + M7 APIs -> M9 Fleet Console v2 + fleet-wide skills
+  M4 desired state + M9 console -> M10 Registry + running services + action broker
 ```
 
 The critical path is M0 → M1 → M2 → M3 for the complete Developer Fleet release, then M6 plus the Packer/image-version slice of M7 for the first Lab release. Full M4 GitOps and Docker are not Lab prerequisites. Tailscale discovery is optional. Agents use skills and `fleetctl`; MCP is not on the roadmap.
 
 ## Recommended GitHub milestones and epic issues
 
-Use the milestone names M0–M8 above. Each epic should be a tracking issue containing only dependency/status checklists; implementation work remains in narrow linked issues.
+Use the milestone names M0–M10 above. Each epic should be a tracking issue containing only dependency/status checklists; implementation work remains in narrow linked issues.
 
 | Milestone | Recommended epics |
 |---|---|
@@ -397,6 +414,7 @@ Use the milestone names M0–M8 above. Each epic should be a tracking issue cont
 | M7 | Packer recipe editor/build/version/promotion; minimal Lab templates/readiness; leases and cleanup; Lab CLI/skills/project workflow; later Windows guest and hardware slices |
 | M8 | Optional authenticated deployment; agent/CI identity hardening and delegation; autonomous Lab/CI workflows; policy/audit administration |
 | M9 | Console foundation; fleet inventory console; fleet-wide skills; Lab and images console; settings/Proxmox/projects/audit/access |
+| M10 | Foundations (plan, ADR, provider accounts); Registry; domain and service views; running services (Coolify and Docker); agent action broker |
 
 Issue-ready work for M0–M2 is in [planning/initial-issues.md](planning/initial-issues.md). Use its issue template for later milestones.
 
@@ -434,7 +452,7 @@ Issue-ready work for M0–M2 is in [planning/initial-issues.md](planning/initial
 
 ## Explicitly outside Fleet Manager
 
-- Generic enterprise RMM, endpoint surveillance, patch compliance, helpdesk, or asset/license management
+- Generic enterprise RMM, endpoint surveillance, patch compliance, helpdesk, or asset/license management. The descriptive, manually maintained Registry (M10, ADR 0016) is in scope because agents need it for discovery; compliance, seat tracking, discovery agents, and procurement are not
 - A Proxmox replacement, hypervisor console, storage/network configuration suite, or full backup UI
 - A Portainer replacement, Compose authoring platform, image registry, or build service
 - Browser automation; use Playwright or a project-selected runner
@@ -444,7 +462,7 @@ Issue-ready work for M0–M2 is in [planning/initial-issues.md](planning/initial
 - A dedicated MCP server in the initial roadmap; agents use Fleet skills over `fleetctl --output json`
 - Distribution of VM disk images or licensed operating-system media; a future catalog distributes build recipes and metadata
 - A dotfile manager; use chezmoi if dotfile convergence is requested
-- A secrets-management platform; Fleet stores only the credentials it must use and delegates project secrets to Frogenv or another provider
+- A secrets-management platform; Fleet stores only the credentials it must use and delegates project secrets to Frogenv or another provider. Brokered provider actions (M10) run with credentials Fleet holds and never return them
 - A general package/configuration manager such as Ansible, Nix, or Chef
 - A generic dynamic plugin SDK in the early product
 - A native desktop application containing core logic
