@@ -15,6 +15,7 @@
 pub mod audit;
 pub mod build_addresses;
 pub mod credentials;
+pub mod external_accounts;
 pub mod guest_links;
 pub mod images;
 pub mod lab;
@@ -36,6 +37,7 @@ pub mod source;
 pub use audit::{AuditLedger, AuditSink};
 pub use build_addresses::BuildAddressRepository;
 pub use credentials::CredentialRepository;
+pub use external_accounts::ExternalAccountRepository;
 pub use guest_links::GuestLinkRepository;
 pub use images::RecipeRepository;
 pub use lab::{LabRepository, LeaseRepository};

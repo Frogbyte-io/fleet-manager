@@ -23,6 +23,8 @@ fleet-schema = { path = "../../schemas" }
 fleet-provider-mise = { version = "0.1.0", path = "../providers/fleet-provider-mise" }
 fleet-provider-skills-manager = { version = "0.1.0", path = "../providers/fleet-provider-skills-manager" }
 fleet-provider-tailscale = { path = "../providers/fleet-provider-tailscale" }
+fleet-provider-coolify = { path = "../providers/fleet-provider-coolify" }
+fleet-provider-cloudflare = { path = "../providers/fleet-provider-cloudflare" }
 fleet-provider-proxmox = { path = "../providers/fleet-provider-proxmox" }
 fleet-provider-packer = { path = "../providers/fleet-provider-packer" }
 fleet-secrets = { version = "0.1.0", path = "../fleet-secrets" }

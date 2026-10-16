@@ -1003,6 +1003,370 @@
         }
       }
     },
+    "/api/v1/external-accounts": {
+      "get": {
+        "tags": [
+          "external-accounts"
+        ],
+        "summary": "Lists external provider accounts.",
+        "description": "# Errors\n\nReturns the public error envelope on refusal or backend failure.",
+        "operationId": "listExternalAccounts",
+        "parameters": [
+          {
+            "name": "kind",
+            "in": "query",
+            "description": "Restrict to one provider kind.",
+            "required": false,
+            "schema": {
+              "$ref": "#/components/schemas/ExternalProviderKindDto"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "description": "The maximum number of accounts to return.",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int32",
+              "minimum": 0
+            }
+          },
+          {
+            "name": "cursor",
+            "in": "query",
+            "description": "The opaque cursor: the last account id of the previous page.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The accounts, newest first.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Page_ExternalAccountDto"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The caller may not read external accounts.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "external-accounts"
+        ],
+        "summary": "Registers an account and stores its token.",
+        "description": "# Errors\n\nReturns the public error envelope on refusal, conflict, or backend\nfailure.",
+        "operationId": "createExternalAccount",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateExternalAccountRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "description": "The account was created.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Resource_ExternalAccountDto"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The request is malformed.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The caller may not configure external accounts.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The label is taken for that kind.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/external-accounts/{accountId}": {
+      "get": {
+        "tags": [
+          "external-accounts"
+        ],
+        "summary": "Reads one external provider account.",
+        "description": "# Errors\n\nReturns the public error envelope on refusal or an unknown account.",
+        "operationId": "getExternalAccount",
+        "parameters": [
+          {
+            "name": "accountId",
+            "in": "path",
+            "description": "The account's identity.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The account.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Resource_ExternalAccountDto"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The caller may not read external accounts.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "The account does not exist.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "tags": [
+          "external-accounts"
+        ],
+        "summary": "Removes an account and its token.",
+        "description": "# Errors\n\nReturns the public error envelope on refusal, an unknown account, or a\nbackend failure.",
+        "operationId": "deleteExternalAccount",
+        "parameters": [
+          {
+            "name": "accountId",
+            "in": "path",
+            "description": "The account's identity.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "The account was removed."
+          },
+          "403": {
+            "description": "The caller may not configure external accounts.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "The account does not exist.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "patch": {
+        "tags": [
+          "external-accounts"
+        ],
+        "summary": "Updates an account; a supplied token replaces the stored one.",
+        "description": "# Errors\n\nReturns the public error envelope on refusal, an unknown account, a\nconflict, or a malformed request.",
+        "operationId": "updateExternalAccount",
+        "parameters": [
+          {
+            "name": "accountId",
+            "in": "path",
+            "description": "The account's identity.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UpdateExternalAccountRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "The updated account.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Resource_ExternalAccountDto"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The request is malformed.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The caller may not configure external accounts.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "The account does not exist.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The label is taken for that kind.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/external-accounts/{accountId}/probe": {
+      "post": {
+        "tags": [
+          "external-accounts"
+        ],
+        "summary": "Probes an account with its stored token and records the classified\nresult. An unreachable or refusing service is a successful probe whose\nstatus says so.",
+        "description": "# Errors\n\nReturns the public error envelope on refusal, an unknown account, or a\nmissing stored token.",
+        "operationId": "probeExternalAccount",
+        "parameters": [
+          {
+            "name": "accountId",
+            "in": "path",
+            "description": "The account's identity.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The account with its fresh probe result.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Resource_ExternalAccountDto"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The caller may not configure external accounts.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "The account does not exist.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The account's token is not in the secret store.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/images/build-addresses": {
       "get": {
         "tags": [
@@ -9281,6 +9645,50 @@
           }
         }
       },
+      "CreateExternalAccountRequest": {
+        "type": "object",
+        "description": "The create-account request. The token is write-only.",
+        "required": [
+          "kind",
+          "label",
+          "token"
+        ],
+        "properties": {
+          "accountId": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The Cloudflare account id, for account-owned tokens."
+          },
+          "baseUrl": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The API base URL; Cloudflare defaults to its public API, Coolify\nneeds the instance URL."
+          },
+          "kind": {
+            "$ref": "#/components/schemas/ExternalProviderKindDto",
+            "description": "The provider kind."
+          },
+          "label": {
+            "type": "string",
+            "description": "The operator-facing label, unique within the kind."
+          },
+          "notes": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Free-form notes."
+          },
+          "token": {
+            "type": "string",
+            "description": "The API token (write-only)."
+          }
+        }
+      },
       "CreateLabPoolRequest": {
         "type": "object",
         "description": "A pool creation request.",
@@ -10178,6 +10586,117 @@
             "minimum": 0
           }
         }
+      },
+      "ExternalAccountDto": {
+        "type": "object",
+        "description": "One external provider account. The token is never here.",
+        "required": [
+          "id",
+          "kind",
+          "label",
+          "baseUrl",
+          "notes",
+          "createdAt",
+          "updatedAt"
+        ],
+        "properties": {
+          "accountId": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The provider-side account id (Cloudflare account-owned tokens)."
+          },
+          "baseUrl": {
+            "type": "string",
+            "description": "The provider's API base URL."
+          },
+          "createdAt": {
+            "type": "integer",
+            "format": "int64",
+            "description": "When the account was created (epoch millis)."
+          },
+          "id": {
+            "type": "string",
+            "description": "The account's identity."
+          },
+          "kind": {
+            "$ref": "#/components/schemas/ExternalProviderKindDto",
+            "description": "The provider kind."
+          },
+          "label": {
+            "type": "string",
+            "description": "The operator-facing label, unique within the kind."
+          },
+          "lastProbe": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/ExternalProbeDto",
+                "description": "The latest probe, absent until one runs after the last credential\nor endpoint change."
+              }
+            ]
+          },
+          "notes": {
+            "type": "string",
+            "description": "Free-form operator notes."
+          },
+          "updatedAt": {
+            "type": "integer",
+            "format": "int64",
+            "description": "When the account last changed (epoch millis)."
+          }
+        }
+      },
+      "ExternalProbeDto": {
+        "type": "object",
+        "description": "The latest probe of an account.",
+        "required": [
+          "status",
+          "detail",
+          "granted",
+          "missing",
+          "checkedAt"
+        ],
+        "properties": {
+          "checkedAt": {
+            "type": "integer",
+            "format": "int64",
+            "description": "When the probe ran (epoch millis)."
+          },
+          "detail": {
+            "type": "string",
+            "description": "A short, redacted explanation."
+          },
+          "granted": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Permissions the token was seen to hold."
+          },
+          "missing": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Permissions Fleet needs that the token lacks."
+          },
+          "status": {
+            "$ref": "#/components/schemas/ProbeStatusDto",
+            "description": "The classification."
+          }
+        }
+      },
+      "ExternalProviderKindDto": {
+        "type": "string",
+        "description": "The provider kinds an account may belong to.",
+        "enum": [
+          "coolify",
+          "cloudflare"
+        ]
       },
       "FetchDesiredRequest": {
         "type": "object",
@@ -12918,6 +13437,87 @@
           }
         }
       },
+      "Page_ExternalAccountDto": {
+        "type": "object",
+        "description": "A page of resources.\n\nThe concrete schema for a list endpoint appears when that endpoint does;\n[`PageInfo`] is the part of the shape that is fixed for every one of them.",
+        "required": [
+          "items",
+          "page"
+        ],
+        "properties": {
+          "items": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "description": "One external provider account. The token is never here.",
+              "required": [
+                "id",
+                "kind",
+                "label",
+                "baseUrl",
+                "notes",
+                "createdAt",
+                "updatedAt"
+              ],
+              "properties": {
+                "accountId": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "description": "The provider-side account id (Cloudflare account-owned tokens)."
+                },
+                "baseUrl": {
+                  "type": "string",
+                  "description": "The provider's API base URL."
+                },
+                "createdAt": {
+                  "type": "integer",
+                  "format": "int64",
+                  "description": "When the account was created (epoch millis)."
+                },
+                "id": {
+                  "type": "string",
+                  "description": "The account's identity."
+                },
+                "kind": {
+                  "$ref": "#/components/schemas/ExternalProviderKindDto",
+                  "description": "The provider kind."
+                },
+                "label": {
+                  "type": "string",
+                  "description": "The operator-facing label, unique within the kind."
+                },
+                "lastProbe": {
+                  "oneOf": [
+                    {
+                      "type": "null"
+                    },
+                    {
+                      "$ref": "#/components/schemas/ExternalProbeDto",
+                      "description": "The latest probe, absent until one runs after the last credential\nor endpoint change."
+                    }
+                  ]
+                },
+                "notes": {
+                  "type": "string",
+                  "description": "Free-form operator notes."
+                },
+                "updatedAt": {
+                  "type": "integer",
+                  "format": "int64",
+                  "description": "When the account last changed (epoch millis)."
+                }
+              }
+            },
+            "description": "The items on this page, in the endpoint's documented order."
+          },
+          "page": {
+            "$ref": "#/components/schemas/PageInfo",
+            "description": "Where this page sits in the result set."
+          }
+        }
+      },
       "Page_ImageBuildDto": {
         "type": "object",
         "description": "A page of resources.\n\nThe concrete schema for a list endpoint appears when that endpoint does;\n[`PageInfo`] is the part of the shape that is fixed for every one of them.",
@@ -14510,6 +15110,16 @@
             "description": "The content digest."
           }
         }
+      },
+      "ProbeStatusDto": {
+        "type": "string",
+        "description": "The classified outcome of a probe.",
+        "enum": [
+          "ok",
+          "unreachable",
+          "unauthorized",
+          "insufficient_permission"
+        ]
       },
       "ProjectDto": {
         "type": "object",
@@ -16265,6 +16875,78 @@
               "token": {
                 "type": "string",
                 "description": "The token value. Shown once."
+              }
+            }
+          }
+        }
+      },
+      "Resource_ExternalAccountDto": {
+        "type": "object",
+        "description": "A single resource.\n\nThe payload is nested under `data` so that later top-level fields are an\nadditive change rather than a breaking one.",
+        "required": [
+          "data"
+        ],
+        "properties": {
+          "data": {
+            "type": "object",
+            "description": "One external provider account. The token is never here.",
+            "required": [
+              "id",
+              "kind",
+              "label",
+              "baseUrl",
+              "notes",
+              "createdAt",
+              "updatedAt"
+            ],
+            "properties": {
+              "accountId": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "description": "The provider-side account id (Cloudflare account-owned tokens)."
+              },
+              "baseUrl": {
+                "type": "string",
+                "description": "The provider's API base URL."
+              },
+              "createdAt": {
+                "type": "integer",
+                "format": "int64",
+                "description": "When the account was created (epoch millis)."
+              },
+              "id": {
+                "type": "string",
+                "description": "The account's identity."
+              },
+              "kind": {
+                "$ref": "#/components/schemas/ExternalProviderKindDto",
+                "description": "The provider kind."
+              },
+              "label": {
+                "type": "string",
+                "description": "The operator-facing label, unique within the kind."
+              },
+              "lastProbe": {
+                "oneOf": [
+                  {
+                    "type": "null"
+                  },
+                  {
+                    "$ref": "#/components/schemas/ExternalProbeDto",
+                    "description": "The latest probe, absent until one runs after the last credential\nor endpoint change."
+                  }
+                ]
+              },
+              "notes": {
+                "type": "string",
+                "description": "Free-form operator notes."
+              },
+              "updatedAt": {
+                "type": "integer",
+                "format": "int64",
+                "description": "When the account last changed (epoch millis)."
               }
             }
           }
@@ -19556,6 +20238,47 @@
           }
         }
       },
+      "UpdateExternalAccountRequest": {
+        "type": "object",
+        "description": "The update-account request. Absent fields are left alone.",
+        "properties": {
+          "accountId": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "A new Cloudflare account id; an empty string clears it."
+          },
+          "baseUrl": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "A new base URL."
+          },
+          "label": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "A new label."
+          },
+          "notes": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "New notes."
+          },
+          "token": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "A replacement API token (write-only)."
+          }
+        }
+      },
       "UpdateProjectRequest": {
         "type": "object",
         "description": "The update-project request.",
@@ -19634,6 +20357,10 @@
     {
       "name": "images",
       "description": "Image recipes and their immutable published versions, built over the operator-installed Packer CLI. The content is stored verbatim, but Fleet refuses recipes that fail the structural gate described in docs/architecture/lab.md (legacy JSON with an allowlisted structure) at publish and again before every build; Packer's own fields are otherwise not re-validated."
+    },
+    {
+      "name": "external-accounts",
+      "description": "External provider accounts for API-token providers (Coolify, Cloudflare), with a health and permission probe. The token is write-only and never returned."
     },
     {
       "name": "proxmox",

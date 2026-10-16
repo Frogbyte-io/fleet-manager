@@ -19,6 +19,7 @@ pub mod credentials;
 pub mod desired;
 mod envelope;
 mod error;
+pub mod external_accounts;
 pub mod frogenv;
 pub mod images;
 pub mod lab;
@@ -163,6 +164,12 @@ pub const API_BASE_PATH: &str = "/api/v1";
         tailnet::CorrelationCandidateDto,
         tailnet::ImportTailnetDeviceRequest,
         tailnet::TailnetStatusDto,
+        external_accounts::CreateExternalAccountRequest,
+        external_accounts::UpdateExternalAccountRequest,
+        external_accounts::ExternalAccountDto,
+        external_accounts::ExternalProbeDto,
+        external_accounts::ExternalProviderKindDto,
+        external_accounts::ProbeStatusDto,
         proxmox::ConfirmProxmoxFingerprintRequest,
         proxmox::CreateProxmoxAccountRequest,
         proxmox::ProxmoxAccountDto,
@@ -253,6 +260,10 @@ pub const API_BASE_PATH: &str = "/api/v1";
         (
             name = "images",
             description = "Image recipes and their immutable published versions, built over the operator-installed Packer CLI. The content is stored verbatim, but Fleet refuses recipes that fail the structural gate described in docs/architecture/lab.md (legacy JSON with an allowlisted structure) at publish and again before every build; Packer's own fields are otherwise not re-validated."
+        ),
+        (
+            name = "external-accounts",
+            description = "External provider accounts for API-token providers (Coolify, Cloudflare), with a health and permission probe. The token is write-only and never returned."
         ),
         (
             name = "proxmox",
@@ -358,6 +369,16 @@ pub fn api(state: Arc<operations::ApiState>) -> (Router, utoipa::openapi::OpenAp
                     proxmox::list_proxmox_accounts,
                     proxmox::create_proxmox_account
                 ))
+                .routes(routes!(
+                    external_accounts::list_external_accounts,
+                    external_accounts::create_external_account
+                ))
+                .routes(routes!(
+                    external_accounts::get_external_account,
+                    external_accounts::update_external_account,
+                    external_accounts::delete_external_account
+                ))
+                .routes(routes!(external_accounts::probe_external_account))
                 .routes(routes!(proxmox::delete_proxmox_account))
                 .routes(routes!(proxmox::observe_proxmox_fingerprint))
                 .routes(routes!(proxmox::confirm_proxmox_fingerprint))

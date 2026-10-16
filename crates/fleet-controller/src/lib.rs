@@ -15,6 +15,7 @@ pub mod browser;
 pub mod builtin_skills;
 pub mod checkout;
 pub mod exec;
+pub mod external_accounts_store;
 pub mod frogenv;
 pub mod gateway;
 pub mod git_credentials;
@@ -86,6 +87,9 @@ pub struct NodeServices {
     /// The Git credential store for the desired source (FM-412); set by the
     /// binary once the secret store is open, absent otherwise.
     pub git_credentials: Option<Arc<dyn fleet_application::source::GitCredentialStore>>,
+    /// The external provider account use cases (FM-1001); set by the binary
+    /// once the secret store is open, absent otherwise.
+    pub external_accounts: Option<Arc<fleet_application::external_accounts::ExternalAccounts>>,
 }
 
 fn event_hub_for_services(
@@ -150,6 +154,7 @@ pub fn compose_node_services_with_events(
     );
     NodeServices {
         git_credentials: None,
+        external_accounts: None,
         nodes,
         gateway,
         events,
@@ -523,7 +528,13 @@ fn build_router_for_caller(
         events,
     ));
     let credentials = api_state.credentials.clone();
-    let api_router = fleet_api::router(api_state.clone());
+    let external_accounts = services.and_then(|services| services.external_accounts.clone());
+    let mut api_router = fleet_api::router(api_state.clone());
+    if let Some(external_accounts) = external_accounts {
+        // The external accounts surface (FM-1001) takes its use cases as a
+        // request extension, so the shared API state stays untouched.
+        api_router = api_router.layer(axum::Extension(external_accounts));
+    }
     let shell = shell(settings).fallback(api_router);
     let web_index = std::fs::read(settings.web_dist.join("index.html"))
         .ok()

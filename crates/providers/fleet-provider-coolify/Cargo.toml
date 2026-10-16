@@ -1,0 +1,17 @@
+[package]
+name = "fleet-provider-coolify"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+fleet-core = { path = "../../fleet-core" }
+reqwest = { version = "0.12.24", default-features = false, features = ["rustls-tls"] }
+
+[dev-dependencies]
+tokio = { version = "1.53.1", features = ["macros", "rt", "net", "io-util"] }
+
+[lints]
+workspace = true
