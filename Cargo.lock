@@ -769,6 +769,7 @@ version = "0.1.0"
 dependencies = [
  "fleet-core",
  "reqwest",
+ "serde_json",
  "tokio",
 ]
 

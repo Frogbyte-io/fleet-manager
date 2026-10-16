@@ -143,10 +143,10 @@ fn looks_like_version(body: &str) -> bool {
 /// The `message` sentence of a JSON error body, empty when there is none
 /// (HTML error pages are dropped).
 fn message_of(body: &str) -> String {
-    body.split("\"message\":\"")
-        .nth(1)
-        .and_then(|rest| rest.split('"').next())
-        .unwrap_or("")
+    serde_json::from_str::<serde_json::Value>(body)
+        .ok()
+        .and_then(|value| value.get("message")?.as_str().map(str::to_owned))
+        .unwrap_or_default()
         .chars()
         .take(120)
         .collect()

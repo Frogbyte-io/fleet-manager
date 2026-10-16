@@ -188,3 +188,14 @@ async fn a_tls_failure_has_its_own_category() {
     assert_eq!(report.status, ProbeStatus::Unreachable);
     assert!(report.detail.contains("TLS"), "{}", report.detail);
 }
+
+#[tokio::test]
+async fn pretty_printed_json_bodies_classify_the_same() {
+    let (base, _) = stub(canned(
+        403,
+        "{ \"message\": \"Missing required permissions: read\" }",
+    ))
+    .await;
+    let report = fleet_provider_coolify::probe(&base, TOKEN).await;
+    assert_eq!(report.status, ProbeStatus::InsufficientPermission);
+}
