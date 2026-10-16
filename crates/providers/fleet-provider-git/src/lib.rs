@@ -271,6 +271,19 @@ impl GitSource {
         self.git_timed(arguments, auth, GIT_TIMEOUT)
     }
 
+    /// Kills the child's whole process group (the child leads its own on
+    /// Unix) and reaps the child.
+    fn kill_group(child: &mut std::process::Child) {
+        #[cfg(unix)]
+        {
+            let _ = Command::new("kill")
+                .args(["-KILL", "--", &format!("-{}", child.id())])
+                .status();
+        }
+        let _ = child.kill();
+        let _ = child.wait();
+    }
+
     /// Runs git with a deadline: a hung remote or credential prompt is
     /// killed and reported, never waited on forever.
     fn git_timed(
@@ -287,6 +300,13 @@ impl GitSource {
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
+        // Its own process group, so a timeout can kill the command and every
+        // helper it started (ssh, credential helpers), not just the leader.
+        #[cfg(unix)]
+        {
+            use std::os::unix::process::CommandExt as _;
+            command.process_group(0);
+        }
         let mut child = command
             .spawn()
             .map_err(|error| format!("git could not start: {error}"))?;
@@ -306,10 +326,8 @@ impl GitSource {
             match child.try_wait() {
                 Ok(Some(status)) => break status,
                 Ok(None) if std::time::Instant::now() >= deadline => {
-                    // Kill and detach the readers: a grandchild may still
-                    // hold the pipes open.
-                    let _ = child.kill();
-                    let _ = child.wait();
+                    // Kill the group and detach the readers.
+                    Self::kill_group(&mut child);
                     return Err(format!(
                         "git {} timed out after {} seconds",
                         arguments.first().unwrap_or(&""),
@@ -317,7 +335,10 @@ impl GitSource {
                     ));
                 }
                 Ok(None) => std::thread::sleep(std::time::Duration::from_millis(20)),
-                Err(error) => return Err(format!("git could not be awaited: {error}")),
+                Err(error) => {
+                    Self::kill_group(&mut child);
+                    return Err(format!("git could not be awaited: {error}"));
+                }
             }
         };
         let output = std::process::Output {

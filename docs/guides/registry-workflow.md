@@ -40,6 +40,18 @@ Auto-activation has these guards you can rely on:
   in the same serialized section. If the active revision changed meanwhile
   (for example a manual activation), the auto-activation is skipped and a
   `registry_auto_activation_skipped` audit event records why.
+- **A rollback holds it.** Rolling back sets an auto-activation hold
+  (`autoActivateHold` in the settings API, audited as
+  `registry_auto_activation_hold_set`), so re-fetching the newer head (a
+  controller restart with the periodic fetch, a webhook) does not undo the
+  rollback. Auto-activation skips with a "held" reason until a manual
+  activation releases it (`registry_auto_activation_hold_cleared`).
+- **A skipped write leaves two events.** A skipped auto-activation (the active
+  revision changed, the setting went off, or a hold appeared between the
+  decision and the write) has already recorded its `source_activation` intent;
+  the follow-up `registry_auto_activation_skipped` event, with the commit and
+  the reason, is its outcome. An intent without a matching activation and a
+  skipped event for the same commit means the write was refused, not lost.
 - **It is audited.** Each automatic activation is an audit event under the
   controller's own identity (`system:fleet-controller`), carrying the commit
   SHA, the previous commit, `authorizedAs`, and a count per kind (for example

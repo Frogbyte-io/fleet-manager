@@ -620,6 +620,64 @@ async fn a_settings_change_is_audited_under_its_own_action_with_an_outcome() {
 }
 
 #[tokio::test]
+async fn a_rollback_holds_auto_activation_until_a_manual_activation() {
+    let dir = tempfile::tempdir().unwrap();
+    let harness = activated(dir.path()).await;
+    let first = harness.active_sha().await.unwrap();
+    let (_, history) = harness.call("GET", "/desired/history", None).await;
+    let first_digest = history["items"][0]["contentDigest"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let second = commit(&harness.repo, &[("entry.yaml", &entry("two"))]);
+    let fetched = harness.fetch(&second).await;
+    assert_eq!(fetched["result"]["autoActivation"]["activated"], true);
+
+    // Roll back to the first revision: auto-activation is now held.
+    let (_, accepted) = harness
+        .call(
+            "POST",
+            "/desired/rollback",
+            Some(serde_json::json!({"commitSha": first, "contentDigest": first_digest})),
+        )
+        .await;
+    assert_eq!(harness.run(&accepted).await["state"], "succeeded");
+    assert_eq!(harness.active_sha().await.as_deref(), Some(first.as_str()));
+    let (_, settings) = harness.call("GET", "/desired/settings", None).await;
+    assert_eq!(settings["data"]["autoActivateHold"], true);
+
+    // Re-fetching HEAD (a poller restart or webhook) must not undo it.
+    let refetched = harness.fetch(&second).await;
+    assert_eq!(refetched["result"]["autoActivation"]["activated"], false);
+    assert!(
+        refetched["result"]["autoActivation"]["reason"]
+            .as_str()
+            .unwrap()
+            .contains("held"),
+        "{refetched}"
+    );
+    assert_eq!(harness.active_sha().await.as_deref(), Some(first.as_str()));
+
+    // A manual activation releases the hold; the next push auto-activates.
+    harness.activate_manually(&refetched).await;
+    assert_eq!(harness.active_sha().await.as_deref(), Some(second.as_str()));
+    let (_, settings) = harness.call("GET", "/desired/settings", None).await;
+    assert_eq!(settings["data"]["autoActivateHold"], false);
+    let third = commit(&harness.repo, &[("entry.yaml", &entry("three"))]);
+    let fetched = harness.fetch(&third).await;
+    assert_eq!(fetched["result"]["autoActivation"]["activated"], true);
+    // The hold and its release are audited.
+    let events: Vec<(String,)> = sqlx::query_as(
+        "SELECT metadata_json FROM audit_events WHERE metadata_json LIKE '%registry_auto_activation_hold_%'",
+    )
+    .fetch_all(harness.store.pool())
+    .await
+    .unwrap();
+    assert!(events.iter().any(|e| e.0.contains("hold_set")));
+    assert!(events.iter().any(|e| e.0.contains("hold_cleared")));
+}
+
+#[tokio::test]
 async fn the_poller_backs_off_after_repeated_failures() {
     let dir = tempfile::tempdir().unwrap();
     let harness = harness(dir.path()).await;

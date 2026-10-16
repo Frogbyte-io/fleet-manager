@@ -237,6 +237,9 @@ pub struct RegistrySettingsDto {
     /// How Registry edits should reach the default branch: `direct` or
     /// `pull-request`.
     pub change_mode: String,
+    /// Whether auto-activation is held because a rollback happened. A
+    /// manual activation releases the hold. Read-only.
+    pub auto_activate_hold: bool,
 }
 
 impl From<fleet_application::source::RegistrySettings> for RegistrySettingsDto {
@@ -244,6 +247,7 @@ impl From<fleet_application::source::RegistrySettings> for RegistrySettingsDto {
         Self {
             auto_activate: settings.auto_activate,
             change_mode: settings.change_mode.as_str().to_owned(),
+            auto_activate_hold: settings.auto_activate_hold,
         }
     }
 }

@@ -188,6 +188,8 @@ pub enum CasOutcome {
     /// `registry.autoActivate` was off at the moment of the write; nothing
     /// changed.
     AutoActivateOff,
+    /// A rollback holds auto-activation; nothing changed.
+    Held,
 }
 
 /// How a candidate commit relates to the active commit in the controller's
@@ -298,6 +300,9 @@ pub const REGISTRY_KINDS: [&str; 2] = ["RegistryType", "RegistryEntry"];
 
 /// The setting key for Registry auto-activation.
 pub const SETTING_AUTO_ACTIVATE: &str = "registry.autoActivate";
+/// The key of the auto-activation hold a rollback sets and a manual
+/// activation clears. Its value is `held` or `released`.
+pub const SETTING_AUTO_ACTIVATE_HOLD: &str = "registry.autoActivateHold";
 /// The setting key for the Registry change mode.
 pub const SETTING_CHANGE_MODE: &str = "registry.changeMode";
 
@@ -346,6 +351,9 @@ pub struct RegistrySettings {
     pub auto_activate: bool,
     /// How Registry edits should reach the default branch.
     pub change_mode: ChangeMode,
+    /// Whether auto-activation is held because of a rollback. A manual
+    /// activation releases it. Read-only: it is not a setting to change.
+    pub auto_activate_hold: bool,
 }
 
 impl Default for RegistrySettings {
@@ -353,6 +361,7 @@ impl Default for RegistrySettings {
         Self {
             auto_activate: true,
             change_mode: ChangeMode::PullRequest,
+            auto_activate_hold: false,
         }
     }
 }
@@ -768,6 +777,8 @@ impl DesiredSource {
                 .activate_serialized(&revision)
                 .await
                 .map_err(backend)?;
+            // A manual activation releases a rollback's hold.
+            self.release_hold(actor, &revision.commit_sha).await?;
             self.refresh_registry().await;
             return Ok(activated);
         };
@@ -786,6 +797,7 @@ impl DesiredSource {
             }
             CasOutcome::ActiveChanged => "the active revision changed during auto-activation",
             CasOutcome::AutoActivateOff => "registry.autoActivate was turned off",
+            CasOutcome::Held => "auto-activation is held after a rollback; activate manually",
         };
         let mut skipped = crate::audit::AuditMetadata::default();
         for (key, value) in [
@@ -835,6 +847,10 @@ impl DesiredSource {
         if let Some(value) = port.get(SETTING_CHANGE_MODE).await? {
             settings.change_mode = ChangeMode::parse(&value)?;
         }
+        settings.auto_activate_hold = port
+            .get(SETTING_AUTO_ACTIVATE_HOLD)
+            .await?
+            .is_some_and(|value| value == "held");
         Ok(settings)
     }
 
@@ -980,13 +996,15 @@ impl DesiredSource {
                 reason: reason.to_owned(),
             })
         };
-        if !self
+        let settings = self
             .read_settings()
             .await
-            .map_err(backend("registry_settings"))?
-            .auto_activate
-        {
+            .map_err(backend("registry_settings"))?;
+        if !settings.auto_activate {
             return skip("registry.autoActivate is off");
+        }
+        if settings.auto_activate_hold {
+            return skip("auto-activation is held after a rollback; activate manually");
         }
         let Some(comparer) = &self.comparer else {
             return skip("no commit comparer is wired; ancestry cannot be verified");
@@ -1338,6 +1356,21 @@ impl DesiredSource {
             operation_id,
         )
         .await?;
+        // The hold lands before the switch, so no later fetch can slip an
+        // auto-activation in after the rollback.
+        if let Some(settings) = &self.settings {
+            self.record_source_intent(
+                principal_id,
+                "registry_auto_activation_hold_set",
+                Some(&target.commit_sha),
+                None,
+            )
+            .await?;
+            settings
+                .set(SETTING_AUTO_ACTIVATE_HOLD, "held")
+                .await
+                .map_err(backend("registry_settings"))?;
+        }
         let activated = self
             .port
             .activate_serialized(target)
@@ -1345,6 +1378,41 @@ impl DesiredSource {
             .map_err(backend("source_activate"))?;
         self.refresh_registry().await;
         Ok(activated)
+    }
+
+    /// Releases the auto-activation hold, when one is set, with an audit
+    /// event naming who released it.
+    async fn release_hold(
+        &self,
+        actor: &str,
+        commit_sha: &str,
+    ) -> Result<(), crate::project::ProjectUseCaseError> {
+        let Some(settings) = &self.settings else {
+            return Ok(());
+        };
+        let backend = |detail: String| crate::project::ProjectUseCaseError::Backend {
+            context: "registry_settings",
+            detail,
+        };
+        if settings
+            .get(SETTING_AUTO_ACTIVATE_HOLD)
+            .await
+            .map_err(backend)?
+            .is_none_or(|value| value != "held")
+        {
+            return Ok(());
+        }
+        self.record_source_intent(
+            actor,
+            "registry_auto_activation_hold_cleared",
+            Some(commit_sha),
+            None,
+        )
+        .await?;
+        settings
+            .set(SETTING_AUTO_ACTIVATE_HOLD, "released")
+            .await
+            .map_err(backend)
     }
 
     async fn record_source_intent(

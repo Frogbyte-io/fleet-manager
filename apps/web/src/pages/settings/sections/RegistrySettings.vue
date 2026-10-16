@@ -140,6 +140,13 @@ async function apply(change: UpdateRegistrySettingsRequest) {
       </fieldset>
 
       <p
+        v-if="current.autoActivateHold"
+        class="rounded-sm border border-fc-warn/40 p-3 text-xs text-fc-warn"
+        data-testid="registry-hold"
+      >
+        Automatic activation is held because of a rollback. It resumes after you activate a revision by hand.
+      </p>
+      <p
         v-if="saveError"
         class="text-xs text-fc-err"
         role="alert"

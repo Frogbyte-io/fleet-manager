@@ -52,6 +52,12 @@ describe('Registry settings', () => {
     expect(wrapper.text()).toContain('fleetctl desired settings set --auto-activate false')
   })
 
+  it('shows when a rollback holds automatic activation', async () => {
+    getRegistrySettings.mockResolvedValue(ok({ data: { autoActivate: true, changeMode: 'pull-request', autoActivateHold: true } }))
+    const wrapper = await mountSection()
+    expect(wrapper.get('[data-testid="registry-hold"]').text()).toContain('held because of a rollback')
+  })
+
   it('switches the change mode', async () => {
     updateRegistrySettings.mockResolvedValue(ok({ data: { autoActivate: true, changeMode: 'direct' } }))
     const wrapper = await mountSection()

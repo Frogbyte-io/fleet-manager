@@ -4756,6 +4756,11 @@ export interface RegistrySettingsDto {
      */
   autoActivate: boolean;
   /**
+     * Whether auto-activation is held because a rollback happened. A
+     * manual activation releases the hold. Read-only.
+     */
+  autoActivateHold: boolean;
+  /**
      * How Registry edits should reach the default branch: `direct` or
      * `pull-request`.
      */
@@ -6525,6 +6530,11 @@ export type ResourceRegistrySettingsDtoData = {
      * resources activates without a manual step.
      */
   autoActivate: boolean;
+  /**
+     * Whether auto-activation is held because a rollback happened. A
+     * manual activation releases the hold. Read-only.
+     */
+  autoActivateHold: boolean;
   /**
      * How Registry edits should reach the default branch: `direct` or
      * `pull-request`.

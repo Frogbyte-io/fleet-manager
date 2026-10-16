@@ -126,6 +126,15 @@ impl fleet_application::source::SourcePort for SourceRepository {
             if setting.is_some_and(|(value,)| value != "true") {
                 return Ok(CasOutcome::AutoActivateOff);
             }
+            let hold: Option<(String,)> = sqlx::query_as(
+                "SELECT value FROM controller_settings WHERE key = 'registry.autoActivateHold'",
+            )
+            .fetch_optional(&mut *tx)
+            .await
+            .map_err(|error| format!("the setting read failed: {error}"))?;
+            if hold.is_some_and(|(value,)| value == "held") {
+                return Ok(CasOutcome::Held);
+            }
         }
         sqlx::query(
             "INSERT INTO source_active_revision (singleton, commit_sha, content_digest, activated_at) \

@@ -17445,12 +17445,17 @@
         "description": "The Registry controller settings. Fleet does not enforce the change\nmode (the repository host's branch protection does); `fleetctl` and the\n`fleet` skill follow it.",
         "required": [
           "autoActivate",
-          "changeMode"
+          "changeMode",
+          "autoActivateHold"
         ],
         "properties": {
           "autoActivate": {
             "type": "boolean",
             "description": "Whether a fetched, valid revision that changes only Registry\nresources activates without a manual step."
+          },
+          "autoActivateHold": {
+            "type": "boolean",
+            "description": "Whether auto-activation is held because a rollback happened. A\nmanual activation releases the hold. Read-only."
           },
           "changeMode": {
             "type": "string",
@@ -20332,12 +20337,17 @@
             "description": "The Registry controller settings. Fleet does not enforce the change\nmode (the repository host's branch protection does); `fleetctl` and the\n`fleet` skill follow it.",
             "required": [
               "autoActivate",
-              "changeMode"
+              "changeMode",
+              "autoActivateHold"
             ],
             "properties": {
               "autoActivate": {
                 "type": "boolean",
                 "description": "Whether a fetched, valid revision that changes only Registry\nresources activates without a manual step."
+              },
+              "autoActivateHold": {
+                "type": "boolean",
+                "description": "Whether auto-activation is held because a rollback happened. A\nmanual activation releases the hold. Read-only."
               },
               "changeMode": {
                 "type": "string",
