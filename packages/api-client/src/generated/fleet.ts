@@ -4540,6 +4540,254 @@ export interface RecordCheckoutsRequest {
 }
 
 /**
+ * What a relation points at.
+ */
+export interface RegistryTargetDto {
+  /** `registry`, `machine`, `project`, `coolify`, or `proxmoxGuest`. */
+  class: string;
+  /**
+     * The reference within the class: `<type>/<key>` for `registry`, a
+     * name for `machine` and `project`, the recorded reference otherwise.
+     */
+  reference: string;
+}
+
+/**
+ * One relation of an entry.
+ */
+export interface RegistryRelationDto {
+  /** What it points at. */
+  target: RegistryTargetDto;
+  /** The relation type, for example `used-by`. */
+  type: string;
+}
+
+/**
+ * One Registry entry.
+ */
+export interface RegistryEntryDto {
+  /** The field values, as declared by the type. */
+  fields: unknown;
+  /** The stable resource identity. */
+  id: string;
+  /** The natural key, unique per type: the entry is `<type>/<key>`. */
+  key: string;
+  /** Links to dashboards and documents. */
+  links: unknown;
+  /** The resource's slug name. */
+  name: string;
+  /**
+     * Free-form notes.
+     * @nullable
+     */
+  notes?: string | null;
+  /** The entry's outgoing relations. */
+  relations: RegistryRelationDto[];
+  /**
+     * The entry's repository-relative file path in the revision, when the
+     * snapshot recorded it. Null for a revision fetched before paths were
+     * recorded.
+     * @nullable
+     */
+  sourcePath?: string | null;
+  /** The tags. */
+  tags: string[];
+  /** The entry's type. */
+  type: string;
+}
+
+/**
+ * One Registry entry.
+ */
+export type RegistryOneRegistryEntryDtoData = {
+  /** The field values, as declared by the type. */
+  fields: unknown;
+  /** The stable resource identity. */
+  id: string;
+  /** The natural key, unique per type: the entry is `<type>/<key>`. */
+  key: string;
+  /** Links to dashboards and documents. */
+  links: unknown;
+  /** The resource's slug name. */
+  name: string;
+  /**
+     * Free-form notes.
+     * @nullable
+     */
+  notes?: string | null;
+  /** The entry's outgoing relations. */
+  relations: RegistryRelationDto[];
+  /**
+     * The entry's repository-relative file path in the revision, when the
+     * snapshot recorded it. Null for a revision fetched before paths were
+     * recorded.
+     * @nullable
+     */
+  sourcePath?: string | null;
+  /** The tags. */
+  tags: string[];
+  /** The entry's type. */
+  type: string;
+};
+
+/**
+ * The desired revision a Registry answer was read at.
+ */
+export interface RegistryRevisionDto {
+  /** The Fleet Git commit SHA the data came from. */
+  commitSha: string;
+  /** The content digest of the revision. */
+  contentDigest: string;
+}
+
+/**
+ * One Registry resource and the revision it was read at.
+ */
+export interface RegistryOneRegistryEntryDto {
+  /** One Registry entry. */
+  data: RegistryOneRegistryEntryDtoData;
+  /** The active revision. */
+  revision: RegistryRevisionDto;
+}
+
+/**
+ * One Registry entry.
+ */
+export type RegistryPageRegistryEntryDtoItemsItem = {
+  /** The field values, as declared by the type. */
+  fields: unknown;
+  /** The stable resource identity. */
+  id: string;
+  /** The natural key, unique per type: the entry is `<type>/<key>`. */
+  key: string;
+  /** Links to dashboards and documents. */
+  links: unknown;
+  /** The resource's slug name. */
+  name: string;
+  /**
+     * Free-form notes.
+     * @nullable
+     */
+  notes?: string | null;
+  /** The entry's outgoing relations. */
+  relations: RegistryRelationDto[];
+  /**
+     * The entry's repository-relative file path in the revision, when the
+     * snapshot recorded it. Null for a revision fetched before paths were
+     * recorded.
+     * @nullable
+     */
+  sourcePath?: string | null;
+  /** The tags. */
+  tags: string[];
+  /** The entry's type. */
+  type: string;
+};
+
+/**
+ * A page of Registry data and the revision it was read at.
+ */
+export interface RegistryPageRegistryEntryDto {
+  /** The items, in the endpoint's documented order. */
+  items: RegistryPageRegistryEntryDtoItemsItem[];
+  /** Where this page sits in the result set. */
+  page: PageInfo;
+  revision?: null | RegistryRevisionDto;
+}
+
+/**
+ * An entry that points at the queried target.
+ */
+export type RegistryPageRegistryReferenceDtoItemsItem = {
+  /** The pointing entry's key. */
+  entryKey: string;
+  /** The pointing entry's slug name. */
+  entryName: string;
+  /** The pointing entry's type. */
+  entryType: string;
+  /** The relation type the entry declares. */
+  relation: string;
+  /**
+     * The pointing entry's repository path, when recorded.
+     * @nullable
+     */
+  sourcePath?: string | null;
+};
+
+/**
+ * A page of Registry data and the revision it was read at.
+ */
+export interface RegistryPageRegistryReferenceDto {
+  /** The items, in the endpoint's documented order. */
+  items: RegistryPageRegistryReferenceDtoItemsItem[];
+  /** Where this page sits in the result set. */
+  page: PageInfo;
+  revision?: null | RegistryRevisionDto;
+}
+
+/**
+ * An entry that points at the queried target.
+ */
+export interface RegistryReferenceDto {
+  /** The pointing entry's key. */
+  entryKey: string;
+  /** The pointing entry's slug name. */
+  entryName: string;
+  /** The pointing entry's type. */
+  entryType: string;
+  /** The relation type the entry declares. */
+  relation: string;
+  /**
+     * The pointing entry's repository path, when recorded.
+     * @nullable
+     */
+  sourcePath?: string | null;
+}
+
+/**
+ * One Registry type.
+ */
+export interface RegistryTypeDto {
+  /** The human-facing name. */
+  displayName: string;
+  /** How many entries of this type the revision holds. */
+  entryCount: number;
+  /** The field holding an entry's natural key. */
+  keyField: string;
+  /** The type's name, as entries reference it. */
+  name: string;
+  /**
+     * `builtin` (shipped with Fleet) or `repository` (a `RegistryType`
+     * resource in Fleet Git).
+     */
+  origin: string;
+  /** The relation names entries of this type may declare. */
+  relations: string[];
+  /**
+     * The resource identity, for repository types.
+     * @nullable
+     */
+  resourceId?: string | null;
+  /**
+     * The defining document's repository path, for repository types, when
+     * the snapshot recorded it.
+     * @nullable
+     */
+  sourcePath?: string | null;
+  /** The type's spec: declared fields and their value types. */
+  spec: unknown;
+}
+
+/**
+ * The type list: all types of the active revision.
+ */
+export interface RegistryTypeList {
+  /** The types, ordered by name. */
+  items: RegistryTypeDto[];
+  revision?: null | RegistryRevisionDto;
+}
+
+/**
  * The release request.
  */
 export interface ReleaseLeaseRequest {
@@ -7126,6 +7374,91 @@ limit?: number;
  * The opaque cursor: the last task's UPID from the previous page.
  */
 cursor?: string;
+};
+
+export type ListRegistryEntriesParams = {
+/**
+ * Only entries of this type.
+ * @nullable
+ */
+type?: string | null;
+/**
+ * Only entries carrying this tag (exact match).
+ * @nullable
+ */
+tag?: string | null;
+/**
+ * Only entries whose key, name, field values, tags, or notes contain
+ * this text (case-insensitive substring).
+ * @nullable
+ */
+q?: string | null;
+/**
+ * Only entries with a relation to this target, as `<class>:<reference>`
+ * (for example `machine:build-1` or `registry:service/aptabase`).
+ * @nullable
+ */
+target?: string | null;
+/**
+ * With `target`, only relations of this type.
+ * @nullable
+ */
+relation?: string | null;
+/**
+ * Opaque cursor returned as the previous page's `nextCursor`.
+ * @nullable
+ */
+cursor?: string | null;
+/**
+ * Requested page size, clamped to the API maximum.
+ * @minimum 0
+ * @nullable
+ */
+limit?: number | null;
+};
+
+export type ListRegistryEntryReferencesParams = {
+/**
+ * Only relations of this type.
+ * @nullable
+ */
+relation?: string | null;
+/**
+ * Opaque cursor returned as the previous page's `nextCursor`.
+ * @nullable
+ */
+cursor?: string | null;
+/**
+ * Requested page size, clamped to the API maximum.
+ * @minimum 0
+ * @nullable
+ */
+limit?: number | null;
+};
+
+export type ListRegistryReferencesParams = {
+/**
+ * The target, as `<class>:<reference>`: `registry:<type>/<key>`,
+ * `machine:<name>`, `project:<name>`, `coolify:<reference>`, or
+ * `proxmoxGuest:<reference>`.
+ */
+target: string;
+/**
+ * Only relations of this type.
+ * @nullable
+ */
+relation?: string | null;
+/**
+ * Opaque cursor returned as the previous page's `nextCursor`.
+ * @nullable
+ */
+cursor?: string | null;
+/**
+ * Requested page size, clamped to the API maximum.
+ * @minimum 0
+ * @nullable
+ */
+limit?: number | null;
 };
 
 export type ListActionRequestsParams = {
@@ -14484,6 +14817,376 @@ export const listProxmoxTasks = async (accountId: string,
 
   const data: listProxmoxTasksResponse['data'] = body ? JSON.parse(body) : {}
   return { data, status: res.status, headers: res.headers } as listProxmoxTasksResponse
+}
+
+
+
+export type listRegistryEntriesResponse200 = {
+  data: RegistryPageRegistryEntryDto
+  status: 200
+}
+
+export type listRegistryEntriesResponse400 = {
+  data: ApiError
+  status: 400
+}
+
+export type listRegistryEntriesResponse403 = {
+  data: ApiError
+  status: 403
+}
+
+export type listRegistryEntriesResponse500 = {
+  data: ApiError
+  status: 500
+}
+
+export type listRegistryEntriesResponse503 = {
+  data: ApiError
+  status: 503
+}
+
+export type listRegistryEntriesResponseSuccess = (listRegistryEntriesResponse200) & {
+  headers: Headers;
+};
+export type listRegistryEntriesResponseError = (listRegistryEntriesResponse400 | listRegistryEntriesResponse403 | listRegistryEntriesResponse500 | listRegistryEntriesResponse503) & {
+  headers: Headers;
+};
+
+export type listRegistryEntriesResponse = (listRegistryEntriesResponseSuccess | listRegistryEntriesResponseError)
+
+export const getListRegistryEntriesUrl = (params?: ListRegistryEntriesParams,) => {
+  const normalizedParams = new URLSearchParams();
+
+  Object.entries(params || {}).forEach(([key, value]) => {
+
+    if (value !== undefined) {
+      normalizedParams.append(key, value === null ? 'null' : String(value))
+    }
+  });
+
+  const stringifiedParams = normalizedParams.toString();
+
+  return stringifiedParams.length > 0 ? `/api/v1/registry/entries?${stringifiedParams}` : `/api/v1/registry/entries`
+}
+
+/**
+ * # Errors
+ *
+ * Returns an API error when a filter is malformed, or authentication,
+ * authorization, or storage fails.
+ * @summary Lists Registry entries, filtered by type, tag, text, and relation
+target, ordered by type then key.
+ */
+export const listRegistryEntries = async (params?: ListRegistryEntriesParams, options?: RequestInit): Promise<listRegistryEntriesResponse> => {
+
+  const res = await fetch(getListRegistryEntriesUrl(params),
+  {
+    ...options,
+    method: 'GET'
+
+
+  }
+)
+
+
+  const body = [204, 205, 304].includes(res.status) ? null : await res.text();
+
+  const data: listRegistryEntriesResponse['data'] = body ? JSON.parse(body) : {}
+  return { data, status: res.status, headers: res.headers } as listRegistryEntriesResponse
+}
+
+
+
+export type getRegistryEntryResponse200 = {
+  data: RegistryOneRegistryEntryDto
+  status: 200
+}
+
+export type getRegistryEntryResponse403 = {
+  data: ApiError
+  status: 403
+}
+
+export type getRegistryEntryResponse404 = {
+  data: ApiError
+  status: 404
+}
+
+export type getRegistryEntryResponse500 = {
+  data: ApiError
+  status: 500
+}
+
+export type getRegistryEntryResponse503 = {
+  data: ApiError
+  status: 503
+}
+
+export type getRegistryEntryResponseSuccess = (getRegistryEntryResponse200) & {
+  headers: Headers;
+};
+export type getRegistryEntryResponseError = (getRegistryEntryResponse403 | getRegistryEntryResponse404 | getRegistryEntryResponse500 | getRegistryEntryResponse503) & {
+  headers: Headers;
+};
+
+export type getRegistryEntryResponse = (getRegistryEntryResponseSuccess | getRegistryEntryResponseError)
+
+export const getGetRegistryEntryUrl = (type: string,
+    key: string,) => {
+
+
+
+
+  return `/api/v1/registry/entries/${type}/${key}`
+}
+
+/**
+ * # Errors
+ *
+ * Returns an API error when the entry does not exist, or authentication,
+ * authorization, or storage fails.
+ * @summary Reads one Registry entry by its `<type>/<key>` address.
+ */
+export const getRegistryEntry = async (type: string,
+    key: string, options?: RequestInit): Promise<getRegistryEntryResponse> => {
+
+  const res = await fetch(getGetRegistryEntryUrl(type,key),
+  {
+    ...options,
+    method: 'GET'
+
+
+  }
+)
+
+
+  const body = [204, 205, 304].includes(res.status) ? null : await res.text();
+
+  const data: getRegistryEntryResponse['data'] = body ? JSON.parse(body) : {}
+  return { data, status: res.status, headers: res.headers } as getRegistryEntryResponse
+}
+
+
+
+export type listRegistryEntryReferencesResponse200 = {
+  data: RegistryPageRegistryReferenceDto
+  status: 200
+}
+
+export type listRegistryEntryReferencesResponse400 = {
+  data: ApiError
+  status: 400
+}
+
+export type listRegistryEntryReferencesResponse403 = {
+  data: ApiError
+  status: 403
+}
+
+export type listRegistryEntryReferencesResponse500 = {
+  data: ApiError
+  status: 500
+}
+
+export type listRegistryEntryReferencesResponse503 = {
+  data: ApiError
+  status: 503
+}
+
+export type listRegistryEntryReferencesResponseSuccess = (listRegistryEntryReferencesResponse200) & {
+  headers: Headers;
+};
+export type listRegistryEntryReferencesResponseError = (listRegistryEntryReferencesResponse400 | listRegistryEntryReferencesResponse403 | listRegistryEntryReferencesResponse500 | listRegistryEntryReferencesResponse503) & {
+  headers: Headers;
+};
+
+export type listRegistryEntryReferencesResponse = (listRegistryEntryReferencesResponseSuccess | listRegistryEntryReferencesResponseError)
+
+export const getListRegistryEntryReferencesUrl = (type: string,
+    key: string,
+    params?: ListRegistryEntryReferencesParams,) => {
+  const normalizedParams = new URLSearchParams();
+
+  Object.entries(params || {}).forEach(([key, value]) => {
+
+    if (value !== undefined) {
+      normalizedParams.append(key, value === null ? 'null' : String(value))
+    }
+  });
+
+  const stringifiedParams = normalizedParams.toString();
+
+  return stringifiedParams.length > 0 ? `/api/v1/registry/entries/${type}/${key}/referenced-by?${stringifiedParams}` : `/api/v1/registry/entries/${type}/${key}/referenced-by`
+}
+
+/**
+ * # Errors
+ *
+ * Returns an API error when the cursor is malformed, or authentication,
+ * authorization, or storage fails.
+ * @summary Lists the entries that point at one entry ("what uses
+`service/aptabase`?"), ordered by type, key, then relation.
+ */
+export const listRegistryEntryReferences = async (type: string,
+    key: string,
+    params?: ListRegistryEntryReferencesParams, options?: RequestInit): Promise<listRegistryEntryReferencesResponse> => {
+
+  const res = await fetch(getListRegistryEntryReferencesUrl(type,key,params),
+  {
+    ...options,
+    method: 'GET'
+
+
+  }
+)
+
+
+  const body = [204, 205, 304].includes(res.status) ? null : await res.text();
+
+  const data: listRegistryEntryReferencesResponse['data'] = body ? JSON.parse(body) : {}
+  return { data, status: res.status, headers: res.headers } as listRegistryEntryReferencesResponse
+}
+
+
+
+export type listRegistryReferencesResponse200 = {
+  data: RegistryPageRegistryReferenceDto
+  status: 200
+}
+
+export type listRegistryReferencesResponse400 = {
+  data: ApiError
+  status: 400
+}
+
+export type listRegistryReferencesResponse403 = {
+  data: ApiError
+  status: 403
+}
+
+export type listRegistryReferencesResponse500 = {
+  data: ApiError
+  status: 500
+}
+
+export type listRegistryReferencesResponse503 = {
+  data: ApiError
+  status: 503
+}
+
+export type listRegistryReferencesResponseSuccess = (listRegistryReferencesResponse200) & {
+  headers: Headers;
+};
+export type listRegistryReferencesResponseError = (listRegistryReferencesResponse400 | listRegistryReferencesResponse403 | listRegistryReferencesResponse500 | listRegistryReferencesResponse503) & {
+  headers: Headers;
+};
+
+export type listRegistryReferencesResponse = (listRegistryReferencesResponseSuccess | listRegistryReferencesResponseError)
+
+export const getListRegistryReferencesUrl = (params: ListRegistryReferencesParams,) => {
+  const normalizedParams = new URLSearchParams();
+
+  Object.entries(params || {}).forEach(([key, value]) => {
+
+    if (value !== undefined) {
+      normalizedParams.append(key, value === null ? 'null' : String(value))
+    }
+  });
+
+  const stringifiedParams = normalizedParams.toString();
+
+  return stringifiedParams.length > 0 ? `/api/v1/registry/references?${stringifiedParams}` : `/api/v1/registry/references`
+}
+
+/**
+ * # Errors
+ *
+ * Returns an API error when the target or cursor is malformed, or
+ * authentication, authorization, or storage fails.
+ * @summary Lists the entries that point at a target: a Registry entry, a machine,
+a project, a Coolify resource, or a Proxmox guest ("what points at
+machine X?"), ordered by type, key, then relation.
+ */
+export const listRegistryReferences = async (params: ListRegistryReferencesParams, options?: RequestInit): Promise<listRegistryReferencesResponse> => {
+
+  const res = await fetch(getListRegistryReferencesUrl(params),
+  {
+    ...options,
+    method: 'GET'
+
+
+  }
+)
+
+
+  const body = [204, 205, 304].includes(res.status) ? null : await res.text();
+
+  const data: listRegistryReferencesResponse['data'] = body ? JSON.parse(body) : {}
+  return { data, status: res.status, headers: res.headers } as listRegistryReferencesResponse
+}
+
+
+
+export type listRegistryTypesResponse200 = {
+  data: RegistryTypeList
+  status: 200
+}
+
+export type listRegistryTypesResponse403 = {
+  data: ApiError
+  status: 403
+}
+
+export type listRegistryTypesResponse500 = {
+  data: ApiError
+  status: 500
+}
+
+export type listRegistryTypesResponse503 = {
+  data: ApiError
+  status: 503
+}
+
+export type listRegistryTypesResponseSuccess = (listRegistryTypesResponse200) & {
+  headers: Headers;
+};
+export type listRegistryTypesResponseError = (listRegistryTypesResponse403 | listRegistryTypesResponse500 | listRegistryTypesResponse503) & {
+  headers: Headers;
+};
+
+export type listRegistryTypesResponse = (listRegistryTypesResponseSuccess | listRegistryTypesResponseError)
+
+export const getListRegistryTypesUrl = () => {
+
+
+
+
+  return `/api/v1/registry/types`
+}
+
+/**
+ * # Errors
+ *
+ * Returns an API error when authentication, authorization, or storage fails.
+ * @summary Lists the Registry types of the active revision.
+ */
+export const listRegistryTypes = async ( options?: RequestInit): Promise<listRegistryTypesResponse> => {
+
+  const res = await fetch(getListRegistryTypesUrl(),
+  {
+    ...options,
+    method: 'GET'
+
+
+  }
+)
+
+
+  const body = [204, 205, 304].includes(res.status) ? null : await res.text();
+
+  const data: listRegistryTypesResponse['data'] = body ? JSON.parse(body) : {}
+  return { data, status: res.status, headers: res.headers } as listRegistryTypesResponse
 }
 
 

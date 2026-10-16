@@ -40,6 +40,10 @@ pub struct DesiredResourceRecord {
     pub name: String,
     /// The kind-specific non-secret spec.
     pub spec: serde_json::Value,
+    /// The document's repository-relative path in the revision, when the
+    /// snapshot recorded it (older snapshots did not).
+    #[serde(default)]
+    pub source_path: Option<String>,
 }
 
 /// The active revision with what its snapshot holds.
@@ -105,6 +109,21 @@ pub trait SourcePort: std::fmt::Debug + Send + Sync {
     /// Fails when the backend errors.
     async fn active_resources(
         &self,
+        kind: Option<&str>,
+        after: Option<&str>,
+        limit: i64,
+    ) -> Result<Vec<DesiredResourceRecord>, String>;
+    /// The resources of one NAMED revision's snapshot, ordered by identity:
+    /// at most `limit` after the `after` identity, optionally of one kind.
+    /// Unlike [`active_resources`](Self::active_resources) it cannot mix
+    /// two revisions when the active one changes between pages.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the backend errors.
+    async fn snapshot_resources(
+        &self,
+        revision: &ActiveRevision,
         kind: Option<&str>,
         after: Option<&str>,
         limit: i64,
@@ -207,6 +226,7 @@ pub struct DesiredSource {
     port: std::sync::Arc<dyn SourcePort>,
     audit: std::sync::Arc<dyn crate::operation::AuditPort>,
     credentials: Option<std::sync::Arc<dyn GitCredentialStore>>,
+    registry: Option<std::sync::Arc<crate::registry::RegistryReadModel>>,
 }
 
 impl DesiredSource {
@@ -220,6 +240,33 @@ impl DesiredSource {
             port,
             audit,
             credentials: None,
+            registry: None,
+        }
+    }
+
+    /// Attaches the Registry read model (FM-1012): its cache is rebuilt
+    /// from the new active revision after every activation and rollback.
+    #[must_use]
+    pub fn with_registry(
+        mut self,
+        registry: std::sync::Arc<crate::registry::RegistryReadModel>,
+    ) -> Self {
+        self.registry = Some(registry);
+        self
+    }
+
+    /// The Registry read model, when one is attached.
+    #[must_use]
+    pub fn registry(&self) -> Option<&std::sync::Arc<crate::registry::RegistryReadModel>> {
+        self.registry.as_ref()
+    }
+
+    /// Re-derives the Registry cache after the active revision changed.
+    /// A failure is not an activation failure: the cache is rebuildable
+    /// and repaired on the next read.
+    async fn refresh_registry(&self) {
+        if let Some(registry) = &self.registry {
+            let _ = registry.refresh().await;
         }
     }
 
@@ -390,13 +437,16 @@ impl DesiredSource {
         };
         // The backend serializes the check-and-set: a concurrent
         // activation cannot race.
-        self.port
+        let activated = self
+            .port
             .activate_serialized(&revision)
             .await
             .map_err(|detail| crate::project::ProjectUseCaseError::Backend {
                 context: "source_activate",
                 detail,
-            })
+            })?;
+        self.refresh_registry().await;
+        Ok(activated)
     }
 
     /// The configured remote, when one is set.
@@ -645,10 +695,13 @@ impl DesiredSource {
             operation_id,
         )
         .await?;
-        self.port
+        let activated = self
+            .port
             .activate_serialized(target)
             .await
-            .map_err(backend("source_activate"))
+            .map_err(backend("source_activate"))?;
+        self.refresh_registry().await;
+        Ok(activated)
     }
 
     async fn record_source_intent(
@@ -939,6 +992,15 @@ mod tests {
                 kind_counts,
             }))
         }
+        async fn snapshot_resources(
+            &self,
+            _revision: &ActiveRevision,
+            _kind: Option<&str>,
+            _after: Option<&str>,
+            _limit: i64,
+        ) -> Result<Vec<DesiredResourceRecord>, String> {
+            Ok(Vec::new())
+        }
         async fn active_resources(
             &self,
             kind: Option<&str>,
@@ -995,6 +1057,7 @@ mod tests {
             kind: "Machine".to_owned(),
             id: id.to_owned(),
             name: id.to_owned(),
+            source_path: None,
             spec: serde_json::json!({}),
         }
     }
