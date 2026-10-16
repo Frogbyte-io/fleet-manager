@@ -48,7 +48,7 @@ pub fn builtin_registry_types() -> Vec<BuiltinRegistryType> {
                     "autoRenew": {"type": "boolean", "description": "Whether the registrar renews it automatically."},
                     "loginAt": {"type": "string", "description": login}
                 },
-                "relations": ["resolves-to", "hosted-on", "used-by", "depends-on"]
+                "relations": ["resolves-to", "hosted-on", "used-by", "depends-on", "billed-to"]
             })),
         },
         BuiltinRegistryType {
@@ -75,7 +75,7 @@ pub fn builtin_registry_types() -> Vec<BuiltinRegistryType> {
                     "loginAt": {"type": "string", "description": login},
                     "url": {"type": "url", "description": "The service's address."}
                 },
-                "relations": ["used-by", "hosted-on", "depends-on", "serves"]
+                "relations": ["used-by", "hosted-on", "depends-on", "serves", "billed-to"]
             })),
         },
     ]

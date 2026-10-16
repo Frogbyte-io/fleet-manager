@@ -116,7 +116,7 @@ A `Machine` resource binds `spec.profiles` and `spec.projects` by `metadata.name
 
 `domain` and `service` live in `fleet-schema` (`registry_builtin.rs`), versioned by `BUILTIN_REGISTRY_TYPES_VERSION` like built-in skills (ADR 0012); a test pins the definitions' SHA-256 so any change forces a version bump. `RegistryContext::default()` carries them, so the controller's activation path, `fleet-schema validate`, and a future `fleetctl registry validate` resolve them without a file in the repository, and a repository `RegistryType` of the same name is refused (`FM_SCHEMA_REGISTRY_BUILTIN_REDEFINED`). Every entry also carries the standard `tags`, `links`, `notes`, and `relations`. Field names are the spec keys; `required` marks the natural key and mandatory fields; suggestions are not enforced.
 
-`domain` (key `fqdn`; relations `resolves-to`, `hosted-on`, `used-by`, `depends-on`):
+`domain` (key `fqdn`; relations `resolves-to`, `hosted-on`, `used-by`, `depends-on`, `billed-to`):
 
 | Field | Type | Notes |
 | --- | --- | --- |
@@ -129,7 +129,7 @@ A `Machine` resource binds `spec.profiles` and `spec.projects` by `metadata.name
 | `autoRenew` | boolean | |
 | `loginAt` | string | where the login lives, e.g. "1Password (Webhuset vault)" |
 
-`service` (key `slug`; relations `used-by`, `hosted-on`, `depends-on`, `serves`):
+`service` (key `slug`; relations `used-by`, `hosted-on`, `depends-on`, `serves`, `billed-to`):
 
 | Field | Type | Notes |
 | --- | --- | --- |

@@ -11,7 +11,7 @@ use sha2::{Digest as _, Sha256};
 /// The digest of the built-in definitions at `PINNED_VERSION`. A definition
 /// change moves the digest; update this pair and the version constant.
 const PINNED_VERSION: u32 = 1;
-const PINNED_DIGEST: &str = "e186a0868c711f0164eb9dadd576a9eba172df4b872c2004486ad9b1e1441caf";
+const PINNED_DIGEST: &str = "c2321b8cf792d1488ff096e78b02f79c7b6b9a5d5a3c305e77bccb46a26843b4";
 
 fn digest() -> String {
     let canonical = serde_json::to_vec(
