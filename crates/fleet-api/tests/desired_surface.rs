@@ -60,6 +60,7 @@ fn resource(kind: &str, id: &str) -> DesiredResourceRecord {
         id: id.to_owned(),
         name: format!("{id}-name"),
         spec: serde_json::json!({ "note": id }),
+        source_path: None,
     }
 }
 
@@ -108,6 +109,15 @@ impl SourcePort for Source {
                 .into_iter()
                 .collect(),
         }))
+    }
+    async fn snapshot_resources(
+        &self,
+        _revision: &ActiveRevision,
+        _kind: Option<&str>,
+        _after: Option<&str>,
+        _limit: i64,
+    ) -> Result<Vec<DesiredResourceRecord>, String> {
+        Ok(Vec::new())
     }
     async fn active_resources(
         &self,

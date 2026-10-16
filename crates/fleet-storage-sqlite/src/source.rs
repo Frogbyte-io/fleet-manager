@@ -126,14 +126,44 @@ impl fleet_application::source::SourcePort for SourceRepository {
         .await
         .map_err(|error| format!("the snapshot write failed: {error}"))?
         .rows_affected();
-        // A snapshot that already exists is kept: the digest names its
-        // content, and snapshots are immutable.
+        // A snapshot that already exists keeps its content: the digest names
+        // it, and snapshots are immutable. A repeat fetch may only fill in a
+        // source path an older snapshot lacks (a path is not content).
+        if inserted == 0 {
+            let mut filled = 0;
+            for resource in resources {
+                let Some(path) = resource.source_path.as_deref() else {
+                    continue;
+                };
+                filled += sqlx::query(
+                    "UPDATE source_revision_resources SET source_path = ?1 \
+                     WHERE commit_sha = ?2 AND content_digest = ?3 AND resource_id = ?4 \
+                       AND source_path IS NULL",
+                )
+                .bind(path)
+                .bind(&revision.commit_sha)
+                .bind(&revision.content_digest)
+                .bind(&resource.id)
+                .execute(&mut *tx)
+                .await
+                .map_err(|error| format!("the source path backfill failed: {error}"))?
+                .rows_affected();
+            }
+            if filled > 0 {
+                // The Registry cache mirrors these paths; dropping its state
+                // makes the next read rebuild it (it is only a cache).
+                sqlx::query("DELETE FROM registry_cache_state")
+                    .execute(&mut *tx)
+                    .await
+                    .map_err(|error| format!("the registry cache reset failed: {error}"))?;
+            }
+        }
         if inserted == 1 {
             for resource in resources {
                 sqlx::query(
                     "INSERT INTO source_revision_resources \
-                     (commit_sha, content_digest, resource_id, kind, name, spec_json) \
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                     (commit_sha, content_digest, resource_id, kind, name, spec_json, source_path) \
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
                 )
                 .bind(&revision.commit_sha)
                 .bind(&revision.content_digest)
@@ -141,6 +171,7 @@ impl fleet_application::source::SourcePort for SourceRepository {
                 .bind(&resource.kind)
                 .bind(&resource.name)
                 .bind(resource.spec.to_string())
+                .bind(resource.source_path.as_deref())
                 .execute(&mut *tx)
                 .await
                 .map_err(|error| format!("the resource write failed: {error}"))?;
@@ -235,8 +266,8 @@ impl fleet_application::source::SourcePort for SourceRepository {
         after: Option<&str>,
         limit: i64,
     ) -> Result<Vec<DesiredResourceRecord>, String> {
-        let rows: Vec<(String, String, String, String)> = sqlx::query_as(
-            "SELECT r.kind, r.resource_id, r.name, r.spec_json \
+        let rows: Vec<ResourceRow> = sqlx::query_as(
+            "SELECT r.kind, r.resource_id, r.name, r.spec_json, r.source_path \
              FROM source_revision_resources r \
              JOIN source_active_revision a \
                ON a.commit_sha = r.commit_sha AND a.content_digest = r.content_digest \
@@ -249,16 +280,46 @@ impl fleet_application::source::SourcePort for SourceRepository {
         .fetch_all(&self.pool)
         .await
         .map_err(|error| format!("the resource read failed: {error}"))?;
-        rows.into_iter()
-            .map(|(kind, id, name, spec_json)| {
-                Ok(DesiredResourceRecord {
-                    kind,
-                    id,
-                    name,
-                    spec: serde_json::from_str(&spec_json)
-                        .map_err(|error| format!("a stored resource spec is corrupt: {error}"))?,
-                })
-            })
-            .collect()
+        rows.into_iter().map(resource_from).collect()
     }
+
+    async fn snapshot_resources(
+        &self,
+        revision: &ActiveRevision,
+        kind: Option<&str>,
+        after: Option<&str>,
+        limit: i64,
+    ) -> Result<Vec<DesiredResourceRecord>, String> {
+        let rows: Vec<ResourceRow> = sqlx::query_as(
+            "SELECT r.kind, r.resource_id, r.name, r.spec_json, r.source_path \
+             FROM source_revision_resources r \
+             WHERE r.commit_sha = ?1 AND r.content_digest = ?2 \
+               AND (?3 IS NULL OR r.kind = ?3) AND (?4 IS NULL OR r.resource_id > ?4) \
+             ORDER BY r.resource_id LIMIT ?5",
+        )
+        .bind(&revision.commit_sha)
+        .bind(&revision.content_digest)
+        .bind(kind)
+        .bind(after)
+        .bind(limit)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|error| format!("the snapshot read failed: {error}"))?;
+        rows.into_iter().map(resource_from).collect()
+    }
+}
+
+type ResourceRow = (String, String, String, String, Option<String>);
+
+fn resource_from(
+    (kind, id, name, spec_json, source_path): ResourceRow,
+) -> Result<DesiredResourceRecord, String> {
+    Ok(DesiredResourceRecord {
+        kind,
+        id,
+        name,
+        spec: serde_json::from_str(&spec_json)
+            .map_err(|error| format!("a stored resource spec is corrupt: {error}"))?,
+        source_path,
+    })
 }

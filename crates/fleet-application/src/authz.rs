@@ -216,6 +216,10 @@ pub enum Permission {
     /// risky like [`Permission::LabArtifacts`]. A delegated credential reads
     /// its own owner's handles only.
     LabExecRead,
+    /// List and read Registry types and entries, and their relations
+    /// (FM-1012). A read of descriptive, never-secret data: the Registry
+    /// holds no credentials, so it is not risky.
+    RegistryRead,
     /// Ask the action broker to run a provider action (FM-1040). The
     /// resource is the action id. A mutation: it records a durable request
     /// and, for `auto` actions, starts the operation.
@@ -300,6 +304,7 @@ impl Permission {
         Permission::LabLeaseProvision,
         Permission::LabPut,
         Permission::LabExecRead,
+        Permission::RegistryRead,
         Permission::ActionRequest,
         Permission::ActionApprove,
         Permission::ActionDeny,
@@ -374,6 +379,7 @@ impl Permission {
             Permission::LabLeaseProvision => "lab.lease.provision",
             Permission::LabPut => "lab.put",
             Permission::LabExecRead => "lab.exec.read",
+            Permission::RegistryRead => "registry.read",
             Permission::ActionRequest => "action.request",
             Permission::ActionApprove => "action.approve",
             Permission::ActionDeny => "action.deny",
@@ -398,6 +404,7 @@ impl Permission {
             | Permission::ImagesRead
             | Permission::LabRead
             | Permission::LabLeaseRead
+            | Permission::RegistryRead
             | Permission::LabArtifactRead
             | Permission::ActionRead => false,
             Permission::MachineReadSensitive
@@ -493,6 +500,7 @@ impl Permission {
             | Permission::CredentialRead
             | Permission::CredentialIssue
             | Permission::LabLeaseRead
+            | Permission::RegistryRead
             | Permission::LabArtifactRead
             | Permission::ActionRead => false,
             Permission::MachineReadSensitive

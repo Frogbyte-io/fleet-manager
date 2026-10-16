@@ -7836,6 +7836,521 @@
         }
       }
     },
+    "/api/v1/registry/entries": {
+      "get": {
+        "tags": [
+          "registry"
+        ],
+        "summary": "Lists Registry entries, filtered by type, tag, text, and relation\ntarget, ordered by type then key.",
+        "description": "# Errors\n\nReturns an API error when a filter is malformed, or authentication,\nauthorization, or storage fails.",
+        "operationId": "listRegistryEntries",
+        "parameters": [
+          {
+            "name": "type",
+            "in": "query",
+            "description": "Only entries of this type.",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          {
+            "name": "tag",
+            "in": "query",
+            "description": "Only entries carrying this tag (exact match).",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          {
+            "name": "q",
+            "in": "query",
+            "description": "Only entries whose key, name, field values, tags, or notes contain\nthis text (case-insensitive substring).",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          {
+            "name": "target",
+            "in": "query",
+            "description": "Only entries with a relation to this target, as `<class>:<reference>`\n(for example `machine:build-1` or `registry:service/aptabase`).",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          {
+            "name": "relation",
+            "in": "query",
+            "description": "With `target`, only relations of this type.",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          {
+            "name": "cursor",
+            "in": "query",
+            "description": "Opaque cursor returned as the previous page's `nextCursor`.",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "description": "Requested page size, clamped to the API maximum.",
+            "required": false,
+            "schema": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "int32",
+              "minimum": 0
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RegistryPage_RegistryEntryDto"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "A filter or the cursor is malformed.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The caller may not read the Registry.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "The request could not be completed.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The Registry surface is not wired.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/registry/entries/{type}/{key}": {
+      "get": {
+        "tags": [
+          "registry"
+        ],
+        "summary": "Reads one Registry entry by its `<type>/<key>` address.",
+        "description": "# Errors\n\nReturns an API error when the entry does not exist, or authentication,\nauthorization, or storage fails.",
+        "operationId": "getRegistryEntry",
+        "parameters": [
+          {
+            "name": "type",
+            "in": "path",
+            "description": "The entry's type name.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "key",
+            "in": "path",
+            "description": "The entry's natural key.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RegistryOne_RegistryEntryDto"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The caller may not read the Registry.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such entry in the active revision.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "The request could not be completed.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The Registry surface is not wired.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/registry/entries/{type}/{key}/referenced-by": {
+      "get": {
+        "tags": [
+          "registry"
+        ],
+        "summary": "Lists the entries that point at one entry (\"what uses\n`service/aptabase`?\"), ordered by type, key, then relation.",
+        "description": "# Errors\n\nReturns an API error when the cursor is malformed, or authentication,\nauthorization, or storage fails.",
+        "operationId": "listRegistryEntryReferences",
+        "parameters": [
+          {
+            "name": "type",
+            "in": "path",
+            "description": "The entry's type name.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "key",
+            "in": "path",
+            "description": "The entry's natural key.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "relation",
+            "in": "query",
+            "description": "Only relations of this type.",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          {
+            "name": "cursor",
+            "in": "query",
+            "description": "Opaque cursor returned as the previous page's `nextCursor`.",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "description": "Requested page size, clamped to the API maximum.",
+            "required": false,
+            "schema": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "int32",
+              "minimum": 0
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RegistryPage_RegistryReferenceDto"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "A filter or the cursor is malformed.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The caller may not read the Registry.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "The request could not be completed.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The Registry surface is not wired.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/registry/references": {
+      "get": {
+        "tags": [
+          "registry"
+        ],
+        "summary": "Lists the entries that point at a target: a Registry entry, a machine,\na project, a Coolify resource, or a Proxmox guest (\"what points at\nmachine X?\"), ordered by type, key, then relation.",
+        "description": "# Errors\n\nReturns an API error when the target or cursor is malformed, or\nauthentication, authorization, or storage fails.",
+        "operationId": "listRegistryReferences",
+        "parameters": [
+          {
+            "name": "target",
+            "in": "query",
+            "description": "The target, as `<class>:<reference>`: `registry:<type>/<key>`,\n`machine:<name>`, `project:<name>`, `coolify:<reference>`, or\n`proxmoxGuest:<reference>`.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "relation",
+            "in": "query",
+            "description": "Only relations of this type.",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          {
+            "name": "cursor",
+            "in": "query",
+            "description": "Opaque cursor returned as the previous page's `nextCursor`.",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "description": "Requested page size, clamped to the API maximum.",
+            "required": false,
+            "schema": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "int32",
+              "minimum": 0
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RegistryPage_RegistryReferenceDto"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The target, a filter, or the cursor is malformed.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The caller may not read the Registry.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "The request could not be completed.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The Registry surface is not wired.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/registry/types": {
+      "get": {
+        "tags": [
+          "registry"
+        ],
+        "summary": "Lists the Registry types of the active revision.",
+        "description": "# Errors\n\nReturns an API error when authentication, authorization, or storage fails.",
+        "operationId": "listRegistryTypes",
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RegistryTypeList"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The caller may not read the Registry.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "The request could not be completed.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The Registry surface is not wired.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/requests": {
       "get": {
         "tags": [
@@ -17045,6 +17560,487 @@
           }
         }
       },
+      "RegistryEntryDto": {
+        "type": "object",
+        "description": "One Registry entry.",
+        "required": [
+          "type",
+          "key",
+          "id",
+          "name",
+          "fields",
+          "tags",
+          "links",
+          "relations"
+        ],
+        "properties": {
+          "fields": {
+            "description": "The field values, as declared by the type."
+          },
+          "id": {
+            "type": "string",
+            "description": "The stable resource identity."
+          },
+          "key": {
+            "type": "string",
+            "description": "The natural key, unique per type: the entry is `<type>/<key>`."
+          },
+          "links": {
+            "description": "Links to dashboards and documents."
+          },
+          "name": {
+            "type": "string",
+            "description": "The resource's slug name."
+          },
+          "notes": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Free-form notes."
+          },
+          "relations": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/RegistryRelationDto"
+            },
+            "description": "The entry's outgoing relations."
+          },
+          "sourcePath": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The entry's repository-relative file path in the revision, when the\nsnapshot recorded it. Null for a revision fetched before paths were\nrecorded."
+          },
+          "tags": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "The tags."
+          },
+          "type": {
+            "type": "string",
+            "description": "The entry's type."
+          }
+        }
+      },
+      "RegistryOne_RegistryEntryDto": {
+        "type": "object",
+        "description": "One Registry resource and the revision it was read at.",
+        "required": [
+          "revision",
+          "data"
+        ],
+        "properties": {
+          "data": {
+            "type": "object",
+            "description": "One Registry entry.",
+            "required": [
+              "type",
+              "key",
+              "id",
+              "name",
+              "fields",
+              "tags",
+              "links",
+              "relations"
+            ],
+            "properties": {
+              "fields": {
+                "description": "The field values, as declared by the type."
+              },
+              "id": {
+                "type": "string",
+                "description": "The stable resource identity."
+              },
+              "key": {
+                "type": "string",
+                "description": "The natural key, unique per type: the entry is `<type>/<key>`."
+              },
+              "links": {
+                "description": "Links to dashboards and documents."
+              },
+              "name": {
+                "type": "string",
+                "description": "The resource's slug name."
+              },
+              "notes": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "description": "Free-form notes."
+              },
+              "relations": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/components/schemas/RegistryRelationDto"
+                },
+                "description": "The entry's outgoing relations."
+              },
+              "sourcePath": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "description": "The entry's repository-relative file path in the revision, when the\nsnapshot recorded it. Null for a revision fetched before paths were\nrecorded."
+              },
+              "tags": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                },
+                "description": "The tags."
+              },
+              "type": {
+                "type": "string",
+                "description": "The entry's type."
+              }
+            }
+          },
+          "revision": {
+            "$ref": "#/components/schemas/RegistryRevisionDto",
+            "description": "The active revision."
+          }
+        }
+      },
+      "RegistryPage_RegistryEntryDto": {
+        "type": "object",
+        "description": "A page of Registry data and the revision it was read at.",
+        "required": [
+          "items",
+          "page"
+        ],
+        "properties": {
+          "items": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "description": "One Registry entry.",
+              "required": [
+                "type",
+                "key",
+                "id",
+                "name",
+                "fields",
+                "tags",
+                "links",
+                "relations"
+              ],
+              "properties": {
+                "fields": {
+                  "description": "The field values, as declared by the type."
+                },
+                "id": {
+                  "type": "string",
+                  "description": "The stable resource identity."
+                },
+                "key": {
+                  "type": "string",
+                  "description": "The natural key, unique per type: the entry is `<type>/<key>`."
+                },
+                "links": {
+                  "description": "Links to dashboards and documents."
+                },
+                "name": {
+                  "type": "string",
+                  "description": "The resource's slug name."
+                },
+                "notes": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "description": "Free-form notes."
+                },
+                "relations": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/RegistryRelationDto"
+                  },
+                  "description": "The entry's outgoing relations."
+                },
+                "sourcePath": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "description": "The entry's repository-relative file path in the revision, when the\nsnapshot recorded it. Null for a revision fetched before paths were\nrecorded."
+                },
+                "tags": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  },
+                  "description": "The tags."
+                },
+                "type": {
+                  "type": "string",
+                  "description": "The entry's type."
+                }
+              }
+            },
+            "description": "The items, in the endpoint's documented order."
+          },
+          "page": {
+            "$ref": "#/components/schemas/PageInfo",
+            "description": "Where this page sits in the result set."
+          },
+          "revision": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/RegistryRevisionDto",
+                "description": "The active revision, or null while none has been activated (the\nlist is then empty)."
+              }
+            ]
+          }
+        }
+      },
+      "RegistryPage_RegistryReferenceDto": {
+        "type": "object",
+        "description": "A page of Registry data and the revision it was read at.",
+        "required": [
+          "items",
+          "page"
+        ],
+        "properties": {
+          "items": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "description": "An entry that points at the queried target.",
+              "required": [
+                "relation",
+                "entryType",
+                "entryKey",
+                "entryName"
+              ],
+              "properties": {
+                "entryKey": {
+                  "type": "string",
+                  "description": "The pointing entry's key."
+                },
+                "entryName": {
+                  "type": "string",
+                  "description": "The pointing entry's slug name."
+                },
+                "entryType": {
+                  "type": "string",
+                  "description": "The pointing entry's type."
+                },
+                "relation": {
+                  "type": "string",
+                  "description": "The relation type the entry declares."
+                },
+                "sourcePath": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "description": "The pointing entry's repository path, when recorded."
+                }
+              }
+            },
+            "description": "The items, in the endpoint's documented order."
+          },
+          "page": {
+            "$ref": "#/components/schemas/PageInfo",
+            "description": "Where this page sits in the result set."
+          },
+          "revision": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/RegistryRevisionDto",
+                "description": "The active revision, or null while none has been activated (the\nlist is then empty)."
+              }
+            ]
+          }
+        }
+      },
+      "RegistryReferenceDto": {
+        "type": "object",
+        "description": "An entry that points at the queried target.",
+        "required": [
+          "relation",
+          "entryType",
+          "entryKey",
+          "entryName"
+        ],
+        "properties": {
+          "entryKey": {
+            "type": "string",
+            "description": "The pointing entry's key."
+          },
+          "entryName": {
+            "type": "string",
+            "description": "The pointing entry's slug name."
+          },
+          "entryType": {
+            "type": "string",
+            "description": "The pointing entry's type."
+          },
+          "relation": {
+            "type": "string",
+            "description": "The relation type the entry declares."
+          },
+          "sourcePath": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The pointing entry's repository path, when recorded."
+          }
+        }
+      },
+      "RegistryRelationDto": {
+        "type": "object",
+        "description": "One relation of an entry.",
+        "required": [
+          "type",
+          "target"
+        ],
+        "properties": {
+          "target": {
+            "$ref": "#/components/schemas/RegistryTargetDto",
+            "description": "What it points at."
+          },
+          "type": {
+            "type": "string",
+            "description": "The relation type, for example `used-by`."
+          }
+        }
+      },
+      "RegistryRevisionDto": {
+        "type": "object",
+        "description": "The desired revision a Registry answer was read at.",
+        "required": [
+          "commitSha",
+          "contentDigest"
+        ],
+        "properties": {
+          "commitSha": {
+            "type": "string",
+            "description": "The Fleet Git commit SHA the data came from."
+          },
+          "contentDigest": {
+            "type": "string",
+            "description": "The content digest of the revision."
+          }
+        }
+      },
+      "RegistryTargetDto": {
+        "type": "object",
+        "description": "What a relation points at.",
+        "required": [
+          "class",
+          "reference"
+        ],
+        "properties": {
+          "class": {
+            "type": "string",
+            "description": "`registry`, `machine`, `project`, `coolify`, or `proxmoxGuest`."
+          },
+          "reference": {
+            "type": "string",
+            "description": "The reference within the class: `<type>/<key>` for `registry`, a\nname for `machine` and `project`, the recorded reference otherwise."
+          }
+        }
+      },
+      "RegistryTypeDto": {
+        "type": "object",
+        "description": "One Registry type.",
+        "required": [
+          "name",
+          "origin",
+          "displayName",
+          "keyField",
+          "relations",
+          "spec",
+          "entryCount"
+        ],
+        "properties": {
+          "displayName": {
+            "type": "string",
+            "description": "The human-facing name."
+          },
+          "entryCount": {
+            "type": "integer",
+            "format": "int64",
+            "description": "How many entries of this type the revision holds."
+          },
+          "keyField": {
+            "type": "string",
+            "description": "The field holding an entry's natural key."
+          },
+          "name": {
+            "type": "string",
+            "description": "The type's name, as entries reference it."
+          },
+          "origin": {
+            "type": "string",
+            "description": "`builtin` (shipped with Fleet) or `repository` (a `RegistryType`\nresource in Fleet Git)."
+          },
+          "relations": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "The relation names entries of this type may declare."
+          },
+          "resourceId": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The resource identity, for repository types."
+          },
+          "sourcePath": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The defining document's repository path, for repository types, when\nthe snapshot recorded it."
+          },
+          "spec": {
+            "description": "The type's spec: declared fields and their value types."
+          }
+        }
+      },
+      "RegistryTypeList": {
+        "type": "object",
+        "description": "The type list: all types of the active revision.",
+        "required": [
+          "items"
+        ],
+        "properties": {
+          "items": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/RegistryTypeDto"
+            },
+            "description": "The types, ordered by name."
+          },
+          "revision": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/RegistryRevisionDto",
+                "description": "The active revision, or null while none has been activated."
+              }
+            ]
+          }
+        }
+      },
       "ReleaseLeaseRequest": {
         "type": "object",
         "description": "The release request.",
@@ -21169,6 +22165,10 @@
     {
       "name": "desired",
       "description": "The active desired-state revision and its validated, non-secret resources. Read-only; activation is an operation."
+    },
+    {
+      "name": "registry",
+      "description": "The descriptive Registry of the active desired revision: types, entries, and relations. Read-only; edits are commits to the Fleet repository."
     },
     {
       "name": "operations",
