@@ -808,6 +808,8 @@ dependencies = [
 name = "fleet-provider-cloudflare"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
+ "fleet-application",
  "fleet-core",
  "reqwest",
  "serde",

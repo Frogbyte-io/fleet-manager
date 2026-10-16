@@ -237,6 +237,10 @@ pub enum Permission {
     ActionDeny,
     /// List and read action requests, with their scrubbed parameters.
     ActionRead,
+    /// Read DNS zones and records through a Cloudflare account, and compute
+    /// the preview of a record change (FM-1042). Risky: it sends the
+    /// account's token off the host. The change itself is an action request.
+    DnsRead,
     /// Record RDAP and DNS observations against a Registry domain entry,
     /// on demand or from the scheduled sweep (FM-1020). A mutation of
     /// Fleet-side observations (never of Fleet Git) that makes outbound
@@ -320,6 +324,7 @@ impl Permission {
         Permission::ActionApprove,
         Permission::ActionDeny,
         Permission::ActionRead,
+        Permission::DnsRead,
         Permission::RegistryObserve,
     ];
 
@@ -397,6 +402,7 @@ impl Permission {
             Permission::ActionApprove => "action.approve",
             Permission::ActionDeny => "action.deny",
             Permission::ActionRead => "action.read",
+            Permission::DnsRead => "dns.read",
             Permission::RegistryObserve => "registry.observe",
         }
     }
@@ -476,6 +482,7 @@ impl Permission {
             | Permission::LabExecRead
             | Permission::ActionRequest
             | Permission::ActionApprove
+            | Permission::DnsRead
             | Permission::ActionDeny
             | Permission::RegistryObserve => true,
         }
@@ -520,6 +527,7 @@ impl Permission {
             | Permission::RegistryRead
             | Permission::LabArtifactRead
             | Permission::ActionRead
+            | Permission::DnsRead
             | Permission::RegistryObserve => false,
             Permission::MachineReadSensitive
             | Permission::OperationCancel

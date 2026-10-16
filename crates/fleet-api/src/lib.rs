@@ -18,6 +18,7 @@ pub mod coolify;
 mod correlation;
 pub mod credentials;
 pub mod desired;
+pub mod dns;
 mod envelope;
 mod error;
 pub mod external_accounts;
@@ -191,6 +192,15 @@ pub const API_BASE_PATH: &str = "/api/v1";
         tailnet::CorrelationCandidateDto,
         tailnet::ImportTailnetDeviceRequest,
         tailnet::TailnetStatusDto,
+        dns::AccountZonesDto,
+        dns::CreateDnsChangeRequest,
+        dns::DnsChangeKind,
+        dns::CloudflareDnsObservationDto,
+        dns::CloudflareDnsObservationsDto,
+        dns::DnsRecordDto,
+        dns::CloudflareDnsRecordsDto,
+        dns::DnsZoneDto,
+        dns::DnsZonesDto,
         coolify::CoolifyObservationDto,
         coolify::CoolifyClassDto,
         coolify::CoolifyFailureDto,
@@ -281,6 +291,7 @@ pub const API_BASE_PATH: &str = "/api/v1";
         (name = "audit", description = "Authorized, metadata-only audit event queries."),
         (name = "desired", description = "The active desired-state revision and its validated, non-secret resources. Read-only; activation is an operation."),
         (name = "registry", description = "The descriptive Registry of the active desired revision: types, entries, and relations. Edits are commits to the Fleet repository; the only mutation is recording public RDAP/DNS observations of domain entries."),
+        (name = "dns", description = "DNS zones and records read through a Cloudflare external account, and record changes (`dns.record.upsert`, `dns.record.delete`) requested through the action broker with a computed preview. Fleet holds the token and never returns it."),
         (name = "services", description = "Running services: Coolify resources joined with Docker containers on Fleet machines and with Registry entries. Read-only; inputs the caller may not read are left out and reported in the coverage."),
         (name = "operations", description = "Durable operations: accepted remote work."),
         (name = "requests", description = "The action broker (ADR 0016): agents request typed provider actions; policy or a person approves them; approved requests run as durable operations. Before authenticated identities, policy is a guardrail keyed on risk class, not a security boundary."),
@@ -486,6 +497,10 @@ pub fn api(state: Arc<operations::ApiState>) -> (Router, utoipa::openapi::OpenAp
                     requests::create_action_request,
                     requests::list_action_requests
                 ))
+                .routes(routes!(dns::list_dns_zones))
+                .routes(routes!(dns::list_dns_records))
+                .routes(routes!(dns::list_dns_observations))
+                .routes(routes!(dns::create_dns_change))
                 .routes(routes!(requests::get_action_request))
                 .routes(routes!(requests::approve_action_request))
                 .routes(routes!(requests::deny_action_request))

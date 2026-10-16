@@ -14,6 +14,7 @@ pub mod artifacts;
 pub mod browser;
 pub mod builtin_skills;
 pub mod checkout;
+pub mod dns_exec;
 pub mod exec;
 pub mod external_accounts_store;
 pub mod frogenv;
@@ -92,6 +93,9 @@ pub struct NodeServices {
     /// The external provider account use cases (FM-1001); set by the binary
     /// once the secret store is open, absent otherwise.
     pub external_accounts: Option<Arc<fleet_application::external_accounts::ExternalAccounts>>,
+    /// The DNS use cases (FM-1042); set by the binary once the secret store
+    /// is open, absent otherwise.
+    pub dns: Option<Arc<fleet_application::dns::Dns>>,
     /// The Coolify read discovery use cases (FM-1030); set with the
     /// external accounts, absent otherwise.
     pub coolify_discovery: Option<Arc<fleet_application::coolify::CoolifyDiscovery>>,
@@ -160,6 +164,7 @@ pub fn compose_node_services_with_events(
     NodeServices {
         git_credentials: None,
         external_accounts: None,
+        dns: None,
         coolify_discovery: None,
         nodes,
         gateway,
@@ -275,10 +280,18 @@ pub fn broker_settings_from_env() -> Result<fleet_application::broker::BrokerSet
     )
 }
 
-/// The provider actions this controller offers through the broker. Empty
-/// until a provider registers its actions here (FM-1033, FM-1034, FM-1042).
+/// The provider actions this controller offers through the broker. Providers
+/// register their actions here (FM-1033, FM-1034 add theirs; FM-1042 DNS).
 fn compose_action_registry() -> Arc<fleet_application::broker::ActionRegistry> {
-    Arc::new(fleet_application::broker::ActionRegistry::new())
+    let mut registry = fleet_application::broker::ActionRegistry::new();
+    // FM-1042: `dns.record.upsert` and `dns.record.delete`, risk class
+    // `approve`.
+    for action in fleet_application::dns::dns_actions() {
+        registry
+            .register(action)
+            .expect("the DNS action ids are valid and unique");
+    }
+    Arc::new(registry)
 }
 
 /// The operation kinds provider actions own. Every `Operations` instance (the
@@ -635,6 +648,7 @@ fn build_router_for_caller(
     ));
     let credentials = api_state.credentials.clone();
     let external_accounts = services.and_then(|services| services.external_accounts.clone());
+    let dns = services.and_then(|services| services.dns.clone());
     let coolify_discovery = services.and_then(|services| services.coolify_discovery.clone());
     let mut api_router = fleet_api::router(api_state.clone());
     if let (Some(pool), Some(machines)) = (audit_db.as_ref(), api_state.machines.as_ref()) {
@@ -659,6 +673,10 @@ fn build_router_for_caller(
         // The external accounts surface (FM-1001) takes its use cases as a
         // request extension, so the shared API state stays untouched.
         api_router = api_router.layer(axum::Extension(external_accounts));
+    }
+    if let Some(dns) = dns {
+        // The DNS surface (FM-1042) takes its use cases the same way.
+        api_router = api_router.layer(axum::Extension(dns));
     }
     let shell = shell(settings).fallback(api_router);
     let web_index = std::fs::read(settings.web_dist.join("index.html"))

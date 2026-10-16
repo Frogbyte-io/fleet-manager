@@ -24,7 +24,15 @@
 //! verifies is reported `ok`; per-zone permissions are checked by the DNS
 //! features that use them (FM-1042). The token is sent as a bearer header
 //! only and never appears in any returned value.
+//!
+//! Zones and DNS records (FM-1042) are in [`api`]; [`CloudflareDns`] is the
+//! application's DNS port over them.
 #![warn(missing_docs)]
+
+pub mod api;
+mod gateway;
+
+pub use gateway::CloudflareDns;
 
 use std::error::Error as _;
 use std::time::Duration;
@@ -153,7 +161,7 @@ fn classify(status: u16, body: &[u8], account_owned: bool) -> ProbeReport {
 }
 
 /// A category for a transport failure; never the URL or any server text.
-fn transport_category(error: &reqwest::Error) -> &'static str {
+pub(crate) fn transport_category(error: &reqwest::Error) -> &'static str {
     if error.is_timeout() {
         return "the request timed out";
     }

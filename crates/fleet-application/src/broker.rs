@@ -789,6 +789,42 @@ impl Broker {
         self.reconcile(authorizer, existing, now).await
     }
 
+    /// The requester's request already made with this idempotency key, brought
+    /// up to date, so a caller that would otherwise do work before creating
+    /// the request (a preview that reads a provider) can return it first.
+    /// Authorized as a request for the found action.
+    ///
+    /// # Errors
+    ///
+    /// Fails on denial or a backend failure.
+    pub async fn existing_for_key(
+        &self,
+        authorizer: &dyn Authorizer,
+        principal_id: &str,
+        key: &str,
+        now: i64,
+    ) -> Result<Option<ActionRequest>, BrokerError> {
+        validate_idempotency_key(Some(key))?;
+        let Some(existing) = self
+            .requests
+            .find_by_idempotency(principal_id, key)
+            .await
+            .map_err(backend("action requests"))?
+        else {
+            return Ok(None);
+        };
+        authorize(
+            authorizer,
+            AccessRequest {
+                principal_id,
+                action: Permission::ActionRequest,
+                resource: Some(&existing.action_id),
+            },
+        )
+        .map_err(BrokerError::Denied)?;
+        self.reconcile(authorizer, existing, now).await.map(Some)
+    }
+
     /// Lists requests, newest first, after bringing each up to date (expiry
     /// and operation outcome). A request that cannot be brought up to date
     /// is listed as stored rather than failing the page.
@@ -1457,11 +1493,6 @@ fn validate_text(
 /// the provider anyway, and storing a masked copy would hide that.
 fn check_parameters(parameters: serde_json::Value) -> Result<serde_json::Value, BrokerError> {
     use serde_json::Value;
-    let credential_like = || {
-        BrokerError::Invalid {
-        detail: "the parameters contain a credential-like value or a secret-named key; Fleet holds provider credentials, requests never carry them".to_owned(),
-    }
-    };
     let parameters = match parameters {
         Value::Null => Value::Object(serde_json::Map::new()),
         object @ Value::Object(_) => object,
@@ -1482,16 +1513,102 @@ fn check_parameters(parameters: serde_json::Value) -> Result<serde_json::Value, 
             detail: format!("the parameters must nest at most {MAX_PARAMETER_DEPTH} levels"),
         });
     }
-    // The shared scrubber over every string and key.
-    let mut scrubbed = parameters.clone();
-    fleet_core::redact_json_strings(&mut scrubbed);
-    if scrubbed != parameters {
-        return Err(credential_like());
-    }
-    if has_secret_shape(&parameters) {
-        return Err(credential_like());
+    if credential_like(&parameters) {
+        return Err(credential_like_error());
     }
     Ok(parameters)
+}
+
+fn credential_like_error() -> BrokerError {
+    BrokerError::Invalid {
+        detail: "the parameters contain a credential-like value or a secret-named key; Fleet holds provider credentials, requests never carry them".to_owned(),
+    }
+}
+
+/// Whether the shared credential rules would change or refuse these
+/// parameters. A well-formed `mailto:<address>` is not a credential (a DMARC
+/// `rua` holds one), so the rules run on a probe copy in which each is
+/// rewritten with the separators removed; the original is what a request stores. Anything
+/// else with a credential's shape, including `mailto:user:pw@host`, is still
+/// found.
+#[must_use]
+pub fn credential_like(parameters: &serde_json::Value) -> bool {
+    let probe = mailto_probe(parameters);
+    // The shared scrubber over every string and key.
+    let mut scrubbed = probe.clone();
+    fleet_core::redact_json_strings(&mut scrubbed);
+    scrubbed != probe || has_secret_shape(&probe)
+}
+
+fn mailto_probe(value: &serde_json::Value) -> serde_json::Value {
+    use serde_json::Value;
+    match value {
+        Value::String(text) => Value::String(replace_mailto(text)),
+        Value::Array(items) => Value::Array(items.iter().map(mailto_probe).collect()),
+        Value::Object(map) => Value::Object(
+            map.iter()
+                .map(|(key, value)| (key.clone(), mailto_probe(value)))
+                .collect(),
+        ),
+        other => other.clone(),
+    }
+}
+
+/// Rewrites each well-formed `mailto:<local>@<domain>` as `mailto <local>
+/// <domain>`: only the `:` and the `@` go, so the credential rules still see
+/// the local part and the domain on their own. An address must start the text
+/// or follow whitespace, `=`, `,`, or `;`, must not sit in a token that holds
+/// `://` (a URL), and ends at whitespace, `,`, `;`, or `!` (the DMARC size
+/// suffix); it has one `@`, no `:`, and plain local and domain characters.
+fn replace_mailto(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    let mut previous: Option<char> = None;
+    while !rest.is_empty() {
+        let at_boundary = previous.is_none_or(|c| c.is_whitespace() || "=,;".contains(c));
+        let in_url = out
+            .rsplit(char::is_whitespace)
+            .next()
+            .is_some_and(|token| token.contains("://"));
+        if at_boundary
+            && !in_url
+            && let Some(after) = rest.strip_prefix("mailto:")
+        {
+            let end = after
+                .find(|c: char| c.is_whitespace() || ",;!".contains(c))
+                .unwrap_or(after.len());
+            if valid_mail_address(&after[..end]) {
+                let (local, domain) = after[..end].split_once('@').expect("validated");
+                out.push_str("mailto ");
+                out.push_str(local);
+                out.push(' ');
+                out.push_str(domain);
+                previous = domain.chars().last();
+                rest = &after[end..];
+                continue;
+            }
+        }
+        let c = rest.chars().next().expect("rest is not empty");
+        out.push(c);
+        previous = Some(c);
+        rest = &rest[c.len_utf8()..];
+    }
+    out
+}
+
+fn valid_mail_address(address: &str) -> bool {
+    let Some((local, domain)) = address.split_once('@') else {
+        return false;
+    };
+    !local.is_empty()
+        && !domain.is_empty()
+        && !domain.contains('@')
+        && local
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || "._%+-".contains(c))
+        && domain
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || ".-".contains(c))
 }
 
 fn parameter_depth(value: &serde_json::Value) -> usize {
@@ -1578,6 +1695,33 @@ pub mod test_support {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_well_formed_mailto_is_not_a_credential_but_credential_shapes_still_are() {
+        let params = |text: &str| serde_json::json!({ "content": text });
+        for fine in [
+            "v=DMARC1; p=none; rua=mailto:a@x.com,mailto:b@y.com!10m",
+            "v=DMARC1; p=reject; rua=mailto:d@example.com; ruf=mailto:f@example.com",
+            "mailto:d@example.com",
+        ] {
+            assert!(!credential_like(&params(fine)), "{fine}");
+            // The stored copy is the original, not the probe.
+            assert!(check_parameters(params(fine)).is_ok_and(|p| p["content"] == fine));
+        }
+        for refused in [
+            "mailto:user:pw@host",
+            "x=mailto:a@b,user:pw@host",
+            "https://u:p@h",
+            "api_key=Zx81QwErTy93LkJhGf62Mn40",
+            "mailto:ghp_abcdefghijklmnopqrstuvwxyzABCDEF0123@x.com",
+            "https://user!mailto:pw@host/",
+            "https://u=mailto:pw@host",
+            "v=DMARC1; rua=mailto:a@b@c",
+            "see mailto:user:pw@host and mailto:a@b.com",
+        ] {
+            assert!(credential_like(&params(refused)), "{refused}");
+        }
+    }
 
     #[test]
     fn settings_parse_the_environment_values() {
