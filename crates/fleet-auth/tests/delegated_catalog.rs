@@ -139,6 +139,7 @@ fn the_named_refusals_of_the_issue_are_refused() {
         (Permission::LabRead, None),
         (Permission::ImagesConfig, None),
         (Permission::ImagesRead, None),
+        (Permission::RegistryRead, None),
         // Proxmox and settings administration
         (Permission::ProxmoxConfig, None),
         (Permission::ProxmoxOperate, None),

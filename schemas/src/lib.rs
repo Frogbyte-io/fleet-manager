@@ -295,6 +295,9 @@ pub struct ParsedResource {
     pub name: String,
     /// The kind-specific non-secret spec.
     pub spec: Value,
+    /// The path of the source document, exactly as the caller supplied it
+    /// (the controller makes it repository-relative).
+    pub source_path: PathBuf,
 }
 
 /// Validates the sources as one candidate and returns their resources,
@@ -327,6 +330,7 @@ pub fn parse_resources(sources: &[SourceDocument]) -> Result<Vec<ParsedResource>
                 id: text("/metadata/id"),
                 name: text("/metadata/name"),
                 spec: document.get("spec").cloned().unwrap_or(Value::Null),
+                source_path: source.path.clone(),
             });
         }
     }
