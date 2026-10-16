@@ -111,6 +111,13 @@ word (uppercase); color never carries meaning alone.
 | Operation | `failed`,`timed_out` | `--fc-err` | (API word) |
 | Operation | `cancelled` | `--fc-muted` | `CANCELLED` |
 | Operation | `blocked_manual_approval` | `--fc-warn` | `BLOCKED APPROVAL` |
+| Action request | `pending` | `--fc-warn` | `PENDING` |
+| Action request | `approved`,`executing` | `--fc-info` | (API word) |
+| Action request | `succeeded` | `--fc-ok` | `SUCCEEDED` |
+| Action request | `failed` | `--fc-err` | `FAILED` |
+| Action request | `denied` | `--fc-muted` | `DENIED` |
+| Action request | `expired` | `--fc-faint` | `EXPIRED` |
+| Action request risk | `approve`,`auto`,`deny` | `--fc-warn`,`--fc-muted`,`--fc-err` | `RISK <API word>` |
 
 ### Connection badges
 

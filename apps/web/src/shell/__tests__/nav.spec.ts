@@ -24,6 +24,7 @@ describe('nav', () => {
       '/images',
       '/registry',
       '/operations',
+      '/requests',
       '/audit',
       '/settings',
     ])
@@ -31,6 +32,6 @@ describe('nav', () => {
 
   it('exposes exactly the built pages as available', () => {
     const available = NAV_GROUPS.flatMap(g => g.items.filter(i => i.available).map(i => i.to))
-    expect(available).toEqual(['/', '/fleet', '/proxmox', '/projects', '/skills', '/lab', '/images', '/registry', '/operations', '/audit', '/settings'])
+    expect(available).toEqual(['/', '/fleet', '/proxmox', '/projects', '/skills', '/lab', '/images', '/registry', '/operations', '/requests', '/audit', '/settings'])
   })
 })

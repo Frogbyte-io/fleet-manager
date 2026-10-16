@@ -13,6 +13,7 @@ import {
   operationRows,
   orphanRows,
   proxmoxRows,
+  requestRows,
   sortAttention,
   templatePinRows,
 } from '../attention'
@@ -89,6 +90,15 @@ describe('attention sources', () => {
     ] as OperationDto[])
     expect(rows).toHaveLength(1)
     expect(rows[0]).toMatchObject({ detail: 'frogenv approval pending', to: { path: '/operations', query: { op: 'op-1' } } })
+  })
+
+  it('flags only pending action requests, linking to the request in the inbox', () => {
+    const rows = requestRows([
+      { id: 'r1', actionId: 'coolify.application.redeploy', target: 'app', requester: 'agent', reason: 'fix', state: 'pending', createdAt: 3 },
+      { id: 'r2', actionId: 'coolify.application.redeploy', target: 'app', requester: 'agent', reason: 'fix', state: 'denied', createdAt: 4 },
+    ])
+    expect(rows).toHaveLength(1)
+    expect(rows[0]).toMatchObject({ source: 'request-pending', severity: 'warn', to: { path: '/requests', query: { request: 'r1' } }, at: 3 })
   })
 
   it('flags changed and unconfirmed Proxmox fingerprints, linking to Proxmox', () => {
