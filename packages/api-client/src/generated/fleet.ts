@@ -1746,6 +1746,283 @@ export interface DiscoveredCheckoutDto {
 }
 
 /**
+ * Records of each type at one DNS name.
+ */
+export interface DnsRecordsDto {
+  /** A values. */
+  a: string[];
+  /** AAAA values. */
+  aaaa: string[];
+  /** CNAME values. */
+  cname: string[];
+  /** NS values (meaningful at the apex). */
+  ns: string[];
+}
+
+/**
+ * The status of the DNS half of an observation.
+ */
+export type DnsStatusDto = typeof DnsStatusDto[keyof typeof DnsStatusDto];
+
+
+export const DnsStatusDto = {
+  ok: 'ok',
+  not_found: 'not_found',
+  error: 'error',
+} as const;
+
+/**
+ * The DNS half of a domain observation.
+ */
+export interface DnsObservationDto {
+  /** Records at the apex. */
+  apex: DnsRecordsDto;
+  /**
+     * Why, for `not_found` and `error`.
+     * @nullable
+     */
+  detail?: string | null;
+  /** How the lookup ended. */
+  status: DnsStatusDto;
+  /** Records at `www.<apex>`. */
+  www: DnsRecordsDto;
+}
+
+/**
+ * The status of the RDAP half of an observation.
+ */
+export type RdapStatusDto = typeof RdapStatusDto[keyof typeof RdapStatusDto];
+
+
+export const RdapStatusDto = {
+  ok: 'ok',
+  unavailable: 'unavailable',
+  not_found: 'not_found',
+  error: 'error',
+} as const;
+
+/**
+ * The RDAP half of a domain observation.
+ */
+export interface RdapObservationDto {
+  /**
+     * Why, for `unavailable`, `not_found`, and `error`.
+     * @nullable
+     */
+  detail?: string | null;
+  /**
+     * The expiry as a calendar date (`YYYY-MM-DD`). Some ccTLD registries
+     * do not publish one.
+     * @nullable
+     */
+  expires?: string | null;
+  /** The nameservers the registry lists. */
+  nameservers: string[];
+  /**
+     * The registrar's name as the registry reports it.
+     * @nullable
+     */
+  registrar?: string | null;
+  /**
+     * The RDAP server's base URL, when one was resolved.
+     * @nullable
+     */
+  server?: string | null;
+  /** How the lookup ended. */
+  status: RdapStatusDto;
+  /** The EPP status values. */
+  statuses: string[];
+}
+
+/**
+ * One public lookup result for a domain entry. Recorded in the
+ * controller's database; never written to Fleet Git.
+ */
+export interface DomainObservationDto {
+  /** The public DNS data. */
+  dns: DnsObservationDto;
+  /**
+     * Consecutive attempts with a failed half.
+     * @minimum 0
+     */
+  failures: number;
+  /**
+     * The latest attempt's failure, when a half failed.
+     * @nullable
+     */
+  lastError?: string | null;
+  /** When the latest lookup attempt finished (epoch milliseconds). */
+  observedAt: number;
+  /** The public registration data. */
+  rdap: RdapObservationDto;
+  /**
+     * When the data of a half that now fails to refresh was last good
+     * (epoch milliseconds); set only while old data is being kept.
+     * @nullable
+     */
+  staleSince?: number | null;
+}
+
+/**
+ * How a field's recorded value compares with the observation.
+ */
+export type FieldStateDto = typeof FieldStateDto[keyof typeof FieldStateDto];
+
+
+export const FieldStateDto = {
+  in_sync: 'in_sync',
+  changed: 'changed',
+  unknown: 'unknown',
+} as const;
+
+/**
+ * What the lookups saw.
+ * @nullable
+ */
+export type FieldDiffDtoObserved = { [key: string]: unknown } | null;
+
+/**
+ * What the entry (Fleet Git) records.
+ * @nullable
+ */
+export type FieldDiffDtoRecorded = { [key: string]: unknown } | null;
+
+/**
+ * The difference for one entry field.
+ */
+export interface FieldDiffDto {
+  /** `registrar`, `expires`, `nameservers`, or `dnsHost`. */
+  field: string;
+  /**
+     * What the lookups saw.
+     * @nullable
+     */
+  observed?: FieldDiffDtoObserved;
+  /**
+     * What the entry (Fleet Git) records.
+     * @nullable
+     */
+  recorded?: FieldDiffDtoRecorded;
+  /** The comparison. */
+  state: FieldStateDto;
+}
+
+/**
+ * The suggested value, in the field's type (a string, or a list of
+ * strings for `nameservers`).
+ */
+export type SuggestedFieldDtoValue = { [key: string]: unknown };
+
+/**
+ * One suggested field value.
+ */
+export interface SuggestedFieldDto {
+  /** The entry field. */
+  field: string;
+  /**
+     * The suggested value, in the field's type (a string, or a list of
+     * strings for `nameservers`).
+     */
+  value: SuggestedFieldDtoValue;
+}
+
+/**
+ * The derived warning rules.
+ */
+export type WarningCodeDto = typeof WarningCodeDto[keyof typeof WarningCodeDto];
+
+
+export const WarningCodeDto = {
+  registrar_mismatch: 'registrar_mismatch',
+  nameservers_mismatch: 'nameservers_mismatch',
+  dns_host_mismatch: 'dns_host_mismatch',
+  expiry_changed: 'expiry_changed',
+  expiring: 'expiring',
+  auto_renew_off_expiring: 'auto_renew_off_expiring',
+  stale_observation: 'stale_observation',
+  rdap_not_found: 'rdap_not_found',
+  lookup_failing: 'lookup_failing',
+} as const;
+
+/**
+ * How serious a warning is.
+ */
+export type SeverityDto = typeof SeverityDto[keyof typeof SeverityDto];
+
+
+export const SeverityDto = {
+  info: 'info',
+  warn: 'warn',
+  err: 'err',
+} as const;
+
+/**
+ * One derived warning.
+ */
+export interface DomainWarningDto {
+  /** Which rule fired. */
+  code: WarningCodeDto;
+  /** A sentence for people. */
+  message: string;
+  /** How serious it is. */
+  severity: SeverityDto;
+}
+
+/**
+ * A domain entry's latest observation compared with the entry.
+ */
+export interface DomainObservationViewDto {
+  /** Per-field comparison, in a stable order. */
+  diffs: FieldDiffDto[];
+  /** The entry's key (`domain/<key>`). */
+  key: string;
+  observation?: null | DomainObservationDto;
+  /**
+     * The field changes that would bring the entry in line with the
+     * observation. A person or agent applies them with
+     * `fleetctl registry set` and publishes through Git; Fleet never
+     * writes them.
+     */
+  suggestion: SuggestedFieldDto[];
+  /**
+     * Derived warnings, most serious first. These feed the Overview's
+     * needs-attention queue.
+     */
+  warnings: DomainWarningDto[];
+}
+
+/**
+ * Where a list response sits in its result set.
+ *
+ * Pagination is cursor-based, never offset-based: an offset silently skips or
+ * repeats rows when the underlying set changes between requests. The cursor is
+ * opaque, and a client that parses one is relying on an implementation detail
+ * that is free to change.
+ */
+export interface PageInfo {
+  /**
+     * The number of items this page was limited to.
+     * @minimum 0
+     */
+  limit: number;
+  /**
+     * Cursor for the next page, or `null` on the last page.
+     * @nullable
+     */
+  nextCursor?: string | null;
+}
+
+/**
+ * A page of domain observation views.
+ */
+export interface DomainObservationPage {
+  /** The views, ordered by key. */
+  items: DomainObservationViewDto[];
+  /** Where this page sits in the result set. */
+  page: PageInfo;
+}
+
+/**
  * The proposed endpoint of a draft. The user arrives redacted unless the
  * caller may read sensitive endpoint detail.
  */
@@ -2903,27 +3180,6 @@ export interface OperationAccepted {
   operationId: string;
   /** The operation's state at the time the response was written. */
   status: OperationStatus;
-}
-
-/**
- * Where a list response sits in its result set.
- *
- * Pagination is cursor-based, never offset-based: an offset silently skips or
- * repeats rows when the underlying set changes between requests. The cursor is
- * opaque, and a client that parses one is relying on an implementation detail
- * that is free to change.
- */
-export interface PageInfo {
-  /**
-     * The number of items this page was limited to.
-     * @minimum 0
-     */
-  limit: number;
-  /**
-     * Cursor for the next page, or `null` on the last page.
-     * @nullable
-     */
-  nextCursor?: string | null;
 }
 
 /**
@@ -8123,6 +8379,25 @@ export type ListRegistryEntryReferencesParams = {
  * @nullable
  */
 relation?: string | null;
+/**
+ * Opaque cursor returned as the previous page's `nextCursor`.
+ * @nullable
+ */
+cursor?: string | null;
+/**
+ * Requested page size, clamped to the API maximum.
+ * @minimum 0
+ * @nullable
+ */
+limit?: number | null;
+};
+
+export type ListDomainObservationsParams = {
+/**
+ * Only domains with at least one warning.
+ * @nullable
+ */
+attention?: boolean | null;
 /**
  * Opaque cursor returned as the previous page's `nextCursor`.
  * @nullable
@@ -16334,6 +16609,168 @@ export const getRegistryEntry = async (type: string,
 
 
 
+export type getDomainObservationResponse200 = {
+  data: DomainObservationViewDto
+  status: 200
+}
+
+export type getDomainObservationResponse400 = {
+  data: ApiError
+  status: 400
+}
+
+export type getDomainObservationResponse403 = {
+  data: ApiError
+  status: 403
+}
+
+export type getDomainObservationResponse404 = {
+  data: ApiError
+  status: 404
+}
+
+export type getDomainObservationResponse500 = {
+  data: ApiError
+  status: 500
+}
+
+export type getDomainObservationResponse503 = {
+  data: ApiError
+  status: 503
+}
+
+export type getDomainObservationResponseSuccess = (getDomainObservationResponse200) & {
+  headers: Headers;
+};
+export type getDomainObservationResponseError = (getDomainObservationResponse400 | getDomainObservationResponse403 | getDomainObservationResponse404 | getDomainObservationResponse500 | getDomainObservationResponse503) & {
+  headers: Headers;
+};
+
+export type getDomainObservationResponse = (getDomainObservationResponseSuccess | getDomainObservationResponseError)
+
+export const getGetDomainObservationUrl = (type: string,
+    key: string,) => {
+
+
+
+
+  return `/api/v1/registry/entries/${type}/${key}/observations`
+}
+
+/**
+ * # Errors
+ *
+ * Returns an API error when the entry does not exist or is not a domain,
+ * or authentication, authorization, or storage fails.
+ * @summary Reads one domain entry's latest observation and its comparison with the
+entry.
+ */
+export const getDomainObservation = async (type: string,
+    key: string, options?: RequestInit): Promise<getDomainObservationResponse> => {
+
+  const res = await fetch(getGetDomainObservationUrl(type,key),
+  {
+    ...options,
+    method: 'GET'
+
+
+  }
+)
+
+
+  const body = [204, 205, 304].includes(res.status) ? null : await res.text();
+
+  const data: getDomainObservationResponse['data'] = body ? JSON.parse(body) : {}
+  return { data, status: res.status, headers: res.headers } as getDomainObservationResponse
+}
+
+
+
+export type refreshDomainObservationResponse200 = {
+  data: DomainObservationViewDto
+  status: 200
+}
+
+export type refreshDomainObservationResponse400 = {
+  data: ApiError
+  status: 400
+}
+
+export type refreshDomainObservationResponse403 = {
+  data: ApiError
+  status: 403
+}
+
+export type refreshDomainObservationResponse404 = {
+  data: ApiError
+  status: 404
+}
+
+export type refreshDomainObservationResponse429 = {
+  data: ApiError
+  status: 429
+}
+
+export type refreshDomainObservationResponse500 = {
+  data: ApiError
+  status: 500
+}
+
+export type refreshDomainObservationResponse503 = {
+  data: ApiError
+  status: 503
+}
+
+export type refreshDomainObservationResponseSuccess = (refreshDomainObservationResponse200) & {
+  headers: Headers;
+};
+export type refreshDomainObservationResponseError = (refreshDomainObservationResponse400 | refreshDomainObservationResponse403 | refreshDomainObservationResponse404 | refreshDomainObservationResponse429 | refreshDomainObservationResponse500 | refreshDomainObservationResponse503) & {
+  headers: Headers;
+};
+
+export type refreshDomainObservationResponse = (refreshDomainObservationResponseSuccess | refreshDomainObservationResponseError)
+
+export const getRefreshDomainObservationUrl = (type: string,
+    key: string,) => {
+
+
+
+
+  return `/api/v1/registry/entries/${type}/${key}/observations/refresh`
+}
+
+/**
+ * # Errors
+ *
+ * Returns an API error when the entry does not exist or is not a domain,
+ * the caller may not observe, the RDAP server's rate-limit slot is not
+ * available soon (429), or storage fails. A lookup that fails is recorded
+ * in the returned observation, not reported as an error.
+ * @summary Looks the domain up now (RDAP and DNS) and records the observation. A
+mutation of observations, never of Fleet Git: authorized as
+`registry.observe` and audited.
+ */
+export const refreshDomainObservation = async (type: string,
+    key: string, options?: RequestInit): Promise<refreshDomainObservationResponse> => {
+
+  const res = await fetch(getRefreshDomainObservationUrl(type,key),
+  {
+    ...options,
+    method: 'POST'
+
+
+  }
+)
+
+
+  const body = [204, 205, 304].includes(res.status) ? null : await res.text();
+
+  const data: refreshDomainObservationResponse['data'] = body ? JSON.parse(body) : {}
+  return { data, status: res.status, headers: res.headers } as refreshDomainObservationResponse
+}
+
+
+
 export type listRegistryEntryReferencesResponse200 = {
   data: RegistryPageRegistryReferenceDto
   status: 200
@@ -16411,6 +16848,84 @@ export const listRegistryEntryReferences = async (type: string,
 
   const data: listRegistryEntryReferencesResponse['data'] = body ? JSON.parse(body) : {}
   return { data, status: res.status, headers: res.headers } as listRegistryEntryReferencesResponse
+}
+
+
+
+export type listDomainObservationsResponse200 = {
+  data: DomainObservationPage
+  status: 200
+}
+
+export type listDomainObservationsResponse400 = {
+  data: ApiError
+  status: 400
+}
+
+export type listDomainObservationsResponse403 = {
+  data: ApiError
+  status: 403
+}
+
+export type listDomainObservationsResponse500 = {
+  data: ApiError
+  status: 500
+}
+
+export type listDomainObservationsResponse503 = {
+  data: ApiError
+  status: 503
+}
+
+export type listDomainObservationsResponseSuccess = (listDomainObservationsResponse200) & {
+  headers: Headers;
+};
+export type listDomainObservationsResponseError = (listDomainObservationsResponse400 | listDomainObservationsResponse403 | listDomainObservationsResponse500 | listDomainObservationsResponse503) & {
+  headers: Headers;
+};
+
+export type listDomainObservationsResponse = (listDomainObservationsResponseSuccess | listDomainObservationsResponseError)
+
+export const getListDomainObservationsUrl = (params?: ListDomainObservationsParams,) => {
+  const normalizedParams = new URLSearchParams();
+
+  Object.entries(params || {}).forEach(([key, value]) => {
+
+    if (value !== undefined) {
+      normalizedParams.append(key, value === null ? 'null' : String(value))
+    }
+  });
+
+  const stringifiedParams = normalizedParams.toString();
+
+  return stringifiedParams.length > 0 ? `/api/v1/registry/observations?${stringifiedParams}` : `/api/v1/registry/observations`
+}
+
+/**
+ * # Errors
+ *
+ * Returns an API error when the cursor is malformed, or authentication,
+ * authorization, or storage fails.
+ * @summary Lists the observations of domain entries, compared with the entries,
+ordered by key. With `attention=true`, only domains with a warning:
+the feed of the Overview's needs-attention queue.
+ */
+export const listDomainObservations = async (params?: ListDomainObservationsParams, options?: RequestInit): Promise<listDomainObservationsResponse> => {
+
+  const res = await fetch(getListDomainObservationsUrl(params),
+  {
+    ...options,
+    method: 'GET'
+
+
+  }
+)
+
+
+  const body = [204, 205, 304].includes(res.status) ? null : await res.text();
+
+  const data: listDomainObservationsResponse['data'] = body ? JSON.parse(body) : {}
+  return { data, status: res.status, headers: res.headers } as listDomainObservationsResponse
 }
 
 

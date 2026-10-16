@@ -19,6 +19,7 @@ use crate::{CliError, Command, Invocation, Output, RequestShape};
 
 mod edit;
 mod publish;
+mod suggest;
 mod tree;
 
 pub use edit::EntryRef;
@@ -37,6 +38,7 @@ pub(crate) const USAGE: &[&str] = &[
     "registry relate <from> <relation> <to> [--remove] [--repo <path>] (<to> is <type>/<key>, machine:<name>, project:<name>, coolify:<ref>, or proxmoxGuest:<ref>)",
     "registry tags add|rm <type>/<key> <tag>... [--repo <path>]",
     "registry validate [--repo <path>] [--output json|text]",
+    "registry suggest domain/<fqdn> [--output json|text] (prints the `registry set` patch from the latest RDAP/DNS observation)",
     "registry publish -m <message> [--change-mode direct|pull-request] [--base <branch>] [--branch <name>] [--repo <path>] [--output json|text]",
 ];
 
@@ -70,6 +72,12 @@ pub enum RegistryAction {
         limit: Option<u32>,
         /// The previous page's `nextCursor`.
         cursor: Option<String>,
+    },
+    /// Print the `set` patch suggested by a domain's latest RDAP/DNS
+    /// observation (FM-1020).
+    Suggest {
+        /// The domain's natural key (its fqdn).
+        key: String,
     },
     /// Read one entry.
     Get {
@@ -156,7 +164,10 @@ impl RegistryAction {
     /// the controller.
     #[must_use]
     pub fn is_local(&self) -> bool {
-        !matches!(self, Self::Types | Self::List { .. } | Self::Get { .. })
+        !matches!(
+            self,
+            Self::Types | Self::List { .. } | Self::Get { .. } | Self::Suggest { .. }
+        )
     }
 }
 
@@ -484,7 +495,16 @@ pub(crate) fn parse(rest: &[&str], output: &mut Output) -> Result<Command, CliEr
                 repo: flags.repo()?,
             }
         }
-        // FM-1020: `"suggest" => suggest::parse(words, output)?` plugs in here.
+        "suggest" => {
+            let flags = scan(verb, words, &[], &[], output)?;
+            let reference = EntryRef::parse(flags.positionals(1)?[0])?;
+            if reference.entry_type != "domain" || !suggest::is_hostname(&reference.key) {
+                return Err(CliError {
+                    message: "suggest takes a domain entry: domain/<fqdn>".to_owned(),
+                });
+            }
+            RegistryAction::Suggest { key: reference.key }
+        }
         _ => {
             return Err(CliError {
                 message: format!(
@@ -547,6 +567,7 @@ pub(crate) fn request(action: &RegistryAction) -> RequestShape {
             }
             get("/api/v1/registry/entries".to_owned(), params)
         }
+        RegistryAction::Suggest { key } => get(suggest::path(key), Vec::new()),
         RegistryAction::Get { reference } => get(
             format!(
                 "/api/v1/registry/entries/{}/{}",
@@ -611,6 +632,9 @@ fn render_entry(entry: &Value) -> String {
 
 /// Renders a read result as human text.
 pub(crate) fn render(payload: &Value) -> String {
+    if suggest::is_view(payload) {
+        return suggest::render(payload);
+    }
     let Some(items) = payload.get("items").and_then(Value::as_array) else {
         return render_entry(payload);
     };
@@ -940,7 +964,10 @@ pub(crate) fn run_local(
             };
             Ok((text, 0))
         }
-        RegistryAction::Types | RegistryAction::List { .. } | RegistryAction::Get { .. } => {
+        RegistryAction::Types
+        | RegistryAction::List { .. }
+        | RegistryAction::Get { .. }
+        | RegistryAction::Suggest { .. } => {
             unreachable!("registry reads go to the controller")
         }
     }
@@ -992,5 +1019,54 @@ mod tests {
         );
         let (_, path, _, _) = request(&action(&["get", "service/a+b@c"]));
         assert_eq!(path, "/api/v1/registry/entries/service/a%2Bb%40c");
+    }
+}
+
+#[cfg(test)]
+mod suggest_tests {
+    use super::*;
+
+    fn parse_words(words: &[&str]) -> Result<Command, CliError> {
+        let mut output = Output::Text;
+        parse(words, &mut output)
+    }
+
+    #[test]
+    fn suggest_parses_a_domain_address() {
+        assert_eq!(
+            parse_words(&["suggest", "domain/example.com"]).unwrap(),
+            Command::Registry(RegistryAction::Suggest {
+                key: "example.com".to_owned()
+            })
+        );
+        let mut output = Output::Text;
+        parse(
+            &["suggest", "domain/a.com", "--output", "json"],
+            &mut output,
+        )
+        .unwrap();
+        assert_eq!(output, Output::Json);
+    }
+
+    #[test]
+    fn suggest_refuses_other_types_and_odd_keys() {
+        for bad in [
+            vec!["suggest"],
+            vec!["suggest", "service/aptabase"],
+            vec!["suggest", "domain/a b.com"],
+            vec!["suggest", "domain/a.com", "--bogus"],
+        ] {
+            assert!(parse_words(&bad).is_err(), "{bad:?}");
+        }
+    }
+
+    #[test]
+    fn suggest_reads_the_observation_view() {
+        let (method, path, query, body) = request(&RegistryAction::Suggest {
+            key: "example.com".to_owned(),
+        });
+        assert_eq!(method, reqwest::Method::GET);
+        assert!(path.ends_with("/domain/example.com/observations"));
+        assert!(query.is_empty() && body.is_none());
     }
 }

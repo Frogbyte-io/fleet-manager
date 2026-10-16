@@ -117,6 +117,10 @@ API-token providers outside Proxmox share one account registry (FM-1001; `crates
   - **Fixtures:** `tests/fixtures/v4.4.6/` is synthetic (from the upstream v4.4.6 schemas and controllers) with a `read:sensitive` variant whose secret fields carry sentinels that must not come out. An operator records real fixtures with the ignored `capture` test and a read token; the scrubber is default-deny (object keys, image names, hostnames, and addresses included) and refuses output containing the token, the instance host, a hostname outside `.example.test`, or an address outside 192.0.2.0/24; capture writes the files under the names the contract tests read, and a test applies the same check to every committed fixture directory. Real-instance fixtures are pending.
 - **Out of scope here:** Cloudflare resource discovery (FM-1042) and the unified service view (FM-1031).
 
+## Public lookups: RDAP and DNS (FM-1020)
+
+`fleet-provider-rdap` and `fleet-provider-dns` are credential-free providers for the Registry domain enricher (see [desired-state.md](desired-state.md)). RDAP uses the IANA bootstrap registry and HTTPS only, with bounded bodies and redirects; DNS uses hickory-resolver (MIT OR Apache-2.0) over the system resolver. Failures are fixed, credential-free categories. Provider types are translated in the controller adapters (`registry_enrich.rs`), not leaked into the application.
+
 ## Recipes and custom actions
 
 Recipes are data interpreted by a built-in node runner, not providers and not a plugin SDK. A proposed schema includes:

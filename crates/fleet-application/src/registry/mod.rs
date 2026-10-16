@@ -11,6 +11,7 @@
 //! The Registry is descriptive: nothing here plans, applies, or writes.
 #![warn(missing_docs)]
 
+pub mod enrich;
 mod projection;
 
 use std::sync::Arc;

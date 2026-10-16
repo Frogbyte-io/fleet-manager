@@ -6890,11 +6890,11 @@ fn request_for(command: &Command) -> Result<RequestShape, CliError> {
                 .unwrap_or_default(),
             None,
         ),
-        Command::Registry(action) => registry::request(action),
         Command::Requests(action) => requests::request(action),
         Command::Accounts(action) => {
             accounts::request(action, || read_stdin_line("the provider API token"))?
         }
+        Command::Registry(action) => registry::request(action),
         Command::ProxmoxAccounts => (
             reqwest::Method::GET,
             "/api/v1/proxmox/accounts".to_owned(),
