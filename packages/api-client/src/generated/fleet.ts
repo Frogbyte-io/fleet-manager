@@ -5202,6 +5202,29 @@ export interface RegistryReferenceDto {
 }
 
 /**
+ * The Registry controller settings. Fleet does not enforce the change
+ * mode (the repository host's branch protection does); `fleetctl` and the
+ * `fleet` skill follow it.
+ */
+export interface RegistrySettingsDto {
+  /**
+     * Whether a fetched, valid revision that changes only Registry
+     * resources activates without a manual step.
+     */
+  autoActivate: boolean;
+  /**
+     * Whether auto-activation is held because a rollback happened. A
+     * manual activation releases the hold. Read-only.
+     */
+  autoActivateHold: boolean;
+  /**
+     * How Registry edits should reach the default branch: `direct` or
+     * `pull-request`.
+     */
+  changeMode: string;
+}
+
+/**
  * One Registry type.
  */
 export interface RegistryTypeDto {
@@ -7033,6 +7056,44 @@ export interface ResourceRecipeVersionDto {
 }
 
 /**
+ * The Registry controller settings. Fleet does not enforce the change
+ * mode (the repository host's branch protection does); `fleetctl` and the
+ * `fleet` skill follow it.
+ */
+export type ResourceRegistrySettingsDtoData = {
+  /**
+     * Whether a fetched, valid revision that changes only Registry
+     * resources activates without a manual step.
+     */
+  autoActivate: boolean;
+  /**
+     * Whether auto-activation is held because a rollback happened. A
+     * manual activation releases the hold. Read-only.
+     */
+  autoActivateHold: boolean;
+  /**
+     * How Registry edits should reach the default branch: `direct` or
+     * `pull-request`.
+     */
+  changeMode: string;
+};
+
+/**
+ * A single resource.
+ *
+ * The payload is nested under `data` so that later top-level fields are an
+ * additive change rather than a breaking one.
+ */
+export interface ResourceRegistrySettingsDto {
+  /**
+     * The Registry controller settings. Fleet does not enforce the change
+     * mode (the repository host's branch protection does); `fleetctl` and the
+     * `fleet` skill follow it.
+     */
+  data: ResourceRegistrySettingsDtoData;
+}
+
+/**
  * One machine's observed skill inventory.
  */
 export type ResourceSkillsSnapshotDtoData = {
@@ -7669,6 +7730,22 @@ export interface UpdateProjectRequest {
   description?: string | null;
   /** The display name. */
   name: string;
+}
+
+/**
+ * A partial change to the Registry settings; omitted fields stay.
+ */
+export interface UpdateRegistrySettingsRequest {
+  /**
+     * Turns Registry-only auto-activation on or off.
+     * @nullable
+     */
+  autoActivate?: boolean | null;
+  /**
+     * `direct` or `pull-request`.
+     * @nullable
+     */
+  changeMode?: string | null;
 }
 
 export type ListAuditEventsParams = {
@@ -8550,7 +8627,10 @@ export const getFetchDesiredRevisionUrl = () => {
  *
  * Returns an API error when no remote is configured, or on authentication,
  * authorization, validation, or storage failure.
- * @summary Fetches a commit of the configured source as a candidate.
+ * @summary Fetches a commit of the configured source as a candidate. This is the
+fetch-now endpoint a webhook or CI step calls after a push: post the
+pushed commit's full SHA. A valid Registry-only candidate then
+activates on its own when `registry.autoActivate` is on.
  */
 export const fetchDesiredRevision = async (fetchDesiredRequest: FetchDesiredRequest, options?: RequestInit): Promise<fetchDesiredRevisionResponse> => {
 
@@ -8839,6 +8919,143 @@ const res = await fetch(getRollbackDesiredRevisionUrl(),
 
   const data: rollbackDesiredRevisionResponse['data'] = body ? JSON.parse(body) : {}
   return { data, status: res.status, headers: res.headers } as rollbackDesiredRevisionResponse
+}
+
+
+
+export type getRegistrySettingsResponse200 = {
+  data: ResourceRegistrySettingsDto
+  status: 200
+}
+
+export type getRegistrySettingsResponse403 = {
+  data: ApiError
+  status: 403
+}
+
+export type getRegistrySettingsResponse500 = {
+  data: ApiError
+  status: 500
+}
+
+export type getRegistrySettingsResponse503 = {
+  data: ApiError
+  status: 503
+}
+
+export type getRegistrySettingsResponseSuccess = (getRegistrySettingsResponse200) & {
+  headers: Headers;
+};
+export type getRegistrySettingsResponseError = (getRegistrySettingsResponse403 | getRegistrySettingsResponse500 | getRegistrySettingsResponse503) & {
+  headers: Headers;
+};
+
+export type getRegistrySettingsResponse = (getRegistrySettingsResponseSuccess | getRegistrySettingsResponseError)
+
+export const getGetRegistrySettingsUrl = () => {
+
+
+
+
+  return `/api/v1/desired/settings`
+}
+
+/**
+ * # Errors
+ *
+ * Returns an API error when authentication, authorization, or storage fails.
+ * @summary Reads the Registry settings (auto-activation and change mode).
+ */
+export const getRegistrySettings = async ( options?: RequestInit): Promise<getRegistrySettingsResponse> => {
+
+  const res = await fetch(getGetRegistrySettingsUrl(),
+  {
+    ...options,
+    method: 'GET'
+
+
+  }
+)
+
+
+  const body = [204, 205, 304].includes(res.status) ? null : await res.text();
+
+  const data: getRegistrySettingsResponse['data'] = body ? JSON.parse(body) : {}
+  return { data, status: res.status, headers: res.headers } as getRegistrySettingsResponse
+}
+
+
+
+export type updateRegistrySettingsResponse200 = {
+  data: ResourceRegistrySettingsDto
+  status: 200
+}
+
+export type updateRegistrySettingsResponse400 = {
+  data: ApiError
+  status: 400
+}
+
+export type updateRegistrySettingsResponse403 = {
+  data: ApiError
+  status: 403
+}
+
+export type updateRegistrySettingsResponse500 = {
+  data: ApiError
+  status: 500
+}
+
+export type updateRegistrySettingsResponse503 = {
+  data: ApiError
+  status: 503
+}
+
+export type updateRegistrySettingsResponseSuccess = (updateRegistrySettingsResponse200) & {
+  headers: Headers;
+};
+export type updateRegistrySettingsResponseError = (updateRegistrySettingsResponse400 | updateRegistrySettingsResponse403 | updateRegistrySettingsResponse500 | updateRegistrySettingsResponse503) & {
+  headers: Headers;
+};
+
+export type updateRegistrySettingsResponse = (updateRegistrySettingsResponseSuccess | updateRegistrySettingsResponseError)
+
+export const getUpdateRegistrySettingsUrl = () => {
+
+
+
+
+  return `/api/v1/desired/settings`
+}
+
+/**
+ * # Errors
+ *
+ * Returns an API error when authentication, authorization, validation, or storage fails.
+ * @summary Changes the Registry settings. Authorized like activation and audited.
+ */
+export const updateRegistrySettings = async (updateRegistrySettingsRequest: UpdateRegistrySettingsRequest, options?: RequestInit): Promise<updateRegistrySettingsResponse> => {
+
+    const getHeaders = (h?: NonNullable<RequestInit['headers']>): Record<string, string | readonly string[]> => {
+    if (!h) return {};
+    if (h instanceof Headers) return Object.fromEntries(h.entries());
+    if (Array.isArray(h)) return Object.fromEntries(h);
+    return h;
+  };
+const res = await fetch(getUpdateRegistrySettingsUrl(),
+  {
+    ...options,
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json', ...getHeaders(options?.headers) },
+    body: JSON.stringify(updateRegistrySettingsRequest)
+  }
+)
+
+
+  const body = [204, 205, 304].includes(res.status) ? null : await res.text();
+
+  const data: updateRegistrySettingsResponse['data'] = body ? JSON.parse(body) : {}
+  return { data, status: res.status, headers: res.headers } as updateRegistrySettingsResponse
 }
 
 

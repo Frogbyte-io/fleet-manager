@@ -466,9 +466,14 @@ fn run_serve(mut config: fleet_config::ControllerConfig) -> ExitCode {
                     std::sync::Arc::new({
                         let executor = fleet_controller::source::SourceExecutor::new(
                             config.data_dir.join("git-source"),
-                            std::sync::Arc::new(fleet_controller::compose_desired_source(
-                                store.pool(),
-                            )),
+                            std::sync::Arc::new(
+                                fleet_controller::compose_desired_source(store.pool())
+                                    .with_comparer(std::sync::Arc::new(
+                                        fleet_controller::source::GitRevisionComparer::new(
+                                            config.data_dir.join("git-source"),
+                                        ),
+                                    )),
+                            ),
                         );
                         match &secrets {
                             Some(secrets) => executor.with_credentials(std::sync::Arc::new(
@@ -927,6 +932,7 @@ fn run_serve(mut config: fleet_config::ControllerConfig) -> ExitCode {
             }
         };
         let sweeper_operations = worker_operations.clone();
+        let poller_operations = worker_operations.clone();
         let worker_host = WorkerHost::new(worker_operations, executor, 4);
         let worker_handle = tokio::spawn(async move {
             worker_host
@@ -1116,6 +1122,48 @@ fn run_serve(mut config: fleet_config::ControllerConfig) -> ExitCode {
                 let _ = sweeper_shutdown_rx.await;
             }))
         });
+        // FM-1014: the optional periodic desired-source fetch queues the
+        // ordinary `source.fetch` for the remote's head (0 = off, the
+        // default); a Registry-only result then auto-activates.
+        let (poller_shutdown, poller_shutdown_rx) = tokio::sync::oneshot::channel::<()>();
+        let poller_handle = (config.desired_fetch_interval_seconds > 0).then(|| {
+            let desired = std::sync::Arc::new(
+                fleet_application::source::DesiredSource::new(
+                    std::sync::Arc::new(fleet_storage_sqlite::SourceRepository::new(
+                        store.pool().clone(),
+                    )),
+                    std::sync::Arc::new(fleet_storage_sqlite::AuditSink::new(store.pool().clone())),
+                )
+                .with_settings(std::sync::Arc::new(
+                    fleet_storage_sqlite::SourceRepository::new(store.pool().clone()),
+                )),
+            );
+            let credentials: Option<
+                std::sync::Arc<dyn fleet_application::source::GitCredentialStore>,
+            > = secrets.as_ref().map(|secrets| {
+                std::sync::Arc::new(
+                    fleet_controller::git_credentials::SecretBackedGitCredentials::new(
+                        secrets.clone(),
+                    ),
+                )
+                    as std::sync::Arc<dyn fleet_application::source::GitCredentialStore>
+            });
+            let poller = fleet_controller::source_poller::SourcePoller::new(
+                desired,
+                poller_operations,
+                std::sync::Arc::new(fleet_storage_sqlite::SourceRepository::new(
+                    store.pool().clone(),
+                )),
+                std::sync::Arc::new(fleet_controller::source_poller::GitHeadResolver::new(
+                    fleet_provider_git::GitSource::new(config.data_dir.join("git-source")),
+                    credentials,
+                )),
+            );
+            let interval = std::time::Duration::from_secs(config.desired_fetch_interval_seconds);
+            tokio::spawn(std::sync::Arc::new(poller).run(interval, async move {
+                let _ = poller_shutdown_rx.await;
+            }))
+        });
         let served = serve_with_events(
             settings,
             pool,
@@ -1130,6 +1178,10 @@ fn run_serve(mut config: fleet_config::ControllerConfig) -> ExitCode {
             shutdown_signal(),
         )
         .await;
+        let _ = poller_shutdown.send(());
+        if let Some(handle) = poller_handle {
+            let _ = handle.await;
+        }
         let _ = sweeper_shutdown.send(());
         if let Some(handle) = sweeper_handle {
             let _ = handle.await;

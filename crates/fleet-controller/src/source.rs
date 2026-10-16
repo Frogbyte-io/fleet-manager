@@ -230,14 +230,46 @@ impl SourceExecutor {
                 digest,
                 diagnostics,
                 resources,
-            } => serde_json::json!({
-                "commitSha": digest.commit_sha,
-                "contentDigest": digest.content_digest,
-                "diagnostics": diagnostics,
-                "valid": diagnostics.is_empty(),
-                "resourceCount": resources.len(),
-            })
-            .to_string(),
+            } => {
+                // A valid candidate may qualify for Registry-only
+                // auto-activation. An invalid one never does, and a failure
+                // here never fails the fetch: the candidate stays recorded
+                // for manual activation.
+                let auto_activation = if diagnostics.is_empty() {
+                    match self
+                        .desired_source
+                        .auto_activate(
+                            &fleet_auth::LanAllowAllAuthorizer,
+                            fleet_auth::LAN_PRINCIPAL_ID,
+                            &digest,
+                            &resources,
+                            Some(&operation.id),
+                        )
+                        .await
+                    {
+                        Ok(fleet_application::source::AutoActivation::Activated {
+                            diff, ..
+                        }) => serde_json::json!({ "activated": true, "diff": diff.render() }),
+                        Ok(fleet_application::source::AutoActivation::Skipped { reason }) => {
+                            serde_json::json!({ "activated": false, "reason": reason })
+                        }
+                        Err(error) => {
+                            serde_json::json!({ "activated": false, "reason": format!("auto-activation failed: {error}") })
+                        }
+                    }
+                } else {
+                    serde_json::json!({ "activated": false, "reason": "the candidate carries validation diagnostics" })
+                };
+                serde_json::json!({
+                    "commitSha": digest.commit_sha,
+                    "contentDigest": digest.content_digest,
+                    "diagnostics": diagnostics,
+                    "valid": diagnostics.is_empty(),
+                    "resourceCount": resources.len(),
+                    "autoActivation": auto_activation,
+                })
+                .to_string()
+            }
             fleet_application::source::FetchOutcome::TransportFailed { detail } => {
                 return complete_failed(operations, &operation.id, &detail).await;
             }
@@ -398,6 +430,78 @@ fn collect_yaml(
         {
             sources.push(path);
         }
+    }
+}
+
+/// Compares two commits in the candidate's own clone for the
+/// auto-activation policy: ancestry, and whether every changed file holds
+/// only Registry documents on both sides. Reads in memory; runs no hooks.
+#[derive(Debug)]
+pub struct GitRevisionComparer {
+    source: GitSource,
+}
+
+impl GitRevisionComparer {
+    /// Composes the comparer over the git work root the fetches use.
+    #[must_use]
+    pub fn new(work_root: std::path::PathBuf) -> Self {
+        Self {
+            source: GitSource::new(work_root),
+        }
+    }
+}
+
+/// Whether one version of a file holds only Registry documents: a `.yaml`
+/// file with at least one document, every `kind` a Registry kind.
+fn registry_only_text(path: &str, text: &str) -> bool {
+    if !std::path::Path::new(path)
+        .extension()
+        .is_some_and(|extension| extension == "yaml")
+    {
+        return false;
+    }
+    match fleet_schema::document_kinds(text) {
+        Ok(kinds) => {
+            !kinds.is_empty()
+                && kinds
+                    .iter()
+                    .all(|kind| fleet_application::source::REGISTRY_KINDS.contains(&kind.as_str()))
+        }
+        Err(_) => false,
+    }
+}
+
+#[async_trait::async_trait]
+impl fleet_application::source::RevisionComparer for GitRevisionComparer {
+    async fn compare(
+        &self,
+        active_commit: &str,
+        candidate_commit: &str,
+    ) -> Result<fleet_application::source::RevisionChange, String> {
+        let source = self.source.clone();
+        let clone = self
+            .source
+            .work_root()
+            .join(format!("candidate-{candidate_commit}"));
+        let (active, candidate) = (active_commit.to_owned(), candidate_commit.to_owned());
+        let comparison = tokio::task::spawn_blocking(move || {
+            source.compare_commits(&clone, &active, &candidate)
+        })
+        .await
+        .map_err(|error| format!("the comparison thread failed: {error}"))??;
+        let only_registry_files = comparison.changed.iter().all(|file| {
+            !file.opaque
+                && (file.before.is_some() || file.after.is_some())
+                && file
+                    .before
+                    .iter()
+                    .chain(file.after.iter())
+                    .all(|text| registry_only_text(&file.path, text))
+        });
+        Ok(fleet_application::source::RevisionChange {
+            descendant: comparison.descendant,
+            only_registry_files,
+        })
     }
 }
 

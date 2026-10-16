@@ -41,6 +41,11 @@
 //! sweeper and leaves the manual sweep. A value that is not a whole number
 //! of seconds fails configuration loading.
 //!
+//! `FLEET_DESIRED_FETCH_INTERVAL_SECONDS` (TOML
+//! `desired_fetch_interval_seconds`, default `0` = off) makes the
+//! controller fetch the configured desired source's head periodically; a
+//! non-zero value below 30 seconds fails configuration loading.
+//!
 //! Lab artifacts (FM-721) keep their bytes under `FLEET_LAB_ARTIFACTS_DIR`
 //! (TOML `lab_artifacts_dir`, default `<data_dir>/lab-artifacts`), for
 //! `FLEET_LAB_ARTIFACT_RETENTION_SECONDS` (TOML
@@ -84,6 +89,11 @@ pub const TAILSCALE_SERVE_LISTEN_VAR: &str = "FLEET_TAILSCALE_SERVE_LISTEN";
 pub const LAB_SWEEP_INTERVAL_VAR: &str = "FLEET_LAB_SWEEP_INTERVAL_SECONDS";
 /// The default Lab sweeper interval (FM-716).
 pub const DEFAULT_LAB_SWEEP_INTERVAL_SECONDS: u64 = 60;
+/// Environment variable holding the periodic desired-source fetch interval
+/// in seconds (`0`, the default, disables the periodic fetch).
+pub const DESIRED_FETCH_INTERVAL_VAR: &str = "FLEET_DESIRED_FETCH_INTERVAL_SECONDS";
+/// The shortest allowed non-zero periodic fetch interval, in seconds.
+pub const MIN_DESIRED_FETCH_INTERVAL_SECONDS: u64 = 30;
 /// Environment variable holding the Lab placement memory overcommit ratio.
 pub const LAB_MEMORY_OVERCOMMIT_VAR: &str = "FLEET_LAB_MEMORY_OVERCOMMIT";
 /// Environment variable holding the Lab placement CPU overcommit ratio.
@@ -160,6 +170,10 @@ pub struct ControllerConfig {
     /// How often the Lab sweeper expires leases, queues due cleanups, and
     /// reconciles Lab guests, in seconds; `0` disables it.
     pub lab_sweep_interval_seconds: u64,
+    /// How often the controller fetches the configured desired source's
+    /// head, in seconds; `0` (the default) disables the periodic fetch. A
+    /// non-zero value must be at least [`MIN_DESIRED_FETCH_INTERVAL_SECONDS`].
+    pub desired_fetch_interval_seconds: u64,
     /// Where Lab artifact bytes live (FM-721). The controller prepares it at
     /// startup and serves without Lab artifacts when it cannot.
     pub lab_artifacts_dir: PathBuf,
@@ -335,6 +349,7 @@ struct ConfigFile {
     data_dir: Option<String>,
     master_key_file: Option<String>,
     lab_sweep_interval_seconds: Option<u64>,
+    desired_fetch_interval_seconds: Option<u64>,
     lab_memory_overcommit: Option<f64>,
     lab_cpu_overcommit: Option<f64>,
     lab_capacity_max_age_seconds: Option<u64>,
@@ -382,6 +397,12 @@ pub enum ConfigError {
     /// The configured Tailscale Serve listener is not a socket address.
     TailscaleServeListenInvalid {
         /// The value that failed to parse.
+        value: String,
+    },
+    /// The periodic fetch interval is not `0` or a whole number of seconds
+    /// of at least the minimum.
+    DesiredFetchIntervalInvalid {
+        /// The value that failed to parse or validate.
         value: String,
     },
     /// The Lab sweeper interval is not a whole number of seconds.
@@ -498,6 +519,10 @@ impl fmt::Display for ConfigError {
             Self::ListenInvalid { value } => {
                 write!(f, "{LISTEN_VAR} is not a socket address: {value:?}")
             }
+            Self::DesiredFetchIntervalInvalid { value } => write!(
+                f,
+                "{DESIRED_FETCH_INTERVAL_VAR} must be 0 (off) or a whole number of seconds of at least {MIN_DESIRED_FETCH_INTERVAL_SECONDS}, not {value:?}"
+            ),
             Self::LabSweepIntervalInvalid { value } => write!(
                 f,
                 "{LAB_SWEEP_INTERVAL_VAR} must be a whole number of seconds (0 disables the sweeper), not {value:?}"
@@ -580,6 +605,7 @@ pub fn load(
     let mut data_dir: Option<String> = None;
     let mut master_key_file: Option<String> = None;
     let mut lab_sweep_interval_seconds: Option<u64> = None;
+    let mut desired_fetch_interval_seconds: Option<u64> = None;
     let mut lab_placement = LabPlacementConfig::default();
     let mut lab_artifacts_dir: Option<String> = None;
     let mut lab_artifact_retention_seconds: Option<u64> = None;
@@ -609,6 +635,7 @@ pub fn load(
         data_dir = file.data_dir;
         master_key_file = file.master_key_file;
         lab_sweep_interval_seconds = file.lab_sweep_interval_seconds;
+        desired_fetch_interval_seconds = file.desired_fetch_interval_seconds;
         if let Some(ratio) = file.lab_memory_overcommit {
             lab_placement.memory_overcommit = ratio;
         }
@@ -644,6 +671,21 @@ pub fn load(
                 .parse()
                 .map_err(|_| ConfigError::LabSweepIntervalInvalid { value: raw })?,
         );
+    }
+    if let Some(raw) = env(DESIRED_FETCH_INTERVAL_VAR) {
+        desired_fetch_interval_seconds = Some(
+            raw.trim()
+                .parse()
+                .map_err(|_| ConfigError::DesiredFetchIntervalInvalid { value: raw })?,
+        );
+    }
+    if let Some(value) = desired_fetch_interval_seconds
+        && value != 0
+        && value < MIN_DESIRED_FETCH_INTERVAL_SECONDS
+    {
+        return Err(ConfigError::DesiredFetchIntervalInvalid {
+            value: value.to_string(),
+        });
     }
     let lab_placement = layer_lab_placement(lab_placement, env)?;
 
@@ -698,6 +740,7 @@ pub fn load(
         master_key_file: master_key_file.map(PathBuf::from),
         lab_sweep_interval_seconds: lab_sweep_interval_seconds
             .unwrap_or(DEFAULT_LAB_SWEEP_INTERVAL_SECONDS),
+        desired_fetch_interval_seconds: desired_fetch_interval_seconds.unwrap_or(0),
         lab_placement,
         image_build_proxy,
         image_build_address_pool,
@@ -1039,6 +1082,15 @@ impl ControllerConfig {
                 self.lab_sweep_interval_seconds,
                 if self.lab_sweep_interval_seconds == 0 {
                     " (disabled)"
+                } else {
+                    ""
+                }
+            ),
+            format!(
+                "desired_fetch_interval_seconds = {}{}",
+                self.desired_fetch_interval_seconds,
+                if self.desired_fetch_interval_seconds == 0 {
+                    " (off)"
                 } else {
                     ""
                 }

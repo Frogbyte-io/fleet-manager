@@ -36,6 +36,7 @@ pub mod proxmox_tasks_store;
 pub mod ready;
 pub mod skills;
 pub mod source;
+pub mod source_poller;
 pub mod tailnet_store;
 pub mod worker;
 
@@ -224,9 +225,10 @@ pub fn compose_desired_source(db: &SqlitePool) -> fleet_application::source::Des
     )
     .with_builtin_types(builtin_registry_types());
     fleet_application::source::DesiredSource::new(
-        source,
+        source.clone(),
         std::sync::Arc::new(fleet_storage_sqlite::AuditSink::new(db.clone())),
     )
+    .with_settings(source)
     .with_registry(std::sync::Arc::new(registry))
 }
 
