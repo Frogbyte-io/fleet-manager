@@ -119,8 +119,8 @@ describe('targetLink', () => {
     expect(targetLink({ class: 'project', reference: 'site' }, machines).to).toBeNull()
   })
 
-  it('leaves targets without a page as text', () => {
-    expect(targetLink({ class: 'coolify', reference: 'abc' }, machines).to).toBeNull()
+  it('links a Coolify resource to the running service and leaves targets without a page as text', () => {
+    expect(targetLink({ class: 'coolify', reference: 'abc' }, machines).to).toEqual({ path: '/services', query: { uuid: 'abc' } })
     expect(targetLink({ class: 'registry', reference: 'nokey' }, machines).to).toBeNull()
   })
 })

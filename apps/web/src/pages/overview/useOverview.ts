@@ -19,12 +19,13 @@ import { useFleetDrift } from '../drift/useDrift'
 import { fetchAllPages, type PagedResponse } from '../fleet/useFleetInventory'
 import { useImages } from '../images/useImages'
 import { leaseDetailKey } from '../lab/useLab'
-import { retryTransient, unwrap } from '../machine/api'
+import { ApiRequestError, retryTransient, unwrap } from '../machine/api'
 import { useOperationsList } from '../operations/useOperations'
 import { usePendingRequests } from '../requests/useRequests'
 import { isFingerprintMismatch } from '../proxmox/proxmox'
 import { useProxmox } from '../proxmox/useProxmox'
 import { useRegistryEntries } from '../registry/useRegistry'
+import { useServices } from '../services/useServices'
 
 import {
   activity,
@@ -38,6 +39,7 @@ import {
   operationRows,
   proxmoxRows,
   requestRows,
+  serviceHealthRows,
   serviceRenewalRows,
   sortAttention,
   templatePinRows,
@@ -116,6 +118,9 @@ export function useOverview() {
   // Services renewing soon (FM-1021). A failure (no active revision, no
   // service type) quietly omits the rows. Shares the Services view's cache entry.
   const services = useRegistryEntries('service', '')
+  // Unhealthy services and failed deploys (FM-1032). Shares the Services page's
+  // cache entry. An unreadable or unconfigured source quietly omits the rows.
+  const runningServices = useServices()
   const operations = useOperationsList()
   const requests = usePendingRequests()
   const proxmox = useProxmox()
@@ -163,6 +168,7 @@ export function useOverview() {
       ...driftRows(drift.query.data.value?.items ?? []),
       ...domainRows(domains.data.value ?? []),
       ...serviceRenewalRows(services.data.value?.items ?? [], now.value),
+      ...serviceHealthRows(runningServices.data.value?.items ?? [], now.value),
     ])
   })
 
@@ -171,6 +177,10 @@ export function useOverview() {
 
   // A source that failed to load is named, so an empty queue is never
   // mistaken for "all clear".
+  const servicesFailed = computed(() => {
+    const error = runningServices.error.value
+    return !!error && !(error instanceof ApiRequestError && (error.status === 403 || error.status === 503))
+  })
   const failures = computed(() => [
     machines.error.value && 'machines',
     drafts.error.value && 'onboarding drafts',
@@ -178,6 +188,8 @@ export function useOverview() {
     requests.error.value && 'action requests',
     proxmox.accounts.error.value && 'Proxmox accounts',
     drift.query.error.value && 'skill drift',
+    // Denied (no Coolify/Docker access) or unwired is not a failure to flag.
+    servicesFailed.value && 'running services',
     domains.error.value && 'domain observations',
     images.leases.error.value && 'Lab leases',
     orphanAudit.error.value && 'Lab orphan reports',

@@ -16,12 +16,14 @@ import type {
   OnboardingDraftDto,
   OperationDto,
   RecipeVersionDto,
+  RunningServiceDto,
 } from '@frogbyte-io/fleet-api-client'
 import type { RouteLocationRaw } from 'vue-router'
 
 import { driftView } from '../drift/drift'
 import { pinState } from '../images/images'
 import type { AccountView } from '../proxmox/proxmox'
+import { deployView, detailPath } from '../services/services'
 import { formatMicros, relativeDays, serviceRows, upcomingRenewals } from '../registry/services/services'
 
 export type Severity = 'err' | 'warn' | 'info'
@@ -39,6 +41,8 @@ export type AttentionSource =
   | 'drift'
   | 'domain'
   | 'service-renewal'
+  | 'service-unhealthy'
+  | 'service-deploy-failed'
 
 export interface AttentionRow {
   key: string
@@ -348,6 +352,43 @@ export function serviceRenewalRows(entries: RegistryEntryDto[], now = Date.now()
       at: now,
     }
   })
+}
+
+/**
+ * Running services (FM-1032) that are unhealthy or whose latest deployment
+ * failed: a degraded service is an error, a stopped one a warning (it may be
+ * intended). A failed deployment is its own row. Data that is stale is
+ * labelled in the detail, never read as a pass, and never raised on its own.
+ */
+export function serviceHealthRows(services: Pick<RunningServiceDto, 'id' | 'name' | 'state' | 'stale' | 'lastDeploy'>[], now = 0): AttentionRow[] {
+  const rows: AttentionRow[] = []
+  for (const service of services) {
+    const stale = service.stale ? ' (last known state; the data is stale)' : ''
+    if (service.state === 'degraded' || service.state === 'stopped') {
+      rows.push({
+        key: `service-unhealthy:${service.id}`,
+        source: 'service-unhealthy',
+        severity: service.state === 'degraded' ? 'err' : 'warn',
+        title: `${service.name} is ${service.state}`,
+        detail: `Reported ${service.state}${stale}.`,
+        to: detailPath(service.id),
+        at: now,
+      })
+    }
+    const deploy = deployView(service as RunningServiceDto)
+    if (deploy?.failed) {
+      rows.push({
+        key: `service-deploy-failed:${service.id}`,
+        source: 'service-deploy-failed',
+        severity: 'err',
+        title: `${service.name} deployment ${deploy.label.replace(' · stale', '')}`,
+        detail: `The latest deployment did not succeed${service.lastDeploy?.stale ? ' (deployment data is stale)' : ''}.`,
+        to: detailPath(service.id),
+        at: now,
+      })
+    }
+  }
+  return rows
 }
 
 const SEVERITY_ORDER: Record<Severity, number> = { err: 0, warn: 1, info: 2 }
