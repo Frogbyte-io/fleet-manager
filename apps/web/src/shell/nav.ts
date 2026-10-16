@@ -1,6 +1,7 @@
 import type { Component } from 'vue'
 import {
   Activity,
+  BookMarked,
   Boxes,
   FileText,
   FlaskConical,
@@ -48,6 +49,7 @@ export const NAV_GROUPS: NavGroup[] = [
       { title: 'Skills', to: '/skills', icon: Layers, available: true },
       { title: 'Lab', to: '/lab', icon: FlaskConical, available: true },
       { title: 'Images', to: '/images', icon: Image, available: true },
+      { title: 'Registry', to: '/registry', icon: BookMarked, available: true },
     ],
   },
   {
