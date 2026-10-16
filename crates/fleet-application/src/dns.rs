@@ -540,6 +540,15 @@ pub fn build_desired(desired: &DesiredRecord) -> Result<DnsRecord, String> {
         return Err("only an MX record has a priority".to_owned());
     }
     let content = desired.content.trim();
+    // The marker stands in for a stored value that has a credential's shape;
+    // it names an existing record (a delete's content, an upsert's
+    // `replaces`) and is never a value to write.
+    if content.starts_with(CREDENTIAL_MARKER) {
+        return Err(
+            "the content is a credential marker, which only identifies an existing record (as a delete's content or an upsert's `replaces`)"
+                .to_owned(),
+        );
+    }
     let (content, priority) = match record_type.as_str() {
         "A" => (
             content
@@ -962,6 +971,9 @@ pub struct ChangeParameters {
     /// The existing value an upsert replaces (upsert).
     #[serde(default)]
     pub replaces: Option<String>,
+    /// Whether the upsert asked to add a value beside the existing ones.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub add: bool,
     /// The change as previewed when the request was made.
     pub preview: Plan,
 }
@@ -1091,6 +1103,9 @@ fn validate_parameters(params: &ChangeParameters, upsert: bool) -> Result<(), St
         return Err("the preview does not describe this action".to_owned());
     }
     if upsert {
+        if params.add && params.replaces.is_some() {
+            return Err("`add` and `replaces` cannot be used together".to_owned());
+        }
         let desired = params.desired()?;
         if params.ttl.is_none() || params.proxied.is_none() {
             return Err("an upsert carries an explicit ttl and proxied".to_owned());
@@ -1113,7 +1128,11 @@ fn validate_parameters(params: &ChangeParameters, upsert: bool) -> Result<(), St
             _ => return Err("the preview's current record does not fit its operation".to_owned()),
         }
     } else {
-        if params.ttl.is_some() || params.proxied.is_some() || params.replaces.is_some() {
+        if params.ttl.is_some()
+            || params.proxied.is_some()
+            || params.replaces.is_some()
+            || params.add
+        {
             return Err(
                 "a delete carries only the record's name, type, content, and (MX) priority"
                     .to_owned(),
@@ -1699,25 +1718,56 @@ impl Dns {
 
     /// The request already made with the caller's idempotency key, when it
     /// is for the same change; a key reused for a different change is a
-    /// conflict.
-    fn replay(existing: ActionRequest, change: &ChangeRequest) -> Result<ActionRequest, DnsError> {
+    /// conflict. Everything the caller states explicitly is compared (the
+    /// values left out were resolved at request time and are not).
+    async fn replay(
+        &self,
+        existing: ActionRequest,
+        change: &ChangeRequest,
+    ) -> Result<ActionRequest, DnsError> {
         let action = match change.kind {
             ChangeKind::Upsert => UPSERT_ACTION,
             ChangeKind::Delete => DELETE_ACTION,
         };
+        let conflict = |existing: &ActionRequest| {
+            DnsError::Broker(BrokerError::Conflict {
+                state: existing.state,
+                detail: "the idempotency key was already used for a different request".to_owned(),
+            })
+        };
         let record_type = normalize_change_type(&change.record_type).map_err(invalid)?;
         let name = normalize_hostname(&change.name, true).map_err(invalid)?;
         let content = protect_content(&normalize_content(&record_type, &change.content));
-        let stored = &existing.parameters;
-        if existing.action_id != action
-            || stored["name"] != name
-            || stored["type"] != record_type
-            || stored["content"] != content
-        {
-            return Err(DnsError::Broker(BrokerError::Conflict {
-                state: existing.state,
-                detail: "the idempotency key was already used for a different request".to_owned(),
-            }));
+        let Ok(stored) = serde_json::from_value::<ChangeParameters>(existing.parameters.clone())
+        else {
+            return Err(conflict(&existing));
+        };
+        let replaces = change
+            .replaces
+            .as_deref()
+            .map(|value| protect_content(&normalize_content(&record_type, value)));
+        let same = existing.action_id == action
+            && stored.name == name
+            && stored.record_type == record_type
+            && stored.content == content
+            && change.ttl.is_none_or(|ttl| stored.ttl == Some(ttl))
+            && change
+                .proxied
+                .is_none_or(|proxied| stored.proxied == Some(proxied))
+            && (change.kind == ChangeKind::Delete
+                || change.priority.is_none()
+                || change.priority == stored.priority)
+            && (change.kind == ChangeKind::Upsert || change.priority == stored.priority)
+            && stored.replaces == replaces
+            && stored.add == change.add;
+        if !same {
+            return Err(conflict(&existing));
+        }
+        if let Some(account) = change.account.as_deref() {
+            let held = self.accounts.get(&stored.account_id).await.ok();
+            if !held.is_some_and(|held| held.id == account || held.label == account) {
+                return Err(conflict(&existing));
+            }
         }
         Ok(existing)
     }
@@ -1750,7 +1800,7 @@ impl Dns {
                 .await
                 .map_err(DnsError::Broker)?
         {
-            return Self::replay(existing, &change);
+            return self.replay(existing, &change).await;
         }
         let record_type = normalize_change_type(&change.record_type).map_err(invalid)?;
         let resolved = self
@@ -1827,6 +1877,7 @@ impl Dns {
                         proxied: Some(desired.proxied),
                         priority: desired.priority,
                         replaces,
+                        add: change.add,
                         preview: plan,
                     },
                 )
@@ -1875,6 +1926,7 @@ impl Dns {
                         proxied: None,
                         priority: change.priority,
                         replaces: None,
+                        add: false,
                         preview: plan,
                     },
                 )
@@ -1999,7 +2051,15 @@ impl Dns {
             }
             _ => {}
         }
-        if plan.operation != params.preview.operation || plan.before != params.preview.before {
+        let by_id = |records: &[DnsRecord]| {
+            let mut sorted = records.to_vec();
+            sorted.sort_by(|a, b| a.id.cmp(&b.id));
+            sorted
+        };
+        if plan.operation != params.preview.operation
+            || plan.before != params.preview.before
+            || by_id(&plan.others) != by_id(&params.preview.others)
+        {
             return Err(stale(&format!(
                 "the preview said {} of {}, the zone now says {} of {}",
                 params.preview.operation.id(),
@@ -2333,6 +2393,7 @@ mod tests {
             proxied: Some(false),
             priority: None,
             replaces: None,
+            add: false,
             preview: Plan {
                 operation: PlanOp::Create,
                 changes: diff(None, Some(&desired)),

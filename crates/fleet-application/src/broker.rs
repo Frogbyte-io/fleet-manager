@@ -1528,7 +1528,7 @@ fn credential_like_error() -> BrokerError {
 /// Whether the shared credential rules would change or refuse these
 /// parameters. A well-formed `mailto:<address>` is not a credential (a DMARC
 /// `rua` holds one), so the rules run on a probe copy in which each is
-/// replaced by `mailto:x`; the original is what a request stores. Anything
+/// rewritten with the separators removed; the original is what a request stores. Anything
 /// else with a credential's shape, including `mailto:user:pw@host`, is still
 /// found.
 #[must_use]
@@ -1554,23 +1554,36 @@ fn mailto_probe(value: &serde_json::Value) -> serde_json::Value {
     }
 }
 
-/// Replaces each well-formed `mailto:<address>` with `mailto:x`. It must
-/// start the text or follow whitespace, `=`, `,`, `;`, or `!`; the address
-/// ends at whitespace, `,`, `;`, or `!` and has one `@`, no `:`, and plain
-/// local and domain characters.
+/// Rewrites each well-formed `mailto:<local>@<domain>` as `mailto <local>
+/// <domain>`: only the `:` and the `@` go, so the credential rules still see
+/// the local part and the domain on their own. An address must start the text
+/// or follow whitespace, `=`, `,`, or `;`, must not sit in a token that holds
+/// `://` (a URL), and ends at whitespace, `,`, `;`, or `!` (the DMARC size
+/// suffix); it has one `@`, no `:`, and plain local and domain characters.
 fn replace_mailto(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
     let mut rest = text;
     let mut previous: Option<char> = None;
     while !rest.is_empty() {
-        let at_boundary = previous.is_none_or(|c| c.is_whitespace() || "=,;!".contains(c));
-        if at_boundary && let Some(after) = rest.strip_prefix("mailto:") {
+        let at_boundary = previous.is_none_or(|c| c.is_whitespace() || "=,;".contains(c));
+        let in_url = out
+            .rsplit(char::is_whitespace)
+            .next()
+            .is_some_and(|token| token.contains("://"));
+        if at_boundary
+            && !in_url
+            && let Some(after) = rest.strip_prefix("mailto:")
+        {
             let end = after
                 .find(|c: char| c.is_whitespace() || ",;!".contains(c))
                 .unwrap_or(after.len());
             if valid_mail_address(&after[..end]) {
-                out.push_str("mailto:x");
-                previous = Some('x');
+                let (local, domain) = after[..end].split_once('@').expect("validated");
+                out.push_str("mailto ");
+                out.push_str(local);
+                out.push(' ');
+                out.push_str(domain);
+                previous = domain.chars().last();
                 rest = &after[end..];
                 continue;
             }
@@ -1700,6 +1713,9 @@ mod tests {
             "x=mailto:a@b,user:pw@host",
             "https://u:p@h",
             "api_key=Zx81QwErTy93LkJhGf62Mn40",
+            "mailto:ghp_abcdefghijklmnopqrstuvwxyzABCDEF0123@x.com",
+            "https://user!mailto:pw@host/",
+            "https://u=mailto:pw@host",
             "v=DMARC1; rua=mailto:a@b@c",
             "see mailto:user:pw@host and mailto:a@b.com",
         ] {

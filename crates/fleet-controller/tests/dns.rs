@@ -982,6 +982,35 @@ async fn forged_previews_and_zone_bindings_are_refused_on_the_generic_route() {
         .await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
 
+    // Forged `others` (the records said to stay beside the change): accepted
+    // as a request, but the executor sees the zone differently and refuses.
+    let mut hidden = base.clone();
+    hidden["preview"]["others"] = json!([]);
+    let (status, answer) = harness
+        .call(
+            "POST",
+            "/requests",
+            Some(raw_request(
+                &hidden,
+                "www.example.com A",
+                "dns.record.upsert",
+            )),
+        )
+        .await;
+    assert_eq!(status, StatusCode::CREATED, "{answer}");
+    let done = harness
+        .approve_and_run(answer["data"]["id"].as_str().unwrap())
+        .await;
+    assert_eq!(done["operation"]["state"], "failed", "{done}");
+    assert!(
+        done["operation"]["errorJson"]
+            .as_str()
+            .unwrap()
+            .contains("stale preview"),
+        "{done}"
+    );
+    assert_eq!(harness.writes(), 0);
+
     // A zone id that is not the named zone's: accepted as a request, but the
     // executor refuses it before reading or writing anything.
     let mut wrong_zone = base.clone();
@@ -1406,4 +1435,84 @@ async fn the_dns_kinds_cannot_be_created_through_the_generic_operations_route() 
         );
     }
     assert_eq!(harness.writes(), 0);
+}
+
+#[tokio::test]
+async fn the_credential_marker_names_a_record_and_is_never_a_value_to_write() {
+    let harness = Harness::new().await;
+    let (_, filed) = harness
+        .change(json!({
+            "operation": "delete", "name": "leak.example.com", "type": "TXT",
+            "content": LEAKED, "reason": "x"
+        }))
+        .await;
+    let marker = filed["data"]["parameters"]["content"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    assert!(marker.starts_with("[credential-shaped sha256:"));
+    // As the content of an upsert the literal marker is refused, with or
+    // without `replaces`.
+    for body in [
+        json!({"operation": "upsert", "name": "leak.example.com", "type": "TXT", "content": marker, "reason": "x", "add": true}),
+        json!({"operation": "upsert", "name": "leak.example.com", "type": "TXT", "content": marker, "reason": "x"}),
+        json!({"operation": "upsert", "name": "leak.example.com", "type": "TXT", "content": marker, "replaces": marker, "reason": "x"}),
+    ] {
+        let (status, answer) = harness.change(body.clone()).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{body}: {answer}");
+    }
+    // As `replaces` it names the leaked record, and the update needs it.
+    let (status, filed) = harness
+        .change(json!({
+            "operation": "upsert", "name": "leak.example.com", "type": "TXT",
+            "content": "rotated", "replaces": marker, "ttl": 1, "reason": "x"
+        }))
+        .await;
+    assert_eq!(status, StatusCode::CREATED, "{filed}");
+    let (status, _) = harness
+        .change(json!({
+            "operation": "upsert", "name": "leak.example.com", "type": "TXT",
+            "content": "rotated", "ttl": 1, "reason": "x"
+        }))
+        .await;
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "a protected record is replaced only by naming it"
+    );
+}
+
+#[tokio::test]
+async fn a_retry_that_states_anything_differently_conflicts() {
+    let harness = Harness::new().await;
+    let body = json!({
+        "operation": "upsert", "name": "www.example.com", "type": "A",
+        "content": "203.0.113.9", "ttl": 600, "replaces": "203.0.113.2",
+        "reason": "x", "idempotencyKey": "replay-1"
+    });
+    let (status, first) = harness.change(body.clone()).await;
+    assert_eq!(status, StatusCode::CREATED, "{first}");
+    for (field, value) in [
+        ("ttl", json!(900)),
+        ("proxied", json!(true)),
+        ("priority", json!(10)),
+        ("replaces", json!("203.0.113.1")),
+        ("account", json!("another")),
+    ] {
+        let mut other = body.clone();
+        other[field] = value;
+        let (status, answer) = harness.change(other).await;
+        assert_eq!(status, StatusCode::CONFLICT, "{field}: {answer}");
+    }
+    let mut dropped = body.clone();
+    dropped.as_object_mut().unwrap().remove("replaces");
+    dropped["add"] = json!(true);
+    let (status, _) = harness.change(dropped).await;
+    assert_eq!(status, StatusCode::CONFLICT);
+    // The same statement, naming the account by label, replays.
+    let mut same = body;
+    same["account"] = json!("dns");
+    let (status, again) = harness.change(same).await;
+    assert_eq!(status, StatusCode::CREATED, "{again}");
+    assert_eq!(again["data"]["id"], first["data"]["id"]);
 }

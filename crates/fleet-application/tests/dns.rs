@@ -239,6 +239,7 @@ fn payload(content: &str, preview: Plan) -> String {
         proxied: Some(false),
         priority: None,
         replaces: None,
+        add: false,
         preview,
     })
     .unwrap()
