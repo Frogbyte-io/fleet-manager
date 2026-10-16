@@ -8,8 +8,8 @@ use std::time::Duration;
 
 use serde_json::{Value, json};
 
-use crate::requests::{Outcome, outcome_body, parse_wait_approval, wait_for_outcome};
-use crate::{CliError, Command, Invocation, Output, RequestShape, usage};
+use crate::requests::parse_wait_approval;
+use crate::{CliError, Command, Output, RequestShape, usage};
 
 /// One `services` subcommand.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -233,57 +233,6 @@ pub(crate) fn request(action: &ServicesAction) -> RequestShape {
     }
 }
 
-/// After an action request was filed, waits for its outcome when asked and
-/// answers the value to render and the exit code. Without a wait the filed
-/// request is the answer (exit 0): it is durable, and `requests get <id>
-/// --wait` follows it later. With a wait the answer is
-/// `{outcome, request, result}`, where `result` is the operation's result
-/// (including the status observed after the call).
-///
-/// # Errors
-///
-/// Fails when a read is refused or the controller keeps not answering.
-pub(crate) fn finish_action(
-    client: &reqwest::blocking::Client,
-    invocation: &Invocation,
-    created: &Value,
-    wait: Option<Duration>,
-) -> Result<(Value, u8), CliError> {
-    let request = created.get("data").unwrap_or(created);
-    let Some(bound) = wait else {
-        return Ok((request.clone(), 0));
-    };
-    let id = request["id"].as_str().ok_or_else(|| CliError {
-        message: "the controller's answer carried no request id".to_owned(),
-    })?;
-    let (outcome, request) = wait_for_outcome(client, invocation, id, bound)?;
-    let mut answer = outcome_body(outcome, &request);
-    if outcome == Outcome::Executed
-        && let Some(operation_id) = request["operationId"].as_str()
-    {
-        let read = crate::send_classified(
-            client,
-            invocation,
-            reqwest::Method::GET,
-            &format!("/api/v1/operations/{}", encode(operation_id)),
-            &[],
-            None,
-            uuid::Uuid::now_v7().to_string(),
-            None,
-            Some(Duration::from_secs(30)),
-        );
-        if let Ok(operation) = read {
-            let data = operation.get("data").unwrap_or(&operation);
-            if let Some(result) = data["resultJson"]
-                .as_str()
-                .and_then(|text| serde_json::from_str::<Value>(text).ok())
-            {
-                answer["result"] = result;
-            }
-        }
-    }
-    Ok((answer, outcome.exit_code()))
-}
 
 /// Percent-encodes one path segment: only unreserved characters pass.
 fn encode(segment: &str) -> String {

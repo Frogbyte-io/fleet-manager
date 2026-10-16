@@ -19,6 +19,7 @@ const listLabLeases = vi.fn()
 const getSystemInfo = vi.fn()
 const listDesiredDrift = vi.fn()
 const getLabLease = vi.fn()
+const listRunningServices = vi.fn()
 
 vi.mock('@frogbyte-io/fleet-api-client', () => ({
   listMachines: (...a: unknown[]) => listMachines(...a),
@@ -36,6 +37,7 @@ vi.mock('@frogbyte-io/fleet-api-client', () => ({
   getSystemInfo: (...a: unknown[]) => getSystemInfo(...a),
   listDesiredDrift: (...a: unknown[]) => listDesiredDrift(...a),
   getLabLease: (...a: unknown[]) => getLabLease(...a),
+  listRunningServices: (...a: unknown[]) => listRunningServices(...a),
 }))
 
 import OverviewPage from '../OverviewPage.vue'
@@ -67,6 +69,7 @@ function everythingFine() {
   listLabTemplates.mockResolvedValue(ok(page([])))
   listLabLeases.mockResolvedValue(ok(page([])))
   listDesiredDrift.mockResolvedValue(ok(page([])))
+  listRunningServices.mockResolvedValue(ok({ ...page([]), ambiguousServers: [], coverage: {}, evaluatedAt: 1 }))
   getSystemInfo.mockResolvedValue(ok({ service: 'fleet-controller', version: '0.1.0', trustMode: 'trusted-lan', trustWarning: '', storageOk: true, queuePending: 0, queueRunning: 0, currentPrincipal: 'me' }))
 }
 
@@ -89,7 +92,7 @@ function row(wrapper: Awaited<ReturnType<typeof mountPage>>, source: string) {
 enableAutoUnmount(afterEach)
 
 beforeEach(() => {
-  for (const mock of [listMachines, listOnboardingDrafts, listAuditEvents, listOperations, listActionRequests, listProxmoxAccounts, discoverProxmoxCluster, listProxmoxGuests, listImageRecipes, listImageRecipeVersions, listLabTemplates, listLabLeases, getSystemInfo, listDesiredDrift, getLabLease])
+  for (const mock of [listMachines, listOnboardingDrafts, listAuditEvents, listOperations, listActionRequests, listProxmoxAccounts, discoverProxmoxCluster, listProxmoxGuests, listImageRecipes, listImageRecipeVersions, listLabTemplates, listLabLeases, getSystemInfo, listDesiredDrift, getLabLease, listRunningServices])
     mock.mockReset()
   everythingFine()
 })
@@ -98,6 +101,22 @@ describe('Overview attention queue', () => {
   it('says so when nothing needs attention', async () => {
     const wrapper = await mountPage()
     expect(wrapper.find('[data-testid="attention-empty"]').exists()).toBe(true)
+  })
+
+  it('lists a degraded service and a failed deploy, linking to the service', async () => {
+    const svc = (id: string, state: string, lastDeploy: unknown = null) => ({ id: `coolify:a:${id}`, name: id, state, stale: false, lastDeploy })
+    listRunningServices.mockResolvedValue(ok({ ...page([svc('api', 'degraded'), svc('web', 'running', { deploymentUuid: 'd', status: 'failed', stale: false }), svc('ok', 'running')]), ambiguousServers: [], coverage: {}, evaluatedAt: 1 }))
+    const wrapper = await mountPage()
+    expect(row(wrapper, 'service-unhealthy').text()).toContain('api is degraded')
+    expect(row(wrapper, 'service-unhealthy').attributes('href')).toBe('/services/coolify%3Aa%3Aapi')
+    expect(row(wrapper, 'service-deploy-failed').text()).toContain('web deployment failed')
+    expect(wrapper.findAll('[data-testid^="attention-service"]')).toHaveLength(2)
+  })
+
+  it('does not call a denied services read a failure', async () => {
+    listRunningServices.mockResolvedValue({ status: 403, data: { code: 'denied', message: 'no' }, headers: new Headers() })
+    const wrapper = await mountPage()
+    expect(wrapper.text()).not.toContain('running services')
   })
 
   it('lists an offline machine and links to it', async () => {

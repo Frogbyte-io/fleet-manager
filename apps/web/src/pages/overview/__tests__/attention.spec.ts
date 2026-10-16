@@ -6,6 +6,7 @@ import {
   activity,
   domainRows,
   serviceRenewalRows,
+  serviceHealthRows,
   driftRows,
   EXPIRING_WINDOW_MS,
   kpis,
@@ -223,5 +224,31 @@ describe('kpis and activity', () => {
     ])
     expect(rows[0]!.title).toBe('Soon renews in 4 days')
     expect(rows[0]!.detail).toContain('€9.00 / month')
+  })
+
+  it('flags unhealthy services and failed deploys, never stale-only ones', () => {
+    const svc = (id: string, state: string, extra: Record<string, unknown> = {}) => ({ id, name: id, state, stale: false, lastDeploy: null, ...extra })
+    const deploy = (status: string, stale = false) => ({ deploymentUuid: 'd', status, stale })
+    const rows = serviceHealthRows([
+      svc('ok', 'running', { lastDeploy: deploy('finished') }),
+      svc('bad', 'degraded'),
+      svc('recovering', 'degraded', { stale: true }),
+      svc('off', 'stopped', { stale: true }),
+      svc('stale', 'running', { stale: true }),
+      svc('failed', 'running', { lastDeploy: deploy('failed', true) }),
+      svc('down', 'stopped', { lastDeploy: deploy('failed') }),
+    ], NOW)
+    expect(rows.map(r => [r.key.replace(/^service-/, ''), r.severity])).toEqual([
+      ['unhealthy:bad', 'err'],
+      ['unhealthy:recovering', 'warn'],
+      ['unhealthy:off', 'info'],
+      ['deploy-failed:failed', 'warn'],
+      ['unhealthy:down', 'info'],
+      ['deploy-failed:down', 'err'],
+    ])
+    expect(rows[0]!.to).toBe('/services/bad')
+    expect(rows[2]!.detail).toContain('stale')
+    expect(rows[3]!.detail).toContain('still running')
+    expect(rows[3]!.detail).toContain('deployment data is stale')
   })
 })

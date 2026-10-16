@@ -48,7 +48,7 @@ All of these are MIT/ISC and must pass `.github/scripts/check-licenses.mjs`. Non
 
 - **Sidebar** (collapsible to icons, persisted), grouped:
   - Overview
-  - *Infrastructure*: Fleet · Proxmox · Tailnet · Containers (M5)
+  - *Infrastructure*: Fleet · Proxmox · Services · Tailnet · Containers (M5)
   - *Work*: Projects · Skills · Lab · Images · Registry
   - *Control*: Operations (running/blocked count badge) · Audit log · Settings
   - Footer: controller readiness, version, **trusted-LAN warning**
@@ -198,8 +198,15 @@ Contents:
 - Sub-routes `/registry/domains` and `/registry/services`, built on the FM-1015 helpers and drawer; read-only.
 - **Domains**: each domain entry joined with its latest RDAP/DNS observation (`GET /registry/observations`): registrar, DNS host, where it points (apex and `www` A/AAAA/CNAME), expiry with warning states (expired; within 30 days, `err` within 7, the API's urgent threshold). The expiry is the observed RDAP date when present, else the recorded one (as the API does), with the recorded date shown beside it and the `expires` drift badge carrying any mismatch, auto-renew, and per-field drift badges. A row expands to the Fleet Git vs lookup values, the API's warnings, related entries, and the `fleetctl registry set` command for the suggested patch (the same text as `fleetctl registry suggest`, with a copy button). If observations cannot be read the view degrades to what Fleet Git records. `?open=<fqdn>` expands a row (the Overview links there).
 - **Services**: vendor, plan, cost, renewal, hosting; cost totals per currency (monthly plans, yearly plans, and the converted per-month and per-year figures, labelled as such; `other` periods and entries without a usable cost are excluded and counted; currencies are never converted); upcoming renewals within 60 days, with dates passed by at most 30 days flagged as stale.
-- Relations link to Registry entries, machines, and Proxmox guests. Running services (FM-1031) are not linked yet: the controller has no running-service API, so those relations render as plain text; `RelationLinks.vue` is the one place a link gets added later.
+- Relations link to Registry entries, machines, Proxmox guests, and Coolify resources (`/services?uuid=<resource uuid>`, FM-1032); other targets render as plain text.
 - Overview: domain rows link to `/registry/domains?open=<fqdn>`; a service renewing within 14 days adds a `service-renewal` row (passed dates stay off the queue; no notice when the `service` type or revision is missing).
+
+### Services (FM-1032)
+- `/services` (Infrastructure group) lists every running service from `GET /api/v1/services` (all pages), `/services/:id` shows one from `GET /api/v1/services/{id}`. Read-only; there is no event for a service change, so both re-read every 30 s. Not to be confused with the Registry's third-party *Services* tab.
+- **List**: cards/table toggle (own `localStorage` key, same pattern as Fleet), search over name, image, and hostname, filters for status, source (Coolify/Docker), server, and Coolify project/environment, and grouping by server, project, source, status, or none. `?status=` and `?uuid=` (a Registry link) preselect filters.
+- **Honesty**: a service with stale input is labelled `running · stale` (warning tone) and filed under the `stale` status, never as healthy; degraded and stopped keep their state when stale. Ambiguous placement is shown as such with the candidates, none chosen. A coverage strip names inputs that were not configured, denied, unavailable, stale, or truncated; until the Docker inventory exists (M5) it says containers are not collected yet.
+- **Detail**: status and stale reasons, server and how it was derived, Fleet machine placement, Coolify identity, hostnames, last deploy (failed and stale labelled), containers, related Registry entries (links into the domain/service/entry views), and an "Open in Coolify" link (http/https only). `ServiceActions.vue` is the one slot where FM-1033's brokered start/stop/restart/redeploy buttons mount; it renders nothing until that API exists.
+- **Overview**: a degraded service is an `err` `service-unhealthy` row, a stopped one a `warn` row, and a failed latest deployment an `err` `service-deploy-failed` row, each linking to the detail. Stale-only services are not raised. A denied or unwired read is not reported as a failure.
 
 ### Operations & Audit
 - Operations: filterable list, detail with SSE event stream/log, cancel, and blocked-approval handling.
