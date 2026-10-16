@@ -1970,6 +1970,13 @@ export interface ExternalAccountDto {
   lastProbe?: null | ExternalProbeDto;
   /** Free-form operator notes. */
   notes: string;
+  /**
+     * A policy the stored record breaks: `https_required` for an http base
+     * URL that is not a loopback address. Such an account is never probed
+     * or discovered until its base URL is edited to https.
+     * @nullable
+     */
+  policyViolation?: string | null;
   /** When the account last changed (epoch millis). */
   updatedAt: number;
 }
@@ -3391,6 +3398,13 @@ export type PageExternalAccountDtoItemsItem = {
   lastProbe?: null | ExternalProbeDto;
   /** Free-form operator notes. */
   notes: string;
+  /**
+     * A policy the stored record breaks: `https_required` for an http base
+     * URL that is not a loopback address. Such an account is never probed
+     * or discovered until its base URL is edited to https.
+     * @nullable
+     */
+  policyViolation?: string | null;
   /** When the account last changed (epoch millis). */
   updatedAt: number;
 };
@@ -5814,6 +5828,13 @@ export type ResourceExternalAccountDtoData = {
   lastProbe?: null | ExternalProbeDto;
   /** Free-form operator notes. */
   notes: string;
+  /**
+     * A policy the stored record breaks: `https_required` for an http base
+     * URL that is not a loopback address. Such an account is never probed
+     * or discovered until its base URL is edited to https.
+     * @nullable
+     */
+  policyViolation?: string | null;
   /** When the account last changed (epoch millis). */
   updatedAt: number;
 };

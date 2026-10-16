@@ -12602,6 +12602,13 @@
             "type": "string",
             "description": "Free-form operator notes."
           },
+          "policyViolation": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "A policy the stored record breaks: `https_required` for an http base\nURL that is not a loopback address. Such an account is never probed\nor discovered until its base URL is edited to https."
+          },
           "updatedAt": {
             "type": "integer",
             "format": "int64",
@@ -15599,6 +15606,13 @@
                 "notes": {
                   "type": "string",
                   "description": "Free-form operator notes."
+                },
+                "policyViolation": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "description": "A policy the stored record breaks: `https_required` for an http base\nURL that is not a loopback address. Such an account is never probed\nor discovered until its base URL is edited to https."
                 },
                 "updatedAt": {
                   "type": "integer",
@@ -19769,6 +19783,13 @@
               "notes": {
                 "type": "string",
                 "description": "Free-form operator notes."
+              },
+              "policyViolation": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "description": "A policy the stored record breaks: `https_required` for an http base\nURL that is not a loopback address. Such an account is never probed\nor discovered until its base URL is edited to https."
               },
               "updatedAt": {
                 "type": "integer",

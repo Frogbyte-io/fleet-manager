@@ -57,6 +57,14 @@ const UNVERIFIED: [&str; 2] = ["write", "deploy"];
 /// `base_url` is the instance root without a trailing slash, for example
 /// `https://coolify.example.com`.
 pub async fn probe(base_url: &str, token: &str) -> ProbeReport {
+    // The bearer token never travels over plain http, except to a literal
+    // loopback address (a local stub).
+    if base_url.starts_with("http://") && !fleet_core::base_url_is_loopback(base_url) {
+        return ProbeReport::simple(
+            ProbeStatus::Unreachable,
+            "the base URL uses http; the token is only sent over https (edit the account to use https)",
+        );
+    }
     let Ok(client) = reqwest::Client::builder()
         .timeout(REQUEST_TIMEOUT)
         .redirect(reqwest::redirect::Policy::none())

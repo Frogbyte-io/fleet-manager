@@ -179,16 +179,35 @@ pub(crate) fn service(value: &Value) -> Option<CoolifyService> {
     })
 }
 
-/// The public hostnames of a service's applications
-/// (`/services/{uuid}/applications` items).
-pub(crate) fn service_fqdns(applications: &Value) -> Vec<String> {
-    let mut all = Vec::new();
-    if let Some(items) = applications.as_array() {
-        for item in items {
-            push_unique(&mut all, fqdns_of(item.get("fqdn").and_then(Value::as_str)));
+/// The items of a list answer. Coolify (Laravel) usually answers an array,
+/// but a sorted collection serializes as an object keyed by the original
+/// positions (`{"1":{...},"0":{...}}`). An object is accepted only when it
+/// is non-empty, every key is a decimal integer, and every value is an
+/// object; `{}`, `{"data":[...]}`, and `{"error":{...}}` are not lists.
+pub(crate) fn items_of(value: &Value) -> Option<Vec<&Value>> {
+    match value {
+        Value::Array(items) => Some(items.iter().collect()),
+        Value::Object(map)
+            if !map.is_empty()
+                && map.iter().all(|(key, value)| {
+                    !key.is_empty() && key.chars().all(|c| c.is_ascii_digit()) && value.is_object()
+                }) =>
+        {
+            Some(map.values().collect())
         }
+        _ => None,
     }
-    all
+}
+
+/// The public hostnames of a service's applications
+/// (`/services/{uuid}/applications` items); `None` when the answer is not
+/// a list.
+pub(crate) fn service_fqdns(applications: &Value) -> Option<Vec<String>> {
+    let mut all = Vec::new();
+    for item in items_of(applications)? {
+        push_unique(&mut all, fqdns_of(item.get("fqdn").and_then(Value::as_str)));
+    }
+    Some(all)
 }
 
 /// A database. Reads no passwords, URLs, init scripts, or backup configs.

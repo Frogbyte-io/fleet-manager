@@ -70,7 +70,7 @@ pub const DEPLOYMENTS_PER_APP: u32 = 5;
 /// The longest `Retry-After` reported, in seconds.
 const MAX_RETRY_AFTER: u64 = 3600;
 /// The warning recorded when the token can read sensitive values.
-pub const SENSITIVE_TOKEN_WARNING: &str = "the token can read sensitive values (read:sensitive); Fleet drops them at the boundary, but use a read-only token";
+pub const SENSITIVE_TOKEN_WARNING: &str = "the answers carried fields a read-only token should not receive (for example deployment logs or database passwords); Fleet drops them at the boundary, but use a read-only token";
 
 /// The bounds of one run; [`Limits::default`] is what production uses.
 #[derive(Clone, Copy, Debug)]
@@ -296,18 +296,14 @@ enum Body {
     Json(Value),
 }
 
-/// The items of a list answer. Coolify (Laravel) usually answers an array,
-/// but a sorted collection serializes as an object keyed by the original
-/// positions (`{"1":{...},"0":{...}}`), so an object whose values are all
-/// objects or arrays is read as its values. Any other shape is `None`.
-fn items_of(value: &Value) -> Option<Vec<&Value>> {
-    match value {
-        Value::Array(items) => Some(items.iter().collect()),
-        Value::Object(map) if map.values().all(|v| v.is_object() || v.is_array()) => {
-            Some(map.values().collect())
-        }
-        _ => None,
-    }
+use translate::items_of;
+
+/// The deployments of a per-application answer: the `deployments` member of
+/// the `{count, deployments}` wrapper, or the answer itself.
+fn deployment_items(value: &Value) -> Option<Vec<&Value>> {
+    value
+        .get("deployments")
+        .map_or_else(|| items_of(value), items_of)
 }
 
 impl<'a> Run<'a> {
@@ -426,7 +422,9 @@ impl<'a> Run<'a> {
         let text = String::from_utf8_lossy(&buffer).into_owned();
         if !(200..300).contains(&status) {
             let error = classify_error(status, &text);
-            if error.kind == FailureKind::NotFound {
+            // Only the router's catch-all 404 means the route family does
+            // not exist; "Project not found." is about one resource.
+            if error.kind == FailureKind::NotFound && is_catch_all_not_found(&text) {
                 self.state().missing.insert(route.kind());
             }
             return Err(error);
@@ -479,9 +477,7 @@ impl<'a> Run<'a> {
     /// `read:sensitive` token (deployment logs, database passwords and
     /// connection URLs).
     fn scan_for_sensitive(&self, route: Route<'_>, value: &Value) {
-        let items = value
-            .get("deployments")
-            .and_then(items_of)
+        let items = deployment_items(value)
             .or_else(|| items_of(value))
             .unwrap_or_default();
         let sensitive = match route {
@@ -614,7 +610,14 @@ impl<'a> Run<'a> {
                 continue;
             }
             match self.json(Route::ServiceApplications(&service.uuid)).await {
-                Ok(value) => service.fqdns = translate::service_fqdns(&value),
+                Ok(value) => {
+                    if let Some(fqdns) = translate::service_fqdns(&value) {
+                        service.fqdns = fqdns;
+                    } else {
+                        service.details_stale = true;
+                        failed.push(FailureKind::InvalidResponse);
+                    }
+                }
                 Err(reason) => {
                     service.details_stale = true;
                     failed.push(reason.kind);
@@ -675,17 +678,16 @@ impl<'a> Run<'a> {
         for app in apps.iter().take(MAX_DEPLOYMENT_APPS) {
             match self.json(Route::ApplicationDeployments(&app.uuid)).await {
                 Ok(value) => {
-                    any_ok = true;
-                    let items = value
-                        .get("deployments")
-                        .and_then(items_of)
-                        .or_else(|| items_of(&value))
-                        .unwrap_or_default();
-                    all.extend(
-                        items
-                            .into_iter()
-                            .filter_map(|item| translate::deployment(item, Some(&app.uuid))),
-                    );
+                    if let Some(items) = deployment_items(&value) {
+                        any_ok = true;
+                        all.extend(
+                            items
+                                .into_iter()
+                                .filter_map(|item| translate::deployment(item, Some(&app.uuid))),
+                        );
+                    } else {
+                        app_failures.push(FailureKind::InvalidResponse);
+                    }
                 }
                 Err(reason) => app_failures.push(reason.kind),
             }
@@ -717,6 +719,15 @@ impl<'a> Run<'a> {
         all.truncate(MAX_ITEMS_PER_CLASS);
         finish(all, reasons)
     }
+}
+
+/// Whether a 404 body is Laravel's route catch-all (`{"message":"Not
+/// found."}`), as opposed to a resource-specific message.
+fn is_catch_all_not_found(body: &str) -> bool {
+    message_of(body)
+        .trim()
+        .trim_end_matches('.')
+        .eq_ignore_ascii_case("not found")
 }
 
 fn rate_limited(after: u64) -> ClassFailure {

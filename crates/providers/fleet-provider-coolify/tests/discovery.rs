@@ -759,14 +759,25 @@ fn every_committed_fixture_directory_is_clean() {
 }
 
 #[tokio::test]
-async fn every_committed_fixture_directory_discovers_without_a_failed_class() {
+async fn committed_fixture_directories_discover_without_failure_and_the_synthetic_ones_completely()
+{
     for entry in std::fs::read_dir(fixtures_root()).expect("fixtures") {
         let path = entry.expect("entry").path();
         let name = path.file_name().unwrap().to_str().unwrap().to_owned();
         let (base, _) = stub(dir_routes(&path)).await;
         let found = discover(&base, TOKEN).await;
         assert!(found.version.is_some(), "{name}");
+        // No class failed (`items` panics on a failed class).
         rendered(&found);
+        // The synthetic sets serve every route, so nothing is partial.
+        if name.starts_with("v4.4.6") {
+            assert_complete(&found.servers, &name);
+            assert_complete(&found.projects, &name);
+            assert_complete(&found.applications, &name);
+            assert_complete(&found.services, &name);
+            assert_complete(&found.databases, &name);
+            assert_complete(&found.deployments, &name);
+        }
     }
 }
 
@@ -840,4 +851,94 @@ async fn capture_records_scrubbed_fixtures_the_contract_tests_can_read() {
         "the expanded projects carry their environments"
     );
     assert!(!items(&found.deployments).is_empty());
+}
+
+#[tokio::test]
+async fn only_the_catch_all_404_makes_a_route_family_missing() {
+    // A resource-specific 404 ("Project not found.") says nothing about the
+    // route: the next project still gets its environments.
+    let mut routes = fixture_routes("v4.4.6");
+    routes.insert(
+        "/api/v1/projects/prjshop0000000000001/environments".to_owned(),
+        (
+            404,
+            String::new(),
+            r#"{"message":"Project not found."}"#.to_owned(),
+        ),
+    );
+    let (base, seen) = stub(routes).await;
+    let found = discover(&base, TOKEN).await;
+    let ClassResult::Partial(projects, reasons) = &found.projects else {
+        panic!("projects should be partial");
+    };
+    assert!(projects[0].details_stale && projects[0].environments.is_empty());
+    assert!(!projects[1].details_stale);
+    assert_eq!(projects[1].environments.len(), 1);
+    assert_eq!(reasons[0].kind, FailureKind::NotFound);
+    let asked = seen
+        .lock()
+        .expect("log")
+        .iter()
+        .filter(|line| line.contains("/environments"))
+        .count();
+    assert_eq!(asked, 2);
+}
+
+#[tokio::test]
+async fn only_integer_keyed_objects_of_objects_are_lists() {
+    for (body, valid) in [
+        (r#"{"1":{"uuid":"srv1"},"0":{"uuid":"srv2"}}"#, true),
+        (r#"[{"uuid":"srv1"}]"#, true),
+        (r"[]", true),
+        (r"{}", false),
+        (r#"{"data":[{"uuid":"srv1"}]}"#, false),
+        (r#"{"error":{"message":"x"}}"#, false),
+        (r#"{"1":[{"uuid":"srv1"}]}"#, false),
+        (r#"{"a":{"uuid":"srv1"}}"#, false),
+    ] {
+        let mut routes = fixture_routes("v4.4.6");
+        routes.insert(
+            "/api/v1/servers".to_owned(),
+            (200, String::new(), body.to_owned()),
+        );
+        let (base, _) = stub(routes).await;
+        let found = discover(&base, TOKEN).await;
+        match (&found.servers, valid) {
+            (ClassResult::Failed(failure), false) => {
+                assert_eq!(failure.kind, FailureKind::InvalidResponse, "{body}");
+            }
+            (ClassResult::Complete(_) | ClassResult::Partial(..), true) => {}
+            (other, _) => panic!("{body}: unexpected {other:?}"),
+        }
+    }
+}
+
+#[tokio::test]
+async fn an_object_shaped_service_answer_is_read_and_a_bad_shape_marks_the_item_stale() {
+    let mut routes = fixture_routes("v4.4.6");
+    routes.insert(
+        "/api/v1/services/svcplausible000000001/applications".to_owned(),
+        (
+            200,
+            String::new(),
+            r#"{"0":{"fqdn":"https://obj.example.test"}}"#.to_owned(),
+        ),
+    );
+    routes.insert(
+        "/api/v1/services/svcminio0000000000002/applications".to_owned(),
+        (
+            200,
+            String::new(),
+            r#"{"data":[{"fqdn":"https://hidden.example.test"}]}"#.to_owned(),
+        ),
+    );
+    let (base, _) = stub(routes).await;
+    let found = discover(&base, TOKEN).await;
+    let ClassResult::Partial(services, reasons) = &found.services else {
+        panic!("services should be partial");
+    };
+    assert_eq!(services[0].fqdns, ["https://obj.example.test"]);
+    assert!(!services[0].details_stale);
+    assert!(services[1].fqdns.is_empty() && services[1].details_stale);
+    assert_eq!(reasons[0].kind, FailureKind::InvalidResponse);
 }

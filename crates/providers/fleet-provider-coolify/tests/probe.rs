@@ -200,3 +200,10 @@ async fn pretty_printed_json_bodies_classify_the_same() {
     let report = fleet_provider_coolify::probe(&base, TOKEN).await;
     assert_eq!(report.status, ProbeStatus::InsufficientPermission);
 }
+
+#[tokio::test]
+async fn a_plain_http_base_url_off_loopback_is_refused_without_a_request() {
+    let report = fleet_provider_coolify::probe("http://coolify.example.test", TOKEN).await;
+    assert_eq!(report.status, ProbeStatus::Unreachable, "{report:?}");
+    assert!(report.detail.contains("https"), "{report:?}");
+}

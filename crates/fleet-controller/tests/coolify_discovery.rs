@@ -310,3 +310,41 @@ async fn an_unwired_discovery_surface_answers_503() {
         assert_eq!(status, 503, "{path}: {body}");
     }
 }
+
+#[tokio::test]
+async fn a_legacy_http_account_reports_the_policy_violation_and_is_neither_probed_nor_discovered() {
+    let rig = rig(true).await;
+    let address = rig.address;
+    // An account stored before the https rule.
+    sqlx::query(
+        "INSERT INTO external_accounts (id, kind, label, base_url, scope_id, notes, last_probe, created_at, updated_at) \
+         VALUES ('legacy-1', 'coolify', 'legacy', 'http://coolify.example.test', '', '', NULL, 1, 1)",
+    )
+    .execute(rig.store.pool())
+    .await
+    .unwrap();
+    let (status, body) = raw(address, "GET", "/api/v1/external-accounts/legacy-1", None).await;
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(body["data"]["policyViolation"], "https_required");
+    for path in ["coolify/discover", "probe"] {
+        let (status, body) = raw(
+            address,
+            "POST",
+            &format!("/api/v1/external-accounts/legacy-1/{path}"),
+            None,
+        )
+        .await;
+        assert_eq!(status, 400, "{path}: {body}");
+        assert!(body.to_string().contains("https"), "{body}");
+    }
+    // A healthy account has none.
+    let ok = create_account(address, "coolify", "http://127.0.0.1:9").await;
+    let (_, body) = raw(
+        address,
+        "GET",
+        &format!("/api/v1/external-accounts/{ok}"),
+        None,
+    )
+    .await;
+    assert!(body["data"]["policyViolation"].is_null(), "{body}");
+}

@@ -315,6 +315,15 @@ pub(crate) fn render(value: &Value) -> String {
             clean(account["notes"].as_str().unwrap_or(""))
         ),
     ];
+    if let Some(policy) = account
+        .get("policyViolation")
+        .and_then(serde_json::Value::as_str)
+    {
+        lines.push(format!(
+            "  policy: {} (the token is not sent until the base URL is edited to https with a new token)",
+            clean(policy)
+        ));
+    }
     if let Some(probe) = account.get("lastProbe").filter(|probe| !probe.is_null()) {
         lines.push(format!(
             "  probe: {} ({})",

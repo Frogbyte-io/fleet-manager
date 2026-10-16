@@ -35,10 +35,11 @@ use serde::{Deserialize, Serialize};
 use crate::audit::{AuditIntent, AuditMetadata};
 use crate::authz::{AccessRequest, ActingPrincipal, Authorizer, Decision, Permission, authorize};
 use crate::external_accounts::{
-    ExternalAccount, ExternalAccountError, ExternalAccountPort, ExternalCredentialStore,
+    AccountLocks, ExternalAccount, ExternalAccountError, ExternalAccountPort,
+    ExternalCredentialStore,
 };
 use crate::operation::AuditPort;
-use fleet_core::{ExternalProviderKind, SensitiveString, SystemClock, base_url_is_loopback};
+use fleet_core::{ExternalProviderKind, SensitiveString, SystemClock};
 
 /// How long a successful class observation stays fresh.
 pub const OBSERVATION_STALE_AFTER_MS: i64 = 15 * 60 * 1000;
@@ -703,6 +704,28 @@ impl CoolifyDiscovery {
         Ok(account)
     }
 
+    /// Reads the endpoint and the token together under the account lock, so
+    /// they always belong to the same state of the account.
+    async fn resolve(&self, id: &str) -> Result<(ExternalAccount, String), ExternalAccountError> {
+        let _account_lock = AccountLocks::global().lock(id).await;
+        let account = self.coolify_account(id).await?;
+        if account.policy_violation().is_some() {
+            return Err(ExternalAccountError::Invalid {
+                detail: "a Coolify base URL must use https (a loopback address is allowed); edit the account to use https"
+                    .to_owned(),
+            });
+        }
+        let token = self
+            .credentials
+            .load(id)
+            .await
+            .map_err(ExternalAccountError::Credentials)?
+            .ok_or_else(|| ExternalAccountError::NoSecret {
+                account: account.label.clone(),
+            })?;
+        Ok((account, token))
+    }
+
     /// Runs discovery for one account and records the folded snapshot.
     ///
     /// An unreachable or refusing Coolify is not an error: every class
@@ -724,21 +747,7 @@ impl CoolifyDiscovery {
             Permission::ExternalAccountConfig,
             Some(id),
         )?;
-        let account = self.coolify_account(id).await?;
-        if account.base_url.starts_with("http://") && !base_url_is_loopback(&account.base_url) {
-            return Err(ExternalAccountError::Invalid {
-                detail: "a Coolify base URL must use https (a loopback address is allowed); update the account"
-                    .to_owned(),
-            });
-        }
-        let token = self
-            .credentials
-            .load(id)
-            .await
-            .map_err(ExternalAccountError::Credentials)?
-            .ok_or_else(|| ExternalAccountError::NoSecret {
-                account: account.label.clone(),
-            })?;
+        let (account, token) = self.resolve(id).await?;
         self.audit(
             principal,
             id,
