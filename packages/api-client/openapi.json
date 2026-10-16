@@ -9843,6 +9843,206 @@
         }
       }
     },
+    "/api/v1/services/{serviceId}/actions/{verb}": {
+      "post": {
+        "tags": [
+          "services"
+        ],
+        "summary": "Files a lifecycle action (`start`, `stop`, `restart`, or `redeploy`) on a\nCoolify service as a brokered action request. `restart`, `redeploy`, and\n`start` run at once; `stop` waits for a person to approve it. The\nresource must be in the account's latest Coolify observation. The answer\nis the action request; follow it at `/requests/{id}` and its operation at\n`/operations/{id}`, whose result records the status observed after the\ncall.",
+        "description": "# Errors\n\nReturns the public error envelope on refusal, an unknown service or verb,\nor a broker refusal.",
+        "operationId": "requestServiceAction",
+        "parameters": [
+          {
+            "name": "serviceId",
+            "in": "path",
+            "description": "A Coolify service id, `coolify:<account>:<uuid>`, as the list returns it.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "verb",
+            "in": "path",
+            "description": "start, stop, restart, or redeploy (applications only).",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ServiceActionBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "description": "The action request was recorded; its state shows what policy did.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Resource_ActionRequestDto"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The service id, the verb, or a field is invalid.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The caller may not do this, or policy denies the action.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such resource in the account's latest observation.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The idempotency key was already used for a different request.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The surface is not wired.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/services/{serviceId}/logs": {
+      "get": {
+        "tags": [
+          "services"
+        ],
+        "summary": "Tails the log of a Coolify application's deployment, bounded in lines\nand bytes and redacted before it is returned; it is never stored.\nCoolify returns deployment logs only to a token with the `read:sensitive`\nability, so an account whose token lacks it answers 403 with\n`provider_permission`. Needs `external_account.config` on the account.",
+        "description": "# Errors\n\nReturns the public error envelope on refusal, a service that is not a\nknown application, or a provider failure.",
+        "operationId": "getServiceLogs",
+        "parameters": [
+          {
+            "name": "serviceId",
+            "in": "path",
+            "description": "A Coolify application id, `coolify:<account>:<uuid>`.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "deployment",
+            "in": "query",
+            "description": "A deployment uuid; the newest deployment when absent.",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          {
+            "name": "lines",
+            "in": "query",
+            "description": "How many trailing lines to return (default 200, at most 1000).",
+            "required": false,
+            "schema": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "minimum": 0
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The redacted log tail.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Resource_ServiceLogsDto"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The service is not an application or a parameter is invalid.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The caller may not read logs (`denied`), or the Coolify token lacks read:sensitive (`provider_permission`).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such service, or it has no deployment.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The surface is not wired.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/skills/catalog": {
       "get": {
         "tags": [
@@ -23619,6 +23819,51 @@
           }
         }
       },
+      "Resource_ServiceLogsDto": {
+        "type": "object",
+        "description": "A single resource.\n\nThe payload is nested under `data` so that later top-level fields are an\nadditive change rather than a breaking one.",
+        "required": [
+          "data"
+        ],
+        "properties": {
+          "data": {
+            "type": "object",
+            "description": "A deployment log tail: bounded, redacted, never stored.",
+            "required": [
+              "deploymentUuid",
+              "deploymentStatus",
+              "lines",
+              "truncated",
+              "redacted"
+            ],
+            "properties": {
+              "deploymentStatus": {
+                "type": "string",
+                "description": "Coolify's deployment status."
+              },
+              "deploymentUuid": {
+                "type": "string",
+                "description": "The deployment the lines belong to."
+              },
+              "lines": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                },
+                "description": "The log lines, oldest first, after redaction."
+              },
+              "redacted": {
+                "type": "boolean",
+                "description": "Whether redaction changed any line."
+              },
+              "truncated": {
+                "type": "boolean",
+                "description": "Whether earlier lines were cut to fit the bounds."
+              }
+            }
+          }
+        }
+      },
       "Resource_SkillsSnapshotDto": {
         "type": "object",
         "description": "A single resource.\n\nThe payload is nested under `data` so that later top-level fields are an\nadditive change rather than a breaking one.",
@@ -24090,6 +24335,23 @@
           }
         }
       },
+      "ServiceActionBody": {
+        "type": "object",
+        "description": "What to say when filing a lifecycle action on a service.",
+        "properties": {
+          "idempotencyKey": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "A key making a retry return the request already made (scoped to the\ncaller)."
+          },
+          "reason": {
+            "type": "string",
+            "description": "Why, for the approver (at most 1000 characters)."
+          }
+        }
+      },
       "ServiceContainerDto": {
         "type": "object",
         "description": "A container of a service.",
@@ -24238,6 +24500,42 @@
           "service": {
             "$ref": "#/components/schemas/RunningServiceDto",
             "description": "The service."
+          }
+        }
+      },
+      "ServiceLogsDto": {
+        "type": "object",
+        "description": "A deployment log tail: bounded, redacted, never stored.",
+        "required": [
+          "deploymentUuid",
+          "deploymentStatus",
+          "lines",
+          "truncated",
+          "redacted"
+        ],
+        "properties": {
+          "deploymentStatus": {
+            "type": "string",
+            "description": "Coolify's deployment status."
+          },
+          "deploymentUuid": {
+            "type": "string",
+            "description": "The deployment the lines belong to."
+          },
+          "lines": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "The log lines, oldest first, after redaction."
+          },
+          "redacted": {
+            "type": "boolean",
+            "description": "Whether redaction changed any line."
+          },
+          "truncated": {
+            "type": "boolean",
+            "description": "Whether earlier lines were cut to fit the bounds."
           }
         }
       },
