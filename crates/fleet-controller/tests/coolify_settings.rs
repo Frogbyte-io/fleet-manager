@@ -371,6 +371,15 @@ struct Rig {
 
 impl Rig {
     async fn new() -> Self {
+        Self::build(false).await
+    }
+
+    /// A rig whose held-value store refuses to bind a record to a request.
+    async fn with_unbindable_holds() -> Self {
+        Self::build(true).await
+    }
+
+    async fn build(unbindable: bool) -> Self {
         let mut state = Coolify {
             version: "4.4.6".to_owned(),
             fqdn: "https://shop.example.test".to_owned(),
@@ -443,11 +452,24 @@ impl Rig {
             store.pool(),
             secrets.clone(),
         );
-        services.coolify_settings = Some(fleet_controller::coolify_exec::compose_coolify_settings(
-            store.pool(),
-            secrets.clone(),
-            lifecycle.clone(),
-        ));
+        services.coolify_settings = Some(if unbindable {
+            Arc::new(CoolifySettings::new(
+                lifecycle.clone(),
+                Arc::new(fleet_provider_coolify::CoolifyHttpSettings),
+                Arc::new(UnbindableHolds(
+                    fleet_controller::coolify_exec::SecretBackedHeldValues::new(secrets.clone()),
+                )),
+                Arc::new(fleet_storage_sqlite::ActionRequestRepository::new(
+                    store.pool().clone(),
+                )),
+            ))
+        } else {
+            fleet_controller::coolify_exec::compose_coolify_settings(
+                store.pool(),
+                secrets.clone(),
+                lifecycle.clone(),
+            )
+        });
         services.coolify_lifecycle = Some(lifecycle);
         // The executor under test: the same composition, no wait.
         let executor_lifecycle = Arc::new(
@@ -652,6 +674,34 @@ impl Rig {
         for secret in [TOKEN, SECRET, SECRET_TWO] {
             assert!(!text.contains(secret), "a secret reached stored state");
         }
+    }
+}
+
+/// A held-value store whose write fails once a record names its request
+/// (the second write of a filing).
+#[derive(Debug)]
+struct UnbindableHolds(fleet_controller::coolify_exec::SecretBackedHeldValues);
+
+#[async_trait::async_trait]
+impl fleet_application::coolify::settings::HeldValueStore for UnbindableHolds {
+    async fn put(
+        &self,
+        hold_id: &str,
+        document: &fleet_core::SensitiveString,
+    ) -> Result<(), String> {
+        if document.expose().contains("\"requestId\":\"") {
+            return Err("the secret store is down".to_owned());
+        }
+        self.0.put(hold_id, document).await
+    }
+    async fn get(&self, hold_id: &str) -> Result<Option<fleet_core::SensitiveString>, String> {
+        self.0.get(hold_id).await
+    }
+    async fn discard(&self, hold_id: &str) -> Result<(), String> {
+        self.0.discard(hold_id).await
+    }
+    async fn list(&self) -> Result<Vec<String>, String> {
+        self.0.list().await
     }
 }
 
@@ -1404,4 +1454,23 @@ async fn an_unsupported_coolify_version_is_refused_before_any_write() {
     assert_eq!(status, 422, "{answer}");
     assert_eq!(rig.held_records().await, 0);
     assert!(rig.requests_to("").iter().all(|l| l.starts_with("GET")));
+}
+
+#[tokio::test]
+async fn a_request_whose_hold_cannot_be_bound_is_withdrawn_at_once_and_its_hold_deleted() {
+    let rig = Rig::with_unbindable_holds().await;
+    let (status, answer) = rig
+        .post(APP, "env", json!({"changes": [env_set("API_URL", SECRET)]}))
+        .await;
+    assert_eq!(status, 500, "{answer}");
+    // No orphan: the request exists only as failed, and the hold is gone.
+    let (_, list) = raw(rig.address, "GET", "/api/v1/requests?limit=10", None).await;
+    let items = list["items"].as_array().unwrap();
+    assert_eq!(items.len(), 1, "{list}");
+    assert_eq!(items[0]["state"], "denied");
+    assert_eq!(items[0]["decidedBy"], "system:action-broker");
+    assert_eq!(items[0]["decisionNote"], "hold could not be bound");
+    assert_eq!(rig.held_records().await, 0);
+    assert!(rig.requests_to("").iter().all(|l| l.starts_with("GET")));
+    rig.assert_nothing_stored().await;
 }

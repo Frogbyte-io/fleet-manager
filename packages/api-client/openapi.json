@@ -10224,7 +10224,7 @@
         "tags": [
           "services"
         ],
-        "summary": "Files a request to set or unset environment variables of a Coolify\napplication or service. The values are write-only: each is moved into\nthe encrypted secret store and the request records only key names,\nflags, and a digest per value, so the approver sees names and never a\nvalue. The held values are deleted after execution, denial, or expiry.\nThe change is an `approve`-class action request; the answer is that\nrequest. A secret-shaped value never appears in any response.",
+        "summary": "Files a request to set or unset environment variables of a Coolify\napplication or service. The values are write-only: each is moved into\nthe encrypted secret store and the request records only key names\nand flags, so the approver sees names and never a\nvalue. The held values are deleted after execution, denial, or expiry.\nThe change is an `approve`-class action request; the answer is that\nrequest. A secret-shaped value never appears in any response.",
         "description": "# Errors\n\nReturns the public error envelope on refusal, invalid input, an unknown\nresource, or a broker refusal.",
         "operationId": "requestServiceEnvChange",
         "parameters": [

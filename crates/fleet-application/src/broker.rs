@@ -1235,6 +1235,51 @@ impl Broker {
         }
     }
 
+    /// Withdraws a pending request the caller made but cannot carry out (for
+    /// example a provider action whose side state could not be stored): a
+    /// system denial with the reason as its note, audited, so no orphan
+    /// request waits for a person. Losing the compare-and-set returns the
+    /// current request.
+    ///
+    /// # Errors
+    ///
+    /// Fails on a backend failure.
+    pub async fn abandon(
+        &self,
+        request: &ActionRequest,
+        reason: &str,
+        now: i64,
+    ) -> Result<ActionRequest, BrokerError> {
+        let note = fleet_core::scrub_failure_detail(reason);
+        let update = TransitionUpdate {
+            from: ActionRequestState::Pending,
+            to: ActionRequestState::Denied,
+            decided_by: Some(SYSTEM_ACTOR.to_owned()),
+            decision_note: Some(note),
+            operation_id: None,
+            failure: None,
+            at: now,
+            require_unexpired: false,
+        };
+        let audit = audit_intent(
+            SYSTEM_ACTOR,
+            Permission::ActionDeny.id(),
+            request,
+            Some(ActionRequestState::Pending),
+            ActionRequestState::Denied,
+            &[],
+        )?;
+        match self
+            .requests
+            .transition(&request.id, &update, &audit)
+            .await
+            .map_err(backend("action requests"))?
+        {
+            Some(updated) => Ok(updated),
+            None => self.load(&request.id).await,
+        }
+    }
+
     async fn fail(
         &self,
         request: &ActionRequest,

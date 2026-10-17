@@ -19324,8 +19324,8 @@ export const getRequestServiceEnvChangeUrl = (serviceId: string,) => {
  * resource, or a broker refusal.
  * @summary Files a request to set or unset environment variables of a Coolify
 application or service. The values are write-only: each is moved into
-the encrypted secret store and the request records only key names,
-flags, and a digest per value, so the approver sees names and never a
+the encrypted secret store and the request records only key names
+and flags, so the approver sees names and never a
 value. The held values are deleted after execution, denial, or expiry.
 The change is an `approve`-class action request; the answer is that
 request. A secret-shaped value never appears in any response.

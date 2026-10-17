@@ -1734,8 +1734,19 @@ impl CoolifySettings {
                         // Bind the record to the request the broker made. A
                         // record that cannot be bound is refused at
                         // execution, so a failure here is reported.
-                        self.store_held(hold_id, &binding, Some(request.id.clone()), held)
-                            .await?;
+                        if let Err(error) = self
+                            .store_held(hold_id, &binding, Some(request.id.clone()), held)
+                            .await
+                        {
+                            // No orphan: the request cannot run without its
+                            // values, so it is withdrawn now (a system denial, audited) and the
+                            // hold deleted.
+                            let _ = broker
+                                .abandon(&request, "hold could not be bound", now)
+                                .await;
+                            let _ = self.holds.discard(hold_id).await;
+                            return Err(error);
+                        }
                     } else {
                         // A concurrent retry won: that request holds its own
                         // record, so ours is not needed.
@@ -2291,14 +2302,14 @@ impl CoolifySettings {
         }
         let mut changed = Vec::new();
         let partial = |changed: &Vec<String>, message: &str| SettingsFailure {
-            message: message.to_owned(),
+            message: fleet_core::scrub_failure_detail(message),
             partial: Some(Box::new(SettingsOutcome {
                 setting: Setting::Env.id().to_owned(),
                 outcome: "partial".to_owned(),
                 changed: changed.clone(),
                 verified: false,
                 follow_up: None,
-                error: Some(message.to_owned()),
+                error: Some(fleet_core::scrub_failure_detail(message)),
             })),
         };
         for (index, (change, now_env)) in params.changes.iter().zip(plan).enumerate() {
@@ -2588,7 +2599,9 @@ impl CoolifySettings {
             .run_verb(base, token, resource, uuid, verb)
             .await
         {
-            Err(failure) => follow.error = Some(failure.to_string()),
+            Err(failure) => {
+                follow.error = Some(fleet_core::scrub_failure_detail(&failure.to_string()));
+            }
             Ok(ack) if verb == LifecycleVerb::Redeploy && ack.deployment_uuid.is_none() => {
                 follow.error = Some("Coolify did not queue a deployment".to_owned());
             }
@@ -2680,7 +2693,9 @@ fn conclude(outcome: SettingsOutcome) -> Result<SettingsOutcome, SettingsFailure
     match failed {
         None => Ok(outcome),
         Some((verb, error)) => Err(SettingsFailure {
-            message: format!("the change was applied but the {verb} failed: {error}"),
+            message: fleet_core::scrub_failure_detail(&format!(
+                "the change was applied but the {verb} failed: {error}"
+            )),
             partial: Some(Box::new(outcome)),
         }),
     }

@@ -266,7 +266,7 @@ impl OperationExecutor for CoolifySettingsExecutor {
                     .map_err(|_| "the outcome could not be recorded".to_owned())?;
                 let error = serde_json::json!({
                     "reason": "settings_partial",
-                    "detail": failure.message,
+                    "detail": fleet_core::scrub_failure_detail(&failure.message),
                 })
                 .to_string();
                 return operations

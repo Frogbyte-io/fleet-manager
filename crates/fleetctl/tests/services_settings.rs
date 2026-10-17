@@ -131,7 +131,7 @@ fn request(state: &str, operation_id: Option<&str>) -> String {
             "accountId": "acc1", "resourceKind": "application", "uuid": "appweb0001",
             "name": "web", "redeploy": true,
             "preview": [{"key": "API_URL", "isPreview": false, "operation": "create",
-                "changes": [{"field": "value", "from": null, "to": "(write-only, digest ab12cd34ef56)"}]}]
+                "changes": [{"field": "value", "from": null, "to": "(write-only)"}]}]
         },
         "riskClass": "approve", "reason": "test", "state": state,
         "terminal": !matches!(state, "pending" | "approved" | "executing"),

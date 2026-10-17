@@ -315,10 +315,14 @@ pub(crate) fn parse(rest: &[&str], output: &mut Output) -> Result<SettingsAction
                 health.start_period = Some(number("start-period", &value("start-period")?)?);
             }
             other if other.starts_with("--") => {
-                // Only the flag's name: a mistyped `--value=secret` must not
-                // be echoed back.
-                let name = other.split('=').next().unwrap_or(other);
-                return Err(bad(format!("unknown flag {name:?}")));
+                // A mistyped `--value=secret` must not be echoed back: only
+                // the leading lower-case letters and dashes, at most 32.
+                let name: String = other
+                    .chars()
+                    .take_while(|c| c.is_ascii_lowercase() || *c == '-')
+                    .take(32)
+                    .collect();
+                return Err(bad(format!("unknown flag {name}")));
             }
             other => positional.push(other.to_owned()),
         }
@@ -1137,7 +1141,7 @@ mod tests {
             "parameters": {"redeploy": true, "preview": [
                 {"key": "API_URL", "isPreview": false, "operation": "update",
                  "changes": [{"field": "isLiteral", "from": false, "to": true},
-                             {"field": "value", "from": "(write-only)", "to": "(write-only, digest ab12)"}]},
+                             {"field": "value", "from": "(write-only)", "to": "(write-only)"}]},
                 {"key": "OLD", "isPreview": true, "operation": "delete", "changes": []}
             ]}
         }});
