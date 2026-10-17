@@ -1,15 +1,19 @@
-import { useQueries, useQuery } from '@tanstack/vue-query'
+import { useMutation, useQueries, useQuery, useQueryClient } from '@tanstack/vue-query'
 import { computed, ref, toValue, type MaybeRefOrGetter } from 'vue'
 
 import {
+  deleteImageSecret,
   getImageBuild,
   listImageBuilds,
   listImageRecipes,
   listImageRecipeVersions,
+  listImageSecrets,
   listLabLeases,
   listLabTemplates,
   listOperations,
+  setImageSecret,
   type ImageBuildDto,
+  type ImageSecretDto,
   type LabTemplateDto,
   type LeaseDto,
   type OperationDto,
@@ -140,5 +144,50 @@ export function useBuildRecord(buildId: MaybeRefOrGetter<string | null>, enabled
     enabled: computed(() => !!toValue(buildId) && toValue(enabled)),
     retry: retryTransient,
     refetchInterval: q => (q.state.data && buildRunning(q.state.data) ? LIVE_REFRESH_MS : false),
+  })
+}
+
+/** The `images/<name>` build secret names. Values are never readable. */
+export const IMAGE_SECRETS_KEY = ['images', 'secrets'] as const
+
+export function useImageSecrets() {
+  return useQuery({
+    queryKey: IMAGE_SECRETS_KEY,
+    queryFn: async () => items<ImageSecretDto>(await listImageSecrets()).items,
+    retry: retryTransient,
+  })
+}
+
+/**
+ * Writes one build secret. The value is a secret, so it is never a mutation
+ * variable (those live in the TanStack mutation cache): the call is a
+ * closure, the mutation is not kept (`gcTime: 0`), and it is reset as soon
+ * as the call settles.
+ */
+export function useSetImageSecret() {
+  const queryClient = useQueryClient()
+  const mutation = useMutation({
+    mutationFn: async (send: () => Promise<{ status: number, data: unknown }>) => unwrap<ImageSecretDto>(await send()),
+    gcTime: 0,
+    onSettled: () => queryClient.invalidateQueries({ queryKey: IMAGE_SECRETS_KEY }),
+  })
+  return {
+    isPending: mutation.isPending,
+    async save(name: string, value: string): Promise<ImageSecretDto> {
+      try {
+        return await mutation.mutateAsync(() => setImageSecret({ name, value }))
+      }
+      finally {
+        mutation.reset()
+      }
+    },
+  }
+}
+
+export function useDeleteImageSecret() {
+  const queryClient = useQueryClient()
+  return useMutation({
+    mutationFn: async (name: string) => unwrap<ImageSecretDto>(await deleteImageSecret(name)),
+    onSettled: () => queryClient.invalidateQueries({ queryKey: IMAGE_SECRETS_KEY }),
   })
 }

@@ -2691,6 +2691,36 @@ fn parsing_walks_the_promotion_forms() {
 }
 
 #[test]
+fn image_secret_commands_take_names_only_never_values() {
+    let parse = |words: &[&str]| {
+        let args: Vec<String> = words.iter().map(ToString::to_string).collect();
+        fleetctl::parse(&args).map(|parsed| parsed.command)
+    };
+    assert!(matches!(
+        parse(&["images", "secret", "list"]).unwrap(),
+        fleetctl::Command::ImagesSecretList
+    ));
+    assert!(matches!(
+        parse(&["images", "secret", "set", "iso-pass"]).unwrap(),
+        fleetctl::Command::ImagesSecretSet { name } if name == "iso-pass"
+    ));
+    // The optional namespace prefix is folded into the short name.
+    assert!(matches!(
+        parse(&["images", "secret", "rm", "images/iso-pass"]).unwrap(),
+        fleetctl::Command::ImagesSecretRemove { name } if name == "iso-pass"
+    ));
+    // A value is never an argument: a second positional is refused, so a
+    // secret cannot reach argv or shell history.
+    assert!(parse(&["images", "secret", "set", "iso-pass", "hunter2"]).is_err());
+    assert!(parse(&["images", "secret", "set"]).is_err());
+    // The name is a path segment, so free text is refused.
+    for bad in ["../x", "a/b", "proxmox/acct", ".hidden", "a b", ""] {
+        assert!(parse(&["images", "secret", "set", bad]).is_err(), "{bad}");
+        assert!(parse(&["images", "secret", "rm", bad]).is_err(), "{bad}");
+    }
+}
+
+#[test]
 fn parsing_walks_the_build_address_forms() {
     let parse = |words: &[&str]| {
         let args: Vec<String> = words.iter().map(ToString::to_string).collect();

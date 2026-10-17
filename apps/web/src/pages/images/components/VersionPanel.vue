@@ -54,7 +54,16 @@ watch(() => props.version.id, () => {
   concurrentAcknowledged.value = false
 })
 
-const varsValid = computed(() => secretVars.value.every(v => /^[A-Za-z_][\w-]*$/.test(v.name.trim()) && v.reference.trim() !== ''))
+// A build reads only `images/<name>` records, by name (the controller refuses the rest).
+const SECRET_NAME = /^images\/[\w-][\w.-]*$/
+const varsValid = computed(() => secretVars.value.every(v => /^[A-Za-z_][\w-]*$/.test(v.name.trim()) && SECRET_NAME.test(v.reference.trim())))
+
+/** Scrolls to the build secrets section further down the page. */
+function showSecrets() {
+  const section = document.getElementById('image-secrets')
+  section?.scrollIntoView({ block: 'start' })
+  section?.focus({ preventScroll: true })
+}
 const timeoutSeconds = computed(() => Math.min(MAX_TIMEOUT, Math.max(60, Math.round(timeoutMinutes.value * 60))))
 // fleetctl sends exactly this request only without secret variables and
 // with its fixed 4h deadline.
@@ -189,7 +198,15 @@ const structured = computed(() => props.version.structured ?? null)
         Build
       </h4>
       <p class="text-fc-muted">
-        Runs <span class="font-mono">packer validate</span>, then <span class="font-mono">packer build</span>, with the operator-installed CLI on the controller. Secret variables are passed by secret reference; their values never reach this page, argv, logs, or audit.
+        Runs <span class="font-mono">packer validate</span>, then <span class="font-mono">packer build</span>, with the operator-installed CLI on the controller. Secret variables name a build secret record (<span class="font-mono">images/…</span>); their values never reach this page, argv, logs, or audit.
+        <button
+          type="button"
+          class="text-fc-info hover:text-fc-ink"
+          data-testid="manage-secrets"
+          @click="showSecrets"
+        >
+          Manage build secrets ↓
+        </button>
       </p>
       <div
         v-for="(item, index) in secretVars"
@@ -205,8 +222,8 @@ const structured = computed(() => props.version.structured ?? null)
         <span class="text-fc-faint">←</span>
         <input
           v-model="item.reference"
-          placeholder="secret reference id"
-          aria-label="Secret reference id"
+          placeholder="secret name (images/…)"
+          aria-label="Secret name (images/…)"
           class="h-8 w-56 rounded-sm border border-input bg-background px-2 font-mono text-foreground"
         >
         <button

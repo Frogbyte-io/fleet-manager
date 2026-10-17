@@ -2539,6 +2539,167 @@ async fn build_addresses_list_and_clear_are_authorized_and_additive() {
 }
 
 #[tokio::test]
+#[allow(clippy::too_many_lines, clippy::items_after_statements)]
+async fn image_secrets_are_write_only_namespaced_authorized_and_audited_by_name() {
+    use fleet_application::authz::{AccessRequest, Permission};
+    #[derive(Debug)]
+    struct ReadOnly;
+    impl fleet_application::authz::Authorizer for ReadOnly {
+        fn decide(&self, request: AccessRequest<'_>) -> Decision {
+            if request.action == Permission::ImagesConfig {
+                Decision::deny(ReasonId::UnknownPrincipal)
+            } else {
+                Decision::allow()
+            }
+        }
+    }
+    #[derive(Debug, Default)]
+    struct MemorySecrets(std::sync::Mutex<std::collections::BTreeMap<String, String>>);
+    #[async_trait]
+    impl fleet_application::images::ImageSecretPort for MemorySecrets {
+        async fn list(&self) -> Result<Vec<String>, String> {
+            Ok(self.0.lock().unwrap().keys().cloned().collect())
+        }
+        async fn set(
+            &self,
+            reference: &str,
+            value: &fleet_core::SensitiveString,
+        ) -> Result<bool, String> {
+            Ok(self
+                .0
+                .lock()
+                .unwrap()
+                .insert(reference.to_owned(), value.expose().to_owned())
+                .is_some())
+        }
+        async fn delete(&self, reference: &str) -> Result<bool, String> {
+            Ok(self.0.lock().unwrap().remove(reference).is_some())
+        }
+    }
+    #[derive(Debug, Default)]
+    struct RecordingAudit(std::sync::Mutex<Vec<String>>);
+    #[async_trait]
+    impl AuditPort for RecordingAudit {
+        async fn record_intent(&self, intent: &AuditIntent) -> Result<(), String> {
+            self.0.lock().unwrap().push(format!("{intent:?}"));
+            Ok(())
+        }
+        async fn record_outcome(
+            &self,
+            _operation_id: &str,
+            _outcome: AuditOutcome,
+        ) -> Result<(), String> {
+            Ok(())
+        }
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let store = fleet_storage_sqlite::Store::open(&dir.path().join("fleet.db"))
+        .await
+        .unwrap();
+    let secrets = Arc::new(MemorySecrets::default());
+    let audit = Arc::new(RecordingAudit::default());
+    let build = |authorizer: Arc<dyn fleet_application::authz::Authorizer>| {
+        let mut state = (*test_state().0).clone();
+        state.authorizer = authorizer;
+        state.images = Some(Arc::new(
+            fleet_application::images::Images::new(
+                Arc::new(fleet_storage_sqlite::RecipeRepository::new(
+                    store.pool().clone(),
+                )),
+                audit.clone(),
+            )
+            .with_secrets(secrets.clone()),
+        ));
+        principal_router(Arc::new(state))
+    };
+    let permit = build(Arc::new(PermitAllAuthorizer));
+    let read_only = build(Arc::new(ReadOnly));
+    let request = |method: &str, path: &str, body: Option<serde_json::Value>| {
+        let builder = Request::builder()
+            .method(method)
+            .uri(format!("{API_BASE_PATH}{path}"))
+            .header("content-type", "application/json");
+        builder
+            .body(body.map_or_else(Body::empty, |body| {
+                Body::from(serde_json::to_vec(&body).unwrap())
+            }))
+            .unwrap()
+    };
+    const VALUE: &str = "s3cr3t-value-do-not-echo";
+
+    // Writing needs images.config; reading names does not.
+    let (parts, body) = call_via(
+        &read_only,
+        request(
+            "POST",
+            "/images/secrets",
+            Some(serde_json::json!({"name": "iso-pass", "value": VALUE})),
+        ),
+    )
+    .await;
+    assert_eq!(parts.status, StatusCode::FORBIDDEN, "{body}");
+    assert!(secrets.0.lock().unwrap().is_empty());
+
+    // Namespace and value are validated before any write.
+    for bad in [
+        serde_json::json!({"name": "proxmox/acct", "value": VALUE}),
+        serde_json::json!({"name": "../x", "value": VALUE}),
+        serde_json::json!({"name": "", "value": VALUE}),
+        serde_json::json!({"name": "ok", "value": "  "}),
+    ] {
+        let (parts, body) = call_via(&permit, request("POST", "/images/secrets", Some(bad))).await;
+        assert_eq!(parts.status, StatusCode::BAD_REQUEST, "{body}");
+        assert!(!body.to_string().contains(VALUE));
+    }
+    assert!(secrets.0.lock().unwrap().is_empty());
+
+    let set = |name: &str| {
+        request(
+            "POST",
+            "/images/secrets",
+            Some(serde_json::json!({"name": name, "value": VALUE})),
+        )
+    };
+    let (parts, body) = call_via(&permit, set("iso-pass")).await;
+    assert_eq!(parts.status, StatusCode::OK, "{body}");
+    assert_eq!(body["data"]["reference"], "images/iso-pass");
+    assert_eq!(body["data"]["replaced"], false);
+    assert!(!body.to_string().contains(VALUE));
+    let (_, body) = call_via(&permit, set("images/iso-pass")).await;
+    assert_eq!(body["data"]["replaced"], true, "{body}");
+
+    let (parts, body) = call_via(&read_only, get(&format!("{API_BASE_PATH}/images/secrets"))).await;
+    assert_eq!(parts.status, StatusCode::OK);
+    assert_eq!(body["items"][0]["reference"], "images/iso-pass");
+    assert!(!body.to_string().contains(VALUE));
+
+    let (parts, body) = call_via(
+        &read_only,
+        request("DELETE", "/images/secrets/iso-pass", None),
+    )
+    .await;
+    assert_eq!(parts.status, StatusCode::FORBIDDEN, "{body}");
+    let (parts, body) = call_via(&permit, request("DELETE", "/images/secrets/nope", None)).await;
+    assert_eq!(parts.status, StatusCode::NOT_FOUND, "{body}");
+    let (parts, body) =
+        call_via(&permit, request("DELETE", "/images/secrets/iso-pass", None)).await;
+    assert_eq!(parts.status, StatusCode::OK, "{body}");
+    assert!(secrets.0.lock().unwrap().is_empty());
+
+    // The audit trail names records and never carries the value.
+    let events = audit.0.lock().unwrap().join("\n");
+    assert!(events.contains("image_secret_set"), "{events}");
+    assert!(events.contains("image_secret_deleted"), "{events}");
+    assert!(events.contains("images/iso-pass"), "{events}");
+    assert!(!events.contains(VALUE), "{events}");
+
+    let value = serde_json::to_value(fleet_api::openapi()).unwrap();
+    assert!(value["paths"]["/api/v1/images/secrets"]["get"].is_object());
+    assert!(value["paths"]["/api/v1/images/secrets"]["post"].is_object());
+    assert!(value["paths"]["/api/v1/images/secrets/{name}"]["delete"].is_object());
+}
+
+#[tokio::test]
 async fn an_unknown_recipe_source_is_a_json_400_not_a_panic() {
     let dir = tempfile::tempdir().unwrap();
     let store = fleet_storage_sqlite::Store::open(&dir.path().join("fleet.db"))

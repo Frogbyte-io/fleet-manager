@@ -1061,18 +1061,24 @@ fn run_serve(mut config: fleet_config::ControllerConfig) -> ExitCode {
             std::sync::Arc::new(fleet_storage_sqlite::RecipeRepository::new(
                 store.pool().clone(),
             ));
-        let images = std::sync::Arc::new(
-            fleet_application::images::Images::new(
-                recipe_versions.clone(),
-                std::sync::Arc::new(fleet_storage_sqlite::AuditSink::new(store.pool().clone())),
-            )
-            .with_build_addresses(
-                std::sync::Arc::new(fleet_storage_sqlite::BuildAddressRepository::new(
-                    store.pool().clone(),
-                )),
-                config.image_build_address_pool.is_some(),
-            ),
+        let mut images = fleet_application::images::Images::new(
+            recipe_versions.clone(),
+            std::sync::Arc::new(fleet_storage_sqlite::AuditSink::new(store.pool().clone())),
+        )
+        .with_build_addresses(
+            std::sync::Arc::new(fleet_storage_sqlite::BuildAddressRepository::new(
+                store.pool().clone(),
+            )),
+            config.image_build_address_pool.is_some(),
         );
+        // The `images/<name>` build secrets live in the encrypted store;
+        // without one the surface lists nothing and refuses writes (#520).
+        if let Some(secrets) = &secrets {
+            images = images.with_secrets(std::sync::Arc::new(
+                fleet_controller::image_secrets::SecretBackedImageSecrets::new(secrets.clone()),
+            ));
+        }
+        let images = std::sync::Arc::new(images);
         // The Lab surface composes over the store and the image pin
         // validator: a template cannot pin an unpromoted image version.
         // Lease creation validates an explicit project against the same

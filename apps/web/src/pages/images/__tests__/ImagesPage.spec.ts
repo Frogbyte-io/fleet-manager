@@ -19,6 +19,9 @@ const promoteImageVersion = vi.fn()
 const getOperation = vi.fn()
 const listImageBuilds = vi.fn()
 const getImageBuild = vi.fn()
+const listImageSecrets = vi.fn()
+const setImageSecret = vi.fn()
+const deleteImageSecret = vi.fn()
 
 vi.mock('@frogbyte-io/fleet-api-client', () => ({
   listImageRecipes: (...args: unknown[]) => listImageRecipes(...args),
@@ -34,6 +37,9 @@ vi.mock('@frogbyte-io/fleet-api-client', () => ({
   getOperation: (...args: unknown[]) => getOperation(...args),
   listImageBuilds: (...args: unknown[]) => listImageBuilds(...args),
   getImageBuild: (...args: unknown[]) => getImageBuild(...args),
+  listImageSecrets: (...args: unknown[]) => listImageSecrets(...args),
+  setImageSecret: (...args: unknown[]) => setImageSecret(...args),
+  deleteImageSecret: (...args: unknown[]) => deleteImageSecret(...args),
   cancelOperation: vi.fn(),
 }))
 
@@ -91,7 +97,7 @@ enableAutoUnmount(afterEach)
 
 beforeEach(() => {
   sessionStorage.clear()
-  for (const mock of [listImageRecipes, listImageRecipeVersions, listLabTemplates, listLabLeases, listOperations, createImageRecipe, updateImageRecipe, publishImageRecipe, startImageBuild, promoteImageVersion, getOperation, listImageBuilds, getImageBuild])
+  for (const mock of [listImageRecipes, listImageRecipeVersions, listLabTemplates, listLabLeases, listOperations, createImageRecipe, updateImageRecipe, publishImageRecipe, startImageBuild, promoteImageVersion, getOperation, listImageBuilds, getImageBuild, listImageSecrets, setImageSecret, deleteImageSecret])
     mock.mockReset()
   operations = []
   listImageRecipes.mockResolvedValue(ok(page([recipe()])))
@@ -101,6 +107,7 @@ beforeEach(() => {
   listOperations.mockImplementation(async () => ok(page(operations)))
   getOperation.mockImplementation(async (id: string) => ok({ data: operations.find(o => o.id === id) }))
   listImageBuilds.mockResolvedValue(ok(page([])))
+  listImageSecrets.mockResolvedValue(ok(page([{ reference: 'images/iso-pass' }])))
   getImageBuild.mockResolvedValue({ status: 404, data: { code: 'not_found', message: 'no such build' }, headers: new Headers() })
 })
 
@@ -166,10 +173,10 @@ describe('e2e: edit → publish → build → promote', () => {
     })
     await wrapper.findAll('button').find(b => b.text() === '+ Secret variable')!.trigger('click')
     await wrapper.get('input[aria-label="Packer variable name"]').setValue('pve_token')
-    await wrapper.get('input[aria-label="Secret reference id"]').setValue('secret-ref-1')
+    await wrapper.get('input[aria-label="Secret name (images/…)"]').setValue('images/pve-token')
     await wrapper.get('[data-testid="build"]').trigger('click')
     await flushPromises()
-    expect(startImageBuild).toHaveBeenCalledWith({ versionId: 'r1@bbbb', timeoutSeconds: 14400, secretVars: [{ name: 'pve_token', reference: 'secret-ref-1' }] })
+    expect(startImageBuild).toHaveBeenCalledWith({ versionId: 'r1@bbbb', timeoutSeconds: 14400, secretVars: [{ name: 'pve_token', reference: 'images/pve-token' }] })
     expect(wrapper.get('[data-testid="version-r1@bbbb"]').text()).toContain('building')
 
     // The build succeeds with an artifact: the evidence appears and promotion unlocks.
@@ -207,10 +214,10 @@ describe('e2e: edit → publish → build → promote', () => {
     listImageRecipeVersions.mockResolvedValue(ok(page([version('r1@aaaa', 1), version('r1@bbbb', 2)])))
     const { wrapper, router } = await mountAt('/images?select=version:r1@aaaa')
     await wrapper.findAll('button').find(b => b.text() === '+ Secret variable')!.trigger('click')
-    await wrapper.get('input[aria-label="Secret reference id"]').setValue('secret-ref-1')
+    await wrapper.get('input[aria-label="Secret name (images/…)"]').setValue('images/pve-token')
     await router.replace({ query: { select: 'version:r1@bbbb' } })
     await flushPromises()
-    expect(wrapper.find('input[aria-label="Secret reference id"]').exists()).toBe(false)
+    expect(wrapper.find('input[aria-label="Secret name (images/…)"]').exists()).toBe(false)
   })
 
   it('asks before building while a build started elsewhere is running', async () => {
@@ -251,5 +258,50 @@ describe('e2e: edit → publish → build → promote', () => {
     const { wrapper } = await mountAt('/images?select=recipe:r1')
     expect(wrapper.get('[data-testid="raw-only"]').text()).toContain('not JSON')
     expect(wrapper.get('[data-testid="raw-only"]').text()).not.toMatch(/hcl/i)
+  })
+})
+
+describe('build secrets', () => {
+  it('lists names only and writes a value through a closure that the mutation cache never holds', async () => {
+    const { wrapper, queryClient } = await mountAt('/images')
+    const section = wrapper.get('[data-testid="image-secrets"]')
+    expect(section.get('[data-testid="secrets-list"]').text()).toContain('images/iso-pass')
+
+    setImageSecret.mockResolvedValue(ok({ data: { reference: 'images/pve-token', replaced: false } }))
+    const value = section.get('[data-testid="secret-value"]')
+    expect((value.element as HTMLInputElement).type).toBe('password')
+    expect((value.element as HTMLInputElement).value).toBe('')
+    await section.get('[data-testid="secret-name"]').setValue('images/pve-token')
+    await value.setValue('hunter2-fixture')
+    await section.get('form').trigger('submit')
+    await flushPromises()
+
+    expect(setImageSecret).toHaveBeenCalledWith({ name: 'pve-token', value: 'hunter2-fixture' })
+    expect(section.get('[data-testid="secret-saved"]').text()).toContain('images/pve-token created')
+    // The value left the input, and no mutation (or its variables) was kept.
+    expect((section.get('[data-testid="secret-value"]').element as HTMLInputElement).value).toBe('')
+    expect(JSON.stringify(queryClient.getMutationCache().getAll().map(m => m.state))).not.toContain('hunter2-fixture')
+    expect(wrapper.html()).not.toContain('hunter2-fixture')
+  })
+
+  it('refuses a name outside the namespace charset and deletes after a confirmation', async () => {
+    const { wrapper } = await mountAt('/images')
+    const section = wrapper.get('[data-testid="image-secrets"]')
+    await section.get('[data-testid="secret-name"]').setValue('proxmox/acct')
+    await section.get('[data-testid="secret-value"]').setValue('x')
+    expect(section.get('[data-testid="secret-save"]').attributes('disabled')).toBeDefined()
+
+    deleteImageSecret.mockResolvedValue(ok({ data: { reference: 'images/iso-pass' } }))
+    await section.get('button[aria-label="Delete images/iso-pass"]').trigger('click')
+    expect(deleteImageSecret).not.toHaveBeenCalled()
+    await section.get('[data-testid="secret-confirm-images/iso-pass"]').trigger('click')
+    await flushPromises()
+    expect(deleteImageSecret).toHaveBeenCalledWith('iso-pass')
+  })
+
+  it('shows the empty state', async () => {
+    listImageSecrets.mockResolvedValue(ok(page([])))
+    const { wrapper } = await mountAt('/images')
+    expect(wrapper.get('[data-testid="secrets-empty"]').text()).toContain('No build secrets yet')
   })
 })

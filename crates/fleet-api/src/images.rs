@@ -938,6 +938,163 @@ pub async fn clear_image_build_address(
     })))
 }
 
+/// The set-secret request. The value is write-only: it is never echoed,
+/// logged, audited, or readable afterwards.
+#[derive(Deserialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct SetImageSecretRequest {
+    /// The record name, without the `images/` prefix (`images/<name>` is
+    /// accepted too). Letters, digits, `.`, `_`, `-`.
+    pub name: String,
+    /// The secret value (write-only).
+    pub value: String,
+}
+
+impl std::fmt::Debug for SetImageSecretRequest {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SetImageSecretRequest")
+            .field("name", &self.name)
+            .field("value", &"[REDACTED]")
+            .finish()
+    }
+}
+
+/// One image build secret record: its name only.
+#[derive(Clone, Debug, Serialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct ImageSecretDto {
+    /// The record name (`images/<name>`): what a build's secret variable
+    /// references.
+    pub reference: String,
+    /// Whether the write replaced an existing record's value. Absent when
+    /// listing.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub replaced: Option<bool>,
+}
+
+/// Lists the names of the `images/<name>` build secrets. Values are never
+/// returned.
+///
+/// # Errors
+///
+/// Returns the public error envelope on refusal or backend failure.
+#[utoipa::path(
+    get,
+    path = "/images/secrets",
+    tag = "images",
+    operation_id = "listImageSecrets",
+    responses(
+        (status = 200, description = "The complete list of secret names, by name. Not paginated: `page.limit` is the item count and `page.nextCursor` is always null.", body = Page<ImageSecretDto>),
+        (status = 403, description = "The caller may not read the image surface.", body = crate::error::ApiError),
+    )
+)]
+pub async fn list_image_secrets(
+    State(state): State<Arc<crate::operations::ApiState>>,
+    principal: Option<Extension<crate::ActingPrincipal>>,
+    Extension(correlation_id): Extension<CorrelationId>,
+) -> Result<Json<Page<ImageSecretDto>>, ApiErrorResponse> {
+    let images = images_or_error(&state, correlation_id)?;
+    let principal = crate::operations::principal_or_error(principal, correlation_id)?;
+    let names = images
+        .list_secrets(state.authorizer.as_ref(), &principal)
+        .await
+        .map_err(|error| map_images_error(&error, correlation_id))?;
+    let items: Vec<ImageSecretDto> = names
+        .into_iter()
+        .map(|reference| ImageSecretDto {
+            reference,
+            replaced: None,
+        })
+        .collect();
+    let limit = u32::try_from(items.len()).unwrap_or(u32::MAX);
+    Ok(Json(Page {
+        page: PageInfo {
+            next_cursor: None,
+            limit,
+        },
+        items,
+    }))
+}
+
+/// Creates or replaces one `images/<name>` build secret. The value is
+/// write-only; the answer carries the record name only.
+///
+/// # Errors
+///
+/// Returns the public error envelope on refusal, a malformed name or
+/// value, or backend failure.
+#[utoipa::path(
+    post,
+    path = "/images/secrets",
+    tag = "images",
+    operation_id = "setImageSecret",
+    request_body = SetImageSecretRequest,
+    responses(
+        (status = 200, description = "The secret was stored; `replaced` says whether it overwrote an existing value.", body = Resource<ImageSecretDto>),
+        (status = 400, description = "The name or value is malformed.", body = crate::error::ApiError),
+        (status = 403, description = "The caller may not configure the image surface.", body = crate::error::ApiError),
+    )
+)]
+pub async fn set_image_secret(
+    State(state): State<Arc<crate::operations::ApiState>>,
+    principal: Option<Extension<crate::ActingPrincipal>>,
+    Extension(correlation_id): Extension<CorrelationId>,
+    Json(request): Json<SetImageSecretRequest>,
+) -> Result<Json<Resource<ImageSecretDto>>, ApiErrorResponse> {
+    let images = images_or_error(&state, correlation_id)?;
+    let principal = crate::operations::principal_or_error(principal, correlation_id)?;
+    let written = images
+        .set_secret(
+            state.authorizer.as_ref(),
+            &principal,
+            &request.name,
+            &fleet_core::SensitiveString::new(request.value),
+        )
+        .await
+        .map_err(|error| map_images_error(&error, correlation_id))?;
+    Ok(Json(Resource::new(ImageSecretDto {
+        reference: written.reference,
+        replaced: Some(written.replaced),
+    })))
+}
+
+/// Deletes one `images/<name>` build secret.
+///
+/// # Errors
+///
+/// Returns the public error envelope on refusal, a malformed name, or an
+/// unknown secret.
+#[utoipa::path(
+    delete,
+    path = "/images/secrets/{name}",
+    tag = "images",
+    operation_id = "deleteImageSecret",
+    params(("name" = String, Path, description = "The record name without the `images/` prefix.")),
+    responses(
+        (status = 200, description = "The secret was deleted.", body = Resource<ImageSecretDto>),
+        (status = 400, description = "The name is malformed.", body = crate::error::ApiError),
+        (status = 403, description = "The caller may not configure the image surface.", body = crate::error::ApiError),
+        (status = 404, description = "No such secret.", body = crate::error::ApiError),
+    )
+)]
+pub async fn delete_image_secret(
+    State(state): State<Arc<crate::operations::ApiState>>,
+    principal: Option<Extension<crate::ActingPrincipal>>,
+    Extension(correlation_id): Extension<CorrelationId>,
+    Path(name): Path<String>,
+) -> Result<Json<Resource<ImageSecretDto>>, ApiErrorResponse> {
+    let images = images_or_error(&state, correlation_id)?;
+    let principal = crate::operations::principal_or_error(principal, correlation_id)?;
+    let reference = images
+        .delete_secret(state.authorizer.as_ref(), &principal, &name)
+        .await
+        .map_err(|error| map_images_error(&error, correlation_id))?;
+    Ok(Json(Resource::new(ImageSecretDto {
+        reference,
+        replaced: None,
+    })))
+}
+
 /// Reads one published version with its structured view.
 ///
 /// # Errors

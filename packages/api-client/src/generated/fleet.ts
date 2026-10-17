@@ -2607,6 +2607,23 @@ export interface ImageBuildDto {
 }
 
 /**
+ * One image build secret record: its name only.
+ */
+export interface ImageSecretDto {
+  /**
+     * The record name (`images/<name>`): what a build's secret variable
+     * references.
+     */
+  reference: string;
+  /**
+     * Whether the write replaced an existing record's value. Absent when
+     * listing.
+     * @nullable
+     */
+  replaced?: boolean | null;
+}
+
+/**
  * The import request: the SSH login user and port for the draft.
  */
 export interface ImportTailnetDeviceRequest {
@@ -3991,6 +4008,36 @@ export type PageImageBuildDtoItemsItem = {
 export interface PageImageBuildDto {
   /** The items on this page, in the endpoint's documented order. */
   items: PageImageBuildDtoItemsItem[];
+  /** Where this page sits in the result set. */
+  page: PageInfo;
+}
+
+/**
+ * One image build secret record: its name only.
+ */
+export type PageImageSecretDtoItemsItem = {
+  /**
+     * The record name (`images/<name>`): what a build's secret variable
+     * references.
+     */
+  reference: string;
+  /**
+     * Whether the write replaced an existing record's value. Absent when
+     * listing.
+     * @nullable
+     */
+  replaced?: boolean | null;
+};
+
+/**
+ * A page of resources.
+ *
+ * The concrete schema for a list endpoint appears when that endpoint does;
+ * [`PageInfo`] is the part of the shape that is fixed for every one of them.
+ */
+export interface PageImageSecretDto {
+  /** The items on this page, in the endpoint's documented order. */
+  items: PageImageSecretDtoItemsItem[];
   /** Where this page sits in the result set. */
   page: PageInfo;
 }
@@ -6497,6 +6544,34 @@ export interface ResourceImageBuildDto {
 }
 
 /**
+ * One image build secret record: its name only.
+ */
+export type ResourceImageSecretDtoData = {
+  /**
+     * The record name (`images/<name>`): what a build's secret variable
+     * references.
+     */
+  reference: string;
+  /**
+     * Whether the write replaced an existing record's value. Absent when
+     * listing.
+     * @nullable
+     */
+  replaced?: boolean | null;
+};
+
+/**
+ * A single resource.
+ *
+ * The payload is nested under `data` so that later top-level fields are an
+ * additive change rather than a breaking one.
+ */
+export interface ResourceImageSecretDto {
+  /** One image build secret record: its name only. */
+  data: ResourceImageSecretDtoData;
+}
+
+/**
  * A freshly issued credential: its metadata and the token, shown once.
  */
 export type ResourceIssuedCredentialDtoData = CredentialDto & {
@@ -8506,6 +8581,20 @@ export interface ServicesPage {
   items: RunningServiceDto[];
   /** Where this page sits in the result set. */
   page: PageInfo;
+}
+
+/**
+ * The set-secret request. The value is write-only: it is never echoed,
+ * logged, audited, or readable afterwards.
+ */
+export interface SetImageSecretRequest {
+  /**
+     * The record name, without the `images/` prefix (`images/<name>` is
+     * accepted too). Letters, digits, `.`, `_`, `-`.
+     */
+  name: string;
+  /** The secret value (write-only). */
+  value: string;
 }
 
 /**
@@ -12161,6 +12250,190 @@ export const listImageRecipeVersions = async (recipeId: string, options?: Reques
 
   const data: listImageRecipeVersionsResponse['data'] = body ? JSON.parse(body) : {}
   return { data, status: res.status, headers: res.headers } as listImageRecipeVersionsResponse
+}
+
+
+
+export type listImageSecretsResponse200 = {
+  data: PageImageSecretDto
+  status: 200
+}
+
+export type listImageSecretsResponse403 = {
+  data: ApiError
+  status: 403
+}
+
+export type listImageSecretsResponseSuccess = (listImageSecretsResponse200) & {
+  headers: Headers;
+};
+export type listImageSecretsResponseError = (listImageSecretsResponse403) & {
+  headers: Headers;
+};
+
+export type listImageSecretsResponse = (listImageSecretsResponseSuccess | listImageSecretsResponseError)
+
+export const getListImageSecretsUrl = () => {
+
+
+
+
+  return `/api/v1/images/secrets`
+}
+
+/**
+ * # Errors
+ *
+ * Returns the public error envelope on refusal or backend failure.
+ * @summary Lists the names of the `images/<name>` build secrets. Values are never
+returned.
+ */
+export const listImageSecrets = async ( options?: RequestInit): Promise<listImageSecretsResponse> => {
+
+  const res = await fetch(getListImageSecretsUrl(),
+  {
+    ...options,
+    method: 'GET'
+
+
+  }
+)
+
+
+  const body = [204, 205, 304].includes(res.status) ? null : await res.text();
+
+  const data: listImageSecretsResponse['data'] = body ? JSON.parse(body) : {}
+  return { data, status: res.status, headers: res.headers } as listImageSecretsResponse
+}
+
+
+
+export type setImageSecretResponse200 = {
+  data: ResourceImageSecretDto
+  status: 200
+}
+
+export type setImageSecretResponse400 = {
+  data: ApiError
+  status: 400
+}
+
+export type setImageSecretResponse403 = {
+  data: ApiError
+  status: 403
+}
+
+export type setImageSecretResponseSuccess = (setImageSecretResponse200) & {
+  headers: Headers;
+};
+export type setImageSecretResponseError = (setImageSecretResponse400 | setImageSecretResponse403) & {
+  headers: Headers;
+};
+
+export type setImageSecretResponse = (setImageSecretResponseSuccess | setImageSecretResponseError)
+
+export const getSetImageSecretUrl = () => {
+
+
+
+
+  return `/api/v1/images/secrets`
+}
+
+/**
+ * # Errors
+ *
+ * Returns the public error envelope on refusal, a malformed name or
+ * value, or backend failure.
+ * @summary Creates or replaces one `images/<name>` build secret. The value is
+write-only; the answer carries the record name only.
+ */
+export const setImageSecret = async (setImageSecretRequest: SetImageSecretRequest, options?: RequestInit): Promise<setImageSecretResponse> => {
+
+    const getHeaders = (h?: NonNullable<RequestInit['headers']>): Record<string, string | readonly string[]> => {
+    if (!h) return {};
+    if (h instanceof Headers) return Object.fromEntries(h.entries());
+    if (Array.isArray(h)) return Object.fromEntries(h);
+    return h;
+  };
+const res = await fetch(getSetImageSecretUrl(),
+  {
+    ...options,
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...getHeaders(options?.headers) },
+    body: JSON.stringify(setImageSecretRequest)
+  }
+)
+
+
+  const body = [204, 205, 304].includes(res.status) ? null : await res.text();
+
+  const data: setImageSecretResponse['data'] = body ? JSON.parse(body) : {}
+  return { data, status: res.status, headers: res.headers } as setImageSecretResponse
+}
+
+
+
+export type deleteImageSecretResponse200 = {
+  data: ResourceImageSecretDto
+  status: 200
+}
+
+export type deleteImageSecretResponse400 = {
+  data: ApiError
+  status: 400
+}
+
+export type deleteImageSecretResponse403 = {
+  data: ApiError
+  status: 403
+}
+
+export type deleteImageSecretResponse404 = {
+  data: ApiError
+  status: 404
+}
+
+export type deleteImageSecretResponseSuccess = (deleteImageSecretResponse200) & {
+  headers: Headers;
+};
+export type deleteImageSecretResponseError = (deleteImageSecretResponse400 | deleteImageSecretResponse403 | deleteImageSecretResponse404) & {
+  headers: Headers;
+};
+
+export type deleteImageSecretResponse = (deleteImageSecretResponseSuccess | deleteImageSecretResponseError)
+
+export const getDeleteImageSecretUrl = (name: string,) => {
+
+
+
+
+  return `/api/v1/images/secrets/${name}`
+}
+
+/**
+ * # Errors
+ *
+ * Returns the public error envelope on refusal, a malformed name, or an
+ * unknown secret.
+ * @summary Deletes one `images/<name>` build secret.
+ */
+export const deleteImageSecret = async (name: string, options?: RequestInit): Promise<deleteImageSecretResponse> => {
+
+  const res = await fetch(getDeleteImageSecretUrl(name),
+  {
+    ...options,
+    method: 'DELETE'
+
+
+  }
+)
+
+
+  const body = [204, 205, 304].includes(res.status) ? null : await res.text();
+
+  const data: deleteImageSecretResponse['data'] = body ? JSON.parse(body) : {}
+  return { data, status: res.status, headers: res.headers } as deleteImageSecretResponse
 }
 
 

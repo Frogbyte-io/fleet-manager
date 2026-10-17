@@ -2640,6 +2640,151 @@
         }
       }
     },
+    "/api/v1/images/secrets": {
+      "get": {
+        "tags": [
+          "images"
+        ],
+        "summary": "Lists the names of the `images/<name>` build secrets. Values are never\nreturned.",
+        "description": "# Errors\n\nReturns the public error envelope on refusal or backend failure.",
+        "operationId": "listImageSecrets",
+        "responses": {
+          "200": {
+            "description": "The complete list of secret names, by name. Not paginated: `page.limit` is the item count and `page.nextCursor` is always null.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Page_ImageSecretDto"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The caller may not read the image surface.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "images"
+        ],
+        "summary": "Creates or replaces one `images/<name>` build secret. The value is\nwrite-only; the answer carries the record name only.",
+        "description": "# Errors\n\nReturns the public error envelope on refusal, a malformed name or\nvalue, or backend failure.",
+        "operationId": "setImageSecret",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SetImageSecretRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "The secret was stored; `replaced` says whether it overwrote an existing value.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Resource_ImageSecretDto"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The name or value is malformed.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The caller may not configure the image surface.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/images/secrets/{name}": {
+      "delete": {
+        "tags": [
+          "images"
+        ],
+        "summary": "Deletes one `images/<name>` build secret.",
+        "description": "# Errors\n\nReturns the public error envelope on refusal, a malformed name, or an\nunknown secret.",
+        "operationId": "deleteImageSecret",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "description": "The record name without the `images/` prefix.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The secret was deleted.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Resource_ImageSecretDto"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The name is malformed.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The caller may not configure the image surface.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such secret.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/images/versions/{versionId}": {
       "get": {
         "tags": [
@@ -15053,6 +15198,26 @@
           }
         }
       },
+      "ImageSecretDto": {
+        "type": "object",
+        "description": "One image build secret record: its name only.",
+        "required": [
+          "reference"
+        ],
+        "properties": {
+          "reference": {
+            "type": "string",
+            "description": "The record name (`images/<name>`): what a build's secret variable\nreferences."
+          },
+          "replaced": {
+            "type": [
+              "boolean",
+              "null"
+            ],
+            "description": "Whether the write replaced an existing record's value. Absent when\nlisting."
+          }
+        }
+      },
       "ImportTailnetDeviceRequest": {
         "type": "object",
         "description": "The import request: the SSH login user and port for the draft.",
@@ -17833,6 +17998,44 @@
                 "versionId": {
                   "type": "string",
                   "description": "Immutable version identity."
+                }
+              }
+            },
+            "description": "The items on this page, in the endpoint's documented order."
+          },
+          "page": {
+            "$ref": "#/components/schemas/PageInfo",
+            "description": "Where this page sits in the result set."
+          }
+        }
+      },
+      "Page_ImageSecretDto": {
+        "type": "object",
+        "description": "A page of resources.\n\nThe concrete schema for a list endpoint appears when that endpoint does;\n[`PageInfo`] is the part of the shape that is fixed for every one of them.",
+        "required": [
+          "items",
+          "page"
+        ],
+        "properties": {
+          "items": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "description": "One image build secret record: its name only.",
+              "required": [
+                "reference"
+              ],
+              "properties": {
+                "reference": {
+                  "type": "string",
+                  "description": "The record name (`images/<name>`): what a build's secret variable\nreferences."
+                },
+                "replaced": {
+                  "type": [
+                    "boolean",
+                    "null"
+                  ],
+                  "description": "Whether the write replaced an existing record's value. Absent when\nlisting."
                 }
               }
             },
@@ -22186,6 +22389,35 @@
           }
         }
       },
+      "Resource_ImageSecretDto": {
+        "type": "object",
+        "description": "A single resource.\n\nThe payload is nested under `data` so that later top-level fields are an\nadditive change rather than a breaking one.",
+        "required": [
+          "data"
+        ],
+        "properties": {
+          "data": {
+            "type": "object",
+            "description": "One image build secret record: its name only.",
+            "required": [
+              "reference"
+            ],
+            "properties": {
+              "reference": {
+                "type": "string",
+                "description": "The record name (`images/<name>`): what a build's secret variable\nreferences."
+              },
+              "replaced": {
+                "type": [
+                  "boolean",
+                  "null"
+                ],
+                "description": "Whether the write replaced an existing record's value. Absent when\nlisting."
+              }
+            }
+          }
+        }
+      },
       "Resource_IssuedCredentialDto": {
         "type": "object",
         "description": "A single resource.\n\nThe payload is nested under `data` so that later top-level fields are an\nadditive change rather than a breaking one.",
@@ -25634,6 +25866,24 @@
           "page": {
             "$ref": "#/components/schemas/PageInfo",
             "description": "Where this page sits in the result set."
+          }
+        }
+      },
+      "SetImageSecretRequest": {
+        "type": "object",
+        "description": "The set-secret request. The value is write-only: it is never echoed,\nlogged, audited, or readable afterwards.",
+        "required": [
+          "name",
+          "value"
+        ],
+        "properties": {
+          "name": {
+            "type": "string",
+            "description": "The record name, without the `images/` prefix (`images/<name>` is\naccepted too). Letters, digits, `.`, `_`, `-`."
+          },
+          "value": {
+            "type": "string",
+            "description": "The secret value (write-only)."
           }
         }
       },
