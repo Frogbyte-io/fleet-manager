@@ -638,7 +638,7 @@ export interface BuildAddressDto {
 export interface SecretVarDto {
   /** The Packer variable name. */
   name: string;
-  /** The secret reference id. */
+  /** The name of the secret record, which must be `images/<name>`. */
   reference: string;
 }
 

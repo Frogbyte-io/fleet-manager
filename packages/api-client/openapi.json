@@ -24764,7 +24764,7 @@
           },
           "reference": {
             "type": "string",
-            "description": "The secret reference id."
+            "description": "The name of the secret record, which must be `images/<name>`."
           }
         }
       },
