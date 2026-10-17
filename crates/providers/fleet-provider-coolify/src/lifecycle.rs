@@ -148,6 +148,54 @@ async fn send(
     route: Route<'_>,
     body_limit: usize,
 ) -> Result<String, LifecycleFailure> {
+    let Some(path) = route.path() else {
+        return Err(failure(
+            LifecycleFailureClass::Invalid,
+            "the identifier has an unexpected shape",
+        ));
+    };
+    send_request(
+        base_url,
+        token,
+        &Request {
+            method: route.method(),
+            path,
+            body: None,
+            timeout: request_timeout(route),
+            needs: "lifecycle actions need the deploy ability; reading deployment logs needs read:sensitive",
+            quiet: false,
+        },
+        body_limit,
+    )
+    .await
+}
+
+/// One request the shared sender carries.
+pub(crate) struct Request {
+    /// The HTTP method.
+    pub(crate) method: reqwest::Method,
+    /// The path and query below the base URL.
+    pub(crate) path: String,
+    /// A JSON body, already serialized. It may hold a secret value, so it is
+    /// never logged and never part of an error.
+    pub(crate) body: Option<String>,
+    /// The longest the call may take.
+    pub(crate) timeout: Duration,
+    /// What a missing-ability answer tells the operator the call needs.
+    pub(crate) needs: &'static str,
+    /// Whether an error carries only its status, never Coolify's own text
+    /// (a write that carried a secret value).
+    pub(crate) quiet: bool,
+}
+
+/// Sends one request: https only (loopback excepted), no redirects, bounded
+/// body, classified failures. Shared by the lifecycle and settings clients.
+pub(crate) async fn send_request(
+    base_url: &str,
+    token: &SensitiveString,
+    request: &Request,
+    body_limit: usize,
+) -> Result<String, LifecycleFailure> {
     // The bearer token never travels over plain http, except to a literal
     // loopback address (a local stub).
     if base_url.starts_with("http://") && !fleet_core::base_url_is_loopback(base_url) {
@@ -156,12 +204,6 @@ async fn send(
             "the base URL uses http; the token is only sent over https (edit the account to use https)",
         ));
     }
-    let Some(path) = route.path() else {
-        return Err(failure(
-            LifecycleFailureClass::Invalid,
-            "the identifier has an unexpected shape",
-        ));
-    };
     let client = reqwest::Client::builder()
         .timeout(REQUEST_TIMEOUT)
         .redirect(reqwest::redirect::Policy::none())
@@ -172,19 +214,25 @@ async fn send(
                 "the HTTP client could not start",
             )
         })?;
-    let mut response = client
-        .request(route.method(), format!("{base_url}{path}"))
+    let mut builder = client
+        .request(
+            request.method.clone(),
+            format!("{base_url}{}", request.path),
+        )
         .bearer_auth(token.expose())
         .header("Accept", "application/json")
-        .timeout(request_timeout(route))
-        .send()
-        .await
-        .map_err(|error| {
-            failure(
-                LifecycleFailureClass::Unavailable,
-                transport_category(&error),
-            )
-        })?;
+        .timeout(request.timeout);
+    if let Some(body) = &request.body {
+        builder = builder
+            .header("Content-Type", "application/json")
+            .body(body.clone());
+    }
+    let mut response = builder.send().await.map_err(|error| {
+        failure(
+            LifecycleFailureClass::Unavailable,
+            transport_category(&error),
+        )
+    })?;
     let status = response.status().as_u16();
     if (300..400).contains(&status) {
         let host = response
@@ -238,7 +286,7 @@ async fn send(
     if (200..300).contains(&status) {
         Ok(text)
     } else {
-        Err(classify_error(status, &text))
+        Err(classify_error(status, &text, request.needs, request.quiet))
     }
 }
 
@@ -250,22 +298,27 @@ fn request_timeout(route: Route<'_>) -> Duration {
     }
 }
 
-fn classify_error(status: u16, body: &str) -> LifecycleFailure {
-    let message = message_of(body);
+fn classify_error(status: u16, body: &str, needs: &str, quiet: bool) -> LifecycleFailure {
+    // A write that carried a secret value never echoes Coolify's text: a
+    // validation message could quote the input.
+    let said = message_of(body);
+    let missing_ability = said
+        .to_ascii_lowercase()
+        .contains("missing required permissions");
+    let message = if quiet {
+        "(detail withheld)".to_owned()
+    } else {
+        said
+    };
     match status {
         401 => failure(
             LifecycleFailureClass::Auth,
             "the token was refused (HTTP 401)",
         ),
-        403 if message
-            .to_ascii_lowercase()
-            .contains("missing required permissions") =>
-        {
-            failure(
-                LifecycleFailureClass::Permission,
-                "the token is valid but lacks the ability for this call (lifecycle actions need the deploy ability; reading deployment logs needs read:sensitive)",
-            )
-        }
+        403 if missing_ability => failure(
+            LifecycleFailureClass::Permission,
+            &format!("the token is valid but lacks the ability for this call ({needs})"),
+        ),
         403 => failure(
             LifecycleFailureClass::Auth,
             &format!("the request was refused (HTTP 403): {message}"),

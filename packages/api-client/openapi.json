@@ -10043,6 +10043,368 @@
         }
       }
     },
+    "/api/v1/services/{serviceId}/settings": {
+      "get": {
+        "tags": [
+          "services"
+        ],
+        "summary": "Reads a Coolify resource's settings: environment variable names and\nflags (never values), an application's domains, and its health check.\nNeeds `external_account.read`.",
+        "description": "# Errors\n\nReturns the public error envelope on refusal, an unknown service, an\nunsupported Coolify version, or a provider failure.",
+        "operationId": "getServiceSettings",
+        "parameters": [
+          {
+            "name": "serviceId",
+            "in": "path",
+            "description": "A Coolify service id, `coolify:<account>:<uuid>`.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The settings. Environment variable values are never included.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Resource_ServiceSettingsDto"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The service id is invalid.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The caller may not read accounts, or the Coolify token lacks the read ability.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such resource in the account's latest observation.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "The Coolify version is not supported.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The surface is not wired.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/services/{serviceId}/settings/domains": {
+      "post": {
+        "tags": [
+          "services"
+        ],
+        "summary": "Files a request to replace a Coolify application's domains, with a\npreview of the difference (`before`, `after`, and the changed fields).\nAn `approve`-class action request; stale at execution when the domains\nchanged in the meantime.",
+        "description": "# Errors\n\nReturns the public error envelope on refusal, invalid domains, an\nunknown or non-application resource, a Compose application, a change\nthat would do nothing, or a broker refusal.",
+        "operationId": "requestServiceDomainsChange",
+        "parameters": [
+          {
+            "name": "serviceId",
+            "in": "path",
+            "description": "A Coolify application id, `coolify:<account>:<uuid>`.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ServiceDomainsBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "description": "The action request was recorded; its parameters carry the preview.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Resource_ActionRequestDto"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The service id or a domain is invalid, the resource is not an application, or nothing would change.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The caller may not do this, or policy denies the action.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such resource in the account's latest observation.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The idempotency key was already used for a different request.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The surface is not wired.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/services/{serviceId}/settings/env": {
+      "post": {
+        "tags": [
+          "services"
+        ],
+        "summary": "Files a request to set or unset environment variables of a Coolify\napplication or service. The values are write-only: each is moved into\nthe encrypted secret store and the request records only key names,\nflags, and a digest per value, so the approver sees names and never a\nvalue. The held values are deleted after execution, denial, or expiry.\nThe change is an `approve`-class action request; the answer is that\nrequest. A secret-shaped value never appears in any response.",
+        "description": "# Errors\n\nReturns the public error envelope on refusal, invalid input, an unknown\nresource, or a broker refusal.",
+        "operationId": "requestServiceEnvChange",
+        "parameters": [
+          {
+            "name": "serviceId",
+            "in": "path",
+            "description": "A Coolify application or service id, `coolify:<account>:<uuid>`.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ServiceEnvBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "description": "The action request was recorded; its preview lists the variables and flags (values show as write-only).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Resource_ActionRequestDto"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The service id or a field is invalid, or the resource has no variables.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The caller may not do this, or policy denies the action.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such resource or variable.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The idempotency key was already used for a different request.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The surface is not wired.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/services/{serviceId}/settings/health": {
+      "post": {
+        "tags": [
+          "services"
+        ],
+        "summary": "Files a request to change a Coolify application's health check, with a\npreview of the difference. Only the named fields change. An\n`approve`-class action request.",
+        "description": "# Errors\n\nReturns the public error envelope on refusal, invalid fields, an unknown\nor non-application resource, a change that would do nothing, or a broker\nrefusal.",
+        "operationId": "requestServiceHealthChange",
+        "parameters": [
+          {
+            "name": "serviceId",
+            "in": "path",
+            "description": "A Coolify application id, `coolify:<account>:<uuid>`.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ServiceHealthBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "description": "The action request was recorded; its parameters carry the preview.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Resource_ActionRequestDto"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The service id or a field is invalid, the resource is not an application, or nothing would change.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The caller may not do this, or policy denies the action.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such resource in the account's latest observation.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The idempotency key was already used for a different request.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The surface is not wired.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/skills/catalog": {
       "get": {
         "tags": [
@@ -23864,6 +24226,77 @@
           }
         }
       },
+      "Resource_ServiceSettingsDto": {
+        "type": "object",
+        "description": "A single resource.\n\nThe payload is nested under `data` so that later top-level fields are an\nadditive change rather than a breaking one.",
+        "required": [
+          "data"
+        ],
+        "properties": {
+          "data": {
+            "type": "object",
+            "description": "A Coolify resource's settings as Fleet can show and change them.",
+            "required": [
+              "serviceId",
+              "resourceKind",
+              "name",
+              "notes"
+            ],
+            "properties": {
+              "domains": {
+                "type": [
+                  "array",
+                  "null"
+                ],
+                "items": {
+                  "type": "string"
+                },
+                "description": "The domains, when Fleet can change them for this resource."
+              },
+              "env": {
+                "type": [
+                  "array",
+                  "null"
+                ],
+                "items": {
+                  "$ref": "#/components/schemas/ServiceEnvVarDto"
+                },
+                "description": "The variables (keys and flags only), when the kind has them."
+              },
+              "health": {
+                "oneOf": [
+                  {
+                    "type": "null"
+                  },
+                  {
+                    "$ref": "#/components/schemas/ServiceHealthDto",
+                    "description": "The health check, when the kind has one."
+                  }
+                ]
+              },
+              "name": {
+                "type": "string",
+                "description": "The resource's name."
+              },
+              "notes": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                },
+                "description": "What Fleet cannot show or change here, and why."
+              },
+              "resourceKind": {
+                "type": "string",
+                "description": "`application`, `service`, or `database`."
+              },
+              "serviceId": {
+                "type": "string",
+                "description": "The running-service id."
+              }
+            }
+          }
+        }
+      },
       "Resource_SkillsSnapshotDto": {
         "type": "object",
         "description": "A single resource.\n\nThe payload is nested under `data` so that later top-level fields are an\nadditive change rather than a breaking one.",
@@ -24503,6 +24936,364 @@
           }
         }
       },
+      "ServiceDomainsBody": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/ServiceSettingsMeta",
+            "description": "The shared fields."
+          },
+          {
+            "type": "object",
+            "required": [
+              "domains"
+            ],
+            "properties": {
+              "domains": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                },
+                "description": "The complete new list of URLs (`https://shop.example.com`); an empty\nlist clears the domains."
+              }
+            }
+          }
+        ],
+        "description": "A request to replace an application's domains."
+      },
+      "ServiceEnvBody": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/ServiceSettingsMeta",
+            "description": "The shared fields."
+          },
+          {
+            "type": "object",
+            "required": [
+              "changes"
+            ],
+            "properties": {
+              "changes": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/components/schemas/ServiceEnvChangeBody"
+                },
+                "description": "The variables to change (one to eight)."
+              }
+            }
+          }
+        ],
+        "description": "A request to set or unset environment variables."
+      },
+      "ServiceEnvChangeBody": {
+        "type": "object",
+        "description": "One variable change.",
+        "required": [
+          "op",
+          "key"
+        ],
+        "properties": {
+          "isBuildtime": {
+            "type": [
+              "boolean",
+              "null"
+            ],
+            "description": "Build-time availability (applications; unset keeps the current one)."
+          },
+          "isLiteral": {
+            "type": [
+              "boolean",
+              "null"
+            ],
+            "description": "A literal value (unset keeps the current one)."
+          },
+          "isMultiline": {
+            "type": [
+              "boolean",
+              "null"
+            ],
+            "description": "A multiline value (unset keeps the current one)."
+          },
+          "isPreview": {
+            "type": "boolean",
+            "description": "Whether the change is to the preview-deployment variable."
+          },
+          "isRuntime": {
+            "type": [
+              "boolean",
+              "null"
+            ],
+            "description": "Runtime availability (applications; unset keeps the current one)."
+          },
+          "isShownOnce": {
+            "type": [
+              "boolean",
+              "null"
+            ],
+            "description": "Hide the value after saving (unset keeps the current one)."
+          },
+          "key": {
+            "type": "string",
+            "description": "The variable's name."
+          },
+          "op": {
+            "type": "string",
+            "description": "`set` or `unset`."
+          },
+          "value": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The new value (`set` only). It is write-only: it is moved into the\nencrypted secret store, never stored in the request, never audited,\nand never returned.",
+            "writeOnly": true
+          }
+        },
+        "additionalProperties": false
+      },
+      "ServiceEnvVarDto": {
+        "type": "object",
+        "description": "One environment variable of a service: its name and flags. There is no\nvalue field: Coolify hides values from Fleet's token and Fleet never\nasks for them.",
+        "required": [
+          "key",
+          "isPreview",
+          "isShared",
+          "isBuildtime",
+          "isRuntime",
+          "isMultiline",
+          "isLiteral",
+          "isShownOnce"
+        ],
+        "properties": {
+          "isBuildtime": {
+            "type": "boolean",
+            "description": "Available while building (applications)."
+          },
+          "isLiteral": {
+            "type": "boolean",
+            "description": "A literal value: nothing is escaped or expanded."
+          },
+          "isMultiline": {
+            "type": "boolean",
+            "description": "A multiline value."
+          },
+          "isPreview": {
+            "type": "boolean",
+            "description": "Whether it belongs to preview deployments."
+          },
+          "isRuntime": {
+            "type": "boolean",
+            "description": "Available at runtime (applications)."
+          },
+          "isShared": {
+            "type": "boolean",
+            "description": "Whether the value refers to a shared variable."
+          },
+          "isShownOnce": {
+            "type": "boolean",
+            "description": "Coolify hides the value after saving."
+          },
+          "key": {
+            "type": "string",
+            "description": "The variable's name."
+          }
+        }
+      },
+      "ServiceHealthBody": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/ServiceSettingsMeta",
+            "description": "The shared fields."
+          },
+          {
+            "type": "object",
+            "properties": {
+              "enabled": {
+                "type": [
+                  "boolean",
+                  "null"
+                ],
+                "description": "Turn the check on or off."
+              },
+              "host": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "description": "The host header."
+              },
+              "interval": {
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "int32",
+                "description": "Seconds between checks (1 to 3600).",
+                "minimum": 0
+              },
+              "method": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "description": "`GET`, `HEAD`, `POST`, or `OPTIONS`."
+              },
+              "path": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "description": "The request path, starting with `/`."
+              },
+              "port": {
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "int32",
+                "description": "The port (1 to 65535).",
+                "minimum": 0
+              },
+              "responseText": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "description": "Text the response must contain."
+              },
+              "retries": {
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "int32",
+                "description": "Failures before unhealthy (1 to 100).",
+                "minimum": 0
+              },
+              "returnCode": {
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "int32",
+                "description": "The healthy status code (100 to 599).",
+                "minimum": 0
+              },
+              "scheme": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "description": "`http` or `https`."
+              },
+              "startPeriod": {
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "int32",
+                "description": "Seconds before the first check (0 to 3600).",
+                "minimum": 0
+              },
+              "timeout": {
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "int32",
+                "description": "Seconds a check may take (1 to 3600).",
+                "minimum": 0
+              }
+            }
+          }
+        ],
+        "description": "A request to change an application's health check. Only the fields named\nchange."
+      },
+      "ServiceHealthDto": {
+        "type": "object",
+        "description": "An application's health check (the HTTP kind).",
+        "required": [
+          "enabled",
+          "path",
+          "method",
+          "scheme",
+          "returnCode",
+          "interval",
+          "timeout",
+          "retries",
+          "startPeriod"
+        ],
+        "properties": {
+          "enabled": {
+            "type": "boolean",
+            "description": "Whether Coolify runs the check."
+          },
+          "host": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The host header, when set."
+          },
+          "interval": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Seconds between checks.",
+            "minimum": 0
+          },
+          "method": {
+            "type": "string",
+            "description": "The HTTP method."
+          },
+          "path": {
+            "type": "string",
+            "description": "The request path."
+          },
+          "port": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "The port, when not the application's own.",
+            "minimum": 0
+          },
+          "responseText": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Text the response must contain, when set."
+          },
+          "retries": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Failures before the application is unhealthy.",
+            "minimum": 0
+          },
+          "returnCode": {
+            "type": "integer",
+            "format": "int32",
+            "description": "The status code that counts as healthy.",
+            "minimum": 0
+          },
+          "scheme": {
+            "type": "string",
+            "description": "`http` or `https`."
+          },
+          "startPeriod": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Seconds before the first check.",
+            "minimum": 0
+          },
+          "timeout": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Seconds a check may take.",
+            "minimum": 0
+          }
+        }
+      },
       "ServiceLogsDto": {
         "type": "object",
         "description": "A deployment log tail: bounded, redacted, never stored.",
@@ -24652,6 +25443,89 @@
           "uuid": {
             "type": "string",
             "description": "The server's uuid."
+          }
+        }
+      },
+      "ServiceSettingsDto": {
+        "type": "object",
+        "description": "A Coolify resource's settings as Fleet can show and change them.",
+        "required": [
+          "serviceId",
+          "resourceKind",
+          "name",
+          "notes"
+        ],
+        "properties": {
+          "domains": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "type": "string"
+            },
+            "description": "The domains, when Fleet can change them for this resource."
+          },
+          "env": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "$ref": "#/components/schemas/ServiceEnvVarDto"
+            },
+            "description": "The variables (keys and flags only), when the kind has them."
+          },
+          "health": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/ServiceHealthDto",
+                "description": "The health check, when the kind has one."
+              }
+            ]
+          },
+          "name": {
+            "type": "string",
+            "description": "The resource's name."
+          },
+          "notes": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "What Fleet cannot show or change here, and why."
+          },
+          "resourceKind": {
+            "type": "string",
+            "description": "`application`, `service`, or `database`."
+          },
+          "serviceId": {
+            "type": "string",
+            "description": "The running-service id."
+          }
+        }
+      },
+      "ServiceSettingsMeta": {
+        "type": "object",
+        "description": "The fields every settings request shares.",
+        "properties": {
+          "idempotencyKey": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "A key making a retry return the request already made (scoped to the\ncaller)."
+          },
+          "reason": {
+            "type": "string",
+            "description": "Why, for the approver (at most 1000 characters)."
+          },
+          "redeploy": {
+            "type": "boolean",
+            "description": "Redeploy an application (restart a service) once the change is\napplied, as part of the same approved operation."
           }
         }
       },

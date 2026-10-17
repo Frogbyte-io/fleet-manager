@@ -7973,6 +7973,121 @@ export interface ResourceServiceLogsDto {
 }
 
 /**
+ * One environment variable of a service: its name and flags. There is no
+ * value field: Coolify hides values from Fleet's token and Fleet never
+ * asks for them.
+ */
+export interface ServiceEnvVarDto {
+  /** Available while building (applications). */
+  isBuildtime: boolean;
+  /** A literal value: nothing is escaped or expanded. */
+  isLiteral: boolean;
+  /** A multiline value. */
+  isMultiline: boolean;
+  /** Whether it belongs to preview deployments. */
+  isPreview: boolean;
+  /** Available at runtime (applications). */
+  isRuntime: boolean;
+  /** Whether the value refers to a shared variable. */
+  isShared: boolean;
+  /** Coolify hides the value after saving. */
+  isShownOnce: boolean;
+  /** The variable's name. */
+  key: string;
+}
+
+/**
+ * An application's health check (the HTTP kind).
+ */
+export interface ServiceHealthDto {
+  /** Whether Coolify runs the check. */
+  enabled: boolean;
+  /**
+     * The host header, when set.
+     * @nullable
+     */
+  host?: string | null;
+  /**
+     * Seconds between checks.
+     * @minimum 0
+     */
+  interval: number;
+  /** The HTTP method. */
+  method: string;
+  /** The request path. */
+  path: string;
+  /**
+     * The port, when not the application's own.
+     * @minimum 0
+     * @nullable
+     */
+  port?: number | null;
+  /**
+     * Text the response must contain, when set.
+     * @nullable
+     */
+  responseText?: string | null;
+  /**
+     * Failures before the application is unhealthy.
+     * @minimum 0
+     */
+  retries: number;
+  /**
+     * The status code that counts as healthy.
+     * @minimum 0
+     */
+  returnCode: number;
+  /** `http` or `https`. */
+  scheme: string;
+  /**
+     * Seconds before the first check.
+     * @minimum 0
+     */
+  startPeriod: number;
+  /**
+     * Seconds a check may take.
+     * @minimum 0
+     */
+  timeout: number;
+}
+
+/**
+ * A Coolify resource's settings as Fleet can show and change them.
+ */
+export type ResourceServiceSettingsDtoData = {
+  /**
+     * The domains, when Fleet can change them for this resource.
+     * @nullable
+     */
+  domains?: string[] | null;
+  /**
+     * The variables (keys and flags only), when the kind has them.
+     * @nullable
+     */
+  env?: ServiceEnvVarDto[] | null;
+  health?: null | ServiceHealthDto;
+  /** The resource's name. */
+  name: string;
+  /** What Fleet cannot show or change here, and why. */
+  notes: string[];
+  /** `application`, `service`, or `database`. */
+  resourceKind: string;
+  /** The running-service id. */
+  serviceId: string;
+};
+
+/**
+ * A single resource.
+ *
+ * The payload is nested under `data` so that later top-level fields are an
+ * additive change rather than a breaking one.
+ */
+export interface ResourceServiceSettingsDto {
+  /** A Coolify resource's settings as Fleet can show and change them. */
+  data: ResourceServiceSettingsDtoData;
+}
+
+/**
  * One machine's observed skill inventory.
  */
 export type ResourceSkillsSnapshotDtoData = {
@@ -8205,6 +8320,161 @@ export interface ServiceDetailDto {
 }
 
 /**
+ * The fields every settings request shares.
+ */
+export interface ServiceSettingsMeta {
+  /**
+     * A key making a retry return the request already made (scoped to the
+     * caller).
+     * @nullable
+     */
+  idempotencyKey?: string | null;
+  /** Why, for the approver (at most 1000 characters). */
+  reason?: string;
+  /**
+     * Redeploy an application (restart a service) once the change is
+     * applied, as part of the same approved operation.
+     */
+  redeploy?: boolean;
+}
+
+/**
+ * A request to replace an application's domains.
+ */
+export type ServiceDomainsBody = ServiceSettingsMeta & {
+  /**
+     * The complete new list of URLs (`https://shop.example.com`); an empty
+     * list clears the domains.
+     */
+  domains: string[];
+};
+
+/**
+ * One variable change.
+ */
+export interface ServiceEnvChangeBody {
+  /**
+     * Build-time availability (applications; unset keeps the current one).
+     * @nullable
+     */
+  isBuildtime?: boolean | null;
+  /**
+     * A literal value (unset keeps the current one).
+     * @nullable
+     */
+  isLiteral?: boolean | null;
+  /**
+     * A multiline value (unset keeps the current one).
+     * @nullable
+     */
+  isMultiline?: boolean | null;
+  /** Whether the change is to the preview-deployment variable. */
+  isPreview?: boolean;
+  /**
+     * Runtime availability (applications; unset keeps the current one).
+     * @nullable
+     */
+  isRuntime?: boolean | null;
+  /**
+     * Hide the value after saving (unset keeps the current one).
+     * @nullable
+     */
+  isShownOnce?: boolean | null;
+  /** The variable's name. */
+  key: string;
+  /** `set` or `unset`. */
+  op: string;
+  /**
+     * The new value (`set` only). It is write-only: it is moved into the
+     * encrypted secret store, never stored in the request, never audited,
+     * and never returned.
+     * @nullable
+     */
+  value?: string | null;
+}
+
+/**
+ * A request to set or unset environment variables.
+ */
+export type ServiceEnvBody = ServiceSettingsMeta & {
+  /** The variables to change (one to eight). */
+  changes: ServiceEnvChangeBody[];
+};
+
+/**
+ * A request to change an application's health check. Only the fields named
+ * change.
+ */
+export type ServiceHealthBody = ServiceSettingsMeta & ({
+  /**
+     * Turn the check on or off.
+     * @nullable
+     */
+  enabled?: boolean | null;
+  /**
+     * The host header.
+     * @nullable
+     */
+  host?: string | null;
+  /**
+     * Seconds between checks (1 to 3600).
+     * @minimum 0
+     * @nullable
+     */
+  interval?: number | null;
+  /**
+     * `GET`, `HEAD`, `POST`, or `OPTIONS`.
+     * @nullable
+     */
+  method?: string | null;
+  /**
+     * The request path, starting with `/`.
+     * @nullable
+     */
+  path?: string | null;
+  /**
+     * The port (1 to 65535).
+     * @minimum 0
+     * @nullable
+     */
+  port?: number | null;
+  /**
+     * Text the response must contain.
+     * @nullable
+     */
+  responseText?: string | null;
+  /**
+     * Failures before unhealthy (1 to 100).
+     * @minimum 0
+     * @nullable
+     */
+  retries?: number | null;
+  /**
+     * The healthy status code (100 to 599).
+     * @minimum 0
+     * @nullable
+     */
+  returnCode?: number | null;
+  /**
+     * `http` or `https`.
+     * @nullable
+     */
+  scheme?: string | null;
+  /**
+     * Seconds before the first check (0 to 3600).
+     * @minimum 0
+     * @nullable
+     */
+  startPeriod?: number | null;
+  /**
+     * Seconds a check may take (1 to 3600).
+     * @minimum 0
+     * @nullable
+     */
+  timeout?: number | null;
+});
+
+/**
  * A deployment log tail: bounded, redacted, never stored.
  */
 export interface ServiceLogsDto {
@@ -8218,6 +8488,31 @@ export interface ServiceLogsDto {
   redacted: boolean;
   /** Whether earlier lines were cut to fit the bounds. */
   truncated: boolean;
+}
+
+/**
+ * A Coolify resource's settings as Fleet can show and change them.
+ */
+export interface ServiceSettingsDto {
+  /**
+     * The domains, when Fleet can change them for this resource.
+     * @nullable
+     */
+  domains?: string[] | null;
+  /**
+     * The variables (keys and flags only), when the kind has them.
+     * @nullable
+     */
+  env?: ServiceEnvVarDto[] | null;
+  health?: null | ServiceHealthDto;
+  /** The resource's name. */
+  name: string;
+  /** What Fleet cannot show or change here, and why. */
+  notes: string[];
+  /** `application`, `service`, or `database`. */
+  resourceKind: string;
+  /** The running-service id. */
+  serviceId: string;
 }
 
 /**
@@ -18806,6 +19101,338 @@ export const getServiceLogs = async (serviceId: string,
 
   const data: getServiceLogsResponse['data'] = body ? JSON.parse(body) : {}
   return { data, status: res.status, headers: res.headers } as getServiceLogsResponse
+}
+
+
+
+export type getServiceSettingsResponse200 = {
+  data: ResourceServiceSettingsDto
+  status: 200
+}
+
+export type getServiceSettingsResponse400 = {
+  data: ApiError
+  status: 400
+}
+
+export type getServiceSettingsResponse403 = {
+  data: ApiError
+  status: 403
+}
+
+export type getServiceSettingsResponse404 = {
+  data: ApiError
+  status: 404
+}
+
+export type getServiceSettingsResponse422 = {
+  data: ApiError
+  status: 422
+}
+
+export type getServiceSettingsResponse503 = {
+  data: ApiError
+  status: 503
+}
+
+export type getServiceSettingsResponseSuccess = (getServiceSettingsResponse200) & {
+  headers: Headers;
+};
+export type getServiceSettingsResponseError = (getServiceSettingsResponse400 | getServiceSettingsResponse403 | getServiceSettingsResponse404 | getServiceSettingsResponse422 | getServiceSettingsResponse503) & {
+  headers: Headers;
+};
+
+export type getServiceSettingsResponse = (getServiceSettingsResponseSuccess | getServiceSettingsResponseError)
+
+export const getGetServiceSettingsUrl = (serviceId: string,) => {
+
+
+
+
+  return `/api/v1/services/${serviceId}/settings`
+}
+
+/**
+ * # Errors
+ *
+ * Returns the public error envelope on refusal, an unknown service, an
+ * unsupported Coolify version, or a provider failure.
+ * @summary Reads a Coolify resource's settings: environment variable names and
+flags (never values), an application's domains, and its health check.
+Needs `external_account.read`.
+ */
+export const getServiceSettings = async (serviceId: string, options?: RequestInit): Promise<getServiceSettingsResponse> => {
+
+  const res = await fetch(getGetServiceSettingsUrl(serviceId),
+  {
+    ...options,
+    method: 'GET'
+
+
+  }
+)
+
+
+  const body = [204, 205, 304].includes(res.status) ? null : await res.text();
+
+  const data: getServiceSettingsResponse['data'] = body ? JSON.parse(body) : {}
+  return { data, status: res.status, headers: res.headers } as getServiceSettingsResponse
+}
+
+
+
+export type requestServiceDomainsChangeResponse201 = {
+  data: ResourceActionRequestDto
+  status: 201
+}
+
+export type requestServiceDomainsChangeResponse400 = {
+  data: ApiError
+  status: 400
+}
+
+export type requestServiceDomainsChangeResponse403 = {
+  data: ApiError
+  status: 403
+}
+
+export type requestServiceDomainsChangeResponse404 = {
+  data: ApiError
+  status: 404
+}
+
+export type requestServiceDomainsChangeResponse409 = {
+  data: ApiError
+  status: 409
+}
+
+export type requestServiceDomainsChangeResponse503 = {
+  data: ApiError
+  status: 503
+}
+
+export type requestServiceDomainsChangeResponseSuccess = (requestServiceDomainsChangeResponse201) & {
+  headers: Headers;
+};
+export type requestServiceDomainsChangeResponseError = (requestServiceDomainsChangeResponse400 | requestServiceDomainsChangeResponse403 | requestServiceDomainsChangeResponse404 | requestServiceDomainsChangeResponse409 | requestServiceDomainsChangeResponse503) & {
+  headers: Headers;
+};
+
+export type requestServiceDomainsChangeResponse = (requestServiceDomainsChangeResponseSuccess | requestServiceDomainsChangeResponseError)
+
+export const getRequestServiceDomainsChangeUrl = (serviceId: string,) => {
+
+
+
+
+  return `/api/v1/services/${serviceId}/settings/domains`
+}
+
+/**
+ * # Errors
+ *
+ * Returns the public error envelope on refusal, invalid domains, an
+ * unknown or non-application resource, a Compose application, a change
+ * that would do nothing, or a broker refusal.
+ * @summary Files a request to replace a Coolify application's domains, with a
+preview of the difference (`before`, `after`, and the changed fields).
+An `approve`-class action request; stale at execution when the domains
+changed in the meantime.
+ */
+export const requestServiceDomainsChange = async (serviceId: string,
+    serviceDomainsBody: ServiceDomainsBody, options?: RequestInit): Promise<requestServiceDomainsChangeResponse> => {
+
+    const getHeaders = (h?: NonNullable<RequestInit['headers']>): Record<string, string | readonly string[]> => {
+    if (!h) return {};
+    if (h instanceof Headers) return Object.fromEntries(h.entries());
+    if (Array.isArray(h)) return Object.fromEntries(h);
+    return h;
+  };
+const res = await fetch(getRequestServiceDomainsChangeUrl(serviceId),
+  {
+    ...options,
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...getHeaders(options?.headers) },
+    body: JSON.stringify(serviceDomainsBody)
+  }
+)
+
+
+  const body = [204, 205, 304].includes(res.status) ? null : await res.text();
+
+  const data: requestServiceDomainsChangeResponse['data'] = body ? JSON.parse(body) : {}
+  return { data, status: res.status, headers: res.headers } as requestServiceDomainsChangeResponse
+}
+
+
+
+export type requestServiceEnvChangeResponse201 = {
+  data: ResourceActionRequestDto
+  status: 201
+}
+
+export type requestServiceEnvChangeResponse400 = {
+  data: ApiError
+  status: 400
+}
+
+export type requestServiceEnvChangeResponse403 = {
+  data: ApiError
+  status: 403
+}
+
+export type requestServiceEnvChangeResponse404 = {
+  data: ApiError
+  status: 404
+}
+
+export type requestServiceEnvChangeResponse409 = {
+  data: ApiError
+  status: 409
+}
+
+export type requestServiceEnvChangeResponse503 = {
+  data: ApiError
+  status: 503
+}
+
+export type requestServiceEnvChangeResponseSuccess = (requestServiceEnvChangeResponse201) & {
+  headers: Headers;
+};
+export type requestServiceEnvChangeResponseError = (requestServiceEnvChangeResponse400 | requestServiceEnvChangeResponse403 | requestServiceEnvChangeResponse404 | requestServiceEnvChangeResponse409 | requestServiceEnvChangeResponse503) & {
+  headers: Headers;
+};
+
+export type requestServiceEnvChangeResponse = (requestServiceEnvChangeResponseSuccess | requestServiceEnvChangeResponseError)
+
+export const getRequestServiceEnvChangeUrl = (serviceId: string,) => {
+
+
+
+
+  return `/api/v1/services/${serviceId}/settings/env`
+}
+
+/**
+ * # Errors
+ *
+ * Returns the public error envelope on refusal, invalid input, an unknown
+ * resource, or a broker refusal.
+ * @summary Files a request to set or unset environment variables of a Coolify
+application or service. The values are write-only: each is moved into
+the encrypted secret store and the request records only key names,
+flags, and a digest per value, so the approver sees names and never a
+value. The held values are deleted after execution, denial, or expiry.
+The change is an `approve`-class action request; the answer is that
+request. A secret-shaped value never appears in any response.
+ */
+export const requestServiceEnvChange = async (serviceId: string,
+    serviceEnvBody: ServiceEnvBody, options?: RequestInit): Promise<requestServiceEnvChangeResponse> => {
+
+    const getHeaders = (h?: NonNullable<RequestInit['headers']>): Record<string, string | readonly string[]> => {
+    if (!h) return {};
+    if (h instanceof Headers) return Object.fromEntries(h.entries());
+    if (Array.isArray(h)) return Object.fromEntries(h);
+    return h;
+  };
+const res = await fetch(getRequestServiceEnvChangeUrl(serviceId),
+  {
+    ...options,
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...getHeaders(options?.headers) },
+    body: JSON.stringify(serviceEnvBody)
+  }
+)
+
+
+  const body = [204, 205, 304].includes(res.status) ? null : await res.text();
+
+  const data: requestServiceEnvChangeResponse['data'] = body ? JSON.parse(body) : {}
+  return { data, status: res.status, headers: res.headers } as requestServiceEnvChangeResponse
+}
+
+
+
+export type requestServiceHealthChangeResponse201 = {
+  data: ResourceActionRequestDto
+  status: 201
+}
+
+export type requestServiceHealthChangeResponse400 = {
+  data: ApiError
+  status: 400
+}
+
+export type requestServiceHealthChangeResponse403 = {
+  data: ApiError
+  status: 403
+}
+
+export type requestServiceHealthChangeResponse404 = {
+  data: ApiError
+  status: 404
+}
+
+export type requestServiceHealthChangeResponse409 = {
+  data: ApiError
+  status: 409
+}
+
+export type requestServiceHealthChangeResponse503 = {
+  data: ApiError
+  status: 503
+}
+
+export type requestServiceHealthChangeResponseSuccess = (requestServiceHealthChangeResponse201) & {
+  headers: Headers;
+};
+export type requestServiceHealthChangeResponseError = (requestServiceHealthChangeResponse400 | requestServiceHealthChangeResponse403 | requestServiceHealthChangeResponse404 | requestServiceHealthChangeResponse409 | requestServiceHealthChangeResponse503) & {
+  headers: Headers;
+};
+
+export type requestServiceHealthChangeResponse = (requestServiceHealthChangeResponseSuccess | requestServiceHealthChangeResponseError)
+
+export const getRequestServiceHealthChangeUrl = (serviceId: string,) => {
+
+
+
+
+  return `/api/v1/services/${serviceId}/settings/health`
+}
+
+/**
+ * # Errors
+ *
+ * Returns the public error envelope on refusal, invalid fields, an unknown
+ * or non-application resource, a change that would do nothing, or a broker
+ * refusal.
+ * @summary Files a request to change a Coolify application's health check, with a
+preview of the difference. Only the named fields change. An
+`approve`-class action request.
+ */
+export const requestServiceHealthChange = async (serviceId: string,
+    serviceHealthBody: ServiceHealthBody, options?: RequestInit): Promise<requestServiceHealthChangeResponse> => {
+
+    const getHeaders = (h?: NonNullable<RequestInit['headers']>): Record<string, string | readonly string[]> => {
+    if (!h) return {};
+    if (h instanceof Headers) return Object.fromEntries(h.entries());
+    if (Array.isArray(h)) return Object.fromEntries(h);
+    return h;
+  };
+const res = await fetch(getRequestServiceHealthChangeUrl(serviceId),
+  {
+    ...options,
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...getHeaders(options?.headers) },
+    body: JSON.stringify(serviceHealthBody)
+  }
+)
+
+
+  const body = [204, 205, 304].includes(res.status) ? null : await res.text();
+
+  const data: requestServiceHealthChangeResponse['data'] = body ? JSON.parse(body) : {}
+  return { data, status: res.status, headers: res.headers } as requestServiceHealthChangeResponse
 }
 
 

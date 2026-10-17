@@ -8,6 +8,8 @@ use std::time::Duration;
 
 use serde_json::{Value, json};
 
+pub mod settings;
+
 use crate::requests::parse_wait_approval;
 use crate::{CliError, Command, Output, RequestShape, usage};
 
@@ -45,6 +47,9 @@ pub enum ServicesAction {
         /// Wait this long for the request to reach an outcome.
         wait: Option<Duration>,
     },
+    /// Settings of a Coolify resource (FM-1034): environment variables,
+    /// domains, and health checks.
+    Settings(settings::SettingsAction),
     /// Tail a Coolify application's deployment log (FM-1033).
     Logs {
         /// The service id.
@@ -62,6 +67,10 @@ pub(crate) fn parse(rest: &[&str], output: &mut Output) -> Result<Command, CliEr
     let Some((verb, args)) = rest.split_first() else {
         return Err(CliError { message: usage() });
     };
+    if matches!(*verb, "settings" | "env" | "domains" | "health") {
+        return settings::parse(rest, output)
+            .map(|action| Command::Services(ServicesAction::Settings(action)));
+    }
     let (id, flags) = match *verb {
         "get" | "start" | "stop" | "restart" | "redeploy" | "logs" => {
             let Some((id, flags)) = args.split_first() else {
@@ -170,8 +179,32 @@ pub(crate) fn parse(rest: &[&str], output: &mut Output) -> Result<Command, CliEr
     Ok(Command::Services(action))
 }
 
+impl ServicesAction {
+    /// The wait of a command that files an action request: `Some(wait)` for
+    /// a lifecycle or settings change, `None` for a read.
+    #[must_use]
+    pub fn filing_wait(&self) -> Option<Option<Duration>> {
+        match self {
+            Self::Action { wait, .. } => Some(*wait),
+            Self::Settings(action) => action.filing_wait(),
+            _ => None,
+        }
+    }
+}
+
 /// The controller request for one subcommand.
-pub(crate) fn request(action: &ServicesAction) -> RequestShape {
+///
+/// # Errors
+///
+/// Fails when a settings command cannot read its input.
+pub(crate) fn request(action: &ServicesAction) -> Result<RequestShape, CliError> {
+    if let ServicesAction::Settings(action) = action {
+        return settings::request(action);
+    }
+    Ok(request_of(action))
+}
+
+fn request_of(action: &ServicesAction) -> RequestShape {
     match action {
         ServicesAction::List {
             source,
@@ -216,6 +249,7 @@ pub(crate) fn request(action: &ServicesAction) -> RequestShape {
                 Some(body),
             )
         }
+        ServicesAction::Settings(_) => unreachable!("handled by request"),
         ServicesAction::Logs {
             id,
             deployment,
@@ -316,6 +350,7 @@ pub(crate) fn render_for(action: &ServicesAction, value: &Value) -> String {
     match action {
         ServicesAction::Action { .. } => return render_action(value),
         ServicesAction::Logs { .. } => return render_logs(value),
+        ServicesAction::Settings(action) => return settings::render_for(action, value),
         _ => {}
     }
     let mut text = render(value);
@@ -515,13 +550,13 @@ mod tests {
 
     #[test]
     fn requests_are_reads_with_encoded_ids() {
-        let (method, path, query, body) = request(&ServicesAction::Get {
+        let (method, path, query, body) = request_of(&ServicesAction::Get {
             id: "docker:m 1:redis/x".to_owned(),
         });
         assert_eq!(method, reqwest::Method::GET);
         assert_eq!(path, "/api/v1/services/docker%3Am%201%3Aredis%2Fx");
         assert!(query.is_empty() && body.is_none());
-        let (_, path, query, _) = request(&ServicesAction::List {
+        let (_, path, query, _) = request_of(&ServicesAction::List {
             source: Some("docker".to_owned()),
             machine: None,
             query: Some("web".to_owned()),

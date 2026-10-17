@@ -103,6 +103,9 @@ pub struct NodeServices {
     /// The Coolify lifecycle use cases (FM-1033); set with the external
     /// accounts, absent otherwise.
     pub coolify_lifecycle: Option<Arc<fleet_application::coolify::lifecycle::CoolifyLifecycle>>,
+    /// The Coolify settings use cases (FM-1034); set with the lifecycle
+    /// use cases, absent otherwise.
+    pub coolify_settings: Option<Arc<fleet_application::coolify::settings::CoolifySettings>>,
 }
 
 fn event_hub_for_services(
@@ -171,6 +174,7 @@ pub fn compose_node_services_with_events(
         dns: None,
         coolify_discovery: None,
         coolify_lifecycle: None,
+        coolify_settings: None,
         nodes,
         gateway,
         events,
@@ -302,6 +306,13 @@ fn compose_action_registry() -> Arc<fleet_application::broker::ActionRegistry> {
         registry
             .register(action)
             .expect("the Coolify action ids are valid and unique");
+    }
+    // FM-1034: Coolify environment variables, domains, and health checks;
+    // all `approve`.
+    for action in fleet_application::coolify::settings::settings_actions() {
+        registry
+            .register(action)
+            .expect("the Coolify settings action ids are valid and unique");
     }
     Arc::new(registry)
 }
@@ -663,6 +674,7 @@ fn build_router_for_caller(
     let dns = services.and_then(|services| services.dns.clone());
     let coolify_discovery = services.and_then(|services| services.coolify_discovery.clone());
     let coolify_lifecycle = services.and_then(|services| services.coolify_lifecycle.clone());
+    let coolify_settings = services.and_then(|services| services.coolify_settings.clone());
     let mut api_router = fleet_api::router(api_state.clone());
     if let (Some(pool), Some(machines)) = (audit_db.as_ref(), api_state.machines.as_ref()) {
         // The running-services surface (FM-1031), same shape: cached
@@ -685,6 +697,10 @@ fn build_router_for_caller(
     if let Some(coolify_lifecycle) = coolify_lifecycle {
         // The Coolify lifecycle and log surface (FM-1033), same shape.
         api_router = api_router.layer(axum::Extension(coolify_lifecycle));
+    }
+    if let Some(coolify_settings) = coolify_settings {
+        // The Coolify settings surface (FM-1034), same shape.
+        api_router = api_router.layer(axum::Extension(coolify_settings));
     }
     if let Some(external_accounts) = external_accounts {
         // The external accounts surface (FM-1001) takes its use cases as a

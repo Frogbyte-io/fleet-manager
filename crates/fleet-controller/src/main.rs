@@ -171,11 +171,18 @@ fn run_serve(mut config: fleet_config::ControllerConfig) -> ExitCode {
                                 secret_store.clone(),
                             ),
                         );
-                        node_services.coolify_lifecycle =
-                            Some(fleet_controller::coolify_exec::compose_coolify_lifecycle(
+                        let coolify_lifecycle =
+                            fleet_controller::coolify_exec::compose_coolify_lifecycle(
                                 store.pool(),
                                 secret_store.clone(),
+                            );
+                        node_services.coolify_settings =
+                            Some(fleet_controller::coolify_exec::compose_coolify_settings(
+                                store.pool(),
+                                secret_store.clone(),
+                                coolify_lifecycle.clone(),
                             ));
+                        node_services.coolify_lifecycle = Some(coolify_lifecycle);
                         Some(node_services)
                     }
                     Err(error) => {
@@ -960,6 +967,25 @@ fn run_serve(mut config: fleet_config::ControllerConfig) -> ExitCode {
                     ),
                     None => with_lab,
                 };
+            // FM-1034: the brokered Coolify settings kind runs through the
+            // settings use cases.
+            let with_lab: std::sync::Arc<dyn fleet_application::worker::OperationExecutor> =
+                match services
+                    .as_ref()
+                    .and_then(|services| services.coolify_settings.clone())
+                {
+                    Some(settings) => std::sync::Arc::new(
+                        fleet_controller::coolify_exec::CoolifySettingsDispatch::new(
+                            with_lab,
+                            std::sync::Arc::new(
+                                fleet_controller::coolify_exec::CoolifySettingsExecutor::new(
+                                    settings,
+                                ),
+                            ),
+                        ),
+                    ),
+                    None => with_lab,
+                };
             match &services {
                 Some(services) => {
                     let node_machines: std::sync::Arc<dyn fleet_application::machine::MachinePort> =
@@ -1168,6 +1194,21 @@ fn run_serve(mut config: fleet_config::ControllerConfig) -> ExitCode {
                 let _ = sweeper_shutdown_rx.await;
             }))
         });
+        // FM-1034: held environment values whose request was denied,
+        // expired, or finished are removed on a timer.
+        let (hold_shutdown, hold_shutdown_rx) = tokio::sync::oneshot::channel::<()>();
+        let hold_handle = services
+            .as_ref()
+            .and_then(|services| services.coolify_settings.clone())
+            .map(|settings| {
+                tokio::spawn(fleet_controller::coolify_exec::run_hold_sweeper(
+                    settings,
+                    fleet_controller::coolify_exec::HOLD_SWEEP_INTERVAL,
+                    async move {
+                        let _ = hold_shutdown_rx.await;
+                    },
+                ))
+            });
         // FM-1020: the scheduled RDAP/DNS sweep over Registry domain
         // entries (interval 0 turns it off; the on-demand refresh stays).
         let (enrich_shutdown, enrich_shutdown_rx) = tokio::sync::oneshot::channel::<()>();
@@ -1249,6 +1290,10 @@ fn run_serve(mut config: fleet_config::ControllerConfig) -> ExitCode {
             shutdown_signal(),
         )
         .await;
+        let _ = hold_shutdown.send(());
+        if let Some(handle) = hold_handle {
+            let _ = handle.await;
+        }
         let _ = enrich_shutdown.send(());
         if let Some(handle) = enrich_handle {
             let _ = handle.await;
