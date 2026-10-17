@@ -27,6 +27,7 @@
 #![warn(missing_docs)]
 
 pub mod lifecycle;
+pub mod settings;
 
 use std::fmt;
 use std::sync::Arc;

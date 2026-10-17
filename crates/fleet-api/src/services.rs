@@ -13,6 +13,13 @@
 //! risk class decides whether it runs or waits for a person), and `GET
 //! /services/{id}/logs` tails the newest deployment's log, bounded and
 //! redacted. Both are adapters over `CoolifyLifecycle`.
+//!
+//! FM-1034 adds the settings routes: `GET /services/{id}/settings` (keys and
+//! flags, domains, health check; never a value) and `POST
+//! /services/{id}/settings/{env|domains|health}`, which file `approve`-class
+//! requests with a preview. Environment values are write-only: they pass
+//! through this adapter once, into the use case, which holds them in the
+//! encrypted secret store. Adapters over `CoolifySettings`.
 
 use std::str::FromStr as _;
 use std::sync::Arc;
@@ -26,12 +33,16 @@ use fleet_application::coolify::lifecycle::{
     CoolifyLifecycle, LifecycleError, LifecycleFailureClass, LifecycleRequest, LifecycleVerb,
     LogTail,
 };
+use fleet_application::coolify::settings::{
+    CoolifySettings, DomainsRequest, EnvChangeInput, EnvFlagOverrides, EnvOp, EnvRequest,
+    HealthPatch, HealthRequest, HealthSettings, RequestMeta, SettingsView,
+};
 use fleet_application::services::{
     AccountCoverage, AmbiguousServer, ContainerRef, CoolifyRef, Coverage, InputState, LastDeploy,
     MachineRef, Placement, RegistryLink, RunningService, RunningServices, ServerRef, ServiceFilter,
     ServiceSource, ServicesError,
 };
-use fleet_core::{CorrelationId, ErrorCode, PublicError, RetryClass};
+use fleet_core::{CorrelationId, ErrorCode, PublicError, RetryClass, SensitiveString};
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 
@@ -884,6 +895,561 @@ pub async fn get_service_logs(
         .await
         .map_err(|error| map_lifecycle_error(&error, correlation_id))?;
     Ok(Json(Resource::new(tail.into())))
+}
+
+// ---------------------------------------------------------------------
+// Settings (FM-1034): environment variables, domains, health checks.
+// ---------------------------------------------------------------------
+
+/// One environment variable of a service: its name and flags. There is no
+/// value field: Coolify hides values from Fleet's token and Fleet never
+/// asks for them.
+#[allow(clippy::struct_excessive_bools)] // the flags Coolify reports
+#[derive(Clone, Debug, Serialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct ServiceEnvVarDto {
+    /// The variable's name.
+    pub key: String,
+    /// Whether it belongs to preview deployments.
+    pub is_preview: bool,
+    /// Whether the value refers to a shared variable.
+    pub is_shared: bool,
+    /// Available while building (applications).
+    pub is_buildtime: bool,
+    /// Available at runtime (applications).
+    pub is_runtime: bool,
+    /// A multiline value.
+    pub is_multiline: bool,
+    /// A literal value: nothing is escaped or expanded.
+    pub is_literal: bool,
+    /// Coolify hides the value after saving.
+    pub is_shown_once: bool,
+}
+
+/// An application's health check (the HTTP kind).
+#[derive(Clone, Debug, Serialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct ServiceHealthDto {
+    /// `http`, or `cmd` for a command check Fleet shows but does not edit.
+    pub check_type: String,
+    /// Whether Coolify runs the check.
+    pub enabled: bool,
+    /// The request path.
+    pub path: String,
+    /// The port, when not the application's own.
+    pub port: Option<u16>,
+    /// The host header, when set.
+    pub host: Option<String>,
+    /// The HTTP method.
+    pub method: String,
+    /// `http` or `https`.
+    pub scheme: String,
+    /// The status code that counts as healthy.
+    pub return_code: u16,
+    /// Text the response must contain, when set.
+    pub response_text: Option<String>,
+    /// Seconds between checks.
+    pub interval: u32,
+    /// Seconds a check may take.
+    pub timeout: u32,
+    /// Failures before the application is unhealthy.
+    pub retries: u32,
+    /// Seconds before the first check.
+    pub start_period: u32,
+}
+
+impl From<HealthSettings> for ServiceHealthDto {
+    fn from(health: HealthSettings) -> Self {
+        Self {
+            check_type: health.check_type,
+            enabled: health.enabled,
+            path: health.path,
+            port: health.port,
+            host: health.host,
+            method: health.method,
+            scheme: health.scheme,
+            return_code: health.return_code,
+            response_text: health.response_text,
+            interval: health.interval,
+            timeout: health.timeout,
+            retries: health.retries,
+            start_period: health.start_period,
+        }
+    }
+}
+
+/// A Coolify resource's settings as Fleet can show and change them.
+#[derive(Clone, Debug, Serialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct ServiceSettingsDto {
+    /// The running-service id.
+    pub service_id: String,
+    /// `application`, `service`, or `database`.
+    pub resource_kind: String,
+    /// The resource's name.
+    pub name: String,
+    /// The variables (keys and flags only), when the kind has them.
+    pub env: Option<Vec<ServiceEnvVarDto>>,
+    /// The domains, when Fleet can change them for this resource.
+    pub domains: Option<Vec<String>>,
+    /// The health check, when the kind has one.
+    pub health: Option<ServiceHealthDto>,
+    /// What Fleet cannot show or change here, and why.
+    pub notes: Vec<String>,
+}
+
+impl From<SettingsView> for ServiceSettingsDto {
+    fn from(view: SettingsView) -> Self {
+        Self {
+            service_id: view.service_id,
+            resource_kind: view.resource_kind.id().to_owned(),
+            name: view.name,
+            env: view.env.map(|envs| {
+                envs.into_iter()
+                    .map(|env| ServiceEnvVarDto {
+                        key: env.key,
+                        is_preview: env.is_preview,
+                        is_shared: env.is_shared,
+                        is_buildtime: env.flags.is_buildtime,
+                        is_runtime: env.flags.is_runtime,
+                        is_multiline: env.flags.is_multiline,
+                        is_literal: env.flags.is_literal,
+                        is_shown_once: env.flags.is_shown_once,
+                    })
+                    .collect()
+            }),
+            domains: view.domains,
+            health: view.health.map(Into::into),
+            notes: view.notes,
+        }
+    }
+}
+
+fn settings_or_error(
+    extension: Option<Extension<Arc<CoolifySettings>>>,
+    correlation_id: CorrelationId,
+) -> Result<Arc<CoolifySettings>, ApiErrorResponse> {
+    extension
+        .map(|Extension(settings)| settings)
+        .ok_or_else(|| {
+            let public = PublicError::new(
+                ErrorCode::from_str("services_unavailable").expect("valid error code"),
+                "the Coolify settings surface is not wired; the controller needs its database and secret store",
+                RetryClass::Backoff,
+            );
+            ApiError::new(&public, correlation_id).with_status(StatusCode::SERVICE_UNAVAILABLE)
+        })
+}
+
+/// Reads a Coolify resource's settings: environment variable names and
+/// flags (never values), an application's domains, and its health check.
+/// Needs `external_account.read`.
+///
+/// # Errors
+///
+/// Returns the public error envelope on refusal, an unknown service, an
+/// unsupported Coolify version, or a provider failure.
+#[utoipa::path(
+    get,
+    path = "/services/{serviceId}/settings",
+    tag = "services",
+    operation_id = "getServiceSettings",
+    params(("serviceId" = String, Path, description = "A Coolify service id, `coolify:<account>:<uuid>`.")),
+    responses(
+        (status = 200, description = "The settings. Environment variable values are never included.", body = Resource<ServiceSettingsDto>),
+        (status = 400, description = "The service id is invalid.", body = ApiError),
+        (status = 403, description = "The caller may not read accounts, or the Coolify token lacks the read ability.", body = ApiError),
+        (status = 404, description = "No such resource in the account's latest observation.", body = ApiError),
+        (status = 422, description = "The Coolify version is not supported.", body = ApiError),
+        (status = 503, description = "The surface is not wired.", body = ApiError),
+    )
+)]
+pub async fn get_service_settings(
+    State(state): State<Arc<crate::operations::ApiState>>,
+    principal: Option<Extension<crate::ActingPrincipal>>,
+    Extension(correlation_id): Extension<CorrelationId>,
+    settings: Option<Extension<Arc<CoolifySettings>>>,
+    Path(service_id): Path<String>,
+) -> Result<Json<Resource<ServiceSettingsDto>>, ApiErrorResponse> {
+    let settings = settings_or_error(settings, correlation_id)?;
+    let principal = crate::operations::principal_or_error(principal, correlation_id)?;
+    let view = settings
+        .view(state.authorizer.as_ref(), &principal, &service_id)
+        .await
+        .map_err(|error| map_lifecycle_error(&error, correlation_id))?;
+    Ok(Json(Resource::new(view.into())))
+}
+
+/// The fields every settings request shares.
+#[derive(Debug, Default, Deserialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct ServiceSettingsMeta {
+    /// Why, for the approver (at most 1000 characters).
+    #[serde(default)]
+    pub reason: String,
+    /// A key making a retry return the request already made (scoped to the
+    /// caller).
+    #[serde(default)]
+    pub idempotency_key: Option<String>,
+    /// Redeploy an application (restart a service) once the change is
+    /// applied, as part of the same approved operation.
+    #[serde(default)]
+    pub redeploy: bool,
+}
+
+/// One variable change.
+#[derive(Deserialize, ToSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ServiceEnvChangeBody {
+    /// `set` or `unset`.
+    pub op: String,
+    /// The variable's name.
+    pub key: String,
+    /// Whether the change is to the preview-deployment variable.
+    #[serde(default)]
+    pub is_preview: bool,
+    /// The new value (`set` only). It is write-only: it is moved into the
+    /// encrypted secret store, never stored in the request, never audited,
+    /// and never returned.
+    #[serde(default)]
+    #[schema(write_only)]
+    pub value: Option<String>,
+    /// Build-time availability (applications; unset keeps the current one).
+    #[serde(default)]
+    pub is_buildtime: Option<bool>,
+    /// Runtime availability (applications; unset keeps the current one).
+    #[serde(default)]
+    pub is_runtime: Option<bool>,
+    /// A multiline value (unset keeps the current one).
+    #[serde(default)]
+    pub is_multiline: Option<bool>,
+    /// A literal value (unset keeps the current one).
+    #[serde(default)]
+    pub is_literal: Option<bool>,
+    /// Hide the value after saving (unset keeps the current one).
+    #[serde(default)]
+    pub is_shown_once: Option<bool>,
+}
+
+/// A request to set or unset environment variables.
+#[derive(Deserialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct ServiceEnvBody {
+    /// The variables to change (one to eight).
+    pub changes: Vec<ServiceEnvChangeBody>,
+    /// The shared fields.
+    #[serde(flatten)]
+    pub meta: ServiceSettingsMeta,
+}
+
+/// A request to replace an application's domains.
+#[derive(Debug, Deserialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct ServiceDomainsBody {
+    /// The complete new list of URLs (`https://shop.example.com`); an empty
+    /// list clears the domains.
+    pub domains: Vec<String>,
+    /// The shared fields.
+    #[serde(flatten)]
+    pub meta: ServiceSettingsMeta,
+}
+
+/// A request to change an application's health check. Only the fields named
+/// change.
+#[derive(Debug, Deserialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct ServiceHealthBody {
+    /// Turn the check on or off.
+    #[serde(default)]
+    pub enabled: Option<bool>,
+    /// The request path, starting with `/`.
+    #[serde(default)]
+    pub path: Option<String>,
+    /// The port (1 to 65535).
+    #[serde(default)]
+    pub port: Option<u16>,
+    /// The host header.
+    #[serde(default)]
+    pub host: Option<String>,
+    /// `GET`, `HEAD`, `POST`, or `OPTIONS`.
+    #[serde(default)]
+    pub method: Option<String>,
+    /// `http` or `https`.
+    #[serde(default)]
+    pub scheme: Option<String>,
+    /// The healthy status code (100 to 599).
+    #[serde(default)]
+    pub return_code: Option<u16>,
+    /// Text the response must contain.
+    #[serde(default)]
+    pub response_text: Option<String>,
+    /// Seconds between checks (1 to 3600).
+    #[serde(default)]
+    pub interval: Option<u32>,
+    /// Seconds a check may take (1 to 3600).
+    #[serde(default)]
+    pub timeout: Option<u32>,
+    /// Failures before unhealthy (1 to 100).
+    #[serde(default)]
+    pub retries: Option<u32>,
+    /// Seconds before the first check (0 to 3600).
+    #[serde(default)]
+    pub start_period: Option<u32>,
+    /// Fields to clear: `port`, `host`, `responseText`.
+    #[serde(default)]
+    pub clear: Vec<String>,
+    /// The shared fields.
+    #[serde(flatten)]
+    pub meta: ServiceSettingsMeta,
+}
+
+fn meta_of(
+    service_id: String,
+    meta: ServiceSettingsMeta,
+    what: &str,
+    correlation_id: CorrelationId,
+) -> RequestMeta {
+    let reason = if meta.reason.trim().is_empty() {
+        format!("change {what} of {service_id}")
+    } else {
+        meta.reason
+    };
+    RequestMeta {
+        service_id,
+        redeploy: meta.redeploy,
+        reason,
+        origin: "api".to_owned(),
+        correlation_id: Some(correlation_id.to_string()),
+        idempotency_key: meta.idempotency_key,
+    }
+}
+
+type Filed = Result<
+    (
+        StatusCode,
+        Json<Resource<crate::requests::ActionRequestDto>>,
+    ),
+    ApiErrorResponse,
+>;
+
+/// Files a request to set or unset environment variables of a Coolify
+/// application or service. The values are write-only: each is moved into
+/// the encrypted secret store and the request records only key names
+/// and flags, so the approver sees names and never a
+/// value. The held values are deleted after execution, denial, or expiry.
+/// The change is an `approve`-class action request; the answer is that
+/// request. A secret-shaped value never appears in any response.
+///
+/// # Errors
+///
+/// Returns the public error envelope on refusal, invalid input, an unknown
+/// resource, or a broker refusal.
+#[utoipa::path(
+    post,
+    path = "/services/{serviceId}/settings/env",
+    tag = "services",
+    operation_id = "requestServiceEnvChange",
+    params(("serviceId" = String, Path, description = "A Coolify application or service id, `coolify:<account>:<uuid>`.")),
+    request_body = ServiceEnvBody,
+    responses(
+        (status = 201, description = "The action request was recorded; its preview lists the variables and flags (values show as write-only).", body = Resource<crate::requests::ActionRequestDto>),
+        (status = 400, description = "The service id or a field is invalid, or the resource has no variables.", body = ApiError),
+        (status = 403, description = "The caller may not do this, or policy denies the action.", body = ApiError),
+        (status = 404, description = "No such resource or variable.", body = ApiError),
+        (status = 409, description = "The idempotency key was already used for a different request.", body = ApiError),
+        (status = 503, description = "The surface is not wired.", body = ApiError),
+    )
+)]
+pub async fn request_service_env_change(
+    State(state): State<Arc<crate::operations::ApiState>>,
+    principal: Option<Extension<crate::ActingPrincipal>>,
+    Extension(correlation_id): Extension<CorrelationId>,
+    settings: Option<Extension<Arc<CoolifySettings>>>,
+    Path(service_id): Path<String>,
+    body: Result<Json<ServiceEnvBody>, axum::extract::rejection::JsonRejection>,
+) -> Filed {
+    let settings = settings_or_error(settings, correlation_id)?;
+    let broker = crate::requests::broker_or_error(&state, correlation_id)?;
+    let principal = crate::operations::principal_or_error(principal, correlation_id)?;
+    // The rejection is never echoed: its text can quote the body.
+    let Json(body) = body.map_err(|_| {
+        invalid(
+            "the request body must be JSON: changes (op, key, value for a set), and optional reason, idempotencyKey, redeploy",
+            correlation_id,
+        )
+    })?;
+    let mut changes = Vec::with_capacity(body.changes.len());
+    for change in body.changes {
+        let op = match change.op.as_str() {
+            "set" => EnvOp::Set,
+            "unset" => EnvOp::Unset,
+            _ => return Err(invalid("op must be set or unset", correlation_id)),
+        };
+        changes.push(EnvChangeInput {
+            op,
+            key: change.key,
+            is_preview: change.is_preview,
+            value: change.value.map(SensitiveString::new),
+            flags: EnvFlagOverrides {
+                is_buildtime: change.is_buildtime,
+                is_runtime: change.is_runtime,
+                is_multiline: change.is_multiline,
+                is_literal: change.is_literal,
+                is_shown_once: change.is_shown_once,
+            },
+        });
+    }
+    let created = settings
+        .request_env(
+            &broker,
+            state.authorizer.as_ref(),
+            &principal,
+            EnvRequest {
+                meta: meta_of(
+                    service_id,
+                    body.meta,
+                    "environment variables",
+                    correlation_id,
+                ),
+                changes,
+            },
+            fleet_core::SystemClock::now_unix_millis(),
+        )
+        .await
+        .map_err(|error| map_lifecycle_error(&error, correlation_id))?;
+    Ok((StatusCode::CREATED, Json(Resource::new(created.into()))))
+}
+
+/// Files a request to replace a Coolify application's domains, with a
+/// preview of the difference (`before`, `after`, and the changed fields).
+/// An `approve`-class action request; stale at execution when the domains
+/// changed in the meantime.
+///
+/// # Errors
+///
+/// Returns the public error envelope on refusal, invalid domains, an
+/// unknown or non-application resource, a Compose application, a change
+/// that would do nothing, or a broker refusal.
+#[utoipa::path(
+    post,
+    path = "/services/{serviceId}/settings/domains",
+    tag = "services",
+    operation_id = "requestServiceDomainsChange",
+    params(("serviceId" = String, Path, description = "A Coolify application id, `coolify:<account>:<uuid>`.")),
+    request_body = ServiceDomainsBody,
+    responses(
+        (status = 201, description = "The action request was recorded; its parameters carry the preview.", body = Resource<crate::requests::ActionRequestDto>),
+        (status = 400, description = "The service id or a domain is invalid, the resource is not an application, or nothing would change.", body = ApiError),
+        (status = 403, description = "The caller may not do this, or policy denies the action.", body = ApiError),
+        (status = 404, description = "No such resource in the account's latest observation.", body = ApiError),
+        (status = 409, description = "The idempotency key was already used for a different request.", body = ApiError),
+        (status = 503, description = "The surface is not wired.", body = ApiError),
+    )
+)]
+pub async fn request_service_domains_change(
+    State(state): State<Arc<crate::operations::ApiState>>,
+    principal: Option<Extension<crate::ActingPrincipal>>,
+    Extension(correlation_id): Extension<CorrelationId>,
+    settings: Option<Extension<Arc<CoolifySettings>>>,
+    Path(service_id): Path<String>,
+    body: Result<Json<ServiceDomainsBody>, axum::extract::rejection::JsonRejection>,
+) -> Filed {
+    let settings = settings_or_error(settings, correlation_id)?;
+    let broker = crate::requests::broker_or_error(&state, correlation_id)?;
+    let principal = crate::operations::principal_or_error(principal, correlation_id)?;
+    let Json(body) = body.map_err(|_| {
+        invalid(
+            "the request body must be JSON: domains (a list of URLs), and optional reason, idempotencyKey, redeploy",
+            correlation_id,
+        )
+    })?;
+    let created = settings
+        .request_domains(
+            &broker,
+            state.authorizer.as_ref(),
+            &principal,
+            DomainsRequest {
+                meta: meta_of(service_id, body.meta, "domains", correlation_id),
+                domains: body.domains,
+            },
+            fleet_core::SystemClock::now_unix_millis(),
+        )
+        .await
+        .map_err(|error| map_lifecycle_error(&error, correlation_id))?;
+    Ok((StatusCode::CREATED, Json(Resource::new(created.into()))))
+}
+
+/// Files a request to change a Coolify application's health check, with a
+/// preview of the difference. Only the named fields change. An
+/// `approve`-class action request.
+///
+/// # Errors
+///
+/// Returns the public error envelope on refusal, invalid fields, an unknown
+/// or non-application resource, a change that would do nothing, or a broker
+/// refusal.
+#[utoipa::path(
+    post,
+    path = "/services/{serviceId}/settings/health",
+    tag = "services",
+    operation_id = "requestServiceHealthChange",
+    params(("serviceId" = String, Path, description = "A Coolify application id, `coolify:<account>:<uuid>`.")),
+    request_body = ServiceHealthBody,
+    responses(
+        (status = 201, description = "The action request was recorded; its parameters carry the preview.", body = Resource<crate::requests::ActionRequestDto>),
+        (status = 400, description = "The service id or a field is invalid, the resource is not an application, or nothing would change.", body = ApiError),
+        (status = 403, description = "The caller may not do this, or policy denies the action.", body = ApiError),
+        (status = 404, description = "No such resource in the account's latest observation.", body = ApiError),
+        (status = 409, description = "The idempotency key was already used for a different request.", body = ApiError),
+        (status = 503, description = "The surface is not wired.", body = ApiError),
+    )
+)]
+pub async fn request_service_health_change(
+    State(state): State<Arc<crate::operations::ApiState>>,
+    principal: Option<Extension<crate::ActingPrincipal>>,
+    Extension(correlation_id): Extension<CorrelationId>,
+    settings: Option<Extension<Arc<CoolifySettings>>>,
+    Path(service_id): Path<String>,
+    body: Result<Json<ServiceHealthBody>, axum::extract::rejection::JsonRejection>,
+) -> Filed {
+    let settings = settings_or_error(settings, correlation_id)?;
+    let broker = crate::requests::broker_or_error(&state, correlation_id)?;
+    let principal = crate::operations::principal_or_error(principal, correlation_id)?;
+    let Json(body) = body.map_err(|_| {
+        invalid(
+            "the request body must be JSON with the health-check fields to change, and optional reason, idempotencyKey, redeploy",
+            correlation_id,
+        )
+    })?;
+    let patch = HealthPatch {
+        enabled: body.enabled,
+        path: body.path,
+        port: body.port,
+        host: body.host,
+        method: body.method,
+        scheme: body.scheme,
+        return_code: body.return_code,
+        response_text: body.response_text,
+        interval: body.interval,
+        timeout: body.timeout,
+        retries: body.retries,
+        start_period: body.start_period,
+        clear: body.clear,
+    };
+    let created = settings
+        .request_health(
+            &broker,
+            state.authorizer.as_ref(),
+            &principal,
+            HealthRequest {
+                meta: meta_of(service_id, body.meta, "health check", correlation_id),
+                patch,
+            },
+            fleet_core::SystemClock::now_unix_millis(),
+        )
+        .await
+        .map_err(|error| map_lifecycle_error(&error, correlation_id))?;
+    Ok((StatusCode::CREATED, Json(Resource::new(created.into()))))
 }
 
 #[cfg(test)]

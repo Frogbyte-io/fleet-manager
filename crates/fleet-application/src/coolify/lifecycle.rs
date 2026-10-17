@@ -434,7 +434,7 @@ pub fn parse_service_id(id: &str) -> Option<(&str, &str)> {
     (safe_id(account) && safe_id(uuid)).then_some((account, uuid))
 }
 
-fn safe_id(id: &str) -> bool {
+pub(super) fn safe_id(id: &str) -> bool {
     !id.is_empty()
         && id.len() <= 64
         && id
@@ -746,7 +746,10 @@ impl CoolifyLifecycle {
         .map_err(LifecycleError::Denied)
     }
 
-    async fn coolify_account(&self, id: &str) -> Result<ExternalAccount, LifecycleError> {
+    pub(super) async fn coolify_account(
+        &self,
+        id: &str,
+    ) -> Result<ExternalAccount, LifecycleError> {
         let account = self.accounts.get(id).await.map_err(|detail| {
             if detail.contains("not found") {
                 LifecycleError::NotFound {
@@ -766,7 +769,7 @@ impl CoolifyLifecycle {
     }
 
     /// The endpoint and the token together, under the account lock.
-    async fn resolve(
+    pub(super) async fn resolve(
         &self,
         id: &str,
     ) -> Result<(ExternalAccount, SensitiveString), LifecycleError> {
@@ -795,7 +798,7 @@ impl CoolifyLifecycle {
     }
 
     /// The kind and name of a resource in the account's latest observation.
-    async fn observed_resource(
+    pub(super) async fn observed_resource(
         &self,
         account_id: &str,
         uuid: &str,
@@ -816,6 +819,30 @@ impl CoolifyLifecycle {
         find_resource(&snapshot, uuid).ok_or_else(|| LifecycleError::NotFound {
             what: "that resource in the latest Coolify observation; run discovery".to_owned(),
         })
+    }
+
+    /// Checks the probed Coolify version against [`MIN_VERSION`]; the
+    /// settings routes share the lifecycle routes' floor.
+    pub(super) async fn require_supported_version(
+        &self,
+        base_url: &str,
+        token: &SensitiveString,
+    ) -> Result<(), LifecycleFailure> {
+        let version = self.port.version(base_url, token).await?;
+        check_version(&version)
+    }
+
+    /// Runs one lifecycle call, for a settings change that asked to be
+    /// applied.
+    pub(super) async fn run_verb(
+        &self,
+        base_url: &str,
+        token: &SensitiveString,
+        resource: LifecycleResource,
+        uuid: &str,
+        verb: LifecycleVerb,
+    ) -> Result<LifecycleAck, LifecycleFailure> {
+        self.port.run(base_url, token, resource, uuid, verb).await
     }
 
     /// Files a lifecycle action request for a running service. The resource
@@ -1219,7 +1246,10 @@ impl CoolifyLifecycle {
 }
 
 /// The kind and name of the resource with `uuid` in a snapshot.
-fn find_resource(snapshot: &CoolifySnapshot, uuid: &str) -> Option<(LifecycleResource, String)> {
+pub(super) fn find_resource(
+    snapshot: &CoolifySnapshot,
+    uuid: &str,
+) -> Option<(LifecycleResource, String)> {
     if let Some(item) = snapshot.applications.items.iter().find(|i| i.uuid == uuid) {
         return Some((LifecycleResource::Application, item.name.clone()));
     }
@@ -1234,7 +1264,7 @@ fn find_resource(snapshot: &CoolifySnapshot, uuid: &str) -> Option<(LifecycleRes
         .map(|item| (LifecycleResource::Database, item.name.clone()))
 }
 
-fn bounded_name(name: &str) -> String {
+pub(super) fn bounded_name(name: &str) -> String {
     name.chars()
         .filter(|c| !c.is_control())
         .take(MAX_NAME_LEN)

@@ -9,6 +9,14 @@ const getRunningService = vi.fn()
 vi.mock('@frogbyte-io/fleet-api-client', () => ({
   listRunningServices: (...a: unknown[]) => listRunningServices(...a),
   getRunningService: (...a: unknown[]) => getRunningService(...a),
+  // The lifecycle buttons and the settings tab (FM-1034) are covered in
+  // ServiceSettings.spec.ts; here they are never called.
+  getServiceSettings: vi.fn(),
+  getActionRequest: vi.fn(),
+  requestServiceAction: vi.fn(),
+  requestServiceEnvChange: vi.fn(),
+  requestServiceDomainsChange: vi.fn(),
+  requestServiceHealthChange: vi.fn(),
 }))
 
 import { routes } from '@/router'
@@ -184,8 +192,9 @@ describe('Service detail page', () => {
     expect(coolify.attributes('href')).toBe('https://coolify.example.net/project/p1')
     expect(coolify.attributes('rel')).toContain('noopener')
     expect(wrapper.find('[data-testid="stale-banner"]').exists()).toBe(false)
-    // The lifecycle slot exists and is empty until the broker has actions.
-    expect(wrapper.get('[data-testid="service-actions"]').text()).toBe('')
+    // The lifecycle buttons mount in the actions slot (FM-1033).
+    expect(wrapper.get('[data-testid="service-actions"]').text()).toContain('Redeploy')
+    expect(wrapper.get('[data-testid="tab-settings"]').text()).toBe('Settings')
   })
 
   it('lists why a service is stale and its ambiguous candidates', async () => {
