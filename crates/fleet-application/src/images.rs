@@ -438,16 +438,18 @@ impl Images {
         name: &str,
         value: &fleet_core::SensitiveString,
     ) -> Result<ImageSecretWrite, RecipeUseCaseError> {
-        let reference = secret_reference(name)?;
+        // Authorization comes first: a denied caller learns nothing about
+        // which names are well formed.
         authorize(
             authorizer,
             AccessRequest {
                 principal_id: &principal.id,
                 action: Permission::ImagesConfig,
-                resource: Some(&reference),
+                resource: None,
             },
         )
         .map_err(RecipeUseCaseError::Denied)?;
+        let reference = secret_reference(name)?;
         let text = value.expose();
         if text.trim().is_empty() || text.len() > MAX_SECRET_VALUE_LEN {
             return Err(RecipeUseCaseError::Invalid {
@@ -466,18 +468,22 @@ impl Images {
         )
         .await?;
         let outcome = port.set(&reference, value).await;
-        let event = if outcome.is_ok() {
-            "image_secret_set"
-        } else {
-            "image_secret_set_failed"
+        let (event, replaced_fact) = match &outcome {
+            Ok(true) => ("image_secret_set", Some("true")),
+            Ok(false) => ("image_secret_set", Some("false")),
+            Err(_) => ("image_secret_set_failed", None),
         };
+        let mut facts = vec![("name", reference.as_str())];
+        if let Some(replaced) = replaced_fact {
+            facts.push(("replaced", replaced));
+        }
         let audited = self
             .audit_event(
                 principal,
                 Permission::ImagesConfig,
                 Some(&reference),
                 event,
-                &[("name", reference.as_str())],
+                &facts,
             )
             .await;
         let replaced = outcome.map_err(|detail| RecipeUseCaseError::Backend {
@@ -504,16 +510,18 @@ impl Images {
         principal: &ActingPrincipal,
         name: &str,
     ) -> Result<String, RecipeUseCaseError> {
-        let reference = secret_reference(name)?;
+        // Authorization comes first: a denied caller learns nothing about
+        // which names are well formed.
         authorize(
             authorizer,
             AccessRequest {
                 principal_id: &principal.id,
                 action: Permission::ImagesConfig,
-                resource: Some(&reference),
+                resource: None,
             },
         )
         .map_err(RecipeUseCaseError::Denied)?;
+        let reference = secret_reference(name)?;
         let port = self.secret_port()?;
         self.audit_event(
             principal,

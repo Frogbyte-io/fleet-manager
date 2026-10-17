@@ -10,7 +10,7 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use fleet_application::images::{ImageSecretPort, SECRET_NAMESPACE};
+use fleet_application::images::{ImageSecretPort, check_secret_reference};
 use fleet_core::SensitiveString;
 use fleet_secrets::{SecretError, SecretStore, SecretValue};
 
@@ -28,7 +28,7 @@ impl SecretBackedImageSecrets {
     }
 
     async fn record_id(&self, reference: &str) -> Result<Option<String>, String> {
-        if !reference.starts_with(SECRET_NAMESPACE) {
+        if check_secret_reference(reference).is_err() {
             return Err("the record is outside the images/ namespace".to_owned());
         }
         Ok(self
@@ -52,34 +52,31 @@ impl ImageSecretPort for SecretBackedImageSecrets {
             .map_err(|error| format!("the secret store is unreadable: {error}"))?
             .into_iter()
             .map(|record| record.name)
-            .filter(|name| name.starts_with(SECRET_NAMESPACE))
+            .filter(|name| check_secret_reference(name).is_ok())
             .collect())
     }
 
     async fn set(&self, reference: &str, value: &SensitiveString) -> Result<bool, String> {
         let sealed = || SecretValue::new(value.expose().as_bytes().to_vec());
-        if let Some(id) = self.record_id(reference).await? {
-            return match self.secrets.update(&id, sealed()).await {
-                Ok(_) => Ok(true),
-                Err(error) => Err(format!("the secret could not be replaced: {error}")),
-            };
-        }
-        match self.secrets.create(reference, sealed()).await {
-            Ok(_) => Ok(false),
-            // A concurrent writer won the create: replace its record.
-            Err(SecretError::DuplicateName { .. }) => {
-                let id = self
-                    .record_id(reference)
-                    .await?
-                    .ok_or_else(|| "the secret record vanished during the write".to_owned())?;
-                self.secrets
-                    .update(&id, sealed())
-                    .await
-                    .map(|_| true)
-                    .map_err(|error| format!("the secret could not be replaced: {error}"))
+        // A concurrent delete or create can race either step, so the pair
+        // retries a few times: replace when the record exists, else create.
+        for _ in 0..3 {
+            if let Some(id) = self.record_id(reference).await? {
+                match self.secrets.update(&id, sealed()).await {
+                    Ok(_) => return Ok(true),
+                    // Deleted between the lookup and the update: create.
+                    Err(SecretError::NotFound { .. }) => continue,
+                    Err(error) => return Err(format!("the secret could not be replaced: {error}")),
+                }
             }
-            Err(error) => Err(format!("the secret could not be stored: {error}")),
+            match self.secrets.create(reference, sealed()).await {
+                Ok(_) => return Ok(false),
+                // A concurrent writer won the create: replace its record.
+                Err(SecretError::DuplicateName { .. }) => continue,
+                Err(error) => return Err(format!("the secret could not be stored: {error}")),
+            }
         }
+        Err("the secret record kept changing during the write; retry".to_owned())
     }
 
     async fn delete(&self, reference: &str) -> Result<bool, String> {

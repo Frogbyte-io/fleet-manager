@@ -2721,6 +2721,19 @@ fn image_secret_commands_take_names_only_never_values() {
 }
 
 #[test]
+fn a_secret_from_stdin_loses_exactly_one_trailing_newline() {
+    let strip = |text: &str| fleetctl::finish_secret_for_test(text).unwrap();
+    assert_eq!(strip("hunter2\n"), "hunter2");
+    assert_eq!(strip("hunter2\r\n"), "hunter2");
+    assert_eq!(strip("hunter2"), "hunter2");
+    // A PEM's own final newline survives when a second one was added.
+    assert_eq!(strip("-----END KEY-----\n\n"), "-----END KEY-----\n");
+    assert_eq!(strip(" pad \n"), " pad ");
+    assert!(fleetctl::finish_secret_for_test("\n").is_err());
+    assert!(fleetctl::finish_secret_for_test("").is_err());
+}
+
+#[test]
 fn parsing_walks_the_build_address_forms() {
     let parse = |words: &[&str]| {
         let args: Vec<String> = words.iter().map(ToString::to_string).collect();

@@ -55,7 +55,7 @@ watch(() => props.version.id, () => {
 })
 
 // A build reads only `images/<name>` records, by name (the controller refuses the rest).
-const SECRET_NAME = /^images\/[\w-][\w.-]*$/
+const SECRET_NAME = /^images\/(?=[\w.-]{1,128}$)[\w-][\w.-]*$/
 const varsValid = computed(() => secretVars.value.every(v => /^[A-Za-z_][\w-]*$/.test(v.name.trim()) && SECRET_NAME.test(v.reference.trim())))
 
 /** Scrolls to the build secrets section further down the page. */

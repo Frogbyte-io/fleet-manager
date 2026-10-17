@@ -1039,10 +1039,17 @@ pub async fn set_image_secret(
     State(state): State<Arc<crate::operations::ApiState>>,
     principal: Option<Extension<crate::ActingPrincipal>>,
     Extension(correlation_id): Extension<CorrelationId>,
-    Json(request): Json<SetImageSecretRequest>,
+    body: Result<Json<SetImageSecretRequest>, axum::extract::rejection::JsonRejection>,
 ) -> Result<Json<Resource<ImageSecretDto>>, ApiErrorResponse> {
     let images = images_or_error(&state, correlation_id)?;
     let principal = crate::operations::principal_or_error(principal, correlation_id)?;
+    // The rejection is never echoed: its text can quote the value.
+    let Json(request) = body.map_err(|_| {
+        crate::machines::invalid_request(
+            "the request body must be JSON with a name and a value",
+            correlation_id,
+        )
+    })?;
     let written = images
         .set_secret(
             state.authorizer.as_ref(),

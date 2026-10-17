@@ -2652,6 +2652,29 @@ async fn image_secrets_are_write_only_namespaced_authorized_and_audited_by_name(
         assert!(!body.to_string().contains(VALUE));
     }
     assert!(secrets.0.lock().unwrap().is_empty());
+    // A body that fails to deserialize gets a fixed 400 that never quotes it.
+    let (parts, body) = call_via(
+        &permit,
+        request(
+            "POST",
+            "/images/secrets",
+            Some(serde_json::json!({"name": 7, "value": VALUE})),
+        ),
+    )
+    .await;
+    assert_eq!(parts.status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(!body.to_string().contains(VALUE), "{body}");
+    // A denied caller gets 403 even for a malformed name.
+    let (parts, _) = call_via(
+        &read_only,
+        request(
+            "POST",
+            "/images/secrets",
+            Some(serde_json::json!({"name": "../x", "value": VALUE})),
+        ),
+    )
+    .await;
+    assert_eq!(parts.status, StatusCode::FORBIDDEN);
 
     let set = |name: &str| {
         request(
@@ -2690,6 +2713,7 @@ async fn image_secrets_are_write_only_namespaced_authorized_and_audited_by_name(
     let events = audit.0.lock().unwrap().join("\n");
     assert!(events.contains("image_secret_set"), "{events}");
     assert!(events.contains("image_secret_deleted"), "{events}");
+    assert!(events.contains("replaced"), "{events}");
     assert!(events.contains("images/iso-pass"), "{events}");
     assert!(!events.contains(VALUE), "{events}");
 
