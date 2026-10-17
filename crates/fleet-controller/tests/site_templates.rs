@@ -677,7 +677,7 @@ async fn a_git_template_creates_the_application_writes_defaults_and_deploys() {
 }
 
 #[tokio::test]
-async fn a_failure_after_creation_reports_what_exists_and_a_retry_reuses_it() {
+async fn a_failure_after_creation_reports_what_exists_and_the_marker_guards_duplicates() {
     let rig = Rig::new().await;
     rig.coolify.lock().unwrap().fail_deploy = true;
     let (_, request, operation) = rig
@@ -709,8 +709,10 @@ async fn a_failure_after_creation_reports_what_exists_and_a_retry_reuses_it() {
     assert_eq!(error["reason"], "site_partial");
     assert_eq!(rig.coolify.lock().unwrap().applications.len(), 1);
 
-    // Coolify recovers; running the same payload again finds the resource by
-    // its marker and finishes the deployment without a second creation.
+    // A failed request is final and is never re-run. What this checks is the
+    // duplicate guard for a worker that resumes an interrupted execution of
+    // the same operation: it finds the resource by its marker and does not
+    // create a second one.
     rig.coolify.lock().unwrap().fail_deploy = false;
     let payload: String =
         sqlx::query_scalar("SELECT payload_json FROM operations WHERE kind = 'coolify.site'")
@@ -745,6 +747,78 @@ async fn a_failure_after_creation_reports_what_exists_and_a_retry_reuses_it() {
             .any(|s| s.step == "start" && s.status == "skipped")
     );
     assert_eq!(rig.coolify.lock().unwrap().applications.len(), 1);
+
+    // A resource that carries the marker but is not the one this request
+    // asked for (another name) is not reused, and nothing is created.
+    rig.coolify
+        .lock()
+        .unwrap()
+        .applications
+        .get_mut(&uuid)
+        .unwrap()
+        .body["name"] = json!("someone-elses-app");
+    let failure = rig
+        .sites
+        .execute(SITE_KIND, payload, &NoProgress)
+        .await
+        .expect_err("a different name is refused");
+    assert!(failure.message.contains("different name"), "{failure}");
+    assert!(failure.partial.is_none());
+    assert_eq!(rig.coolify.lock().unwrap().applications.len(), 1);
+}
+
+#[tokio::test]
+async fn a_deployment_still_running_is_started_not_deployed() {
+    let rig = Rig::new().await;
+    rig.coolify.lock().unwrap().deployment_status = Some("in_progress".to_owned());
+    let (_, request, operation) = rig
+        .file_approve_run(rig.body("node-app", "https://slow.example.test"))
+        .await;
+    assert_eq!(request["state"], "succeeded", "{request}");
+    let result = result_of(&operation);
+    assert_eq!(result["outcome"], "started");
+    assert_eq!(result["settled"], false);
+    assert_eq!(result["deploymentStatus"], "in_progress");
+}
+
+#[tokio::test]
+async fn a_generic_request_with_a_forged_display_name_is_refused_at_execution() {
+    let rig = Rig::new().await;
+    // Everything the approver trusts is in the parameters: a valid template
+    // digest, a real server and project, but a server name that is not the
+    // observed one.
+    let (_, list) = raw(rig.address, "GET", "/api/v1/site-templates", None).await;
+    let ghost = &list["data"]["templates"][0];
+    assert_eq!(ghost["id"], "ghost");
+    let (status, filed) = raw(
+        rig.address,
+        "POST",
+        "/api/v1/requests",
+        Some(json!({
+            "actionId": "coolify.site.deploy",
+            "target": format!("site:{}:forged.example.test", rig.account),
+            "parameters": {
+                "accountId": rig.account, "templateId": "ghost", "templateVersion": 1,
+                "templateDigest": ghost["digest"], "serverUuid": SERVER,
+                "serverName": "production-database-host", "projectUuid": PROJECT,
+                "projectName": "sites", "environmentName": "production",
+                "domain": "https://forged.example.test", "name": "forged-example-test"
+            },
+            "reason": "forged"
+        })),
+    )
+    .await;
+    assert_eq!(status, 201, "{filed}");
+    let id = filed["data"]["id"].as_str().unwrap().to_owned();
+    rig.approve(&id).await;
+    let (request, operation) = rig.run(&id).await;
+    assert_eq!(operation["state"], "failed", "{operation}");
+    assert_eq!(request["state"], "failed", "{request}");
+    assert!(
+        operation["errorJson"].as_str().unwrap().contains("re-file"),
+        "{operation}"
+    );
+    assert!(rig.coolify.lock().unwrap().services.is_empty());
 }
 
 #[tokio::test]

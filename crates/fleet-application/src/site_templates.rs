@@ -36,9 +36,11 @@
 //! v4.2.0 floor, no token in any value that leaves the module) and these
 //! steps, each reported:
 //!
-//! 1. **find** a resource already created for this request, by a marker in
-//!    its description (`fleet-deploy:<request id>`), so a retry never makes a
-//!    second one;
+//! 1. **find** a resource this same request already created, by a marker in
+//!    its description (`fleet-deploy:<request id>`) that also matches the
+//!    name and environment. A request is never re-run once it has failed, so
+//!    this is a duplicate guard for a worker that resumes an interrupted
+//!    execution, not a retry path;
 //! 2. **create** it, with the domain, without `instant_deploy`;
 //! 3. **env**: write the template's default values that are not yet there
 //!    (applications; the values are non-secret literals fixed in the
@@ -50,8 +52,9 @@
 //! The created uuid is noted in the operation's progress before the next
 //! step. A failure after the resource exists completes the operation as
 //! `failed` with a structured partial result naming the uuid and what each
-//! step did, so a person can finish in Coolify or re-run the request (which
-//! reuses the resource).
+//! step did. A failed request is final and is never re-run: a person finishes
+//! in Coolify (the uuid is in the result), or deletes the resource there and
+//! files a new request.
 //!
 //! # Secrets
 //!
@@ -316,12 +319,23 @@ pub struct ApplicationCreate {
     pub domain: String,
 }
 
+/// A resource found by its request marker.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct MarkedResource {
+    /// Its Coolify uuid.
+    pub uuid: String,
+    /// Its name.
+    pub name: String,
+    /// The numeric id of its environment, when the list carried one.
+    pub environment_id: Option<i64>,
+}
+
 /// The Coolify creation client port. The provider crate implements it: a
 /// separate mutating surface from read discovery.
 #[async_trait]
 pub trait CoolifyCreatePort: fmt::Debug + Send + Sync {
-    /// The uuid of the resource whose description carries `marker`, if one
-    /// exists (`GET` of the list).
+    /// The resource whose description carries `marker`, if one exists (`GET`
+    /// of the list).
     ///
     /// # Errors
     ///
@@ -332,7 +346,7 @@ pub trait CoolifyCreatePort: fmt::Debug + Send + Sync {
         token: &SensitiveString,
         resource: LifecycleResource,
         marker: &str,
-    ) -> Result<Option<String>, LifecycleFailure>;
+    ) -> Result<Option<MarkedResource>, LifecycleFailure>;
 
     /// Creates a one-click service (`POST /services`) and returns its uuid.
     ///
@@ -684,8 +698,10 @@ pub struct DeployOutcome {
     pub template: String,
     /// The template version.
     pub template_version: u32,
-    /// `deployed` (the deployment was started and followed), or `partial`
-    /// (the resource exists but a later step failed; see `steps`).
+    /// `deployed` (the deployment finished, or the service runs), `started`
+    /// (it was started but had not finished when Fleet stopped following; it
+    /// may still succeed or fail), or `partial` (the resource exists but a
+    /// step failed; see `steps`).
     pub outcome: String,
     /// `application` or `service`.
     pub resource_kind: String,
@@ -1041,25 +1057,44 @@ impl SiteTemplates {
                 }
                 other => step_error(other),
             })?;
-        let known = snapshot
+        // What the approver read must still be true: the server, the project,
+        // and the environment exist, and the names shown in the request are
+        // theirs. A request filed through the generic `POST /requests` route
+        // can carry any display name, so they are compared here.
+        let server = snapshot
             .servers
             .items
             .iter()
-            .any(|server| server.uuid == params.server_uuid)
-            && snapshot.projects.items.iter().any(|project| {
-                project.uuid == params.project_uuid
-                    && project
-                        .environments
-                        .iter()
-                        .any(|environment| environment.name == params.environment_name)
-            });
-        if !known {
+            .find(|server| server.uuid == params.server_uuid);
+        let project = snapshot
+            .projects
+            .items
+            .iter()
+            .find(|project| project.uuid == params.project_uuid);
+        let environment = project.and_then(|project| {
+            project
+                .environments
+                .iter()
+                .find(|environment| environment.name == params.environment_name)
+        });
+        let (Some(server), Some(project), Some(environment)) = (server, project, environment)
+        else {
             return Err(
                 "the server, project, or environment is not in the account's latest Coolify observation; nothing was changed, so run discovery and re-file the request"
                     .to_owned()
                     .into(),
             );
+        };
+        if bounded_name(&server.name) != params.server_name
+            || bounded_name(&project.name) != params.project_name
+        {
+            return Err(
+                "the server or project name in the request is not the one in the latest Coolify observation; nothing was changed, so re-file the request"
+                    .to_owned()
+                    .into(),
+            );
         }
+        let environment_id = environment.id;
         let (account, token) = self
             .lifecycle
             .resolve(&params.account_id)
@@ -1085,22 +1120,35 @@ impl SiteTemplates {
             settled: false,
         };
 
-        // 1. Find a resource an earlier run of this request created.
+        // 1. Find a resource this same request already created (a worker that
+        // resumes an interrupted execution): the marker, the name, and the
+        // environment must all match, or the resource is not ours to reuse.
         let existing = self
             .create_port
             .find_by_marker(base, &token, resource, &marker)
             .await
             .map_err(provider)?;
+        if let Some(found) = &existing
+            && (found.name != params.name
+                || found.environment_id.is_some_and(|id| id != environment_id))
+        {
+            return Err(format!(
+                "Coolify has {} {} carrying this request's marker but a different name or environment; it was not reused and nothing was changed",
+                resource.id(),
+                found.uuid
+            )
+            .into());
+        }
         // 2. Create it.
         let reused = existing.is_some();
-        run.uuid = if let Some(uuid) = existing {
+        run.uuid = if let Some(found) = existing {
             run.step(
                 "find",
                 "done",
-                Some("found the resource an earlier run created"),
+                Some("found the resource this request already created"),
             );
             run.step("create", "reused", None);
-            uuid
+            found.uuid
         } else {
             run.step("find", "done", Some("no resource for this request yet"));
             let created = match &template.source {
@@ -1152,7 +1200,14 @@ impl SiteTemplates {
                         .await
                 }
             };
-            let uuid = created.map_err(|failure| format!("creating the resource: {failure}"))?;
+            let uuid = created.map_err(|failure| {
+                if failure.detail.contains("multiple destinations") {
+                    "creating the resource: the server has more than one destination; file a new request with its destination uuid (--destination)"
+                        .to_owned()
+                } else {
+                    format!("creating the resource: {failure}")
+                }
+            })?;
             if !safe_id(&uuid) {
                 return Err(
                     "Coolify created a resource but answered an unusable uuid; find it in Coolify by its description and finish there"
@@ -1178,7 +1233,7 @@ impl SiteTemplates {
 
         // 3. Default environment values (applications).
         if let Err(message) = self
-            .apply_env(base, &token, &template, &run.uuid, &mut run.steps)
+            .apply_env(base, &token, &template, resource, &run.uuid, &mut run.steps)
             .await
         {
             return Err(Self::partial(&template, &params, run, &message));
@@ -1196,10 +1251,13 @@ impl SiteTemplates {
             run.deployment_status.as_deref(),
             Some("failed" | "cancelled" | "cancelled-by-user")
         ) {
-            let message = "the first deployment did not finish; read its log with `fleetctl services logs`, fix the cause, and redeploy";
+            let message = "the first deployment did not finish; read its log with `fleetctl services logs`, then fix the cause in Coolify (or delete the resource there and file a new request)";
             return Err(Self::partial(&template, &params, run, message));
         }
-        Ok(Self::outcome(&template, &params, run, "deployed", None))
+        // `deployed` only once the deployment (or service) was seen to finish;
+        // a build that is still running is `started`, honestly.
+        let outcome = if run.settled { "deployed" } else { "started" };
+        Ok(Self::outcome(&template, &params, run, outcome, None))
     }
 
     async fn apply_env(
@@ -1207,6 +1265,7 @@ impl SiteTemplates {
         base: &str,
         token: &SensitiveString,
         template: &SiteTemplate,
+        resource: LifecycleResource,
         uuid: &str,
         steps: &mut Vec<StepReport>,
     ) -> Result<(), String> {
@@ -1220,7 +1279,7 @@ impl SiteTemplates {
         }
         let existing = match self
             .settings_port
-            .read_envs(base, token, LifecycleResource::Application, uuid)
+            .read_envs(base, token, resource, uuid)
             .await
         {
             Ok(existing) => existing,
@@ -1246,7 +1305,7 @@ impl SiteTemplates {
             };
             if let Err(failure) = self
                 .settings_port
-                .create_env(base, token, LifecycleResource::Application, uuid, &write)
+                .create_env(base, token, resource, uuid, &write)
                 .await
             {
                 steps.push(step(
@@ -1594,6 +1653,57 @@ mod tests {
                     template.id,
                     env.key
                 );
+            }
+        }
+    }
+
+    /// The pinned definitions. A change to a template changes its digest; this
+    /// table makes that a visible, reviewed edit (bump the version, update the
+    /// digest), because requests pin both.
+    #[test]
+    fn the_built_in_templates_are_pinned() {
+        let table: Vec<(String, u32, String)> = builtin_templates()
+            .iter()
+            .map(|t| (t.id.clone(), t.version, t.digest()))
+            .collect();
+        let expected = [
+            (
+                "ghost",
+                1,
+                "a14975d3ce9b2934dfd019b696ceca5efe72ce1a1aec7d269b0a5d1ea30d56f1",
+            ),
+            (
+                "uptime-kuma",
+                1,
+                "73418aa29553ae249840b1f1de41987d2a92497ce14cd19e9e38da8b98238863",
+            ),
+            (
+                "static-site",
+                1,
+                "1c17a1a49306dfec33ed30f7b8d75ed161f9b9174ac9b534e8c34a6f03ef2861",
+            ),
+            (
+                "node-app",
+                1,
+                "8b848ab3368246024f8bd9684fc791d8df18b3000a8b8b20ccc4222ef817e99f",
+            ),
+        ];
+        assert_eq!(table.len(), expected.len(), "{table:?}");
+        for ((id, version, digest), (want_id, want_version, want_digest)) in
+            table.iter().zip(expected)
+        {
+            assert_eq!((id.as_str(), *version), (want_id, want_version));
+            assert_eq!(digest, want_digest, "{id} changed: bump its version");
+        }
+    }
+
+    #[test]
+    fn only_git_templates_have_default_variables() {
+        // Variables are written to applications only: a service template with
+        // defaults would be silently ignored.
+        for template in builtin_templates() {
+            if template.resource() != LifecycleResource::Application {
+                assert!(template.default_env.is_empty(), "{}", template.id);
             }
         }
     }

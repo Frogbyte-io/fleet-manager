@@ -191,6 +191,40 @@ describe('filing', () => {
     expect(wrapper.get('[data-testid="registry-patch"]').text()).toContain('fleetctl registry relate domain/blog.example.org hosted-on coolify:svc1')
   })
 
+  it('says started, not deployed, while the deployment still builds, and labels the patch', async () => {
+    requestSiteDeployment.mockResolvedValue(ok(filedRequest(), 201))
+    getActionRequest.mockResolvedValue(ok(filedRequest({ state: 'succeeded', terminal: true, operationId: 'op-1' })))
+    getOperation.mockResolvedValue(ok({
+      id: 'op-1', state: 'succeeded',
+      resultJson: JSON.stringify({
+        outcome: 'started', resourceKind: 'application', uuid: 'app1', serviceId: 'coolify:acc1:app1',
+        domain: 'https://blog.example.org', followUpEnvKeys: [], deploymentStatus: 'in_progress',
+        steps: [{ step: 'create', status: 'done' }, { step: 'verify', status: 'pending', detail: 'deployment in_progress' }],
+      }),
+    }))
+    const wrapper = await mountPage()
+    await toTarget(wrapper)
+    await fillTarget(wrapper)
+    await wrapper.get('[data-testid="next"]').trigger('click')
+    await wrapper.get('[data-testid="file-request"]').trigger('click')
+    await flushPromises()
+    await flushPromises()
+    expect(wrapper.get('[data-testid="result-started"]').text()).toContain('had not finished')
+    expect(wrapper.get('[data-testid="registry-patch"]').text()).toContain('has not finished yet')
+  })
+
+  it('sends a destination uuid when one is given', async () => {
+    requestSiteDeployment.mockResolvedValue(ok(filedRequest(), 201))
+    const wrapper = await mountPage()
+    await toTarget(wrapper)
+    await fillTarget(wrapper)
+    await wrapper.get('[data-testid="destination"]').setValue('dest01')
+    await wrapper.get('[data-testid="next"]').trigger('click')
+    await wrapper.get('[data-testid="file-request"]').trigger('click')
+    await flushPromises()
+    expect(requestSiteDeployment.mock.calls[0]![0].destinationUuid).toBe('dest01')
+  })
+
   it('shows what exists after a partial failure and offers no registry patch', async () => {
     requestSiteDeployment.mockResolvedValue(ok(filedRequest(), 201))
     getActionRequest.mockResolvedValue(ok(filedRequest({ state: 'failed', terminal: true, operationId: 'op-1', failure: 'the application app1 was created but the deployment did not complete' })))
@@ -210,6 +244,7 @@ describe('filing', () => {
     await flushPromises()
     await flushPromises()
     expect(wrapper.get('[data-testid="result-error"]').text()).toContain('queue unavailable')
+    expect(wrapper.get('[data-testid="result-error"]').text()).toContain('delete it there and file a new request')
     expect(wrapper.text()).toContain('app1')
     expect(wrapper.find('[data-testid="registry-patch"]').exists()).toBe(false)
   })

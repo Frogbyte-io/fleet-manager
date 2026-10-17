@@ -7,6 +7,7 @@ import {
   buildBody,
   defaultName,
   deployCommand,
+  destinationProblem,
   domainProblem,
   draftProblem,
   environmentsOf,
@@ -111,6 +112,15 @@ describe('the draft', () => {
       'fleetctl services deploy --template ghost --account acc1 --server srv1 --project proj1 --environment production --domain blog.example.org --wait-approval',
     )
     expect(deployCommand(filled({ repository: 'https://example.org/o/r' }), NODE)).toContain('--repo https://example.org/o/r --branch main')
+  })
+
+  it('carries an optional destination uuid and refuses a malformed one', () => {
+    expect(buildBody(filled(), GHOST).destinationUuid).toBeUndefined()
+    expect(buildBody(filled({ destinationUuid: ' dest01 ' }), GHOST).destinationUuid).toBe('dest01')
+    expect(deployCommand(filled({ destinationUuid: 'dest01' }), GHOST)).toContain('--destination dest01')
+    expect(destinationProblem('')).toBeNull()
+    expect(destinationProblem('dest 01; rm')).not.toBeNull()
+    expect(draftProblem(filled({ destinationUuid: 'a b' }), GHOST)).toMatch(/destination/)
   })
 })
 

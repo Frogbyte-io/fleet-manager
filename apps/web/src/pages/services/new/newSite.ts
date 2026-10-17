@@ -18,6 +18,7 @@ export interface SiteDraft {
   serverUuid: string
   projectUuid: string
   environmentName: string
+  destinationUuid: string
   domain: string
   name: string
   repository: string
@@ -31,6 +32,7 @@ export function blankDraft(): SiteDraft {
     serverUuid: '',
     projectUuid: '',
     environmentName: '',
+    destinationUuid: '',
     domain: '',
     name: '',
     repository: '',
@@ -57,6 +59,19 @@ export function domainProblem(domain: string): string | null {
   if (!HOST.test(host))
     return 'Enter a host name such as blog.example.org (no path, port, or credentials).'
   return null
+}
+
+/**
+ * Why a destination uuid cannot be used, or null. Coolify has several
+ * destinations on a server only in unusual setups, and the observation does
+ * not list them, so the console takes the uuid as text (the controller and
+ * Coolify check it).
+ */
+export function destinationProblem(destination: string): string | null {
+  const text = destination.trim()
+  if (text === '')
+    return null
+  return /^[A-Za-z0-9_-]{1,64}$/.test(text) ? null : 'A destination uuid is letters, digits, "-" and "_".'
 }
 
 /** A resource name: lowercase letters, digits, and `-`. */
@@ -116,6 +131,9 @@ export function draftProblem(draft: SiteDraft, template: SiteTemplateDto | null)
   const name = nameProblem(draft.name)
   if (name)
     return name
+  const destination = destinationProblem(draft.destinationUuid)
+  if (destination)
+    return destination
   if (template.needsRepository)
     return repositoryProblem(draft.repository) ?? branchProblem(draft.branch)
   return null
@@ -134,6 +152,8 @@ export function buildBody(draft: SiteDraft, template: SiteTemplateDto): SiteDepl
   }
   if (draft.name.trim() !== '')
     body.name = draft.name.trim()
+  if (draft.destinationUuid.trim() !== '')
+    body.destinationUuid = draft.destinationUuid.trim()
   if (template.needsRepository) {
     body.repository = draft.repository.trim()
     body.branch = draft.branch.trim()
@@ -216,6 +236,8 @@ export function deployCommand(draft: SiteDraft, template: SiteTemplateDto): stri
   ]
   if (body.name)
     parts.push(`--name ${quote(body.name)}`)
+  if (body.destinationUuid)
+    parts.push(`--destination ${quote(body.destinationUuid)}`)
   if (body.repository)
     parts.push(`--repo ${quote(body.repository)}`, `--branch ${quote(body.branch ?? '')}`)
   parts.push('--wait-approval')

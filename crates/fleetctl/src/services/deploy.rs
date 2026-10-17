@@ -153,8 +153,13 @@ pub(crate) fn parse(rest: &[&str], output: &mut Output) -> Result<Command, CliEr
             ));
         }
         args.dns = Some(dns_args);
-    } else if !dns_args.target.is_empty() || dns_args.record_type.is_some() {
-        return Err(bad("--dns-target and --dns-type need --dns"));
+    } else if !dns_args.target.is_empty()
+        || dns_args.record_type.is_some()
+        || dns_args.account.is_some()
+    {
+        return Err(bad(
+            "--dns-target, --dns-type, and --dns-account need --dns",
+        ));
     }
     Ok(Command::Services(super::ServicesAction::Deploy(Box::new(
         args,
@@ -273,18 +278,23 @@ fn registry_patch(domain: &str, uuid: &str) -> Vec<String> {
     ]
 }
 
-/// Adds the DNS request and, after a success, the registry patch to the
-/// answer.
+/// Adds the DNS request and, for a site that exists, the registry patch to
+/// the answer (`registryPatchReady` is false while the deployment still runs).
 pub(crate) fn annotate(answer: &mut Value, dns: Option<Value>) {
     if let Some(dns) = dns {
         answer["dnsRequest"] = dns;
     }
-    let result = &answer["result"];
-    if result["outcome"].as_str() == Some("deployed")
+    // The patch records a site that exists. A deployment still building is
+    // `started`: the patch is given with the note that it is for once the
+    // deployment finishes, and a partial deployment gets none.
+    let result = answer["result"].clone();
+    let outcome = result["outcome"].as_str();
+    if matches!(outcome, Some("deployed" | "started"))
         && let (Some(domain), Some(uuid)) = (result["domain"].as_str(), result["uuid"].as_str())
     {
         let patch = registry_patch(domain, uuid);
         answer["registryPatch"] = json!(patch);
+        answer["registryPatchReady"] = json!(outcome == Some("deployed"));
     }
 }
 
@@ -388,7 +398,7 @@ pub(crate) fn render_deploy(value: &Value) -> String {
     if let Some(error) = result["error"].as_str() {
         let _ = write!(
             text,
-            "\n  stopped: {}\n  the resource exists; finish in Coolify, or re-run the approved request",
+            "\n  stopped: {}\n  the resource exists in Coolify (uuid above): finish there, or delete it there and file a new request",
             clean(error)
         );
     }
@@ -407,7 +417,11 @@ pub(crate) fn render_deploy(value: &Value) -> String {
         );
     }
     if let Some(patch) = value["registryPatch"].as_array() {
-        text.push_str("\n  record it in the registry (in a Fleet Git checkout):");
+        text.push_str(if value["registryPatchReady"].as_bool() == Some(false) {
+            "\n  the deployment has not finished yet; once it has, record it in the registry (in a Fleet Git checkout):"
+        } else {
+            "\n  record it in the registry (in a Fleet Git checkout):"
+        });
         for line in patch.iter().filter_map(Value::as_str) {
             let _ = write!(text, "\n    {}", clean(line));
         }
@@ -578,8 +592,39 @@ mod tests {
         annotate(&mut partial, None);
         let text = render_deploy(&partial);
         assert!(!text.contains("registry set"), "{text}");
-        assert!(text.contains("the resource exists"), "{text}");
+        assert!(
+            text.contains("delete it there and file a new request"),
+            "{text}"
+        );
         assert!(partial.get("registryPatch").is_none());
+    }
+
+    #[test]
+    fn a_dns_account_without_dns_is_refused_like_the_other_dns_flags() {
+        for flag in [
+            ["--dns-account", "cf"],
+            ["--dns-type", "A"],
+            ["--dns-target", "203.0.113.9"],
+        ] {
+            let mut words: Vec<&str> = FULL.to_vec();
+            words.extend(flag);
+            assert!(parsed(&words).is_err(), "{flag:?}");
+        }
+    }
+
+    #[test]
+    fn a_deployment_still_running_gets_a_patch_marked_not_ready() {
+        let mut answer = json!({
+            "outcome": "executed",
+            "request": {"id": "r3", "state": "succeeded"},
+            "result": {"outcome": "started", "resourceKind": "application", "uuid": "app7",
+                       "domain": "https://x.example.test", "steps": []}
+        });
+        annotate(&mut answer, None);
+        assert_eq!(answer["registryPatchReady"], json!(false));
+        let text = render_deploy(&answer);
+        assert!(text.contains("has not finished yet"), "{text}");
+        assert!(text.contains("hosted-on coolify:app7"), "{text}");
     }
 
     #[test]

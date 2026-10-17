@@ -17,6 +17,7 @@ import {
   buildBody,
   defaultName,
   deployCommand,
+  destinationProblem,
   domainProblem,
   draftProblem,
   environmentsOf,
@@ -68,6 +69,7 @@ watch(() => draft.value.projectUuid, () => {
 const problem = computed(() => draftProblem(draft.value, chosen.value))
 const domainError = computed(() => (draft.value.domain === '' && !touched.value ? null : domainProblem(draft.value.domain)))
 const nameError = computed(() => nameProblem(draft.value.name))
+const destinationError = computed(() => destinationProblem(draft.value.destinationUuid))
 const repoError = computed(() => (draft.value.repository === '' && !touched.value ? null : repositoryProblem(draft.value.repository)))
 const branchError = computed(() => branchProblem(draft.value.branch))
 const namePlaceholder = computed(() => defaultName(draft.value.domain) || 'blog-example-org')
@@ -113,7 +115,10 @@ const live = useFiledRequest(() => filed.value?.id ?? null)
 const current = computed(() => live.data.value ?? filed.value)
 const result = useDeployResult(() => current.value?.operationId)
 const outcome = computed(() => result.data.value?.result ?? null)
-const patch = computed(() => (outcome.value?.outcome === 'deployed' ? registryPatch(outcome.value) : []))
+// A site that exists can be recorded; while its deployment still builds the
+// patch is shown with that note, and a partial deployment gets none.
+const patch = computed(() => (outcome.value && ['deployed', 'started'].includes(outcome.value.outcome) ? registryPatch(outcome.value) : []))
+const patchReady = computed(() => outcome.value?.outcome === 'deployed')
 const failedWithoutResult = computed(() => current.value?.state === 'failed' && !outcome.value && !result.isFetching.value)
 
 function stepTone(status: string): 'ok' | 'err' | 'warn' | 'faint' {
@@ -167,7 +172,7 @@ function stepTone(status: string): 'ok' | 'err' | 'warn' | 'faint' {
         <div class="flex flex-wrap items-center gap-2">
           <StatusChip
             :label="outcome.outcome"
-            :tone="outcome.outcome === 'deployed' ? 'ok' : 'err'"
+            :tone="outcome.outcome === 'deployed' ? 'ok' : outcome.outcome === 'started' ? 'info' : 'err'"
           />
           <span class="font-mono text-[11px] text-fc-ink">{{ outcome.resourceKind }} {{ outcome.uuid }}</span>
           <RouterLink
@@ -198,7 +203,14 @@ function stepTone(status: string): 'ok' | 'err' | 'warn' | 'faint' {
           class="border-l-2 border-l-fc-err pl-2 text-fc-muted"
           data-testid="result-error"
         >
-          Stopped: {{ outcome.error }}. The resource exists in Coolify; finish there, or re-run the approved request.
+          Stopped: {{ outcome.error }}. The resource exists in Coolify (uuid above): finish there, or delete it there and file a new request.
+        </p>
+        <p
+          v-if="outcome.outcome === 'started'"
+          class="text-fc-muted"
+          data-testid="result-started"
+        >
+          The deployment was started but had not finished when Fleet stopped following it. Watch it on the service page; it may still succeed or fail.
         </p>
         <p
           v-if="outcome.followUpEnvKeys.length > 0"
@@ -212,14 +224,15 @@ function stepTone(status: string): 'ok' | 'err' | 'warn' | 'faint' {
         class="border-l-2 border-l-fc-err bg-card px-3 py-2 text-xs text-fc-muted"
         data-testid="result-none"
       >
-        The deployment failed before anything was created. Nothing needs cleaning up in Coolify.
+        The deployment failed before anything was created, so there is nothing to clean up in Coolify.
+        <span v-if="current?.failure"> {{ current.failure }}</span>
       </p>
       <div
         v-if="patch.length > 0"
         data-testid="registry-patch"
       >
         <p class="mb-1 text-xs text-fc-muted">
-          Record the new site in the Registry, in a Fleet Git checkout:
+          {{ patchReady ? 'Record the new site in the Registry, in a Fleet Git checkout:' : 'The deployment has not finished yet. Once it has, record the new site in the Registry, in a Fleet Git checkout:' }}
         </p>
         <CopyFleetctl :command="patch.join('\n')" />
       </div>
@@ -442,6 +455,22 @@ function stepTone(status: string): 'ok' | 'err' | 'warn' | 'faint' {
             Only public https repositories are supported. Private repositories need a credential path Fleet does not have yet.
           </p>
         </template>
+        <label class="grid gap-1">
+          <span class="fc-kicker">Destination uuid (only if the server has several)</span>
+          <input
+            v-model="draft.destinationUuid"
+            class="h-8 rounded-sm border border-input bg-transparent px-3 font-mono text-xs outline-none focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/50"
+            spellcheck="false"
+            autocomplete="off"
+            data-testid="destination"
+          >
+          <span class="text-[11px] text-fc-faint">Leave empty for a server with one destination. Coolify refuses a server with several unless one is named; its uuid is in Coolify under the server's Destinations (the console does not list them yet).</span>
+          <span
+            v-if="destinationError"
+            class="text-[11px] text-fc-warn"
+            data-testid="destination-problem"
+          >{{ destinationError }}</span>
+        </label>
         <label class="grid gap-1">
           <span class="fc-kicker">Resource name (optional)</span>
           <input

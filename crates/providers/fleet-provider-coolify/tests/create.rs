@@ -167,7 +167,7 @@ async fn an_application_is_created_with_post_applications_public() {
 async fn the_marker_lookup_reads_the_list_with_get() {
     let (base, seen) = stub(canned(
         200,
-        r#"[{"uuid":"a","description":"x"},{"uuid":"svc009","description":"fleet-deploy:req1"}]"#,
+        r#"[{"uuid":"a","description":"x"},{"uuid":"svc009","name":"blog","environment_id":3,"description":"fleet-deploy:req1"}]"#,
     ))
     .await;
     let found = CoolifyHttpCreate
@@ -179,7 +179,10 @@ async fn the_marker_lookup_reads_the_list_with_get() {
         )
         .await
         .unwrap();
-    assert_eq!(found.as_deref(), Some("svc009"));
+    let found = found.expect("found by its marker");
+    assert_eq!(found.uuid, "svc009");
+    assert_eq!(found.name, "blog");
+    assert_eq!(found.environment_id, Some(3));
     assert_eq!(seen.lock().unwrap()[0].0, "GET /api/v1/services");
     let (base, seen) = stub(canned(200, "[]")).await;
     let found = CoolifyHttpCreate

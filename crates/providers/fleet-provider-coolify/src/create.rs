@@ -29,7 +29,9 @@ use async_trait::async_trait;
 use fleet_application::coolify::lifecycle::{
     LifecycleFailure, LifecycleFailureClass, LifecycleResource,
 };
-use fleet_application::site_templates::{ApplicationCreate, CoolifyCreatePort, ServiceCreate};
+use fleet_application::site_templates::{
+    ApplicationCreate, CoolifyCreatePort, MarkedResource, ServiceCreate,
+};
 use fleet_core::SensitiveString;
 use serde_json::{Map, Value, json};
 
@@ -136,14 +138,23 @@ fn safe_uuid(text: &str) -> bool {
             .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_'))
 }
 
-/// The uuid of the listed item whose `description` equals `marker`.
-fn find_marked(list: &Value, marker: &str) -> Option<String> {
-    list.as_array()?
+/// The listed item whose `description` equals `marker`, with its name and
+/// environment id so the caller can check it is the resource it expects.
+fn find_marked(list: &Value, marker: &str) -> Option<MarkedResource> {
+    let item = list
+        .as_array()?
         .iter()
-        .find(|item| item.get("description").and_then(Value::as_str) == Some(marker))
-        .and_then(|item| item.get("uuid")?.as_str())
-        .filter(|uuid| safe_uuid(uuid))
-        .map(str::to_owned)
+        .find(|item| item.get("description").and_then(Value::as_str) == Some(marker))?;
+    let uuid = item.get("uuid")?.as_str().filter(|uuid| safe_uuid(uuid))?;
+    Some(MarkedResource {
+        uuid: uuid.to_owned(),
+        name: item
+            .get("name")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_owned(),
+        environment_id: item.get("environment_id").and_then(Value::as_i64),
+    })
 }
 
 fn uuid_of_creation(text: &str) -> Result<String, LifecycleFailure> {
@@ -216,7 +227,7 @@ impl CoolifyCreatePort for CoolifyHttpCreate {
         token: &SensitiveString,
         resource: LifecycleResource,
         marker: &str,
-    ) -> Result<Option<String>, LifecycleFailure> {
+    ) -> Result<Option<MarkedResource>, LifecycleFailure> {
         let route = match resource {
             LifecycleResource::Application => Route::ListApplications,
             LifecycleResource::Service => Route::ListServices,
@@ -333,12 +344,16 @@ mod tests {
     fn a_marker_finds_exactly_one_resource() {
         let list = json!([
             {"uuid": "a1", "description": "something else"},
-            {"uuid": "b2", "description": "fleet-deploy:abc"},
+            {"uuid": "b2", "name": "site", "environment_id": 4, "description": "fleet-deploy:abc"},
             {"uuid": "c3", "description": null},
         ]);
         assert_eq!(
-            find_marked(&list, "fleet-deploy:abc").as_deref(),
-            Some("b2")
+            find_marked(&list, "fleet-deploy:abc"),
+            Some(MarkedResource {
+                uuid: "b2".to_owned(),
+                name: "site".to_owned(),
+                environment_id: Some(4)
+            })
         );
         assert_eq!(find_marked(&list, "fleet-deploy:zzz"), None);
         assert_eq!(find_marked(&json!({"message": "x"}), "m"), None);
