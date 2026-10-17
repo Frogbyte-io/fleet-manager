@@ -449,7 +449,9 @@ pub(crate) fn finish_filed_request(
     })?;
     let (outcome, request) = wait_for_outcome(client, invocation, id, bound)?;
     let mut answer = outcome_body(outcome, &request);
-    if outcome == Outcome::Executed
+    // A failed operation may still carry a structured partial result (a site
+    // deployment that stopped after creating its resource), so it is read too.
+    if matches!(outcome, Outcome::Executed | Outcome::Failed)
         && let Some(operation_id) = request["operationId"].as_str()
     {
         let read = crate::send_classified(
@@ -471,11 +473,14 @@ pub(crate) fn finish_filed_request(
                     .and_then(|text| serde_json::from_str::<Value>(text).ok())
                 {
                     Some(result) => answer["result"] = result,
+                    // A failed operation usually has no result: say nothing.
+                    None if outcome == Outcome::Failed => {}
                     None => {
                         answer["resultWarning"] = json!("the operation carried no readable result");
                     }
                 }
             }
+            Err(_) if outcome == Outcome::Failed => {}
             Err((error, _)) => {
                 answer["resultWarning"] = json!(format!(
                     "the request executed, but its operation result could not be read: {}",

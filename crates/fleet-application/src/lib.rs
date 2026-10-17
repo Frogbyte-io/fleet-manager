@@ -36,6 +36,7 @@ pub mod proxmox;
 pub mod ready;
 pub mod registry;
 pub mod services;
+pub mod site_templates;
 pub mod skill_catalog;
 pub mod skills;
 pub mod source;

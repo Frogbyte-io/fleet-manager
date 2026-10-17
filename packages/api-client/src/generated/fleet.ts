@@ -8090,6 +8090,89 @@ export interface ResourceServiceSettingsDto {
 }
 
 /**
+ * A default variable of a template: a non-secret literal.
+ */
+export interface SiteTemplateEnvDto {
+  /** The variable's name. */
+  key: string;
+  /** The default value. */
+  value: string;
+}
+
+/**
+ * What a template creates.
+ */
+export interface SiteTemplateSourceDto {
+  /**
+     * The build pack (`git` templates).
+     * @nullable
+     */
+  buildPack?: string | null;
+  /**
+     * `service` (a Coolify one-click service) or `git` (a public Git
+     * repository built by Coolify).
+     */
+  kind: string;
+  /**
+     * The port the application listens on (`git` templates).
+     * @minimum 0
+     * @nullable
+     */
+  portsExposes?: number | null;
+  /**
+     * The one-click service type (`service` templates).
+     * @nullable
+     */
+  serviceType?: string | null;
+}
+
+/**
+ * One site template.
+ */
+export interface SiteTemplateDto {
+  /** Default environment values written after creation. */
+  defaultEnv: SiteTemplateEnvDto[];
+  /** What the template makes. */
+  description: string;
+  /** The SHA-256 that pins the definition; a request carries it. */
+  digest: string;
+  /** Variables to set after the deploy, by name only. */
+  followUpEnvKeys: string[];
+  /** The stable id. */
+  id: string;
+  /** A short display name. */
+  name: string;
+  /** Whether a deploy needs a public repository and a branch. */
+  needsRepository: boolean;
+  /** What it creates. */
+  source: SiteTemplateSourceDto;
+  /**
+     * The definition's version.
+     * @minimum 0
+     */
+  version: number;
+}
+
+/**
+ * The site templates.
+ */
+export type ResourceSiteTemplatesDtoData = {
+  /** The built-in templates. */
+  templates: SiteTemplateDto[];
+};
+
+/**
+ * A single resource.
+ *
+ * The payload is nested under `data` so that later top-level fields are an
+ * additive change rather than a breaking one.
+ */
+export interface ResourceSiteTemplatesDto {
+  /** The site templates. */
+  data: ResourceSiteTemplatesDtoData;
+}
+
+/**
  * One machine's observed skill inventory.
  */
 export type ResourceSkillsSnapshotDtoData = {
@@ -8533,6 +8616,60 @@ export interface ServicesPage {
   items: RunningServiceDto[];
   /** Where this page sits in the result set. */
   page: PageInfo;
+}
+
+/**
+ * The body of a deploy request.
+ */
+export interface SiteDeployBody {
+  /** The Fleet Coolify account id. */
+  accountId: string;
+  /**
+     * The branch (templates that deploy a repository).
+     * @nullable
+     */
+  branch?: string | null;
+  /**
+     * The destination uuid, when the server has several.
+     * @nullable
+     */
+  destinationUuid?: string | null;
+  /** The site's domain: a host name or an `https://` URL. */
+  domain: string;
+  /** The environment name within the project. */
+  environmentName: string;
+  /**
+     * A key making a retry return the request already made (scoped to the
+     * caller).
+     * @nullable
+     */
+  idempotencyKey?: string | null;
+  /**
+     * The resource name; derived from the domain when absent.
+     * @nullable
+     */
+  name?: string | null;
+  /** The target project's Coolify uuid, or its exact name when unambiguous. */
+  projectUuid: string;
+  /** Why, for the approver (at most 1000 characters). */
+  reason?: string;
+  /**
+     * The public repository URL (templates that deploy a repository).
+     * @nullable
+     */
+  repository?: string | null;
+  /** The target server's Coolify uuid, or its exact name when unambiguous. */
+  serverUuid: string;
+  /** The template id. */
+  templateId: string;
+}
+
+/**
+ * The site templates.
+ */
+export interface SiteTemplatesDto {
+  /** The built-in templates. */
+  templates: SiteTemplateDto[];
 }
 
 /**
@@ -19437,6 +19574,153 @@ const res = await fetch(getRequestServiceHealthChangeUrl(serviceId),
 
   const data: requestServiceHealthChangeResponse['data'] = body ? JSON.parse(body) : {}
   return { data, status: res.status, headers: res.headers } as requestServiceHealthChangeResponse
+}
+
+
+
+export type requestSiteDeploymentResponse201 = {
+  data: ResourceActionRequestDto
+  status: 201
+}
+
+export type requestSiteDeploymentResponse400 = {
+  data: ApiError
+  status: 400
+}
+
+export type requestSiteDeploymentResponse403 = {
+  data: ApiError
+  status: 403
+}
+
+export type requestSiteDeploymentResponse404 = {
+  data: ApiError
+  status: 404
+}
+
+export type requestSiteDeploymentResponse409 = {
+  data: ApiError
+  status: 409
+}
+
+export type requestSiteDeploymentResponse503 = {
+  data: ApiError
+  status: 503
+}
+
+export type requestSiteDeploymentResponseSuccess = (requestSiteDeploymentResponse201) & {
+  headers: Headers;
+};
+export type requestSiteDeploymentResponseError = (requestSiteDeploymentResponse400 | requestSiteDeploymentResponse403 | requestSiteDeploymentResponse404 | requestSiteDeploymentResponse409 | requestSiteDeploymentResponse503) & {
+  headers: Headers;
+};
+
+export type requestSiteDeploymentResponse = (requestSiteDeploymentResponseSuccess | requestSiteDeploymentResponseError)
+
+export const getRequestSiteDeploymentUrl = () => {
+
+
+
+
+  return `/api/v1/site-deployments`
+}
+
+/**
+ * # Errors
+ *
+ * Returns the public error envelope on refusal, an unknown template,
+ * account, or target, a domain already in use, or a broker refusal.
+ * @summary Files a request to deploy a new site from a template: it creates the
+Coolify resource, sets the domain, and starts the first deployment. The
+server, project, and environment must be in the account's latest Coolify
+observation and the domain must not already be routed there. The request
+is `approve` class (it waits for a person unless policy says otherwise);
+the answer is the action request. Follow it at `/requests/{id}` and its
+operation at `/operations/{id}`: the result names the created uuid and
+every step, and a deployment that stopped after creating the resource is a
+failed operation whose result still carries them.
+ */
+export const requestSiteDeployment = async (siteDeployBody: SiteDeployBody, options?: RequestInit): Promise<requestSiteDeploymentResponse> => {
+
+    const getHeaders = (h?: NonNullable<RequestInit['headers']>): Record<string, string | readonly string[]> => {
+    if (!h) return {};
+    if (h instanceof Headers) return Object.fromEntries(h.entries());
+    if (Array.isArray(h)) return Object.fromEntries(h);
+    return h;
+  };
+const res = await fetch(getRequestSiteDeploymentUrl(),
+  {
+    ...options,
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...getHeaders(options?.headers) },
+    body: JSON.stringify(siteDeployBody)
+  }
+)
+
+
+  const body = [204, 205, 304].includes(res.status) ? null : await res.text();
+
+  const data: requestSiteDeploymentResponse['data'] = body ? JSON.parse(body) : {}
+  return { data, status: res.status, headers: res.headers } as requestSiteDeploymentResponse
+}
+
+
+
+export type listSiteTemplatesResponse200 = {
+  data: ResourceSiteTemplatesDto
+  status: 200
+}
+
+export type listSiteTemplatesResponse403 = {
+  data: ApiError
+  status: 403
+}
+
+export type listSiteTemplatesResponse503 = {
+  data: ApiError
+  status: 503
+}
+
+export type listSiteTemplatesResponseSuccess = (listSiteTemplatesResponse200) & {
+  headers: Headers;
+};
+export type listSiteTemplatesResponseError = (listSiteTemplatesResponse403 | listSiteTemplatesResponse503) & {
+  headers: Headers;
+};
+
+export type listSiteTemplatesResponse = (listSiteTemplatesResponseSuccess | listSiteTemplatesResponseError)
+
+export const getListSiteTemplatesUrl = () => {
+
+
+
+
+  return `/api/v1/site-templates`
+}
+
+/**
+ * # Errors
+ *
+ * Returns the public error envelope on refusal or when the surface is not
+ * wired.
+ * @summary Lists the built-in site templates. Needs `external_account.read`.
+ */
+export const listSiteTemplates = async ( options?: RequestInit): Promise<listSiteTemplatesResponse> => {
+
+  const res = await fetch(getListSiteTemplatesUrl(),
+  {
+    ...options,
+    method: 'GET'
+
+
+  }
+)
+
+
+  const body = [204, 205, 304].includes(res.status) ? null : await res.text();
+
+  const data: listSiteTemplatesResponse['data'] = body ? JSON.parse(body) : {}
+  return { data, status: res.status, headers: res.headers } as listSiteTemplatesResponse
 }
 
 

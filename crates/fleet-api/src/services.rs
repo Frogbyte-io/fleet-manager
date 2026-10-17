@@ -466,7 +466,7 @@ pub struct ServicesParams {
     pub limit: Option<u32>,
 }
 
-fn invalid(detail: &str, correlation_id: CorrelationId) -> ApiErrorResponse {
+pub(crate) fn invalid(detail: &str, correlation_id: CorrelationId) -> ApiErrorResponse {
     let public = PublicError::new(
         ErrorCode::from_str("invalid_request").expect("valid error code"),
         detail.to_owned(),
@@ -691,7 +691,10 @@ fn lifecycle_or_error(
         })
 }
 
-fn map_lifecycle_error(error: &LifecycleError, correlation_id: CorrelationId) -> ApiErrorResponse {
+pub(crate) fn map_lifecycle_error(
+    error: &LifecycleError,
+    correlation_id: CorrelationId,
+) -> ApiErrorResponse {
     if let LifecycleError::Broker(broker) = error {
         return crate::requests::map_broker_error(broker, correlation_id);
     }

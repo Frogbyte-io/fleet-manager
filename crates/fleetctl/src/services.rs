@@ -8,6 +8,7 @@ use std::time::Duration;
 
 use serde_json::{Value, json};
 
+pub mod deploy;
 pub mod settings;
 
 use crate::requests::parse_wait_approval;
@@ -50,6 +51,10 @@ pub enum ServicesAction {
     /// Settings of a Coolify resource (FM-1034): environment variables,
     /// domains, and health checks.
     Settings(settings::SettingsAction),
+    /// List the site templates (FM-1035).
+    Templates,
+    /// File a request to deploy a new site from a template (FM-1035).
+    Deploy(Box<deploy::DeployArgs>),
     /// Tail a Coolify application's deployment log (FM-1033).
     Logs {
         /// The service id.
@@ -70,6 +75,9 @@ pub(crate) fn parse(rest: &[&str], output: &mut Output) -> Result<Command, CliEr
     if matches!(*verb, "settings" | "env" | "domains" | "health") {
         return settings::parse(rest, output)
             .map(|action| Command::Services(ServicesAction::Settings(action)));
+    }
+    if matches!(*verb, "templates" | "deploy") {
+        return deploy::parse(rest, output);
     }
     let (id, flags) = match *verb {
         "get" | "start" | "stop" | "restart" | "redeploy" | "logs" => {
@@ -186,6 +194,7 @@ impl ServicesAction {
     pub fn filing_wait(&self) -> Option<Option<Duration>> {
         match self {
             Self::Action { wait, .. } => Some(*wait),
+            Self::Deploy(args) => Some(args.wait),
             Self::Settings(action) => action.filing_wait(),
             _ => None,
         }
@@ -250,6 +259,8 @@ fn request_of(action: &ServicesAction) -> RequestShape {
             )
         }
         ServicesAction::Settings(_) => unreachable!("handled by request"),
+        ServicesAction::Templates => deploy::templates_request(),
+        ServicesAction::Deploy(args) => deploy::request(args),
         ServicesAction::Logs {
             id,
             deployment,
@@ -350,6 +361,8 @@ pub(crate) fn render_for(action: &ServicesAction, value: &Value) -> String {
     match action {
         ServicesAction::Action { .. } => return render_action(value),
         ServicesAction::Logs { .. } => return render_logs(value),
+        ServicesAction::Templates => return deploy::render_templates(value),
+        ServicesAction::Deploy(_) => return deploy::render_deploy(value),
         ServicesAction::Settings(action) => return settings::render_for(action, value),
         _ => {}
     }

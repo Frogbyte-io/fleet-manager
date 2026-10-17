@@ -37,6 +37,7 @@ pub mod proxmox_store;
 pub mod proxmox_tasks_store;
 pub mod ready;
 pub mod registry_enrich;
+pub mod site_exec;
 pub mod skills;
 pub mod source;
 pub mod source_poller;
@@ -106,6 +107,9 @@ pub struct NodeServices {
     /// The Coolify settings use cases (FM-1034); set with the lifecycle
     /// use cases, absent otherwise.
     pub coolify_settings: Option<Arc<fleet_application::coolify::settings::CoolifySettings>>,
+    /// The site-template use cases (FM-1035); set with the lifecycle use
+    /// cases, absent otherwise.
+    pub site_templates: Option<Arc<fleet_application::site_templates::SiteTemplates>>,
 }
 
 fn event_hub_for_services(
@@ -175,6 +179,7 @@ pub fn compose_node_services_with_events(
         coolify_discovery: None,
         coolify_lifecycle: None,
         coolify_settings: None,
+        site_templates: None,
         nodes,
         gateway,
         events,
@@ -313,6 +318,12 @@ fn compose_action_registry() -> Arc<fleet_application::broker::ActionRegistry> {
         registry
             .register(action)
             .expect("the Coolify settings action ids are valid and unique");
+    }
+    // FM-1035: deploy a site from a template; `approve`.
+    for action in fleet_application::site_templates::site_actions() {
+        registry
+            .register(action)
+            .expect("the site-template action ids are valid and unique");
     }
     Arc::new(registry)
 }
@@ -675,6 +686,7 @@ fn build_router_for_caller(
     let coolify_discovery = services.and_then(|services| services.coolify_discovery.clone());
     let coolify_lifecycle = services.and_then(|services| services.coolify_lifecycle.clone());
     let coolify_settings = services.and_then(|services| services.coolify_settings.clone());
+    let site_templates = services.and_then(|services| services.site_templates.clone());
     let mut api_router = fleet_api::router(api_state.clone());
     if let (Some(pool), Some(machines)) = (audit_db.as_ref(), api_state.machines.as_ref()) {
         // The running-services surface (FM-1031), same shape: cached
@@ -701,6 +713,10 @@ fn build_router_for_caller(
     if let Some(coolify_settings) = coolify_settings {
         // The Coolify settings surface (FM-1034), same shape.
         api_router = api_router.layer(axum::Extension(coolify_settings));
+    }
+    if let Some(site_templates) = site_templates {
+        // The site-template surface (FM-1035), same shape.
+        api_router = api_router.layer(axum::Extension(site_templates));
     }
     if let Some(external_accounts) = external_accounts {
         // The external accounts surface (FM-1001) takes its use cases as a

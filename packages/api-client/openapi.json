@@ -10405,6 +10405,130 @@
         }
       }
     },
+    "/api/v1/site-deployments": {
+      "post": {
+        "tags": [
+          "services"
+        ],
+        "summary": "Files a request to deploy a new site from a template: it creates the\nCoolify resource, sets the domain, and starts the first deployment. The\nserver, project, and environment must be in the account's latest Coolify\nobservation and the domain must not already be routed there. The request\nis `approve` class (it waits for a person unless policy says otherwise);\nthe answer is the action request. Follow it at `/requests/{id}` and its\noperation at `/operations/{id}`: the result names the created uuid and\nevery step, and a deployment that stopped after creating the resource is a\nfailed operation whose result still carries them.",
+        "description": "# Errors\n\nReturns the public error envelope on refusal, an unknown template,\naccount, or target, a domain already in use, or a broker refusal.",
+        "operationId": "requestSiteDeployment",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SiteDeployBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "description": "The action request was recorded; its state shows what policy did.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Resource_ActionRequestDto"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "A field is invalid, or the domain is already routed.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The caller may not do this, or policy denies the action.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such account, server, project, or environment in the latest observation.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The idempotency key was already used for a different request.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The surface is not wired.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/site-templates": {
+      "get": {
+        "tags": [
+          "services"
+        ],
+        "summary": "Lists the built-in site templates. Needs `external_account.read`.",
+        "description": "# Errors\n\nReturns the public error envelope on refusal or when the surface is not\nwired.",
+        "operationId": "listSiteTemplates",
+        "responses": {
+          "200": {
+            "description": "The built-in templates, each pinned by version and digest.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Resource_SiteTemplatesDto"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The caller may not do this.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The surface is not wired.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/skills/catalog": {
       "get": {
         "tags": [
@@ -24297,6 +24421,31 @@
           }
         }
       },
+      "Resource_SiteTemplatesDto": {
+        "type": "object",
+        "description": "A single resource.\n\nThe payload is nested under `data` so that later top-level fields are an\nadditive change rather than a breaking one.",
+        "required": [
+          "data"
+        ],
+        "properties": {
+          "data": {
+            "type": "object",
+            "description": "The site templates.",
+            "required": [
+              "templates"
+            ],
+            "properties": {
+              "templates": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/components/schemas/SiteTemplateDto"
+                },
+                "description": "The built-in templates."
+              }
+            }
+          }
+        }
+      },
       "Resource_SkillsSnapshotDto": {
         "type": "object",
         "description": "A single resource.\n\nThe payload is nested under `data` so that later top-level fields are an\nadditive change rather than a breaking one.",
@@ -25625,6 +25774,215 @@
           "warn",
           "err"
         ]
+      },
+      "SiteDeployBody": {
+        "type": "object",
+        "description": "The body of a deploy request.",
+        "required": [
+          "accountId",
+          "templateId",
+          "serverUuid",
+          "projectUuid",
+          "environmentName",
+          "domain"
+        ],
+        "properties": {
+          "accountId": {
+            "type": "string",
+            "description": "The Fleet Coolify account id."
+          },
+          "branch": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The branch (templates that deploy a repository)."
+          },
+          "destinationUuid": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The destination uuid, when the server has several."
+          },
+          "domain": {
+            "type": "string",
+            "description": "The site's domain: a host name or an `https://` URL."
+          },
+          "environmentName": {
+            "type": "string",
+            "description": "The environment name within the project."
+          },
+          "idempotencyKey": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "A key making a retry return the request already made (scoped to the\ncaller)."
+          },
+          "name": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The resource name; derived from the domain when absent."
+          },
+          "projectUuid": {
+            "type": "string",
+            "description": "The target project's Coolify uuid, or its exact name when unambiguous."
+          },
+          "reason": {
+            "type": "string",
+            "description": "Why, for the approver (at most 1000 characters)."
+          },
+          "repository": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The public repository URL (templates that deploy a repository)."
+          },
+          "serverUuid": {
+            "type": "string",
+            "description": "The target server's Coolify uuid, or its exact name when unambiguous."
+          },
+          "templateId": {
+            "type": "string",
+            "description": "The template id."
+          }
+        },
+        "additionalProperties": false
+      },
+      "SiteTemplateDto": {
+        "type": "object",
+        "description": "One site template.",
+        "required": [
+          "id",
+          "version",
+          "digest",
+          "name",
+          "description",
+          "source",
+          "needsRepository",
+          "defaultEnv",
+          "followUpEnvKeys"
+        ],
+        "properties": {
+          "defaultEnv": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/SiteTemplateEnvDto"
+            },
+            "description": "Default environment values written after creation."
+          },
+          "description": {
+            "type": "string",
+            "description": "What the template makes."
+          },
+          "digest": {
+            "type": "string",
+            "description": "The SHA-256 that pins the definition; a request carries it."
+          },
+          "followUpEnvKeys": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Variables to set after the deploy, by name only."
+          },
+          "id": {
+            "type": "string",
+            "description": "The stable id."
+          },
+          "name": {
+            "type": "string",
+            "description": "A short display name."
+          },
+          "needsRepository": {
+            "type": "boolean",
+            "description": "Whether a deploy needs a public repository and a branch."
+          },
+          "source": {
+            "$ref": "#/components/schemas/SiteTemplateSourceDto",
+            "description": "What it creates."
+          },
+          "version": {
+            "type": "integer",
+            "format": "int32",
+            "description": "The definition's version.",
+            "minimum": 0
+          }
+        }
+      },
+      "SiteTemplateEnvDto": {
+        "type": "object",
+        "description": "A default variable of a template: a non-secret literal.",
+        "required": [
+          "key",
+          "value"
+        ],
+        "properties": {
+          "key": {
+            "type": "string",
+            "description": "The variable's name."
+          },
+          "value": {
+            "type": "string",
+            "description": "The default value."
+          }
+        }
+      },
+      "SiteTemplateSourceDto": {
+        "type": "object",
+        "description": "What a template creates.",
+        "required": [
+          "kind"
+        ],
+        "properties": {
+          "buildPack": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The build pack (`git` templates)."
+          },
+          "kind": {
+            "type": "string",
+            "description": "`service` (a Coolify one-click service) or `git` (a public Git\nrepository built by Coolify)."
+          },
+          "portsExposes": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "The port the application listens on (`git` templates).",
+            "minimum": 0
+          },
+          "serviceType": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The one-click service type (`service` templates)."
+          }
+        }
+      },
+      "SiteTemplatesDto": {
+        "type": "object",
+        "description": "The site templates.",
+        "required": [
+          "templates"
+        ],
+        "properties": {
+          "templates": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/SiteTemplateDto"
+            },
+            "description": "The built-in templates."
+          }
+        }
       },
       "SkillsAuthDto": {
         "oneOf": [
