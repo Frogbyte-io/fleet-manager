@@ -1,7 +1,7 @@
 // Pure model for the Domains view: a domain entry joined with its latest
 // RDAP/DNS observation (FM-1020). Nothing here fetches or renders.
 
-import type { DomainObservationViewDto, DomainWarningDto, RegistryEntryDto } from '@frogbyte-io/fleet-api-client'
+import type { DomainObservationViewDto, DomainWarningDto,RegistryEntryDto, SuggestedFieldDto } from '@frogbyte-io/fleet-api-client'
 
 import { daysUntil } from '../dates'
 import { fieldValues } from '../registry'
@@ -41,12 +41,9 @@ export interface DriftBadge {
 }
 
 /** A diff value (a string, or a list of strings) as one line of text. */
-export function diffText(value: unknown): string {
-  if (value === null || value === undefined || value === '')
-    return 'none'
-  if (Array.isArray(value))
-    return value.length ? value.map(String).join(', ') : 'none'
-  return typeof value === 'object' ? JSON.stringify(value) : String(value)
+export function diffText(value: string | string[] | null | undefined): string {
+  const text = Array.isArray(value) ? value.join(', ') : value
+  return text ? text : 'none'
 }
 
 export interface PointsAt {
@@ -110,11 +107,11 @@ export function shellWord(value: string): string {
 }
 
 /** The `fleetctl registry set` command that applies a suggestion; null when there is nothing to change. */
-export function suggestCommand(key: string, suggestion: { field: string, value: unknown }[]): string | null {
+export function suggestCommand(key: string, suggestion: SuggestedFieldDto[]): string | null {
   if (suggestion.length === 0)
     return null
   const fields = suggestion.map(({ field, value }) => {
-    const rendered = Array.isArray(value) ? value.map(String).join(',') : typeof value === 'string' ? value : JSON.stringify(value)
+    const rendered = Array.isArray(value) ? value.join(',') : value
     return `--field ${field}=${shellWord(rendered)}`
   })
   return `fleetctl registry set domain/${key} ${fields.join(' ')}`

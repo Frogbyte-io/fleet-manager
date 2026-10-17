@@ -1,8 +1,8 @@
-import { describe, expect, it } from 'vitest'
+import { describe, expect, expectTypeOf, it } from 'vitest'
 
-import type { DomainObservationViewDto, RegistryEntryDto } from '@frogbyte-io/fleet-api-client'
+import type { DomainObservationViewDto, FieldDiffDto, RegistryEntryDto, SuggestedFieldDto } from '@frogbyte-io/fleet-api-client'
 
-import { domainRow, domainRows, domainSummary, expiryState, shellWord, suggestCommand } from '../domains'
+import { diffText, domainRow, domainRows, domainSummary, expiryState, shellWord, suggestCommand } from '../domains'
 
 const NOW = Date.UTC(2026, 9, 16, 12)
 
@@ -141,5 +141,21 @@ describe('suggestCommand', () => {
     expect(suggestCommand('example.org', [{ field: 'registrar', value: 'Name Cheap' }])).toBe(`fleetctl registry set domain/example.org --field registrar='Name Cheap'`)
     expect(shellWord(`it's`)).toBe(`'it'\\''s'`)
     expect(shellWord('')).toBe(`''`)
+  })
+})
+
+describe('generated observation value types', () => {
+  it('types diff and suggestion values as a string or a list of strings', () => {
+    expectTypeOf<FieldDiffDto['recorded']>().toEqualTypeOf<string | string[] | null | undefined>()
+    expectTypeOf<FieldDiffDto['observed']>().toEqualTypeOf<string | string[] | null | undefined>()
+    expectTypeOf<SuggestedFieldDto['value']>().toEqualTypeOf<string | string[]>()
+  })
+
+  it('renders them as one line of text', () => {
+    expect(diffText(null)).toBe('none')
+    expect(diffText([])).toBe('none')
+    expect(diffText('Name Cheap')).toBe('Name Cheap')
+    expect(diffText(['ns1.example.net', 'ns2.example.net'])).toBe('ns1.example.net, ns2.example.net')
+    expect(suggestCommand('example.org', [{ field: 'nameservers', value: ['a.example', 'b.example'] }])).toBe('fleetctl registry set domain/example.org --field nameservers=a.example,b.example')
   })
 })

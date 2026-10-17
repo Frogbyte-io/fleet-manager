@@ -2138,42 +2138,18 @@ export const FieldStateDto = {
 } as const;
 
 /**
- * What the lookups saw.
- * @nullable
- */
-export type FieldDiffDtoObserved = { [key: string]: unknown } | null;
-
-/**
- * What the entry (Fleet Git) records.
- * @nullable
- */
-export type FieldDiffDtoRecorded = { [key: string]: unknown } | null;
-
-/**
  * The difference for one entry field.
  */
 export interface FieldDiffDto {
   /** `registrar`, `expires`, `nameservers`, or `dnsHost`. */
   field: string;
-  /**
-     * What the lookups saw.
-     * @nullable
-     */
-  observed?: FieldDiffDtoObserved;
-  /**
-     * What the entry (Fleet Git) records.
-     * @nullable
-     */
-  recorded?: FieldDiffDtoRecorded;
+  /** What the lookups saw. */
+  observed?: null | string | string[];
+  /** What the entry records. */
+  recorded?: null | string | string[];
   /** The comparison. */
   state: FieldStateDto;
 }
-
-/**
- * The suggested value, in the field's type (a string, or a list of
- * strings for `nameservers`).
- */
-export type SuggestedFieldDtoValue = { [key: string]: unknown };
 
 /**
  * One suggested field value.
@@ -2181,11 +2157,8 @@ export type SuggestedFieldDtoValue = { [key: string]: unknown };
 export interface SuggestedFieldDto {
   /** The entry field. */
   field: string;
-  /**
-     * The suggested value, in the field's type (a string, or a list of
-     * strings for `nameservers`).
-     */
-  value: SuggestedFieldDtoValue;
+  /** The suggested value, in the field's type (a string, or a list of strings for `nameservers`). */
+  value: string | string[];
 }
 
 /**

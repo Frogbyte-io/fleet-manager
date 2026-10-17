@@ -794,6 +794,35 @@ pub enum FieldStateDto {
     Unknown,
 }
 
+/// A field value as the entry types declare it: a string, or a list of strings.
+fn field_value_schema(description: &str, nullable: bool) -> utoipa::openapi::Schema {
+    use utoipa::openapi::schema::{ArrayBuilder, ObjectBuilder, OneOfBuilder, Type};
+    let mut one_of = OneOfBuilder::new().description(Some(description));
+    if nullable {
+        one_of = one_of.item(ObjectBuilder::new().schema_type(Type::Null));
+    }
+    one_of
+        .item(ObjectBuilder::new().schema_type(Type::String))
+        .item(ArrayBuilder::new().items(ObjectBuilder::new().schema_type(Type::String)))
+        .build()
+        .into()
+}
+
+fn recorded_schema() -> utoipa::openapi::Schema {
+    field_value_schema("What the entry records.", true)
+}
+
+fn observed_schema() -> utoipa::openapi::Schema {
+    field_value_schema("What the lookups saw.", true)
+}
+
+fn suggested_value_schema() -> utoipa::openapi::Schema {
+    field_value_schema(
+        "The suggested value, in the field's type (a string, or a list of strings for `nameservers`).",
+        false,
+    )
+}
+
 /// The difference for one entry field.
 #[derive(Clone, Debug, Serialize, ToSchema)]
 #[serde(rename_all = "camelCase")]
@@ -803,10 +832,10 @@ pub struct FieldDiffDto {
     /// The comparison.
     pub state: FieldStateDto,
     /// What the entry (Fleet Git) records.
-    #[schema(value_type = Option<Object>)]
+    #[schema(schema_with = recorded_schema)]
     pub recorded: Option<serde_json::Value>,
     /// What the lookups saw.
-    #[schema(value_type = Option<Object>)]
+    #[schema(schema_with = observed_schema)]
     pub observed: Option<serde_json::Value>,
 }
 
@@ -867,7 +896,7 @@ pub struct SuggestedFieldDto {
     pub field: String,
     /// The suggested value, in the field's type (a string, or a list of
     /// strings for `nameservers`).
-    #[schema(value_type = Object)]
+    #[schema(schema_with = suggested_value_schema)]
     pub value: serde_json::Value,
 }
 
