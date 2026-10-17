@@ -182,6 +182,11 @@ fn run_serve(mut config: fleet_config::ControllerConfig) -> ExitCode {
                                 secret_store.clone(),
                                 coolify_lifecycle.clone(),
                             ));
+                        node_services.site_templates =
+                            Some(fleet_controller::site_exec::compose_site_templates(
+                                store.pool(),
+                                coolify_lifecycle.clone(),
+                            ));
                         node_services.coolify_lifecycle = Some(coolify_lifecycle);
                         Some(node_services)
                     }
@@ -984,6 +989,23 @@ fn run_serve(mut config: fleet_config::ControllerConfig) -> ExitCode {
                             ),
                         ),
                     ),
+                    None => with_lab,
+                };
+            // FM-1035: the brokered site-deployment kind runs through the
+            // site-template use cases.
+            let with_lab: std::sync::Arc<dyn fleet_application::worker::OperationExecutor> =
+                match services
+                    .as_ref()
+                    .and_then(|services| services.site_templates.clone())
+                {
+                    Some(sites) => {
+                        std::sync::Arc::new(fleet_controller::site_exec::SiteDispatch::new(
+                            with_lab,
+                            std::sync::Arc::new(fleet_controller::site_exec::SiteExecutor::new(
+                                sites,
+                            )),
+                        ))
+                    }
                     None => with_lab,
                 };
             match &services {

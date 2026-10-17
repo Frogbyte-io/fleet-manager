@@ -32,12 +32,14 @@
 //! is sent only as a bearer header and never appears in any returned value.
 #![warn(missing_docs)]
 
+pub mod create;
 pub mod discovery;
 pub mod lifecycle;
 pub mod scrub;
 pub mod settings;
 mod translate;
 
+pub use create::CoolifyHttpCreate;
 pub use discovery::{CoolifyHttpSource, Limits, discover, discover_with};
 pub use lifecycle::CoolifyHttpLifecycle;
 pub use settings::CoolifyHttpSettings;

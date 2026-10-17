@@ -44,6 +44,7 @@ pub mod ready;
 pub mod registry;
 pub mod requests;
 pub mod services;
+pub mod site_templates;
 pub mod skill_catalog;
 pub mod skills;
 pub mod system;
@@ -227,6 +228,11 @@ pub const API_BASE_PATH: &str = "/api/v1";
         services::ServicesCoverageDto,
         services::ServiceActionBody,
         services::ServiceLogsDto,
+        site_templates::SiteTemplatesDto,
+        site_templates::SiteTemplateDto,
+        site_templates::SiteTemplateSourceDto,
+        site_templates::SiteTemplateEnvDto,
+        site_templates::SiteDeployBody,
         external_accounts::CreateExternalAccountRequest,
         external_accounts::UpdateExternalAccountRequest,
         external_accounts::ExternalAccountDto,
@@ -468,6 +474,8 @@ pub fn api(state: Arc<operations::ApiState>) -> (Router, utoipa::openapi::OpenAp
                 .routes(routes!(services::request_service_env_change))
                 .routes(routes!(services::request_service_domains_change))
                 .routes(routes!(services::request_service_health_change))
+                .routes(routes!(site_templates::list_site_templates))
+                .routes(routes!(site_templates::request_site_deployment))
                 .routes(routes!(proxmox::delete_proxmox_account))
                 .routes(routes!(proxmox::observe_proxmox_fingerprint))
                 .routes(routes!(proxmox::confirm_proxmox_fingerprint))

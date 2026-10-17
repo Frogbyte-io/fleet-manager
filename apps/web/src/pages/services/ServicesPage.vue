@@ -109,6 +109,13 @@ function resetFilters() {
             Table
           </button>
         </div>
+        <RouterLink
+          to="/services/new"
+          class="rounded-sm border border-input px-3 py-1.5 font-mono text-[10px] uppercase tracking-wider text-fc-ink hover:border-fc-line2"
+          data-testid="new-site"
+        >
+          Deploy a site
+        </RouterLink>
         <button
           class="rounded-sm border border-input px-3 py-1.5 font-mono text-[10px] uppercase tracking-wider text-fc-muted hover:border-fc-line2 hover:text-fc-ink"
           data-testid="refresh"

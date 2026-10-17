@@ -66,12 +66,14 @@ pub const BROKER_IDEMPOTENCY_PREFIX: &str = "action-request:";
 /// machine-scoped shape plus the plan and its approval identities
 /// (FM-402); the source kinds carry the remote/commit payloads and are
 /// catalog-level (FM-403).
-pub const CREATABLE_KINDS: [&str; 69] = [
+pub const CREATABLE_KINDS: [&str; 70] = [
     "noop",
     // Brokered Coolify lifecycle kind (FM-1033): created only through the
     // action broker.
     "coolify.lifecycle",
     "coolify.settings",
+    // Brokered site-template deploy kind (FM-1035).
+    "coolify.site",
     "ssh.exec",
     "agentless.inventory",
     "machine.onboard.test",
