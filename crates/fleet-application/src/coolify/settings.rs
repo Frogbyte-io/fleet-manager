@@ -33,12 +33,17 @@
 //! 1. the caller sends it with the filing call; it is validated and moved
 //!    into the encrypted secret store as one *held value* record
 //!    (`coolify-env-hold/<holdId>`, a [`HeldValueStore`]);
-//! 2. the action request stores only key names, flags, a salted truncated
-//!    digest per value, and the `holdId`. The approver reads key names and
-//!    flags, never a value;
-//! 3. at execution the executor loads the record, checks each value against
-//!    its digest (a tamper check), sends it to Coolify, and deletes the
-//!    record on every exit;
+//! 2. the action request stores only key names, flags, and the `holdId`.
+//!    There is no digest or any other function of a value in a request. The
+//!    approver reads key names and flags, never a value;
+//! 3. the record is *bound to its request*: the controller writes into it a
+//!    hash of the request's canonical parameters (without the display-only
+//!    name) and, once the broker has made the request, the request id. At
+//!    execution both must match the operation's own, so a second request
+//!    that copies a `holdId` (the parameters are public) cannot spend, read,
+//!    or delete another request's values. A mismatch changes nothing and
+//!    leaves the record alone. The executor then sends the values to Coolify
+//!    and deletes the record on every exit;
 //! 4. a held value whose request was denied or expired, or whose operation
 //!    died before deleting it, is removed by [`CoolifySettings::sweep_held`].
 //!
@@ -114,6 +119,8 @@ const MAX_HEALTH_TEXT: usize = 256;
 /// The most requests the sweep reads per state before it gives up rather
 /// than risk deleting the value of a request it did not see.
 const SWEEP_PAGE: u32 = 500;
+/// The most requests per state the sweep will read.
+const SWEEP_MAX: u32 = 200_000;
 
 // ---------------------------------------------------------------------
 // The model.
@@ -193,6 +200,9 @@ pub struct RemoteEnv {
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct HealthSettings {
+    /// `http`, or `cmd` for a command check Fleet shows but does not edit.
+    #[serde(default = "default_check_type")]
+    pub check_type: String,
     /// Whether Coolify runs the check.
     pub enabled: bool,
     /// The request path.
@@ -220,6 +230,10 @@ pub struct HealthSettings {
     pub retries: u32,
     /// Seconds before the first check.
     pub start_period: u32,
+}
+
+fn default_check_type() -> String {
+    "http".to_owned()
 }
 
 /// The health-check fields a request changes; absent fields stay.
@@ -262,6 +276,9 @@ pub struct HealthPatch {
     /// Seconds before the first check.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub start_period: Option<u32>,
+    /// Fields to clear: `port`, `host`, `responseText`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub clear: Vec<String>,
 }
 
 impl HealthPatch {
@@ -290,6 +307,17 @@ impl HealthPatch {
                     .to_owned(),
             );
         }
+        for name in &self.clear {
+            let set = match name.as_str() {
+                "port" => self.port.is_some(),
+                "host" => self.host.is_some(),
+                "responseText" => self.response_text.is_some(),
+                _ => return Err("clear may name port, host, or responseText".to_owned()),
+            };
+            if set {
+                return Err(format!("{name} is both set and cleared"));
+            }
+        }
         if self.port == Some(0) {
             return Err("port must be 1 to 65535".to_owned());
         }
@@ -298,9 +326,9 @@ impl HealthPatch {
                 || host.len() > MAX_DOMAIN_LEN
                 || !host
                     .chars()
-                    .all(|c| c.is_ascii_alphanumeric() || "-_.:".contains(c)))
+                    .all(|c| c.is_ascii_alphanumeric() || "-_.".contains(c)))
         {
-            return Err("host must be a plain host name (letters, digits, - _ . :)".to_owned());
+            return Err("host must be a plain host name (letters, digits, - _ .)".to_owned());
         }
         if let Some(method) = &self.method
             && !matches!(method.as_str(), "GET" | "HEAD" | "POST" | "OPTIONS")
@@ -347,15 +375,27 @@ impl HealthPatch {
         HealthSettings {
             enabled: self.enabled.unwrap_or(before.enabled),
             path: self.path.clone().unwrap_or_else(|| before.path.clone()),
-            port: self.port.or(before.port),
-            host: self.host.clone().or_else(|| before.host.clone()),
+            check_type: before.check_type.clone(),
+            port: if self.clear.iter().any(|n| n == "port") {
+                None
+            } else {
+                self.port.or(before.port)
+            },
+            host: if self.clear.iter().any(|n| n == "host") {
+                None
+            } else {
+                self.host.clone().or_else(|| before.host.clone())
+            },
             method: self.method.clone().unwrap_or_else(|| before.method.clone()),
             scheme: self.scheme.clone().unwrap_or_else(|| before.scheme.clone()),
             return_code: self.return_code.unwrap_or(before.return_code),
-            response_text: self
-                .response_text
-                .clone()
-                .or_else(|| before.response_text.clone()),
+            response_text: if self.clear.iter().any(|n| n == "responseText") {
+                None
+            } else {
+                self.response_text
+                    .clone()
+                    .or_else(|| before.response_text.clone())
+            },
             interval: self.interval.unwrap_or(before.interval),
             timeout: self.timeout.unwrap_or(before.timeout),
             retries: self.retries.unwrap_or(before.retries),
@@ -529,7 +569,7 @@ pub enum EnvOp {
 }
 
 /// One variable change as stored in a request. There is no value: a `set`
-/// carries only a digest of it.
+/// carries nothing of it.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct EnvChange {
@@ -542,9 +582,6 @@ pub struct EnvChange {
     /// The flags the variable will have (`set` only).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub flags: Option<EnvFlags>,
-    /// A salted, truncated digest of the held value (`set` only).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub digest: Option<String>,
 }
 
 /// One variable's preview: what it is now and what it will be.
@@ -659,11 +696,11 @@ fn normalized(changes: Vec<FieldChange>) -> Vec<FieldChange> {
         .unwrap_or_default()
 }
 
-fn value_marker(digest: &str, replaces: bool) -> FieldChange {
+fn value_marker(replaces: bool) -> FieldChange {
     FieldChange {
         field: "value".to_owned(),
         from: replaces.then(|| Value::String("(write-only)".to_owned())),
-        to: Some(Value::String(format!("(write-only, digest {digest})"))),
+        to: Some(Value::String("(write-only)".to_owned())),
     }
 }
 
@@ -671,7 +708,7 @@ fn value_marker(digest: &str, replaces: bool) -> FieldChange {
 fn env_entry_changes(
     before: Option<&EnvFlags>,
     after: Option<&EnvFlags>,
-    digest: Option<&str>,
+    writes_value: bool,
 ) -> Vec<FieldChange> {
     let mut changes: Vec<FieldChange> = match (before, after) {
         (Some(before), Some(after)) => before
@@ -705,8 +742,8 @@ fn env_entry_changes(
             .collect(),
         (None, None) => Vec::new(),
     };
-    if let Some(digest) = digest {
-        changes.push(value_marker(digest, before.is_some()));
+    if writes_value {
+        changes.push(value_marker(before.is_some()));
     }
     normalized(changes)
 }
@@ -744,32 +781,37 @@ fn health_changes(before: &HealthSettings, after: &HealthSettings) -> Vec<FieldC
     normalized(changes)
 }
 
-/// Whether a salted digest looks like one this module makes.
-fn valid_digest(digest: &str) -> bool {
-    digest.len() == 12
-        && digest
-            .bytes()
-            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+/// The record a held value lives in: the values, and what binds them to
+/// exactly one request. Written by the controller only; it never leaves the
+/// secret store except into the executor.
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct HeldRecord {
+    /// SHA-256 of the request's canonical parameters without `name`.
+    binding: String,
+    /// The request this record belongs to; absent between storing and the
+    /// broker's answer.
+    #[serde(default)]
+    request_id: Option<String>,
+    /// Change index to value.
+    values: BTreeMap<String, String>,
 }
 
-/// A salted, truncated digest of a value. It exists for the tamper check at
-/// execution (the held value must be the one the request was made with) and
-/// to let a retry with the same value be recognized. It is salted with the
-/// request's own id and truncated, so it is not a way to confirm a guess at
-/// a short value from outside.
-fn value_digest(hold_id: &str, key: &str, is_preview: bool, value: &str) -> String {
+/// The hash a held record is bound to: the request's parameters (account,
+/// kind, uuid, changes with flags, redeploy, preview, hold id) without the
+/// display-only `name`.
+fn binding_of(parameters: &Value) -> String {
+    let mut canonical = parameters.clone();
+    if let Some(object) = canonical.as_object_mut() {
+        object.remove("name");
+    }
     let mut hasher = Sha256::new();
-    hasher.update(b"fleet-coolify-env-value\0");
-    hasher.update(hold_id.as_bytes());
-    hasher.update([0]);
-    hasher.update(key.as_bytes());
-    hasher.update([u8::from(is_preview)]);
-    hasher.update(value.as_bytes());
-    let digest = hasher.finalize();
-    digest
+    hasher.update(b"fleet-coolify-env-binding\0");
+    hasher.update(canonical.to_string().as_bytes());
+    hasher
+        .finalize()
         .iter()
-        .take(6)
-        .fold(String::with_capacity(12), |mut out, byte| {
+        .fold(String::with_capacity(64), |mut out, byte| {
             use std::fmt::Write as _;
             let _ = write!(out, "{byte:02x}");
             out
@@ -904,13 +946,13 @@ fn validate_env(params: &EnvParameters) -> Result<(), String> {
         }
         match change.op {
             EnvOp::Set => {
-                if change.flags.is_none() || !change.digest.as_deref().is_some_and(valid_digest) {
-                    return Err("a set carries its flags and a value digest".to_owned());
+                if change.flags.is_none() {
+                    return Err("a set carries its flags".to_owned());
                 }
             }
             EnvOp::Unset => {
-                if change.flags.is_some() || change.digest.is_some() {
-                    return Err("an unset carries neither flags nor a value digest".to_owned());
+                if change.flags.is_some() {
+                    return Err("an unset carries no flags".to_owned());
                 }
             }
         }
@@ -928,7 +970,7 @@ fn validate_env(params: &EnvParameters) -> Result<(), String> {
                 != env_entry_changes(
                     entry.before.as_ref(),
                     entry.after.as_ref(),
-                    change.digest.as_deref(),
+                    change.op == EnvOp::Set,
                 )
         {
             return Err(
@@ -1019,6 +1061,9 @@ impl Setting {
 struct Payload {
     setting: Setting,
     parameters: Value,
+    /// The request the operation carries out; a held value is only released
+    /// to the request it was bound to.
+    request_id: String,
 }
 
 /// One settings provider action.
@@ -1101,6 +1146,7 @@ impl ProviderAction for CoolifySettingsAction {
         let payload = serde_json::to_string(&Payload {
             setting: self.setting,
             parameters: request.parameters.clone(),
+            request_id: request.id.clone(),
         })
         .map_err(|_| "the payload could not be built".to_owned())?;
         Ok(NewOperation {
@@ -1241,6 +1287,35 @@ pub struct FollowUp {
     /// The deployment Coolify queued, when it did.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub deployment_uuid: Option<String>,
+    /// Why it did not happen, when the change was applied but this failed.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+/// An execution that did not finish: the failure text, and what had been
+/// applied before it (names only), so a partial change is recorded rather
+/// than lost.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SettingsFailure {
+    /// The caller-safe failure text.
+    pub message: String,
+    /// What was applied before the failure, when anything was.
+    pub partial: Option<Box<SettingsOutcome>>,
+}
+
+impl From<String> for SettingsFailure {
+    fn from(message: String) -> Self {
+        Self {
+            message,
+            partial: None,
+        }
+    }
+}
+
+impl fmt::Display for SettingsFailure {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.message)
+    }
 }
 
 /// How an executed settings change ended. Recorded as the operation result;
@@ -1250,7 +1325,8 @@ pub struct FollowUp {
 pub struct SettingsOutcome {
     /// `env`, `domains`, or `health`.
     pub setting: String,
-    /// `applied` or `unchanged` (everything was already in place).
+    /// `applied`, `unchanged` (everything was already in place), or
+    /// `partial` (the change stopped part way; see `error` and `changed`).
     pub outcome: String,
     /// What changed: `set KEY`, `unset KEY`, `domains`, or the field names.
     pub changed: Vec<String>,
@@ -1259,6 +1335,9 @@ pub struct SettingsOutcome {
     /// The redeploy or restart that followed, when asked.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub follow_up: Option<FollowUp>,
+    /// Why a partial change stopped.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
 }
 
 /// The Coolify settings use cases.
@@ -1390,6 +1469,7 @@ impl CoolifySettings {
                     .await
                     .map_err(provider)?;
                 view.env = Some(envs.iter().map(env_view).collect());
+                note_duplicates(&envs, &mut view.notes);
                 view.notes.push(
                     "a service keeps its domains per sub-application in Coolify; change them there"
                         .to_owned(),
@@ -1402,6 +1482,7 @@ impl CoolifySettings {
                     .await
                     .map_err(provider)?;
                 view.env = Some(envs.iter().map(env_view).collect());
+                note_duplicates(&envs, &mut view.notes);
                 let application = self
                     .port
                     .read_application(base, &token, uuid)
@@ -1415,6 +1496,12 @@ impl CoolifySettings {
                 } else {
                     view.domains = Some(application.domains);
                 }
+                if application.health.check_type != "http" {
+                    view.notes.push(
+                        "this application has a command health check; Fleet shows it but does not edit it"
+                            .to_owned(),
+                    );
+                }
                 view.health = Some(application.health);
             }
         }
@@ -1422,8 +1509,8 @@ impl CoolifySettings {
     }
 
     /// Files a request to set or unset environment variables. The values go
-    /// to the encrypted secret store; the request holds key names, flags,
-    /// and digests only.
+    /// to the encrypted secret store, bound to the request; the request holds
+    /// key names and flags only.
     ///
     /// A retry with the requester's idempotency key returns the request
     /// already made before anything is read or stored.
@@ -1457,9 +1544,10 @@ impl CoolifySettings {
             match (change.op, &change.value) {
                 (EnvOp::Set, Some(value)) => {
                     let text = value.expose();
-                    if text.is_empty() || text.len() > MAX_ENV_VALUE_BYTES || text.contains('\0') {
+                    // An empty value is allowed: Coolify stores it as blank.
+                    if text.len() > MAX_ENV_VALUE_BYTES || text.contains('\0') {
                         return Err(invalid(format!(
-                            "a value must be 1 to {MAX_ENV_VALUE_BYTES} bytes with no NUL; use unset to remove a variable"
+                            "a value is at most {MAX_ENV_VALUE_BYTES} bytes with no NUL"
                         )));
                     }
                 }
@@ -1491,7 +1579,7 @@ impl CoolifySettings {
                 .await
                 .map_err(LifecycleError::Broker)?
         {
-            return replay_env(existing, &changes, &meta);
+            return self.replay_env(existing, &changes, &meta).await;
         }
         let (account, token) = self.lifecycle.resolve(account_id).await?;
         let base = account.base_url.as_str();
@@ -1504,6 +1592,20 @@ impl CoolifySettings {
             .read_envs(base, &token, resource, uuid)
             .await
             .map_err(provider)?;
+        // Coolify can hold a variable twice (a name and a preview flag); a
+        // request cannot say which one it means, so it is refused.
+        for change in &changes {
+            let count = current
+                .iter()
+                .filter(|env| env.key == change.key && env.is_preview == change.is_preview)
+                .count();
+            if count > 1 {
+                return Err(invalid(format!(
+                    "{} appears more than once in Coolify; resolve the duplicate there first",
+                    change.key
+                )));
+            }
+        }
         let hold_id = fleet_core::UuidV7Generator.next_resource_id().to_string();
         let mut stored: Vec<EnvChange> = Vec::with_capacity(changes.len());
         let mut preview: Vec<EnvPreviewEntry> = Vec::with_capacity(changes.len());
@@ -1531,7 +1633,6 @@ impl CoolifySettings {
                         .as_ref()
                         .map(SensitiveString::expose)
                         .unwrap_or_default();
-                    let digest = value_digest(&hold_id, &change.key, change.is_preview, value);
                     held.insert(index.to_string(), value.to_owned());
                     preview.push(EnvPreviewEntry {
                         key: change.key.clone(),
@@ -1543,14 +1644,13 @@ impl CoolifySettings {
                         },
                         before,
                         after: Some(after),
-                        changes: env_entry_changes(before.as_ref(), Some(&after), Some(&digest)),
+                        changes: env_entry_changes(before.as_ref(), Some(&after), true),
                     });
                     stored.push(EnvChange {
                         op: EnvOp::Set,
                         key: change.key.clone(),
                         is_preview: change.is_preview,
                         flags: Some(after),
-                        digest: Some(digest),
                     });
                 }
                 EnvOp::Unset => {
@@ -1569,14 +1669,13 @@ impl CoolifySettings {
                         operation: PlanOp::Delete,
                         before: Some(before),
                         after: None,
-                        changes: env_entry_changes(Some(&before), None, None),
+                        changes: env_entry_changes(Some(&before), None, false),
                     });
                     stored.push(EnvChange {
                         op: EnvOp::Unset,
                         key: change.key.clone(),
                         is_preview: change.is_preview,
                         flags: None,
-                        digest: None,
                     });
                 }
             }
@@ -1605,17 +1704,10 @@ impl CoolifySettings {
             .validate(&target, &parameters)
             .map_err(|detail| LifecycleError::Broker(BrokerError::Invalid { detail }))?;
         let _ = self.sweep_held(now).await;
+        let binding = binding_of(&parameters);
         if let Some(hold_id) = &hold_id {
-            let document = SensitiveString::new(serde_json::to_string(&held).map_err(|error| {
-                LifecycleError::Backend {
-                    context: "held values",
-                    detail: error.to_string(),
-                }
-            })?);
-            self.holds
-                .put(hold_id, &document)
-                .await
-                .map_err(backend("held values"))?;
+            self.store_held(hold_id, &binding, None, held.clone())
+                .await?;
         }
         let created = broker
             .create(
@@ -1635,13 +1727,20 @@ impl CoolifySettings {
             .await;
         match created {
             Ok(request) => {
-                // A concurrent retry may have won: that request holds its
-                // own record, so ours is not needed.
-                if let Some(hold_id) = &hold_id
-                    && request.parameters.get("holdId").and_then(Value::as_str)
-                        != Some(hold_id.as_str())
-                {
-                    let _ = self.holds.discard(hold_id).await;
+                if let Some(hold_id) = &hold_id {
+                    if request.parameters.get("holdId").and_then(Value::as_str)
+                        == Some(hold_id.as_str())
+                    {
+                        // Bind the record to the request the broker made. A
+                        // record that cannot be bound is refused at
+                        // execution, so a failure here is reported.
+                        self.store_held(hold_id, &binding, Some(request.id.clone()), held)
+                            .await?;
+                    } else {
+                        // A concurrent retry won: that request holds its own
+                        // record, so ours is not needed.
+                        let _ = self.holds.discard(hold_id).await;
+                    }
                 }
                 Ok(request)
             }
@@ -1651,6 +1750,87 @@ impl CoolifySettings {
                 }
                 Err(LifecycleError::Broker(error))
             }
+        }
+    }
+
+    async fn store_held(
+        &self,
+        hold_id: &str,
+        binding: &str,
+        request_id: Option<String>,
+        values: BTreeMap<String, String>,
+    ) -> Result<(), LifecycleError> {
+        let record = HeldRecord {
+            binding: binding.to_owned(),
+            request_id,
+            values,
+        };
+        let document = SensitiveString::new(serde_json::to_string(&record).map_err(|error| {
+            LifecycleError::Backend {
+                context: "held values",
+                detail: error.to_string(),
+            }
+        })?);
+        self.holds
+            .put(hold_id, &document)
+            .await
+            .map_err(backend("held values"))
+    }
+
+    /// A retry of an environment request: the same request when the keys,
+    /// operations, and flags agree and each value equals the one still held.
+    /// When the held record is gone (the request already ran) only the
+    /// structure is compared.
+    async fn replay_env(
+        &self,
+        existing: ActionRequest,
+        changes: &[EnvChangeInput],
+        meta: &RequestMeta,
+    ) -> Result<ActionRequest, LifecycleError> {
+        let Ok(stored) = serde_json::from_value::<EnvParameters>(existing.parameters.clone())
+        else {
+            return Err(key_conflict(&existing));
+        };
+        let held: Option<HeldRecord> = match &stored.hold_id {
+            Some(id) => self
+                .holds
+                .get(id)
+                .await
+                .map_err(backend("held values"))?
+                .and_then(|document| serde_json::from_str(document.expose()).ok()),
+            None => None,
+        };
+        let mut same = existing.action_id == ENV_ACTION
+            && existing.target == meta.service_id
+            && stored.redeploy == meta.redeploy
+            && stored.changes.len() == changes.len();
+        if same {
+            for (index, (have, want)) in stored.changes.iter().zip(changes).enumerate() {
+                let flags_agree =
+                    flag_agrees(want.flags.is_buildtime, have.flags, |f| f.is_buildtime)
+                        && flag_agrees(want.flags.is_runtime, have.flags, |f| f.is_runtime)
+                        && flag_agrees(want.flags.is_multiline, have.flags, |f| f.is_multiline)
+                        && flag_agrees(want.flags.is_literal, have.flags, |f| f.is_literal)
+                        && flag_agrees(want.flags.is_shown_once, have.flags, |f| f.is_shown_once);
+                let value_agrees = match (&want.value, &held) {
+                    (Some(value), Some(record)) => {
+                        record.values.get(&index.to_string()).map(String::as_str)
+                            == Some(value.expose())
+                    }
+                    (Some(_), None) => have.op == EnvOp::Set,
+                    (None, _) => have.op == EnvOp::Unset,
+                };
+                same &= have.op == want.op
+                    && have.key == want.key
+                    && have.is_preview == want.is_preview
+                    && flags_agree
+                    && value_agrees;
+            }
+        }
+        if same {
+            Ok(existing)
+        } else {
+            Err(key_conflict(&existing))
         }
     }
 
@@ -1775,6 +1955,11 @@ impl CoolifySettings {
             };
         }
         let current = self.read_application(account_id, uuid).await?;
+        if current.health.check_type != "http" {
+            return Err(invalid(
+                "this application has a command health check, which Fleet shows but does not edit; change it in Coolify",
+            ));
+        }
         let after = patch.apply(&current.health);
         if after == current.health {
             return Err(invalid(
@@ -1868,11 +2053,16 @@ impl CoolifySettings {
     ///
     /// Fails with a caller-safe reason: a malformed payload, a request that
     /// no longer matches the observation, a stale preview, a held value that
-    /// is gone or does not match its digest, an unsupported Coolify version,
-    /// a provider failure, or a read-back that differs.
-    pub async fn execute(&self, kind: &str, payload: &str) -> Result<SettingsOutcome, String> {
+    /// is gone or not bound to this request, an unsupported Coolify version,
+    /// a provider failure, or a read-back that differs. A change that stopped
+    /// part way, or whose redeploy failed, carries what was applied.
+    pub async fn execute(
+        &self,
+        kind: &str,
+        payload: &str,
+    ) -> Result<SettingsOutcome, SettingsFailure> {
         if kind != SETTINGS_KIND {
-            return Err(format!("{kind} is not a Coolify settings operation"));
+            return Err(format!("{kind} is not a Coolify settings operation").into());
         }
         let payload: Payload = serde_json::from_str(payload)
             .map_err(|_| "the operation payload is not a Coolify settings request".to_owned())?;
@@ -1894,11 +2084,21 @@ impl CoolifySettings {
         action.validate(&target, &payload.parameters)?;
         match payload.setting {
             Setting::Env => {
-                let params: EnvParameters = serde_json::from_value(payload.parameters)
+                let params: EnvParameters = serde_json::from_value(payload.parameters.clone())
                     .map_err(|_| "the payload is malformed".to_owned())?;
-                let result = self.execute_env(&params).await;
-                // On every exit the held values go.
-                if let Some(hold_id) = &params.hold_id {
+                let mut owned = false;
+                let result = self
+                    .execute_env(
+                        &params,
+                        &payload.parameters,
+                        &payload.request_id,
+                        &mut owned,
+                    )
+                    .await;
+                // On every exit after the record was proved to be this
+                // request's, its values go. A record that is not this
+                // request's is left for the request it belongs to.
+                if owned && let Some(hold_id) = &params.hold_id {
                     let _ = self.holds.discard(hold_id).await;
                 }
                 let _ = self.sweep_held(now_millis()).await;
@@ -1940,12 +2140,18 @@ impl CoolifySettings {
         Ok(())
     }
 
-    #[allow(clippy::too_many_lines)]
-    async fn execute_env(&self, params: &EnvParameters) -> Result<SettingsOutcome, String> {
-        // The held values come first: a request whose values are gone cannot
-        // run, and must not touch Coolify.
-        let mut values: BTreeMap<String, String> = BTreeMap::new();
-        if let Some(hold_id) = &params.hold_id {
+    /// Loads the held record and proves it is this request's: its binding
+    /// is the hash of this request's parameters and its request id is this
+    /// request's. The id is bound just after the broker answers, so a
+    /// request that runs at once (an `auto` policy) waits briefly for it.
+    async fn claim_held(
+        &self,
+        hold_id: &str,
+        parameters: &Value,
+        request_id: &str,
+    ) -> Result<BTreeMap<String, String>, String> {
+        let mut attempts = 0;
+        loop {
             let document = self
                 .holds
                 .get(hold_id)
@@ -1955,22 +2161,54 @@ impl CoolifySettings {
                     "the held values for this request are gone (already used, expired, or removed); nothing was changed, so re-file the request"
                         .to_owned()
                 })?;
-            values = serde_json::from_str(document.expose())
+            let record: HeldRecord = serde_json::from_str(document.expose())
                 .map_err(|_| "the held values are unreadable; re-file the request".to_owned())?;
-            for (index, change) in params.changes.iter().enumerate() {
-                if change.op != EnvOp::Set {
-                    continue;
-                }
-                let held = values.get(&index.to_string()).ok_or_else(|| {
-                    "a held value is missing; nothing was changed, so re-file the request"
-                        .to_owned()
-                })?;
-                if Some(value_digest(hold_id, &change.key, change.is_preview, held).as_str())
-                    != change.digest.as_deref()
-                {
+            if record.binding != binding_of(parameters) {
+                return Err(
+                    "the held values are not bound to this request; nothing was changed".to_owned(),
+                );
+            }
+            match record.request_id.as_deref() {
+                Some(id) if id == request_id => return Ok(record.values),
+                Some(_) => {
                     return Err(
-                        "a held value does not match the request it was filed with; nothing was changed, so re-file the request"
+                        "the held values belong to another request; nothing was changed".to_owned(),
+                    );
+                }
+                None if attempts < 10 => {
+                    attempts += 1;
+                    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+                }
+                None => {
+                    return Err(
+                        "the held values were never bound to a request; nothing was changed, so re-file the request"
                             .to_owned(),
+                    );
+                }
+            }
+        }
+    }
+
+    #[allow(clippy::too_many_lines)]
+    async fn execute_env(
+        &self,
+        params: &EnvParameters,
+        parameters: &Value,
+        request_id: &str,
+        owned: &mut bool,
+    ) -> Result<SettingsOutcome, SettingsFailure> {
+        // The held values come first: a request whose values are gone, or are
+        // not its own, cannot run and must not touch Coolify.
+        let mut values: BTreeMap<String, String> = BTreeMap::new();
+        if let Some(hold_id) = &params.hold_id {
+            values = self.claim_held(hold_id, parameters, request_id).await?;
+            *owned = true;
+            for (index, change) in params.changes.iter().enumerate() {
+                if change.op == EnvOp::Set && !values.contains_key(&index.to_string()) {
+                    return Err(
+                        "a held value is missing; nothing was changed, so re-file the request"
+                            .to_owned()
+                            .into(),
                     );
                 }
             }
@@ -2000,11 +2238,70 @@ impl CoolifySettings {
             .read_envs(base, &token, resource, uuid)
             .await
             .map_err(provider_text)?;
-        let mut changed = Vec::new();
-        for (index, (change, entry)) in params.changes.iter().zip(&params.preview).enumerate() {
-            let now_env = current
+        // Every staleness check runs before the first write, so a change that
+        // is going to be refused is refused whole.
+        let mut plan: Vec<Option<&RemoteEnv>> = Vec::with_capacity(params.changes.len());
+        for (change, entry) in params.changes.iter().zip(&params.preview) {
+            let mut matching = current
                 .iter()
-                .find(|env| env.key == change.key && env.is_preview == change.is_preview);
+                .filter(|env| env.key == change.key && env.is_preview == change.is_preview);
+            let now_env = matching.next();
+            if matching.next().is_some() {
+                return Err(stale(&format!("{} now appears more than once", change.key)).into());
+            }
+            let before_holds = |env: &RemoteEnv| {
+                entry
+                    .before
+                    .as_ref()
+                    .is_some_and(|b| b.same_for(&env.flags, resource))
+            };
+            let flags_moved = || {
+                stale(&format!(
+                    "the flags of {} changed since the request was made",
+                    change.key
+                ))
+            };
+            match (change.op, now_env) {
+                (EnvOp::Set, Some(env)) => {
+                    let in_place = change
+                        .flags
+                        .is_some_and(|after| env.flags.same_for(&after, resource));
+                    if !(before_holds(env) || in_place) {
+                        return Err(flags_moved().into());
+                    }
+                }
+                (EnvOp::Unset, Some(env)) => {
+                    if !before_holds(env) {
+                        return Err(flags_moved().into());
+                    }
+                }
+                (EnvOp::Set, None) => {
+                    if entry.before.is_some() {
+                        return Err(stale(&format!(
+                            "the variable {} no longer exists",
+                            change.key
+                        ))
+                        .into());
+                    }
+                }
+                // Already gone: a replay after a crash.
+                (EnvOp::Unset, None) => {}
+            }
+            plan.push(now_env);
+        }
+        let mut changed = Vec::new();
+        let partial = |changed: &Vec<String>, message: &str| SettingsFailure {
+            message: message.to_owned(),
+            partial: Some(Box::new(SettingsOutcome {
+                setting: Setting::Env.id().to_owned(),
+                outcome: "partial".to_owned(),
+                changed: changed.clone(),
+                verified: false,
+                follow_up: None,
+                error: Some(message.to_owned()),
+            })),
+        };
+        for (index, (change, now_env)) in params.changes.iter().zip(plan).enumerate() {
             let label = |verb: &str| {
                 format!(
                     "{verb} {}{}",
@@ -2012,30 +2309,8 @@ impl CoolifySettings {
                     if change.is_preview { " (preview)" } else { "" }
                 )
             };
-            match change.op {
+            let sent = match change.op {
                 EnvOp::Set => {
-                    let after = change.flags.unwrap_or_default();
-                    match now_env {
-                        Some(env)
-                            if entry
-                                .before
-                                .as_ref()
-                                .is_some_and(|b| b.same_for(&env.flags, resource))
-                                || env.flags.same_for(&after, resource) => {}
-                        Some(_) => {
-                            return Err(stale(&format!(
-                                "the flags of {} changed since the request was made",
-                                change.key
-                            )));
-                        }
-                        None if entry.before.is_none() => {}
-                        None => {
-                            return Err(stale(&format!(
-                                "the variable {} no longer exists",
-                                change.key
-                            )));
-                        }
-                    }
                     let value = SensitiveString::new(
                         values.get(&index.to_string()).cloned().unwrap_or_default(),
                     );
@@ -2043,9 +2318,9 @@ impl CoolifySettings {
                         key: &change.key,
                         value: &value,
                         is_preview: change.is_preview,
-                        flags: after,
+                        flags: change.flags.unwrap_or_default(),
                     };
-                    if now_env.is_some() {
+                    let outcome = if now_env.is_some() {
                         self.port
                             .update_env(base, &token, resource, uuid, &write)
                             .await
@@ -2053,29 +2328,29 @@ impl CoolifySettings {
                         self.port
                             .create_env(base, &token, resource, uuid, &write)
                             .await
-                    }
-                    .map_err(provider_text)?;
-                    changed.push(label("set"));
+                    };
+                    outcome.map(|()| Some(label("set")))
                 }
-                EnvOp::Unset => {
-                    // A variable already gone is a replay after a crash.
-                    if let Some(env) = now_env {
-                        if !entry
-                            .before
-                            .as_ref()
-                            .is_some_and(|b| b.same_for(&env.flags, resource))
-                        {
-                            return Err(stale(&format!(
-                                "the flags of {} changed since the request was made",
-                                change.key
-                            )));
-                        }
-                        self.port
-                            .delete_env(base, &token, resource, uuid, &env.uuid)
-                            .await
-                            .map_err(provider_text)?;
-                        changed.push(label("unset"));
-                    }
+                EnvOp::Unset => match now_env {
+                    Some(env) => self
+                        .port
+                        .delete_env(base, &token, resource, uuid, &env.uuid)
+                        .await
+                        .map(|()| Some(label("unset"))),
+                    None => Ok(None),
+                },
+            };
+            match sent {
+                Ok(Some(name)) => changed.push(name),
+                Ok(None) => {}
+                Err(failure) => {
+                    let message = format!(
+                        "stopped at {}: {failure}; {} of {} changes were applied (see the result), the rest were not",
+                        change.key,
+                        changed.len(),
+                        params.changes.len()
+                    );
+                    return Err(partial(&changed, &message));
                 }
             }
         }
@@ -2084,7 +2359,12 @@ impl CoolifySettings {
             .port
             .read_envs(base, &token, resource, uuid)
             .await
-            .map_err(provider_text)?;
+            .map_err(|failure| {
+                partial(
+                    &changed,
+                    &format!("the change was applied but could not be read back: {failure}"),
+                )
+            })?;
         for change in &params.changes {
             let found = after
                 .iter()
@@ -2098,16 +2378,19 @@ impl CoolifySettings {
                 _ => false,
             };
             if !ok {
-                return Err(format!(
-                    "Coolify accepted the change but reading it back differs for {}; check it in Coolify",
-                    change.key
+                return Err(partial(
+                    &changed,
+                    &format!(
+                        "Coolify accepted the change but reading it back differs for {}; check it in Coolify",
+                        change.key
+                    ),
                 ));
             }
         }
         let follow_up = self
             .follow_up(params.redeploy, base, &token, resource, uuid)
-            .await?;
-        Ok(SettingsOutcome {
+            .await;
+        conclude(SettingsOutcome {
             setting: Setting::Env.id().to_owned(),
             outcome: if changed.is_empty() {
                 "unchanged"
@@ -2118,10 +2401,14 @@ impl CoolifySettings {
             changed,
             verified: true,
             follow_up,
+            error: None,
         })
     }
 
-    async fn execute_domains(&self, params: &DomainsParameters) -> Result<SettingsOutcome, String> {
+    async fn execute_domains(
+        &self,
+        params: &DomainsParameters,
+    ) -> Result<SettingsOutcome, SettingsFailure> {
         self.recheck(
             &params.account_id,
             &params.uuid,
@@ -2147,12 +2434,12 @@ impl CoolifySettings {
             .await
             .map_err(provider_text)?;
         if current.build_pack == "dockercompose" {
-            return Err(stale("the application is now built from a Compose file"));
+            return Err(stale("the application is now built from a Compose file").into());
         }
         let now_domains: Vec<String> = current.domains.iter().map(|d| lenient(d)).collect();
         let already = now_domains == params.domains;
         if !already && now_domains != params.preview.before {
-            return Err(stale("the domains changed since the request was made"));
+            return Err(stale("the domains changed since the request was made").into());
         }
         if !already {
             self.port
@@ -2176,14 +2463,15 @@ impl CoolifySettings {
             if read != params.domains {
                 return Err(
                     "Coolify accepted the change but reading the domains back differs; check them in Coolify"
-                        .to_owned(),
+                        .to_owned()
+                        .into(),
                 );
             }
         }
         let follow_up = self
             .follow_up(params.redeploy, base, &token, params.resource_kind, uuid)
-            .await?;
-        Ok(SettingsOutcome {
+            .await;
+        conclude(SettingsOutcome {
             setting: Setting::Domains.id().to_owned(),
             outcome: if already { "unchanged" } else { "applied" }.to_owned(),
             changed: if already {
@@ -2193,10 +2481,14 @@ impl CoolifySettings {
             },
             verified: true,
             follow_up,
+            error: None,
         })
     }
 
-    async fn execute_health(&self, params: &HealthParameters) -> Result<SettingsOutcome, String> {
+    async fn execute_health(
+        &self,
+        params: &HealthParameters,
+    ) -> Result<SettingsOutcome, SettingsFailure> {
         self.recheck(
             &params.account_id,
             &params.uuid,
@@ -2223,7 +2515,7 @@ impl CoolifySettings {
             .map_err(provider_text)?;
         let already = current.health == params.preview.after;
         if !already && current.health != params.preview.before {
-            return Err(stale("the health check changed since the request was made"));
+            return Err(stale("the health check changed since the request was made").into());
         }
         if !already {
             self.port
@@ -2246,14 +2538,15 @@ impl CoolifySettings {
             if after.health != params.preview.after {
                 return Err(
                     "Coolify accepted the change but reading the health check back differs; check it in Coolify"
-                        .to_owned(),
+                        .to_owned()
+                        .into(),
                 );
             }
         }
         let follow_up = self
             .follow_up(params.redeploy, base, &token, params.resource_kind, uuid)
-            .await?;
-        Ok(SettingsOutcome {
+            .await;
+        conclude(SettingsOutcome {
             setting: Setting::Health.id().to_owned(),
             outcome: if already { "unchanged" } else { "applied" }.to_owned(),
             changed: params
@@ -2264,6 +2557,7 @@ impl CoolifySettings {
                 .collect(),
             verified: true,
             follow_up,
+            error: None,
         })
     }
 
@@ -2275,42 +2569,40 @@ impl CoolifySettings {
         token: &SensitiveString,
         resource: LifecycleResource,
         uuid: &str,
-    ) -> Result<Option<FollowUp>, String> {
+    ) -> Option<FollowUp> {
         if !asked {
-            return Ok(None);
+            return None;
         }
         let verb = if resource == LifecycleResource::Application {
             LifecycleVerb::Redeploy
         } else {
             LifecycleVerb::Restart
         };
-        let ack = self
+        let mut follow = FollowUp {
+            verb: verb.id().to_owned(),
+            deployment_uuid: None,
+            error: None,
+        };
+        match self
             .lifecycle
             .run_verb(base, token, resource, uuid, verb)
             .await
-            .map_err(|failure| {
-                format!(
-                    "the change was applied but the {} failed: {failure}",
-                    verb.id()
-                )
-            })?;
-        if verb == LifecycleVerb::Redeploy && ack.deployment_uuid.is_none() {
-            return Err(
-                "the change was applied but Coolify did not queue a deployment; redeploy it in Coolify"
-                    .to_owned(),
-            );
+        {
+            Err(failure) => follow.error = Some(failure.to_string()),
+            Ok(ack) if verb == LifecycleVerb::Redeploy && ack.deployment_uuid.is_none() => {
+                follow.error = Some("Coolify did not queue a deployment".to_owned());
+            }
+            Ok(ack) => follow.deployment_uuid = ack.deployment_uuid,
         }
-        Ok(Some(FollowUp {
-            verb: verb.id().to_owned(),
-            deployment_uuid: ack.deployment_uuid,
-        }))
+        Some(follow)
     }
 
     /// Deletes held values no live request names: those of denied, expired,
     /// failed, and succeeded requests (or of none), once past the grace that
     /// covers the moment between storing a value and filing its request.
-    /// Returns how many were removed. A page of requests that may be
-    /// truncated removes nothing.
+    /// Returns how many were removed. A record is live when the request it
+    /// is bound to is pending, approved, or executing. Every such request is
+    /// read; if they cannot all be read, nothing is removed.
     ///
     /// # Errors
     ///
@@ -2320,31 +2612,50 @@ impl CoolifySettings {
         if ids.is_empty() {
             return Ok(0);
         }
+        // Every live request, however many: the page grows until it is not
+        // full, and a page that cannot be read whole removes nothing.
         let mut live: BTreeSet<String> = BTreeSet::new();
         for state in [
             ActionRequestState::Pending,
             ActionRequestState::Approved,
             ActionRequestState::Executing,
         ] {
-            let page = self.requests.list(Some(state), SWEEP_PAGE).await?;
-            if page.len() >= SWEEP_PAGE as usize {
-                return Ok(0);
-            }
+            let mut limit = SWEEP_PAGE;
+            let page = loop {
+                let page = self.requests.list(Some(state), limit).await?;
+                if page.len() < limit as usize {
+                    break page;
+                }
+                if limit >= SWEEP_MAX {
+                    return Ok(0);
+                }
+                limit = limit.saturating_mul(4).min(SWEEP_MAX);
+            };
             for request in page {
                 // A pending request past its deadline is as good as expired.
                 if state == ActionRequestState::Pending && request.expires_at <= now {
                     continue;
                 }
-                if request.action_id == ENV_ACTION
-                    && let Some(id) = request.parameters.get("holdId").and_then(Value::as_str)
-                {
-                    live.insert(id.to_owned());
+                if request.action_id == ENV_ACTION {
+                    live.insert(request.id);
                 }
             }
         }
         let mut removed = 0;
         for id in ids {
-            if live.contains(&id) {
+            let bound_to = self
+                .holds
+                .get(&id)
+                .await?
+                .and_then(|document| serde_json::from_str::<HeldRecord>(document.expose()).ok())
+                .and_then(|record| record.request_id);
+            // A record bound to a live request is kept; so is one not yet
+            // bound (it is between storing and the broker's answer) until
+            // the grace has passed.
+            if bound_to
+                .as_ref()
+                .is_some_and(|request| live.contains(request))
+            {
                 continue;
             }
             let age = uuid7_millis(&id).map_or(i64::MAX, |made| now.saturating_sub(made));
@@ -2354,6 +2665,24 @@ impl CoolifySettings {
             }
         }
         Ok(removed)
+    }
+}
+
+/// A finished change: `Ok` when the follow-up (if asked) went through, else
+/// a failure that still carries what was applied.
+fn conclude(outcome: SettingsOutcome) -> Result<SettingsOutcome, SettingsFailure> {
+    let failed = outcome.follow_up.as_ref().and_then(|follow| {
+        follow
+            .error
+            .clone()
+            .map(|error| (follow.verb.clone(), error))
+    });
+    match failed {
+        None => Ok(outcome),
+        Some((verb, error)) => Err(SettingsFailure {
+            message: format!("the change was applied but the {verb} failed: {error}"),
+            partial: Some(Box::new(outcome)),
+        }),
     }
 }
 
@@ -2380,6 +2709,23 @@ fn require_application(resource: LifecycleResource, what: &str) -> Result<(), Li
     }
 }
 
+/// Names Coolify holds more than once (same name and preview flag): Fleet
+/// cannot tell which one a request means, so it refuses to change them.
+fn note_duplicates(envs: &[RemoteEnv], notes: &mut Vec<String>) {
+    let mut seen = BTreeSet::new();
+    let mut named = BTreeSet::new();
+    for env in envs {
+        if !seen.insert((env.key.as_str(), env.is_preview)) {
+            named.insert(env.key.as_str());
+        }
+    }
+    for key in named {
+        notes.push(format!(
+            "{key} appears more than once in Coolify; Fleet will not change it until the duplicate is resolved there"
+        ));
+    }
+}
+
 fn env_view(env: &RemoteEnv) -> EnvView {
     EnvView {
         key: env.key.clone(),
@@ -2402,61 +2748,10 @@ fn key_conflict(existing: &ActionRequest) -> LifecycleError {
     })
 }
 
-/// A retry of an environment request: the same request when the keys,
-/// operations, and flags agree and each value matches its stored digest.
-fn replay_env(
-    existing: ActionRequest,
-    changes: &[EnvChangeInput],
-    meta: &RequestMeta,
-) -> Result<ActionRequest, LifecycleError> {
-    let Ok(stored) = serde_json::from_value::<EnvParameters>(existing.parameters.clone()) else {
-        return Err(key_conflict(&existing));
-    };
-    let mut same = existing.action_id == ENV_ACTION
-        && existing.target == meta.service_id
-        && stored.redeploy == meta.redeploy
-        && stored.changes.len() == changes.len();
-    if same {
-        for (have, want) in stored.changes.iter().zip(changes) {
-            let flags_agree = want
-                .flags
-                .is_buildtime
-                .is_none_or(|v| have.flags.is_some_and(|f| f.is_buildtime == v))
-                && want
-                    .flags
-                    .is_runtime
-                    .is_none_or(|v| have.flags.is_some_and(|f| f.is_runtime == v))
-                && want
-                    .flags
-                    .is_multiline
-                    .is_none_or(|v| have.flags.is_some_and(|f| f.is_multiline == v))
-                && want
-                    .flags
-                    .is_literal
-                    .is_none_or(|v| have.flags.is_some_and(|f| f.is_literal == v))
-                && want
-                    .flags
-                    .is_shown_once
-                    .is_none_or(|v| have.flags.is_some_and(|f| f.is_shown_once == v));
-            let value_agrees = match (&want.value, &have.digest, &stored.hold_id) {
-                (Some(value), Some(digest), Some(hold_id)) => {
-                    value_digest(hold_id, &have.key, have.is_preview, value.expose()) == *digest
-                }
-                (None, None, _) => true,
-                _ => false,
-            };
-            same &= have.op == want.op
-                && have.key == want.key
-                && have.is_preview == want.is_preview
-                && flags_agree
-                && value_agrees;
-        }
-    }
-    if same {
-        Ok(existing)
-    } else {
-        Err(key_conflict(&existing))
-    }
+/// Whether a flag the caller named agrees with the stored one; a flag the
+/// caller left out agrees with anything.
+fn flag_agrees(wanted: Option<bool>, have: Option<EnvFlags>, pick: fn(&EnvFlags) -> bool) -> bool {
+    wanted.is_none_or(|value| have.is_some_and(|flags| pick(&flags) == value))
 }
 
 #[cfg(test)]
@@ -2469,6 +2764,7 @@ mod tests {
 
     fn health() -> HealthSettings {
         HealthSettings {
+            check_type: "http".to_owned(),
             enabled: true,
             path: "/".to_owned(),
             port: None,
@@ -2575,16 +2871,63 @@ mod tests {
     }
 
     #[test]
-    fn the_digest_is_salted_per_request_and_hides_nothing_it_should_not() {
-        let a = value_digest("hold-a", "API_URL", false, "https://x.test");
-        let b = value_digest("hold-b", "API_URL", false, "https://x.test");
-        assert!(valid_digest(&a) && valid_digest(&b));
-        assert_ne!(a, b, "the same value digests differently per request");
-        assert_ne!(
-            a,
-            value_digest("hold-a", "API_URL", true, "https://x.test"),
-            "the preview flag is part of the identity"
+    fn the_binding_covers_the_parameters_but_not_the_display_name() {
+        let params = serde_json::to_value(env_params()).unwrap();
+        let same = binding_of(&params);
+        assert_eq!(same.len(), 64);
+        let mut renamed = params.clone();
+        renamed["name"] = serde_json::json!("renamed");
+        assert_eq!(binding_of(&renamed), same, "the name is display-only");
+        for edit in [
+            |p: &mut Value| p["uuid"] = serde_json::json!("other"),
+            |p: &mut Value| p["redeploy"] = serde_json::json!(false),
+            |p: &mut Value| p["holdId"] = serde_json::json!("hold-2"),
+            |p: &mut Value| p["changes"][0]["flags"]["isLiteral"] = serde_json::json!(false),
+            |p: &mut Value| p["accountId"] = serde_json::json!("acct2"),
+        ] {
+            let mut changed = params.clone();
+            edit(&mut changed);
+            assert_ne!(binding_of(&changed), same);
+        }
+    }
+
+    #[test]
+    fn a_cleared_health_field_applies_and_never_conflicts_with_a_set() {
+        let mut before = health();
+        before.port = Some(8080);
+        before.host = Some("app.example.org".to_owned());
+        before.response_text = Some("ok".to_owned());
+        let patch = HealthPatch {
+            clear: vec![
+                "port".to_owned(),
+                "host".to_owned(),
+                "responseText".to_owned(),
+            ],
+            ..HealthPatch::default()
+        };
+        patch.validate().unwrap();
+        let after = patch.apply(&before);
+        assert_eq!(
+            (after.port, after.host, after.response_text),
+            (None, None, None)
         );
+        let both = HealthPatch {
+            port: Some(1),
+            clear: vec!["port".to_owned()],
+            ..HealthPatch::default()
+        };
+        assert!(both.validate().is_err());
+        let unknown = HealthPatch {
+            clear: vec!["path".to_owned()],
+            ..HealthPatch::default()
+        };
+        assert!(unknown.validate().is_err());
+        // Coolify's host pattern: no colon.
+        let host = HealthPatch {
+            host: Some("a:b".to_owned()),
+            ..HealthPatch::default()
+        };
+        assert!(host.validate().is_err());
     }
 
     #[test]
@@ -2599,7 +2942,6 @@ mod tests {
     }
 
     fn env_params() -> EnvParameters {
-        let digest = value_digest("hold-1", "API_URL", false, "https://x.test");
         let after = EnvFlags {
             is_literal: true,
             ..flags()
@@ -2616,14 +2958,12 @@ mod tests {
                     key: "API_URL".to_owned(),
                     is_preview: false,
                     flags: Some(after),
-                    digest: Some(digest.clone()),
                 },
                 EnvChange {
                     op: EnvOp::Unset,
                     key: "OLD".to_owned(),
                     is_preview: false,
                     flags: None,
-                    digest: None,
                 },
             ],
             redeploy: true,
@@ -2634,7 +2974,7 @@ mod tests {
                     operation: PlanOp::Update,
                     before: Some(flags()),
                     after: Some(after),
-                    changes: env_entry_changes(Some(&flags()), Some(&after), Some(&digest)),
+                    changes: env_entry_changes(Some(&flags()), Some(&after), true),
                 },
                 EnvPreviewEntry {
                     key: "OLD".to_owned(),
@@ -2642,7 +2982,7 @@ mod tests {
                     operation: PlanOp::Delete,
                     before: Some(flags()),
                     after: None,
-                    changes: env_entry_changes(Some(&flags()), None, None),
+                    changes: env_entry_changes(Some(&flags()), None, false),
                 },
             ],
         }
@@ -2673,7 +3013,7 @@ mod tests {
         tampered.hold_id = None;
         assert!(validate_env(&tampered).is_err(), "a set needs its hold");
         let mut tampered = env_params();
-        tampered.changes[0].digest = Some("nothex".to_owned());
+        tampered.changes[0].flags = None;
         assert!(validate_env(&tampered).is_err());
         let mut tampered = env_params();
         tampered.resource_kind = LifecycleResource::Database;

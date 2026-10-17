@@ -6,7 +6,7 @@ import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 
 import { errorMessage } from '../../machine/api'
-import { HEALTH_METHODS, HEALTH_SCHEMES, healthForm, healthPatch } from '../settings'
+import { HEALTH_METHODS, HEALTH_SCHEMES, healthEditable, healthForm, healthPatch } from '../settings'
 import { useHealthRequest } from '../useServiceSettings'
 import FiledRequest from './FiledRequest.vue'
 
@@ -56,7 +56,15 @@ const selectClass = 'h-8 w-full rounded-sm border border-input bg-fc-inset px-2 
     class="space-y-3"
     data-testid="health-settings"
   >
+    <p
+      v-if="!healthEditable(health)"
+      class="text-xs text-fc-muted"
+      data-testid="health-command"
+    >
+      Command check (not editable). This application's health check runs a command inside the container; Fleet shows it but does not change it. Edit it in Coolify.
+    </p>
     <form
+      v-else
       class="grid gap-2"
       data-testid="health-form"
       @submit.prevent="submit"
@@ -107,7 +115,7 @@ const selectClass = 'h-8 w-full rounded-sm border border-input bg-fc-inset px-2 
           />
         </label>
         <label :class="labelClass">
-          <span :class="captionClass">Port (blank: the application's)</span>
+          <span :class="captionClass">Port (blank: the application's own)</span>
           <Input
             v-model="form.port"
             class="h-8 text-xs"
@@ -116,7 +124,7 @@ const selectClass = 'h-8 w-full rounded-sm border border-input bg-fc-inset px-2 
           />
         </label>
         <label :class="labelClass">
-          <span :class="captionClass">Host header</span>
+          <span :class="captionClass">Host header (blank: none)</span>
           <Input
             v-model="form.host"
             class="h-8 text-xs"
@@ -134,7 +142,7 @@ const selectClass = 'h-8 w-full rounded-sm border border-input bg-fc-inset px-2 
           />
         </label>
         <label :class="labelClass">
-          <span :class="captionClass">Response must contain</span>
+          <span :class="captionClass">Response must contain (blank: anything)</span>
           <Input
             v-model="form.responseText"
             class="h-8 text-xs"

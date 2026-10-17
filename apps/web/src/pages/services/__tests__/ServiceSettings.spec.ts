@@ -48,15 +48,18 @@ const SETTINGS = {
     { key: 'OLD_SETTING', isPreview: false, isShared: false, isBuildtime: true, isRuntime: true, isMultiline: false, isLiteral: false, isShownOnce: true },
   ],
   domains: ['https://shop.example.org'],
-  health: { enabled: false, path: '/', port: null, host: null, method: 'GET', scheme: 'http', returnCode: 200, responseText: null, interval: 5, timeout: 5, retries: 10, startPeriod: 5 },
+  health: { checkType: 'http', enabled: false, path: '/', port: null, host: null, method: 'GET', scheme: 'http', returnCode: 200, responseText: null, interval: 5, timeout: 5, retries: 10, startPeriod: 5 },
   notes: [],
 }
+
+let lastClient: QueryClient
 
 async function mountComponent<T>(component: T, props: Record<string, unknown>) {
   const router = createRouter({ history: createMemoryHistory(), routes })
   await router.push('/services')
   await router.isReady()
   const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false, staleTime: Infinity }, mutations: { retry: false } } })
+  lastClient = queryClient
   const wrapper = mount(component as never, { props: props as never, global: { plugins: [[VueQueryPlugin, { queryClient }], router] } })
   await flushPromises()
   await flushPromises()
@@ -81,6 +84,7 @@ describe('lifecycle buttons', () => {
     await flushPromises()
     expect(requestServiceAction).toHaveBeenCalledWith('coolify:acc1:web', 'restart', { reason: 'restart web from the console' })
     expect(wrapper.get('[data-testid="filed-state"]').text()).toBe('succeeded')
+    expect(wrapper.get('[data-testid="filed-text"]').text()).toContain('status back')
     expect(wrapper.get('[data-testid="filed-link"]').attributes('href')).toBe('/requests?request=req-1')
   })
 
@@ -90,7 +94,7 @@ describe('lifecycle buttons', () => {
     const wrapper = await mountComponent(ServiceActions, { service: service('web') })
     await wrapper.get('[data-testid="action-stop"]').trigger('click')
     expect(requestServiceAction).not.toHaveBeenCalled()
-    expect(wrapper.get('[data-testid="confirm-text"]').text()).toContain('a person must approve')
+    expect(wrapper.get('[data-testid="confirm-text"]').text()).toContain('Policy decides')
     await wrapper.get('[data-testid="cancel-stop"]').trigger('click')
     expect(wrapper.find('[data-testid="confirm-text"]').exists()).toBe(false)
     await wrapper.get('[data-testid="action-stop"]').trigger('click')
@@ -165,13 +169,51 @@ describe('settings tab', () => {
     expect(wrapper.get('[data-testid="filed-preview"]').text()).toContain('then redeploy')
   })
 
-  it('blocks an empty value and a bad name before anything is sent', async () => {
+  it('keeps the value out of the TanStack mutation cache, and clears the field after a failed send too', async () => {
+    requestServiceEnvChange.mockResolvedValueOnce({ status: 500, data: { code: 'internal', message: 'boom' }, headers: new Headers() })
+    requestServiceEnvChange.mockResolvedValueOnce(ok(filedRequest('coolify.env.update'), 201))
+    getActionRequest.mockResolvedValue(ok(filedRequest('coolify.env.update')))
+    const wrapper = await mountComponent(ServiceSettings, { service: service('web') })
+    await wrapper.get('[data-testid="env-key"]').setValue('API_URL')
+    await wrapper.get('[data-testid="env-value"]').setValue(SECRET)
+    await wrapper.get('[data-testid="env-form"]').trigger('submit')
+    await flushPromises()
+    // Failed: the error is shown and the field is empty again.
+    expect(wrapper.find('[data-testid="env-error"]').exists()).toBe(true)
+    expect((wrapper.get('[data-testid="env-value"]').element as HTMLInputElement).value).toBe('')
+    expect(wrapper.html()).not.toContain(SECRET)
+    await wrapper.get('[data-testid="env-value"]').setValue(SECRET)
+    await wrapper.get('[data-testid="env-form"]').trigger('submit')
+    await flushPromises()
+    await new Promise(resolve => setTimeout(resolve, 5))
+    const cache = lastClient.getMutationCache().getAll()
+    expect(cache).toHaveLength(0)
+    expect(JSON.stringify(cache.map(m => m.state))).not.toContain(SECRET)
+  })
+
+  it('allows an empty value (Coolify stores it as blank) but not a bad name', async () => {
+    requestServiceEnvChange.mockResolvedValue(ok(filedRequest('coolify.env.update'), 201))
+    getActionRequest.mockResolvedValue(ok(filedRequest('coolify.env.update')))
+    const wrapper = await mountComponent(ServiceSettings, { service: service('web') })
+    await wrapper.get('[data-testid="env-key"]').setValue('EMPTY_ONE')
+    expect((wrapper.get('[data-testid="env-submit"]').element as HTMLButtonElement).disabled).toBe(false)
+    await wrapper.get('[data-testid="env-form"]').trigger('submit')
+    await flushPromises()
+    expect(requestServiceEnvChange.mock.calls[0]![1].changes[0]).toMatchObject({ key: 'EMPTY_ONE', value: '' })
+  })
+
+  it('shows a command health check but offers no form for it', async () => {
+    getServiceSettings.mockResolvedValue(ok({ ...SETTINGS, health: { ...SETTINGS.health, checkType: 'cmd' } }))
+    const wrapper = await mountComponent(ServiceSettings, { service: service('web') })
+    expect(wrapper.get('[data-testid="health-command"]').text()).toContain('Command check (not editable)')
+    expect(wrapper.find('[data-testid="health-form"]').exists()).toBe(false)
+  })
+
+  it('blocks a bad name before anything is sent', async () => {
     const wrapper = await mountComponent(ServiceSettings, { service: service('web') })
     await wrapper.get('[data-testid="env-key"]').setValue('1BAD')
     expect(wrapper.get('[data-testid="env-problem"]').text()).toContain('letters')
     expect((wrapper.get('[data-testid="env-submit"]').element as HTMLButtonElement).disabled).toBe(true)
-    await wrapper.get('[data-testid="env-key"]').setValue('GOOD_NAME')
-    expect(wrapper.get('[data-testid="env-problem"]').text()).toContain('write-only')
     await wrapper.get('[data-testid="env-form"]').trigger('submit')
     expect(requestServiceEnvChange).not.toHaveBeenCalled()
   })

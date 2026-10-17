@@ -237,6 +237,7 @@ fn health_of(value: &Value) -> HealthSettings {
             .unwrap_or(default)
     };
     HealthSettings {
+        check_type: text_of(value.get("health_check_type")).unwrap_or_else(|| "http".to_owned()),
         enabled: bool_of(value.get("health_check_enabled"), false),
         path: text_of(value.get("health_check_path")).unwrap_or_else(|| "/".to_owned()),
         port: uint_of(value.get("health_check_port")).and_then(|n| u16::try_from(n).ok()),
@@ -318,6 +319,16 @@ fn patch_body(patch: &ApplicationPatch) -> String {
             "health_check_start_period",
             health.start_period.map(|v| json!(v)),
         );
+        // A cleared field is sent as null (Coolify reads it as blank).
+        for (name, field) in [
+            ("port", "health_check_port"),
+            ("host", "health_check_host"),
+            ("responseText", "health_check_response_text"),
+        ] {
+            if health.clear.iter().any(|cleared| cleared == name) {
+                put(field, Some(Value::Null));
+            }
+        }
     }
     Value::Object(body).to_string()
 }

@@ -13,12 +13,12 @@ import { useFiledRequest } from '../useServiceSettings'
 // until it settles), what that means, the preview the approver reads, and the
 // way to Approvals. The console decides nothing here; the controller's
 // request is the truth.
-const props = defineProps<{ request: ActionRequestDto }>()
+const props = withDefaults(defineProps<{ request: ActionRequestDto, kind?: 'lifecycle' | 'settings' }>(), { kind: 'settings' })
 const emit = defineEmits<{ dismiss: [] }>()
 
 const live = useFiledRequest(() => props.request.id)
 const current = computed(() => live.data.value ?? props.request)
-const outcome = computed(() => requestOutcome(current.value))
+const outcome = computed(() => requestOutcome(current.value, props.kind))
 const preview = computed(() => previewLines(props.request.parameters))
 </script>
 

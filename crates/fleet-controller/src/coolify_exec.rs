@@ -253,7 +253,29 @@ impl OperationExecutor for CoolifySettingsExecutor {
             .record_progress(&operation.id, Some(0), Some(1), Some("calling Coolify"))
             .await
             .map_err(|error| error.to_string())?;
-        let outcome = self.settings.execute(&operation.kind, payload).await?;
+        let outcome = match self.settings.execute(&operation.kind, payload).await {
+            Ok(outcome) => outcome,
+            // A change that stopped part way, or whose redeploy failed, is
+            // recorded as a failed operation that still names what was
+            // applied (names only), instead of losing it.
+            Err(failure) => {
+                let Some(partial) = failure.partial else {
+                    return Err(failure.message);
+                };
+                let result = serde_json::to_string(&partial)
+                    .map_err(|_| "the outcome could not be recorded".to_owned())?;
+                let error = serde_json::json!({
+                    "reason": "settings_partial",
+                    "detail": failure.message,
+                })
+                .to_string();
+                return operations
+                    .complete(&operation.id, "failed", Some(&result), Some(&error))
+                    .await
+                    .map(|_| ())
+                    .map_err(|error| error.to_string());
+            }
+        };
         // The outcome names fields and keys, never a value.
         let result = serde_json::to_string(&outcome)
             .map_err(|_| "the outcome could not be recorded".to_owned())?;

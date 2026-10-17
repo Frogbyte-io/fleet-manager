@@ -8000,6 +8000,8 @@ export interface ServiceEnvVarDto {
  * An application's health check (the HTTP kind).
  */
 export interface ServiceHealthDto {
+  /** `http`, or `cmd` for a command check Fleet shows but does not edit. */
+  checkType: string;
   /** Whether Coolify runs the check. */
   enabled: boolean;
   /**
@@ -8406,6 +8408,8 @@ export type ServiceEnvBody = ServiceSettingsMeta & {
  * change.
  */
 export type ServiceHealthBody = ServiceSettingsMeta & ({
+  /** Fields to clear: `port`, `host`, `responseText`. */
+  clear?: string[];
   /**
      * Turn the check on or off.
      * @nullable

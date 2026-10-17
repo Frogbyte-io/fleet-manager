@@ -93,6 +93,8 @@ pub struct HealthArgs {
     pub retries: Option<u32>,
     /// Seconds before the first check.
     pub start_period: Option<u32>,
+    /// Fields to clear: `port`, `host`, `responseText`.
+    pub clear: Vec<String>,
 }
 
 /// One settings subcommand.
@@ -296,11 +298,27 @@ pub(crate) fn parse(rest: &[&str], output: &mut Output) -> Result<SettingsAction
             "--retries" if kind == "health" => {
                 health.retries = Some(number("retries", &value("retries")?)?);
             }
+            "--clear" if kind == "health" => {
+                let field = match value("clear")?.as_str() {
+                    "port" => "port",
+                    "host" => "host",
+                    "response-text" => "responseText",
+                    other => {
+                        return Err(bad(format!(
+                            "--clear names port, host, or response-text, not {other:?}"
+                        )));
+                    }
+                };
+                health.clear.push(field.to_owned());
+            }
             "--start-period" if kind == "health" => {
                 health.start_period = Some(number("start-period", &value("start-period")?)?);
             }
             other if other.starts_with("--") => {
-                return Err(bad(format!("unknown flag {other:?}")));
+                // Only the flag's name: a mistyped `--value=secret` must not
+                // be echoed back.
+                let name = other.split('=').next().unwrap_or(other);
+                return Err(bad(format!("unknown flag {name:?}")));
             }
             other => positional.push(other.to_owned()),
         }
@@ -533,13 +551,6 @@ pub(crate) fn request_with(
                         .or_else(|| text.strip_suffix('\n'))
                         .unwrap_or(&text)
                         .to_owned();
-                    if value.is_empty() {
-                        return Err(CliError {
-                            message:
-                                "the value must not be empty; use env unset to remove a variable"
-                                    .to_owned(),
-                        });
-                    }
                     vec![(key.clone(), value)]
                 }
                 None => parse_dotenv(&text)?,
@@ -603,6 +614,9 @@ pub(crate) fn request_with(
             put("timeout", args.timeout.map(|v| json!(v)));
             put("retries", args.retries.map(|v| json!(v)));
             put("startPeriod", args.start_period.map(|v| json!(v)));
+            if !args.clear.is_empty() {
+                put("clear", Some(json!(args.clear)));
+            }
             post(id, "health", Value::Object(body))
         }
     })
@@ -992,7 +1006,8 @@ mod tests {
         );
         assert!(request_with(&set, || Ok("\n# nothing\n".to_owned())).is_err());
         let keyed = action(&["services", "env", "set", "x", "--stdin", "--key", "K"]);
-        assert!(request_with(&keyed, || Ok("\n".to_owned())).is_err());
+        let (_, _, _, body) = request_with(&keyed, || Ok("\n".to_owned())).unwrap();
+        assert_eq!(body.unwrap()["changes"][0]["value"], "");
 
         // A file is read from disk.
         let dir = tempfile::tempdir().unwrap();
@@ -1008,6 +1023,38 @@ mod tests {
         ]);
         let (_, _, _, body) = request_with(&from_file, || panic!("stdin is not read")).unwrap();
         assert_eq!(body.unwrap()["changes"][0]["key"], "FROM_FILE");
+    }
+
+    #[test]
+    fn an_unknown_flag_error_never_echoes_a_value() {
+        let args: Vec<String> = ["services", "env", "set", "x", "--stdin", "--value=hunter2"]
+            .iter()
+            .map(ToString::to_string)
+            .collect();
+        let error = crate::parse(&args).unwrap_err().message;
+        assert!(
+            error.contains("--value") && !error.contains("hunter2"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn health_fields_can_be_cleared() {
+        let set = action(&[
+            "services",
+            "health",
+            "set",
+            "x",
+            "--clear",
+            "port",
+            "--clear",
+            "response-text",
+        ]);
+        let (_, _, _, body) = request_with(&set, || unreachable!()).unwrap();
+        assert_eq!(body.unwrap()["clear"], json!(["port", "responseText"]));
+        assert!(fails(&[
+            "services", "health", "set", "x", "--clear", "path"
+        ]));
     }
 
     #[test]

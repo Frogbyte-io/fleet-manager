@@ -55,6 +55,10 @@ struct Coolify {
     leak_values: bool,
     /// Answer an env write with a 422 that quotes the submitted value.
     quote_value_on_error: bool,
+    /// Answer a write to this variable name with HTTP 500.
+    fail_key: Option<String>,
+    /// Answer a deploy with 200 and no deployment.
+    deploy_empty: bool,
     /// Every request as `METHOD target`.
     log: Vec<String>,
     /// Every request body, by `METHOD target`.
@@ -150,6 +154,9 @@ fn respond(state: &mut Coolify, method: &str, target: &str, body: &str) -> (u16,
                         .to_string(),
                 );
             }
+            if state.fail_key.as_deref() == Some(key.as_str()) {
+                return (500, json!({"message": format!("boom {value}")}).to_string());
+            }
             let preview = sent["is_preview"].as_bool().unwrap_or(false);
             let envs = state.envs.entry((*uuid).to_owned()).or_default();
             if envs.iter().any(|e| e.key == key && e.is_preview == preview) {
@@ -184,6 +191,9 @@ fn respond(state: &mut Coolify, method: &str, target: &str, body: &str) -> (u16,
         ("PATCH", [_, uuid, "envs"]) => {
             let key = sent["key"].as_str().unwrap_or_default().to_owned();
             let preview = sent["is_preview"].as_bool().unwrap_or(false);
+            if state.fail_key.as_deref() == Some(key.as_str()) {
+                return (500, json!({"message": "boom"}).to_string());
+            }
             if state.quote_value_on_error {
                 return (
                     422,
@@ -230,6 +240,11 @@ fn respond(state: &mut Coolify, method: &str, target: &str, body: &str) -> (u16,
             }
             (200, json!({"uuid": APP}).to_string())
         }
+        ("POST", ["deploy"]) if state.deploy_empty => (
+            200,
+            json!({"deployments": [{"message": "Deployment is already queued.", "resource_uuid": APP}]})
+                .to_string(),
+        ),
         ("POST", ["deploy"]) => (
             200,
             json!({"deployments": [{"message": "Application web deployment queued.",
@@ -362,7 +377,7 @@ impl Rig {
             ..Coolify::default()
         };
         state.health = json!({
-            "health_check_enabled": false, "health_check_path": "/",
+            "health_check_type": "http", "health_check_enabled": false, "health_check_path": "/",
             "health_check_port": null, "health_check_host": null,
             "health_check_method": "GET", "health_check_scheme": "http",
             "health_check_return_code": 200, "health_check_response_text": null,
@@ -887,10 +902,6 @@ async fn invalid_variable_requests_are_refused_before_anything_is_held() {
         (APP, json!({"changes": [{"op": "set", "key": "X"}]})),
         (
             APP,
-            json!({"changes": [{"op": "set", "key": "X", "value": ""}]}),
-        ),
-        (
-            APP,
             json!({"changes": [{"op": "unset", "key": "X", "value": SECRET}]}),
         ),
         (
@@ -985,14 +996,58 @@ async fn a_denied_request_loses_its_held_value_to_the_sweep() {
 }
 
 #[tokio::test]
-async fn a_tampered_held_value_is_refused_and_still_deleted() {
+async fn a_request_that_copies_a_hold_id_cannot_spend_or_delete_the_victims_values() {
+    let rig = Rig::new().await;
+    let (_, filed) = rig
+        .post(APP, "env", json!({"changes": [env_set("API_URL", SECRET)]}))
+        .await;
+    let victim = filed["data"]["id"].as_str().unwrap().to_owned();
+    // The parameters are public: an attacker files another request with
+    // exactly the same parameters (and so the same holdId).
+    let (status, forged) = raw(
+        rig.address,
+        "POST",
+        "/api/v1/requests",
+        Some(json!({
+            "actionId": "coolify.env.update", "target": rig.id(APP),
+            "parameters": filed["data"]["parameters"], "reason": "forged",
+        })),
+    )
+    .await;
+    assert_eq!(status, 201, "{forged}");
+    let forged = forged["data"]["id"].as_str().unwrap().to_owned();
+    assert_ne!(forged, victim);
+    rig.approve(&forged).await;
+    let (request, operation) = rig.run(&forged).await;
+    assert_eq!(request["state"], "failed", "{request} {operation}");
+    assert!(
+        operation.to_string().contains("belong to another request"),
+        "{operation}"
+    );
+    // Nothing was written, and the victim's record is intact.
+    assert!(rig.requests_to("").iter().all(|l| l.starts_with("GET")));
+    assert_eq!(rig.held_records().await, 1);
+    // The victim's own request still runs with its own value.
+    rig.approve(&victim).await;
+    let (request, operation) = rig.run(&victim).await;
+    assert_eq!(request["state"], "succeeded", "{request} {operation}");
+    assert_eq!(rig.held_records().await, 0);
+    let value = rig.coolify.lock().unwrap().envs[APP]
+        .iter()
+        .find(|e| e.key == "API_URL")
+        .map(|e| e.value.clone());
+    assert_eq!(value.as_deref(), Some(SECRET));
+    rig.assert_nothing_stored().await;
+}
+
+#[tokio::test]
+async fn a_record_whose_binding_was_altered_is_refused_and_left_alone() {
     let rig = Rig::new().await;
     let (_, filed) = rig
         .post(APP, "env", json!({"changes": [env_set("API_URL", SECRET)]}))
         .await;
     let id = filed["data"]["id"].as_str().unwrap().to_owned();
     rig.approve(&id).await;
-    // Someone with the secret store swaps the held value.
     let record = rig
         .secrets
         .list()
@@ -1004,19 +1059,168 @@ async fn a_tampered_held_value_is_refused_and_still_deleted() {
     rig.secrets
         .update(
             &record.id,
-            SecretValue::new(json!({"0": SECRET_TWO}).to_string().into_bytes()),
+            SecretValue::new(
+                json!({"binding": "0".repeat(64), "requestId": id, "values": {"0": SECRET_TWO}})
+                    .to_string()
+                    .into_bytes(),
+            ),
         )
         .await
         .unwrap();
     let (request, operation) = rig.run(&id).await;
     assert_eq!(request["state"], "failed", "{request}");
-    assert!(
-        operation.to_string().contains("does not match"),
-        "{operation}"
-    );
+    assert!(operation.to_string().contains("not bound"), "{operation}");
     assert!(rig.requests_to("").iter().all(|l| l.starts_with("GET")));
+    assert_eq!(rig.held_records().await, 1);
+}
+
+#[tokio::test]
+async fn staleness_is_checked_before_the_first_write_and_a_partial_change_is_recorded() {
+    let rig = Rig::new().await;
+    // Stale: the second variable's flags move before the run; nothing is written.
+    let (_, filed) = rig
+        .post(
+            APP,
+            "env",
+            json!({"changes": [env_set("FIRST", SECRET), env_set("KEEP_ME", SECRET_TWO)]}),
+        )
+        .await;
+    let id = filed["data"]["id"].as_str().unwrap().to_owned();
+    rig.coolify.lock().unwrap().envs.get_mut(APP).unwrap()[1].flags[3] = true;
+    rig.approve(&id).await;
+    let (request, operation) = rig.run(&id).await;
+    assert_eq!(request["state"], "failed", "{request}");
+    assert!(operation.to_string().contains("stale"), "{operation}");
+    assert!(
+        rig.requests_to("").iter().all(|l| l.starts_with("GET")),
+        "no write before every check passed"
+    );
+    assert_eq!(rig.held_records().await, 0);
+
+    // Partial: the second write fails after the first was applied.
+    rig.coolify.lock().unwrap().envs.get_mut(APP).unwrap()[1].flags[3] = false;
+    rig.coolify.lock().unwrap().fail_key = Some("SECOND".to_owned());
+    let (request, operation) = rig
+        .file_approve_run(
+            APP,
+            "env",
+            json!({"changes": [env_set("FIRST", SECRET), env_set("SECOND", SECRET_TWO)]}),
+        )
+        .await;
+    assert_eq!(request["state"], "failed", "{request}");
+    let result = result_of(&operation);
+    assert_eq!(result["outcome"], "partial", "{operation}");
+    assert_eq!(result["changed"], json!(["set FIRST"]));
+    assert_eq!(result["verified"], false);
+    let text = operation.to_string();
+    assert!(
+        text.contains("stopped at SECOND") && text.contains("500"),
+        "{text}"
+    );
+    assert!(!text.contains(SECRET) && !text.contains(SECRET_TWO));
     assert_eq!(rig.held_records().await, 0);
     rig.assert_nothing_stored().await;
+}
+
+#[tokio::test]
+async fn a_failed_redeploy_after_the_change_is_a_structured_partial_result() {
+    let rig = Rig::new().await;
+    rig.coolify.lock().unwrap().deploy_empty = true;
+    let (request, operation) = rig
+        .file_approve_run(
+            APP,
+            "domains",
+            json!({"domains": ["https://shop.example.test", "https://www.example.test"], "redeploy": true}),
+        )
+        .await;
+    assert_eq!(request["state"], "failed", "{request}");
+    let result = result_of(&operation);
+    assert_eq!(result["outcome"], "applied");
+    assert_eq!(result["changed"], json!(["domains"]));
+    assert!(
+        result["followUp"]["error"]
+            .as_str()
+            .unwrap()
+            .contains("did not queue")
+    );
+    assert!(
+        operation
+            .to_string()
+            .contains("the change was applied but the redeploy failed")
+    );
+}
+
+#[tokio::test]
+async fn a_duplicated_variable_is_refused_empty_values_are_allowed_and_health_can_be_cleared() {
+    let rig = Rig::new().await;
+    {
+        let mut state = rig.coolify.lock().unwrap();
+        let dup = state.envs[APP][0].clone();
+        state.envs.get_mut(APP).unwrap().push(Env {
+            uuid: "env-dup".to_owned(),
+            ..dup
+        });
+    }
+    let (status, answer) = rig
+        .post(
+            APP,
+            "env",
+            json!({"changes": [env_set("OLD_SETTING", SECRET)]}),
+        )
+        .await;
+    assert_eq!(status, 400, "{answer}");
+    assert!(
+        answer["message"]
+            .as_str()
+            .unwrap()
+            .contains("more than once")
+    );
+    assert_eq!(rig.held_records().await, 0);
+    let (_, view) = raw(
+        rig.address,
+        "GET",
+        &format!("/api/v1/services/{}/settings", rig.id(APP)),
+        None,
+    )
+    .await;
+    assert!(
+        view["data"]["notes"][0]
+            .as_str()
+            .unwrap()
+            .contains("OLD_SETTING")
+    );
+    rig.coolify.lock().unwrap().envs.get_mut(APP).unwrap().pop();
+
+    // An empty value is a value.
+    let (request, operation) = rig
+        .file_approve_run(APP, "env", json!({"changes": [env_set("EMPTY_ONE", "")]}))
+        .await;
+    assert_eq!(request["state"], "succeeded", "{request} {operation}");
+
+    // A port can be cleared; a command check is shown but not edited.
+    rig.coolify
+        .lock()
+        .unwrap()
+        .health
+        .insert("health_check_port".to_owned(), json!(8080));
+    let (request, operation) = rig
+        .file_approve_run(APP, "health", json!({"clear": ["port"]}))
+        .await;
+    assert_eq!(request["state"], "succeeded", "{request} {operation}");
+    assert!(rig.coolify.lock().unwrap().health["health_check_port"].is_null());
+    rig.coolify
+        .lock()
+        .unwrap()
+        .health
+        .insert("health_check_type".to_owned(), json!("cmd"));
+    let (status, answer) = rig.post(APP, "health", json!({"retries": 3})).await;
+    assert_eq!(status, 400, "{answer}");
+    assert!(
+        answer["message"]
+            .as_str()
+            .unwrap()
+            .contains("command health check")
+    );
 }
 
 #[tokio::test]

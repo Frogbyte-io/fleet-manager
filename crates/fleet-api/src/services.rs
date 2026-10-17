@@ -930,6 +930,8 @@ pub struct ServiceEnvVarDto {
 #[derive(Clone, Debug, Serialize, ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct ServiceHealthDto {
+    /// `http`, or `cmd` for a command check Fleet shows but does not edit.
+    pub check_type: String,
     /// Whether Coolify runs the check.
     pub enabled: bool,
     /// The request path.
@@ -959,6 +961,7 @@ pub struct ServiceHealthDto {
 impl From<HealthSettings> for ServiceHealthDto {
     fn from(health: HealthSettings) -> Self {
         Self {
+            check_type: health.check_type,
             enabled: health.enabled,
             path: health.path,
             port: health.port,
@@ -1192,6 +1195,9 @@ pub struct ServiceHealthBody {
     /// Seconds before the first check (0 to 3600).
     #[serde(default)]
     pub start_period: Option<u32>,
+    /// Fields to clear: `port`, `host`, `responseText`.
+    #[serde(default)]
+    pub clear: Vec<String>,
     /// The shared fields.
     #[serde(flatten)]
     pub meta: ServiceSettingsMeta,
@@ -1428,6 +1434,7 @@ pub async fn request_service_health_change(
         timeout: body.timeout,
         retries: body.retries,
         start_period: body.start_period,
+        clear: body.clear,
     };
     let created = settings
         .request_health(

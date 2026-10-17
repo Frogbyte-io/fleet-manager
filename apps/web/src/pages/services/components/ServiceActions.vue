@@ -54,7 +54,7 @@ function press(verb: Verb, confirm: boolean) {
         role="alert"
         data-testid="confirm-text"
       >
-        Stop {{ service.name }}? It goes down until it is started again, and a person must approve the request first.
+        Stop {{ service.name }}? It goes down until it is started again. Policy decides whether the request runs at once or waits for a person; the request shows which.
       </span>
       <Button
         size="sm"
@@ -101,6 +101,7 @@ function press(verb: Verb, confirm: boolean) {
       class="basis-full"
     >
       <FiledRequest
+        kind="lifecycle"
         :request="filed"
         @dismiss="filed = null"
       />

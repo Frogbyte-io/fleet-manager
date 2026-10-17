@@ -70,9 +70,30 @@ export function useLifecycleRequest() {
   })
 }
 
+/**
+ * Files an environment change. The body holds a secret value, so it is never
+ * a mutation variable (those live in the TanStack mutation cache): the call
+ * is a closure, the mutation is not kept (`gcTime: 0`), and it is reset as
+ * soon as the call settles.
+ */
 export function useEnvRequest() {
   const refresh = useRefresh()
-  return useMutation({ mutationFn: fileOnce<ServiceEnvBody>(requestServiceEnvChange), onSettled: refresh })
+  const mutation = useMutation({
+    mutationFn: async (send: () => Promise<{ status: number, data: unknown }>) => unwrap<ActionRequestDto>(await send(), [201]),
+    gcTime: 0,
+    onSettled: refresh,
+  })
+  return {
+    isPending: mutation.isPending,
+    async file(serviceId: string, body: ServiceEnvBody): Promise<ActionRequestDto> {
+      try {
+        return await mutation.mutateAsync(() => requestServiceEnvChange(serviceId, body))
+      }
+      finally {
+        mutation.reset()
+      }
+    },
+  }
 }
 
 export function useDomainsRequest() {

@@ -53,12 +53,15 @@ async function submit() {
     return
   error.value = ''
   try {
-    filed.value = await request.mutateAsync({ serviceId: props.serviceId, body: envSetBody(form.value, props.kind) })
-    // The value leaves the page as soon as it is sent.
+    filed.value = await request.file(props.serviceId, envSetBody(form.value, props.kind))
     form.value = blankEnvForm()
   }
   catch (caught) {
     error.value = errorMessage(caught)
+  }
+  finally {
+    // The value leaves the page as soon as it is sent, whatever the outcome.
+    form.value.value = ''
   }
 }
 
@@ -66,10 +69,7 @@ async function unset(env: ServiceEnvVarDto) {
   error.value = ''
   unsetting.value = null
   try {
-    filed.value = await request.mutateAsync({
-      serviceId: props.serviceId,
-      body: envUnsetBody(env, form.value.redeploy, `unset ${env.key} from the console`),
-    })
+    filed.value = await request.file(props.serviceId, envUnsetBody(env, form.value.redeploy, `unset ${env.key} from the console`))
   }
   catch (caught) {
     error.value = errorMessage(caught)
@@ -178,7 +178,7 @@ const labelClass = 'font-mono text-[10px] uppercase tracking-wider text-fc-faint
           />
         </label>
         <label class="grid gap-1">
-          <span :class="labelClass">Value (write-only)</span>
+          <span :class="labelClass">Value (write-only, may be empty)</span>
           <Input
             v-model="form.value"
             type="password"

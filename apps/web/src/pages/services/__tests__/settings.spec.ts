@@ -10,6 +10,7 @@ import {
   envSetBody,
   envUnsetBody,
   findEnv,
+  healthEditable,
   healthForm,
   healthPatch,
   lifecycleVerbs,
@@ -27,7 +28,7 @@ function env(key: string, patch: Partial<ServiceEnvVarDto> = {}): ServiceEnvVarD
 }
 
 const HEALTH: ServiceHealthDto = {
-  enabled: true, path: '/', port: null, host: null, method: 'GET', scheme: 'http', returnCode: 200,
+  checkType: 'http', enabled: true, path: '/', port: null, host: null, method: 'GET', scheme: 'http', returnCode: 200,
   responseText: null, interval: 5, timeout: 5, retries: 10, startPeriod: 5,
 }
 
@@ -49,6 +50,8 @@ describe('request outcome', () => {
   it('says what each state means', () => {
     expect(requestOutcome({ state: 'pending', riskClass: 'approve', failure: null }).text).toContain('Waiting for a person')
     expect(requestOutcome({ state: 'succeeded', riskClass: 'approve', failure: null }).tone).toBe('ok')
+    expect(requestOutcome({ state: 'succeeded', riskClass: 'auto', failure: null }, 'lifecycle').text).toContain('status back')
+    expect(requestOutcome({ state: 'succeeded', riskClass: 'approve', failure: null }, 'settings').text).toContain('read it back')
     expect(requestOutcome({ state: 'failed', riskClass: 'approve', failure: 'the preview is stale' }).text).toBe('the preview is stale')
     expect(requestOutcome({ state: 'denied', riskClass: 'approve', failure: null }).tone).toBe('muted')
   })
@@ -85,7 +88,8 @@ describe('environment variables', () => {
     expect(envFormProblem({ ...form, key: '' })).toContain('Name')
     expect(envFormProblem({ ...form, key: '1BAD' })).toContain('letters')
     expect(envFormProblem({ ...form, key: 'A-B' })).toContain('letters')
-    expect(envFormProblem({ ...form, value: '' })).toContain('write-only')
+    // An empty value is a value: Coolify stores it as blank.
+    expect(envFormProblem({ ...form, value: '' })).toBeNull()
     expect(envFormProblem({ ...form, value: 'a\u0000b' })).toContain('NUL')
     expect(envFormProblem({ ...form, value: 'x'.repeat(16 * 1024 + 1) })).toContain('16 KiB')
   })
@@ -138,10 +142,22 @@ describe('health check', () => {
     expect(healthPatch(healthForm(HEALTH), HEALTH)).toEqual({ error: 'Nothing differs from the current health check.' })
     expect('error' in healthPatch({ ...healthForm(HEALTH), path: 'healthz' }, HEALTH)).toBe(true)
     expect('error' in healthPatch({ ...healthForm(HEALTH), port: '70000' }, HEALTH)).toBe(true)
+    expect('error' in healthPatch({ ...healthForm(HEALTH), host: 'a:b' }, { ...HEALTH, host: 'x' })).toBe(true)
     expect('error' in healthPatch({ ...healthForm(HEALTH), returnCode: '99' }, HEALTH)).toBe(true)
     expect('error' in healthPatch({ ...healthForm(HEALTH), retries: '0' }, HEALTH)).toBe(true)
     expect('error' in healthPatch({ ...healthForm(HEALTH), interval: 'soon' }, HEALTH)).toBe(true)
     expect(healthPatch({ ...healthForm(HEALTH), port: '8080' }, HEALTH)).toEqual({ patch: { port: 8080 } })
+  })
+
+  it('clears a port, host, or response text by blanking it', () => {
+    const current = { ...HEALTH, port: 8080, host: 'app.example.org', responseText: 'ok' }
+    expect(healthPatch({ ...healthForm(current), port: '', host: ' ', responseText: '' }, current)).toEqual({ patch: { clear: ['port', 'host', 'responseText'] } })
+    expect(healthPatch({ ...healthForm(current), port: '9090', host: '' }, current)).toEqual({ patch: { port: 9090, clear: ['host'] } })
+  })
+
+  it('only edits an HTTP check', () => {
+    expect(healthEditable(HEALTH)).toBe(true)
+    expect(healthEditable({ ...HEALTH, checkType: 'cmd' })).toBe(false)
   })
 })
 

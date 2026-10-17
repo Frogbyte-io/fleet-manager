@@ -25107,6 +25107,13 @@
           {
             "type": "object",
             "properties": {
+              "clear": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                },
+                "description": "Fields to clear: `port`, `host`, `responseText`."
+              },
               "enabled": {
                 "type": [
                   "boolean",
@@ -25212,6 +25219,7 @@
         "type": "object",
         "description": "An application's health check (the HTTP kind).",
         "required": [
+          "checkType",
           "enabled",
           "path",
           "method",
@@ -25223,6 +25231,10 @@
           "startPeriod"
         ],
         "properties": {
+          "checkType": {
+            "type": "string",
+            "description": "`http`, or `cmd` for a command check Fleet shows but does not edit."
+          },
           "enabled": {
             "type": "boolean",
             "description": "Whether Coolify runs the check."

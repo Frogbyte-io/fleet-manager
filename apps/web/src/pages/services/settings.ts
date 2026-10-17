@@ -48,13 +48,13 @@ export function lifecycleVerbs(kind: string, isCoolify: boolean): VerbView[] {
 }
 
 /** What a request's state means to the person who filed it. */
-export function requestOutcome(request: Pick<ActionRequestDto, 'state' | 'riskClass' | 'failure'>): { label: string, tone: Tone, text: string } {
+export function requestOutcome(request: Pick<ActionRequestDto, 'state' | 'riskClass' | 'failure'>, kind: 'lifecycle' | 'settings' = 'settings'): { label: string, tone: Tone, text: string } {
   const tone = stateTone(request.state)
   switch (request.state) {
     case 'pending': return { label: 'pending', tone, text: 'Waiting for a person to approve it in Approvals. Nothing has changed yet.' }
     case 'approved':
     case 'executing': return { label: request.state, tone, text: 'Approved. Fleet is carrying it out.' }
-    case 'succeeded': return { label: 'succeeded', tone, text: 'Done. Coolify accepted the change and Fleet read it back.' }
+    case 'succeeded': return { label: 'succeeded', tone, text: kind === 'lifecycle' ? 'Done. Fleet carried it out and read the status back from Coolify.' : 'Done. Coolify accepted the change and Fleet read it back.' }
     case 'failed': return { label: 'failed', tone, text: request.failure ?? 'The change did not complete.' }
     case 'denied': return { label: 'denied', tone, text: 'A person denied the request. Nothing changed.' }
     case 'expired': return { label: 'expired', tone, text: 'Nobody decided in time. Nothing changed.' }
@@ -144,8 +144,6 @@ export function envFormProblem(form: EnvForm): string | null {
     return 'Name the variable.'
   if (form.key.length > MAX_ENV_KEY || !ENV_KEY.test(form.key))
     return 'A name is letters, digits, "_" and ".", and does not start with a digit.'
-  if (form.value === '')
-    return 'Type the new value. Values are write-only: Coolify does not show the current one.'
   if (new TextEncoder().encode(form.value).length > MAX_ENV_VALUE)
     return 'A value is at most 16 KiB.'
   if (form.value.includes('\u0000'))
@@ -210,6 +208,11 @@ function sameList(a: string[], b: string[]): boolean {
 export const HEALTH_METHODS = ['GET', 'HEAD', 'POST', 'OPTIONS'] as const
 export const HEALTH_SCHEMES = ['http', 'https'] as const
 
+/** Whether Fleet edits this health check: only the HTTP kind. */
+export function healthEditable(health: ServiceHealthDto): boolean {
+  return health.checkType === 'http'
+}
+
 export interface HealthForm {
   enabled: boolean
   path: string
@@ -247,7 +250,7 @@ export function healthForm(health: ServiceHealthDto): HealthForm {
   }
 }
 
-type HealthPatch = Pick<ServiceHealthBody, 'enabled' | 'path' | 'port' | 'host' | 'method' | 'scheme' | 'returnCode' | 'responseText' | 'interval' | 'timeout' | 'retries' | 'startPeriod'>
+type HealthPatch = Pick<ServiceHealthBody, 'enabled' | 'path' | 'port' | 'host' | 'method' | 'scheme' | 'returnCode' | 'responseText' | 'interval' | 'timeout' | 'retries' | 'startPeriod' | 'clear'>
 
 function whole(text: string): number | null {
   return /^\d+$/.test(text.trim()) ? Number(text.trim()) : null
@@ -267,17 +270,29 @@ export function healthPatch(form: HealthForm, current: ServiceHealthDto): { patc
       return { error: 'The path starts with "/" and uses letters, digits and /-_.~%,;' }
     patch.path = form.path
   }
+  const clear: string[] = []
   const port = form.port.trim()
   if (port !== (current.port == null ? '' : String(current.port))) {
-    const n = whole(port)
-    if (n === null || n < 1 || n > 65535)
-      return { error: 'The port is 1 to 65535 (it cannot be cleared here).' }
-    patch.port = n
+    if (port === '') {
+      clear.push('port')
+    }
+    else {
+      const n = whole(port)
+      if (n === null || n < 1 || n > 65535)
+        return { error: 'The port is 1 to 65535, or blank to use the application\'s own.' }
+      patch.port = n
+    }
   }
   if (form.host.trim() !== (current.host ?? '')) {
-    if (!/^[A-Za-z0-9._:-]+$/.test(form.host.trim()))
-      return { error: 'The host is a plain host name (it cannot be cleared here).' }
-    patch.host = form.host.trim()
+    if (form.host.trim() === '') {
+      clear.push('host')
+    }
+    else if (!/^[A-Za-z0-9._-]+$/.test(form.host.trim())) {
+      return { error: 'The host is a plain host name (letters, digits, "-", "_" and ".").' }
+    }
+    else {
+      patch.host = form.host.trim()
+    }
   }
   if (form.method !== current.method)
     patch.method = form.method
@@ -289,9 +304,15 @@ export function healthPatch(form: HealthForm, current: ServiceHealthDto): { patc
   if (code !== current.returnCode)
     patch.returnCode = code
   if (form.responseText !== (current.responseText ?? '')) {
-    if (form.responseText === '' || form.responseText.length > 256)
-      return { error: 'The response text is 1 to 256 characters (it cannot be cleared here).' }
-    patch.responseText = form.responseText
+    if (form.responseText === '') {
+      clear.push('responseText')
+    }
+    else if (form.responseText.length > 256) {
+      return { error: 'The response text is at most 256 characters.' }
+    }
+    else {
+      patch.responseText = form.responseText
+    }
   }
   for (const [name, text, min, max, now] of [
     ['interval', form.interval, 1, 3600, current.interval],
@@ -305,6 +326,8 @@ export function healthPatch(form: HealthForm, current: ServiceHealthDto): { patc
     if (n !== now)
       patch[name] = n
   }
+  if (clear.length > 0)
+    patch.clear = clear
   if (Object.keys(patch).length === 0)
     return { error: 'Nothing differs from the current health check.' }
   return { patch }
