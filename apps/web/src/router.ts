@@ -71,6 +71,11 @@ export const routes: RouteRecordRaw[] = [
     meta: { title: 'Services', group: 'Infrastructure' },
   },
   {
+    path: '/services/new',
+    component: () => import('./pages/services/new/NewSitePage.vue'),
+    meta: { title: 'Deploy a site', group: 'Infrastructure' },
+  },
+  {
     path: '/services/:id',
     component: () => import('./pages/services/ServiceDetailPage.vue'),
     meta: { title: 'Service', group: 'Infrastructure' },

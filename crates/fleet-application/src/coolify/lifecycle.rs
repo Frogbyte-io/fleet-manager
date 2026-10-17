@@ -434,7 +434,7 @@ pub fn parse_service_id(id: &str) -> Option<(&str, &str)> {
     (safe_id(account) && safe_id(uuid)).then_some((account, uuid))
 }
 
-pub(super) fn safe_id(id: &str) -> bool {
+pub(crate) fn safe_id(id: &str) -> bool {
     !id.is_empty()
         && id.len() <= 64
         && id
@@ -746,7 +746,7 @@ impl CoolifyLifecycle {
         .map_err(LifecycleError::Denied)
     }
 
-    pub(super) async fn coolify_account(
+    pub(crate) async fn coolify_account(
         &self,
         id: &str,
     ) -> Result<ExternalAccount, LifecycleError> {
@@ -769,7 +769,7 @@ impl CoolifyLifecycle {
     }
 
     /// The endpoint and the token together, under the account lock.
-    pub(super) async fn resolve(
+    pub(crate) async fn resolve(
         &self,
         id: &str,
     ) -> Result<(ExternalAccount, SensitiveString), LifecycleError> {
@@ -1264,7 +1264,7 @@ pub(super) fn find_resource(
         .map(|item| (LifecycleResource::Database, item.name.clone()))
 }
 
-pub(super) fn bounded_name(name: &str) -> String {
+pub(crate) fn bounded_name(name: &str) -> String {
     name.chars()
         .filter(|c| !c.is_control())
         .take(MAX_NAME_LEN)
