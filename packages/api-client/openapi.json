@@ -14830,18 +14830,38 @@
             "description": "`registrar`, `expires`, `nameservers`, or `dnsHost`."
           },
           "observed": {
-            "type": [
-              "object",
-              "null"
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "type": "string"
+              },
+              {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              }
             ],
             "description": "What the lookups saw."
           },
           "recorded": {
-            "type": [
-              "object",
-              "null"
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "type": "string"
+              },
+              {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              }
             ],
-            "description": "What the entry (Fleet Git) records."
+            "description": "What the entry records."
           },
           "state": {
             "$ref": "#/components/schemas/FieldStateDto",
@@ -24913,7 +24933,7 @@
           },
           "reference": {
             "type": "string",
-            "description": "The secret reference id."
+            "description": "The name of the secret record, which must be `images/<name>`."
           }
         }
       },
@@ -26751,8 +26771,18 @@
             "description": "The entry field."
           },
           "value": {
-            "type": "object",
-            "description": "The suggested value, in the field's type (a string, or a list of\nstrings for `nameservers`)."
+            "oneOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              }
+            ],
+            "description": "The suggested value, in the field's type (a string, or a list of strings for `nameservers`)."
           }
         }
       },

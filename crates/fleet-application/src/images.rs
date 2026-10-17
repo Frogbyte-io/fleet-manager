@@ -276,6 +276,37 @@ impl fmt::Display for RecipeUseCaseError {
 
 impl std::error::Error for RecipeUseCaseError {}
 
+/// The secret-record namespace image builds may read (#517). A build's
+/// secret variables name records called `images/<name>`; every other record
+/// (provider tokens, held values, Git credentials) is refused.
+pub const SECRET_NAMESPACE: &str = "images/";
+
+/// Checks that a build secret reference names an `images/<name>` record.
+/// The reference is the record *name*, not its opaque id: ids carry no
+/// namespace, so a record outside the namespace could not be told apart.
+///
+/// # Errors
+///
+/// Returns a message safe to show (it never quotes the reference or a
+/// value) and names the fix.
+pub fn check_secret_reference(reference: &str) -> Result<(), String> {
+    let name = reference.strip_prefix(SECRET_NAMESPACE).unwrap_or("");
+    let valid = !name.is_empty()
+        && name.len() <= 128
+        && name
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-'))
+        && !name.starts_with('.');
+    if valid {
+        Ok(())
+    } else {
+        Err(format!(
+            "image build secrets must be referenced by the name of a secret record in the {SECRET_NAMESPACE}<name> namespace (letters, digits, '.', '_', '-'); \
+             create a record named {SECRET_NAMESPACE}<name> and reference it by that name instead of by record id"
+        ))
+    }
+}
+
 /// The image-recipe use cases.
 #[derive(Debug)]
 pub struct Images {
@@ -1236,4 +1267,30 @@ pub enum ClearQuarantine {
     },
     /// The address is not quarantined.
     NotQuarantined,
+}
+
+#[cfg(test)]
+mod secret_reference_tests {
+    use super::check_secret_reference;
+
+    #[test]
+    fn only_images_namespace_names_pass() {
+        for ok in ["images/token", "images/a.b_c-1"] {
+            assert!(check_secret_reference(ok).is_ok(), "{ok}");
+        }
+        for bad in [
+            "",
+            "images/",
+            "external/acct",
+            "coolify-env-hold/x",
+            "proxmox/acct",
+            "0190a1b2-0000-7000-8000-000000000000",
+            "images/../external/acct",
+            "images/a/b",
+            "images/.hidden",
+            "images/a b",
+        ] {
+            assert!(check_secret_reference(bad).is_err(), "{bad}");
+        }
+    }
 }

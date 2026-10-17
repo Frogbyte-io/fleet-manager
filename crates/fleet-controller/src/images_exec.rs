@@ -71,7 +71,7 @@ pub struct BuildPayload {
 pub struct SecretVar {
     /// The Packer variable name.
     pub name: String,
-    /// The secret reference id.
+    /// The name of the secret record, which must be `images/<name>`.
     pub reference: String,
 }
 
@@ -508,13 +508,26 @@ impl ImagesExecutor {
                     .to_owned(),
             );
         };
+        // The namespace is checked again here, before any value is read:
+        // the payload may come from the generic operations surface (#517).
+        for var in vars {
+            fleet_application::images::check_secret_reference(&var.reference)?;
+        }
+        let records = secrets
+            .list()
+            .await
+            .map_err(|error| format!("the secret store is unreadable: {error}"))?;
         let dir = self.work_root.join(operation_id);
         let path = dir.join("vars.auto.pkrvars.json");
         // The JSON shape keeps the values out of argv entirely.
         let mut object = serde_json::Map::new();
         for var in vars {
+            let record = records
+                .iter()
+                .find(|record| record.name == var.reference)
+                .ok_or_else(|| format!("the secret {} is unreadable: no such record", var.name))?;
             let value = secrets
-                .resolve(&var.reference)
+                .resolve(&record.id)
                 .await
                 .map_err(|error| format!("the secret {} is unreadable: {error}", var.name))?;
             let text = String::from_utf8(value.expose().to_vec())
@@ -2659,12 +2672,12 @@ mod tests {
         let secrets =
             Arc::new(fleet_secrets::SecretStore::open(store.pool().clone(), &key).unwrap());
         let secret = secrets
-            .create("build-token", "fixture-secret-token".into())
+            .create("images/build-token", "fixture-secret-token".into())
             .await
             .unwrap();
         let mut payload: serde_json::Value =
             serde_json::from_str(operation.payload_json.as_deref().unwrap()).unwrap();
-        payload["secretVars"] = serde_json::json!([{"name": "token", "reference": secret.id}]);
+        payload["secretVars"] = serde_json::json!([{"name": "token", "reference": secret.name}]);
         operation.payload_json = Some(payload.to_string());
         // The work root as a path relative to the test's working
         // directory, so no stray directory appears in the source tree.
@@ -2941,7 +2954,7 @@ mod tests {
         let secrets =
             Arc::new(fleet_secrets::SecretStore::open(store.pool().clone(), &key).unwrap());
         let secret = secrets
-            .create("build-token", "fixture-secret-token".into())
+            .create("images/build-token", "fixture-secret-token".into())
             .await
             .unwrap();
         // An existing, world-writable work root is tightened, and a leftover
@@ -2959,7 +2972,7 @@ mod tests {
                 &operation.id,
                 &[SecretVar {
                     name: "token".to_owned(),
-                    reference: secret.id,
+                    reference: secret.name,
                 }],
             )
             .await
@@ -2982,6 +2995,64 @@ mod tests {
         assert_eq!(mode(&pem), 0o600);
         assert_eq!(mode(&roots), 0o700);
         assert_eq!(mode(roots.parent().unwrap()), 0o700);
+    }
+
+    /// #517: a build resolves only `images/` records, by name, and refuses
+    /// any other record before reading a value.
+    #[tokio::test]
+    async fn var_file_refuses_records_outside_the_images_namespace() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let (dir, store, repository, _, operation, transport) =
+            setup(CONTENT, serde_json::json!({}), Vec::new(), false).await;
+        let key = dir.path().join("master.key");
+        std::fs::write(
+            &key,
+            "1 0a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20212223242526272829\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&key, std::fs::Permissions::from_mode(0o600)).unwrap();
+        let secrets =
+            Arc::new(fleet_secrets::SecretStore::open(store.pool().clone(), &key).unwrap());
+        let outside = secrets
+            .create("external/account-1", "fixture-secret-token".into())
+            .await
+            .unwrap();
+        let held = secrets
+            .create("coolify-env-hold/h1", "fixture-secret-token".into())
+            .await
+            .unwrap();
+        let executor = ImagesExecutor::new(
+            repository,
+            transport,
+            Some(secrets),
+            dir.path().join("work"),
+        );
+        for reference in [outside.name, outside.id, held.name, held.id] {
+            let error = executor
+                .write_var_file(
+                    &operation.id,
+                    &[SecretVar {
+                        name: "token".to_owned(),
+                        reference,
+                    }],
+                )
+                .await
+                .unwrap_err();
+            assert!(error.contains("images/<name>"), "{error}");
+            assert!(!error.contains("fixture-secret-token"));
+        }
+        // An in-namespace name with no record is unreadable, not a fallback.
+        let error = executor
+            .write_var_file(
+                &operation.id,
+                &[SecretVar {
+                    name: "token".to_owned(),
+                    reference: "images/missing".to_owned(),
+                }],
+            )
+            .await
+            .unwrap_err();
+        assert!(error.contains("unreadable"), "{error}");
     }
 
     /// #308: an operation id never escapes the work root.
@@ -3061,12 +3132,12 @@ mod tests {
         let secrets =
             Arc::new(fleet_secrets::SecretStore::open(store.pool().clone(), &key).unwrap());
         let secret = secrets
-            .create("build-token", "fixture-secret-token".into())
+            .create("images/build-token", "fixture-secret-token".into())
             .await
             .unwrap();
         let mut payload: serde_json::Value =
             serde_json::from_str(operation.payload_json.as_deref().unwrap()).unwrap();
-        payload["secretVars"] = serde_json::json!([{"name": "token", "reference": secret.id}]);
+        payload["secretVars"] = serde_json::json!([{"name": "token", "reference": secret.name}]);
         operation.payload_json = Some(payload.to_string());
         let executor = ImagesExecutor::new(
             repository.clone(),

@@ -676,7 +676,7 @@ pub struct BuildImageRequest {
 pub struct SecretVarDto {
     /// The Packer variable name.
     pub name: String,
-    /// The secret reference id.
+    /// The name of the secret record, which must be `images/<name>`.
     pub reference: String,
 }
 
@@ -723,6 +723,11 @@ pub async fn start_image_build(
             "the timeout must be 1..=14400 seconds",
             correlation_id,
         ));
+    }
+    for var in &request.secret_vars {
+        if let Err(message) = fleet_application::images::check_secret_reference(&var.reference) {
+            return Err(crate::machines::invalid_request(&message, correlation_id));
+        }
     }
     // The version must exist before the operation is queued: an invalid
     // build is a 404 here, not a worker failure later.
