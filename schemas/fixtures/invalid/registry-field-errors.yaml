@@ -1,0 +1,24 @@
+apiVersion: fleet.frogbyte.io/v1alpha1
+kind: RegistryType
+metadata:
+  id: 01890f3e-9b4a-7cc2-98c3-d24e8f58c001
+  name: vendor-fixture
+spec:
+  displayName: Vendor
+  key: slug
+  fields:
+    slug: { type: string, required: true }
+    plan: { type: string, required: true }
+    renews: { type: date }
+  relations: [used-by]
+---
+apiVersion: fleet.frogbyte.io/v1alpha1
+kind: RegistryEntry
+metadata:
+  id: 01890f3e-9b4a-7cc2-98c3-d24e8f58c002
+  name: vendor-a
+spec:
+  type: vendor-fixture
+  fields: { slug: aptabase, renews: "2027-02-30", color: blue }
+  relations:
+    - { type: hosted-on, target: { registry: vendor-fixture/aptabase } }

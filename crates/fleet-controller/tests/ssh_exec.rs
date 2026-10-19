@@ -105,6 +105,36 @@ async fn an_unverified_endpoint_refuses_to_execute() {
 
 #[tokio::test]
 async fn a_verified_endpoint_runs_the_script_and_reports_output() {
+    let result = run_verified_script("echo executed-on-remote; exit 0").await;
+    assert_eq!(result["exitCode"], 0);
+    assert_eq!(result["stdout"], "executed-on-remote\n");
+}
+
+/// The operation result is scrubbed of credential shapes and its truncation
+/// flags stay accurate.
+#[tokio::test]
+async fn output_credentials_are_scrubbed_from_the_stored_result() {
+    let result = run_verified_script(
+        "echo 'clone https://user:secret@host.invalid/repo'; echo 'push bot:hunter2@git.invalid:r' >&2",
+    )
+    .await;
+    let text = result.to_string();
+    assert!(
+        !text.contains("secret") && !text.contains("hunter2"),
+        "{text}"
+    );
+    assert!(
+        result["stdout"]
+            .as_str()
+            .unwrap()
+            .contains("***@host.invalid"),
+        "{text}"
+    );
+    assert_eq!(result["truncatedStdout"], false);
+    assert_eq!(result["truncatedStderr"], false);
+}
+
+async fn run_verified_script(script: &str) -> serde_json::Value {
     let (dir, operations, executor, pool) = compose().await;
     let sshd = start_sshd();
 
@@ -139,7 +169,7 @@ async fn a_verified_endpoint_runs_the_script_and_reports_output() {
     let payload_json_string = serde_json::json!({
         "machineId": machine.id,
         "endpointId": endpoint_id,
-        "script": "echo executed-on-remote; exit 0",
+        "script": script,
         "timeoutSeconds": 15,
         "auth": {"type": "identityFile", "path": identity_file}
     })
@@ -178,9 +208,7 @@ async fn a_verified_endpoint_runs_the_script_and_reports_output() {
         .await
         .unwrap();
     assert_eq!(finished.state, "succeeded", "{:?}", finished.error_json);
-    let result: serde_json::Value = serde_json::from_str(&finished.result_json.unwrap()).unwrap();
-    assert_eq!(result["exitCode"], 0);
-    assert_eq!(result["stdout"], "executed-on-remote\n");
+    serde_json::from_str(&finished.result_json.unwrap()).unwrap()
 }
 
 #[tokio::test]

@@ -84,7 +84,8 @@ pub struct PveHttpRequest {
     /// The credentials for the call.
     pub credentials: Arc<PveCredentials>,
     /// The HTTP method; `GET` for reads, `POST` for mutations. PVE's
-    /// lifecycle endpoints require `POST`.
+    /// lifecycle endpoints require `POST`; its synchronous config update
+    /// is `PUT`.
     pub method: PveHttpMethod,
 }
 
@@ -96,6 +97,8 @@ pub enum PveHttpMethod {
     Get,
     /// A mutation.
     Post,
+    /// A synchronous update (`PUT …/qemu/{vmid}/config`).
+    Put,
     /// A removal.
     Delete,
 }
@@ -206,6 +209,57 @@ pub trait PveTransport: fmt::Debug + Send + Sync {
         request: PveHttpRequest,
         body: Vec<u8>,
     ) -> Result<PveHttpResponse, PveTransportError>;
+
+    /// Captures the host's leaf certificate without sending any request:
+    /// the observe-only policy refuses the handshake after capture, and no
+    /// `Authorization` header exists on this path at all (#284). The
+    /// caller decides what the bytes are worth by comparing their SHA-256
+    /// with a pin it already holds.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the host is unreachable or presents no certificate, or
+    /// when the transport cannot capture certificates (the default, for
+    /// fixture transports).
+    async fn observe_certificate(
+        &self,
+        host: &str,
+        port: u16,
+    ) -> Result<ObservedCertificate, PveTransportError> {
+        let _ = (host, port);
+        Err(PveTransportError::Connect {
+            detail: "this transport cannot capture certificates".to_owned(),
+        })
+    }
+}
+
+/// A leaf certificate one handshake presented, captured before the
+/// handshake was refused. Public material: the DER bytes and their
+/// SHA-256 fingerprint in PVE's display form.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ObservedCertificate {
+    /// The leaf's SHA-256 fingerprint, uppercase colon-separated hex.
+    pub fingerprint: String,
+    /// The leaf certificate, DER-encoded.
+    pub der: Vec<u8>,
+}
+
+/// Whether the leaf certificate is valid for `host` by RFC 6125 name
+/// rules: an IP literal must be an IP SAN, a DNS name must match a DNS
+/// SAN (wildcards included), and the subject CN is never consulted. Go's
+/// `x509.Certificate.VerifyHostname` applies the same rules, so this is
+/// the check Packer's Proxmox plugin will make against a pinned leaf; a
+/// certificate this rejects (or cannot parse) is reported as not naming
+/// the host.
+#[must_use]
+pub fn certificate_names_host(der: &[u8], host: &str) -> bool {
+    let host = host.trim_start_matches('[').trim_end_matches(']');
+    let Ok(name) = ServerName::try_from(host) else {
+        return false;
+    };
+    let der = CertificateDer::from(der);
+    webpki::EndEntityCert::try_from(&der)
+        .is_ok_and(|cert| cert.verify_is_valid_for_subject_name(&name).is_ok())
 }
 
 /// The reqwest-backed transport: rustls with the pinned-fingerprint
@@ -239,14 +293,16 @@ enum TlsPolicy {
 
 /// The verifier shared with the rustls session. It never disables
 /// verification: every path either matches the pin or refuses. The leaf
-/// fingerprint it observed lands in `captured`, which is how the transport
-/// reports trust facts on refusal — reqwest's own error chain does not
-/// carry them.
+/// it observed lands in `captured`, which is how the transport reports
+/// trust facts on refusal — reqwest's own error chain does not carry them.
 struct PinningVerifier {
     policy: TlsPolicy,
     provider: Arc<CryptoProvider>,
-    captured: Arc<Mutex<Option<String>>>,
+    captured: Arc<Mutex<Option<ObservedCertificate>>>,
 }
+
+/// The leaf the verifier captured, shared with the transport.
+type Captured = Arc<Mutex<Option<ObservedCertificate>>>;
 
 impl PinningVerifier {
     /// Formats a digest the way PVE and the legacy client display it:
@@ -285,7 +341,10 @@ impl ServerCertVerifier for PinningVerifier {
         *self
             .captured
             .lock()
-            .expect("the capture lock is not poisoned") = Some(observed.clone());
+            .expect("the capture lock is not poisoned") = Some(ObservedCertificate {
+            fingerprint: observed.clone(),
+            der: end_entity.as_ref().to_vec(),
+        });
         match &self.policy {
             TlsPolicy::Observe => Err(rustls::Error::General(
                 "fleet observe-only trust probe: refusing after capture".to_owned(),
@@ -356,18 +415,47 @@ impl PveTransport for ReqwestPveTransport {
     async fn execute(&self, request: PveHttpRequest) -> Result<PveHttpResponse, PveTransportError> {
         self.execute_inner(request, None).await
     }
+
+    async fn observe_certificate(
+        &self,
+        host: &str,
+        port: u16,
+    ) -> Result<ObservedCertificate, PveTransportError> {
+        let (client, captured) = Self::client(TlsPolicy::Observe)?;
+        let authority = match host.parse::<std::net::Ipv6Addr>() {
+            Ok(_) => format!("[{host}]"),
+            Err(_) => host.to_owned(),
+        };
+        // No credential exists on this path: the request carries no
+        // `Authorization` header, and the observe policy refuses the
+        // handshake before any request byte is written.
+        let sent = client
+            .get(format!("https://{authority}:{port}/api2/json/version"))
+            .send()
+            .await;
+        let observed = captured
+            .lock()
+            .expect("the capture lock is not poisoned")
+            .take();
+        match (sent, observed) {
+            (Err(_), Some(certificate)) => Ok(certificate),
+            (Err(error), None) => Err(PveTransportError::Connect {
+                detail: error.to_string(),
+            }),
+            // The observe policy refuses every handshake; a completed
+            // request means the policy did not run. Refuse to report it.
+            (Ok(_), _) => Err(PveTransportError::Connect {
+                detail: "the observe probe must refuse; refusing to report a certificate"
+                    .to_owned(),
+            }),
+        }
+    }
 }
 
 impl ReqwestPveTransport {
-    async fn execute_inner(
-        &self,
-        request: PveHttpRequest,
-        body: Option<Vec<u8>>,
-    ) -> Result<PveHttpResponse, PveTransportError> {
-        let policy = match &request.pinned_fingerprint {
-            Some(pinned) => TlsPolicy::Pin(normalize_fingerprint(pinned)),
-            None => TlsPolicy::Observe,
-        };
+    /// A client whose every handshake runs `policy`, and the capture its
+    /// verifier writes the observed leaf into.
+    fn client(policy: TlsPolicy) -> Result<(reqwest::Client, Captured), PveTransportError> {
         let provider = Arc::new(rustls::crypto::ring::default_provider());
         let captured = Arc::new(Mutex::new(None));
         let verifier = Arc::new(PinningVerifier {
@@ -393,6 +481,19 @@ impl ReqwestPveTransport {
             .map_err(|error| PveTransportError::Connect {
                 detail: format!("the TLS configuration was rejected: {error}"),
             })?;
+        Ok((client, captured))
+    }
+
+    async fn execute_inner(
+        &self,
+        request: PveHttpRequest,
+        body: Option<Vec<u8>>,
+    ) -> Result<PveHttpResponse, PveTransportError> {
+        let policy = match &request.pinned_fingerprint {
+            Some(pinned) => TlsPolicy::Pin(normalize_fingerprint(pinned)),
+            None => TlsPolicy::Observe,
+        };
+        let (client, captured) = Self::client(policy)?;
         let url = format!(
             "https://{}:{}{}",
             request.authority(),
@@ -402,6 +503,7 @@ impl ReqwestPveTransport {
         let request_builder = match request.method {
             PveHttpMethod::Get => client.get(&url),
             PveHttpMethod::Post => client.post(&url),
+            PveHttpMethod::Put => client.put(&url),
             PveHttpMethod::Delete => client.delete(&url),
         };
         let request_builder = request_builder.header(
@@ -425,7 +527,8 @@ impl ReqwestPveTransport {
             let observed = captured
                 .lock()
                 .expect("the capture lock is not poisoned")
-                .clone();
+                .take()
+                .map(|certificate| certificate.fingerprint);
             match (observed, request.pinned_fingerprint.as_deref()) {
                 // A mismatch is only a mismatch when the fingerprints
                 // differ: a later TLS failure with a matching pin is a
@@ -1028,6 +1131,24 @@ pub trait ProxmoxSource: fmt::Debug + Send + Sync {
         snapshot: &str,
     ) -> Result<(), PveApiError>;
 
+    /// Destroys a stopped QEMU guest. Returns its qmdestroy task, or None
+    /// when the guest configuration is already absent. Refuses templates
+    /// observed in a config read immediately before DELETE. PVE has no
+    /// conditional-delete parameter: a concurrent external conversion after
+    /// that read can race the DELETE, so this refusal is best-effort.
+    /// Purge removes backup, replication and HA references; locks and
+    /// unreferenced disks are never bypassed or removed.
+    ///
+    /// # Errors
+    /// Returns API/transport failures, including permission refusals.
+    async fn guest_destroy(
+        &self,
+        request: PveHttpRequest,
+        node: &str,
+        vmid: u32,
+        purge: bool,
+    ) -> Result<Option<Upid>, PveApiError>;
+
     /// Clones one guest to a new VMID with the requested name. The caller
     /// classifies idempotency; the provider refuses only transport/API
     /// failures.
@@ -1094,6 +1215,141 @@ pub trait ProxmoxSource: fmt::Debug + Send + Sync {
     ) -> Result<Vec<PveSnapshot>, PveApiError>;
 }
 
+/// A guest's virtual audio device: the parsed `audio0` property string
+/// (`device=ich9-intel-hda,driver=none`).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PveAudio {
+    /// The device model (`ich9-intel-hda`, `intel-hda`, `AC97`).
+    pub device: String,
+    /// The host backend (`spice`, `none`). PVE's default, `spice`, when the
+    /// property string names none.
+    pub driver: String,
+}
+
+impl PveAudio {
+    /// Parses an `audio0` property string. Values are kept as written, so a
+    /// model or driver PVE adds later compares unequal instead of failing.
+    /// A bare first segment is the device, as PVE's `default_key` allows.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the string names no device or is longer than 128
+    /// characters.
+    pub fn parse(value: &str) -> Result<Self, String> {
+        if value.len() > 128 {
+            return Err("the audio0 value is too long".to_owned());
+        }
+        let (mut device, mut driver) = (None, None);
+        for (index, part) in value.split(',').enumerate() {
+            match part.split_once('=') {
+                Some(("device", rest)) => device = Some(rest.trim().to_owned()),
+                Some(("driver", rest)) => driver = Some(rest.trim().to_owned()),
+                None if index == 0 => device = Some(part.trim().to_owned()),
+                _ => {}
+            }
+        }
+        let device = device
+            .filter(|device| !device.is_empty())
+            .ok_or("the audio0 value names no device")?;
+        Ok(Self {
+            device,
+            driver: driver.unwrap_or_else(|| "spice".to_owned()),
+        })
+    }
+
+    /// The `audio0` property string to write.
+    #[must_use]
+    pub fn to_property(&self) -> String {
+        format!("device={},driver={}", self.device, self.driver)
+    }
+}
+
+/// Reads a config's optional `audio0`, leniently: an odd value is reported
+/// as unreadable (`true`), never as an error, so a guest whose audio nobody
+/// asked about is still usable. A caller that needs audio treats an
+/// unreadable value as a difference.
+fn read_audio(config: &serde_json::Value) -> (Option<PveAudio>, bool) {
+    match config.get("audio0") {
+        None | Some(serde_json::Value::Null) => (None, false),
+        Some(serde_json::Value::String(text)) => match PveAudio::parse(text) {
+            Ok(audio) => (Some(audio), false),
+            Err(_) => (None, true),
+        },
+        Some(_) => (None, true),
+    }
+}
+
+/// The config facts the Lab executor checks on a fresh clone before it
+/// clears the clone's inherited `protection` flag (issue #290).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct PveQemuConfigFlags {
+    /// The guest's name, bounded.
+    pub name: Option<String>,
+    /// Whether the guest is a template (`template: 1`).
+    pub template: bool,
+    /// Whether PVE refuses to remove the guest (`protection: 1`).
+    pub protection: bool,
+    /// The config lock, such as `clone` while a clone is still running.
+    pub lock: Option<String>,
+    /// The config digest, for a conditional update.
+    pub digest: Option<String>,
+    /// The snapshot the current state derives from (`parent`), which a
+    /// rollback sets to the restored snapshot (FM-717 verifies a pool
+    /// member's revert by it).
+    pub parent: Option<String>,
+    /// The virtual audio device (`audio0`), when the guest has one.
+    pub audio: Option<PveAudio>,
+    /// Whether the config has an `audio0` this crate cannot read.
+    pub audio_unreadable: bool,
+}
+
+/// The hardware facts of a QEMU guest's config that Lab applies from its
+/// template to a fresh clone (issue #372).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct PveQemuHardware {
+    /// The guest's name, bounded.
+    pub name: Option<String>,
+    /// Whether the guest is a template (`template: 1`).
+    pub template: bool,
+    /// The vCPU cores per socket. PVE's default of 1 when the config has no
+    /// `cores` key.
+    pub cores: u32,
+    /// The CPU sockets. PVE's default of 1 when the config has no `sockets`
+    /// key. The guest's vCPU count is `sockets * cores`.
+    pub sockets: u32,
+    /// The config's `vcpus` (the vCPUs the guest starts with, below the
+    /// maximum of `sockets * cores`), when it sets one.
+    pub vcpus: Option<u32>,
+    /// The `balloon` target in MiB, when the config sets one (`0` disables
+    /// ballooning). PVE refuses a memory size below it.
+    pub balloon_mib: Option<u32>,
+    /// The memory in MiB. PVE's default of 512 when the config has no
+    /// `memory` key.
+    pub memory_mib: u32,
+    /// Whether `memory` is a property string with more than the size
+    /// (`max=…`), which a plain `memory=<n>` update would drop.
+    pub memory_has_options: bool,
+    /// The disk the guest boots from, when it can be identified.
+    pub boot_disk: Option<PveBootDisk>,
+    /// The virtual audio device (`audio0`), when the guest has one.
+    pub audio: Option<PveAudio>,
+    /// Whether the config has an `audio0` this crate cannot read.
+    pub audio_unreadable: bool,
+    /// The config digest, for a conditional update.
+    pub digest: Option<String>,
+}
+
+/// A guest's boot disk.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PveBootDisk {
+    /// The config key (`scsi0`, `virtio0`, …).
+    pub key: String,
+    /// The disk's size in MiB, when the config states one. A size in bytes
+    /// or KiB is rounded down to a whole MiB, so a disk a byte short of a
+    /// size never counts as that size; larger units are exact.
+    pub size_mib: Option<u64>,
+}
+
 /// One guest snapshot, normalized.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PveSnapshot {
@@ -1134,9 +1390,21 @@ impl ProxmoxClient {
         path: &str,
         body: &serde_json::Value,
     ) -> Result<serde_json::Value, PveApiError> {
+        self.call_method_with_body(request, PveHttpMethod::Post, path, body)
+            .await
+    }
+
+    /// One call with a JSON body (`POST` or `PUT`), unwrapping the envelope.
+    async fn call_method_with_body(
+        &self,
+        request: PveHttpRequest,
+        method: PveHttpMethod,
+        path: &str,
+        body: &serde_json::Value,
+    ) -> Result<serde_json::Value, PveApiError> {
         let mut request = request;
         request.path = path.to_owned();
-        request.method = PveHttpMethod::Post;
+        request.method = method;
         let response = self
             .transport
             .execute_with_body(request, body.to_string().into_bytes())
@@ -1673,6 +1941,70 @@ impl ProxmoxSource for ProxmoxClient {
         .await
     }
 
+    async fn guest_destroy(
+        &self,
+        request: PveHttpRequest,
+        node: &str,
+        vmid: u32,
+        purge: bool,
+    ) -> Result<Option<Upid>, PveApiError> {
+        let config = self
+            .call(PveHttpRequest {
+                path: format!("/api2/json/nodes/{}/qemu/{vmid}/config", urlencode(node)),
+                method: PveHttpMethod::Get,
+                ..request.clone()
+            })
+            .await;
+        let config = match config {
+            Ok(config) => config,
+            Err(error) if destroy_already_absent(&error, node, vmid) => return Ok(None),
+            Err(error) => return Err(error),
+        };
+        if !config.is_object()
+            || config
+                .get("template")
+                .is_some_and(|_| loose_number(&config, "template").is_none())
+        {
+            return Err(PveApiError::InvalidPayload {
+                detail: "the destroy configuration is unreadable".to_owned(),
+            });
+        }
+        if loose_number(&config, "template") == Some(1) {
+            return Err(PveApiError::InvalidPayload {
+                detail: "refusing to destroy a QEMU template".to_owned(),
+            });
+        }
+        let result = self
+            .call(PveHttpRequest {
+                path: format!(
+                    "/api2/json/nodes/{}/qemu/{vmid}?purge={}",
+                    urlencode(node),
+                    u8::from(purge)
+                ),
+                method: PveHttpMethod::Delete,
+                ..request
+            })
+            .await;
+        match result {
+            Ok(data) => {
+                let upid = upid_from_data(&data)?.ok_or_else(|| PveApiError::InvalidPayload {
+                    detail: "the destroy answer carries no UPID".to_owned(),
+                })?;
+                if upid.task_type != "qmdestroy"
+                    || upid.node != node
+                    || upid.target != vmid.to_string()
+                {
+                    return Err(PveApiError::InvalidPayload {
+                        detail: "the destroy UPID does not match the target".to_owned(),
+                    });
+                }
+                Ok(Some(upid))
+            }
+            Err(error) if destroy_already_absent(&error, node, vmid) => Ok(None),
+            Err(error) => Err(error),
+        }
+    }
+
     async fn guest_clone(
         &self,
         request: PveHttpRequest,
@@ -1885,10 +2217,20 @@ fn urlencode(value: &str) -> String {
 }
 
 impl ProxmoxClient {
-    /// Probes one guest's agent surfaces, each independently honest. A
-    /// failed or absent surface is a warning on the guest, never a guest
-    /// failure.
-    async fn probe_agent(
+    /// Probes only one QEMU guest's agent info and network surfaces.
+    /// Reuses discovery normalization without scanning unrelated guests or
+    /// querying OS/config surfaces. Unavailable data stays explicitly unknown.
+    pub async fn guest_agent_network(
+        &self,
+        request: PveHttpRequest,
+        node: &str,
+        vmid: u32,
+    ) -> PveGuestAgent {
+        self.probe_agent_network(&request, node, vmid, &mut Vec::new())
+            .await
+    }
+
+    async fn probe_agent_network(
         &self,
         request: &PveHttpRequest,
         node: &str,
@@ -1962,6 +2304,23 @@ impl ProxmoxClient {
                 ));
             }
         }
+        agent
+    }
+
+    async fn probe_agent(
+        &self,
+        request: &PveHttpRequest,
+        node: &str,
+        vmid: u32,
+        warnings: &mut Vec<String>,
+    ) -> PveGuestAgent {
+        let mut agent = self
+            .probe_agent_network(request, node, vmid, warnings)
+            .await;
+        if !agent.online {
+            return agent;
+        }
+        let base = format!("/api2/json/nodes/{}/qemu/{vmid}/agent", urlencode(node));
         // get-osinfo
         let os_request = PveHttpRequest {
             path: format!("{base}/get-osinfo"),
@@ -2045,6 +2404,240 @@ impl ProxmoxClient {
                 type_name_of(&data)
             ),
         })
+    }
+
+    /// The few facts of one QEMU guest's current config
+    /// (`GET /nodes/{node}/qemu/{vmid}/config`) that the Lab executor
+    /// checks before it changes a fresh clone (issue #290). Needs
+    /// `VM.Audit` on `/vms/{vmid}`.
+    ///
+    /// # Errors
+    ///
+    /// Fails with [`PveApiError`], including a config that is not an object
+    /// or whose `template`/`protection` flags are unreadable.
+    pub async fn qemu_config_flags(
+        &self,
+        request: PveHttpRequest,
+        node: &str,
+        vmid: u32,
+    ) -> Result<PveQemuConfigFlags, PveApiError> {
+        let config = self
+            .call(PveHttpRequest {
+                path: format!("/api2/json/nodes/{}/qemu/{vmid}/config", urlencode(node)),
+                method: PveHttpMethod::Get,
+                ..request
+            })
+            .await?;
+        if !config.is_object() {
+            return Err(PveApiError::InvalidPayload {
+                detail: format!(
+                    "the guest config is not an object (it is a {})",
+                    type_name_of(&config)
+                ),
+            });
+        }
+        let flag = |key: &str| match config.get(key) {
+            None | Some(serde_json::Value::Null) => Ok(false),
+            Some(_) => match loose_number(&config, key) {
+                Some(0) => Ok(false),
+                Some(1) => Ok(true),
+                _ => Err(PveApiError::InvalidPayload {
+                    detail: format!("the guest config's {key} flag is unreadable"),
+                }),
+            },
+        };
+        // Over-long values are a payload error, never truncated: they feed
+        // the clone-identity check and the conditional update.
+        let text = |key: &str, limit: usize| {
+            bounded_str(&config, key, limit)
+                .map_err(|detail| PveApiError::InvalidPayload { detail })
+        };
+        let (audio, audio_unreadable) = read_audio(&config);
+        Ok(PveQemuConfigFlags {
+            name: text("name", MAX_ID_CHARS)?,
+            template: flag("template")?,
+            protection: flag("protection")?,
+            // A present lock that is not a string is unreadable, never
+            // "no lock": the caller would treat the guest as settled.
+            lock: match config.get("lock") {
+                None | Some(serde_json::Value::Null | serde_json::Value::String(_)) => {
+                    text("lock", 32)?
+                }
+                Some(_) => {
+                    return Err(PveApiError::InvalidPayload {
+                        detail: "the guest config's lock field is unreadable".to_owned(),
+                    });
+                }
+            },
+            digest: text("digest", 64)?,
+            // A PVE snapshot name is at most 40 characters.
+            parent: text("parent", 40)?,
+            audio,
+            audio_unreadable,
+        })
+    }
+
+    /// Clears the `protection` flag of one QEMU guest
+    /// (`PUT /nodes/{node}/qemu/{vmid}/config` with `protection=0`), which
+    /// PVE answers synchronously. Needs `VM.Config.Options` on
+    /// `/vms/{vmid}`. The update is always conditional on `digest` (from
+    /// [`Self::qemu_config_flags`]): PVE refuses it when the config changed
+    /// since that read. The caller decides
+    /// which guest may be unprotected; Lab clears it only on its own fresh
+    /// clones, never on a template (issue #290).
+    ///
+    /// # Errors
+    ///
+    /// Fails with [`PveApiError`], including PVE's refusal of a locked guest
+    /// or a stale digest.
+    pub async fn qemu_clear_protection(
+        &self,
+        request: PveHttpRequest,
+        node: &str,
+        vmid: u32,
+        digest: &str,
+    ) -> Result<(), PveApiError> {
+        let body = serde_json::json!({ "protection": 0, "digest": digest });
+        self.call_method_with_body(
+            request,
+            PveHttpMethod::Put,
+            &format!("/api2/json/nodes/{}/qemu/{vmid}/config", urlencode(node)),
+            &body,
+        )
+        .await
+        .map(|_| ())
+    }
+
+    /// Reads the hardware facts Lab applies to a fresh clone
+    /// (`GET /nodes/{node}/qemu/{vmid}/config`; needs `VM.Audit`): cores,
+    /// memory, the boot disk and its size, and the digest.
+    ///
+    /// The boot disk is the first disk named by `boot: order=…`, else
+    /// `bootdisk`, else the only disk; a guest with several disks and no
+    /// boot order has none. CD-ROM drives never count as disks.
+    ///
+    /// # Errors
+    ///
+    /// Fails with [`PveApiError`], including a config that is not an object
+    /// or whose cores or memory are unreadable.
+    pub async fn qemu_hardware(
+        &self,
+        request: PveHttpRequest,
+        node: &str,
+        vmid: u32,
+    ) -> Result<PveQemuHardware, PveApiError> {
+        let config = self
+            .call(PveHttpRequest {
+                path: format!("/api2/json/nodes/{}/qemu/{vmid}/config", urlencode(node)),
+                method: PveHttpMethod::Get,
+                ..request
+            })
+            .await?;
+        parse_hardware(&config).map_err(|detail| PveApiError::InvalidPayload { detail })
+    }
+
+    /// Sets a guest's cores, memory and/or virtual audio device
+    /// (`PUT /nodes/{node}/qemu/{vmid}/config`, synchronous). Needs
+    /// `VM.Config.CPU` for cores, `VM.Config.Memory` for memory and
+    /// `VM.Config.HWType` for `audio0` on `/vms/{vmid}`. Always conditional on `digest` (from
+    /// [`Self::qemu_hardware`]). The caller decides which guest may be
+    /// changed; Lab changes only its own fresh clones.
+    ///
+    /// # Errors
+    ///
+    /// Fails with [`PveApiError`], including PVE's refusal of a locked guest
+    /// or a stale digest, and `InvalidPayload` when no value is given.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn qemu_set_hardware(
+        &self,
+        request: PveHttpRequest,
+        node: &str,
+        vmid: u32,
+        cores: Option<u32>,
+        memory_mib: Option<u32>,
+        audio: Option<&PveAudio>,
+        digest: &str,
+    ) -> Result<(), PveApiError> {
+        if cores.is_none() && memory_mib.is_none() && audio.is_none() {
+            return Err(PveApiError::InvalidPayload {
+                detail: "there is no hardware value to set".to_owned(),
+            });
+        }
+        let mut body = serde_json::json!({ "digest": digest });
+        if let Some(cores) = cores {
+            body["cores"] = serde_json::json!(cores);
+        }
+        if let Some(memory) = memory_mib {
+            body["memory"] = serde_json::json!(memory);
+        }
+        if let Some(audio) = audio {
+            body["audio0"] = serde_json::json!(audio.to_property());
+        }
+        self.call_method_with_body(
+            request,
+            PveHttpMethod::Put,
+            &format!("/api2/json/nodes/{}/qemu/{vmid}/config", urlencode(node)),
+            &body,
+        )
+        .await
+        .map(|_| ())
+    }
+
+    /// Grows one disk of a guest to `size_gib` GiB
+    /// (`PUT /nodes/{node}/qemu/{vmid}/resize`; needs `VM.Config.Disk` on
+    /// `/vms/{vmid}` and `Datastore.AllocateSpace` on the disk's storage).
+    /// Conditional on `digest`. PVE runs the resize as a background task
+    /// and answers its UPID. Only the `VM.Config.Disk` check happens before
+    /// the task starts (an HTTP 403); the `Datastore.AllocateSpace` check
+    /// runs inside the forked worker, so a missing storage privilege is the
+    /// task's exit status, like the digest check, the config lock, the
+    /// shrink refusal and a missing disk. The caller polls the task and then
+    /// reads the config again. `None` when PVE answers no task.
+    ///
+    /// # Errors
+    ///
+    /// Fails with [`PveApiError`], including PVE's refusals, and
+    /// `InvalidPayload` for a `disk` that is not a QEMU disk key or an answer
+    /// that is neither null nor a UPID.
+    pub async fn qemu_resize_disk(
+        &self,
+        request: PveHttpRequest,
+        node: &str,
+        vmid: u32,
+        disk: &str,
+        size_gib: u32,
+        digest: &str,
+    ) -> Result<Option<Upid>, PveApiError> {
+        if !is_disk_key(disk) {
+            return Err(PveApiError::InvalidPayload {
+                detail: format!("{disk:?} is not a QEMU disk key"),
+            });
+        }
+        let body = serde_json::json!({
+            "disk": disk,
+            "size": format!("{size_gib}G"),
+            "digest": digest,
+        });
+        let answer = self
+            .call_method_with_body(
+                request,
+                PveHttpMethod::Put,
+                &format!("/api2/json/nodes/{}/qemu/{vmid}/resize", urlencode(node)),
+                &body,
+            )
+            .await?;
+        match answer {
+            serde_json::Value::Null => Ok(None),
+            serde_json::Value::String(raw) => Upid::parse(&raw)
+                .map(Some)
+                .map_err(|detail| PveApiError::InvalidPayload { detail }),
+            other => Err(PveApiError::InvalidPayload {
+                detail: format!(
+                    "the resize answered a {} instead of a task",
+                    type_name_of(&other)
+                ),
+            }),
+        }
     }
 
     /// Reads one task's status.
@@ -2231,6 +2824,149 @@ fn bounded_str(entry: &serde_json::Value, key: &str, max: usize) -> Result<Optio
     }
 }
 
+/// Whether `key` names a QEMU disk (`ide0`, `sata1`, `scsi0`, `virtio3`).
+fn is_disk_key(key: &str) -> bool {
+    ["ide", "sata", "scsi", "virtio"].iter().any(|bus| {
+        key.strip_prefix(bus).is_some_and(|index| {
+            (1..=2).contains(&index.len()) && index.bytes().all(|byte| byte.is_ascii_digit())
+        })
+    })
+}
+
+/// The size a disk entry states (`…,size=20G`), in MiB rounded down.
+fn disk_size_mib(entry: &str) -> Option<u64> {
+    let size = entry
+        .split(',')
+        .find_map(|property| property.strip_prefix("size="))?;
+    // No unit: bytes.
+    let split = size
+        .find(|character: char| !character.is_ascii_digit())
+        .unwrap_or(size.len());
+    let (digits, unit) = size.split_at(split);
+    let value: u64 = digits.parse().ok()?;
+    match unit {
+        "" => Some(value / (1024 * 1024)),
+        "K" => Some(value / 1024),
+        "M" => Some(value),
+        "G" => value.checked_mul(1024),
+        "T" => value.checked_mul(1024 * 1024),
+        _ => None,
+    }
+}
+
+/// Reads the hardware facts out of one guest config.
+#[allow(clippy::too_many_lines)]
+fn parse_hardware(config: &serde_json::Value) -> Result<PveQemuHardware, String> {
+    let object = config.as_object().ok_or_else(|| {
+        format!(
+            "the guest config is not an object (it is a {})",
+            type_name_of(config)
+        )
+    })?;
+    let cores = match config.get("cores") {
+        None | Some(serde_json::Value::Null) => 1,
+        Some(_) => loose_number(config, "cores")
+            .and_then(|cores| u32::try_from(cores).ok())
+            .filter(|cores| *cores >= 1)
+            .ok_or("the guest config's cores value is unreadable")?,
+    };
+    let sockets = match config.get("sockets") {
+        None | Some(serde_json::Value::Null) => 1,
+        Some(_) => loose_number(config, "sockets")
+            .and_then(|sockets| u32::try_from(sockets).ok())
+            .filter(|sockets| *sockets >= 1)
+            .ok_or("the guest config's sockets value is unreadable")?,
+    };
+    let optional_mib = |key: &str| match config.get(key) {
+        None | Some(serde_json::Value::Null) => Ok(None),
+        Some(_) => loose_number(config, key)
+            .and_then(|value| u32::try_from(value).ok())
+            .map(Some)
+            .ok_or_else(|| format!("the guest config's {key} value is unreadable")),
+    };
+    let vcpus = optional_mib("vcpus")?;
+    let balloon_mib = optional_mib("balloon")?;
+    let flag = |key: &str| match config.get(key) {
+        None | Some(serde_json::Value::Null) => Ok(false),
+        Some(_) => match loose_number(config, key) {
+            Some(0) => Ok(false),
+            Some(1) => Ok(true),
+            _ => Err(format!("the guest config's {key} flag is unreadable")),
+        },
+    };
+    let (memory_mib, memory_has_options) = match config.get("memory") {
+        None | Some(serde_json::Value::Null) => (512, false),
+        Some(serde_json::Value::Number(number)) => (
+            number
+                .as_u64()
+                .and_then(|memory| u32::try_from(memory).ok())
+                .ok_or("the guest config's memory value is unreadable")?,
+            false,
+        ),
+        Some(serde_json::Value::String(text)) => {
+            // A plain size, or a property string whose first property is
+            // the size (`current=2048,max=65536`).
+            let first = text.split(',').next().unwrap_or_default();
+            let first = first.strip_prefix("current=").unwrap_or(first);
+            (
+                first
+                    .trim()
+                    .parse::<u32>()
+                    .map_err(|_| "the guest config's memory value is unreadable".to_owned())?,
+                text.contains(','),
+            )
+        }
+        Some(_) => return Err("the guest config's memory value is unreadable".to_owned()),
+    };
+    let disks: std::collections::BTreeMap<&str, &str> = object
+        .iter()
+        .filter(|(key, _)| is_disk_key(key))
+        .filter_map(|(key, value)| value.as_str().map(|value| (key.as_str(), value)))
+        .filter(|(_, value)| {
+            // An empty drive is the storage `none`, exactly (a storage that
+            // merely starts with those letters is a real one).
+            !value.contains("media=cdrom") && *value != "none" && !value.starts_with("none,")
+        })
+        .collect();
+    let by_order = config
+        .get("boot")
+        .and_then(serde_json::Value::as_str)
+        .and_then(|boot| boot.split(',').find_map(|part| part.strip_prefix("order=")))
+        .and_then(|order| order.split(';').find(|entry| disks.contains_key(*entry)));
+    let by_legacy = config
+        .get("bootdisk")
+        .and_then(serde_json::Value::as_str)
+        .filter(|entry| disks.contains_key(*entry));
+    let only = if disks.len() == 1 {
+        disks.keys().next().copied()
+    } else {
+        None
+    };
+    let boot_disk = by_order
+        .or(by_legacy)
+        .or(only)
+        .and_then(|key| disks.get(key).map(|entry| (key, *entry)))
+        .map(|(key, entry)| PveBootDisk {
+            key: key.to_owned(),
+            size_mib: disk_size_mib(entry),
+        });
+    let (audio, audio_unreadable) = read_audio(config);
+    Ok(PveQemuHardware {
+        name: bounded_str(config, "name", MAX_ID_CHARS)?,
+        template: flag("template")?,
+        cores,
+        sockets,
+        vcpus,
+        balloon_mib,
+        memory_mib,
+        memory_has_options,
+        boot_disk,
+        audio,
+        audio_unreadable,
+        digest: bounded_str(config, "digest", 64)?,
+    })
+}
+
 /// Reads a number that PVE may deliver as a JSON number or a string.
 fn loose_number(entry: &serde_json::Value, key: &str) -> Option<u64> {
     match entry.get(key) {
@@ -2339,6 +3075,30 @@ fn normalize_storage(entry: &serde_json::Value) -> Result<PveStorageCapacity, St
         used_bytes,
         total_bytes,
     })
+}
+
+// PVE reports a missing config as HTTP 500, rather than 404. Match the
+// exact reviewed config path so routing errors and other failures remain errors.
+fn destroy_already_absent(error: &PveApiError, node: &str, vmid: u32) -> bool {
+    let PveApiError::Http {
+        status: 404 | 500,
+        detail,
+    } = error
+    else {
+        return false;
+    };
+    let body: serde_json::Value = match serde_json::from_str(detail) {
+        Ok(body) => body,
+        Err(_) => return false,
+    };
+    body.get("message")
+        .and_then(serde_json::Value::as_str)
+        .is_some_and(|message| {
+            message.trim()
+                == format!(
+                    "Configuration file 'nodes/{node}/qemu-server/{vmid}.conf' does not exist"
+                )
+        })
 }
 
 #[cfg(test)]

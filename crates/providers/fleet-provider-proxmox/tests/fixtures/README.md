@@ -201,3 +201,70 @@ Per major: the 8.x guest 201 is Windows Server 2022 Standard (build 20348,
 qemu-ga 8.1.2), and the 9.x guest 201 is Windows 11 Pro (build 26100,
 qemu-ga 9.2.0). The agent version follows the virtio-win release, not the
 PVE major. The interface shapes are the same on both.
+
+### QEMU destroy (FM-712)
+
+The destroy contract tests in `../destroy.rs` use synthetic, sanitized responses.
+The PVE [8.x](https://github.com/proxmox/qemu-server/blob/stable-bookworm/src/PVE/API2/Qemu.pm)
+and [9.x](https://github.com/proxmox/qemu-server/blob/master/src/PVE/API2/Qemu.pm)
+`destroy_vm` schema requires `VM.Allocate` on `/vms/{vmid}`, rejects running
+or protected guests, and forks `qmdestroy` with the VMID as its UPID target.
+PVE permits deleting templates; Fleet refuses templates observed in fresh cluster
+and config reads before deletion. PVE exposes no atomic conditional-delete option,
+so an external template conversion between the final config read and DELETE can
+race this best-effort refusal. A repeated GET would not close that final window.
+`purge` removes backup/replication/HA references. `destroy-unreferenced-disks`
+defaults to false; `skiplock` is root-only. Fleet exposes only `purge` and
+preserves both defaults. A missing config is PVE's HTTP 500 with the exact
+`nodes/{node}/qemu-server/{vmid}.conf` missing-file message, including when a
+concurrent delete wins. Generic HTTP 404/500 failures are not absence.
+The upstream [license](https://github.com/proxmox/qemu-server/blob/master/debian/copyright)
+is AGPL-3+; this integration calls the public API and copies no upstream code.
+
+### Lab clone protection (issue #290)
+
+The contract tests in `../clone_protection.rs` use synthetic, sanitized
+responses, inline like the destroy tests. They cover the QEMU config read
+(`GET /nodes/{node}/qemu/{vmid}/config`) and the synchronous config update
+(`PUT …/config`) that the Lab provision executor uses to clear the
+`protection` flag a clone copies from a protected template. The shapes were
+read from qemu-server `src/PVE/API2/Qemu.pm` on
+[`stable-bookworm`](https://github.com/proxmox/qemu-server/blob/stable-bookworm/src/PVE/API2/Qemu.pm)
+(8.x) and [`master`](https://github.com/proxmox/qemu-server/blob/master/src/PVE/API2/Qemu.pm)
+(9.x), which agree on every point below:
+
+- `clone_vm` copies every source option into the new config except
+  snapshot state, `unused` disks, and MACs, so `protection: 1` is copied.
+  While it copies disks, the target's config holds `lock: clone` (first as a
+  temporary file with only the lock, later with the name); the lock is
+  removed when the clone finishes.
+- `update_vm` (`PUT`) is synchronous and answers `{"data": null}`. Its schema
+  accepts any `VM.Config.*` privilege on `/vms/{vmid}`;
+  `$check_vm_modify_config_perm` then checks `VM.Config.Options` for
+  `protection`, a general option. `$update_vm_api` refuses a stale `digest`
+  ("checksum mismatch (file change by other user?)") and a locked guest
+  ("VM is locked (clone)") before it writes.
+- Hardware (issue #372): `$check_vm_modify_config_perm` checks `VM.Config.CPU` for
+  `cores` and `VM.Config.Memory` for `memory`, and `PUT …/config` is
+  synchronous (`{"data": null}`). `PUT …/resize` is a background task on 8.x
+  and 9.x: it checks `VM.Config.Disk` on `/vms/{vmid}` (an HTTP 403) and
+  answers a UPID (`…:resize:{vmid}:{user}:`); `Datastore.AllocateSpace` on the
+  volume's storage is checked inside the forked worker, so a missing storage
+  privilege (`Permission check failed (/storage/…, Datastore.AllocateSpace)`),
+  like the `digest` check, the config lock, the shrink refusal ("shrinking disks is not supported"), and a missing
+  disk are the task's exit status (`ERROR: …`), not an HTTP status. It takes an
+  absolute `size` such as `20G`. `memory` may be a plain MiB number or, on
+  newer PVE, a property string (`current=2048,max=65536`). A disk size in the
+  config may carry no unit (bytes). These shapes are modeled on pve-manager's
+  and qemu-server's `Qemu.pm`, not captured from a live host.
+- Audio (issue #398): `audio0` is a hardware-type option in qemu-server's
+  `$hwtypeoptions`, so `PUT …/config` with `audio0` checks `VM.Config.HWType`
+  (an HTTP 403, `Permission check failed (/vms/{vmid}, VM.Config.HWType)`).
+  The value is a property string (`device=ich9-intel-hda,driver=none`; device
+  `ich9-intel-hda|intel-hda|AC97`, driver `spice|none`, default `spice`) that
+  the config read answers as written. Checked live on PVE 8.4.0 and 9.2.2.
+- Flags in the config read are integers; the JSON formatter may answer them
+  as strings, so both are accepted.
+
+The upstream license is AGPL-3+; this integration calls the public API and
+copies no upstream code.

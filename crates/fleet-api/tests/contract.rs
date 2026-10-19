@@ -58,6 +58,8 @@ fn test_state() -> (Arc<ApiState>, Arc<FakePort>, Arc<RecordingAuditQuery>) {
         lab: None,
         desired: None,
         planning: None,
+        credentials: None,
+        requests: None,
     });
     (state, port, audit)
 }
@@ -533,6 +535,8 @@ fn operation_state_with_hub(
         lab: None,
         desired: None,
         planning: None,
+        credentials: None,
+        requests: None,
     })
 }
 
@@ -1785,6 +1789,8 @@ fn machine_state(
         lab: None,
         desired: None,
         planning: None,
+        credentials: None,
+        requests: None,
     })
 }
 
@@ -2047,7 +2053,7 @@ impl fleet_application::lab::ImagePinValidator for NoPromotedVersions {
 async fn lab_lease_extension_returns_the_updated_deadline() {
     use fleet_application::lab::{Lab, LeasePort, NewLease};
     use fleet_core::{CleanupStrategy, LeaseState};
-    use fleet_storage_sqlite::{LabRepository, LeaseRepository, Store};
+    use fleet_storage_sqlite::{LabRepository, LeaseRepository, ProjectRepository, Store};
 
     let dir = tempfile::tempdir().unwrap();
     let store = Store::open(&dir.path().join("fleet.db")).await.unwrap();
@@ -2078,6 +2084,7 @@ async fn lab_lease_extension_returns_the_updated_deadline() {
         repository,
         leases.clone(),
         Arc::new(NoPromotedVersions),
+        Arc::new(ProjectRepository::new(store.pool().clone())),
         Arc::new(FakeAudit),
     ));
     let base = test_state().0;
@@ -2173,4 +2180,805 @@ async fn lab_lease_extension_returns_the_updated_deadline() {
     assert_eq!(parts.status, StatusCode::BAD_REQUEST, "{body}");
     assert_eq!(body["code"], "invalid_request");
     assert!(body["correlationId"].as_str().is_some());
+}
+
+#[tokio::test]
+async fn lab_cleanup_retry_rearms_a_cleanup_failed_lease_and_queues_its_cleanup() {
+    use fleet_application::lab::{Lab, LeasePort, MAX_CLEANUP_ATTEMPTS, NewLease};
+    use fleet_core::{CleanupStrategy, LeaseState};
+    use fleet_storage_sqlite::{LabRepository, LeaseRepository, ProjectRepository, Store};
+
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::open(&dir.path().join("fleet.db")).await.unwrap();
+    let repository = Arc::new(LabRepository::new(store.pool().clone()));
+    let leases = Arc::new(LeaseRepository::new(store.pool().clone()));
+    let now = fleet_core::SystemClock::now_unix_millis();
+    let mut lease = leases
+        .create(
+            &NewLease {
+                template_version_id: "template-1@digest".to_owned(),
+                purpose: "the test".to_owned(),
+                project_id: None,
+                cleanup: CleanupStrategy::Destroy,
+                ttl_seconds: 3_600,
+            },
+            "anonymous-lan-admin",
+            now,
+        )
+        .await
+        .unwrap();
+    lease.state = LeaseState::CleanupFailed;
+    lease.cleanup_attempts = MAX_CLEANUP_ATTEMPTS;
+    leases.update(&lease).await.unwrap();
+
+    let lab = Arc::new(Lab::new(
+        repository.clone(),
+        repository,
+        leases.clone(),
+        Arc::new(NoPromotedVersions),
+        Arc::new(ProjectRepository::new(store.pool().clone())),
+        Arc::new(FakeAudit),
+    ));
+    let mut state = (*test_state().0).clone();
+    state.lab = Some(lab);
+    let router = principal_router(Arc::new(state));
+    let retry = || {
+        Request::builder()
+            .method(Method::POST)
+            .uri(format!(
+                "{API_BASE_PATH}/lab/leases/{}/cleanup/retry",
+                lease.id
+            ))
+            .body(Body::empty())
+            .unwrap()
+    };
+
+    let (parts, body) = call_via(&router, retry()).await;
+    assert_eq!(parts.status, StatusCode::ACCEPTED, "{body}");
+    assert_eq!(body["data"]["kind"], "lab.cleanup");
+    let rearmed = leases.get(&lease.id).await.unwrap();
+    assert_eq!(rearmed.state, LeaseState::Releasing);
+    assert_eq!(rearmed.cleanup_next_at, None);
+
+    // Now releasing, not cleanup_failed: refused.
+    let (parts, body) = call_via(&router, retry()).await;
+    assert_eq!(parts.status, StatusCode::BAD_REQUEST, "{body}");
+    assert_eq!(body["code"], "invalid_request");
+
+    let unknown = Request::builder()
+        .method(Method::POST)
+        .uri(format!(
+            "{API_BASE_PATH}/lab/leases/no-such-lease/cleanup/retry"
+        ))
+        .body(Body::empty())
+        .unwrap();
+    let (parts, body) = call_via(&router, unknown).await;
+    assert_eq!(parts.status, StatusCode::NOT_FOUND, "{body}");
+}
+
+#[derive(Debug, Default)]
+struct FakeReservations(
+    std::collections::HashMap<String, fleet_application::lab_placement::CapacityReservation>,
+);
+
+#[async_trait::async_trait]
+impl fleet_application::lab_placement::CapacityReservationPort for FakeReservations {
+    async fn record_observation(
+        &self,
+        _account_id: &str,
+        _observation: &fleet_application::proxmox::ProxmoxNodeCapacity,
+    ) -> Result<(), String> {
+        unreachable!("the detail read never records observations")
+    }
+
+    async fn reserve(
+        &self,
+        _request: &fleet_application::lab_placement::ReservationRequest,
+        _policy: &fleet_application::lab_placement::PlacementPolicy,
+        _now: i64,
+    ) -> Result<fleet_application::lab_placement::ReserveOutcome, String> {
+        unreachable!("the detail read never reserves")
+    }
+
+    async fn release_for_lease(&self, _lease_id: &str, _now: i64) -> Result<bool, String> {
+        unreachable!("the detail read never releases")
+    }
+
+    async fn for_lease(
+        &self,
+        lease_id: &str,
+    ) -> Result<Option<fleet_application::lab_placement::CapacityReservation>, String> {
+        Ok(self.0.get(lease_id).cloned())
+    }
+}
+
+#[tokio::test]
+#[allow(clippy::too_many_lines)]
+async fn lab_lease_detail_reports_its_capacity_reservation_when_it_has_one() {
+    use fleet_application::lab::{Lab, LeasePort, NewLease};
+    use fleet_application::lab_placement::{CapacityDemand, CapacityReservation, ReservationState};
+    use fleet_core::CleanupStrategy;
+    use fleet_storage_sqlite::{LabRepository, LeaseRepository, ProjectRepository, Store};
+
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::open(&dir.path().join("fleet.db")).await.unwrap();
+    let repository = Arc::new(LabRepository::new(store.pool().clone()));
+    let leases = Arc::new(LeaseRepository::new(store.pool().clone()));
+    let now = fleet_core::SystemClock::now_unix_millis();
+    let mut ids = Vec::new();
+    for _ in 0..3 {
+        let lease = leases
+            .create(
+                &NewLease {
+                    template_version_id: "template-1@digest".to_owned(),
+                    purpose: "the test".to_owned(),
+                    project_id: None,
+                    cleanup: CleanupStrategy::Destroy,
+                    ttl_seconds: 3_600,
+                },
+                "anonymous-lan-admin",
+                now,
+            )
+            .await
+            .unwrap();
+        ids.push(lease.id);
+    }
+    let reservation = |lease_id: &str, state, released_at| CapacityReservation {
+        id: format!("res-{lease_id}"),
+        lease_id: lease_id.to_owned(),
+        account_id: "acct-1".to_owned(),
+        node: "pve-a".to_owned(),
+        demand: CapacityDemand {
+            cores: 4,
+            memory_mib: 2048,
+            disk_gib: 20,
+            storage: "local-lvm".to_owned(),
+        },
+        state,
+        created_at: now,
+        released_at,
+    };
+    let mut reservations = FakeReservations::default();
+    reservations.0.insert(
+        ids[0].clone(),
+        reservation(&ids[0], ReservationState::Held, None),
+    );
+    reservations.0.insert(
+        ids[1].clone(),
+        reservation(&ids[1], ReservationState::Released, Some(now + 1)),
+    );
+    let lab = Arc::new(
+        Lab::new(
+            repository.clone(),
+            repository,
+            leases.clone(),
+            Arc::new(NoPromotedVersions),
+            Arc::new(ProjectRepository::new(store.pool().clone())),
+            Arc::new(FakeAudit),
+        )
+        .with_reservations(Arc::new(reservations)),
+    );
+    let mut state = (*test_state().0).clone();
+    state.lab = Some(lab);
+    let router = principal_router(Arc::new(state));
+    let detail = |id: &str| get(&format!("{API_BASE_PATH}/lab/leases/{id}"));
+
+    let (parts, body) = call_via(&router, detail(&ids[0])).await;
+    assert_eq!(parts.status, StatusCode::OK, "{body}");
+    assert_eq!(
+        body["data"]["reservation"],
+        serde_json::json!({
+            "node": "pve-a",
+            "accountId": "acct-1",
+            "storagePool": "local-lvm",
+            "cores": 4,
+            "memoryBytes": 2048u64 * 1024 * 1024,
+            "diskBytes": 20u64 * 1024 * 1024 * 1024,
+            "state": "held",
+        })
+    );
+    // The lease's own fields are unchanged beside it.
+    assert_eq!(body["data"]["id"], ids[0]);
+
+    let (parts, body) = call_via(&router, detail(&ids[1])).await;
+    assert_eq!(parts.status, StatusCode::OK, "{body}");
+    assert_eq!(body["data"]["reservation"]["state"], "released");
+    assert_eq!(body["data"]["reservation"]["cores"], 4);
+
+    let (parts, body) = call_via(&router, detail(&ids[2])).await;
+    assert_eq!(parts.status, StatusCode::OK, "{body}");
+    assert!(
+        body["data"]["reservation"].is_null(),
+        "a lease without one reports null: {body}"
+    );
+}
+
+#[tokio::test]
+async fn image_build_history_routes_and_schema_are_registered() {
+    let (router, _, _) = test_router();
+    for path in ["/images/builds", "/images/builds/no-such-build"] {
+        let (parts, body) = call_via(&router, get(&format!("{API_BASE_PATH}{path}"))).await;
+        assert_eq!(parts.status, StatusCode::SERVICE_UNAVAILABLE, "{body}");
+        assert_eq!(body["code"], "machine_unavailable");
+    }
+    let document = fleet_api::openapi();
+    let value = serde_json::to_value(document).unwrap();
+    assert!(value["paths"]["/api/v1/images/builds"]["get"].is_object());
+    let params = value["paths"]["/api/v1/images/builds"]["get"]["parameters"]
+        .as_array()
+        .unwrap();
+    for name in ["limit", "cursor"] {
+        assert!(params.iter().any(|param| param["name"] == name));
+    }
+    assert!(value["paths"]["/api/v1/images/builds/{buildId}"]["get"].is_object());
+    let properties = &value["components"]["schemas"]["ImageBuildDto"]["properties"];
+    assert!(properties["contentDigest"].is_object());
+    for key in ["secretVars", "varFile", "token", "payloadJson"] {
+        assert!(properties.get(key).is_none());
+    }
+}
+
+#[tokio::test]
+async fn image_build_history_requires_images_read_on_both_endpoints() {
+    #[derive(Debug)]
+    struct DenyImages;
+    impl fleet_application::authz::Authorizer for DenyImages {
+        fn decide(&self, request: fleet_application::authz::AccessRequest<'_>) -> Decision {
+            if request.action == fleet_application::authz::Permission::ImagesRead {
+                Decision::deny(ReasonId::UnknownPrincipal)
+            } else {
+                Decision::allow()
+            }
+        }
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let store = fleet_storage_sqlite::Store::open(&dir.path().join("fleet.db"))
+        .await
+        .unwrap();
+    let mut state = (*test_state().0).clone();
+    state.authorizer = Arc::new(DenyImages);
+    state.images = Some(Arc::new(fleet_application::images::Images::new(
+        Arc::new(fleet_storage_sqlite::RecipeRepository::new(
+            store.pool().clone(),
+        )),
+        Arc::new(FakeAudit),
+    )));
+    let router = principal_router(Arc::new(state));
+    for path in ["/images/builds", "/images/builds/no-such-build"] {
+        let (parts, body) = call_via(&router, get(&format!("{API_BASE_PATH}{path}"))).await;
+        assert_eq!(parts.status, StatusCode::FORBIDDEN, "{body}");
+        assert_eq!(body["code"], "denied");
+    }
+}
+
+#[tokio::test]
+async fn build_addresses_list_and_clear_are_authorized_and_additive() {
+    use fleet_application::authz::{AccessRequest, Permission};
+    use fleet_application::images::BuildAddressPort as _;
+    #[derive(Debug)]
+    struct ReadOnly;
+    impl fleet_application::authz::Authorizer for ReadOnly {
+        fn decide(&self, request: AccessRequest<'_>) -> Decision {
+            if request.action == Permission::ImagesConfig {
+                Decision::deny(ReasonId::UnknownPrincipal)
+            } else {
+                Decision::allow()
+            }
+        }
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let store = fleet_storage_sqlite::Store::open(&dir.path().join("fleet.db"))
+        .await
+        .unwrap();
+    let addresses = Arc::new(fleet_storage_sqlite::BuildAddressRepository::new(
+        store.pool().clone(),
+    ));
+    let build = |authorizer: Arc<dyn fleet_application::authz::Authorizer>| {
+        let mut state = (*test_state().0).clone();
+        state.authorizer = authorizer;
+        state.images = Some(Arc::new(
+            fleet_application::images::Images::new(
+                Arc::new(fleet_storage_sqlite::RecipeRepository::new(
+                    store.pool().clone(),
+                )),
+                Arc::new(FakeAudit),
+            )
+            .with_build_addresses(addresses.clone(), true),
+        ));
+        principal_router(Arc::new(state))
+    };
+    let permit = build(Arc::new(PermitAllAuthorizer));
+    let post = |path: &str| {
+        Request::builder()
+            .method("POST")
+            .uri(format!("{API_BASE_PATH}{path}"))
+            .body(Body::empty())
+            .unwrap()
+    };
+    let list = || get(&format!("{API_BASE_PATH}/images/build-addresses"));
+
+    // Seed one quarantined address.
+    let pool = fleet_core::BuildAddressPool::parse(
+        "192.0.2.0/24",
+        "192.0.2.10-192.0.2.11",
+        "192.0.2.1",
+        None,
+        false,
+    )
+    .unwrap();
+    let now = fleet_core::SystemClock::now_unix_millis();
+    addresses.allocate("op-gone", &pool, 1, now).await.unwrap();
+    addresses.release("op-gone", now, true).await.unwrap();
+
+    let (parts, body) = call_via(&permit, list()).await;
+    assert_eq!(parts.status, StatusCode::OK, "{body}");
+    assert_eq!(body["items"][0]["address"], "192.0.2.10");
+    assert_eq!(body["items"][0]["status"], "quarantined");
+
+    // Clearing needs images.config; reading does not give it.
+    let read_only = build(Arc::new(ReadOnly));
+    let (parts, _) = call_via(&read_only, list()).await;
+    assert_eq!(parts.status, StatusCode::OK);
+    let (parts, body) =
+        call_via(&read_only, post("/images/build-addresses/192.0.2.10/clear")).await;
+    assert_eq!(parts.status, StatusCode::FORBIDDEN, "{body}");
+
+    let (parts, body) = call_via(&permit, post("/images/build-addresses/not-an-ip/clear")).await;
+    assert_eq!(parts.status, StatusCode::BAD_REQUEST, "{body}");
+    let (parts, body) = call_via(&permit, post("/images/build-addresses/192.0.2.11/clear")).await;
+    assert_eq!(parts.status, StatusCode::NOT_FOUND, "{body}");
+    let (parts, body) = call_via(&permit, post("/images/build-addresses/192.0.2.10/clear")).await;
+    assert_eq!(parts.status, StatusCode::OK, "{body}");
+    assert_eq!(body["data"]["address"], "192.0.2.10");
+    let (_, body) = call_via(&permit, list()).await;
+    assert!(body["items"].as_array().unwrap().is_empty(), "{body}");
+
+    let value = serde_json::to_value(fleet_api::openapi()).unwrap();
+    assert!(value["paths"]["/api/v1/images/build-addresses"]["get"].is_object());
+    assert!(value["paths"]["/api/v1/images/build-addresses/{address}/clear"]["post"].is_object());
+}
+
+#[tokio::test]
+#[allow(clippy::too_many_lines, clippy::items_after_statements)]
+async fn image_secrets_are_write_only_namespaced_authorized_and_audited_by_name() {
+    use fleet_application::authz::{AccessRequest, Permission};
+    #[derive(Debug)]
+    struct ReadOnly;
+    impl fleet_application::authz::Authorizer for ReadOnly {
+        fn decide(&self, request: AccessRequest<'_>) -> Decision {
+            if request.action == Permission::ImagesConfig {
+                Decision::deny(ReasonId::UnknownPrincipal)
+            } else {
+                Decision::allow()
+            }
+        }
+    }
+    #[derive(Debug, Default)]
+    struct MemorySecrets(std::sync::Mutex<std::collections::BTreeMap<String, String>>);
+    #[async_trait]
+    impl fleet_application::images::ImageSecretPort for MemorySecrets {
+        async fn list(&self) -> Result<Vec<String>, String> {
+            Ok(self.0.lock().unwrap().keys().cloned().collect())
+        }
+        async fn set(
+            &self,
+            reference: &str,
+            value: &fleet_core::SensitiveString,
+        ) -> Result<bool, String> {
+            Ok(self
+                .0
+                .lock()
+                .unwrap()
+                .insert(reference.to_owned(), value.expose().to_owned())
+                .is_some())
+        }
+        async fn delete(&self, reference: &str) -> Result<bool, String> {
+            Ok(self.0.lock().unwrap().remove(reference).is_some())
+        }
+    }
+    #[derive(Debug, Default)]
+    struct RecordingAudit(std::sync::Mutex<Vec<String>>);
+    #[async_trait]
+    impl AuditPort for RecordingAudit {
+        async fn record_intent(&self, intent: &AuditIntent) -> Result<(), String> {
+            self.0.lock().unwrap().push(format!("{intent:?}"));
+            Ok(())
+        }
+        async fn record_outcome(
+            &self,
+            _operation_id: &str,
+            _outcome: AuditOutcome,
+        ) -> Result<(), String> {
+            Ok(())
+        }
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let store = fleet_storage_sqlite::Store::open(&dir.path().join("fleet.db"))
+        .await
+        .unwrap();
+    let secrets = Arc::new(MemorySecrets::default());
+    let audit = Arc::new(RecordingAudit::default());
+    let build = |authorizer: Arc<dyn fleet_application::authz::Authorizer>| {
+        let mut state = (*test_state().0).clone();
+        state.authorizer = authorizer;
+        state.images = Some(Arc::new(
+            fleet_application::images::Images::new(
+                Arc::new(fleet_storage_sqlite::RecipeRepository::new(
+                    store.pool().clone(),
+                )),
+                audit.clone(),
+            )
+            .with_secrets(secrets.clone()),
+        ));
+        principal_router(Arc::new(state))
+    };
+    let permit = build(Arc::new(PermitAllAuthorizer));
+    let read_only = build(Arc::new(ReadOnly));
+    let request = |method: &str, path: &str, body: Option<serde_json::Value>| {
+        let builder = Request::builder()
+            .method(method)
+            .uri(format!("{API_BASE_PATH}{path}"))
+            .header("content-type", "application/json");
+        builder
+            .body(body.map_or_else(Body::empty, |body| {
+                Body::from(serde_json::to_vec(&body).unwrap())
+            }))
+            .unwrap()
+    };
+    const VALUE: &str = "s3cr3t-value-do-not-echo";
+
+    // Writing needs images.config; reading names does not.
+    let (parts, body) = call_via(
+        &read_only,
+        request(
+            "POST",
+            "/images/secrets",
+            Some(serde_json::json!({"name": "iso-pass", "value": VALUE})),
+        ),
+    )
+    .await;
+    assert_eq!(parts.status, StatusCode::FORBIDDEN, "{body}");
+    assert!(secrets.0.lock().unwrap().is_empty());
+
+    // Namespace and value are validated before any write.
+    for bad in [
+        serde_json::json!({"name": "proxmox/acct", "value": VALUE}),
+        serde_json::json!({"name": "../x", "value": VALUE}),
+        serde_json::json!({"name": "", "value": VALUE}),
+        serde_json::json!({"name": "ok", "value": "  "}),
+    ] {
+        let (parts, body) = call_via(&permit, request("POST", "/images/secrets", Some(bad))).await;
+        assert_eq!(parts.status, StatusCode::BAD_REQUEST, "{body}");
+        assert!(!body.to_string().contains(VALUE));
+    }
+    assert!(secrets.0.lock().unwrap().is_empty());
+    // A body that fails to deserialize gets a fixed 400 that never quotes it.
+    let (parts, body) = call_via(
+        &permit,
+        request(
+            "POST",
+            "/images/secrets",
+            Some(serde_json::json!({"name": 7, "value": VALUE})),
+        ),
+    )
+    .await;
+    assert_eq!(parts.status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(!body.to_string().contains(VALUE), "{body}");
+    // A denied caller gets 403 even for a malformed name.
+    let (parts, _) = call_via(
+        &read_only,
+        request(
+            "POST",
+            "/images/secrets",
+            Some(serde_json::json!({"name": "../x", "value": VALUE})),
+        ),
+    )
+    .await;
+    assert_eq!(parts.status, StatusCode::FORBIDDEN);
+
+    let set = |name: &str| {
+        request(
+            "POST",
+            "/images/secrets",
+            Some(serde_json::json!({"name": name, "value": VALUE})),
+        )
+    };
+    let (parts, body) = call_via(&permit, set("iso-pass")).await;
+    assert_eq!(parts.status, StatusCode::OK, "{body}");
+    assert_eq!(body["data"]["reference"], "images/iso-pass");
+    assert_eq!(body["data"]["replaced"], false);
+    assert!(!body.to_string().contains(VALUE));
+    let (_, body) = call_via(&permit, set("images/iso-pass")).await;
+    assert_eq!(body["data"]["replaced"], true, "{body}");
+
+    let (parts, body) = call_via(&read_only, get(&format!("{API_BASE_PATH}/images/secrets"))).await;
+    assert_eq!(parts.status, StatusCode::OK);
+    assert_eq!(body["items"][0]["reference"], "images/iso-pass");
+    assert!(!body.to_string().contains(VALUE));
+
+    let (parts, body) = call_via(
+        &read_only,
+        request("DELETE", "/images/secrets/iso-pass", None),
+    )
+    .await;
+    assert_eq!(parts.status, StatusCode::FORBIDDEN, "{body}");
+    let (parts, body) = call_via(&permit, request("DELETE", "/images/secrets/nope", None)).await;
+    assert_eq!(parts.status, StatusCode::NOT_FOUND, "{body}");
+    let (parts, body) =
+        call_via(&permit, request("DELETE", "/images/secrets/iso-pass", None)).await;
+    assert_eq!(parts.status, StatusCode::OK, "{body}");
+    assert!(secrets.0.lock().unwrap().is_empty());
+
+    // The audit trail names records and never carries the value.
+    let events = audit.0.lock().unwrap().join("\n");
+    assert!(events.contains("image_secret_set"), "{events}");
+    assert!(events.contains("image_secret_deleted"), "{events}");
+    assert!(events.contains("replaced"), "{events}");
+    assert!(events.contains("images/iso-pass"), "{events}");
+    assert!(!events.contains(VALUE), "{events}");
+
+    let value = serde_json::to_value(fleet_api::openapi()).unwrap();
+    assert!(value["paths"]["/api/v1/images/secrets"]["get"].is_object());
+    assert!(value["paths"]["/api/v1/images/secrets"]["post"].is_object());
+    assert!(value["paths"]["/api/v1/images/secrets/{name}"]["delete"].is_object());
+}
+
+#[tokio::test]
+async fn an_unknown_recipe_source_is_a_json_400_not_a_panic() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = fleet_storage_sqlite::Store::open(&dir.path().join("fleet.db"))
+        .await
+        .unwrap();
+    let recipes = Arc::new(fleet_storage_sqlite::RecipeRepository::new(
+        store.pool().clone(),
+    ));
+    let mut state = (*test_state().0).clone();
+    state.authorizer = Arc::new(PermitAllAuthorizer);
+    state.images = Some(Arc::new(fleet_application::images::Images::new(
+        recipes,
+        Arc::new(FakeAudit),
+    )));
+    let router = principal_router(Arc::new(state));
+    let body = r#"{"name":"r","description":"","node":"pve","storagePool":"local-lvm","source":"x","content":"{}"}"#;
+    for (method, path) in [
+        ("POST", format!("{API_BASE_PATH}/images/recipes")),
+        ("PUT", format!("{API_BASE_PATH}/images/recipes/some-recipe")),
+    ] {
+        let request = Request::builder()
+            .method(method)
+            .uri(&path)
+            .header("content-type", "application/json")
+            .body(Body::from(body))
+            .unwrap();
+        let (parts, body) = call_via(&router, request).await;
+        assert_eq!(parts.status, StatusCode::BAD_REQUEST, "{method}: {body}");
+        assert_eq!(body["code"], "invalid_request");
+        assert_ne!(
+            body["correlationId"], "00000000-0000-0000-0000-000000000000",
+            "the real request correlation id is used"
+        );
+    }
+}
+
+#[tokio::test]
+async fn publishing_takes_an_optional_body_with_the_insecure_tls_opt_in() {
+    use fleet_application::images::RecipePort as _;
+    let dir = tempfile::tempdir().unwrap();
+    let store = fleet_storage_sqlite::Store::open(&dir.path().join("fleet.db"))
+        .await
+        .unwrap();
+    let recipes = Arc::new(fleet_storage_sqlite::RecipeRepository::new(
+        store.pool().clone(),
+    ));
+    let mut state = (*test_state().0).clone();
+    state.authorizer = Arc::new(PermitAllAuthorizer);
+    state.images = Some(Arc::new(fleet_application::images::Images::new(
+        recipes.clone(),
+        Arc::new(FakeAudit),
+    )));
+    let router = principal_router(Arc::new(state));
+    let recipe = recipes
+        .create(
+            &fleet_application::images::NewRecipe {
+                content: fleet_core::RecipeContent {
+                    name: "insecure".to_owned(),
+                    description: String::new(),
+                    node: "pve".to_owned(),
+                    storage_pool: Some("local-lvm".to_owned()),
+                    source: fleet_core::RecipeSource::Clone,
+                    content:
+                        r#"{"builders":[{"type":"proxmox-clone","insecure_skip_tls_verify":true}]}"#
+                            .to_owned(),
+                },
+            },
+            1,
+        )
+        .await
+        .unwrap();
+    let path = format!("{API_BASE_PATH}/images/recipes/{}/publish", recipe.id);
+    let publish = |content_type: Option<&str>, body: &str| {
+        let mut request = Request::builder().method("POST").uri(&path);
+        if let Some(content_type) = content_type {
+            request = request.header("content-type", content_type);
+        }
+        request.body(Body::from(body.to_owned())).unwrap()
+    };
+    // No body, an empty JSON body (what the generated client sends), `{}`,
+    // and `null` all publish the plain version.
+    let mut plain = None;
+    for (content_type, body) in [
+        (None, ""),
+        (Some("application/json"), ""),
+        (Some("application/json"), "{}"),
+        (Some("application/json"), "null"),
+    ] {
+        let (parts, value) = call_via(&router, publish(content_type, body)).await;
+        assert_eq!(parts.status, StatusCode::CREATED, "{body:?}: {value}");
+        assert_eq!(value["data"]["allowInsecureTls"], false, "{value}");
+        let id = value["data"]["id"].as_str().unwrap().to_owned();
+        assert_eq!(plain.get_or_insert_with(|| id.clone()), &id);
+    }
+    let (parts, value) = call_via(
+        &router,
+        publish(Some("application/json"), r#"{"allowInsecureTls":true}"#),
+    )
+    .await;
+    assert_eq!(parts.status, StatusCode::CREATED, "{value}");
+    assert_eq!(value["data"]["allowInsecureTls"], true);
+    assert_ne!(value["data"]["id"].as_str(), plain.as_deref());
+    for body in ["{", r#"{"allowInsecureTLS":true}"#, "[]"] {
+        let (parts, value) = call_via(&router, publish(Some("application/json"), body)).await;
+        assert_eq!(parts.status, StatusCode::BAD_REQUEST, "{body}: {value}");
+    }
+}
+
+/// The project-linked lab surface over a real store: the router, the
+/// registered project, and one published template version to lease from.
+async fn project_linked_lab_router() -> (
+    axum::Router,
+    tempfile::TempDir,
+    fleet_core::Project,
+    String,
+    Arc<fleet_storage_sqlite::ProjectRepository>,
+) {
+    use fleet_application::lab::{
+        Lab, LabTemplateContent, LabTemplatePort as _, LabTemplateVersion, NewLabTemplate,
+    };
+    use fleet_application::project::ProjectPort as _;
+    use fleet_core::{CleanupStrategy, ReadinessProbe};
+    use fleet_storage_sqlite::{LabRepository, LeaseRepository, ProjectRepository, Store};
+
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::open(&dir.path().join("fleet.db")).await.unwrap();
+    let versions = Arc::new(LabRepository::new(store.pool().clone()));
+    let projects = Arc::new(ProjectRepository::new(store.pool().clone()));
+    let leases = Arc::new(LeaseRepository::new(store.pool().clone()));
+    let lab = Arc::new(Lab::new(
+        versions.clone(),
+        versions.clone(),
+        leases.clone(),
+        Arc::new(NoPromotedVersions),
+        projects.clone(),
+        Arc::new(FakeAudit),
+    ));
+    let base = test_state().0;
+    let mut state = (*base).clone();
+    state.lab = Some(lab);
+    let router = principal_router(Arc::new(state));
+
+    let project = projects
+        .create(&fleet_application::project::NewProject {
+            fetch: fleet_core::RemoteFetch::default(),
+            remote: "https://github.com/example/linked.git".to_owned(),
+            idempotency_key: None,
+            name: "linked".to_owned(),
+            description: String::new(),
+        })
+        .await
+        .unwrap();
+    let template = versions
+        .create(
+            &NewLabTemplate {
+                content: LabTemplateContent {
+                    name: "linked-lab".to_owned(),
+                    ssh_user: "root".to_owned(),
+                    ssh_port: 22,
+                    ssh_trust_mode: "tofu".to_owned(),
+                    ssh_fingerprint: None,
+                    description: String::new(),
+                    image_version_id: "rcp-1@abc".to_owned(),
+                    cores: 2,
+                    memory_mib: 2048,
+                    disk_gib: 20,
+                    bootstrap_project_id: None,
+                    readiness_probe: ReadinessProbe::GuestAgent,
+                    readiness_command: None,
+                    readiness_deadline_seconds: 300,
+                    ttl_seconds: 3_600,
+                    cleanup: CleanupStrategy::Destroy,
+                    audio: None,
+                    guest_os: fleet_core::GuestOs::default(),
+                    interactive_user: None,
+                },
+            },
+            1,
+        )
+        .await
+        .unwrap();
+    let version = versions
+        .publish(
+            &template.id,
+            &LabTemplateVersion {
+                id: format!("{}@draft", template.id),
+                template_id: template.id.clone(),
+                name: template.content.name.clone(),
+                content: template.content.clone(),
+                image_digest: "abc".to_owned(),
+                published_by: "tester".to_owned(),
+                published_at: 2,
+            },
+        )
+        .await
+        .unwrap();
+    (router, dir, project, version.id, projects)
+}
+
+#[tokio::test]
+async fn lab_lease_create_refuses_an_unknown_project() {
+    let (router, _dir, _project, version_id, _projects) = project_linked_lab_router().await;
+
+    let request = Request::builder()
+        .method(Method::POST)
+        .uri(format!("{API_BASE_PATH}/lab/leases"))
+        .header("content-type", "application/json")
+        .body(Body::from(format!(
+            r#"{{"templateVersionId":"{version_id}","purpose":"the demo","projectId":"ghost"}}"#
+        )))
+        .unwrap();
+    let (parts, body) = call_via(&router, request).await;
+    assert_eq!(parts.status, StatusCode::BAD_REQUEST, "{body}");
+    assert_eq!(body["code"], "invalid_request");
+}
+
+#[tokio::test]
+async fn lab_lease_creates_carry_and_filter_their_project() {
+    let (router, _dir, project, version_id, _projects) = project_linked_lab_router().await;
+
+    let request = Request::builder()
+        .method(Method::POST)
+        .uri(format!("{API_BASE_PATH}/lab/leases"))
+        .header("content-type", "application/json")
+        .body(Body::from(format!(
+            r#"{{"templateVersionId":"{version_id}","purpose":"the linked demo","projectId":"{}"}}"#,
+            project.id
+        )))
+        .unwrap();
+    let (parts, body) = call_via(&router, request).await;
+    assert_eq!(parts.status, StatusCode::CREATED, "{body}");
+    assert_eq!(body["data"]["projectId"], project.id.as_str());
+
+    let (parts, body) = call_via(
+        &router,
+        get(&format!(
+            "{API_BASE_PATH}/lab/leases?projectId={}",
+            project.id
+        )),
+    )
+    .await;
+    assert_eq!(parts.status, StatusCode::OK, "{body}");
+    let items = body["items"].as_array().cloned().unwrap();
+    assert_eq!(items.len(), 1);
+    assert_eq!(items[0]["projectId"], project.id.as_str());
+
+    let (parts, body) = call_via(
+        &router,
+        get(&format!("{API_BASE_PATH}/lab/leases?projectId=other")),
+    )
+    .await;
+    assert_eq!(parts.status, StatusCode::OK, "{body}");
+    assert_eq!(body["items"].as_array().cloned().unwrap().len(), 0);
+
+    let (parts, body) = call_via(&router, get(&format!("{API_BASE_PATH}/lab/leases"))).await;
+    assert_eq!(parts.status, StatusCode::OK, "{body}");
+    assert_eq!(body["items"].as_array().cloned().unwrap().len(), 1);
 }

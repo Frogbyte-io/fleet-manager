@@ -24,6 +24,7 @@ export const SETTINGS_SECTION_GROUPS: SettingsSectionGroup[] = [
     label: 'Connect',
     sections: [
       { id: 'integrations', title: 'Integrations' },
+      { id: 'provider-accounts', title: 'Provider accounts' },
       { id: 'credentials', title: 'Credentials' },
       { id: 'ssh-keys', title: 'SSH & host keys' },
       { id: 'fleetd', title: 'fleetd & enrollment' },

@@ -39,6 +39,12 @@ use crate::exec::MAX_SCRIPT_TIMEOUT;
 /// The deadline bound for one Frogenv operation.
 pub const MAX_FROGENV_TIMEOUT: u64 = MAX_SCRIPT_TIMEOUT;
 
+/// The fixed scripts' own report that no Frogenv CLI was found (exit 3).
+/// A failed `frogenv.status` whose detail is exactly this is a positive
+/// "not installed" observation, which the ready workflow names
+/// `frogenv_missing`.
+pub const NOT_INSTALLED_DETAIL: &str = "frogenv is not installed";
+
 /// How the endpoint authenticates.
 #[derive(Debug, serde::Deserialize)]
 #[serde(rename_all = "camelCase", tag = "type")]
@@ -601,17 +607,7 @@ async fn finish_cli(
 /// Redacts value-shaped material from CLI output before it becomes a
 /// public result.
 fn redact_output(text: &str) -> String {
-    let trimmed = text.trim();
-    let bounded = if trimmed.len() > 3_000 {
-        let mut end = 3_000;
-        while !trimmed.is_char_boundary(end) {
-            end -= 1;
-        }
-        &trimmed[..end]
-    } else {
-        trimmed
-    };
-    fleet_provider_frogenv::redact(bounded)
+    crate::exec::scrub_and_bound_with(text.trim(), false, fleet_provider_frogenv::redact).0
 }
 
 /// The kind-dispatching wrapper the controller composes: the Frogenv
@@ -641,6 +637,49 @@ impl OperationExecutor for FrogenvDispatch {
                 self.frogenv.execute(operations, operation).await
             }
             _ => self.fallback.execute(operations, operation).await,
+        }
+    }
+}
+
+#[cfg(test)]
+mod not_installed_tests {
+    #[test]
+    fn every_script_reports_a_missing_cli_with_the_shared_detail() {
+        let marker = format!("echo \"{}\" >&2; exit 3;", super::NOT_INSTALLED_DETAIL);
+        for script in [
+            super::status_script(),
+            super::ceremony_script("setup"),
+            super::sync_script(),
+            super::env_run_script(),
+        ] {
+            assert!(script.contains(&marker), "{script}");
+        }
+        // The status failure's detail passes through redaction unchanged,
+        // so the ready workflow can recognize it.
+        assert_eq!(
+            super::redact_output(&format!("{}\n", super::NOT_INSTALLED_DETAIL)),
+            super::NOT_INSTALLED_DETAIL
+        );
+    }
+}
+
+#[cfg(test)]
+mod redact_bound_tests {
+    /// #357: a credential that straddles the result bound is redacted
+    /// before the bound cuts, never half kept.
+    #[test]
+    fn a_credential_at_the_bound_is_redacted_not_cut() {
+        for secret_line in [
+            "https://user:hunter2pw@host.invalid/repo.git",
+            "user:hunter2pw@host.invalid",
+        ] {
+            for pad in [2_970, 2_985, 2_995, 3_000] {
+                let text = format!("{} {secret_line}\n", "x".repeat(pad));
+                let out = super::redact_output(&text);
+                assert!(!out.contains("hunter2"), "pad {pad}: {out}");
+                assert!(!out.contains("user:"), "pad {pad}: {out}");
+                assert!(out.len() <= 3_000 + "…".len(), "pad {pad}: {}", out.len());
+            }
         }
     }
 }

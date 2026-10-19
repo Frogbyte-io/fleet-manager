@@ -24,6 +24,38 @@ use std::process::Command;
 /// transport cannot use.
 pub const CREDENTIAL_MISMATCH: &str = "the credential does not fit the remote's transport: an HTTPS token needs an https:// remote and an SSH key needs an ssh remote";
 
+/// The deadline for a clone or checkout.
+const GIT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(600);
+/// The deadline for resolving a remote's head.
+const LS_REMOTE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+/// The largest file version read when comparing two commits.
+const MAX_COMPARED_FILE_BYTES: usize = 1024 * 1024;
+/// The most changed files one comparison inspects; more means "not safe".
+const MAX_COMPARED_FILES: usize = 500;
+
+/// One tracked file that differs between two commits, with both versions
+/// (`None` when absent on that side). Contents are read in memory only.
+#[derive(Debug)]
+pub struct ChangedFile {
+    /// The path within the repository.
+    pub path: String,
+    /// The file at the older commit.
+    pub before: Option<String>,
+    /// The file at the newer commit.
+    pub after: Option<String>,
+    /// Whether a version was binary, unreadable, or over the size bound.
+    pub opaque: bool,
+}
+
+/// How a candidate commit relates to a base commit.
+#[derive(Debug)]
+pub struct CommitComparison {
+    /// Whether the candidate descends from the base.
+    pub descendant: bool,
+    /// The files that differ (empty when not a descendant).
+    pub changed: Vec<ChangedFile>,
+}
+
 /// One Git credential, resolved just in time by the caller. The value
 /// exists in the process only for the duration of a fetch and never in a
 /// command line or environment.
@@ -236,11 +268,84 @@ impl GitSource {
     }
 
     fn git_with(&self, arguments: &[&str], auth: &Auth) -> Result<String, String> {
+        self.git_timed(arguments, auth, GIT_TIMEOUT)
+    }
+
+    /// Kills the child's whole process group (the child leads its own on
+    /// Unix) and reaps the child.
+    fn kill_group(child: &mut std::process::Child) {
+        #[cfg(unix)]
+        {
+            let _ = Command::new("kill")
+                .args(["-KILL", "--", &format!("-{}", child.id())])
+                .status();
+        }
+        let _ = child.kill();
+        let _ = child.wait();
+    }
+
+    /// Runs git with a deadline: a hung remote or credential prompt is
+    /// killed and reported, never waited on forever.
+    fn git_timed(
+        &self,
+        arguments: &[&str],
+        auth: &Auth,
+        timeout: std::time::Duration,
+    ) -> Result<String, String> {
+        use std::io::Read as _;
+        use std::process::Stdio;
         let _ = self;
         let mut command = Self::command(arguments, auth);
-        let output = command
-            .output()
+        command
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        // Its own process group, so a timeout can kill the command and every
+        // helper it started (ssh, credential helpers), not just the leader.
+        #[cfg(unix)]
+        {
+            use std::os::unix::process::CommandExt as _;
+            command.process_group(0);
+        }
+        let mut child = command
+            .spawn()
             .map_err(|error| format!("git could not start: {error}"))?;
+        let read = |stream: Option<Box<dyn std::io::Read + Send>>| {
+            std::thread::spawn(move || {
+                let mut bytes = Vec::new();
+                if let Some(mut stream) = stream {
+                    let _ = stream.read_to_end(&mut bytes);
+                }
+                bytes
+            })
+        };
+        let stdout_reader = read(child.stdout.take().map(|s| Box::new(s) as _));
+        let stderr_reader = read(child.stderr.take().map(|s| Box::new(s) as _));
+        let deadline = std::time::Instant::now() + timeout;
+        let status = loop {
+            match child.try_wait() {
+                Ok(Some(status)) => break status,
+                Ok(None) if std::time::Instant::now() >= deadline => {
+                    // Kill the group and detach the readers.
+                    Self::kill_group(&mut child);
+                    return Err(format!(
+                        "git {} timed out after {} seconds",
+                        arguments.first().unwrap_or(&""),
+                        timeout.as_secs()
+                    ));
+                }
+                Ok(None) => std::thread::sleep(std::time::Duration::from_millis(20)),
+                Err(error) => {
+                    Self::kill_group(&mut child);
+                    return Err(format!("git could not be awaited: {error}"));
+                }
+            }
+        };
+        let output = std::process::Output {
+            status,
+            stdout: stdout_reader.join().unwrap_or_default(),
+            stderr: stderr_reader.join().unwrap_or_default(),
+        };
         if !output.status.success() {
             // The stderr is bounded and redacted: a credential-bearing
             // remote can echo its URL in a failure message.
@@ -307,6 +412,146 @@ impl GitSource {
         }
         let auth = Auth::prepare(&self.work_root, credential)?;
         self.fetch_inner(remote, commit_sha, &auth, validate)
+    }
+
+    /// Resolves the remote's `HEAD` to a full commit SHA with `git
+    /// ls-remote`, using a credential the caller resolved just in time
+    /// (the same file-based handoff as a fetch).
+    ///
+    /// # Errors
+    ///
+    /// Fails on a credential that does not fit the remote's transport, on
+    /// transport errors, and when the remote answers with no usable SHA.
+    pub fn resolve_head(
+        &self,
+        remote: &str,
+        credential: Option<&GitCredential>,
+    ) -> Result<String, String> {
+        let auth = match credential {
+            Some(credential) => {
+                if !credential.fits(remote) {
+                    return Err(CREDENTIAL_MISMATCH.to_owned());
+                }
+                Auth::prepare(&self.work_root, credential)?
+            }
+            None => Auth::none(),
+        };
+        // `--` keeps an option-looking remote from reaching git as a flag.
+        let listing = self.git_timed(
+            &["ls-remote", "--quiet", "--", remote, "HEAD"],
+            &auth,
+            LS_REMOTE_TIMEOUT,
+        )?;
+        let sha = listing
+            .lines()
+            .next()
+            .and_then(|line| line.split_whitespace().next())
+            .unwrap_or_default();
+        if sha.len() != 40
+            || !sha
+                .chars()
+                .all(|c| c.is_ascii_digit() || ('a'..='f').contains(&c))
+        {
+            return Err("the remote did not report a HEAD commit".to_owned());
+        }
+        Ok(sha.to_owned())
+    }
+
+    /// Compares `candidate` against `base` inside an existing clone (the
+    /// candidate's worktree): whether the candidate descends from the base
+    /// (`git merge-base --is-ancestor`), and every file that differs, with
+    /// both versions read through `git cat-file`. Hooks never run, and a
+    /// base commit the clone does not hold is simply "not a descendant".
+    ///
+    /// # Errors
+    ///
+    /// Fails on a malformed commit id or when git cannot answer.
+    pub fn compare_commits(
+        &self,
+        clone: &Path,
+        base: &str,
+        candidate: &str,
+    ) -> Result<CommitComparison, String> {
+        let hex = |sha: &str| {
+            sha.len() == 40
+                && sha
+                    .bytes()
+                    .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+        };
+        if !hex(base) || !hex(candidate) {
+            return Err("the commit ids must be full 40-character hexadecimal ids".to_owned());
+        }
+        let dir = clone.to_str().unwrap_or_default();
+        // Exit 0 = ancestor, 1 = not; anything else (an unknown commit)
+        // is treated as not a descendant.
+        let mut command = Self::command(
+            &["-C", dir, "merge-base", "--is-ancestor", base, candidate],
+            &Auth::none(),
+        );
+        let status = command
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .map_err(|error| format!("git could not start: {error}"))?;
+        if !status.success() {
+            return Ok(CommitComparison {
+                descendant: false,
+                changed: Vec::new(),
+            });
+        }
+        let names = self.git(&[
+            "-C",
+            dir,
+            "diff",
+            "--name-only",
+            "-z",
+            "--no-renames",
+            "--no-ext-diff",
+            base,
+            candidate,
+        ])?;
+        let paths: Vec<&str> = names.split('\0').filter(|path| !path.is_empty()).collect();
+        if paths.len() > MAX_COMPARED_FILES {
+            return Err("too many files changed to compare".to_owned());
+        }
+        let read = |commit: &str, path: &str| -> (Option<String>, bool) {
+            let spec = format!("{commit}:{path}");
+            let Ok(output) = Self::command(&["-C", dir, "cat-file", "blob", &spec], &Auth::none())
+                .stdin(std::process::Stdio::null())
+                .output()
+            else {
+                return (None, true);
+            };
+            if !output.status.success() {
+                // Absent at that commit.
+                return (None, false);
+            }
+            if output.stdout.len() > MAX_COMPARED_FILE_BYTES {
+                return (None, true);
+            }
+            match String::from_utf8(output.stdout) {
+                Ok(text) => (Some(text), false),
+                Err(_) => (None, true),
+            }
+        };
+        let changed = paths
+            .into_iter()
+            .map(|path| {
+                let (before, before_opaque) = read(base, path);
+                let (after, after_opaque) = read(candidate, path);
+                ChangedFile {
+                    path: path.to_owned(),
+                    before,
+                    after,
+                    opaque: before_opaque || after_opaque,
+                }
+            })
+            .collect();
+        Ok(CommitComparison {
+            descendant: true,
+            changed,
+        })
     }
 
     fn fetch_inner(

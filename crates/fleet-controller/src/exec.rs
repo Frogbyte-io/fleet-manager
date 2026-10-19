@@ -49,6 +49,22 @@ struct SshExecPayload {
     auth: SshExecAuth,
     /// The deadline, in seconds. Bounded hard.
     timeout_seconds: u64,
+    /// The guest's OS, which selects the guest shell. Absent means Linux:
+    /// every non-Lab machine, and operations queued before the field existed.
+    #[serde(default)]
+    guest_os: fleet_core::GuestOs,
+    /// Whether a Windows guest runs the script under the guest-side deadline
+    /// watchdog (#455). Absent means yes; only the start of a detached exec,
+    /// which bounds itself on the guest and must outlive its session, sets
+    /// it to false. This is a bound for honest scripts, not a security
+    /// boundary: whoever can queue an `ssh.exec` already runs arbitrary
+    /// script text on the guest and could kill the watchdog as well.
+    #[serde(default = "watchdog_by_default")]
+    guest_watchdog: bool,
+}
+
+fn watchdog_by_default() -> bool {
+    true
 }
 
 /// How the endpoint authenticates.
@@ -68,8 +84,30 @@ enum SshExecAuth {
 /// operations, which survive controller restarts.
 pub const MAX_SCRIPT_TIMEOUT: u64 = 900;
 
-/// The bound for the operation's public result; output is trimmed to fit.
-pub(crate) const RESULT_STRING_BOUND: usize = 3_000;
+/// The most facts, and the most snapshot bytes, one agentless collection may
+/// store (the same limits as a node inventory report).
+const MAX_COLLECTED_FACTS: usize = fleet_core::MAX_CAPABILITY_FACTS;
+const MAX_COLLECTED_SNAPSHOT_BYTES: usize = 64 * 1024;
+
+/// Probe output is node text: the facts are capped in count, redacted, and
+/// checked against the snapshot size before anything is stored. Shared by
+/// the agentless inventory and onboarding discovery.
+pub(crate) fn redact_collected_facts(
+    facts: &[fleet_core::CapabilityFact],
+) -> Result<Vec<fleet_core::CapabilityFact>, String> {
+    if facts.len() > MAX_COLLECTED_FACTS {
+        return Err("the collection carries too many facts".to_owned());
+    }
+    let redacted: Vec<fleet_core::CapabilityFact> = facts
+        .iter()
+        .map(fleet_core::CapabilityFact::redacted)
+        .collect();
+    let size = serde_json::to_string(&redacted).map_or(usize::MAX, |json| json.len());
+    if size > MAX_COLLECTED_SNAPSHOT_BYTES {
+        return Err("the collected fact set is too large to store".to_owned());
+    }
+    Ok(redacted)
+}
 
 /// The kind-dispatching executor.
 #[derive(Debug)]
@@ -94,6 +132,9 @@ struct InventoryPayload {
     auth: SshExecAuth,
     /// The deadline, in seconds. Bounded hard.
     timeout_seconds: u64,
+    /// The guest's OS; absent means Linux.
+    #[serde(default)]
+    guest_os: fleet_core::GuestOs,
 }
 
 impl ScriptExecutor {
@@ -211,13 +252,15 @@ impl ScriptExecutor {
 
         match (collected, detail) {
             (Some(facts), _) => {
+                let facts = redact_collected_facts(&facts)?;
                 let count = facts.len();
+                let snapshot = serde_json::to_string(&facts)
+                    .map_err(|error| format!("the fact set does not serialize: {error}"))?;
                 self.machines
                     .record_capabilities(&payload.machine_id, &facts)
                     .await
                     .map_err(|failure| failure.to_string())?;
-                let snapshot = serde_json::to_string(&facts)
-                    .map_err(|error| format!("the fact set does not serialize: {error}"))?;
+
                 self.machines
                     .record_snapshot(
                         &payload.machine_id,
@@ -235,9 +278,7 @@ impl ScriptExecutor {
                     .map_err(|error| error.to_string())
             }
             (None, Some(detail)) => {
-                let error_json =
-                    serde_json::json!({ "reason": "collection_failed", "detail": detail })
-                        .to_string();
+                let error_json = transport_failure_json("collection_failed", &detail);
                 operations
                     .complete(&operation.id, "failed", None, Some(&error_json))
                     .await
@@ -268,6 +309,8 @@ impl ScriptExecutor {
                 }
             },
             timeout_seconds: payload.timeout_seconds,
+            guest_os: payload.guest_os,
+            guest_watchdog: true,
         })
         .await
     }
@@ -307,17 +350,30 @@ impl ScriptExecutor {
             arguments: payload.arguments.clone(),
         };
         let (result, detail) = self
-            .run_script(&spec, &payload.script, &metadata, deadline)
+            .run_script(
+                &spec,
+                &payload.script,
+                &metadata,
+                deadline,
+                payload.guest_watchdog,
+            )
             .await;
 
         match (result, detail) {
             (Some(result), _) => {
+                // The stored output is scrubbed of credential shapes and
+                // then bounded; each flag stays true when either the
+                // provider or this bound dropped output.
+                let (stdout, truncated_stdout) =
+                    scrub_and_bound(&result.stdout, result.truncated_stdout);
+                let (stderr, truncated_stderr) =
+                    scrub_and_bound(&result.stderr, result.truncated_stderr);
                 let result_json = serde_json::json!({
                     "exitCode": result.exit_code,
-                    "stdout": trim_to_bound(&result.stdout),
-                    "stderr": trim_to_bound(&result.stderr),
-                    "truncatedStdout": result.truncated_stdout,
-                    "truncatedStderr": result.truncated_stderr,
+                    "stdout": stdout,
+                    "stderr": stderr,
+                    "truncatedStdout": truncated_stdout,
+                    "truncatedStderr": truncated_stderr,
                 })
                 .to_string();
                 if result.killed_by_deadline {
@@ -325,8 +381,10 @@ impl ScriptExecutor {
                         "reason": "deadline_killed",
                         "detail": "the local ssh process was killed at the deadline; the remote command's fate is unknown",
                         "partialOutput": {
-                            "stdout": trim_to_bound(&result.stdout),
-                            "stderr": trim_to_bound(&result.stderr),
+                            "stdout": stdout,
+                            "stderr": stderr,
+                            "truncatedStdout": truncated_stdout,
+                            "truncatedStderr": truncated_stderr,
                         },
                     })
                     .to_string();
@@ -350,9 +408,7 @@ impl ScriptExecutor {
                 }
             }
             (None, Some(detail)) => {
-                let error_json =
-                    serde_json::json!({ "reason": "connection_failed", "detail": detail })
-                        .to_string();
+                let error_json = transport_failure_json("connection_failed", &detail);
                 operations
                     .complete(&operation.id, "failed", None, Some(&error_json))
                     .await
@@ -372,6 +428,7 @@ impl ScriptExecutor {
         script: &str,
         metadata: &ScriptMetadata,
         deadline: Duration,
+        guest_watchdog: bool,
     ) -> (Option<fleet_provider_ssh::ExecutionResult>, Option<String>) {
         let provider = self.provider.clone();
         let limiter = self.limiter.clone();
@@ -379,8 +436,14 @@ impl ScriptExecutor {
         let script = script.to_owned();
         let metadata = metadata.clone();
         tokio::task::spawn_blocking(move || {
-            fleet_provider_ssh::execute_script(
-                &provider, &limiter, &spec, &script, &metadata, deadline,
+            fleet_provider_ssh::execute_script_with(
+                &provider,
+                &limiter,
+                &spec,
+                &script,
+                &metadata,
+                deadline,
+                guest_watchdog,
             )
         })
         .await
@@ -408,13 +471,14 @@ impl ScriptExecutor {
             SshExecAuth::Agent => SshAuth::Agent,
             SshExecAuth::IdentityFile { path } => SshAuth::IdentityFile { path: path.clone() },
         };
-        let (spec, verified, host) = resolve_ssh_endpoint(
+        let (mut spec, verified, host) = resolve_ssh_endpoint(
             self.machines.as_ref(),
             &payload.machine_id,
             &payload.endpoint_id,
             auth,
         )
         .await?;
+        spec.guest_os = payload.guest_os;
         Ok((spec, verified, host))
     }
 }
@@ -462,6 +526,7 @@ pub(crate) async fn resolve_ssh_endpoint(
         .map_err(|_| "the endpoint reference's port is not a number")?;
     Ok((
         SshConnectionSpec {
+            guest_os: fleet_core::GuestOs::Linux,
             host: host.to_owned(),
             port,
             user: user.to_owned(),
@@ -472,21 +537,218 @@ pub(crate) async fn resolve_ssh_endpoint(
     ))
 }
 
-fn trim_to_bound(text: &str) -> String {
-    if text.len() <= RESULT_STRING_BOUND {
-        text.to_owned()
-    } else {
-        let mut end = RESULT_STRING_BOUND;
-        while !text.is_char_boundary(end) {
-            end -= 1;
-        }
-        format!("{}…", &text[..end])
-    }
-}
-
 /// Convenience: the noop executor remains available for hosts that do not
 /// carry SSH machines.
 #[must_use]
 pub fn noop_only_executor() -> impl OperationExecutor {
     fleet_application::worker::NoopExecutor
+}
+
+/// The stored error for a failure whose detail is transport or tool text
+/// (node- and network-supplied): scrubbed and bounded like command output.
+fn transport_failure_json(reason: &str, detail: &str) -> String {
+    let (detail, _) = scrub_and_bound(detail, false);
+    serde_json::json!({ "reason": reason, "detail": detail }).to_string()
+}
+
+/// Scrubs credential shapes from command output, then bounds it. Scrubbing
+/// first means a credential straddling the bound is never half kept. The
+/// returned flag is true when the provider already truncated the output or
+/// this bound cut it.
+fn scrub_and_bound(text: &str, provider_truncated: bool) -> (String, bool) {
+    scrub_and_bound_with(text, provider_truncated, str::to_owned)
+}
+
+pub(crate) use fleet_core::{scrub_and_bound_with, scrub_window};
+
+#[cfg(test)]
+mod tests {
+    use super::{redact_collected_facts, scrub_and_bound, transport_failure_json};
+    use fleet_core::RESULT_STRING_BOUND;
+
+    /// The guest-side deadline watchdog (#455) is on unless a payload turns
+    /// it off, and only the detached start does.
+    #[test]
+    fn an_ssh_exec_payload_runs_under_the_guest_watchdog_unless_it_says_not() {
+        let base = |extra: &str| {
+            format!(
+                r#"{{"machineId":"m","endpointId":"e","script":"s","auth":{{"type":"agent"}},"timeoutSeconds":5{extra}}}"#
+            )
+        };
+        let default: super::SshExecPayload = serde_json::from_str(&base("")).unwrap();
+        assert!(default.guest_watchdog);
+        let off: super::SshExecPayload =
+            serde_json::from_str(&base(r#","guestWatchdog":false"#)).unwrap();
+        assert!(!off.guest_watchdog);
+    }
+
+    /// The transport error text for a failed connection or collection is
+    /// node- and tool-supplied: a userinfo URL is masked and a huge detail cut.
+    #[test]
+    fn a_transport_failure_detail_is_scrubbed_and_bounded() {
+        for reason in ["connection_failed", "collection_failed"] {
+            let raw = format!(
+                "ssh: connect via https://user:hunter2pw@proxy.invalid/ failed {}",
+                "e".repeat(RESULT_STRING_BOUND * 2)
+            );
+            let json = transport_failure_json(reason, &raw);
+            assert!(!json.contains("hunter2"), "{json}");
+            let value: serde_json::Value = serde_json::from_str(&json).unwrap();
+            assert_eq!(value["reason"], reason);
+            let detail = value["detail"].as_str().unwrap();
+            assert!(detail.len() <= RESULT_STRING_BOUND + 4, "{}", detail.len());
+        }
+    }
+
+    fn probe_fact(value: &str) -> fleet_core::CapabilityFact {
+        fleet_core::CapabilityFact {
+            namespace: "git".to_owned(),
+            name: "remote".to_owned(),
+            value: Some(value.to_owned()),
+            status: fleet_core::CapabilityStatus::Known,
+            observed_at: fleet_core::Timestamp::from_unix_millis(0),
+            source: "agentless/1".to_owned(),
+        }
+    }
+
+    #[test]
+    fn collected_facts_are_redacted_capped_and_size_checked() {
+        let facts =
+            redact_collected_facts(&[probe_fact("https://user:hunter2pw@host.invalid/r")]).unwrap();
+        assert!(!format!("{facts:?}").contains("hunter2"));
+        let many: Vec<_> = (0..300).map(|_| probe_fact("v")).collect();
+        assert!(redact_collected_facts(&many).is_err());
+        let bulky: Vec<_> = (0..40).map(|_| probe_fact(&"z".repeat(3_000))).collect();
+        assert!(redact_collected_facts(&bulky).is_err());
+    }
+
+    #[test]
+    fn a_credential_at_the_bound_of_a_huge_stream_is_never_half_kept() {
+        for tail in ["y".repeat(20_000), format!(" {}", "y".repeat(20_000))] {
+            for secret in [
+                "https://user:hunter2pw@host.invalid/r",
+                "user:hunter2pw@host.invalid",
+            ] {
+                let text = format!("{} {secret}{tail}", "x".repeat(2_990));
+                let (out, truncated) = scrub_and_bound(&text, false);
+                assert!(!out.contains("hunter2"), "{out}");
+                assert!(!out.contains("user:"), "{out}");
+                assert!(truncated);
+                assert!(out.ends_with('…'), "the cut is visible in the text");
+            }
+        }
+    }
+
+    #[test]
+    fn output_is_scrubbed_before_it_is_stored() {
+        let (text, truncated) =
+            scrub_and_bound("cloned https://user:secret@host.invalid/repo\n", false);
+        assert!(!text.contains("secret"), "{text}");
+        assert!(text.contains("***@host.invalid"), "{text}");
+        assert!(!truncated);
+    }
+
+    #[test]
+    fn a_credential_at_the_bound_is_not_half_kept() {
+        let filler = "x".repeat(RESULT_STRING_BOUND - 100);
+        let password = "p".repeat(200);
+        let (text, truncated) = scrub_and_bound(
+            &format!("{filler} https://user:{password}@host.invalid/repo"),
+            false,
+        );
+        assert!(!text.contains("pppp"), "no part of the password survives");
+        assert!(
+            text.ends_with("***@host.invalid/repo"),
+            "{}",
+            &text[text.len() - 40..]
+        );
+        assert!(
+            !truncated,
+            "the raw text was over the bound but nothing was dropped after scrubbing"
+        );
+        // Cut at the bound: the credential is already gone, so the cut can
+        // never leave a fragment of it.
+        let (text, truncated) = scrub_and_bound(
+            &format!(
+                "https://user:{password}@host.invalid/{}",
+                "z".repeat(RESULT_STRING_BOUND)
+            ),
+            false,
+        );
+        assert!(!text.contains("pppp"), "no part of the password survives");
+        assert!(truncated);
+    }
+
+    #[test]
+    fn huge_adversarial_output_is_scrubbed_in_bounded_time() {
+        let started = std::time::Instant::now();
+        let (text, truncated) = scrub_and_bound(&"@".repeat(1024 * 1024), false);
+        assert!(truncated);
+        assert!(text.len() <= RESULT_STRING_BOUND + 4);
+        assert!(started.elapsed() < std::time::Duration::from_secs(5));
+        let emails = "abc@example.com,".repeat(64 * 1024);
+        let (_, truncated) = scrub_and_bound(&emails, false);
+        assert!(truncated);
+    }
+
+    /// A credential wrapped in terminal colour codes is still redacted:
+    /// scrubbing runs before control characters become spaces.
+    #[test]
+    fn a_credential_wrapped_in_terminal_escapes_is_redacted() {
+        for text in [
+            "remote: \u{1b}[1muser:secretpw\u{1b}[0m@host.invalid",
+            "https://\u{1b}[1muser:secretpw\u{1b}[0m@host.invalid/x",
+            "user:sec\0retpw@host.invalid",
+        ] {
+            let (out, _) = scrub_and_bound(text, false);
+            assert!(!out.contains("secretpw"), "{out:?}");
+            assert!(!out.contains("sec retpw"), "{out:?}");
+            assert!(!out.chars().any(|c| c.is_control() && c != '\n'), "{out:?}");
+        }
+    }
+
+    #[test]
+    fn a_window_cut_never_splits_a_credential() {
+        let filler = "x ".repeat(RESULT_STRING_BOUND);
+        let tail = format!(
+            "{filler}{}https://user:secret@host.invalid/r",
+            "y ".repeat(16 * 1024)
+        );
+        let (text, truncated) = scrub_and_bound(&tail, false);
+        assert!(truncated);
+        assert!(!text.contains("secret"), "{text}");
+    }
+
+    #[test]
+    fn the_flags_stay_accurate() {
+        let (_, provider) = scrub_and_bound("short", true);
+        assert!(provider, "a provider truncation is kept");
+        let (text, cut) = scrub_and_bound(&"y".repeat(RESULT_STRING_BOUND + 50), false);
+        assert!(cut, "this bound's own cut is reported");
+        assert!(text.ends_with('…'));
+        let (_, clean) = scrub_and_bound("short", false);
+        assert!(!clean);
+    }
+
+    /// #382: control characters are flattened and the bound counts escaped
+    /// bytes, so both streams together always fit the stored result limit.
+    #[test]
+    fn control_characters_and_escapes_cannot_exceed_the_stored_limit() {
+        for filler in ["\u{1}", "\u{1b}", "\"", "\\", "\n", "\0"] {
+            let stream = filler.repeat(RESULT_STRING_BOUND);
+            let (stdout, _) = scrub_and_bound(&stream, false);
+            let (stderr, _) = scrub_and_bound(&stream, false);
+            assert!(!stdout.chars().any(|c| c.is_control() && c != '\n'));
+            let record = serde_json::json!({
+                "exitCode": 1, "stdout": stdout, "stderr": stderr,
+                "truncatedStdout": true, "truncatedStderr": true,
+            })
+            .to_string();
+            assert!(
+                record.len() <= fleet_storage_sqlite::operations::MAX_RESULT_JSON,
+                "{filler:?}: {}",
+                record.len()
+            );
+        }
+    }
 }

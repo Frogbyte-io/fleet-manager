@@ -182,6 +182,73 @@ fi
     .to_owned()
 }
 
+/// The Windows probe: the same fact set and JSON-line protocol, read through
+/// CIM and .NET (Windows PowerShell 5.1) instead of `uname` and `/proc`. Each
+/// fact is independent (a failing query is `unavailable`, never fatal) and
+/// values are base64 of their UTF-8 bytes. The tool set is skipped as
+/// `unknown`, exactly like any non-Linux family: tool detection has not been
+/// validated on Windows.
+const WINDOWS_PROBE: &str = r#"$fleetT = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()
+function fleetEmit($ns, $name, $value, $status) {
+  $v = ''
+  if ($null -ne $value -and "$value" -ne '') {
+    $v = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes("$value"))
+  }
+  [Console]::Out.Write('{"namespace":"' + $ns + '","name":"' + $name + '","value64":"' + $v + '","status":"' + $status + '","at":' + $fleetT + "}`n")
+}
+function fleetFact($ns, $name, [scriptblock]$read) {
+  $value = $null
+  try { $value = & $read } catch { $value = $null }
+  if ($null -ne $value -and "$value" -ne '') { fleetEmit $ns $name $value 'known' } else { fleetEmit $ns $name '' 'unavailable' }
+}
+$fleetOs = $null; $fleetCs = $null; $fleetCpu = $null
+try { $fleetOs = Get-CimInstance -ClassName Win32_OperatingSystem } catch { }
+try { $fleetCs = Get-CimInstance -ClassName Win32_ComputerSystem } catch { }
+try { $fleetCpu = @(Get-CimInstance -ClassName Win32_Processor)[0] } catch { }
+fleetFact host architecture {
+  switch ($env:PROCESSOR_ARCHITEW6432, $env:PROCESSOR_ARCHITECTURE | Where-Object { $_ } | Select-Object -First 1) {
+    'AMD64' { 'x86_64' } 'ARM64' { 'aarch64' } 'x86' { 'i686' } default { $_ }
+  }
+}
+fleetFact host hostname { [Net.Dns]::GetHostName() }
+fleetFact os kernel { $fleetOs.Version }
+fleetEmit os family 'Windows' known
+fleetEmit os distribution 'windows' known
+fleetFact os distribution_version { $fleetOs.Caption }
+fleetFact hardware cpu_cores { [Environment]::ProcessorCount }
+fleetFact hardware memory_bytes { [uint64]$fleetCs.TotalPhysicalMemory }
+$fleetDrive = $null
+try { $fleetDrive = New-Object System.IO.DriveInfo ($env:SystemDrive) } catch { }
+fleetFact hardware disk_free_bytes { $fleetDrive.AvailableFreeSpace }
+fleetFact hardware disk_total_bytes { $fleetDrive.TotalSize }
+fleetFact host virtualization {
+  $maker = "$($fleetCs.Manufacturer)"
+  if ($maker -match 'QEMU') { 'qemu' }
+  elseif ($maker -match 'VMware') { 'vmware' }
+  elseif ($maker -match 'Microsoft' -and "$($fleetCs.Model)" -match 'Virtual') { 'microsoft' }
+  elseif ($fleetCs.HypervisorPresent) { 'hypervisor' }
+}
+fleetFact hardware model { $fleetCs.Model }
+fleetFact hardware cpu_model { "$($fleetCpu.Name)".Trim() }
+fleetFact network ipv4 {
+  (Get-NetIPAddress -AddressFamily IPv4 -ErrorAction Stop |
+    Where-Object { $_.IPAddress -notlike '127.*' -and $_.IPAddress -notlike '169.254.*' } |
+    Select-Object -First 1).IPAddress
+}
+foreach ($skipped in 'git', 'docker', 'tailscale', 'mise', 'frogenv', 'skills-manager-cli', 'claude', 'codex') {
+  fleetEmit tool $skipped '' unknown
+}
+"#;
+
+/// The probe script for a guest shell.
+#[must_use]
+pub fn probe_script_for(shell: crate::shell::GuestShell) -> String {
+    match shell {
+        crate::shell::GuestShell::Posix => probe_script(),
+        crate::shell::GuestShell::PowerShell => WINDOWS_PROBE.to_owned(),
+    }
+}
+
 /// Runs the probe over a verified endpoint and returns its facts.
 ///
 /// # Errors
@@ -193,11 +260,12 @@ pub fn collect(
     endpoint: &SshConnectionSpec,
     deadline: Duration,
 ) -> Result<Vec<fleet_core::CapabilityFact>, SshProviderError> {
+    let shell = crate::shell::GuestShell::for_os(endpoint.guest_os)?;
     let result = execute_script(
         provider,
         limiter,
         endpoint,
-        &probe_script(),
+        &probe_script_for(shell),
         &crate::ScriptMetadata::default(),
         deadline,
     )?;
@@ -274,4 +342,65 @@ pub fn parse_probe_output(
         }
     }
     facts
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::exec::ScriptMetadata;
+    use crate::pwsh_support::{require_pwsh, run_ps, text};
+    use crate::shell::GuestShell;
+
+    #[test]
+    fn the_windows_probe_runs_and_every_line_is_a_valid_fact() {
+        let Some(pwsh) = require_pwsh() else { return };
+        // On a Linux test host the CIM queries do not exist, so those facts
+        // are reported unavailable: the point is that the script parses, never
+        // dies mid-run, and speaks the same protocol.
+        let out = run_ps(
+            &pwsh,
+            &probe_script_for(GuestShell::PowerShell),
+            &ScriptMetadata::default(),
+            b"",
+            None,
+        );
+        assert_eq!(out.status.code(), Some(0), "{out:?}");
+        let stdout = text(&out.stdout);
+        let facts = parse_probe_output(&stdout, SystemTime::now());
+        assert_eq!(facts.len(), stdout.lines().count(), "{stdout}");
+        let find = |namespace: &str, name: &str| {
+            facts
+                .iter()
+                .find(|fact| fact.namespace == namespace && fact.name == name)
+                .unwrap_or_else(|| panic!("no {namespace}/{name} in {stdout}"))
+        };
+        assert_eq!(find("os", "family").value.as_deref(), Some("Windows"));
+        assert_eq!(find("os", "distribution").value.as_deref(), Some("windows"));
+        assert_eq!(find("host", "hostname").status.id(), "known");
+        for (namespace, name) in [
+            ("host", "architecture"),
+            ("os", "kernel"),
+            ("hardware", "cpu_cores"),
+            ("hardware", "memory_bytes"),
+            ("hardware", "disk_free_bytes"),
+            ("hardware", "disk_total_bytes"),
+            ("host", "virtualization"),
+            ("hardware", "model"),
+            ("hardware", "cpu_model"),
+            ("network", "ipv4"),
+        ] {
+            find(namespace, name);
+        }
+        for tool in ["git", "docker", "claude", "codex"] {
+            assert_eq!(find("tool", tool).status.id(), "unknown");
+        }
+        // The Windows probe never touches `uname` or `/proc`.
+        let script = probe_script_for(GuestShell::PowerShell);
+        assert!(!script.contains("uname") && !script.contains("/proc"));
+    }
+
+    #[test]
+    fn the_linux_probe_is_unchanged() {
+        assert_eq!(probe_script_for(GuestShell::Posix), probe_script());
+    }
 }

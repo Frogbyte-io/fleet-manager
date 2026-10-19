@@ -20,16 +20,24 @@
 //!   is evidence, not authority).
 //! - **Security headers** on every response keep the web shell from being
 //!   framed, MIME-sniffed, or leaking referrers.
+//! - **Style nonces, never `'unsafe-inline'`.** Some web dependencies
+//!   (CodeMirror) inject `<style>` elements at runtime. The shell's
+//!   `index.html` carries [`CSP_NONCE_PLACEHOLDER`] (Vite's `html.cspNonce`);
+//!   each HTML response gets a fresh random nonce substituted for it and
+//!   allowed in `style-src`, so only styles the shell's own code creates
+//!   apply. Scripts get no nonce: they stay `'self'`-only.
 #![warn(missing_docs)]
 
 use std::str::FromStr as _;
 
 use axum::{
+    body::Body,
     extract::Request,
     http::{HeaderValue, Method, StatusCode, header},
     middleware::Next,
     response::{IntoResponse as _, Response},
 };
+use base64::Engine as _;
 use fleet_core::{ErrorCode, IdGenerator as _, PublicError, RetryClass, UuidV7Generator};
 
 use fleet_api::ApiError;
@@ -110,16 +118,54 @@ fn same_origin(origin: &str, host: Option<&str>) -> bool {
     origin_authority.eq_ignore_ascii_case(host)
 }
 
+/// The token the built web shell carries wherever a per-response CSP nonce
+/// belongs (Vite's `html.cspNonce`, set in `apps/web/vite.config.ts`). It is
+/// not secret: it only marks where the controller writes the real nonce.
+pub const CSP_NONCE_PLACEHOLDER: &str = "__FLEET_CSP_NONCE__";
+
+/// The policy for every response that does not carry a nonce. `style-src`
+/// stays the last directive: the shell's nonce is appended to it.
+const CSP: &str = "default-src 'self'; img-src 'self' data:; style-src 'self'";
+
+/// The largest HTML body the nonce rewrite will buffer. The shell's
+/// `index.html` is about a kilobyte; an HTML response that does not declare a
+/// length at or under this is not the shell and passes through untouched.
+const MAX_HTML_REWRITE: usize = 1024 * 1024;
+
 /// Adds the security headers the web shell and the API should always carry.
-pub async fn security_headers(request: Request, next: Next) -> Response {
-    let mut response = next.run(request).await;
+///
+/// An HTML response that contains [`CSP_NONCE_PLACEHOLDER`] gets a fresh
+/// nonce written over the placeholder and allowed in `style-src`, and is
+/// marked `no-store` so a cached copy can never pair an old nonce with a new
+/// policy. Every other response gets the static policy.
+///
+/// `HEAD` is answered as a `GET` whose body is then dropped, so a `HEAD` of
+/// the shell reports the rewritten representation's length and caching
+/// headers rather than the file's. (Axum and the static service already
+/// answer `HEAD` with their `GET` handlers; only the body differs.)
+pub async fn security_headers(mut request: Request, next: Next) -> Response {
+    let head = request.method() == Method::HEAD;
+    if head {
+        *request.method_mut() = Method::GET;
+    }
+    let response = next.run(request).await;
+    let mut response = if is_html(&response) {
+        with_style_nonce(response).await
+    } else {
+        response
+    };
+    if head {
+        *response.body_mut() = Body::empty();
+    }
     let headers = response.headers_mut();
-    // The shell loads nothing but its own assets; scripts from anywhere else
-    // are an attack, not a feature.
-    headers.insert(
-        header::CONTENT_SECURITY_POLICY,
-        HeaderValue::from_static("default-src 'self'; img-src 'self' data:; style-src 'self'"),
-    );
+    if !headers.contains_key(header::CONTENT_SECURITY_POLICY) {
+        // The shell loads nothing but its own assets; scripts from anywhere
+        // else are an attack, not a feature.
+        headers.insert(
+            header::CONTENT_SECURITY_POLICY,
+            HeaderValue::from_static(CSP),
+        );
+    }
     headers.insert(
         header::X_CONTENT_TYPE_OPTIONS,
         HeaderValue::from_static("nosniff"),
@@ -130,6 +176,66 @@ pub async fn security_headers(request: Request, next: Next) -> Response {
         HeaderValue::from_static("no-referrer"),
     );
     response
+}
+
+fn is_html(response: &Response) -> bool {
+    response
+        .headers()
+        .get(header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.split(';').next())
+        .is_some_and(|media_type| media_type.trim().eq_ignore_ascii_case("text/html"))
+}
+
+/// Writes a fresh nonce over the placeholder in an HTML body and sets the
+/// matching policy. A body without the placeholder is passed through
+/// unchanged (and gets the static policy from the caller).
+async fn with_style_nonce(response: Response) -> Response {
+    // Only a body that declares a small length is buffered; anything else
+    // (streamed, large) is not the shell and keeps its status and body.
+    let declared = response
+        .headers()
+        .get(header::CONTENT_LENGTH)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.parse::<usize>().ok());
+    if declared.is_none_or(|length| length > MAX_HTML_REWRITE) {
+        return response;
+    }
+    let (mut parts, body) = response.into_parts();
+    let Ok(bytes) = axum::body::to_bytes(body, MAX_HTML_REWRITE).await else {
+        // A read error on a small file: the response was already broken and
+        // its body is gone, so report it rather than send a truncated page.
+        return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+    };
+    let rewritten = std::str::from_utf8(&bytes)
+        .ok()
+        .filter(|html| html.contains(CSP_NONCE_PLACEHOLDER))
+        .and_then(|html| Some((html, style_nonce()?)));
+    let Some((html, nonce)) = rewritten else {
+        return Response::from_parts(parts, Body::from(bytes));
+    };
+    let html = html.replace(CSP_NONCE_PLACEHOLDER, &nonce);
+    // `CSP` ends with the style-src directive, so the nonce extends it.
+    let policy = format!("{CSP} 'nonce-{nonce}'");
+    let headers = &mut parts.headers;
+    // Base64 is header-safe; the conversion cannot fail.
+    if let Ok(policy) = HeaderValue::from_str(&policy) {
+        headers.insert(header::CONTENT_SECURITY_POLICY, policy);
+    }
+    headers.insert(header::CONTENT_LENGTH, HeaderValue::from(html.len()));
+    headers.insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+    headers.remove(header::ETAG);
+    headers.remove(header::LAST_MODIFIED);
+    Response::from_parts(parts, Body::from(html))
+}
+
+/// 128 random bits, base64-encoded, as CSP nonces should be. `None` when the
+/// OS has no randomness to give; the caller then serves the nonce-free
+/// policy, which blocks injected styles rather than allowing them.
+fn style_nonce() -> Option<String> {
+    let mut bytes = [0_u8; 16];
+    getrandom::getrandom(&mut bytes).ok()?;
+    Some(base64::engine::general_purpose::STANDARD.encode(bytes))
 }
 
 #[cfg(test)]
@@ -147,5 +253,15 @@ mod tests {
         assert!(!same_origin("http://box.lan:8080", None));
         // A proxy header is not a Host.
         assert!(!same_origin("http://box.lan:8080", Some("evil.example")));
+    }
+
+    #[test]
+    fn style_nonces_are_fresh_and_header_safe() {
+        let first = style_nonce().unwrap();
+        let second = style_nonce().unwrap();
+        assert_ne!(first, second);
+        // 16 bytes of base64: long enough to be unguessable.
+        assert_eq!(first.len(), 24);
+        assert!(HeaderValue::from_str(&format!("'nonce-{first}'")).is_ok());
     }
 }

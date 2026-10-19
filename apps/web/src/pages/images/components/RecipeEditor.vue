@@ -54,6 +54,8 @@ watch(() => [props.recipe?.id, props.recipe?.updatedAt], reset)
 
 const analysis = computed(() => analyze(content.value))
 const fields = computed(() => (analysis.value.editable ? analysis.value.fields : null))
+// A clone with no disks keeps its source's storage: the pool is metadata only.
+const diskless = computed(() => analysis.value.editable && analysis.value.diskless)
 
 // The builder is the source of truth for node, pool, and source when the
 // template has one; the draft metadata follows it.
@@ -157,7 +159,10 @@ const missing = computed(() => (props.recipe && dirty.value
   ? 'fleetctl has no recipe update command; save the draft here, then publish.'
   : 'Fix the draft to see the command.'))
 
-const inputClass = 'h-8 rounded-sm border border-input bg-background px-2 font-mono text-foreground'
+// Fields fill their grid cell and may shrink below the browser's intrinsic
+// input width, so the form never pushes the page wider than a phone.
+const inputClass = 'h-8 w-full min-w-0 rounded-sm border border-input bg-background px-2 font-mono text-foreground'
+const plainInputClass = 'h-8 w-full min-w-0 rounded-sm border border-input bg-background px-2 text-foreground'
 </script>
 
 <template>
@@ -166,11 +171,11 @@ const inputClass = 'h-8 rounded-sm border border-input bg-background px-2 font-m
     data-testid="recipe-editor"
   >
     <div class="flex items-start gap-2">
-      <div>
+      <div class="min-w-0">
         <p class="fc-kicker">
           {{ recipe ? `recipe · ${recipe.id}` : 'new recipe' }} · structured ⇄ raw · unknown fields preserved
         </p>
-        <h3 class="font-head text-[17px] font-extrabold">
+        <h3 class="break-words font-head text-[17px] font-extrabold">
           {{ name || 'Untitled recipe' }}
           <span
             v-if="dirty"
@@ -188,8 +193,8 @@ const inputClass = 'h-8 rounded-sm border border-input bg-background px-2 font-m
       </button>
     </div>
 
-    <div class="grid gap-2 text-xs sm:grid-cols-2">
-      <label class="flex flex-col gap-1">
+    <div class="grid grid-cols-1 gap-2 text-xs sm:grid-cols-2">
+      <label class="flex min-w-0 flex-col gap-1">
         <span class="fc-kicker">Name</span>
         <input
           v-model="name"
@@ -197,27 +202,27 @@ const inputClass = 'h-8 rounded-sm border border-input bg-background px-2 font-m
           data-testid="recipe-name"
         >
       </label>
-      <label class="flex flex-col gap-1">
+      <label class="flex min-w-0 flex-col gap-1">
         <span class="fc-kicker">Description</span>
         <input
           v-model="description"
-          class="h-8 rounded-sm border border-input bg-background px-2 text-foreground"
+          :class="plainInputClass"
         >
       </label>
     </div>
 
-    <div class="grid gap-4 xl:grid-cols-2">
-      <section class="space-y-2 text-xs">
+    <div class="grid grid-cols-1 gap-4 xl:grid-cols-2">
+      <section class="min-w-0 space-y-2 text-xs">
         <h4 class="fc-kicker border-b border-fc-line pb-1">
           Structured (Proxmox builder)
         </h4>
         <template v-if="fields">
-          <div class="grid grid-cols-2 gap-2">
-            <label class="flex flex-col gap-1">
+          <div class="grid grid-cols-1 gap-2 sm:grid-cols-2">
+            <label class="flex min-w-0 flex-col gap-1">
               <span class="fc-kicker">Builder</span>
               <select
                 :value="fields.builderType"
-                class="h-8 rounded-sm border border-input bg-background px-2 text-foreground"
+                :class="plainInputClass"
                 data-testid="field-builder"
                 @change="update('builderType', ($event.target as HTMLSelectElement).value as StructuredFields['builderType'])"
               >
@@ -225,7 +230,7 @@ const inputClass = 'h-8 rounded-sm border border-input bg-background px-2 font-m
                 <option value="proxmox-iso">proxmox-iso</option>
               </select>
             </label>
-            <label class="flex flex-col gap-1">
+            <label class="flex min-w-0 flex-col gap-1">
               <span class="fc-kicker">Node</span>
               <input
                 :value="fields.node"
@@ -234,8 +239,23 @@ const inputClass = 'h-8 rounded-sm border border-input bg-background px-2 font-m
                 @change="update('node', ($event.target as HTMLInputElement).value)"
               >
             </label>
-            <label class="flex flex-col gap-1">
+            <label
+              v-if="diskless"
+              class="flex min-w-0 flex-col gap-1"
+            >
               <span class="fc-kicker">Storage pool</span>
+              <input
+                v-model="storagePool"
+                :class="inputClass"
+                data-testid="field-pool"
+                aria-describedby="pool-inherited"
+              >
+            </label>
+            <label
+              v-else
+              class="flex min-w-0 flex-col gap-1"
+            >
+              <span class="fc-kicker">Storage pool (first disk)</span>
               <input
                 :value="fields.storagePool"
                 :class="inputClass"
@@ -245,7 +265,7 @@ const inputClass = 'h-8 rounded-sm border border-input bg-background px-2 font-m
             </label>
             <label
               v-if="fields.builderType === 'proxmox-clone'"
-              class="flex flex-col gap-1"
+              class="flex min-w-0 flex-col gap-1"
             >
               <span class="fc-kicker">Clone from (VM name or VMID)</span>
               <input
@@ -256,7 +276,7 @@ const inputClass = 'h-8 rounded-sm border border-input bg-background px-2 font-m
               >
             </label>
             <template v-else>
-              <label class="flex flex-col gap-1">
+              <label class="flex min-w-0 flex-col gap-1">
                 <span class="fc-kicker">ISO file</span>
                 <input
                   :value="fields.isoFile"
@@ -264,7 +284,7 @@ const inputClass = 'h-8 rounded-sm border border-input bg-background px-2 font-m
                   @change="update('isoFile', ($event.target as HTMLInputElement).value)"
                 >
               </label>
-              <label class="flex flex-col gap-1">
+              <label class="flex min-w-0 flex-col gap-1">
                 <span class="fc-kicker">ISO storage pool</span>
                 <input
                   :value="fields.isoStoragePool"
@@ -273,7 +293,7 @@ const inputClass = 'h-8 rounded-sm border border-input bg-background px-2 font-m
                 >
               </label>
             </template>
-            <label class="flex flex-col gap-1">
+            <label class="flex min-w-0 flex-col gap-1">
               <span class="fc-kicker">Cores</span>
               <input
                 :value="fields.cores ?? ''"
@@ -284,7 +304,7 @@ const inputClass = 'h-8 rounded-sm border border-input bg-background px-2 font-m
                 @change="update('cores', numberOrNull(($event.target as HTMLInputElement).value))"
               >
             </label>
-            <label class="flex flex-col gap-1">
+            <label class="flex min-w-0 flex-col gap-1">
               <span class="fc-kicker">Memory (MiB)</span>
               <input
                 :value="fields.memory ?? ''"
@@ -295,17 +315,21 @@ const inputClass = 'h-8 rounded-sm border border-input bg-background px-2 font-m
                 @change="update('memory', numberOrNull(($event.target as HTMLInputElement).value))"
               >
             </label>
-            <label class="flex flex-col gap-1">
-              <span class="fc-kicker">Disk size</span>
+            <label
+              v-if="!diskless"
+              class="flex min-w-0 flex-col gap-1"
+            >
+              <span class="fc-kicker">Disk size (first disk)</span>
               <input
                 :value="fields.diskSize"
                 placeholder="40G"
                 :class="inputClass"
+                data-testid="field-disk-size"
                 @change="update('diskSize', ($event.target as HTMLInputElement).value)"
               >
             </label>
-            <label class="flex flex-col gap-1">
-              <span class="fc-kicker">Bridge</span>
+            <label class="flex min-w-0 flex-col gap-1">
+              <span class="fc-kicker">Bridge (first network adapter)</span>
               <input
                 :value="fields.bridge"
                 placeholder="vmbr0"
@@ -313,25 +337,17 @@ const inputClass = 'h-8 rounded-sm border border-input bg-background px-2 font-m
                 @change="update('bridge', ($event.target as HTMLInputElement).value)"
               >
             </label>
-            <label class="flex flex-col gap-1">
-              <span class="fc-kicker">Cloud-init user</span>
-              <input
-                :value="fields.cloudInitUser"
-                :class="inputClass"
-                @change="update('cloudInitUser', ($event.target as HTMLInputElement).value)"
-              >
-            </label>
-            <label class="col-span-2 flex flex-col gap-1">
-              <span class="fc-kicker">Cloud-init SSH keys (URL-encoded)</span>
-              <input
-                :value="fields.sshKeys"
-                :class="inputClass"
-                @change="update('sshKeys', ($event.target as HTMLInputElement).value)"
-              >
-            </label>
           </div>
+          <p
+            v-if="diskless"
+            id="pool-inherited"
+            class="text-[11px] text-fc-muted"
+            data-testid="pool-inherited"
+          >
+            This clone declares no disks, so it keeps the source template's storage. The storage pool here is the version's declared pool; the template can't set it. Add disks in the raw template only if the image needs extra disks: Packer adds them next to the source's.
+          </p>
           <p class="text-[11px] text-fc-faint">
-            These are the keys Fleet's structured view reads from the first Proxmox builder. Everything else in the template (other builders, provisioners, variables, unknown fields) is left as it is. A cleared field removes its key.
+            These are the keys Fleet's structured view reads from the first Proxmox builder: storage pool and disk size on <code>disks[0]</code>, the bridge on <code>network_adapters[0]</code>, and the ISO on <code>boot_iso</code>. Everything else in the template (other builders, provisioners, variables, unknown fields) is left as it is. A cleared field removes its key.
           </p>
         </template>
         <template v-else>
@@ -341,26 +357,26 @@ const inputClass = 'h-8 rounded-sm border border-input bg-background px-2 font-m
           >
             {{ analysis.editable ? '' : analysis.reason }}
           </p>
-          <div class="grid grid-cols-3 gap-2">
-            <label class="flex flex-col gap-1">
+          <div class="grid grid-cols-1 gap-2 sm:grid-cols-3">
+            <label class="flex min-w-0 flex-col gap-1">
               <span class="fc-kicker">Node</span>
               <input
                 v-model="node"
                 :class="inputClass"
               >
             </label>
-            <label class="flex flex-col gap-1">
+            <label class="flex min-w-0 flex-col gap-1">
               <span class="fc-kicker">Storage pool</span>
               <input
                 v-model="storagePool"
                 :class="inputClass"
               >
             </label>
-            <label class="flex flex-col gap-1">
+            <label class="flex min-w-0 flex-col gap-1">
               <span class="fc-kicker">Source</span>
               <select
                 v-model="source"
-                class="h-8 rounded-sm border border-input bg-background px-2 text-foreground"
+                :class="plainInputClass"
               >
                 <option value="clone">clone</option>
                 <option value="iso">iso</option>
@@ -370,7 +386,7 @@ const inputClass = 'h-8 rounded-sm border border-input bg-background px-2 font-m
         </template>
       </section>
 
-      <section class="space-y-2 text-xs">
+      <section class="min-w-0 space-y-2 text-xs">
         <h4 class="fc-kicker border-b border-fc-line pb-1">
           Raw .pkr.json
         </h4>

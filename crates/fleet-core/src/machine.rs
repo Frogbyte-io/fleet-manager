@@ -57,6 +57,10 @@ impl CapabilityStatus {
     }
 }
 
+/// The most capability facts one record or report may carry. The controller
+/// refuses more, and fleetd stops collecting at the same number.
+pub const MAX_CAPABILITY_FACTS: usize = 256;
+
 /// One namespaced capability fact about a machine.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -100,6 +104,18 @@ impl CapabilityFact {
         Ok(())
     }
 
+    /// A copy whose node-supplied text is safe to store: `value` and `source`
+    /// are scrubbed of credential shapes, flattened and bounded. Everything
+    /// that records facts from a node or a probe runs them through this.
+    #[must_use]
+    pub fn redacted(&self) -> Self {
+        Self {
+            value: self.value.as_deref().map(crate::scrub_failure_detail),
+            source: crate::scrub_failure_detail(&self.source),
+            ..self.clone()
+        }
+    }
+
     /// The displayed status: a recorded `known` fact ages into `stale` once
     /// its observation is older than the threshold; every other status is
     /// what was recorded. This is the rule that keeps "we do not know
@@ -111,7 +127,10 @@ impl CapabilityFact {
         freshness_threshold_ms: i64,
     ) -> CapabilityStatus {
         if self.status == CapabilityStatus::Known
-            && now.unix_millis() - self.observed_at.unix_millis() > freshness_threshold_ms
+            && now
+                .unix_millis()
+                .saturating_sub(self.observed_at.unix_millis())
+                > freshness_threshold_ms
         {
             CapabilityStatus::Stale
         } else {
@@ -200,6 +219,16 @@ mod tests {
             aged.effective_status(now, threshold),
             CapabilityStatus::Stale
         );
+
+        // Extreme observation times neither panic nor wrap: a minimum one
+        // is simply ancient, so the fact is stale.
+        for at in [i64::MIN, -1, 0] {
+            let odd = fact(CapabilityStatus::Known, at);
+            assert_eq!(
+                odd.effective_status(now, threshold),
+                CapabilityStatus::Stale
+            );
+        }
 
         // "The machine says it is missing" never quietly becomes "stale":
         // unavailable means something different from unknown and from aged.

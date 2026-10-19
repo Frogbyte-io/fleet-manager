@@ -310,6 +310,13 @@ impl OnboardingExecutor {
             }
         };
 
+        let facts = match crate::exec::redact_collected_facts(&facts) {
+            Ok(facts) => facts,
+            Err(detail) => {
+                return fail_operation(operations, &operation.id, "collection_failed", &detail)
+                    .await;
+            }
+        };
         let count = facts.len();
         draft.facts = facts;
         draft.discovery_source = Some(fleet_provider_ssh::PROBE_SOURCE.to_owned());
@@ -338,6 +345,7 @@ fn connection_spec(draft: &OnboardingDraft) -> Result<SshConnectionSpec, String>
         OnboardAuth::IdentityFile { path } => SshAuth::IdentityFile { path: path.clone() },
     };
     Ok(SshConnectionSpec {
+        guest_os: fleet_core::GuestOs::Linux,
         host: draft.endpoint.host.clone(),
         port: draft.endpoint.port,
         user: draft.endpoint.user.clone(),

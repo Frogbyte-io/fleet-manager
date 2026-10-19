@@ -10,12 +10,7 @@ use sqlx::SqlitePool;
 use std::time::Duration;
 
 mod common;
-use common::{TestSshd, start_sshd, whoami};
-use tokio::sync::Mutex;
-
-/// The stub CLI and its install location are shared machine state; the
-/// tests serialize their installation and removal.
-static CLI_LOCK: Mutex<()> = Mutex::const_new(());
+use common::{TestSshd, start_sshd, start_sshd_with_home, whoami};
 
 /// The composed fixture: store, operations, frogenv executor, and a
 /// verified endpoint.
@@ -136,7 +131,7 @@ fn install_stub_cli(home: &str, mode: &str) -> String {
     let path = format!("{bin_dir}/frogenv");
     let stub = format!(
         r#"#!/usr/bin/env bash
-echo "$@" >> /tmp/fleet-frogenv-stub.log
+echo "$@" >> "$HOME/frogenv-stub.log"
 mode="{mode}"
 case "$1" in
   --version) echo "frogenv 0.2.0" ;;
@@ -188,16 +183,13 @@ exit 0
     path
 }
 
-fn remove_stub_cli(home: &str) {
-    let _ = std::fs::remove_file(format!("{home}/.local/bin/frogenv"));
-}
-
 #[tokio::test]
 async fn the_status_surface_answers_the_documented_json() {
-    let _guard = CLI_LOCK.lock().await;
-    let sshd = start_sshd();
+    // A private home per test: the stub CLI never touches the real $HOME.
+    let home_dir = tempfile::tempdir().unwrap();
+    let sshd = start_sshd_with_home(home_dir.path());
     let fixture = compose(&sshd).await;
-    let home = std::env::var("HOME").unwrap();
+    let home = home_dir.path().display().to_string();
     let _path = install_stub_cli(&home, "configured");
 
     let payload = serde_json::json!({
@@ -212,15 +204,15 @@ async fn the_status_surface_answers_the_documented_json() {
     assert_eq!(result["status"]["configured"], true);
     assert_eq!(result["status"]["machineState"], "approved");
     assert_eq!(result["status"]["machineId"], "host-abc123");
-    remove_stub_cli(&home);
 }
 
 #[tokio::test]
 async fn a_shape_changed_status_degrades_explicitly() {
-    let _guard = CLI_LOCK.lock().await;
-    let sshd = start_sshd();
+    // A private home per test: the stub CLI never touches the real $HOME.
+    let home_dir = tempfile::tempdir().unwrap();
+    let sshd = start_sshd_with_home(home_dir.path());
     let fixture = compose(&sshd).await;
-    let home = std::env::var("HOME").unwrap();
+    let home = home_dir.path().display().to_string();
     // A stub that answers human text for status (an upgrade Fleet has not
     // been taught).
     let bin_dir = format!("{home}/.local/bin");
@@ -247,15 +239,15 @@ async fn a_shape_changed_status_degrades_explicitly() {
     assert_eq!(state, "failed");
     let error = error.expect("the degradation names its reason");
     assert!(error.contains("unsupported_version"), "{error}");
-    remove_stub_cli(&home);
 }
 
 #[tokio::test]
 async fn a_blocked_ceremony_is_a_first_class_state_not_a_hang() {
-    let _guard = CLI_LOCK.lock().await;
-    let sshd = start_sshd();
+    // A private home per test: the stub CLI never touches the real $HOME.
+    let home_dir = tempfile::tempdir().unwrap();
+    let sshd = start_sshd_with_home(home_dir.path());
     let fixture = compose(&sshd).await;
-    let home = std::env::var("HOME").unwrap();
+    let home = home_dir.path().display().to_string();
     let _path = install_stub_cli(&home, "blocked");
 
     for kind in ["frogenv.setup", "frogenv.login", "frogenv.request"] {
@@ -274,15 +266,15 @@ async fn a_blocked_ceremony_is_a_first_class_state_not_a_hang() {
             "{kind}: {error}"
         );
     }
-    remove_stub_cli(&home);
 }
 
 #[tokio::test]
 async fn a_willing_ceremony_completes() {
-    let _guard = CLI_LOCK.lock().await;
-    let sshd = start_sshd();
+    // A private home per test: the stub CLI never touches the real $HOME.
+    let home_dir = tempfile::tempdir().unwrap();
+    let sshd = start_sshd_with_home(home_dir.path());
     let fixture = compose(&sshd).await;
-    let home = std::env::var("HOME").unwrap();
+    let home = home_dir.path().display().to_string();
     let _path = install_stub_cli(&home, "willing");
 
     let payload = serde_json::json!({
@@ -293,17 +285,16 @@ async fn a_willing_ceremony_completes() {
     });
     let (state, _result, error) = fixture.run_kind("frogenv.setup", payload).await;
     assert_eq!(state, "succeeded", "{error:?}");
-    remove_stub_cli(&home);
 }
 
 #[tokio::test]
 async fn env_run_passes_the_command_array_verbatim() {
-    let _guard = CLI_LOCK.lock().await;
-    let sshd = start_sshd();
+    // A private home per test: the stub CLI never touches the real $HOME.
+    let home_dir = tempfile::tempdir().unwrap();
+    let sshd = start_sshd_with_home(home_dir.path());
     let fixture = compose(&sshd).await;
-    let home = std::env::var("HOME").unwrap();
+    let home = home_dir.path().display().to_string();
     let _path = install_stub_cli(&home, "willing");
-    std::fs::remove_file("/tmp/fleet-frogenv-stub.log").ok();
 
     let root = std::env::temp_dir().join(format!("fleet-frogenv-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&root);
@@ -322,13 +313,12 @@ async fn env_run_passes_the_command_array_verbatim() {
     let result: serde_json::Value = serde_json::from_str(&result.unwrap()).unwrap();
     assert_eq!(result["kind"], "env run");
 
-    let log = std::fs::read_to_string("/tmp/fleet-frogenv-stub.log").unwrap();
+    let log = std::fs::read_to_string(format!("{home}/frogenv-stub.log")).unwrap();
     assert!(
         log.contains("env run -- pytest -q tests/"),
         "the command array survives verbatim: {log}"
     );
     let _ = std::fs::remove_dir_all(&root);
-    remove_stub_cli(&home);
 }
 
 #[tokio::test]
@@ -351,10 +341,11 @@ async fn a_traversal_root_is_refused_before_any_ssh_work() {
 
 #[tokio::test]
 async fn value_shaped_output_is_redacted_in_the_public_result() {
-    let _guard = CLI_LOCK.lock().await;
-    let sshd = start_sshd();
+    // A private home per test: the stub CLI never touches the real $HOME.
+    let home_dir = tempfile::tempdir().unwrap();
+    let sshd = start_sshd_with_home(home_dir.path());
     let fixture = compose(&sshd).await;
-    let home = std::env::var("HOME").unwrap();
+    let home = home_dir.path().display().to_string();
     let bin_dir = format!("{home}/.local/bin");
     std::fs::create_dir_all(&bin_dir).unwrap();
     let path = format!("{bin_dir}/frogenv");
@@ -380,16 +371,14 @@ async fn value_shaped_output_is_redacted_in_the_public_result() {
     let error = error.expect("the failure carries a detail");
     assert!(!error.contains("AGE-SECRET-KEY"), "{error}");
     assert!(error.contains("[redacted"), "{error}");
-    remove_stub_cli(&home);
 }
 
 #[tokio::test]
 async fn an_absent_cli_fails_honestly() {
-    let _guard = CLI_LOCK.lock().await;
-    let sshd = start_sshd();
+    // A private home per test: the stub CLI never touches the real $HOME.
+    let home_dir = tempfile::tempdir().unwrap();
+    let sshd = start_sshd_with_home(home_dir.path());
     let fixture = compose(&sshd).await;
-    let home = std::env::var("HOME").unwrap();
-    remove_stub_cli(&home);
 
     let payload = serde_json::json!({
         "machineId": fixture.machine_id,
@@ -405,12 +394,12 @@ async fn an_absent_cli_fails_honestly() {
 
 #[tokio::test]
 async fn a_hostile_root_is_data_not_script() {
-    let _guard = CLI_LOCK.lock().await;
-    let sshd = start_sshd();
+    // A private home per test: the stub CLI never touches the real $HOME.
+    let home_dir = tempfile::tempdir().unwrap();
+    let sshd = start_sshd_with_home(home_dir.path());
     let fixture = compose(&sshd).await;
-    let home = std::env::var("HOME").unwrap();
+    let home = home_dir.path().display().to_string();
     let _path = install_stub_cli(&home, "willing");
-    std::fs::remove_file("/tmp/fleet-frogenv-stub.log").ok();
 
     // A root carrying shell metacharacters is a path argument, never
     // script text: the script consumes it as a quoted positional, so the
@@ -432,5 +421,4 @@ async fn a_hostile_root_is_data_not_script() {
         !std::path::Path::new(&format!("/tmp/fleet-pwned-{}", std::process::id())).exists(),
         "the metacharacters must never execute"
     );
-    remove_stub_cli(&home);
 }

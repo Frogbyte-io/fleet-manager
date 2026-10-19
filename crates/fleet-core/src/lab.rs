@@ -53,6 +53,141 @@ impl ReadinessProbe {
     }
 }
 
+/// The operating system of a Lab guest. It selects the guest shell and the
+/// path rules; the template declares it because both must be chosen before
+/// the guest has proven anything (ADR 0015).
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum GuestOs {
+    /// A Linux guest with Bash (the default).
+    #[default]
+    Linux,
+    /// A Windows guest running OpenSSH Server and Windows PowerShell.
+    Windows,
+}
+
+impl GuestOs {
+    /// The stable string used in storage and the API.
+    #[must_use]
+    pub const fn id(self) -> &'static str {
+        match self {
+            Self::Linux => "linux",
+            Self::Windows => "windows",
+        }
+    }
+
+    /// Parses the stable string.
+    ///
+    /// # Errors
+    ///
+    /// Fails on an unrecognized guest OS id.
+    pub fn from_id(id: &str) -> Result<Self, String> {
+        match id {
+            "linux" => Ok(Self::Linux),
+            "windows" => Ok(Self::Windows),
+            other => Err(format!("unrecognized guest OS {other:?}")),
+        }
+    }
+}
+
+/// The longest local Windows account name (the SAM limit).
+pub const MAX_INTERACTIVE_USER_LEN: usize = 20;
+
+/// Validates an interactive test user name: 1 to 20 characters of
+/// `[A-Za-z0-9_.-]`, not starting with `-` or `.`. A domain prefix (`\\`),
+/// an `@` suffix, spaces and every shell or path metacharacter are refused,
+/// so the name is safe as data in a guest script and names a local account.
+///
+/// # Errors
+///
+/// Fails on a name outside that shape.
+pub fn validate_interactive_user_name(user: &str) -> Result<(), String> {
+    if user.is_empty()
+        || user.len() > MAX_INTERACTIVE_USER_LEN
+        || user.starts_with(['-', '.'])
+        || !user
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'-' | b'.'))
+    {
+        return Err(format!(
+            "the interactive user must be a local account name of 1..={MAX_INTERACTIVE_USER_LEN} characters from A-Z a-z 0-9 _ - ."
+        ));
+    }
+    Ok(())
+}
+
+/// Which guest session a `lab exec` command runs in.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ExecSession {
+    /// The SSH login's own session (the default; on Windows a
+    /// non-interactive service session).
+    #[default]
+    Service,
+    /// The template's interactive test user's desktop session.
+    Interactive,
+}
+
+impl ExecSession {
+    /// The stable string used in the API and payloads.
+    #[must_use]
+    pub const fn id(self) -> &'static str {
+        match self {
+            Self::Service => "service",
+            Self::Interactive => "interactive",
+        }
+    }
+
+    /// Parses the stable string.
+    ///
+    /// # Errors
+    ///
+    /// Fails on an unrecognized session.
+    pub fn from_id(id: &str) -> Result<Self, String> {
+        match id {
+            "service" => Ok(Self::Service),
+            "interactive" => Ok(Self::Interactive),
+            other => Err(format!(
+                "unrecognized session {other:?}; use service or interactive"
+            )),
+        }
+    }
+
+    /// The rule for running in this session on a guest of `guest_os`
+    /// whose template declares `interactive_user`: the interactive user's
+    /// name when the command must run in its desktop, `None` for the
+    /// service session.
+    ///
+    /// # Errors
+    ///
+    /// Fails, with a message fit for the caller, when `interactive` is
+    /// asked of a guest that cannot provide it: a non-Windows guest
+    /// (unsupported) or a template that declares no interactive user.
+    pub fn resolve(
+        self,
+        guest_os: GuestOs,
+        interactive_user: Option<&str>,
+    ) -> Result<Option<&str>, String> {
+        match self {
+            Self::Service => Ok(None),
+            Self::Interactive => {
+                if guest_os != GuestOs::Windows {
+                    return Err(
+                        "unsupported: --session interactive runs only on Windows guests".to_owned(),
+                    );
+                }
+                let user = interactive_user.ok_or_else(|| {
+                    "the lease's template declares no interactive user, so there is no desktop session to run in".to_owned()
+                })?;
+                // A row saved before the rule existed, or edited directly,
+                // is refused here too, not only where the guest reads it.
+                validate_interactive_user_name(user)?;
+                Ok(Some(user))
+            }
+        }
+    }
+}
+
 /// The cleanup strategy a template declares. `destroy` is the default;
 /// `revert` applies only to explicitly pooled guests; `keep` is gated at
 /// lease time in FM-711 and recorded here as data.
@@ -108,6 +243,10 @@ pub enum GuestState {
     /// The clone completed and the guest started (verified through the
     /// FM-601 agent data), but the readiness probe has not passed.
     Provisioned,
+    /// The clone is booting; a usable guest IP is not yet observed.
+    Booting,
+    /// SSH trust, configured probes, and project preparation are in progress.
+    Bootstrapping,
     /// The readiness probe passed; the TTL clock starts here.
     Ready,
     /// The readiness deadline expired without the probe passing: an
@@ -122,6 +261,8 @@ impl GuestState {
         match self {
             Self::Provisioning => "provisioning",
             Self::Provisioned => "provisioned",
+            Self::Booting => "booting",
+            Self::Bootstrapping => "bootstrapping",
             Self::Ready => "ready",
             Self::NeverReady => "never_ready",
         }
@@ -136,6 +277,8 @@ impl GuestState {
         match id {
             "provisioning" => Ok(Self::Provisioning),
             "provisioned" => Ok(Self::Provisioned),
+            "booting" => Ok(Self::Booting),
+            "bootstrapping" => Ok(Self::Bootstrapping),
             "ready" => Ok(Self::Ready),
             "never_ready" => Ok(Self::NeverReady),
             other => Err(format!("unrecognized guest state {other:?}")),
@@ -143,9 +286,61 @@ impl GuestState {
     }
 }
 
+fn default_ssh_user() -> String {
+    "root".to_owned()
+}
+fn default_ssh_port() -> u16 {
+    22
+}
+fn default_ssh_trust_mode() -> String {
+    "tofu".to_owned()
+}
+
+/// The audio devices a Lab template may declare: the models of Proxmox's
+/// `audio0` (qemu-server's `audio0` property, `device` enum).
+pub const LAB_AUDIO_DEVICES: [&str; 3] = ["ich9-intel-hda", "intel-hda", "AC97"];
+/// The audio drivers a Lab template may declare. PVE also knows `spice`,
+/// which needs a SPICE display a headless Lab guest does not have; only
+/// `none` (a guest-visible device with no host audio backend) is allowed.
+pub const LAB_AUDIO_DRIVERS: [&str; 1] = ["none"];
+
+/// A virtual audio device a Lab template declares for every guest it
+/// provides (Proxmox `audio0`, e.g. `device=ich9-intel-hda,driver=none`).
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LabAudio {
+    /// The device model, one of [`LAB_AUDIO_DEVICES`].
+    pub device: String,
+    /// The host backend, one of [`LAB_AUDIO_DRIVERS`].
+    pub driver: String,
+}
+
+impl LabAudio {
+    /// Validates the declaration against the allow-lists.
+    ///
+    /// # Errors
+    ///
+    /// Fails on a device or driver outside the allow-lists.
+    pub fn validate(&self) -> Result<(), String> {
+        if !LAB_AUDIO_DEVICES.contains(&self.device.as_str()) {
+            return Err(format!(
+                "the audio device must be one of {}",
+                LAB_AUDIO_DEVICES.join(", ")
+            ));
+        }
+        if !LAB_AUDIO_DRIVERS.contains(&self.driver.as_str()) {
+            return Err(format!(
+                "the audio driver must be one of {}",
+                LAB_AUDIO_DRIVERS.join(", ")
+            ));
+        }
+        Ok(())
+    }
+}
+
 /// A Lab template's content: the pinned image version, runtime
 /// constraints, the bootstrap profile, and the policies.
-#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct LabTemplateContent {
     /// The operator-facing template name.
@@ -167,12 +362,65 @@ pub struct LabTemplateContent {
     pub readiness_probe: ReadinessProbe,
     /// The SSH probe command, for the `ssh_exec` probe.
     pub readiness_command: Option<String>,
+    /// SSH account already configured in the pinned Linux image.
+    #[serde(default = "default_ssh_user")]
+    pub ssh_user: String,
+    /// The guest SSH listener port.
+    #[serde(default = "default_ssh_port")]
+    pub ssh_port: u16,
+    /// Host-key policy: `tofu` for Fleet-created guests or `pinned`.
+    #[serde(default = "default_ssh_trust_mode")]
+    pub ssh_trust_mode: String,
+    /// Public OpenSSH SHA256 fingerprint required for pinned trust.
+    #[serde(default)]
+    pub ssh_fingerprint: Option<String>,
     /// The readiness deadline in seconds; expiry is `never_ready`.
     pub readiness_deadline_seconds: u32,
     /// The default TTL in seconds, beginning at ready.
     pub ttl_seconds: u32,
     /// The cleanup strategy.
     pub cleanup: CleanupStrategy,
+    /// The virtual audio device every guest gets. `None` leaves the clone
+    /// as the image has it: a template without audio never strips a device
+    /// the image already carries.
+    #[serde(default)]
+    pub audio: Option<LabAudio>,
+    /// The guest's operating system; `linux` unless declared. Existing
+    /// templates read as `linux`.
+    #[serde(default)]
+    pub guest_os: GuestOs,
+    /// The local account whose interactive desktop session
+    /// `lab exec --session interactive` runs commands in (a user name,
+    /// never a password). Windows guests only; the image recipe or the
+    /// operator keeps that user logged on (autologon).
+    #[serde(default)]
+    pub interactive_user: Option<String>,
+}
+
+impl Default for LabTemplateContent {
+    fn default() -> Self {
+        Self {
+            name: String::new(),
+            description: String::new(),
+            image_version_id: String::new(),
+            cores: 0,
+            memory_mib: 0,
+            disk_gib: 0,
+            bootstrap_project_id: None,
+            readiness_probe: ReadinessProbe::default(),
+            readiness_command: None,
+            ssh_user: default_ssh_user(),
+            ssh_port: default_ssh_port(),
+            ssh_trust_mode: default_ssh_trust_mode(),
+            ssh_fingerprint: None,
+            readiness_deadline_seconds: 0,
+            ttl_seconds: 0,
+            cleanup: CleanupStrategy::default(),
+            audio: None,
+            guest_os: GuestOs::default(),
+            interactive_user: None,
+        }
+    }
 }
 
 impl LabTemplateContent {
@@ -197,8 +445,8 @@ impl LabTemplateContent {
         if self.cores == 0 || self.cores > 64 {
             return Err("the cores must be 1..=64".to_owned());
         }
-        if self.memory_mib == 0 || self.memory_mib > 262_144 {
-            return Err("the memory must be 1..=262144 MiB".to_owned());
+        if self.memory_mib < 16 || self.memory_mib > 262_144 {
+            return Err("the memory must be 16..=262144 MiB".to_owned());
         }
         if self.disk_gib == 0 || self.disk_gib > 4096 {
             return Err("the disk must be 1..=4096 GiB".to_owned());
@@ -213,6 +461,76 @@ impl LabTemplateContent {
             && self.readiness_command.as_deref().is_none_or(str::is_empty)
         {
             return Err("the ssh_exec probe requires a readiness command".to_owned());
+        }
+        self.validate_ssh()?;
+        self.validate_interactive_user()?;
+        if let Some(audio) = &self.audio {
+            audio.validate()?;
+        }
+        if self.readiness_probe == ReadinessProbe::ProjectReady
+            && self
+                .bootstrap_project_id
+                .as_deref()
+                .is_none_or(|id| id.trim().is_empty())
+        {
+            return Err("the project_ready probe requires a bootstrap project".to_owned());
+        }
+        Ok(())
+    }
+
+    /// Validates the interactive test user declaration: a plain local
+    /// account name, allowed only on a Windows guest.
+    ///
+    /// # Errors
+    /// Fails on a name that is not a local account name, or on a
+    /// non-Windows guest.
+    pub fn validate_interactive_user(&self) -> Result<(), String> {
+        let Some(user) = self.interactive_user.as_deref() else {
+            return Ok(());
+        };
+        if self.guest_os != GuestOs::Windows {
+            return Err("an interactive user needs a windows guest".to_owned());
+        }
+        validate_interactive_user_name(user)
+    }
+
+    /// Validates the non-secret SSH connection and host-key policy.
+    ///
+    /// # Errors
+    /// Fails on an invalid user/port, trust mode or missing pinned key.
+    pub fn validate_ssh(&self) -> Result<(), String> {
+        if self.ssh_user.is_empty()
+            || self.ssh_user.len() > 64
+            || self.ssh_user.starts_with('-')
+            || !self
+                .ssh_user
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'-'))
+            || self.ssh_port == 0
+        {
+            return Err("the Lab SSH user or port is invalid".to_owned());
+        }
+        if !matches!(self.ssh_trust_mode.as_str(), "tofu" | "pinned") {
+            return Err("Lab SSH trust must be tofu or pinned".to_owned());
+        }
+        if self.ssh_trust_mode == "pinned"
+            && self.ssh_fingerprint.as_deref().is_none_or(|value| {
+                let Some(digest) = value.strip_prefix("SHA256:") else {
+                    return true;
+                };
+                // OpenSSH emits the canonical unpadded base64 of 32 bytes:
+                // 43 symbols, with two zero padding bits in the final symbol.
+                digest.len() != 43
+                    || !digest
+                        .bytes()
+                        .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'+' | b'/'))
+                    || !digest
+                        .as_bytes()
+                        .last()
+                        .is_some_and(|b| b"AEIMQUYcgkosw048".contains(b))
+            })
+        {
+            return Err("pinned Lab SSH trust requires an OpenSSH SHA256 fingerprint".to_owned());
         }
         Ok(())
     }
@@ -233,10 +551,78 @@ mod tests {
             bootstrap_project_id: None,
             readiness_probe: ReadinessProbe::GuestAgent,
             readiness_command: None,
+            ssh_user: "root".to_owned(),
+            ssh_port: 22,
+            ssh_trust_mode: "tofu".to_owned(),
+            ssh_fingerprint: None,
             readiness_deadline_seconds: 300,
             ttl_seconds: 3_600,
             cleanup: CleanupStrategy::Destroy,
+            audio: None,
+            guest_os: GuestOs::Linux,
+            interactive_user: None,
         }
+    }
+
+    #[test]
+    fn interactive_user_names_and_session_rule() {
+        let mut template = content();
+        template.interactive_user = Some("qa".to_owned());
+        assert!(template.validate().is_err(), "linux guest refused");
+        template.guest_os = GuestOs::Windows;
+        assert!(template.validate().is_ok());
+        for bad in [
+            "",
+            "-qa",
+            ".qa",
+            "a b",
+            "DOM\\qa",
+            "qa@x",
+            "q;a",
+            "a/b",
+            "$(x)",
+            "qa\n",
+            "abcdefghijklmnopqrstu",
+            "é",
+        ] {
+            template.interactive_user = Some(bad.to_owned());
+            assert!(template.validate().is_err(), "{bad:?}");
+        }
+        assert_eq!(
+            ExecSession::from_id("interactive"),
+            Ok(ExecSession::Interactive)
+        );
+        assert!(ExecSession::from_id("x").is_err());
+        assert_eq!(ExecSession::Service.resolve(GuestOs::Linux, None), Ok(None));
+        let linux = ExecSession::Interactive.resolve(GuestOs::Linux, Some("qa"));
+        assert!(linux.unwrap_err().starts_with("unsupported"));
+        assert!(
+            ExecSession::Interactive
+                .resolve(GuestOs::Windows, None)
+                .is_err()
+        );
+        assert_eq!(
+            ExecSession::Interactive.resolve(GuestOs::Windows, Some("qa")),
+            Ok(Some("qa"))
+        );
+    }
+
+    #[test]
+    fn guest_os_defaults_to_linux_and_round_trips() {
+        assert_eq!(GuestOs::default(), GuestOs::Linux);
+        for os in [GuestOs::Linux, GuestOs::Windows] {
+            assert_eq!(GuestOs::from_id(os.id()), Ok(os));
+        }
+        assert!(GuestOs::from_id("macos").is_err());
+        // A template stored before the field existed reads as linux.
+        let mut json = serde_json::to_value(content()).unwrap();
+        json.as_object_mut().unwrap().remove("guestOs");
+        let back: LabTemplateContent = serde_json::from_value(json).unwrap();
+        assert_eq!(back.guest_os, GuestOs::Linux);
+        let mut windows = content();
+        windows.guest_os = GuestOs::Windows;
+        let text = serde_json::to_string(&windows).unwrap();
+        assert!(text.contains("\"guestOs\":\"windows\""), "{text}");
     }
 
     #[test]
@@ -251,6 +637,38 @@ mod tests {
         bad.readiness_deadline_seconds = 300;
         bad.ttl_seconds = 0;
         assert!(bad.validate().is_err());
+    }
+
+    #[test]
+    fn audio_is_optional_and_limited_to_the_allow_list() {
+        let mut with = content();
+        assert!(with.audio.is_none());
+        for device in LAB_AUDIO_DEVICES {
+            with.audio = Some(LabAudio {
+                device: device.to_owned(),
+                driver: "none".to_owned(),
+            });
+            assert!(with.validate().is_ok(), "{device}");
+        }
+        for (device, driver) in [
+            ("sb16", "none"),
+            ("", "none"),
+            ("ich9-intel-hda", "spice"),
+            ("ich9-intel-hda", ""),
+            ("ich9-intel-hda,driver=spice", "none"),
+            ("ich9-intel-hda", "none,x=1"),
+        ] {
+            with.audio = Some(LabAudio {
+                device: device.to_owned(),
+                driver: driver.to_owned(),
+            });
+            assert!(with.validate().is_err(), "{device}/{driver}");
+        }
+        // A published version stored before the field existed has none.
+        let mut stored = serde_json::to_value(content()).unwrap();
+        stored.as_object_mut().unwrap().remove("audio");
+        let back: LabTemplateContent = serde_json::from_value(stored).unwrap();
+        assert!(back.audio.is_none());
     }
 
     #[test]
@@ -272,6 +690,12 @@ mod tests {
         bad.cores = 2;
         bad.memory_mib = 262_145;
         assert!(bad.validate().is_err());
+        // PVE's minimum is 16 MiB.
+        bad.memory_mib = 15;
+        assert!(bad.validate().is_err());
+        let mut edge = content();
+        edge.memory_mib = 16;
+        assert!(edge.validate().is_ok());
         bad.memory_mib = 2048;
         bad.disk_gib = 4097;
         assert!(bad.validate().is_err());
@@ -297,6 +721,62 @@ mod tests {
     }
 
     #[test]
+    fn project_ready_requires_a_project_and_ssh_trust_is_validated() {
+        let mut template = content();
+        template.readiness_probe = ReadinessProbe::ProjectReady;
+        assert!(template.validate().is_err());
+        template.bootstrap_project_id = Some("project-1".to_owned());
+        assert!(template.validate().is_ok());
+        template.ssh_trust_mode = "pinned".to_owned();
+        assert!(template.validate().is_err());
+        template.ssh_fingerprint =
+            Some("SHA256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA".to_owned());
+        assert!(template.validate().is_ok());
+        template.ssh_user = "-oProxyCommand=bad".to_owned();
+        assert!(template.validate().is_err());
+        template.ssh_user = "fleet".to_owned();
+        template.ssh_port = 0;
+        assert!(template.validate().is_err());
+        template.ssh_port = 2222;
+        template.ssh_trust_mode = "insecure".to_owned();
+        assert!(template.validate().is_err());
+    }
+
+    #[test]
+    fn pinned_ssh_fingerprints_require_canonical_sha256_encoding() {
+        let mut template = content();
+        template.ssh_trust_mode = "pinned".to_owned();
+        for digest in [
+            "public-key-digest".to_owned(),
+            "A".repeat(42),
+            "A".repeat(44),
+            format!("{}=", "A".repeat(42)),
+            format!("{}B", "A".repeat(42)),
+            format!("{}-", "A".repeat(42)),
+        ] {
+            template.ssh_fingerprint = Some(format!("SHA256:{digest}"));
+            assert!(template.validate_ssh().is_err());
+        }
+        for last in "AEIMQUYcgkosw048".chars() {
+            template.ssh_fingerprint = Some(format!("SHA256:{}{last}", "A".repeat(42)));
+            assert!(template.validate_ssh().is_ok());
+        }
+    }
+
+    #[test]
+    fn historical_template_versions_inherit_lab_tofu_defaults() {
+        let mut json = serde_json::to_value(content()).unwrap();
+        for key in ["sshUser", "sshPort", "sshTrustMode", "sshFingerprint"] {
+            json.as_object_mut().unwrap().remove(key);
+        }
+        let version: LabTemplateContent = serde_json::from_value(json).unwrap();
+        assert_eq!(version.ssh_user, "root");
+        assert_eq!(version.ssh_port, 22);
+        assert_eq!(version.ssh_trust_mode, "tofu");
+        assert_eq!(version.ssh_fingerprint, None);
+    }
+
+    #[test]
     fn enums_round_trip_their_ids() {
         for id in ["guest_agent", "ssh_exec", "project_ready"] {
             assert_eq!(ReadinessProbe::from_id(id).unwrap().id(), id);
@@ -306,7 +786,14 @@ mod tests {
             assert_eq!(CleanupStrategy::from_id(id).unwrap().id(), id);
         }
         assert!(CleanupStrategy::from_id("mystery").is_err());
-        for id in ["provisioning", "provisioned", "ready", "never_ready"] {
+        for id in [
+            "provisioning",
+            "provisioned",
+            "booting",
+            "bootstrapping",
+            "ready",
+            "never_ready",
+        ] {
             assert_eq!(GuestState::from_id(id).unwrap().id(), id);
         }
         assert!(GuestState::from_id("mystery").is_err());
@@ -396,7 +883,7 @@ impl LeaseState {
 
 /// A lease: the owner/purpose/project-scoped request and lifecycle, with
 /// the public handle the CLI/API use.
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Lease {
     /// The lease's identity.
@@ -429,19 +916,27 @@ pub struct Lease {
     pub expires_at: Option<i64>,
     /// The cleanup attempts so far, for the backoff.
     pub cleanup_attempts: u32,
+    /// When the next cleanup attempt is due (epoch millis), while a
+    /// releasing lease is backing off after a failed attempt.
+    pub cleanup_next_at: Option<i64>,
 }
 
 impl Lease {
-    /// Marks a provisioning lease ready and starts its TTL, capped by the
-    /// creation-relative absolute lifetime.
+    /// Marks a provisioning, booting, or bootstrapping lease ready and starts
+    /// its TTL, capped by the creation-relative absolute lifetime.
     ///
     /// # Errors
     ///
-    /// Fails if the lease is not provisioning, has no provision record, has
-    /// an invalid TTL, or the deadline arithmetic overflows.
+    /// Fails outside provisioning, booting, and bootstrapping, or when the
+    /// provision link, TTL, or deadline arithmetic is invalid.
     pub fn mark_ready(&mut self, now: i64) -> Result<(), String> {
-        if self.state != LeaseState::Provisioning {
-            return Err("only provisioning leases can become ready".to_owned());
+        if !matches!(
+            self.state,
+            LeaseState::Provisioning | LeaseState::Booting | LeaseState::Bootstrapping
+        ) {
+            return Err(
+                "only provisioning, booting, or bootstrapping leases can become ready".to_owned(),
+            );
         }
         if self.provision_id.is_none() {
             return Err("a ready lease must be linked to a provision record".to_owned());
@@ -524,6 +1019,7 @@ mod lease_tests {
             ready_at: None,
             expires_at,
             cleanup_attempts: 0,
+            cleanup_next_at: None,
         }
     }
 

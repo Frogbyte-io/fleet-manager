@@ -24,6 +24,27 @@ use serde::{Deserialize, Serialize};
 use crate::audit::{AuditMetadata, AuditOutcome};
 use crate::authz::{AccessRequest, Authorizer, Decision, Permission, ReasonId, authorize};
 
+/// Which surface is creating an operation: the generic `POST /operations`,
+/// or a kind's own dedicated route (the Lab kinds are created only there).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum CreateRoute {
+    /// The generic surface.
+    Generic,
+    /// The kind's dedicated route, which already validated and authorized it.
+    Dedicated,
+    /// The action broker (FM-1040): the broker authorized the decision
+    /// (`action.request` under policy for `auto`, `action.approve` for an
+    /// approval) and a provider action built the operation. The caller needs
+    /// no `operation.create`, so a delegated principal can request an action
+    /// and never create its operation directly. Kinds that other dedicated
+    /// routes own stay refused.
+    Brokered,
+}
+
+/// The idempotency-key prefix the broker owns. The generic surface refuses
+/// it, so a caller cannot occupy the key a request's operation will use.
+pub const BROKER_IDEMPOTENCY_PREFIX: &str = "action-request:";
+
 /// The kinds of operation the public API accepts. Until providers and nodes
 /// teach the controller their own kinds, the vocabulary is deliberately tiny:
 /// an unknown kind is refused rather than accepted as an unspecified promise.
@@ -45,8 +66,14 @@ use crate::authz::{AccessRequest, Authorizer, Decision, Permission, ReasonId, au
 /// machine-scoped shape plus the plan and its approval identities
 /// (FM-402); the source kinds carry the remote/commit payloads and are
 /// catalog-level (FM-403).
-pub const CREATABLE_KINDS: [&str; 58] = [
+pub const CREATABLE_KINDS: [&str; 70] = [
     "noop",
+    // Brokered Coolify lifecycle kind (FM-1033): created only through the
+    // action broker.
+    "coolify.lifecycle",
+    "coolify.settings",
+    // Brokered site-template deploy kind (FM-1035).
+    "coolify.site",
     "ssh.exec",
     "agentless.inventory",
     "machine.onboard.test",
@@ -99,11 +126,21 @@ pub const CREATABLE_KINDS: [&str; 58] = [
     "proxmox.guest.snapshot",
     "proxmox.guest.snapshot-revert",
     "proxmox.guest.snapshot-delete",
+    "proxmox.guest.destroy",
     "proxmox.guest.clone",
     "proxmox.guest.template",
     "proxmox.task-cancel",
     "image.build",
     "lab.provision",
+    "lab.cleanup",
+    "lab.exec",
+    "lab.exec_detach",
+    "lab.collect",
+    "lab.put",
+    "lab.pool.fill",
+    // Brokered DNS kinds (FM-1042): created only through the action broker.
+    "dns.record.upsert",
+    "dns.record.delete",
 ];
 
 /// The machine-scoped permission a kind's creation requires, when any.
@@ -131,6 +168,7 @@ fn catalog_scoped_kind_permission(kind: &str) -> Option<Permission> {
         "proxmox.guest.snapshot"
         | "proxmox.guest.snapshot-revert"
         | "proxmox.guest.snapshot-delete"
+        | "proxmox.guest.destroy"
         | "proxmox.guest.clone"
         | "proxmox.guest.template"
         | "proxmox.task-cancel" => Some(Permission::ProxmoxDestructive),
@@ -193,10 +231,11 @@ pub const MAX_PAYLOAD_JSON: usize = 128 * 1024;
 
 /// The destructive-adjacent kinds: their creation requires a review token
 /// computed over exactly the payload being created.
-pub const DESTRUCTIVE_KINDS: [&str; 6] = [
+pub const DESTRUCTIVE_KINDS: [&str; 7] = [
     "proxmox.guest.snapshot",
     "proxmox.guest.snapshot-revert",
     "proxmox.guest.snapshot-delete",
+    "proxmox.guest.destroy",
     "proxmox.guest.clone",
     "proxmox.guest.template",
     "proxmox.task-cancel",
@@ -290,6 +329,15 @@ pub enum OperationUseCaseError {
         /// What is wrong, safe to print.
         detail: String,
     },
+    /// A policy refusal with a stable machine-readable reason (for example
+    /// `pool_member`). The request was well-formed and authorized, but the
+    /// target is protected; retrying cannot help until that changes.
+    Refused {
+        /// The stable reason id.
+        reason: &'static str,
+        /// What was refused, safe to print.
+        detail: String,
+    },
     /// The port or audit sink failed.
     Backend {
         /// The failing half.
@@ -305,6 +353,7 @@ impl fmt::Display for OperationUseCaseError {
             Self::Denied(decision) => write!(f, "denied: {decision}"),
             Self::NotFound { what } => write!(f, "not found: {what}"),
             Self::Invalid { detail } => write!(f, "invalid request: {detail}"),
+            Self::Refused { reason, detail } => write!(f, "refused ({reason}): {detail}"),
             Self::Backend { context, detail } => write!(f, "operation {context} failed: {detail}"),
         }
     }
@@ -541,7 +590,54 @@ pub struct Operations {
     pub(crate) port: Arc<dyn OperationPort>,
     audit: Arc<dyn AuditPort>,
     catalog_rollout_targets: Option<Arc<dyn CatalogRolloutTargetPort>>,
+    pool_members: Option<Arc<dyn PoolMemberLookup>>,
+    lease_owners: Option<Arc<dyn LeaseOwnerLookup>>,
     pub(crate) events: Option<Arc<crate::events::EventHub>>,
+    brokered_kinds: std::collections::BTreeSet<String>,
+}
+
+/// The stable reason a destroy or snapshot delete of a Lab pool member is
+/// refused with.
+pub const POOL_MEMBER_REASON: &str = "pool_member";
+
+/// The narrow view of Lab pools the operator Proxmox routes need: whether a
+/// guest is a current pool member.
+#[async_trait]
+pub trait PoolMemberLookup: fmt::Debug + Send + Sync {
+    /// The pool the guest is a member of on this account, when any.
+    ///
+    /// # Errors
+    ///
+    /// Fails when membership cannot be read; the caller refuses then.
+    async fn pool_of(&self, account_id: &str, vmid: u32) -> Result<Option<String>, String>;
+}
+
+/// The narrow view of Lab leases operation reads need: who owns a lease.
+/// A delegated credential may read only the operations of its own owner's
+/// leases.
+#[async_trait]
+pub trait LeaseOwnerLookup: fmt::Debug + Send + Sync {
+    /// The owner recorded on a lease, when the lease exists.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the lease store cannot be read; the caller refuses then.
+    async fn owner_of(&self, lease_id: &str) -> Result<Option<String>, String>;
+}
+
+/// [`PoolMemberLookup`] over the Lab pool storage port.
+#[derive(Debug)]
+pub struct PoolMembership(pub Arc<dyn crate::lab_pool::LabPoolPort>);
+
+#[async_trait]
+impl PoolMemberLookup for PoolMembership {
+    async fn pool_of(&self, account_id: &str, vmid: u32) -> Result<Option<String>, String> {
+        self.0
+            .member_by_vmid(account_id, vmid)
+            .await
+            .map(|member| member.map(|member| member.pool_id))
+            .map_err(|error| error.to_string())
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -609,7 +705,10 @@ impl Operations {
             port,
             audit,
             catalog_rollout_targets: None,
+            pool_members: None,
+            lease_owners: None,
             events: None,
+            brokered_kinds: std::collections::BTreeSet::new(),
         }
     }
 
@@ -624,7 +723,10 @@ impl Operations {
             port,
             audit,
             catalog_rollout_targets: None,
+            pool_members: None,
+            lease_owners: None,
             events: Some(events),
+            brokered_kinds: std::collections::BTreeSet::new(),
         }
     }
 
@@ -639,7 +741,10 @@ impl Operations {
             port,
             audit,
             catalog_rollout_targets: Some(targets),
+            pool_members: None,
+            lease_owners: None,
             events: None,
+            brokered_kinds: std::collections::BTreeSet::new(),
         }
     }
 
@@ -655,8 +760,122 @@ impl Operations {
             port,
             audit,
             catalog_rollout_targets: Some(targets),
+            pool_members: None,
+            lease_owners: None,
             events: Some(events),
+            brokered_kinds: std::collections::BTreeSet::new(),
         }
+    }
+
+    /// Supplies the Lab pool membership lookup. With it, `destroy` and
+    /// `snapshot-delete` refuse a pool member (`pool_member`).
+    #[must_use]
+    pub fn with_pool_members(mut self, pool_members: Arc<dyn PoolMemberLookup>) -> Self {
+        self.pool_members = Some(pool_members);
+        self
+    }
+
+    /// Declares the operation kinds provider actions own (FM-1040). The
+    /// generic surface refuses them: they are created only by the broker,
+    /// after a request and a decision.
+    #[must_use]
+    pub fn with_brokered_kinds(mut self, kinds: impl IntoIterator<Item = String>) -> Self {
+        self.brokered_kinds = kinds.into_iter().collect();
+        self
+    }
+
+    /// Supplies the lease owner lookup. Without it a delegated credential
+    /// can read no operation (fail closed).
+    #[must_use]
+    pub fn with_lease_owners(mut self, lease_owners: Arc<dyn LeaseOwnerLookup>) -> Self {
+        self.lease_owners = Some(lease_owners);
+        self
+    }
+
+    /// Refuses a destroy or snapshot delete of a current Lab pool member,
+    /// and audits the refusal. A membership that cannot be read fails the
+    /// request as a backend error (fail closed, retryable).
+    /// Runs after authorization, so a caller who may not operate Proxmox
+    /// cannot probe membership.
+    async fn refuse_pool_member(
+        &self,
+        principal_id: &str,
+        new: &NewOperation,
+    ) -> Result<(), OperationUseCaseError> {
+        let Some(lookup) = &self.pool_members else {
+            return Ok(());
+        };
+        if !matches!(
+            new.kind.as_str(),
+            "proxmox.guest.destroy" | "proxmox.guest.snapshot-delete"
+        ) {
+            return Ok(());
+        }
+        let payload = new
+            .payload_json
+            .as_deref()
+            .and_then(|payload| serde_json::from_str::<serde_json::Value>(payload).ok())
+            .unwrap_or_default();
+        let (Some(account_id), Some(vmid)) = (
+            payload["accountId"].as_str(),
+            payload["vmid"]
+                .as_u64()
+                .and_then(|vmid| u32::try_from(vmid).ok()),
+        ) else {
+            return Ok(());
+        };
+        // An unreadable membership is a backend failure, not a statement
+        // that the guest is a member: the request fails closed as retryable.
+        let pool_id = match lookup.pool_of(account_id, vmid).await {
+            Ok(None) => return Ok(()),
+            Ok(Some(pool_id)) => pool_id,
+            Err(detail) => {
+                return Err(OperationUseCaseError::Backend {
+                    context: "pool_membership",
+                    detail,
+                });
+            }
+        };
+        let detail =
+            format!("VMID {vmid} is a member of Lab pool {pool_id}; drain it from the pool first");
+        let vmid_text = vmid.to_string();
+        let mut metadata = AuditMetadata::default();
+        let facts = [
+            ("event", "proxmox_pool_member_refused"),
+            ("outcome", "refused"),
+            ("reason", POOL_MEMBER_REASON),
+            ("poolId", pool_id.as_str()),
+            ("vmid", vmid_text.as_str()),
+            ("kind", new.kind.as_str()),
+            ("accountId", account_id),
+        ];
+        for (key, value) in facts {
+            metadata
+                .insert(key, value)
+                .map_err(|error| OperationUseCaseError::Backend {
+                    context: "refusal_audit",
+                    detail: error.to_string(),
+                })?;
+        }
+        self.audit
+            .record_intent(&crate::audit::AuditIntent {
+                actor: principal_id.to_owned(),
+                action: Permission::ProxmoxDestructive.id().to_owned(),
+                resource: Some(format!("{account_id}/{vmid}")),
+                decision: Decision::allow(),
+                correlation_id: new.correlation_id.clone(),
+                operation_id: None,
+                metadata,
+            })
+            .await
+            .map_err(|detail| OperationUseCaseError::Backend {
+                context: "refusal_audit",
+                detail,
+            })?;
+        Err(OperationUseCaseError::Refused {
+            reason: POOL_MEMBER_REASON,
+            detail,
+        })
     }
 
     pub(crate) fn publish_operation(&self, operation: &Operation, completed: bool) {
@@ -669,7 +888,10 @@ impl Operations {
                 "agentless.inventory" | "node.inventory" | "machine.install-fleetd" => {
                     Some(crate::events::EventKind::MachineChanged)
                 }
-                "lab.provision" => Some(crate::events::EventKind::LeaseChanged),
+                // A collection records its failure on the lease detail.
+                "lab.provision" | "lab.cleanup" | "lab.collect" => {
+                    Some(crate::events::EventKind::LeaseChanged)
+                }
                 kind if kind.starts_with("proxmox.") => {
                     Some(crate::events::EventKind::ProxmoxChanged)
                 }
@@ -703,7 +925,33 @@ impl Operations {
         principal_id: &str,
         new: &NewOperation,
     ) -> Result<Operation, OperationUseCaseError> {
-        self.create_inner(authorizer, principal_id, new, false)
+        self.create_inner(authorizer, principal_id, new, CreateRoute::Generic)
+            .await
+    }
+
+    /// Creates the operation of a brokered action request. This is the
+    /// broker's entry point: it is `pub` only because the broker's
+    /// integration tests live in other crates, and nothing else should call
+    /// it. It refuses any kind no provider action has declared (see
+    /// [`Operations::with_brokered_kinds`]), so it cannot become a second
+    /// generic route. The broker has
+    /// already authorized the decision (`action.request` under policy, or
+    /// `action.approve`), so this route does not require `operation.create`:
+    /// a delegated principal can request an action and never create its
+    /// operation itself. Kinds with their own dedicated routes are refused,
+    /// and the machine-scoped permissions of a kind still apply.
+    ///
+    /// # Errors
+    ///
+    /// Fails on denial of a kind's own permission, an invalid operation, or a
+    /// backend failure.
+    pub async fn create_brokered(
+        &self,
+        authorizer: &dyn Authorizer,
+        principal_id: &str,
+        new: &NewOperation,
+    ) -> Result<Operation, OperationUseCaseError> {
+        self.create_inner(authorizer, principal_id, new, CreateRoute::Brokered)
             .await
     }
 
@@ -735,7 +983,267 @@ impl Operations {
                 detail: "the lab.provision payload must match its dedicated lease route".to_owned(),
             });
         }
-        self.create_inner(authorizer, principal_id, new, true).await
+        self.require_own_lease(principal_id, lease_id).await?;
+        self.create_inner(authorizer, principal_id, new, CreateRoute::Dedicated)
+            .await
+    }
+
+    /// Checks, before a release or sweep changes any lease, that the caller
+    /// may also queue the cleanup that change owes: otherwise the lease
+    /// would commit to `releasing` with no cleanup queued.
+    ///
+    /// # Errors
+    ///
+    /// Fails on denial.
+    pub fn authorize_lab_cleanup(
+        &self,
+        authorizer: &dyn Authorizer,
+        principal_id: &str,
+        lease_id: Option<&str>,
+    ) -> Result<(), OperationUseCaseError> {
+        for (action, resource) in [
+            (Permission::OperationCreate, Some("lab.cleanup")),
+            (Permission::LabLease, lease_id),
+        ] {
+            authorize(
+                authorizer,
+                AccessRequest {
+                    principal_id,
+                    action,
+                    resource,
+                },
+            )
+            .map_err(OperationUseCaseError::Denied)?;
+        }
+        Ok(())
+    }
+
+    /// Queues a `lab.exec` that `Lab::exec_lease` validated (FM-720), by a
+    /// caller allowed to exec on that lease.
+    ///
+    /// # Errors
+    ///
+    /// Fails on a mismatched payload, denial, or a backend failure.
+    pub async fn create_lab_exec(
+        &self,
+        authorizer: &dyn Authorizer,
+        principal_id: &str,
+        lease_id: &str,
+        new: &NewOperation,
+    ) -> Result<Operation, OperationUseCaseError> {
+        self.create_for_lease(
+            authorizer,
+            principal_id,
+            lease_id,
+            new,
+            "lab.exec",
+            Permission::LabExec,
+        )
+        .await
+    }
+
+    /// Queues a `lab.exec_detach` that `LabExecDetach::prepare_start`
+    /// validated (#394), by a caller allowed to run commands on that lease.
+    ///
+    /// # Errors
+    ///
+    /// Fails on a mismatched payload, denial, or a backend failure.
+    pub async fn create_lab_exec_detach(
+        &self,
+        authorizer: &dyn Authorizer,
+        principal_id: &str,
+        lease_id: &str,
+        new: &NewOperation,
+    ) -> Result<Operation, OperationUseCaseError> {
+        self.create_for_lease(
+            authorizer,
+            principal_id,
+            lease_id,
+            new,
+            "lab.exec_detach",
+            Permission::LabExec,
+        )
+        .await
+    }
+
+    /// Queues a `lab.collect` that `LabArtifacts::request_collect`
+    /// validated (FM-721), by a caller allowed to collect artifacts from
+    /// that lease.
+    ///
+    /// # Errors
+    ///
+    /// Fails on a mismatched payload, denial, or a backend failure.
+    pub async fn create_lab_collect(
+        &self,
+        authorizer: &dyn Authorizer,
+        principal_id: &str,
+        lease_id: &str,
+        new: &NewOperation,
+    ) -> Result<Operation, OperationUseCaseError> {
+        self.create_for_lease(
+            authorizer,
+            principal_id,
+            lease_id,
+            new,
+            "lab.collect",
+            Permission::LabArtifacts,
+        )
+        .await
+    }
+
+    /// Queues a `lab.put` that `LabPuts::request_put` validated (#393), by
+    /// a caller allowed to put files into that lease.
+    ///
+    /// # Errors
+    ///
+    /// Fails on a mismatched payload, denial, or a backend failure.
+    pub async fn create_lab_put(
+        &self,
+        authorizer: &dyn Authorizer,
+        principal_id: &str,
+        lease_id: &str,
+        new: &NewOperation,
+    ) -> Result<Operation, OperationUseCaseError> {
+        self.create_for_lease(
+            authorizer,
+            principal_id,
+            lease_id,
+            new,
+            "lab.put",
+            Permission::LabPut,
+        )
+        .await
+    }
+
+    /// Queues the `lab.cleanup` operation for one releasing lease (the
+    /// release and sweep routes), by a caller allowed to lease Lab guests.
+    ///
+    /// # Errors
+    ///
+    /// Fails on a mismatched payload, denial, or a backend failure.
+    pub async fn create_lab_cleanup(
+        &self,
+        authorizer: &dyn Authorizer,
+        principal_id: &str,
+        lease_id: &str,
+        new: &NewOperation,
+    ) -> Result<Operation, OperationUseCaseError> {
+        self.create_for_lease(
+            authorizer,
+            principal_id,
+            lease_id,
+            new,
+            "lab.cleanup",
+            Permission::LabLease,
+        )
+        .await
+    }
+
+    /// Queues the `lab.pool.fill` operation `LabPools::request_fill`
+    /// validated (FM-717), by a caller allowed to configure Lab.
+    ///
+    /// # Errors
+    ///
+    /// Fails on a mismatched payload, denial, or a backend failure.
+    pub async fn create_lab_pool_fill(
+        &self,
+        authorizer: &dyn Authorizer,
+        principal_id: &str,
+        pool_id: &str,
+        new: &NewOperation,
+    ) -> Result<Operation, OperationUseCaseError> {
+        let linked = new
+            .payload_json
+            .as_deref()
+            .and_then(|payload| serde_json::from_str::<serde_json::Value>(payload).ok())
+            .and_then(|payload| payload["poolId"].as_str().map(str::to_owned));
+        if new.kind != crate::lab_pool::FILL_KIND || linked.as_deref() != Some(pool_id) {
+            return Err(OperationUseCaseError::Invalid {
+                detail: "the lab.pool.fill payload must match its pool".to_owned(),
+            });
+        }
+        authorize(
+            authorizer,
+            AccessRequest {
+                principal_id,
+                action: Permission::LabConfig,
+                resource: Some(pool_id),
+            },
+        )
+        .map_err(OperationUseCaseError::Denied)?;
+        self.create_inner(authorizer, principal_id, new, CreateRoute::Dedicated)
+            .await
+    }
+
+    /// The shared path of the lease-scoped Lab kinds: never the generic
+    /// surface; the payload must name exactly this lease; the caller must
+    /// hold `permission` on it.
+    async fn create_for_lease(
+        &self,
+        authorizer: &dyn Authorizer,
+        principal_id: &str,
+        lease_id: &str,
+        new: &NewOperation,
+        kind: &str,
+        permission: Permission,
+    ) -> Result<Operation, OperationUseCaseError> {
+        let linked = new
+            .payload_json
+            .as_deref()
+            .and_then(|payload| serde_json::from_str::<serde_json::Value>(payload).ok())
+            .and_then(|payload| payload["leaseId"].as_str().map(str::to_owned));
+        if new.kind != kind || linked.as_deref() != Some(lease_id) {
+            return Err(OperationUseCaseError::Invalid {
+                detail: format!("the {kind} payload must match its lease"),
+            });
+        }
+        authorize(
+            authorizer,
+            AccessRequest {
+                principal_id,
+                action: permission,
+                resource: Some(lease_id),
+            },
+        )
+        .map_err(OperationUseCaseError::Denied)?;
+        self.require_own_lease(principal_id, lease_id).await?;
+        self.create_inner(authorizer, principal_id, new, CreateRoute::Dedicated)
+            .await
+    }
+
+    /// A delegated credential queues work only for its own owner's leases,
+    /// whatever route calls here; an unknown or foreign lease is not found.
+    async fn require_own_lease(
+        &self,
+        principal_id: &str,
+        lease_id: &str,
+    ) -> Result<(), OperationUseCaseError> {
+        if !crate::authz::is_delegated_principal(principal_id) {
+            return Ok(());
+        }
+        let not_found = || OperationUseCaseError::NotFound {
+            what: format!("lease {lease_id}"),
+        };
+        let lookup = self
+            .lease_owners
+            .as_ref()
+            .ok_or(OperationUseCaseError::Backend {
+                context: "lease_owner",
+                detail: "no lease owner lookup is wired".to_owned(),
+            })?;
+        let owner = lookup
+            .owner_of(lease_id)
+            .await
+            .map_err(|detail| OperationUseCaseError::Backend {
+                context: "lease_owner",
+                detail,
+            })?
+            .ok_or_else(not_found)?;
+        if crate::authz::owner_scope_permits(principal_id, &owner) {
+            Ok(())
+        } else {
+            Err(not_found())
+        }
     }
 
     #[allow(clippy::too_many_lines)]
@@ -744,17 +1252,46 @@ impl Operations {
         authorizer: &dyn Authorizer,
         principal_id: &str,
         new: &NewOperation,
-        allow_lab_provision: bool,
+        route: CreateRoute,
     ) -> Result<Operation, OperationUseCaseError> {
-        authorize(
-            authorizer,
-            AccessRequest {
-                principal_id,
-                action: Permission::OperationCreate,
-                resource: None,
-            },
-        )
-        .map_err(OperationUseCaseError::Denied)?;
+        if route == CreateRoute::Brokered && !self.brokered_kinds.contains(&new.kind) {
+            return Err(OperationUseCaseError::Invalid {
+                detail: "the brokered route creates only kinds a provider action declares"
+                    .to_owned(),
+            });
+        }
+        if route != CreateRoute::Brokered {
+            // The kind is the resource, so a policy can allow a principal to
+            // queue the Lab kinds its routes queue without the generic
+            // surface. The brokered route is authorized by the broker's
+            // decision instead.
+            authorize(
+                authorizer,
+                AccessRequest {
+                    principal_id,
+                    action: Permission::OperationCreate,
+                    resource: Some(&new.kind),
+                },
+            )
+            .map_err(OperationUseCaseError::Denied)?;
+            if self.brokered_kinds.contains(&new.kind) {
+                return Err(OperationUseCaseError::Invalid {
+                    detail: "this kind is run through an action request; POST /requests instead"
+                        .to_owned(),
+                });
+            }
+            if new
+                .idempotency_key
+                .as_deref()
+                .is_some_and(|key| key.starts_with(BROKER_IDEMPOTENCY_PREFIX))
+            {
+                return Err(OperationUseCaseError::Invalid {
+                    detail: format!(
+                        "idempotency keys starting with {BROKER_IDEMPOTENCY_PREFIX} are reserved"
+                    ),
+                });
+            }
+        }
 
         if !CREATABLE_KINDS.contains(&new.kind.as_str()) {
             return Err(OperationUseCaseError::Invalid {
@@ -930,8 +1467,52 @@ impl Operations {
                     });
                 }
             }
+        } else if new.kind == "lab.exec" {
+            // Authorized by `create_lab_exec` against its lease.
+            if route != CreateRoute::Dedicated {
+                return Err(OperationUseCaseError::Invalid {
+                    detail: "lab.exec runs through the lease exec route".to_owned(),
+                });
+            }
+        } else if new.kind == "lab.exec_detach" {
+            // Authorized by `create_lab_exec_detach` against its lease.
+            if route != CreateRoute::Dedicated {
+                return Err(OperationUseCaseError::Invalid {
+                    detail: "lab.exec_detach runs through the lease detached exec route".to_owned(),
+                });
+            }
+        } else if new.kind == "lab.collect" {
+            // Authorized by `create_lab_collect` against its lease.
+            if route != CreateRoute::Dedicated {
+                return Err(OperationUseCaseError::Invalid {
+                    detail: "lab.collect runs through the lease artifacts route".to_owned(),
+                });
+            }
+        } else if new.kind == "lab.put" {
+            // Authorized by `create_lab_put` against its lease.
+            if route != CreateRoute::Dedicated {
+                return Err(OperationUseCaseError::Invalid {
+                    detail: "lab.put runs through the lease files route".to_owned(),
+                });
+            }
+        } else if new.kind == crate::lab_pool::FILL_KIND {
+            // Authorized by `create_lab_pool_fill` against its pool.
+            if route != CreateRoute::Dedicated {
+                return Err(OperationUseCaseError::Invalid {
+                    detail: "lab.pool.fill is queued by filling a Lab pool, not created directly"
+                        .to_owned(),
+                });
+            }
+        } else if new.kind == "lab.cleanup" {
+            // Authorized by `create_lab_cleanup` against its lease.
+            if route != CreateRoute::Dedicated {
+                return Err(OperationUseCaseError::Invalid {
+                    detail: "lab.cleanup is queued by releasing a lease, not created directly"
+                        .to_owned(),
+                });
+            }
         } else if new.kind == "lab.provision" {
-            if !allow_lab_provision {
+            if route != CreateRoute::Dedicated {
                 return Err(OperationUseCaseError::Invalid {
                     detail: "lab.provision must use the dedicated lease provisioning route"
                         .to_owned(),
@@ -949,7 +1530,7 @@ impl Operations {
                 authorizer,
                 AccessRequest {
                     principal_id,
-                    action: Permission::LabProvision,
+                    action: Permission::LabLeaseProvision,
                     resource: Some(&lease_id),
                 },
             )
@@ -989,6 +1570,7 @@ impl Operations {
                 },
             )
             .map_err(OperationUseCaseError::Denied)?;
+            self.refuse_pool_member(principal_id, new).await?;
         }
         let operation = self
             .port
@@ -1094,7 +1676,7 @@ impl Operations {
                 Some(
                     &serde_json::json!({
                         "reason": "step_failed",
-                        "detail": detail,
+                        "detail": fleet_core::scrub_failure_detail(&detail),
                     })
                     .to_string(),
                 ),
@@ -1149,7 +1731,56 @@ impl Operations {
             },
         )
         .map_err(OperationUseCaseError::Denied)?;
-        self.port.get(id).await.map_err(map_port_failure("get"))
+        let operation = self.port.get(id).await.map_err(map_port_failure("get"))?;
+        if crate::authz::is_delegated_principal(principal_id) {
+            self.require_own_lab_operation(principal_id, &operation)
+                .await?;
+        }
+        Ok(operation)
+    }
+
+    /// A delegated credential reads only the operations a Lab route queued
+    /// for one of its owner's leases; any other operation is not found.
+    async fn require_own_lab_operation(
+        &self,
+        principal_id: &str,
+        operation: &Operation,
+    ) -> Result<(), OperationUseCaseError> {
+        let not_found = || OperationUseCaseError::NotFound {
+            what: format!("operation {}", operation.id),
+        };
+        let lease_id = operation
+            .kind
+            .starts_with("lab.")
+            .then(|| {
+                operation
+                    .payload_json
+                    .as_deref()
+                    .and_then(|payload| serde_json::from_str::<serde_json::Value>(payload).ok())
+                    .and_then(|payload| payload["leaseId"].as_str().map(str::to_owned))
+            })
+            .flatten()
+            .ok_or_else(not_found)?;
+        let lookup = self
+            .lease_owners
+            .as_ref()
+            .ok_or(OperationUseCaseError::Backend {
+                context: "lease_owner",
+                detail: "no lease owner lookup is wired".to_owned(),
+            })?;
+        let owner = lookup
+            .owner_of(&lease_id)
+            .await
+            .map_err(|detail| OperationUseCaseError::Backend {
+                context: "lease_owner",
+                detail,
+            })?
+            .ok_or_else(not_found)?;
+        if crate::authz::owner_scope_permits(principal_id, &owner) {
+            Ok(())
+        } else {
+            Err(not_found())
+        }
     }
 
     /// Lists operations, newest first.
@@ -1253,9 +1884,19 @@ impl Operations {
         result_json: Option<&str>,
         error_json: Option<&str>,
     ) -> Result<Operation, OperationUseCaseError> {
+        // The one chokepoint every executor's failure text passes through:
+        // an executor helper that forgets to scrub still cannot store a
+        // credential. Any terminal state but success carries failure data
+        // (a timed-out or cancelled node result holds node text too); a
+        // succeeded result is the executor's own data.
+        let error_json = error_json.map(scrub_stored_json);
+        let result_json = match (result_json, state) {
+            (Some(result), state) if state != "succeeded" => Some(scrub_stored_json(result)),
+            (result, _) => result.map(str::to_owned),
+        };
         let operation = self
             .port
-            .complete(id, state, result_json, error_json)
+            .complete(id, state, result_json.as_deref(), error_json.as_deref())
             .await
             .map_err(map_port_failure("complete"))?;
         self.publish_operation(&operation, true);
@@ -1273,6 +1914,18 @@ impl Operations {
                 detail,
             })?;
         Ok(operation)
+    }
+}
+
+/// Scrubs and bounds every string in a stored failure document. A document
+/// that is not JSON is scrubbed as one string.
+fn scrub_stored_json(document: &str) -> String {
+    match serde_json::from_str::<serde_json::Value>(document) {
+        Ok(mut value) => {
+            fleet_core::redact_json_strings(&mut value);
+            value.to_string()
+        }
+        Err(_) => fleet_core::scrub_failure_detail(document),
     }
 }
 
@@ -1425,8 +2078,9 @@ mod catalog_rollout_authorization_tests {
     use async_trait::async_trait;
 
     use super::{
-        AuditPort, CatalogRolloutTargetPort, NewOperation, Operation, OperationPort, Operations,
-        PortFailure, QueueDepths,
+        AuditPort, CatalogRolloutTargetPort, NewOperation, Operation, OperationPort,
+        OperationUseCaseError, Operations, PoolMemberLookup, PortFailure, QueueDepths,
+        review_token_for,
     };
     use crate::audit::{AuditIntent, AuditOutcome};
     use crate::authz::{AccessRequest, Authorizer, Decision, Permission, ReasonId};
@@ -1481,12 +2135,31 @@ mod catalog_rollout_authorization_tests {
         }
         async fn complete(
             &self,
-            _: &str,
-            _: &str,
-            _: Option<&str>,
-            _: Option<&str>,
+            id: &str,
+            state: &str,
+            result_json: Option<&str>,
+            error_json: Option<&str>,
         ) -> Result<Operation, PortFailure> {
-            Err(missing())
+            // Echoes what the port was handed, so a test sees what is stored.
+            Ok(Operation {
+                id: id.to_owned(),
+                kind: "test".to_owned(),
+                state: state.to_owned(),
+                idempotency_key: None,
+                progress_current: None,
+                progress_total: None,
+                progress_message: None,
+                deadline_at: None,
+                cancel_requested: false,
+                payload_json: None,
+                result_json: result_json.map(str::to_owned),
+                error_json: error_json.map(str::to_owned),
+                correlation_id: None,
+                created_at: 0,
+                updated_at: 0,
+                claimed_at: None,
+                worker_id: None,
+            })
         }
         async fn record_progress(
             &self,
@@ -1587,6 +2260,55 @@ mod catalog_rollout_authorization_tests {
             payload_json: Some(payload.to_string()),
             ..NewOperation::default()
         }
+    }
+
+    #[tokio::test]
+    async fn completing_an_operation_scrubs_the_stored_failure_text() {
+        let operations =
+            Operations::new(Arc::new(RecordingPort::default()), Arc::new(RecordingAudit));
+        let secret = "hunter2-not-a-real-secret";
+        let error = serde_json::json!({
+            "reason": "connection_failed",
+            "detail": format!("cannot reach https://user:{secret}@host.invalid/repo.git"),
+            "nested": { "note": format!("{{\"password\": \"{secret}\"}}") },
+        })
+        .to_string();
+        let done = operations
+            .complete("operation-1", "failed", Some(&error), Some(&error))
+            .await
+            .unwrap();
+        for stored in [done.error_json.unwrap(), done.result_json.unwrap()] {
+            assert!(!stored.contains(secret), "{stored}");
+            assert!(stored.contains("connection_failed"), "{stored}");
+            assert!(stored.contains("***@host.invalid"), "{stored}");
+        }
+        // A timed-out or cancelled result is failure data as well.
+        for state in ["timed_out", "cancelled", "rejected"] {
+            let done = operations
+                .complete("operation-1", state, Some(&error), None)
+                .await
+                .unwrap();
+            let stored = done.result_json.unwrap();
+            assert!(!stored.contains(secret), "{state}: {stored}");
+        }
+        // A non-JSON failure document is scrubbed as one string, and a
+        // succeeded result is the executor's own data, left alone.
+        let done = operations
+            .complete(
+                "operation-1",
+                "failed",
+                None,
+                Some("token=abcdefgh12345678"),
+            )
+            .await
+            .unwrap();
+        assert!(!done.error_json.unwrap().contains("abcdefgh12345678"));
+        let ok = serde_json::json!({ "detail": "kept as is" }).to_string();
+        let done = operations
+            .complete("operation-1", "succeeded", Some(&ok), None)
+            .await
+            .unwrap();
+        assert_eq!(done.result_json.as_deref(), Some(ok.as_str()));
     }
 
     #[tokio::test]
@@ -1741,5 +2463,123 @@ mod catalog_rollout_authorization_tests {
             Err(super::OperationUseCaseError::Invalid { .. })
         ));
         assert!(port.0.lock().unwrap().is_empty());
+    }
+
+    #[derive(Debug)]
+    struct Members(Result<Option<String>, String>);
+
+    #[async_trait]
+    impl PoolMemberLookup for Members {
+        async fn pool_of(&self, _: &str, _: u32) -> Result<Option<String>, String> {
+            self.0.clone()
+        }
+    }
+
+    #[derive(Debug, Default)]
+    struct CountingAudit(Mutex<Vec<AuditIntent>>);
+
+    #[async_trait]
+    impl AuditPort for CountingAudit {
+        async fn record_intent(&self, intent: &AuditIntent) -> Result<(), String> {
+            self.0.lock().unwrap().push(intent.clone());
+            Ok(())
+        }
+        async fn record_outcome(&self, _: &str, _: AuditOutcome) -> Result<(), String> {
+            Ok(())
+        }
+    }
+
+    fn reviewed(kind: &str) -> NewOperation {
+        let payload = serde_json::json!({
+            "accountId": "account-1", "node": "pve1", "vmid": 700,
+            "timeoutSeconds": 300, "params": {"snapshot": "baseline"}
+        })
+        .to_string();
+        NewOperation {
+            kind: kind.to_owned(),
+            review_token: Some(review_token_for(kind, &payload)),
+            payload_json: Some(payload),
+            ..NewOperation::default()
+        }
+    }
+
+    fn permit() -> Policy {
+        Policy {
+            deny: None,
+            seen: Mutex::new(Vec::new()),
+        }
+    }
+
+    #[tokio::test]
+    async fn destroy_and_snapshot_delete_refuse_a_pool_member_with_an_audit_record() {
+        for kind in ["proxmox.guest.destroy", "proxmox.guest.snapshot-delete"] {
+            let port = Arc::new(RecordingPort::default());
+            let audit = Arc::new(CountingAudit::default());
+            let operations = Operations::new(port.clone(), audit.clone())
+                .with_pool_members(Arc::new(Members(Ok(Some("pool-1".to_owned())))));
+            let result = operations
+                .create(&permit(), "operator", &reviewed(kind))
+                .await;
+            assert!(
+                matches!(
+                    result,
+                    Err(OperationUseCaseError::Refused {
+                        reason: "pool_member",
+                        ..
+                    })
+                ),
+                "{kind}: {result:?}"
+            );
+            assert!(port.0.lock().unwrap().is_empty(), "nothing was queued");
+            let intents = audit.0.lock().unwrap();
+            assert_eq!(intents.len(), 1);
+            let metadata: Vec<_> = intents[0].metadata.entries().collect();
+            assert!(metadata.contains(&("reason", "pool_member")));
+            assert!(metadata.contains(&("poolId", "pool-1")));
+        }
+    }
+
+    #[tokio::test]
+    async fn a_non_member_and_other_kinds_are_not_refused() {
+        let port = Arc::new(RecordingPort::default());
+        let operations = Operations::new(port.clone(), Arc::new(RecordingAudit))
+            .with_pool_members(Arc::new(Members(Ok(None))));
+        operations
+            .create(&permit(), "operator", &reviewed("proxmox.guest.destroy"))
+            .await
+            .unwrap();
+        // A member's snapshot or revert is not a delete; the lookup is not
+        // even consulted.
+        let operations = Operations::new(port.clone(), Arc::new(RecordingAudit))
+            .with_pool_members(Arc::new(Members(Err("down".to_owned()))));
+        operations
+            .create(&permit(), "operator", &reviewed("proxmox.guest.snapshot"))
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn an_unreadable_membership_fails_closed_and_a_denied_caller_learns_nothing() {
+        let port = Arc::new(RecordingPort::default());
+        let audit = Arc::new(CountingAudit::default());
+        let operations = Operations::new(port.clone(), audit.clone())
+            .with_pool_members(Arc::new(Members(Err("down".to_owned()))));
+        let result = operations
+            .create(&permit(), "operator", &reviewed("proxmox.guest.destroy"))
+            .await;
+        assert!(matches!(result, Err(OperationUseCaseError::Backend { .. })));
+        assert!(port.0.lock().unwrap().is_empty());
+        let denied = Policy {
+            deny: Some(Permission::ProxmoxDestructive),
+            seen: Mutex::new(Vec::new()),
+        };
+        let result = operations
+            .create(&denied, "operator", &reviewed("proxmox.guest.destroy"))
+            .await;
+        assert!(matches!(result, Err(OperationUseCaseError::Denied(_))));
+        assert!(
+            audit.0.lock().unwrap().is_empty(),
+            "no refusal was recorded"
+        );
     }
 }

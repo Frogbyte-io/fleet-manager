@@ -9,21 +9,31 @@ publish.workspace = true
 [dependencies]
 fleet-api = { path = "../fleet-api" }
 fleet-config = { path = "../fleet-config" }
+fleet-schema = { path = "../../schemas" }
 reqwest = { version = "0.12.24", default-features = false, features = ["blocking", "json", "rustls-tls"] }
 serde = { version = "1.0.229", features = ["derive"] }
+serde-saphyr = { version = "1.1.0", default-features = false, features = ["deserialize"] }
 serde_json = "1.0.151"
+sha2 = "0.10"
 uuid = { version = "1.26.0", features = ["v7"] }
+yaml_serde = "0.10"
+yamlpatch = "1.31.1"
+yamlpath = "1.31.1"
 
 [lints]
 workspace = true
 
 [dev-dependencies]
 fleetd = { path = "../fleetd" }
+async-trait = "0.1.92"
 axum = "0.8.9"
 fleet-application = { path = "../fleet-application" }
+fleet-auth = { path = "../fleet-auth" }
 fleet-controller = { path = "../fleet-controller" }
 fleet-core = { path = "../fleet-core" }
+fleet-provider-ssh = { path = "../providers/fleet-provider-ssh" }
 fleet-storage-sqlite = { path = "../fleet-storage-sqlite" }
+sqlx = { version = "0.9.0", features = ["sqlite", "runtime-tokio"] }
 tempfile = "3.27.0"
-tokio = { version = "1.53.1", features = ["rt-multi-thread", "net", "macros"] }
+tokio = { version = "1.53.1", features = ["rt-multi-thread", "net", "macros", "time"] }
 

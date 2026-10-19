@@ -47,7 +47,34 @@ fn parse_args() -> Result<Args, String> {
 
 /// The serve command: open the store, open the secret store, start the
 /// worker, serve until shutdown, then drain in reverse order.
-fn run_serve(config: fleet_config::ControllerConfig) -> ExitCode {
+fn run_serve(mut config: fleet_config::ControllerConfig) -> ExitCode {
+    // Child processes (Packer, SSH) run in their own working directories,
+    // so a relative `data_dir` (the default is `./data`) must not leak
+    // into any path handed to them (#312).
+    match std::path::absolute(&config.data_dir) {
+        Ok(absolute) => config.data_dir = absolute,
+        Err(error) => {
+            eprintln!(
+                "fleet-controller: refusing to start: the data directory cannot be resolved to an absolute path: {error}"
+            );
+            return ExitCode::FAILURE;
+        }
+    }
+    // A mistyped action-broker setting stops startup: silently falling back
+    // would run an action under a different risk class than the operator set.
+    if let Err(error) = fleet_controller::broker_settings_from_env() {
+        eprintln!("fleet-controller: refusing to start: {error}");
+        return ExitCode::FAILURE;
+    }
+    // Likewise the Registry enricher: a typo must not silently change how
+    // often public RDAP servers are queried.
+    let enrich_settings = match fleet_controller::registry_enrich::enrich_settings_from_env() {
+        Ok(settings) => settings,
+        Err(error) => {
+            eprintln!("fleet-controller: refusing to start: {error}");
+            return ExitCode::FAILURE;
+        }
+    };
     let settings = Settings {
         listen: config.listen,
         tailscale_serve_listen: config.tailscale_serve_listen,
@@ -128,6 +155,39 @@ fn run_serve(config: fleet_config::ControllerConfig) -> ExitCode {
                                 secret_store.clone(),
                             ),
                         ));
+                        node_services.external_accounts = Some(
+                            fleet_controller::external_accounts_store::compose_external_accounts(
+                                store.pool(),
+                                secret_store.clone(),
+                            ),
+                        );
+                        node_services.dns = Some(fleet_controller::dns_exec::compose_dns(
+                            store.pool(),
+                            secret_store.clone(),
+                        ));
+                        node_services.coolify_discovery = Some(
+                            fleet_controller::external_accounts_store::compose_coolify_discovery(
+                                store.pool(),
+                                secret_store.clone(),
+                            ),
+                        );
+                        let coolify_lifecycle =
+                            fleet_controller::coolify_exec::compose_coolify_lifecycle(
+                                store.pool(),
+                                secret_store.clone(),
+                            );
+                        node_services.coolify_settings =
+                            Some(fleet_controller::coolify_exec::compose_coolify_settings(
+                                store.pool(),
+                                secret_store.clone(),
+                                coolify_lifecycle.clone(),
+                            ));
+                        node_services.site_templates =
+                            Some(fleet_controller::site_exec::compose_site_templates(
+                                store.pool(),
+                                coolify_lifecycle.clone(),
+                            ));
+                        node_services.coolify_lifecycle = Some(coolify_lifecycle);
                         Some(node_services)
                     }
                     Err(error) => {
@@ -140,18 +200,118 @@ fn run_serve(config: fleet_config::ControllerConfig) -> ExitCode {
         };
         // The worker drives durable operations to their terminal states; it
         // drains when shutdown fires, before the server.
-        let worker_operations =
-            std::sync::Arc::new(fleet_application::operation::Operations::new_with_events(
+        let worker_operations = std::sync::Arc::new(
+            fleet_application::operation::Operations::new_with_events(
                 std::sync::Arc::new(fleet_storage_sqlite::OperationRepository::new(
                     store.pool().clone(),
                 )),
                 std::sync::Arc::new(fleet_storage_sqlite::AuditSink::new(store.pool().clone())),
                 events.clone(),
-            ));
+            )
+            .with_brokered_kinds(fleet_controller::brokered_operation_kinds()),
+        );
         let (worker_shutdown, worker_shutdown_rx) = tokio::sync::oneshot::channel::<()>();
+        let (image_sweep_shutdown, image_sweep_shutdown_rx) = tokio::sync::oneshot::channel::<()>();
+        // FM-721: Lab artifact bytes live in the configured directory; the
+        // database keeps their metadata. Without the directory the Lab
+        // still runs, without artifacts.
+        let lab_artifact_store = match fleet_controller::lab_artifacts_store::FsArtifactStore::open(
+            &config.lab_artifacts_dir,
+            config.lab_artifact_max_bytes,
+        ) {
+            Ok(artifact_store) => Some(std::sync::Arc::new(artifact_store)),
+            Err(error) => {
+                eprintln!(
+                    "warning: Lab artifacts unavailable: {} cannot be prepared: {error}",
+                    config.lab_artifacts_dir.display()
+                );
+                None
+            }
+        };
+        let lab_artifacts = lab_artifact_store.as_ref().map(|blobs| {
+            std::sync::Arc::new(fleet_application::lab_artifacts::LabArtifacts::new(
+                std::sync::Arc::new(fleet_storage_sqlite::LabArtifactRepository::new(
+                    store.pool().clone(),
+                )),
+                blobs.clone(),
+                std::sync::Arc::new(fleet_storage_sqlite::LeaseRepository::new(
+                    store.pool().clone(),
+                )),
+                std::sync::Arc::new(fleet_storage_sqlite::LabRepository::new(
+                    store.pool().clone(),
+                )),
+                std::sync::Arc::new(fleet_storage_sqlite::LabRepository::new(
+                    store.pool().clone(),
+                )),
+                std::sync::Arc::new(fleet_storage_sqlite::AuditSink::new(store.pool().clone())),
+                fleet_application::lab_artifacts::ArtifactPolicy {
+                    retention_seconds: config.lab_artifact_retention_seconds,
+                    max_bytes: config.lab_artifact_max_bytes,
+                },
+            ))
+        });
+        // #393: `lab put` stages uploads beside the artifact store. Without
+        // the directory the Lab still runs, without puts.
+        let lab_put_store = match fleet_controller::lab_put_store::FsUploadStore::open(
+            &config.lab_artifacts_dir,
+            config.lab_put_max_bytes,
+        ) {
+            Ok(store) => Some(std::sync::Arc::new(store)),
+            Err(error) => {
+                eprintln!(
+                    "warning: Lab put unavailable: {} cannot be prepared: {error}",
+                    config.lab_artifacts_dir.display()
+                );
+                None
+            }
+        };
+        let lab_puts = lab_put_store.as_ref().map(|stage| {
+            std::sync::Arc::new(fleet_application::lab_put::LabPuts::new(
+                stage.clone(),
+                std::sync::Arc::new(fleet_storage_sqlite::LeaseRepository::new(
+                    store.pool().clone(),
+                )),
+                std::sync::Arc::new(fleet_storage_sqlite::LabRepository::new(
+                    store.pool().clone(),
+                )),
+                std::sync::Arc::new(fleet_storage_sqlite::LabRepository::new(
+                    store.pool().clone(),
+                )),
+                std::sync::Arc::new(fleet_storage_sqlite::AuditSink::new(store.pool().clone())),
+            ))
+        });
         // The executor routes by kind: node kinds dispatch through the
         // gateway, onboarding kinds work against the draft record, and
         // everything else is SSH work.
+        // SSH exec (machine and Lab), Lab file collection, and detached
+        // exec status reads share one session pool.
+        let exec_limiter = fleet_provider_ssh::ExecutionLimiter::new(4);
+        // #394: detached Lab commands. The records are durable, so a
+        // restarted controller still knows every handle; the guest reader
+        // answers status over the verified SSH endpoint.
+        let detached_records: std::sync::Arc<
+            dyn fleet_application::lab_exec_detach::DetachedExecPort,
+        > = std::sync::Arc::new(fleet_storage_sqlite::DetachedExecRepository::new(
+            store.pool().clone(),
+        ));
+        let detached_guest: std::sync::Arc<dyn fleet_application::lab_exec_detach::GuestExecPort> =
+            match fleet_controller::lab_detach_store::SshGuestExec::new(
+                std::sync::Arc::new(fleet_storage_sqlite::MachineRepository::new(
+                    store.pool().clone(),
+                )),
+                config.data_dir.join("ssh"),
+                // Status polls get their own small pool, so polling can never
+                // starve exec, collect, or put of session slots.
+                fleet_provider_ssh::ExecutionLimiter::new(2),
+            ) {
+                Ok(guest) => std::sync::Arc::new(guest),
+                Err(error) => {
+                    eprintln!("warning: detached exec status unavailable: {error}");
+                    std::sync::Arc::new(fleet_controller::lab_detach_store::UnavailableGuestExec {
+                        reason: error,
+                    })
+                }
+            };
         let executor = {
             let ssh: std::sync::Arc<dyn fleet_application::worker::OperationExecutor> = {
                 let machines: std::sync::Arc<dyn fleet_application::machine::MachinePort> =
@@ -161,7 +321,7 @@ fn run_serve(config: fleet_config::ControllerConfig) -> ExitCode {
                 std::sync::Arc::new(ScriptExecutor::new(
                     machines,
                     config.data_dir.join("ssh"),
-                    fleet_provider_ssh::ExecutionLimiter::new(4),
+                    exec_limiter.clone(),
                 ))
             };
             let limiter = fleet_provider_ssh::ExecutionLimiter::new(4);
@@ -288,26 +448,44 @@ fn run_serve(config: fleet_config::ControllerConfig) -> ExitCode {
                     std::sync::Arc::new(fleet_storage_sqlite::MachineRepository::new(
                         store.pool().clone(),
                     ));
-                std::sync::Arc::new(fleet_controller::ready::ReadyDispatch::new(
+                let fallback = std::sync::Arc::new(fleet_controller::ready::ReadyDispatch::new(
                     with_mise.clone(),
                     std::sync::Arc::new(fleet_controller::ready::ReadyExecutor::new(
-                        machines,
+                        machines.clone(),
                         worker_operations.clone(),
                         with_mise.clone(),
                         config.data_dir.join("ssh"),
                         limiter.clone(),
                     )),
-                ))
+                ));
+                std::sync::Arc::new(
+                    fleet_controller::proxmox_exec::LabReadinessExecutor::new(
+                        fallback,
+                        with_mise.clone(),
+                        machines,
+                        worker_operations.clone(),
+                        config.data_dir.join("ssh"),
+                        limiter.clone(),
+                    )
+                    .with_provisions(std::sync::Arc::new(
+                        fleet_storage_sqlite::LabRepository::new(store.pool().clone()),
+                    )),
+                )
             };
             // The apply executor composes the FM-402 workflow over the
             // same operation queue and chain.
             let with_apply: std::sync::Arc<dyn fleet_application::worker::OperationExecutor> = {
                 std::sync::Arc::new(fleet_controller::apply::ApplyDispatch::new(
                     with_ready.clone(),
-                    std::sync::Arc::new(fleet_controller::apply::ApplyExecutor::new(
-                        worker_operations.clone(),
-                        with_ready.clone(),
-                    )),
+                    std::sync::Arc::new(
+                        fleet_controller::apply::ApplyExecutor::new(
+                            worker_operations.clone(),
+                            with_ready.clone(),
+                        )
+                        .with_projects(std::sync::Arc::new(
+                            fleet_storage_sqlite::ProjectRepository::new(store.pool().clone()),
+                        )),
+                    ),
                 ))
             };
             // The source executor handles the FM-403 kinds over the git
@@ -318,14 +496,14 @@ fn run_serve(config: fleet_config::ControllerConfig) -> ExitCode {
                     std::sync::Arc::new({
                         let executor = fleet_controller::source::SourceExecutor::new(
                             config.data_dir.join("git-source"),
-                            std::sync::Arc::new(fleet_application::source::DesiredSource::new(
-                                std::sync::Arc::new(fleet_storage_sqlite::SourceRepository::new(
-                                    store.pool().clone(),
-                                )),
-                                std::sync::Arc::new(fleet_storage_sqlite::AuditSink::new(
-                                    store.pool().clone(),
-                                )),
-                            )),
+                            std::sync::Arc::new(
+                                fleet_controller::compose_desired_source(store.pool())
+                                    .with_comparer(std::sync::Arc::new(
+                                        fleet_controller::source::GitRevisionComparer::new(
+                                            config.data_dir.join("git-source"),
+                                        ),
+                                    )),
+                            ),
                         );
                         match &secrets {
                             Some(secrets) => executor.with_credentials(std::sync::Arc::new(
@@ -342,25 +520,31 @@ fn run_serve(config: fleet_config::ControllerConfig) -> ExitCode {
             // the same accounts and secret store the discovery surfaces
             // use; it composes after the source dispatch so its kinds
             // reach it and everything else falls through.
+            // One account repository and one credential store, shared by
+            // every executor that talks to Proxmox (lifecycle, destroy,
+            // images, Lab), so their selection cannot drift apart.
+            let proxmox_accounts: std::sync::Arc<
+                dyn fleet_application::proxmox::ProxmoxAccountPort,
+            > = std::sync::Arc::new(fleet_storage_sqlite::ProxmoxAccountRepository::new(
+                store.pool().clone(),
+            ));
+            let proxmox_credentials: std::sync::Arc<
+                dyn fleet_application::proxmox::ProxmoxCredentialStore,
+            > = match &secrets {
+                Some(secrets) => std::sync::Arc::new(
+                    fleet_controller::proxmox_store::SecretBackedProxmoxCredentials::new(
+                        secrets.clone(),
+                    ),
+                ),
+                None => {
+                    std::sync::Arc::new(fleet_controller::proxmox_store::AbsentProxmoxCredentials)
+                }
+            };
             let with_proxmox: std::sync::Arc<dyn fleet_application::worker::OperationExecutor> = {
                 let proxmox_client =
                     fleet_provider_proxmox::ProxmoxClient::new(pve_transport.clone());
-                let accounts: std::sync::Arc<dyn fleet_application::proxmox::ProxmoxAccountPort> =
-                    std::sync::Arc::new(fleet_storage_sqlite::ProxmoxAccountRepository::new(
-                        store.pool().clone(),
-                    ));
-                let credentials: std::sync::Arc<
-                    dyn fleet_application::proxmox::ProxmoxCredentialStore,
-                > = match &secrets {
-                    Some(secrets) => std::sync::Arc::new(
-                        fleet_controller::proxmox_store::SecretBackedProxmoxCredentials::new(
-                            secrets.clone(),
-                        ),
-                    ),
-                    None => std::sync::Arc::new(
-                        fleet_controller::proxmox_store::AbsentProxmoxCredentials,
-                    ),
-                };
+                let accounts = proxmox_accounts.clone();
+                let credentials = proxmox_credentials.clone();
                 // FM-609: the executors record each UPID they start, so
                 // the task history can link it to its operation.
                 let task_links: std::sync::Arc<
@@ -384,6 +568,14 @@ fn run_serve(config: fleet_config::ControllerConfig) -> ExitCode {
                             credentials,
                             proxmox_client,
                         )
+                        .with_image_artifacts(std::sync::Arc::new(
+                            fleet_storage_sqlite::RecipeRepository::new(store.pool().clone()),
+                        ))
+                        .with_pool_members(std::sync::Arc::new(
+                            fleet_application::operation::PoolMembership(std::sync::Arc::new(
+                                fleet_storage_sqlite::LabPoolRepository::new(store.pool().clone()),
+                            )),
+                        ))
                         .with_task_links(task_links),
                     ),
                 ))
@@ -397,14 +589,92 @@ fn run_serve(config: fleet_config::ControllerConfig) -> ExitCode {
                     std::sync::Arc::new(fleet_storage_sqlite::RecipeRepository::new(
                         store.pool().clone(),
                     ));
+                let mut build = fleet_controller::images_exec::ImagesExecutor::new(
+                    versions,
+                    std::sync::Arc::new(fleet_provider_packer::ProcessTransport::new()),
+                    secrets.clone(),
+                    config.data_dir.join("image-builds"),
+                )
+                // #272: each build gets its own account's token, in
+                // Packer's child environment only; #284: unless the
+                // version carries the audited insecure-TLS opt-in,
+                // with the account's confirmed certificate as its
+                // only TLS root, captured through the shared
+                // transport.
+                .with_account_credentials(
+                    proxmox_accounts.clone(),
+                    proxmox_credentials.clone(),
+                    pve_transport.clone(),
+                );
+                // #339: the operator's explicit, audited proxy for the
+                // `packer build` child. Off unless configured.
+                if let Some(proxy) = config.image_build_proxy.clone() {
+                    build = build.with_build_proxy(
+                        proxy,
+                        std::sync::Arc::new(fleet_storage_sqlite::AuditSink::new(
+                            store.pool().clone(),
+                        )),
+                    );
+                }
+                // #337: the opt-in pool of Fleet-assigned build addresses.
+                // Held addresses of builds that ended while the controller
+                // was down are released first, pool or no pool.
+                let build_addresses: std::sync::Arc<
+                    dyn fleet_application::images::BuildAddressPort,
+                > = std::sync::Arc::new(fleet_storage_sqlite::BuildAddressRepository::new(
+                    store.pool().clone(),
+                ));
+                let released =
+                    fleet_controller::images_exec::ImagesExecutor::reconcile_build_addresses(
+                        build_addresses.as_ref(),
+                    )
+                    .await;
+                if released > 0 {
+                    eprintln!("image build addresses released at startup: {released}");
+                }
+                if let Some(pool) = config.image_build_address_pool.clone() {
+                    build = build.with_build_addresses(
+                        pool,
+                        build_addresses,
+                        std::sync::Arc::new(fleet_storage_sqlite::AuditSink::new(
+                            store.pool().clone(),
+                        )),
+                    );
+                }
+                let build = std::sync::Arc::new(build);
+                // #314: a build that was cut short by a crash or reboot
+                // leaves its work directory, and the owner-only var file in
+                // it, behind. Sweep before the worker claims anything, then
+                // on a timer: a build the dead controller left `running`
+                // keeps its directory until lease recovery fails it. Only
+                // counts are logged.
+                let log_sweep = |report: fleet_controller::images_exec::SweepReport| {
+                    if report != fleet_controller::images_exec::SweepReport::default() {
+                        eprintln!(
+                            "image build work directories swept: {} removed, {} not removable",
+                            report.removed, report.failed
+                        );
+                    }
+                };
+                log_sweep(build.sweep_orphaned_work_dirs(&worker_operations).await);
+                {
+                    let build = build.clone();
+                    let operations = worker_operations.clone();
+                    tokio::spawn(async move {
+                        let mut stop = std::pin::pin!(image_sweep_shutdown_rx);
+                        loop {
+                            tokio::select! {
+                                _ = &mut stop => break,
+                                () = tokio::time::sleep(std::time::Duration::from_secs(300)) => {
+                                    log_sweep(build.sweep_orphaned_work_dirs(&operations).await);
+                                }
+                            }
+                        }
+                    });
+                }
                 std::sync::Arc::new(fleet_controller::images_exec::ImagesDispatch::new(
                     with_proxmox.clone(),
-                    std::sync::Arc::new(fleet_controller::images_exec::ImagesExecutor::new(
-                        versions,
-                        std::sync::Arc::new(fleet_provider_packer::ProcessTransport::new()),
-                        secrets.clone(),
-                        config.data_dir.join("image-builds"),
-                    )),
+                    build,
                 ))
             };
             // The Lab provision executor drives the FM-710 saga's external
@@ -422,45 +692,322 @@ fn run_serve(config: fleet_config::ControllerConfig) -> ExitCode {
                     std::sync::Arc::new(fleet_storage_sqlite::LeaseRepository::new(
                         store.pool().clone(),
                     ));
-                let lab_accounts: std::sync::Arc<
-                    dyn fleet_application::proxmox::ProxmoxAccountPort,
-                > = std::sync::Arc::new(fleet_storage_sqlite::ProxmoxAccountRepository::new(
-                    store.pool().clone(),
-                ));
-                let lab_credentials: std::sync::Arc<
-                    dyn fleet_application::proxmox::ProxmoxCredentialStore,
-                > = match &secrets {
-                    Some(secrets) => std::sync::Arc::new(
-                        fleet_controller::proxmox_store::SecretBackedProxmoxCredentials::new(
-                            secrets.clone(),
-                        ),
-                    ),
-                    None => std::sync::Arc::new(
-                        fleet_controller::proxmox_store::AbsentProxmoxCredentials,
-                    ),
+                let lab_accounts = proxmox_accounts.clone();
+                let lab_credentials = proxmox_credentials.clone();
+                // FM-715: placement observations and capacity reservations.
+                let lab_capacity = std::sync::Arc::new(
+                    fleet_storage_sqlite::CapacityRepository::new(store.pool().clone()),
+                );
+                let lab_placement_policy = fleet_application::lab_placement::PlacementPolicy {
+                    memory_overcommit: config.lab_placement.memory_overcommit,
+                    cpu_overcommit: config.lab_placement.cpu_overcommit,
+                    max_observation_age_ms: i64::try_from(
+                        config
+                            .lab_placement
+                            .capacity_max_age_seconds
+                            .saturating_mul(1_000),
+                    )
+                    .unwrap_or(i64::MAX),
                 };
-                std::sync::Arc::new(fleet_controller::proxmox_exec::LabDispatch::new(
-                    with_images.clone(),
-                    std::sync::Arc::new(
-                        fleet_controller::proxmox_exec::ProvisionExecutor::new(
-                            lab_accounts,
-                            lab_credentials,
-                            lab_provisions,
-                            lab_leases,
-                            lab_versions,
-                            std::sync::Arc::new(fleet_storage_sqlite::RecipeRepository::new(
-                                store.pool().clone(),
-                            )),
-                            fleet_provider_proxmox::ProxmoxClient::new(pve_transport.clone()),
-                        )
-                        .with_task_links(std::sync::Arc::new(
-                            fleet_storage_sqlite::ProxmoxTaskLinkRepository::new(
-                                store.pool().clone(),
-                            ),
+                // FM-713: Lab cleanup destroys through its own reviewed
+                // destroy executor, guarded against templates and promoted
+                // image artifacts like the dedicated destroy route. FM-717's
+                // pool reverts run through the same reviewed executor.
+                let lab_destructive: std::sync::Arc<
+                    dyn fleet_application::worker::OperationExecutor,
+                > = std::sync::Arc::new(
+                    fleet_controller::proxmox_exec::ProxmoxDestructiveExecutor::new(
+                        lab_accounts.clone(),
+                        lab_credentials.clone(),
+                        fleet_provider_proxmox::ProxmoxClient::new(pve_transport.clone()),
+                    )
+                    .with_image_artifacts(std::sync::Arc::new(
+                        fleet_storage_sqlite::RecipeRepository::new(store.pool().clone()),
+                    ))
+                    .with_pool_members(std::sync::Arc::new(
+                        fleet_application::operation::PoolMembership(std::sync::Arc::new(
+                            fleet_storage_sqlite::LabPoolRepository::new(store.pool().clone()),
                         )),
+                    ))
+                    .with_task_links(std::sync::Arc::new(
+                        fleet_storage_sqlite::ProxmoxTaskLinkRepository::new(store.pool().clone()),
+                    )),
+                );
+                // FM-717: pooled guests.
+                let lab_pools: std::sync::Arc<dyn fleet_application::lab_pool::LabPoolPort> =
+                    std::sync::Arc::new(fleet_storage_sqlite::LabPoolRepository::new(
+                        store.pool().clone(),
+                    ));
+                let lab_pool_guests: std::sync::Arc<
+                    dyn fleet_application::lab_pool::PoolGuestPort,
+                > = std::sync::Arc::new(fleet_controller::lab_pool::ProxmoxPoolGuests::new(
+                    lab_accounts.clone(),
+                    lab_credentials.clone(),
+                    fleet_provider_proxmox::ProxmoxClient::new(pve_transport.clone()),
+                    std::sync::Arc::new(fleet_storage_sqlite::RecipeRepository::new(
+                        store.pool().clone(),
+                    )),
+                ));
+                let lab_cleanup = std::sync::Arc::new(
+                    fleet_controller::lab_cleanup::LabCleanupExecutor::new(
+                        lab_leases.clone(),
+                        lab_provisions.clone(),
+                        std::sync::Arc::new(fleet_storage_sqlite::MachineRepository::new(
+                            store.pool().clone(),
+                        )),
+                        std::sync::Arc::new(fleet_storage_sqlite::AuditSink::new(
+                            store.pool().clone(),
+                        )),
+                        lab_destructive.clone(),
+                    )
+                    .with_reservations(lab_capacity.clone())
+                    .with_pools(
+                        lab_pools.clone(),
+                        lab_pool_guests.clone(),
+                        lab_destructive.clone(),
                     ),
+                );
+                let lab_pool_fill =
+                    std::sync::Arc::new(fleet_controller::lab_pool::LabPoolFillExecutor::new(
+                        lab_pools.clone(),
+                        std::sync::Arc::new(fleet_storage_sqlite::LabRepository::new(
+                            store.pool().clone(),
+                        )),
+                        lab_pool_guests,
+                        lab_destructive,
+                        std::sync::Arc::new(fleet_storage_sqlite::AuditSink::new(
+                            store.pool().clone(),
+                        )),
+                    ));
+                let lab_dispatch = std::sync::Arc::new(
+                    fleet_controller::proxmox_exec::LabDispatch::new(
+                        with_images.clone(),
+                        std::sync::Arc::new(
+                            fleet_controller::proxmox_exec::ProvisionExecutor::new(
+                                lab_accounts.clone(),
+                                lab_credentials.clone(),
+                                lab_provisions.clone(),
+                                lab_leases.clone(),
+                                lab_versions,
+                                std::sync::Arc::new(fleet_storage_sqlite::RecipeRepository::new(
+                                    store.pool().clone(),
+                                )),
+                                fleet_provider_proxmox::ProxmoxClient::new(pve_transport.clone()),
+                            )
+                            .with_readiness(
+                                std::sync::Arc::new(
+                                    fleet_controller::proxmox_exec::ProvisionReadiness::new(
+                                        std::sync::Arc::new(
+                                            fleet_storage_sqlite::MachineRepository::new(
+                                                store.pool().clone(),
+                                            ),
+                                        ),
+                                        std::sync::Arc::new(
+                                            fleet_storage_sqlite::ProjectRepository::new(
+                                                store.pool().clone(),
+                                            ),
+                                        ),
+                                        std::sync::Arc::new(fleet_storage_sqlite::AuditSink::new(
+                                            store.pool().clone(),
+                                        )),
+                                        with_ready.clone(),
+                                        worker_operations.clone(),
+                                        config.data_dir.join("ssh"),
+                                    ),
+                                ),
+                                std::sync::Arc::new(fleet_storage_sqlite::AuditSink::new(
+                                    store.pool().clone(),
+                                )),
+                            )
+                            .with_task_links(std::sync::Arc::new(
+                                fleet_storage_sqlite::ProxmoxTaskLinkRepository::new(
+                                    store.pool().clone(),
+                                ),
+                            ))
+                            .with_placement(
+                                lab_capacity.clone(),
+                                lab_capacity,
+                                std::sync::Arc::new(fleet_storage_sqlite::AuditSink::new(
+                                    store.pool().clone(),
+                                )),
+                                lab_placement_policy,
+                            )
+                            .with_pools(lab_pools),
+                        ),
+                    )
+                    .with_cleanup(lab_cleanup, lab_leases, lab_provisions),
+                );
+                std::sync::Arc::new(fleet_controller::lab_pool::LabPoolDispatch::new(
+                    lab_dispatch,
+                    lab_pool_fill,
                 ))
             };
+            // FM-721: every lab.exec keeps its log, and lab.collect copies
+            // guest files, through the artifact store.
+            let with_lab: std::sync::Arc<dyn fleet_application::worker::OperationExecutor> =
+                match (&lab_artifacts, &lab_artifact_store) {
+                    (Some(artifacts), Some(artifact_store)) => {
+                        // Without the SSH work directory, collections fail
+                        // honestly; exec logs are still recorded.
+                        let files: std::sync::Arc<
+                            dyn fleet_controller::lab_artifacts_store::GuestFiles,
+                        > = match fleet_controller::lab_artifacts_store::SshGuestFiles::new(
+                            std::sync::Arc::new(fleet_storage_sqlite::MachineRepository::new(
+                                store.pool().clone(),
+                            )),
+                            config.data_dir.join("ssh"),
+                            exec_limiter.clone(),
+                        ) {
+                            Ok(files) => std::sync::Arc::new(files),
+                            Err(error) => {
+                                eprintln!("warning: Lab artifact collection unavailable: {error}");
+                                std::sync::Arc::new(
+                                    fleet_controller::lab_artifacts_store::UnavailableGuestFiles {
+                                        reason: error,
+                                    },
+                                )
+                            }
+                        };
+                        std::sync::Arc::new(
+                            fleet_controller::lab_artifacts_store::LabArtifactDispatch::new(
+                                with_lab,
+                                artifacts.clone(),
+                                artifact_store.clone(),
+                                std::sync::Arc::new(fleet_storage_sqlite::LeaseRepository::new(
+                                    store.pool().clone(),
+                                )),
+                                std::sync::Arc::new(fleet_storage_sqlite::LabRepository::new(
+                                    store.pool().clone(),
+                                )),
+                                std::sync::Arc::new(fleet_storage_sqlite::LabRepository::new(
+                                    store.pool().clone(),
+                                )),
+                                files,
+                            ),
+                        )
+                    }
+                    _ => with_lab,
+                };
+            // #393: `lab.put` copies a staged upload into a ready lease.
+            let with_lab: std::sync::Arc<dyn fleet_application::worker::OperationExecutor> =
+                match &lab_put_store {
+                    Some(stage) => {
+                        let files: std::sync::Arc<
+                            dyn fleet_controller::lab_artifacts_store::GuestFiles,
+                        > = match fleet_controller::lab_artifacts_store::SshGuestFiles::new(
+                            std::sync::Arc::new(fleet_storage_sqlite::MachineRepository::new(
+                                store.pool().clone(),
+                            )),
+                            config.data_dir.join("ssh"),
+                            exec_limiter.clone(),
+                        ) {
+                            Ok(files) => std::sync::Arc::new(files),
+                            Err(error) => {
+                                eprintln!("warning: Lab put unavailable: {error}");
+                                std::sync::Arc::new(
+                                    fleet_controller::lab_artifacts_store::UnavailableGuestFiles {
+                                        reason: error,
+                                    },
+                                )
+                            }
+                        };
+                        std::sync::Arc::new(fleet_controller::lab_put_store::LabPutDispatch::new(
+                            with_lab,
+                            stage.clone(),
+                            std::sync::Arc::new(fleet_storage_sqlite::LeaseRepository::new(
+                                store.pool().clone(),
+                            )),
+                            std::sync::Arc::new(fleet_storage_sqlite::LabRepository::new(
+                                store.pool().clone(),
+                            )),
+                            std::sync::Arc::new(fleet_storage_sqlite::LabRepository::new(
+                                store.pool().clone(),
+                            )),
+                            files,
+                        ))
+                    }
+                    None => with_lab,
+                };
+            // #394: `lab.exec_detach` starts a command that outlives the
+            // SSH session; its status is read directly from the guest.
+            let with_lab: std::sync::Arc<dyn fleet_application::worker::OperationExecutor> =
+                std::sync::Arc::new(fleet_controller::lab_detach_store::LabDetachDispatch::new(
+                    with_lab,
+                    detached_records.clone(),
+                    std::sync::Arc::new(fleet_storage_sqlite::LeaseRepository::new(
+                        store.pool().clone(),
+                    )),
+                    std::sync::Arc::new(fleet_storage_sqlite::LabRepository::new(
+                        store.pool().clone(),
+                    )),
+                    std::sync::Arc::new(fleet_storage_sqlite::LabRepository::new(
+                        store.pool().clone(),
+                    )),
+                ));
+            // FM-1042: the brokered DNS kinds run through the DNS use cases.
+            let with_lab: std::sync::Arc<dyn fleet_application::worker::OperationExecutor> =
+                match services.as_ref().and_then(|services| services.dns.clone()) {
+                    Some(dns) => std::sync::Arc::new(fleet_controller::dns_exec::DnsDispatch::new(
+                        with_lab,
+                        std::sync::Arc::new(fleet_controller::dns_exec::DnsExecutor::new(dns)),
+                    )),
+                    None => with_lab,
+                };
+            // FM-1033: the brokered Coolify lifecycle kind runs through the
+            // lifecycle use cases.
+            let with_lab: std::sync::Arc<dyn fleet_application::worker::OperationExecutor> =
+                match services
+                    .as_ref()
+                    .and_then(|services| services.coolify_lifecycle.clone())
+                {
+                    Some(lifecycle) => std::sync::Arc::new(
+                        fleet_controller::coolify_exec::CoolifyLifecycleDispatch::new(
+                            with_lab,
+                            std::sync::Arc::new(
+                                fleet_controller::coolify_exec::CoolifyLifecycleExecutor::new(
+                                    lifecycle,
+                                ),
+                            ),
+                        ),
+                    ),
+                    None => with_lab,
+                };
+            // FM-1034: the brokered Coolify settings kind runs through the
+            // settings use cases.
+            let with_lab: std::sync::Arc<dyn fleet_application::worker::OperationExecutor> =
+                match services
+                    .as_ref()
+                    .and_then(|services| services.coolify_settings.clone())
+                {
+                    Some(settings) => std::sync::Arc::new(
+                        fleet_controller::coolify_exec::CoolifySettingsDispatch::new(
+                            with_lab,
+                            std::sync::Arc::new(
+                                fleet_controller::coolify_exec::CoolifySettingsExecutor::new(
+                                    settings,
+                                ),
+                            ),
+                        ),
+                    ),
+                    None => with_lab,
+                };
+            // FM-1035: the brokered site-deployment kind runs through the
+            // site-template use cases.
+            let with_lab: std::sync::Arc<dyn fleet_application::worker::OperationExecutor> =
+                match services
+                    .as_ref()
+                    .and_then(|services| services.site_templates.clone())
+                {
+                    Some(sites) => {
+                        std::sync::Arc::new(fleet_controller::site_exec::SiteDispatch::new(
+                            with_lab,
+                            std::sync::Arc::new(fleet_controller::site_exec::SiteExecutor::new(
+                                sites,
+                            )),
+                        ))
+                    }
+                    None => with_lab,
+                };
             match &services {
                 Some(services) => {
                     let node_machines: std::sync::Arc<dyn fleet_application::machine::MachinePort> =
@@ -478,6 +1025,8 @@ fn run_serve(config: fleet_config::ControllerConfig) -> ExitCode {
                 None => with_lab.clone(),
             }
         };
+        let sweeper_operations = worker_operations.clone();
+        let poller_operations = worker_operations.clone();
         let worker_host = WorkerHost::new(worker_operations, executor, 4);
         let worker_handle = tokio::spawn(async move {
             worker_host
@@ -534,13 +1083,29 @@ fn run_serve(config: fleet_config::ControllerConfig) -> ExitCode {
             std::sync::Arc::new(fleet_storage_sqlite::RecipeRepository::new(
                 store.pool().clone(),
             ));
-        let images = std::sync::Arc::new(fleet_application::images::Images::new(
+        let mut images = fleet_application::images::Images::new(
             recipe_versions.clone(),
             std::sync::Arc::new(fleet_storage_sqlite::AuditSink::new(store.pool().clone())),
-        ));
+        )
+        .with_build_addresses(
+            std::sync::Arc::new(fleet_storage_sqlite::BuildAddressRepository::new(
+                store.pool().clone(),
+            )),
+            config.image_build_address_pool.is_some(),
+        );
+        // The `images/<name>` build secrets live in the encrypted store;
+        // without one the surface lists nothing and refuses writes (#520).
+        if let Some(secrets) = &secrets {
+            images = images.with_secrets(std::sync::Arc::new(
+                fleet_controller::image_secrets::SecretBackedImageSecrets::new(secrets.clone()),
+            ));
+        }
+        let images = std::sync::Arc::new(images);
         // The Lab surface composes over the store and the image pin
         // validator: a template cannot pin an unpromoted image version.
-        let lab = std::sync::Arc::new(fleet_application::lab::Lab::new(
+        // Lease creation validates an explicit project against the same
+        // repository the project surface serves.
+        let lab = fleet_application::lab::Lab::new(
             std::sync::Arc::new(fleet_storage_sqlite::LabRepository::new(
                 store.pool().clone(),
             )),
@@ -553,8 +1118,54 @@ fn run_serve(config: fleet_config::ControllerConfig) -> ExitCode {
             std::sync::Arc::new(
                 fleet_controller::proxmox_store::RecipeImagePinValidator::new(recipe_versions),
             ),
+            std::sync::Arc::new(fleet_storage_sqlite::ProjectRepository::new(
+                store.pool().clone(),
+            )),
             std::sync::Arc::new(fleet_storage_sqlite::AuditSink::new(store.pool().clone())),
+        );
+        // FM-717: the pool use cases, authorized and audited in the
+        // application.
+        let lab = lab.with_reservations(std::sync::Arc::new(
+            fleet_storage_sqlite::CapacityRepository::new(store.pool().clone()),
         ));
+        let lab = lab.with_pools(std::sync::Arc::new(
+            fleet_application::lab_pool::LabPools::new(
+                std::sync::Arc::new(fleet_storage_sqlite::LabPoolRepository::new(
+                    store.pool().clone(),
+                )),
+                std::sync::Arc::new(fleet_storage_sqlite::LabRepository::new(
+                    store.pool().clone(),
+                )),
+                std::sync::Arc::new(fleet_storage_sqlite::ProxmoxAccountRepository::new(
+                    store.pool().clone(),
+                )),
+                std::sync::Arc::new(fleet_storage_sqlite::AuditSink::new(store.pool().clone())),
+            ),
+        ));
+        let lab = match &lab_puts {
+            Some(puts) => lab.with_puts(puts.clone()),
+            None => lab,
+        };
+        let lab = lab.with_detached(std::sync::Arc::new(
+            fleet_application::lab_exec_detach::LabExecDetach::new(
+                detached_records.clone(),
+                detached_guest.clone(),
+                std::sync::Arc::new(fleet_storage_sqlite::LeaseRepository::new(
+                    store.pool().clone(),
+                )),
+                std::sync::Arc::new(fleet_storage_sqlite::LabRepository::new(
+                    store.pool().clone(),
+                )),
+                std::sync::Arc::new(fleet_storage_sqlite::LabRepository::new(
+                    store.pool().clone(),
+                )),
+                std::sync::Arc::new(fleet_storage_sqlite::AuditSink::new(store.pool().clone())),
+            ),
+        ));
+        let lab = std::sync::Arc::new(match &lab_artifacts {
+            Some(artifacts) => lab.with_artifacts(artifacts.clone()),
+            None => lab,
+        });
         // The Proxmox surface composes over the store, the secret store,
         // and the provider's pinned-fingerprint transport. Without a secret
         // store it serves the standard "unavailable" envelope.
@@ -571,6 +1182,128 @@ fn run_serve(config: fleet_config::ControllerConfig) -> ExitCode {
                 ),
             )
         });
+        // FM-716: the Lab sweeper expires leases, queues due cleanups,
+        // compensates stuck provisions, and reports unowned Lab guests on
+        // its interval (0 disables it; the manual sweep route stays).
+        let (sweeper_shutdown, sweeper_shutdown_rx) = tokio::sync::oneshot::channel::<()>();
+        let sweeper_handle = (config.lab_sweep_interval_seconds > 0).then(|| {
+            let mut sweeper = fleet_controller::lab_sweeper::LabSweeper::new(
+                lab.clone(),
+                std::sync::Arc::new(fleet_storage_sqlite::LeaseRepository::new(
+                    store.pool().clone(),
+                )),
+                std::sync::Arc::new(fleet_storage_sqlite::LabRepository::new(
+                    store.pool().clone(),
+                )),
+                sweeper_operations,
+                std::sync::Arc::new(fleet_storage_sqlite::AuditSink::new(store.pool().clone())),
+            )
+            .with_events(events.clone());
+            if let Some(artifacts) = &lab_artifacts {
+                sweeper = sweeper.with_artifacts(artifacts.clone());
+            }
+            if let Some(secrets) = &secrets {
+                sweeper = sweeper.with_inventory(std::sync::Arc::new(
+                    fleet_controller::lab_sweeper::ProxmoxLabGuests::new(
+                        std::sync::Arc::new(fleet_storage_sqlite::ProxmoxAccountRepository::new(
+                            store.pool().clone(),
+                        )),
+                        std::sync::Arc::new(
+                            fleet_controller::proxmox_store::SecretBackedProxmoxCredentials::new(
+                                secrets.clone(),
+                            ),
+                        ),
+                        fleet_provider_proxmox::ProxmoxClient::new(pve_transport.clone()),
+                    ),
+                ));
+            }
+            let interval = std::time::Duration::from_secs(config.lab_sweep_interval_seconds);
+            tokio::spawn(std::sync::Arc::new(sweeper).run(interval, async move {
+                let _ = sweeper_shutdown_rx.await;
+            }))
+        });
+        // FM-1034: held environment values whose request was denied,
+        // expired, or finished are removed on a timer.
+        let (hold_shutdown, hold_shutdown_rx) = tokio::sync::oneshot::channel::<()>();
+        let hold_handle = services
+            .as_ref()
+            .and_then(|services| services.coolify_settings.clone())
+            .map(|settings| {
+                tokio::spawn(fleet_controller::coolify_exec::run_hold_sweeper(
+                    settings,
+                    fleet_controller::coolify_exec::HOLD_SWEEP_INTERVAL,
+                    async move {
+                        let _ = hold_shutdown_rx.await;
+                    },
+                ))
+            });
+        // FM-1020: the scheduled RDAP/DNS sweep over Registry domain
+        // entries (interval 0 turns it off; the on-demand refresh stays).
+        let (enrich_shutdown, enrich_shutdown_rx) = tokio::sync::oneshot::channel::<()>();
+        let enrich_handle = (!enrich_settings.interval.is_zero())
+            .then(|| {
+                let desired = fleet_controller::compose_desired_source(store.pool());
+                desired.registry().cloned().and_then(|registry| {
+                    fleet_controller::registry_enrich::compose_domain_enricher(
+                        store.pool(),
+                        registry,
+                        enrich_settings.clone(),
+                    )
+                })
+            })
+            .flatten()
+            .map(|enricher| {
+                let interval = enrich_settings.interval;
+                tokio::spawn(fleet_controller::registry_enrich::run_sweeper(
+                    enricher,
+                    interval,
+                    async move {
+                        let _ = enrich_shutdown_rx.await;
+                    },
+                ))
+            });
+        // FM-1014: the optional periodic desired-source fetch queues the
+        // ordinary `source.fetch` for the remote's head (0 = off, the
+        // default); a Registry-only result then auto-activates.
+        let (poller_shutdown, poller_shutdown_rx) = tokio::sync::oneshot::channel::<()>();
+        let poller_handle = (config.desired_fetch_interval_seconds > 0).then(|| {
+            let desired = std::sync::Arc::new(
+                fleet_application::source::DesiredSource::new(
+                    std::sync::Arc::new(fleet_storage_sqlite::SourceRepository::new(
+                        store.pool().clone(),
+                    )),
+                    std::sync::Arc::new(fleet_storage_sqlite::AuditSink::new(store.pool().clone())),
+                )
+                .with_settings(std::sync::Arc::new(
+                    fleet_storage_sqlite::SourceRepository::new(store.pool().clone()),
+                )),
+            );
+            let credentials: Option<
+                std::sync::Arc<dyn fleet_application::source::GitCredentialStore>,
+            > = secrets.as_ref().map(|secrets| {
+                std::sync::Arc::new(
+                    fleet_controller::git_credentials::SecretBackedGitCredentials::new(
+                        secrets.clone(),
+                    ),
+                )
+                    as std::sync::Arc<dyn fleet_application::source::GitCredentialStore>
+            });
+            let poller = fleet_controller::source_poller::SourcePoller::new(
+                desired,
+                poller_operations,
+                std::sync::Arc::new(fleet_storage_sqlite::SourceRepository::new(
+                    store.pool().clone(),
+                )),
+                std::sync::Arc::new(fleet_controller::source_poller::GitHeadResolver::new(
+                    fleet_provider_git::GitSource::new(config.data_dir.join("git-source")),
+                    credentials,
+                )),
+            );
+            let interval = std::time::Duration::from_secs(config.desired_fetch_interval_seconds);
+            tokio::spawn(std::sync::Arc::new(poller).run(interval, async move {
+                let _ = poller_shutdown_rx.await;
+            }))
+        });
         let served = serve_with_events(
             settings,
             pool,
@@ -585,6 +1318,23 @@ fn run_serve(config: fleet_config::ControllerConfig) -> ExitCode {
             shutdown_signal(),
         )
         .await;
+        let _ = hold_shutdown.send(());
+        if let Some(handle) = hold_handle {
+            let _ = handle.await;
+        }
+        let _ = enrich_shutdown.send(());
+        if let Some(handle) = enrich_handle {
+            let _ = handle.await;
+        }
+        let _ = poller_shutdown.send(());
+        if let Some(handle) = poller_handle {
+            let _ = handle.await;
+        }
+        let _ = sweeper_shutdown.send(());
+        if let Some(handle) = sweeper_handle {
+            let _ = handle.await;
+        }
+        let _ = image_sweep_shutdown.send(());
         let _ = worker_shutdown.send(());
         let _ = worker_handle.await;
         store.close().await;

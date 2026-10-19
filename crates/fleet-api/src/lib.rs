@@ -14,13 +14,21 @@
 pub mod apply;
 pub mod audit;
 pub mod auth;
+pub mod coolify;
 mod correlation;
+pub mod credentials;
 pub mod desired;
+pub mod dns;
 mod envelope;
 mod error;
+pub mod external_accounts;
 pub mod frogenv;
 pub mod images;
 pub mod lab;
+pub mod lab_artifacts;
+pub mod lab_exec_detach;
+pub mod lab_pools;
+pub mod lab_put;
 pub mod machines;
 mod meta;
 pub mod mise;
@@ -33,6 +41,10 @@ pub mod proxmox;
 pub mod proxmox_privileges;
 pub mod proxmox_tasks;
 pub mod ready;
+pub mod registry;
+pub mod requests;
+pub mod services;
+pub mod site_templates;
 pub mod skill_catalog;
 pub mod skills;
 pub mod system;
@@ -108,6 +120,8 @@ pub const API_BASE_PATH: &str = "/api/v1";
         desired::DesiredHistoryEntryDto,
         desired::DesiredSourceDto,
         desired::DesiredStatusDto,
+        desired::RegistrySettingsDto,
+        desired::UpdateRegistrySettingsRequest,
         plans::ApplyPlanRequest,
         plans::DriftCountsDto,
         plans::MachineDriftDto,
@@ -116,6 +130,27 @@ pub const API_BASE_PATH: &str = "/api/v1";
         plans::PlanDto,
         plans::PlanRevisionDto,
         desired::FetchDesiredRequest,
+        registry::RegistryRevisionDto,
+        registry::RegistryTypeDto,
+        registry::RegistryTypeList,
+        registry::RegistryTargetDto,
+        registry::RegistryRelationDto,
+        registry::RegistryEntryDto,
+        registry::RegistryReferenceDto,
+        registry::RdapStatusDto,
+        registry::RdapObservationDto,
+        registry::DnsRecordsDto,
+        registry::DnsStatusDto,
+        registry::DnsObservationDto,
+        registry::DomainObservationDto,
+        registry::FieldStateDto,
+        registry::FieldDiffDto,
+        registry::SeverityDto,
+        registry::WarningCodeDto,
+        registry::DomainWarningDto,
+        registry::SuggestedFieldDto,
+        registry::DomainObservationViewDto,
+        registry::DomainObservationPage,
         desired::RevisionRequest,
         skill_catalog::CatalogContentDto,
         skill_catalog::CatalogDto,
@@ -158,6 +193,52 @@ pub const API_BASE_PATH: &str = "/api/v1";
         tailnet::CorrelationCandidateDto,
         tailnet::ImportTailnetDeviceRequest,
         tailnet::TailnetStatusDto,
+        dns::AccountZonesDto,
+        dns::CreateDnsChangeRequest,
+        dns::DnsChangeKind,
+        dns::CloudflareDnsObservationDto,
+        dns::CloudflareDnsObservationsDto,
+        dns::DnsRecordDto,
+        dns::CloudflareDnsRecordsDto,
+        dns::DnsZoneDto,
+        dns::DnsZonesDto,
+        coolify::CoolifyObservationDto,
+        coolify::CoolifyClassDto,
+        coolify::CoolifyFailureDto,
+        coolify::CoolifyServerDto,
+        coolify::CoolifyProjectDto,
+        coolify::CoolifyEnvironmentDto,
+        coolify::CoolifyApplicationDto,
+        coolify::CoolifyServiceDto,
+        coolify::CoolifyDatabaseDto,
+        coolify::CoolifyDeploymentDto,
+        services::ServicesPage,
+        services::ServiceDetailDto,
+        services::RunningServiceDto,
+        services::ServiceMachineRefDto,
+        services::ServicePlacementDto,
+        services::ServiceServerDto,
+        services::ServiceCoolifyDto,
+        services::ServiceContainerDto,
+        services::ServiceDeployDto,
+        services::ServiceRegistryLinkDto,
+        services::AmbiguousServerDto,
+        services::InputStateDto,
+        services::AccountCoverageDto,
+        services::ServicesCoverageDto,
+        services::ServiceActionBody,
+        services::ServiceLogsDto,
+        site_templates::SiteTemplatesDto,
+        site_templates::SiteTemplateDto,
+        site_templates::SiteTemplateSourceDto,
+        site_templates::SiteTemplateEnvDto,
+        site_templates::SiteDeployBody,
+        external_accounts::CreateExternalAccountRequest,
+        external_accounts::UpdateExternalAccountRequest,
+        external_accounts::ExternalAccountDto,
+        external_accounts::ExternalProbeDto,
+        external_accounts::ExternalProviderKindDto,
+        external_accounts::ProbeStatusDto,
         proxmox::ConfirmProxmoxFingerprintRequest,
         proxmox::CreateProxmoxAccountRequest,
         proxmox::ProxmoxAccountDto,
@@ -172,6 +253,8 @@ pub const API_BASE_PATH: &str = "/api/v1";
         proxmox::ReviewProxmoxOperationRequest,
         proxmox::StartReviewedProxmoxOperationRequest,
         images::BuildImageRequest,
+        images::ImageBuildDto,
+        images::ImageBuildTemplateDto,
         lab::LabTemplateDto,
         lab::LabTemplateContentDto,
         lab::LabTemplateVersionDto,
@@ -182,9 +265,16 @@ pub const API_BASE_PATH: &str = "/api/v1";
         lab::ReleaseLeaseRequest,
         lab::StartLeaseProvisionRequest,
         lab::ExtendLeaseRequest,
+        lab_pools::LabPoolDto,
+        lab_pools::LabPoolMemberDto,
+        lab_pools::CreateLabPoolRequest,
+        lab_pools::FillLabPoolRequest,
+        lab_pools::DrainLabPoolRequest,
+        lab_pools::LabPoolDrainDto,
         images::RecipeDto,
         images::RecipeVersionDto,
         images::SaveRecipeRequest,
+        images::PublishRecipeRequest,
         proxmox::ProviderAgentDto,
         proxmox::ProviderInterfaceDto,
         proxmox_privileges::ProxmoxPrivilegesDto,
@@ -208,7 +298,12 @@ pub const API_BASE_PATH: &str = "/api/v1";
         (name = "events", description = "Payload-free SSE invalidation notifications."),
         (name = "audit", description = "Authorized, metadata-only audit event queries."),
         (name = "desired", description = "The active desired-state revision and its validated, non-secret resources. Read-only; activation is an operation."),
+        (name = "registry", description = "The descriptive Registry of the active desired revision: types, entries, and relations. Edits are commits to the Fleet repository; the only mutation is recording public RDAP/DNS observations of domain entries."),
+        (name = "dns", description = "DNS zones and records read through a Cloudflare external account, and record changes (`dns.record.upsert`, `dns.record.delete`) requested through the action broker with a computed preview. Fleet holds the token and never returns it."),
+        (name = "services", description = "Running services: Coolify resources joined with Docker containers on Fleet machines and with Registry entries. Read-only; inputs the caller may not read are left out and reported in the coverage."),
         (name = "operations", description = "Durable operations: accepted remote work."),
+        (name = "requests", description = "The action broker (ADR 0016): agents request typed provider actions; policy or a person approves them; approved requests run as durable operations. Before authenticated identities, policy is a guardrail keyed on risk class, not a security boundary."),
+        (name = "credentials", description = "Delegated, scoped, short-lived credentials for CI and agents (ADR 0011). The token is returned once at issue time and is never listed or audited."),
         (
             name = "machines",
             description = "The operational machine view: identity, endpoints, capability facts, \
@@ -229,7 +324,7 @@ pub const API_BASE_PATH: &str = "/api/v1";
         ),
         (
             name = "images",
-            description = "Image recipes and their immutable published versions, built over the operator-installed Packer CLI. The content passes through verbatim; Fleet never re-validates Packer's own fields."
+            description = "Image recipes and their immutable published versions, built over the operator-installed Packer CLI. The content is stored verbatim, but Fleet refuses recipes that fail the structural gate described in docs/architecture/lab.md (legacy JSON with an allowlisted structure) at publish and again before every build; Packer's own fields are otherwise not re-validated."
         ),
         (
             name = "lab",
@@ -237,7 +332,11 @@ pub const API_BASE_PATH: &str = "/api/v1";
         ),
         (
             name = "images",
-            description = "Image recipes and their immutable published versions, built over the operator-installed Packer CLI. The content passes through verbatim; Fleet never re-validates Packer's own fields."
+            description = "Image recipes and their immutable published versions, built over the operator-installed Packer CLI. The content is stored verbatim, but Fleet refuses recipes that fail the structural gate described in docs/architecture/lab.md (legacy JSON with an allowlisted structure) at publish and again before every build; Packer's own fields are otherwise not re-validated."
+        ),
+        (
+            name = "external-accounts",
+            description = "External provider accounts for API-token providers (Coolify, Cloudflare), with a health and permission probe. The token is write-only and never returned."
         ),
         (
             name = "proxmox",
@@ -299,6 +398,14 @@ pub fn api(state: Arc<operations::ApiState>) -> (Router, utoipa::openapi::OpenAp
                 .routes(routes!(skill_catalog::list_catalog_versions))
                 .routes(routes!(skill_catalog::preview_catalog_rollout))
                 .routes(routes!(skill_catalog::start_catalog_rollout))
+                .routes(routes!(registry::list_registry_types))
+                .routes(routes!(registry::list_registry_entries))
+                .routes(routes!(registry::get_registry_entry))
+                .routes(routes!(registry::list_registry_entry_references))
+                .routes(routes!(registry::list_registry_references))
+                .routes(routes!(registry::list_domain_observations))
+                .routes(routes!(registry::get_domain_observation))
+                .routes(routes!(registry::refresh_domain_observation))
                 .routes(routes!(desired::get_desired_revision))
                 .routes(routes!(desired::list_desired_resources))
                 .routes(routes!(
@@ -306,6 +413,10 @@ pub fn api(state: Arc<operations::ApiState>) -> (Router, utoipa::openapi::OpenAp
                     desired::configure_desired_source
                 ))
                 .routes(routes!(desired::store_desired_source_credential))
+                .routes(routes!(
+                    desired::get_registry_settings,
+                    desired::update_registry_settings
+                ))
                 .routes(routes!(desired::list_desired_history))
                 .routes(routes!(desired::fetch_desired_revision))
                 .routes(routes!(desired::activate_desired_revision))
@@ -343,6 +454,28 @@ pub fn api(state: Arc<operations::ApiState>) -> (Router, utoipa::openapi::OpenAp
                     proxmox::list_proxmox_accounts,
                     proxmox::create_proxmox_account
                 ))
+                .routes(routes!(
+                    external_accounts::list_external_accounts,
+                    external_accounts::create_external_account
+                ))
+                .routes(routes!(
+                    external_accounts::get_external_account,
+                    external_accounts::update_external_account,
+                    external_accounts::delete_external_account
+                ))
+                .routes(routes!(external_accounts::probe_external_account))
+                .routes(routes!(coolify::discover_coolify_account))
+                .routes(routes!(coolify::get_coolify_observations))
+                .routes(routes!(services::list_running_services))
+                .routes(routes!(services::get_running_service))
+                .routes(routes!(services::request_service_action))
+                .routes(routes!(services::get_service_logs))
+                .routes(routes!(services::get_service_settings))
+                .routes(routes!(services::request_service_env_change))
+                .routes(routes!(services::request_service_domains_change))
+                .routes(routes!(services::request_service_health_change))
+                .routes(routes!(site_templates::list_site_templates))
+                .routes(routes!(site_templates::request_site_deployment))
                 .routes(routes!(proxmox::delete_proxmox_account))
                 .routes(routes!(proxmox::observe_proxmox_fingerprint))
                 .routes(routes!(proxmox::confirm_proxmox_fingerprint))
@@ -362,9 +495,36 @@ pub fn api(state: Arc<operations::ApiState>) -> (Router, utoipa::openapi::OpenAp
                 .routes(routes!(images::delete_image_recipe))
                 .routes(routes!(images::publish_image_recipe))
                 .routes(routes!(images::list_image_recipe_versions))
-                .routes(routes!(images::start_image_build))
+                .routes(routes!(
+                    images::start_image_build,
+                    images::list_image_builds
+                ))
+                .routes(routes!(images::get_image_build))
                 .routes(routes!(images::promote_image_version))
                 .routes(routes!(images::get_image_version))
+                .routes(routes!(images::list_image_build_addresses))
+                .routes(routes!(images::clear_image_build_address))
+                .routes(routes!(
+                    images::list_image_secrets,
+                    images::set_image_secret
+                ))
+                .routes(routes!(images::delete_image_secret))
+                .routes(routes!(
+                    credentials::list_credentials,
+                    credentials::issue_credential
+                ))
+                .routes(routes!(credentials::revoke_credential))
+                .routes(routes!(
+                    requests::create_action_request,
+                    requests::list_action_requests
+                ))
+                .routes(routes!(dns::list_dns_zones))
+                .routes(routes!(dns::list_dns_records))
+                .routes(routes!(dns::list_dns_observations))
+                .routes(routes!(dns::create_dns_change))
+                .routes(routes!(requests::get_action_request))
+                .routes(routes!(requests::approve_action_request))
+                .routes(routes!(requests::deny_action_request))
                 .routes(routes!(lab::list_lab_templates, lab::create_lab_template))
                 .routes(routes!(lab::get_lab_template))
                 .routes(routes!(lab::update_lab_template))
@@ -376,8 +536,25 @@ pub fn api(state: Arc<operations::ApiState>) -> (Router, utoipa::openapi::OpenAp
                 .routes(routes!(lab::start_lab_lease_provision))
                 .routes(routes!(lab::list_lab_leases))
                 .routes(routes!(lab::release_lab_lease))
+                .routes(routes!(lab::retry_lab_lease_cleanup))
                 .routes(routes!(lab::extend_lab_lease))
+                .routes(routes!(lab::get_lab_lease))
+                .routes(routes!(lab::exec_lab_lease))
+                .routes(routes!(lab_exec_detach::exec_detached_lab_lease))
+                .routes(routes!(lab_exec_detach::get_detached_exec))
                 .routes(routes!(lab::sweep_lab_leases))
+                .routes(routes!(lab_artifacts::collect_lab_artifacts))
+                .routes(routes!(lab_put::put_lab_file))
+                .routes(routes!(lab_artifacts::list_lab_artifacts))
+                .routes(routes!(lab_artifacts::get_lab_artifact))
+                .routes(routes!(lab_artifacts::download_lab_artifact))
+                .routes(routes!(
+                    lab_pools::list_lab_pools,
+                    lab_pools::create_lab_pool
+                ))
+                .routes(routes!(lab_pools::get_lab_pool, lab_pools::delete_lab_pool))
+                .routes(routes!(lab_pools::fill_lab_pool))
+                .routes(routes!(lab_pools::drain_lab_pool))
                 .routes(routes!(proxmox::start_reviewed_proxmox_operation))
                 .with_state(state),
         )
@@ -420,9 +597,7 @@ pub fn tailscale_serve_router(
 /// its separate correlation contract.
 pub fn tailscale_serve_guard(router: Router, peer: fleet_auth::TailscaleServePeer) -> Router {
     router
-        .layer(middleware::from_fn(
-            auth::reject_unauthenticated_tailscale_caller,
-        ))
+        .layer(middleware::from_fn(auth::reject_unauthenticated_caller))
         .layer(middleware::from_fn_with_state(
             peer,
             fleet_auth::resolve_tailscale_serve_caller,

@@ -420,3 +420,155 @@ async fn a_failing_step_stops_with_compensations_and_remainder() {
         "the remaining steps are named"
     );
 }
+
+/// Records every inner operation's payload and succeeds it.
+#[derive(Debug, Default)]
+struct RecordingInner {
+    payloads: std::sync::Mutex<Vec<(String, serde_json::Value)>>,
+}
+
+#[async_trait::async_trait]
+impl fleet_application::worker::OperationExecutor for RecordingInner {
+    async fn execute(
+        &self,
+        operations: &Operations,
+        operation: &fleet_application::operation::Operation,
+    ) -> Result<(), String> {
+        let payload = serde_json::from_str(operation.payload_json.as_deref().unwrap_or("{}"))
+            .unwrap_or_default();
+        self.payloads
+            .lock()
+            .unwrap()
+            .push((operation.kind.clone(), payload));
+        operations
+            .complete(&operation.id, "succeeded", Some("{}"), None)
+            .await
+            .map(|_| ())
+            .map_err(|error| error.to_string())
+    }
+}
+
+/// Runs an approved one-step `projects.clone` plan for `identity`; returns
+/// the finished operation and the inner payloads.
+async fn run_clone_plan(
+    register: &[&str],
+    identity: &str,
+) -> (
+    fleet_application::operation::Operation,
+    Vec<(String, serde_json::Value)>,
+) {
+    use fleet_application::project::ProjectPort;
+    let dir = tempfile::tempdir().unwrap();
+    let store = fleet_storage_sqlite::Store::open(&dir.path().join("fleet.db"))
+        .await
+        .unwrap();
+    let pool = store.pool().clone();
+    std::mem::forget(store);
+    let repository = Arc::new(fleet_storage_sqlite::ProjectRepository::new(pool.clone()));
+    for (index, raw) in register.iter().enumerate() {
+        let (remote, fetch) = fleet_core::NormalizedRemote::parse_with_fetch(raw).unwrap();
+        repository
+            .create(&fleet_application::project::NewProject {
+                remote: remote.as_str().to_owned(),
+                fetch,
+                idempotency_key: None,
+                name: format!("p{index}"),
+                description: String::new(),
+            })
+            .await
+            .unwrap();
+    }
+    let operations = Arc::new(Operations::new(
+        Arc::new(fleet_storage_sqlite::OperationRepository::new(pool.clone())),
+        Arc::new(fleet_storage_sqlite::AuditSink::new(pool.clone())),
+    ));
+    let inner = Arc::new(RecordingInner::default());
+    let executor = fleet_controller::apply::ApplyExecutor::new(operations.clone(), inner.clone())
+        .with_projects(repository);
+    let payload = serde_json::json!({
+        "machineId": "m-1",
+        "endpointId": "e-1",
+        "auth": {"type": "agent"},
+        "planId": "plan-1",
+        "actions": [
+            {"order": 1, "kind": "projects.clone",
+             "difference": {"identity": format!("checkout:{identity}"), "state": "missing",
+                            "desired": "/work/app", "observed": null, "reason": null}},
+        ],
+        "approvals": [
+            {"planId": "plan-1", "actionOrder": 1, "kind": "projects.clone"},
+        ],
+        "timeoutSeconds": 600,
+    });
+    let operation = operations
+        .create(
+            &fleet_auth::LanAllowAllAuthorizer,
+            fleet_auth::LAN_PRINCIPAL_ID,
+            &fleet_application::operation::NewOperation {
+                kind: "apply.workflow".to_owned(),
+                idempotency_key: None,
+                deadline_at: None,
+                correlation_id: None,
+                payload_json: Some(payload.to_string()),
+                review_token: None,
+            },
+        )
+        .await
+        .unwrap();
+    operations
+        .tick(
+            &executor,
+            "worker-a",
+            fleet_core::SystemClock::now_unix_millis(),
+            60_000,
+        )
+        .await
+        .unwrap();
+    let finished = operations
+        .get(
+            &fleet_auth::LanAllowAllAuthorizer,
+            fleet_auth::LAN_PRINCIPAL_ID,
+            &operation.id,
+        )
+        .await
+        .unwrap();
+    let recorded = inner.payloads.lock().unwrap().clone();
+    (finished, recorded)
+}
+
+#[tokio::test]
+async fn the_clone_step_hands_git_the_projects_stored_fetch_url() {
+    for (registered, identity, expected) in [
+        (
+            "git@example.com:acme/app.git",
+            "example.com/acme/app",
+            "git@example.com:acme/app",
+        ),
+        (
+            "https://example.com/acme/app.git",
+            "example.com/acme/app",
+            "https://example.com/acme/app",
+        ),
+        (
+            "ssh://git@example.com:2222/acme/app.git",
+            "example.com:2222/acme/app",
+            "ssh://git@example.com:2222/acme/app",
+        ),
+    ] {
+        let (finished, recorded) = run_clone_plan(&[registered], identity).await;
+        assert_eq!(finished.state, "succeeded", "{:?}", finished.error_json);
+        let clone = recorded.iter().find(|(kind, _)| kind == "projects.clone");
+        assert_eq!(clone.unwrap().1["remote"], expected, "{registered}");
+    }
+}
+
+#[tokio::test]
+async fn a_clone_for_an_unregistered_identity_fails_without_running_git() {
+    let (finished, recorded) = run_clone_plan(&[], "example.com/acme/unknown").await;
+    assert_eq!(finished.state, "failed");
+    assert!(recorded.is_empty(), "no inner step ran: {recorded:?}");
+    assert!(
+        finished.error_json.unwrap().contains("no project"),
+        "named refusal"
+    );
+}

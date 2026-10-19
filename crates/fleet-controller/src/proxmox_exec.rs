@@ -29,6 +29,20 @@ use serde::Deserialize;
 const POLL_INTERVAL: Duration = Duration::from_secs(2);
 /// The maximum lifecycle timeout the executor accepts from a payload.
 pub const MAX_LIFECYCLE_TIMEOUT: u64 = 600;
+/// How long the Lab executor waits for a fresh clone's config lock to clear
+/// (a full clone copies every disk) before it gives up on the clone.
+const CLONE_SETTLE_TIMEOUT: Duration = Duration::from_secs(3_600);
+/// How often the Lab executor records progress while it waits for a clone.
+const CLONE_PROGRESS_INTERVAL: Duration = Duration::from_secs(60);
+/// How long the executor waits for a clone's config to report the template's
+/// hardware after updating it (#372).
+const HARDWARE_CONFIRM_TIMEOUT: Duration = Duration::from_secs(30);
+/// The bound on the whole hardware step, and on one disk resize task.
+const HARDWARE_TIMEOUT: Duration = Duration::from_secs(900);
+const HARDWARE_TASK_TIMEOUT: Duration = Duration::from_secs(600);
+/// The most hardware writes one provision makes (cores and memory once, the
+/// disk once, and a retry of each).
+const HARDWARE_MAX_WRITES: u32 = 6;
 
 /// The payload every lifecycle kind carries: the machine-scoped shape plus
 /// the account, the guest, and its node.
@@ -405,17 +419,18 @@ impl OperationExecutor for ProxmoxDispatch {
 }
 
 /// The destructive-adjacent kinds; they route to their own executor.
-pub const DESTRUCTIVE_KINDS: [&str; 6] = [
+pub const DESTRUCTIVE_KINDS: [&str; 7] = [
     "proxmox.guest.snapshot",
     "proxmox.guest.snapshot-revert",
     "proxmox.guest.snapshot-delete",
+    "proxmox.guest.destroy",
     "proxmox.guest.clone",
     "proxmox.guest.template",
     "proxmox.task-cancel",
 ];
 
 /// The destructive-adjacent executor: snapshot, revert, snapshot-delete,
-/// clone, template conversion, and remote task cancellation. Every kind
+/// clone, template conversion, guest destruction, and remote task cancellation. Every kind
 /// arrived through the reviewed dedicated endpoint (the generic surface
 /// refuses them); the executor re-applies the trust gate and classifies
 /// idempotency before touching anything.
@@ -425,6 +440,8 @@ pub struct ProxmoxDestructiveExecutor {
     credentials: Arc<dyn fleet_application::proxmox::ProxmoxCredentialStore>,
     client: fleet_provider_proxmox::ProxmoxClient,
     links: Option<Arc<dyn ProxmoxTaskLinkPort>>,
+    artifacts: Option<Arc<dyn fleet_application::lab::ImageArtifactPort>>,
+    pool_members: Option<Arc<dyn fleet_application::operation::PoolMemberLookup>>,
 }
 
 impl ProxmoxDestructiveExecutor {
@@ -440,6 +457,79 @@ impl ProxmoxDestructiveExecutor {
             credentials,
             client,
             links: None,
+            artifacts: None,
+            pool_members: None,
+        }
+    }
+
+    /// Supplies the Lab pool membership lookup (#368). With it, a destroy or
+    /// snapshot delete re-asks at execution time whether its target is a
+    /// pool member: the refusal at creation cannot see a VMID that a fill
+    /// registers while the operation waits in the queue. Without it the
+    /// executor does not check (the creation-time refusal alone applies), so
+    /// every production construction site must supply it.
+    #[must_use]
+    pub fn with_pool_members(
+        mut self,
+        pool_members: Arc<dyn fleet_application::operation::PoolMemberLookup>,
+    ) -> Self {
+        self.pool_members = Some(pool_members);
+        self
+    }
+
+    /// The pool the target belongs to, when it is a member. A membership
+    /// that cannot be read is an error: the caller fails closed.
+    async fn pool_of_target(&self, payload: &DestructivePayload) -> Result<Option<String>, String> {
+        match &self.pool_members {
+            Some(pools) => pools
+                .pool_of(&payload.account_id, payload.vmid)
+                .await
+                .map_err(|_| "the Lab pool membership could not be read".to_owned()),
+            None => Ok(None),
+        }
+    }
+
+    /// Refuses (by completing the operation as failed) a destroy or snapshot
+    /// delete whose target is a current Lab pool member. Runs before any
+    /// Proxmox call, so nothing is stopped or deleted. Answers whether the
+    /// operation ended here.
+    async fn refuse_pool_member(
+        &self,
+        operations: &Operations,
+        operation: &Operation,
+        payload: &DestructivePayload,
+    ) -> Result<bool, String> {
+        if !matches!(
+            operation.kind.as_str(),
+            "proxmox.guest.destroy" | "proxmox.guest.snapshot-delete"
+        ) {
+            return Ok(false);
+        }
+        match self.pool_of_target(payload).await {
+            Ok(None) => Ok(false),
+            Ok(Some(pool_id)) => {
+                complete_failure(
+                    operations,
+                    &operation.id,
+                    fleet_application::operation::POOL_MEMBER_REASON,
+                    &format!(
+                        "VMID {} is a member of Lab pool {pool_id}; drain it from the pool first",
+                        payload.vmid
+                    ),
+                )
+                .await?;
+                Ok(true)
+            }
+            Err(detail) => {
+                complete_failure(
+                    operations,
+                    &operation.id,
+                    "pool_membership_unreadable",
+                    &detail,
+                )
+                .await?;
+                Ok(true)
+            }
         }
     }
 
@@ -450,6 +540,15 @@ impl ProxmoxDestructiveExecutor {
         self.links = Some(links);
         self
     }
+    /// Supplies the promoted-image guard. Destroy fails closed without it.
+    #[must_use]
+    pub fn with_image_artifacts(
+        mut self,
+        artifacts: Arc<dyn fleet_application::lab::ImageArtifactPort>,
+    ) -> Self {
+        self.artifacts = Some(artifacts);
+        self
+    }
 }
 
 #[async_trait::async_trait]
@@ -457,11 +556,53 @@ impl OperationExecutor for ProxmoxDestructiveExecutor {
     #[allow(clippy::too_many_lines)]
     async fn execute(&self, operations: &Operations, operation: &Operation) -> Result<(), String> {
         let payload: DestructivePayload = payload(operation)?;
+        if self
+            .refuse_pool_member(operations, operation, &payload)
+            .await?
+        {
+            return Ok(());
+        }
         let (account, secret) = self.bound(&payload.account_id).await?;
         let request = self.request(&account, &secret);
         let deadline = Duration::from_secs(payload.timeout_seconds.min(MAX_LIFECYCLE_TIMEOUT));
         let kind = operation.kind.as_str();
         let outcome: Result<(), String> = match kind {
+            "proxmox.guest.destroy" => {
+                let started = std::time::Instant::now();
+                tokio::time::timeout(
+                    deadline,
+                    self.prepare_destroy(operations, operation, &payload, &request),
+                )
+                .await
+                .map_err(|_| {
+                    "the destroy stop/guard deadline expired; no delete was submitted".to_owned()
+                })??;
+                let remaining = deadline
+                    .checked_sub(started.elapsed())
+                    .ok_or("the destroy deadline expired")?;
+                let node = payload.node.clone();
+                let vmid = payload.vmid;
+                let purge = payload
+                    .params
+                    .get("purge")
+                    .and_then(serde_json::Value::as_bool)
+                    .unwrap_or(false);
+                self.run_to_terminal(
+                    operations,
+                    &operation.id,
+                    &payload.account_id,
+                    &request,
+                    &payload.node,
+                    vmid,
+                    remaining,
+                    move |client, request| {
+                        Box::pin(
+                            async move { client.guest_destroy(request, &node, vmid, purge).await },
+                        )
+                    },
+                )
+                .await
+            }
             "proxmox.guest.snapshot" => {
                 let name = payload
                     .params
@@ -760,6 +901,133 @@ impl OperationExecutor for ProxmoxDestructiveExecutor {
 }
 
 impl ProxmoxDestructiveExecutor {
+    // Stop is a prerequisite task, never the terminal outcome of destroy.
+    async fn prepare_destroy(
+        &self,
+        operations: &Operations,
+        operation: &Operation,
+        payload: &DestructivePayload,
+        request: &fleet_provider_proxmox::PveHttpRequest,
+    ) -> Result<(), String> {
+        let artifacts = self
+            .artifacts
+            .as_ref()
+            .ok_or("the destroy image guard is not configured")?;
+        let image_vmids = artifacts
+            .promoted_template_vmids()
+            .await
+            .map_err(|detail| format!("the image artifacts are unreadable: {detail}"))?;
+        let resources = self
+            .client
+            .list_guest_resources(request.clone())
+            .await
+            .map_err(|error| format!("the resource listing failed: {error}"))?;
+        let resource = resources
+            .iter()
+            .find(|resource| resource.vmid == Some(payload.vmid));
+        fleet_application::lab::guard_destroy_target(
+            payload.vmid,
+            resource.is_some_and(|resource| resource.kind == "qemu-template"),
+            &image_vmids,
+        )?;
+        if let Some(resource) = resource {
+            if resource.kind != "qemu" || resource.node.as_deref() != Some(payload.node.as_str()) {
+                return Err(
+                    "the destroy target is not a QEMU guest on the reviewed node".to_owned(),
+                );
+            }
+            if resource.status.as_deref() == Some("running") {
+                if operations
+                    .cancel_requested(&operation.id)
+                    .await
+                    .map_err(|error| error.to_string())?
+                {
+                    return Err("destroy cancelled before stop".to_owned());
+                }
+                let upid = self
+                    .client
+                    .guest_lifecycle(
+                        request.clone(),
+                        &payload.node,
+                        payload.vmid,
+                        LifecycleAction::Stop,
+                    )
+                    .await
+                    .map_err(|error| format!("the pre-destroy stop failed: {error}"))?;
+                record_task_link(
+                    self.links.as_ref(),
+                    &payload.account_id,
+                    &upid,
+                    &operation.id,
+                )
+                .await;
+                loop {
+                    if operations
+                        .cancel_requested(&operation.id)
+                        .await
+                        .map_err(|error| error.to_string())?
+                    {
+                        return Err(
+                            "destroy cancelled while waiting for stop; no delete was submitted"
+                                .to_owned(),
+                        );
+                    }
+                    match self
+                        .client
+                        .task_status(request.clone(), &upid)
+                        .await
+                        .map_err(|error| error.to_string())?
+                    {
+                        TaskStatus::Ok => break,
+                        TaskStatus::Running => tokio::time::sleep(POLL_INTERVAL).await,
+                        status => {
+                            return Err(format!(
+                                "the pre-destroy stop did not succeed: {status:?}"
+                            ));
+                        }
+                    }
+                }
+            }
+        }
+        if operations
+            .cancel_requested(&operation.id)
+            .await
+            .map_err(|error| error.to_string())?
+        {
+            return Err("destroy cancelled before delete".to_owned());
+        }
+        // Recheck cluster template state and promotion after waiting.
+        let image_vmids = artifacts
+            .promoted_template_vmids()
+            .await
+            .map_err(|detail| format!("the image artifacts are unreadable: {detail}"))?;
+        let resources = self
+            .client
+            .list_guest_resources(request.clone())
+            .await
+            .map_err(|error| format!("the post-stop resource listing failed: {error}"))?;
+        let is_template = resources.iter().any(|resource| {
+            resource.vmid == Some(payload.vmid) && resource.kind == "qemu-template"
+        });
+        if operations
+            .cancel_requested(&operation.id)
+            .await
+            .map_err(|error| error.to_string())?
+        {
+            return Err("destroy cancelled before delete".to_owned());
+        }
+        // A fill can register the VMID while the stop waits: ask again right
+        // before the delete is submitted.
+        if let Some(pool_id) = self.pool_of_target(payload).await? {
+            return Err(format!(
+                "{}: VMID {} became a member of Lab pool {pool_id} while the destroy ran; no delete was submitted",
+                fleet_application::operation::POOL_MEMBER_REASON,
+                payload.vmid
+            ));
+        }
+        fleet_application::lab::guard_destroy_target(payload.vmid, is_template, &image_vmids)
+    }
+
     /// The trusted account and its resolved secret: the same explicit-trust
     /// gate the other surfaces apply.
     async fn bound(
@@ -998,6 +1266,41 @@ async fn record_task_link(
     }
 }
 
+/// Releases a lease's held capacity reservation and audits the release.
+///
+/// # Errors
+///
+/// Fails when the reservation store fails.
+pub async fn release_reservation(
+    reservations: &dyn fleet_application::lab_placement::CapacityReservationPort,
+    audit: &dyn fleet_application::operation::AuditPort,
+    lease_id: &str,
+    why: &str,
+) -> Result<(), String> {
+    let now = fleet_core::SystemClock::now_unix_millis();
+    if reservations.release_for_lease(lease_id, now).await? {
+        let mut facts = vec![("outcome", why.to_owned())];
+        // The lookup only enriches the audit event: the release is
+        // already committed, so its failure is not the caller's.
+        if let Ok(Some(reservation)) = reservations.for_lease(lease_id).await {
+            facts.extend(fleet_application::lab_placement::reservation_facts(
+                &reservation,
+            ));
+        }
+        // Best effort, as for cleanup: the reservation row is the truth.
+        let _ = audit
+            .record_intent(&fleet_application::lab_placement::reservation_audit(
+                fleet_auth::LAN_PRINCIPAL_ID,
+                lease_id,
+                None,
+                "lab_capacity_released",
+                &facts,
+            ))
+            .await;
+    }
+    Ok(())
+}
+
 /// Completes an operation as a failure with a redacted detail.
 async fn complete_failure(
     operations: &Operations,
@@ -1011,6 +1314,789 @@ async fn complete_failure(
         .await
         .map(|_| ())
         .map_err(|error| error.to_string())
+}
+
+/// Bounds Lab children without changing the general M3 workflow contract.
+#[derive(Debug)]
+pub struct LabReadinessExecutor {
+    fallback: Arc<dyn OperationExecutor>,
+    steps: Arc<dyn OperationExecutor>,
+    machines: Arc<dyn fleet_application::machine::MachinePort>,
+    operations: Arc<Operations>,
+    work_dir: std::path::PathBuf,
+    limiter: Arc<fleet_provider_ssh::ExecutionLimiter>,
+    provisions: Option<Arc<dyn fleet_application::lab::ProvisionPort>>,
+}
+
+impl LabReadinessExecutor {
+    /// Reuses M3 with a parent-aware adapter for its nested operations.
+    #[must_use]
+    pub fn new(
+        fallback: Arc<dyn OperationExecutor>,
+        steps: Arc<dyn OperationExecutor>,
+        machines: Arc<dyn fleet_application::machine::MachinePort>,
+        operations: Arc<Operations>,
+        work_dir: std::path::PathBuf,
+        limiter: Arc<fleet_provider_ssh::ExecutionLimiter>,
+    ) -> Self {
+        Self {
+            fallback,
+            steps,
+            machines,
+            operations,
+            work_dir,
+            limiter,
+            provisions: None,
+        }
+    }
+    /// Applies the same bound when a queue worker wins a nested M3 claim.
+    #[must_use]
+    pub fn with_provisions(
+        mut self,
+        provisions: Arc<dyn fleet_application::lab::ProvisionPort>,
+    ) -> Self {
+        self.provisions = Some(provisions);
+        self
+    }
+}
+
+#[derive(Debug)]
+struct LabBoundedStep {
+    inner: Arc<dyn OperationExecutor>,
+    parent: String,
+    workflow: String,
+    deadline: i64,
+}
+
+#[async_trait::async_trait]
+impl OperationExecutor for LabBoundedStep {
+    async fn execute(&self, operations: &Operations, operation: &Operation) -> Result<(), String> {
+        for id in [&self.parent, &self.workflow] {
+            let current = operations
+                .get(
+                    &fleet_auth::LanAllowAllAuthorizer,
+                    fleet_auth::LAN_PRINCIPAL_ID,
+                    id,
+                )
+                .await
+                .map_err(|_| "Lab parent unavailable")?;
+            if current.cancel_requested || !matches!(current.state.as_str(), "pending" | "running")
+            {
+                return Err("Lab readiness was stopped".to_owned());
+            }
+        }
+        let seconds = self
+            .deadline
+            .saturating_sub(fleet_core::SystemClock::now_unix_millis())
+            / 1000;
+        // A whole-second CLI timeout must fit inside the absolute budget.
+        if seconds < 1 {
+            return Err("Lab readiness deadline expired".to_owned());
+        }
+        let mut bounded = operation.clone();
+        let mut payload: serde_json::Value = serde_json::from_str(
+            bounded
+                .payload_json
+                .as_deref()
+                .ok_or("missing Lab step payload")?,
+        )
+        .map_err(|_| "invalid Lab step payload")?;
+        let requested = payload["timeoutSeconds"].as_u64().unwrap_or(120);
+        payload["timeoutSeconds"] =
+            serde_json::json!(requested.min(u64::try_from(seconds).unwrap_or(0)));
+        bounded.payload_json = Some(payload.to_string());
+        bounded.deadline_at = Some(self.deadline);
+        self.inner.execute(operations, &bounded).await
+    }
+}
+
+#[async_trait::async_trait]
+impl OperationExecutor for LabReadinessExecutor {
+    async fn execute(&self, operations: &Operations, operation: &Operation) -> Result<(), String> {
+        let payload: serde_json::Value =
+            serde_json::from_str(operation.payload_json.as_deref().unwrap_or("null"))
+                .unwrap_or_default();
+        let mut parent = payload["labParentOperationId"].as_str().map(str::to_owned);
+        let mut deadline = operation.deadline_at;
+        let mut workflow = operation.id.clone();
+        // M3 creates its steps in the durable queue before claiming them in
+        // process. If another worker wins, those unchanged step payloads must
+        // still inherit the active Lab workflow's budget and cancellation.
+        if parent.is_none()
+            && matches!(
+                operation.kind.as_str(),
+                "mise.status"
+                    | "frogenv.status"
+                    | "projects.clone"
+                    | "mise.install"
+                    | "frogenv.setup"
+                    | "skills.deploy"
+                    | "tools.inventory"
+            )
+            && let Some(provisions) = &self.provisions
+            && let Some(machine) = payload["machineId"].as_str()
+        {
+            let active = provisions
+                .find_by_machine_id(machine)
+                .await
+                .map_err(|_| "Lab readiness record unavailable")?;
+            if let Some(record) = active {
+                if let Some(child_id) = record.ready_project_operation_id {
+                    let child = operations
+                        .get(
+                            &fleet_auth::LanAllowAllAuthorizer,
+                            fleet_auth::LAN_PRINCIPAL_ID,
+                            &child_id,
+                        )
+                        .await
+                        .map_err(|_| "Lab workflow unavailable")?;
+                    // Ordinary operations created after bootstrap finishes are
+                    // independent. Already queued workflow steps keep ownership
+                    // even after the provision itself becomes terminal.
+                    if matches!(child.state.as_str(), "pending" | "running" | "cancelling")
+                        || operation.created_at <= child.updated_at
+                    {
+                        if record.state == fleet_core::GuestState::NeverReady {
+                            return Err("Lab readiness was stopped".to_owned());
+                        }
+                        let child_payload: serde_json::Value =
+                            serde_json::from_str(child.payload_json.as_deref().unwrap_or("null"))
+                                .unwrap_or_default();
+                        parent = Some(
+                            child_payload["labParentOperationId"]
+                                .as_str()
+                                .ok_or("missing Lab workflow parent")?
+                                .to_owned(),
+                        );
+                        workflow = child_id;
+                        deadline = record.readiness_deadline_at;
+                    }
+                } else if record.state == fleet_core::GuestState::Bootstrapping {
+                    return Err("Lab workflow association is not durable yet".to_owned());
+                }
+            }
+        }
+        let Some(parent) = parent else {
+            return self.fallback.execute(operations, operation).await;
+        };
+        let deadline = deadline.ok_or("missing Lab readiness deadline")?;
+        let steps = Arc::new(LabBoundedStep {
+            inner: self.steps.clone(),
+            parent,
+            workflow,
+            deadline,
+        });
+        if operation.kind == "ready.workflow" {
+            if let (Some(provisions), Some(record_id)) =
+                (&self.provisions, operation.correlation_id.as_deref())
+            {
+                loop {
+                    let record = provisions
+                        .get(record_id)
+                        .await
+                        .map_err(|_| "Lab provision unavailable")?;
+                    if record.state != fleet_core::GuestState::Bootstrapping
+                        || operations
+                            .cancel_requested(&operation.id)
+                            .await
+                            .unwrap_or(true)
+                        || fleet_core::SystemClock::now_unix_millis() >= deadline
+                        || operations
+                            .cancel_requested(&steps.parent)
+                            .await
+                            .unwrap_or(true)
+                    {
+                        return Err("Lab readiness was stopped".to_owned());
+                    }
+                    if record.ready_project_operation_id.as_deref() == Some(&operation.id) {
+                        break;
+                    }
+                    tokio::time::sleep(Duration::from_millis(25)).await;
+                }
+            }
+            let parent = steps.parent.clone();
+            crate::ready::ReadyExecutor::new(
+                self.machines.clone(),
+                self.operations.clone(),
+                steps,
+                self.work_dir.clone(),
+                self.limiter.clone(),
+            )
+            .with_lab_readiness(deadline, parent, operation.id.clone())
+            .execute(operations, operation)
+            .await
+        } else {
+            steps.execute(operations, operation).await
+        }
+    }
+}
+
+/// FM-201/202 and M3 adapters for Lab readiness. Uses the controller's shared
+/// SSH directory, operation services and existing executor chain.
+#[derive(Debug)]
+pub struct ProvisionReadiness {
+    machines: Arc<dyn fleet_application::machine::MachinePort>,
+    projects: Arc<dyn fleet_application::project::ProjectPort>,
+    audit: Arc<dyn fleet_application::operation::AuditPort>,
+    inner: Arc<dyn OperationExecutor>,
+    operations: Arc<Operations>,
+    work_dir: std::path::PathBuf,
+    started: Arc<std::sync::Mutex<std::collections::HashSet<String>>>,
+}
+
+impl ProvisionReadiness {
+    /// Composes the existing adapters; no alternate SSH or project runtime.
+    #[must_use]
+    pub fn new(
+        machines: Arc<dyn fleet_application::machine::MachinePort>,
+        projects: Arc<dyn fleet_application::project::ProjectPort>,
+        audit: Arc<dyn fleet_application::operation::AuditPort>,
+        inner: Arc<dyn OperationExecutor>,
+        operations: Arc<Operations>,
+        work_dir: std::path::PathBuf,
+    ) -> Self {
+        Self {
+            machines,
+            projects,
+            audit,
+            inner,
+            operations,
+            work_dir,
+            started: Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
+        }
+    }
+
+    async fn execute_child(&self, operations: &Operations, id: &str) -> Result<Operation, String> {
+        let current = operations
+            .get(
+                &fleet_auth::LanAllowAllAuthorizer,
+                fleet_auth::LAN_PRINCIPAL_ID,
+                id,
+            )
+            .await
+            .map_err(|_| "child record unavailable")?;
+        if current.cancel_requested {
+            return Ok(current);
+        }
+        let state = current.state;
+        if matches!(state.as_str(), "pending" | "running")
+            && self
+                .started
+                .lock()
+                .map_err(|_| "child startup guard unavailable")?
+                .insert(id.to_owned())
+        {
+            // The normal worker can win this claim. Read its resulting state
+            // rather than executing the child twice when that happens.
+            let operations = self.operations.clone();
+            let inner = self.inner.clone();
+            let id = id.to_owned();
+            let watchdog_operations = operations.clone();
+            let watchdog_id = id.clone();
+            let started = self.started.clone();
+            tokio::spawn(async move {
+                loop {
+                    let Ok(child) = watchdog_operations
+                        .get(
+                            &fleet_auth::LanAllowAllAuthorizer,
+                            fleet_auth::LAN_PRINCIPAL_ID,
+                            &watchdog_id,
+                        )
+                        .await
+                    else {
+                        break;
+                    };
+                    if child.cancel_requested
+                        || !matches!(child.state.as_str(), "pending" | "running")
+                    {
+                        break;
+                    }
+                    let payload: serde_json::Value =
+                        serde_json::from_str(child.payload_json.as_deref().unwrap_or("null"))
+                            .unwrap_or_default();
+                    let parent_stopped =
+                        if let Some(parent) = payload["labParentOperationId"].as_str() {
+                            watchdog_operations
+                                .get(
+                                    &fleet_auth::LanAllowAllAuthorizer,
+                                    fleet_auth::LAN_PRINCIPAL_ID,
+                                    parent,
+                                )
+                                .await
+                                .map_or(true, |parent| {
+                                    parent.cancel_requested
+                                        || !matches!(parent.state.as_str(), "pending" | "running")
+                                })
+                        } else {
+                            false
+                        };
+                    if parent_stopped
+                        || child.deadline_at.is_some_and(|deadline| {
+                            deadline <= fleet_core::SystemClock::now_unix_millis()
+                        })
+                    {
+                        let _ = watchdog_operations
+                            .cancel(
+                                &fleet_auth::LanAllowAllAuthorizer,
+                                fleet_auth::LAN_PRINCIPAL_ID,
+                                &watchdog_id,
+                            )
+                            .await;
+                        break;
+                    }
+                    tokio::time::sleep(Duration::from_millis(50)).await;
+                }
+                if let Ok(mut started) = started.lock() {
+                    started.remove(&watchdog_id);
+                }
+            });
+            tokio::spawn(async move {
+                if operations
+                    .claim_only_execute(inner.as_ref(), &id, fleet_auth::LAN_PRINCIPAL_ID)
+                    .await
+                    .is_err()
+                    && operations
+                        .get_state(&id)
+                        .await
+                        .is_ok_and(|state| state == "pending")
+                {
+                    let _ = operations
+                        .complete(
+                            &id,
+                            "failed",
+                            None,
+                            Some(r#"{"reason":"lab_child_claim_failed"}"#),
+                        )
+                        .await;
+                }
+            });
+        }
+        operations
+            .get(
+                &fleet_auth::LanAllowAllAuthorizer,
+                fleet_auth::LAN_PRINCIPAL_ID,
+                id,
+            )
+            .await
+            .map_err(|_| "child record unavailable".to_owned())
+    }
+}
+
+impl ProvisionReadiness {
+    #[allow(clippy::too_many_arguments)]
+    async fn run_probe(
+        &self,
+        operations: &Operations,
+        parent_id: &str,
+        record: &fleet_application::lab::ProvisionRecord,
+        command: &str,
+        arguments: &[String],
+        guest_os: fleet_core::GuestOs,
+        remaining: Duration,
+    ) -> Result<bool, String> {
+        let child = operations.create(&fleet_auth::LanAllowAllAuthorizer, fleet_auth::LAN_PRINCIPAL_ID,
+            &fleet_application::operation::NewOperation {
+                kind: "ssh.exec".to_owned(), idempotency_key: None,
+                deadline_at: record.readiness_deadline_at, correlation_id: Some(record.id.clone()), review_token: None,
+                payload_json: Some(serde_json::json!({
+                    "machineId": record.machine_id, "endpointId": record.endpoint_id,
+                    "auth": {"type": "agent"}, "script": command,
+                    "arguments": arguments,
+                    "guestOs": guest_os.id(),
+                    "labParentOperationId": parent_id,
+                    "timeoutSeconds": remaining.as_secs().clamp(1, crate::exec::MAX_SCRIPT_TIMEOUT),
+                }).to_string()),
+            }).await.map_err(|_| "SSH probe operation could not be created")?;
+        let deadline = tokio::time::Instant::now() + remaining;
+        loop {
+            let finished = self.execute_child(operations, &child.id).await?;
+            if finished.cancel_requested {
+                return Err("SSH probe was cancelled".to_owned());
+            }
+            if !matches!(finished.state.as_str(), "pending" | "running") {
+                return Ok(finished.state == "succeeded");
+            }
+            if tokio::time::Instant::now() >= deadline
+                || operations.cancel_requested(parent_id).await.unwrap_or(true)
+            {
+                let _ = operations
+                    .cancel(
+                        &fleet_auth::LanAllowAllAuthorizer,
+                        fleet_auth::LAN_PRINCIPAL_ID,
+                        &child.id,
+                    )
+                    .await;
+                return Err("SSH probe deadline expired".to_owned());
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl fleet_application::lab::LabReadinessPort for ProvisionReadiness {
+    async fn trust(
+        &self,
+        record: &fleet_application::lab::ProvisionRecord,
+        content: &fleet_core::LabTemplateContent,
+        remaining: Duration,
+    ) -> Result<bool, String> {
+        if remaining.as_secs() == 0 {
+            return Err("SSH trust deadline expired".to_owned());
+        }
+        let endpoint = record
+            .endpoint_id
+            .as_deref()
+            .ok_or("missing SSH endpoint")?;
+        let expected = self
+            .machines
+            .verified_fingerprint(endpoint)
+            .await
+            .map_err(|_| "host key record unavailable")?;
+        let host = record.guest_ipv4.clone().ok_or("missing guest IP")?;
+        let port = content.ssh_port;
+        let work_dir = self.work_dir.clone();
+        let observed = tokio::task::spawn_blocking(move || {
+            let staging = work_dir.join(format!("lab-trust-{}", uuid::Uuid::now_v7()));
+            let provider = fleet_provider_ssh::SshProvider::new(staging.clone())
+                .map_err(|_| "SSH provider unavailable")?;
+            let result = provider
+                .probe_host_key(&host, port, remaining.min(Duration::from_secs(5)))
+                .map_err(|_| "SSH host key unavailable");
+            let _ = std::fs::remove_dir_all(staging);
+            result
+        })
+        .await
+        .map_err(|_| "SSH trust worker failed")?;
+        let Ok(observation) = observed else {
+            return Ok(false);
+        };
+        if expected
+            .as_deref()
+            .is_some_and(|key| key != observation.fingerprint)
+            || (content.ssh_trust_mode == "pinned"
+                && content.ssh_fingerprint.as_deref() != Some(observation.fingerprint.as_str()))
+        {
+            return Err("the SSH host key differs from the pinned key".to_owned());
+        }
+        let machines =
+            fleet_application::machine::Machines::new(self.machines.clone(), self.audit.clone());
+        if expected.is_none() {
+            machines
+                .confirm_host_key(
+                    &fleet_auth::LanAllowAllAuthorizer,
+                    &fleet_application::authz::ActingPrincipal {
+                        id: fleet_auth::LAN_PRINCIPAL_ID.to_owned(),
+                    },
+                    endpoint,
+                    &observation.fingerprint,
+                )
+                .await
+                .map_err(|_| "SSH trust confirmation failed")?;
+        }
+        let provider = fleet_provider_ssh::SshProvider::new(self.work_dir.clone())
+            .map_err(|_| "SSH provider unavailable")?;
+        provider
+            .pin(&observation)
+            .map_err(|_| "SSH pinning failed")?;
+        Ok(true)
+    }
+
+    async fn ssh_probe(
+        &self,
+        operations: &Operations,
+        parent_id: &str,
+        record: &fleet_application::lab::ProvisionRecord,
+        command: &str,
+        guest_os: fleet_core::GuestOs,
+        remaining: Duration,
+    ) -> Result<bool, String> {
+        self.run_probe(
+            operations,
+            parent_id,
+            record,
+            command,
+            &[],
+            guest_os,
+            remaining,
+        )
+        .await
+    }
+
+    /// Readiness for an interactive test user (#397): true once that user
+    /// has an Active desktop session on the guest. The guest script reads
+    /// the session table only; its refusal text names the user and the WTS
+    /// state, never a credential.
+    async fn interactive_session(
+        &self,
+        operations: &Operations,
+        parent_id: &str,
+        record: &fleet_application::lab::ProvisionRecord,
+        user: &str,
+        remaining: Duration,
+    ) -> Result<bool, String> {
+        fleet_core::validate_interactive_user_name(user)?;
+        let metadata = fleet_provider_ssh::detached::session_probe_metadata(user);
+        self.run_probe(
+            operations,
+            parent_id,
+            record,
+            &fleet_provider_ssh::detached::session_probe_script(),
+            &metadata.arguments,
+            fleet_core::GuestOs::Windows,
+            remaining,
+        )
+        .await
+    }
+
+    async fn create_project(
+        &self,
+        operations: &Operations,
+        parent_id: &str,
+        record: &fleet_application::lab::ProvisionRecord,
+        project_id: &str,
+        remaining: Duration,
+    ) -> Result<String, String> {
+        let projects =
+            fleet_application::project::Projects::new(self.projects.clone(), self.audit.clone());
+        let project = projects
+            .get(
+                &fleet_auth::LanAllowAllAuthorizer,
+                &fleet_application::authz::ActingPrincipal {
+                    id: fleet_auth::LAN_PRINCIPAL_ID.to_owned(),
+                },
+                project_id,
+            )
+            .await
+            .map_err(|_| "bootstrap project unavailable")?;
+        let operation = operations.create(&fleet_auth::LanAllowAllAuthorizer, fleet_auth::LAN_PRINCIPAL_ID,
+            &fleet_application::operation::NewOperation {
+                kind: "ready.workflow".to_owned(), idempotency_key: Some(format!("lab-ready:{}", record.id)),
+                deadline_at: record.readiness_deadline_at, correlation_id: Some(record.id.clone()), review_token: None,
+                payload_json: Some(serde_json::json!({
+                    "machineId": record.machine_id, "endpointId": record.endpoint_id,
+                    "auth": {"type": "agent"}, "remote": project.remote, "fetch": project.fetch,
+                    "root": format!("/tmp/fleet-projects/{}", project.id),
+                    // Lab bootstrap is minimal (no tools, no skills) and does
+                    // not use Frogenv: the workflow never logs a disposable
+                    // guest in or approves it, so setup would grant nothing.
+                    // The plan is clone -> verify (#330).
+                    "usesFrogenv": false,
+                    "labParentOperationId": parent_id,
+                    "timeoutSeconds": remaining.as_secs().clamp(1, crate::ready::MAX_WORKFLOW_TIMEOUT),
+                }).to_string()),
+            }).await.map_err(|_| "bootstrap project operation could not be created")?;
+        Ok(operation.id)
+    }
+
+    async fn project_verified(
+        &self,
+        operations: &Operations,
+        child_id: &str,
+        _remaining: Duration,
+    ) -> Result<bool, String> {
+        let child = self.execute_child(operations, child_id).await?;
+        if child.cancel_requested {
+            return Err("bootstrap project was cancelled".to_owned());
+        }
+        if matches!(child.state.as_str(), "pending" | "running") {
+            return Ok(false);
+        }
+        let result: serde_json::Value =
+            serde_json::from_str(child.result_json.as_deref().unwrap_or("null"))
+                .unwrap_or_default();
+        if child.state == "succeeded"
+            && result["ready"] == true
+            && result["completed"]
+                .as_array()
+                .is_some_and(|steps| steps.iter().any(|step| step == "verify"))
+        {
+            Ok(true)
+        } else {
+            Err("bootstrap project verify did not pass".to_owned())
+        }
+    }
+}
+
+#[cfg(test)]
+mod readiness_startup_tests {
+    use super::*;
+
+    #[derive(Debug)]
+    struct HeldChild {
+        calls: Arc<std::sync::atomic::AtomicUsize>,
+        release: Arc<tokio::sync::Notify>,
+    }
+
+    #[async_trait::async_trait]
+    impl OperationExecutor for HeldChild {
+        async fn execute(
+            &self,
+            operations: &Operations,
+            operation: &Operation,
+        ) -> Result<(), String> {
+            self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            self.release.notified().await;
+            operations
+                .complete(&operation.id, "succeeded", Some("{}"), None)
+                .await
+                .map(|_| ())
+                .map_err(|error| error.to_string())
+        }
+    }
+
+    #[tokio::test]
+    async fn pending_polls_reuse_one_startup_and_watchdog() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = fleet_storage_sqlite::Store::open(&dir.path().join("fleet.db"))
+            .await
+            .unwrap();
+        let audit = Arc::new(fleet_storage_sqlite::AuditSink::new(store.pool().clone()));
+        let operations = Arc::new(Operations::new(
+            Arc::new(fleet_storage_sqlite::OperationRepository::new(
+                store.pool().clone(),
+            )),
+            audit.clone(),
+        ));
+        let child = operations
+            .create(
+                &fleet_auth::LanAllowAllAuthorizer,
+                fleet_auth::LAN_PRINCIPAL_ID,
+                &fleet_application::operation::NewOperation {
+                    kind: "noop".to_owned(),
+                    idempotency_key: None,
+                    deadline_at: None,
+                    correlation_id: None,
+                    payload_json: None,
+                    review_token: None,
+                },
+            )
+            .await
+            .unwrap();
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let release = Arc::new(tokio::sync::Notify::new());
+        let readiness = ProvisionReadiness::new(
+            Arc::new(fleet_storage_sqlite::MachineRepository::new(
+                store.pool().clone(),
+            )),
+            Arc::new(fleet_storage_sqlite::ProjectRepository::new(
+                store.pool().clone(),
+            )),
+            audit,
+            Arc::new(HeldChild {
+                calls: calls.clone(),
+                release: release.clone(),
+            }),
+            operations.clone(),
+            dir.path().join("ssh"),
+        );
+        for _ in 0..30 {
+            readiness
+                .execute_child(&operations, &child.id)
+                .await
+                .unwrap();
+            assert_eq!(readiness.started.lock().unwrap().len(), 1);
+        }
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+        release.notify_one();
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                if readiness.started.lock().unwrap().is_empty() {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(operations.get_state(&child.id).await.unwrap(), "succeeded");
+    }
+
+    #[tokio::test]
+    async fn the_bootstrap_project_workflow_declares_no_frogenv() {
+        use fleet_application::lab::LabReadinessPort as _;
+        use fleet_application::project::ProjectPort as _;
+        let dir = tempfile::tempdir().unwrap();
+        let store = fleet_storage_sqlite::Store::open(&dir.path().join("fleet.db"))
+            .await
+            .unwrap();
+        let audit = Arc::new(fleet_storage_sqlite::AuditSink::new(store.pool().clone()));
+        let operations = Arc::new(Operations::new(
+            Arc::new(fleet_storage_sqlite::OperationRepository::new(
+                store.pool().clone(),
+            )),
+            audit.clone(),
+        ));
+        let projects = Arc::new(fleet_storage_sqlite::ProjectRepository::new(
+            store.pool().clone(),
+        ));
+        let project = projects
+            .create(&fleet_application::project::NewProject {
+                fetch: fleet_core::RemoteFetch::default(),
+                remote: "example.test/demo".to_owned(),
+                idempotency_key: None,
+                name: "demo".to_owned(),
+                description: String::new(),
+            })
+            .await
+            .unwrap();
+        let readiness = ProvisionReadiness::new(
+            Arc::new(fleet_storage_sqlite::MachineRepository::new(
+                store.pool().clone(),
+            )),
+            projects,
+            audit,
+            Arc::new(HeldChild {
+                calls: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+                release: Arc::new(tokio::sync::Notify::new()),
+            }),
+            operations.clone(),
+            dir.path().join("ssh"),
+        );
+        let record = fleet_application::lab::ProvisionRecord {
+            id: "provision-1".to_owned(),
+            template_version_id: "version-1".to_owned(),
+            lease_id: None,
+            state: fleet_core::GuestState::Bootstrapping,
+            node: None,
+            vmid: None,
+            clone_upid: None,
+            guest_ipv4: None,
+            machine_id: Some("machine-1".to_owned()),
+            endpoint_id: Some("endpoint-1".to_owned()),
+            ready_project_operation_id: None,
+            readiness_deadline_at: Some(fleet_core::SystemClock::now_unix_millis() + 60_000),
+            failed_step: None,
+            account_id: None,
+            idempotency_key: None,
+            ready_at: None,
+            created_at: 0,
+            updated_at: 0,
+        };
+        let child_id = readiness
+            .create_project(
+                &operations,
+                "parent-1",
+                &record,
+                &project.id,
+                Duration::from_secs(60),
+            )
+            .await
+            .unwrap();
+        let child = operations
+            .get(
+                &fleet_auth::LanAllowAllAuthorizer,
+                fleet_auth::LAN_PRINCIPAL_ID,
+                &child_id,
+            )
+            .await
+            .unwrap();
+        let payload: serde_json::Value =
+            serde_json::from_str(child.payload_json.as_deref().unwrap()).unwrap();
+        // #330: Lab bootstrap plans clone -> verify, never Frogenv.
+        assert_eq!(payload["usesFrogenv"], false);
+        assert!(payload.get("tools").is_none() && payload.get("skillId").is_none());
+    }
 }
 
 /// The Lab provisioning executor (FM-710): drives the provisioning saga's
@@ -1028,6 +2114,58 @@ pub struct ProvisionExecutor {
     artifacts: Arc<dyn fleet_application::lab::ImageArtifactPort>,
     client: fleet_provider_proxmox::ProxmoxClient,
     links: Option<Arc<dyn ProxmoxTaskLinkPort>>,
+    readiness: Option<Arc<dyn fleet_application::lab::LabReadinessPort>>,
+    audit: Option<Arc<dyn fleet_application::operation::AuditPort>>,
+    placement: Option<Placement>,
+    /// Pooled template versions take a pool member instead of a clone
+    /// (FM-717).
+    pools: Option<Arc<dyn fleet_application::lab_pool::LabPoolPort>>,
+    /// The bound on one disk resize task (#372).
+    hardware_task_timeout: Duration,
+    hardware_confirm_timeout: Duration,
+}
+
+/// The placement and capacity reservation parts (FM-715).
+#[derive(Debug)]
+struct Placement {
+    reservations: Arc<dyn fleet_application::lab_placement::CapacityReservationPort>,
+    storage: Arc<dyn fleet_application::lab_placement::ImageStoragePort>,
+    audit: Arc<dyn fleet_application::operation::AuditPort>,
+    policy: fleet_application::lab_placement::PlacementPolicy,
+}
+
+/// Attempts the best-effort `lab_placement_refused` audit for a refusal
+/// decided before the reservation transaction runs (FM-715).
+async fn audit_placement_refusal(
+    placement: &Placement,
+    lease_id: &str,
+    operation_id: &str,
+    node: &str,
+    refusal: &Refusal,
+) {
+    let _ = placement
+        .audit
+        .record_intent(&fleet_application::lab_placement::reservation_audit(
+            fleet_auth::LAN_PRINCIPAL_ID,
+            lease_id,
+            Some(operation_id),
+            "lab_placement_refused",
+            &[
+                ("node", node.to_owned()),
+                ("reason", refusal.reason.to_owned()),
+            ],
+        ))
+        .await;
+}
+
+/// The clone the hardware step works on.
+struct HardwareTarget<'a> {
+    operation_id: &'a str,
+    request: &'a fleet_provider_proxmox::PveHttpRequest,
+    account_id: &'a str,
+    record_id: &'a str,
+    node: &'a str,
+    vmid: u32,
 }
 
 /// A classified provisioning failure: the operation completes as failed
@@ -1064,6 +2202,106 @@ impl ProvisionExecutor {
             artifacts,
             client,
             links: None,
+            readiness: None,
+            audit: None,
+            placement: None,
+            pools: None,
+            hardware_task_timeout: HARDWARE_TASK_TIMEOUT,
+            hardware_confirm_timeout: HARDWARE_CONFIRM_TIMEOUT,
+        }
+    }
+
+    /// Bounds how long a written hardware value may stay unreported by the
+    /// config read before the step fails, instead of the default thirty
+    /// seconds. For tests, which cannot wait that long.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn with_hardware_confirm_timeout(mut self, timeout: Duration) -> Self {
+        self.hardware_confirm_timeout = timeout;
+        self
+    }
+
+    /// Bounds one disk resize task (#372) by `timeout` instead of the
+    /// default ten minutes. For tests, which cannot wait that long.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn with_hardware_task_timeout(mut self, timeout: Duration) -> Self {
+        self.hardware_task_timeout = timeout;
+        self
+    }
+
+    /// Enables pooled leases (FM-717): a lease whose template version has a
+    /// pool claims one of its members instead of reserving capacity and
+    /// cloning.
+    #[must_use]
+    pub fn with_pools(mut self, pools: Arc<dyn fleet_application::lab_pool::LabPoolPort>) -> Self {
+        self.pools = Some(pools);
+        self
+    }
+
+    /// Enables placement and capacity reservation (FM-715): a lease
+    /// provision without an account selects the one account that reaches
+    /// the pinned template, and every clone first reserves the template's
+    /// CPU, memory, and disk on its node in one transaction.
+    #[must_use]
+    pub fn with_placement(
+        mut self,
+        reservations: Arc<dyn fleet_application::lab_placement::CapacityReservationPort>,
+        storage: Arc<dyn fleet_application::lab_placement::ImageStoragePort>,
+        audit: Arc<dyn fleet_application::operation::AuditPort>,
+        policy: fleet_application::lab_placement::PlacementPolicy,
+    ) -> Self {
+        self.placement = Some(Placement {
+            reservations,
+            storage,
+            audit,
+            policy,
+        });
+        self
+    }
+
+    /// After a provision operation ends: a lease that ended `failed`
+    /// without allocating a guest owes nothing to cleanup, so its capacity
+    /// reservation is released (FM-715). A lease whose record holds a VMID
+    /// keeps its reservation until cleanup destroys the guest. This write is
+    /// bookkeeping only: the reservation transaction already stops counting
+    /// a held row whose lease is `failed` without a VMID, so a skipped or
+    /// failed release here cannot strand capacity.
+    async fn release_unallocated(&self, operation: &Operation) {
+        let Some(placement) = &self.placement else {
+            return;
+        };
+        let Some(lease_id) = operation
+            .payload_json
+            .as_deref()
+            .and_then(|raw| serde_json::from_str::<serde_json::Value>(raw).ok())
+            .and_then(|payload| payload["leaseId"].as_str().map(str::to_owned))
+        else {
+            return;
+        };
+        let Ok(lease) = self.leases.get(&lease_id).await else {
+            return;
+        };
+        if lease.state != fleet_core::LeaseState::Failed {
+            return;
+        }
+        let allocated = match &lease.provision_id {
+            Some(id) => match self.provisions.get(id).await {
+                Ok(record) => record.vmid.is_some(),
+                // An unreadable record is not a reason to write: the storage
+                // rule decides from the same rows once they are readable.
+                Err(_) => return,
+            },
+            None => false,
+        };
+        if !allocated {
+            let _ = release_reservation(
+                placement.reservations.as_ref(),
+                placement.audit.as_ref(),
+                &lease_id,
+                "failed_without_allocation",
+            )
+            .await;
         }
     }
 
@@ -1073,6 +2311,87 @@ impl ProvisionExecutor {
     pub fn with_task_links(mut self, links: Arc<dyn ProxmoxTaskLinkPort>) -> Self {
         self.links = Some(links);
         self
+    }
+
+    /// Supplies the existing SSH and M3 readiness ports and mutation audit sink.
+    #[must_use]
+    pub fn with_readiness(
+        mut self,
+        readiness: Arc<dyn fleet_application::lab::LabReadinessPort>,
+        audit: Arc<dyn fleet_application::operation::AuditPort>,
+    ) -> Self {
+        self.readiness = Some(readiness);
+        self.audit = Some(audit);
+        self
+    }
+
+    async fn persist_failure(&self, record_id: &str, step: &str) -> Result<(), String> {
+        let mut record = self.provisions.get(record_id).await?;
+        if record.state == fleet_core::GuestState::Ready {
+            return Ok(());
+        }
+        record.state = fleet_core::GuestState::NeverReady;
+        record.failed_step = Some(step.to_owned());
+        self.provisions.update(&record).await?;
+        if let Some(id) = record.lease_id.as_deref() {
+            let mut lease = self.leases.get(id).await?;
+            if matches!(
+                lease.state,
+                fleet_core::LeaseState::Provisioning
+                    | fleet_core::LeaseState::Booting
+                    | fleet_core::LeaseState::Bootstrapping
+            ) {
+                lease.state = fleet_core::LeaseState::Failed;
+                self.leases.update(&lease).await?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Fails the provision at `step` with a classified refusal: the record
+    /// ends `never_ready` with its external IDs kept for cleanup, and the
+    /// operation completes with the same `{reason, step, detail}` shape as
+    /// [`Self::fail`].
+    async fn fail_at(
+        &self,
+        operations: &Operations,
+        operation_id: &str,
+        record_id: &str,
+        step: &str,
+        refusal: &Refusal,
+    ) -> Result<(), String> {
+        self.persist_failure(record_id, step).await?;
+        operations
+            .complete(
+                operation_id,
+                "failed",
+                None,
+                Some(
+                    &serde_json::json!({
+                        "reason": refusal.reason,
+                        "step": step,
+                        "detail": refusal.detail,
+                    })
+                    .to_string(),
+                ),
+            )
+            .await
+            .map(|_| ())
+            .map_err(|error| error.to_string())
+    }
+
+    async fn fail(
+        &self,
+        operations: &Operations,
+        operation_id: &str,
+        record_id: &str,
+        reason: &str,
+        step: &str,
+    ) -> Result<(), String> {
+        self.persist_failure(record_id, step).await?;
+        operations.complete(operation_id, "failed", None,
+            Some(&serde_json::json!({"reason": reason, "step": step, "detail": format!("Lab provisioning failed at {step}; recorded external IDs are retained")}).to_string()))
+            .await.map(|_| ()).map_err(|error| error.to_string())
     }
 
     async fn bound(
@@ -1113,7 +2432,7 @@ impl ProvisionExecutor {
 
 /// The pinned request every provider call of the Lab executor carries. The
 /// account's host is the API endpoint; it is never a PVE node name.
-fn pve_request(
+pub(crate) fn pve_request(
     account: &fleet_application::proxmox::ProxmoxAccount,
     secret: String,
 ) -> fleet_provider_proxmox::PveHttpRequest {
@@ -1133,7 +2452,8 @@ fn pve_request(
 impl ProvisionExecutor {
     /// The Lab cleanup guard over the cluster's live truth (issue #220):
     /// refuses a VMID that `/cluster/resources` reports as a template, or
-    /// that matches a promoted image's recorded build artifact. Lab cleanup
+    /// that matches a protected image build artifact (a promoted version's
+    /// build or a promotion's pinned build, issue #281). Lab cleanup
     /// (`destroy`, FM-711) must pass this before it deletes a guest; the
     /// provision executor also applies it before it resumes a record.
     ///
@@ -1241,11 +2561,12 @@ impl ProvisionExecutor {
     async fn clone_into_reserved_target(
         &self,
         record: &fleet_application::lab::ProvisionRecord,
-        image_version_id: &str,
+        content: &fleet_core::LabTemplateContent,
         account_id: &str,
         operation_id: &str,
         request: &fleet_provider_proxmox::PveHttpRequest,
     ) -> Result<Result<(String, u32), Refusal>, String> {
+        let image_version_id = content.image_version_id.as_str();
         // The clone source: the template VMID the pinned image version's
         // build recorded. No artifact is an honest failure: the pin was
         // validated as promoted, and promotion requires one.
@@ -1298,6 +2619,16 @@ impl ProvisionExecutor {
 
         // The target: reserved and recorded before the clone call. A
         // record that already holds a reservation resumes with it.
+        // FM-715: every pending clone (this function only runs before the
+        // clone starts) holds the template's capacity on its node before a
+        // VMID is taken or anything is cloned, including a record that
+        // reserved its VMID in an earlier run or before FM-715.
+        if let Err(refusal) = self
+            .reserve_capacity(record, content, &node, account_id, operation_id, request)
+            .await?
+        {
+            return Ok(Err(refusal));
+        }
         let mut reserved = if record.vmid.is_some() {
             record.clone()
         } else {
@@ -1318,7 +2649,7 @@ impl ProvisionExecutor {
                 return Ok(Err(Refusal::new(
                     "conflict",
                     format!(
-                        "the next free VMID {candidate} is a promoted image's recorded template, which no longer exists in the cluster; rebuild or demote that image, or move the next-id range"
+                        "the next free VMID {candidate} is a promoted image's recorded template, which no longer exists in the cluster; promote a newer build of that image version, or move the next-id range"
                     ),
                 )));
             }
@@ -1406,6 +2737,1019 @@ impl ProvisionExecutor {
 }
 
 impl ProvisionExecutor {
+    /// Step 1b (issue #290): a PVE clone copies the template's
+    /// `protection` flag, and PVE refuses to delete a protected guest, so
+    /// cleanup could never destroy a clone of a protected template. Once
+    /// the clone has landed (its config lock is gone; PVE refuses config
+    /// changes under a lock), the executor clears the flag on this
+    /// provision's own `fm-lab-<record>` guest. It never touches a
+    /// template or another guest, and a clone that carries no flag (an
+    /// unprotected template, or a resumed record already cleared) is left
+    /// alone, so a resume repeats nothing. The update carries the config
+    /// digest it was checked against; when PVE refuses it with a server
+    /// error (a config rewritten after the read: stale digest, or a brief
+    /// lock), the executor re-reads and re-checks the config and tries once
+    /// more.
+    async fn unprotect_clone(
+        &self,
+        operations: &Operations,
+        operation_id: &str,
+        request: &fleet_provider_proxmox::PveHttpRequest,
+        record: &fleet_application::lab::ProvisionRecord,
+        node: &str,
+        vmid: u32,
+    ) -> Result<Result<(), Refusal>, String> {
+        let name = format!("fm-lab-{}", record.id);
+        let clone_upid = record.clone_upid.as_deref();
+        let mut attempt = 0;
+        loop {
+            attempt += 1;
+            let config = match self
+                .settled_clone_config(operations, operation_id, request, clone_upid, node, vmid)
+                .await?
+            {
+                Ok(config) => config,
+                Err(refusal) => return Ok(Err(refusal)),
+            };
+            if config.template || config.name.as_deref() != Some(name.as_str()) {
+                return Ok(Err(Refusal::new(
+                    "conflict",
+                    format!(
+                        "{node}/qemu/{vmid} is {} named {}, not this provision's clone; its config is left unchanged",
+                        if config.template {
+                            "a template"
+                        } else {
+                            "a guest"
+                        },
+                        config.name.as_deref().unwrap_or("nothing")
+                    ),
+                )));
+            }
+            if !config.protection {
+                return Ok(Ok(()));
+            }
+            // Never an unconditional update: the digest binds the write to
+            // the config whose identity was just checked.
+            let Some(digest) = config.digest.as_deref() else {
+                return Ok(Err(Refusal::new(
+                    "unprotect_failed",
+                    format!(
+                        "the config of {node}/qemu/{vmid} carries no digest, so its protection flag is not cleared unconditionally; until it is cleared, PVE refuses to destroy the guest"
+                    ),
+                )));
+            };
+            match self
+                .client
+                .qemu_clear_protection(request.clone(), node, vmid, digest)
+                .await
+            {
+                Ok(()) => return Ok(Ok(())),
+                Err(fleet_provider_proxmox::PveApiError::Http { status, .. })
+                    if (500..600).contains(&status) && attempt < 2 => {}
+                Err(error) => {
+                    let cause = match &error {
+                        fleet_provider_proxmox::PveApiError::Auth
+                        | fleet_provider_proxmox::PveApiError::Forbidden { .. } => {
+                            format!("the token needs VM.Config.Options on /vms/{vmid} ({error})")
+                        }
+                        _ => format!(
+                            "PVE refused the update; the config may still be locked or changing ({error})"
+                        ),
+                    };
+                    return Ok(Err(Refusal::new(
+                        "unprotect_failed",
+                        format!(
+                            "the clone {node}/qemu/{vmid} inherited the template's protection flag, which could not be cleared: {cause}. Until the flag is cleared, PVE refuses to destroy the guest"
+                        ),
+                    )));
+                }
+            }
+        }
+    }
+
+    /// Reads the clone's hardware for step 1c. A server or transport error
+    /// is retried once; an unreadable payload is a guest Fleet cannot
+    /// understand (`hardware_unsupported`), any other failure
+    /// `hardware_failed`, so the provision fails at the `hardware` step with
+    /// its guest recorded, never as a generic step failure.
+    async fn read_clone_hardware(
+        &self,
+        target: &HardwareTarget<'_>,
+    ) -> Result<fleet_provider_proxmox::PveQemuHardware, Refusal> {
+        let (node, vmid) = (target.node, target.vmid);
+        let mut retried = false;
+        loop {
+            match self
+                .client
+                .qemu_hardware(target.request.clone(), node, vmid)
+                .await
+            {
+                Ok(hardware) => return Ok(hardware),
+                Err(fleet_provider_proxmox::PveApiError::InvalidPayload { detail }) => {
+                    return Err(Refusal::new(
+                        "hardware_unsupported",
+                        format!("the config of {node}/qemu/{vmid} cannot be read: {detail}"),
+                    ));
+                }
+                Err(
+                    error @ (fleet_provider_proxmox::PveApiError::Auth
+                    | fleet_provider_proxmox::PveApiError::Forbidden { .. }),
+                ) => {
+                    return Err(Refusal::new(
+                        "hardware_failed",
+                        format!(
+                            "the token needs VM.Audit on /vms/{vmid} to read the clone's hardware ({error})"
+                        ),
+                    ));
+                }
+                Err(error) if !std::mem::replace(&mut retried, true) => {
+                    let _ = error;
+                }
+                Err(error) => {
+                    return Err(Refusal::new(
+                        "hardware_failed",
+                        format!("the config of {node}/qemu/{vmid} could not be read: {error}"),
+                    ));
+                }
+            }
+        }
+    }
+
+    /// Waits for a disk resize task to end, bounded, honoring cancellation.
+    /// PVE checks `VM.Config.Disk` before it starts the task, but the
+    /// `Datastore.AllocateSpace` check runs inside the forked worker, and
+    /// the digest, the config lock, a shrink, and a missing disk are all the
+    /// task's exit status. A stale digest is answered `Ok(false)` (read and
+    /// try again); any other failed task is the refusal's cause. A transport
+    /// or server error reading the task is retried until the bound (the
+    /// resize keeps running on the node); only a refused token fails at
+    /// once.
+    async fn wait_resize_task(
+        &self,
+        operations: &Operations,
+        target: &HardwareTarget<'_>,
+        upid: &fleet_provider_proxmox::Upid,
+    ) -> Result<Result<bool, Refusal>, String> {
+        let started = std::time::Instant::now();
+        let mut unreadable: Option<String>;
+        loop {
+            if operations
+                .cancel_requested(target.operation_id)
+                .await
+                .map_err(|error| error.to_string())?
+            {
+                return Ok(Err(Refusal::new(
+                    "cancelled",
+                    format!(
+                        "cancelled while the disk of {}/qemu/{} was resizing; the guest is retained for cleanup",
+                        target.node, target.vmid
+                    ),
+                )));
+            }
+            match self.client.task_status(target.request.clone(), upid).await {
+                Ok(fleet_provider_proxmox::TaskStatus::Ok) => return Ok(Ok(true)),
+                Ok(fleet_provider_proxmox::TaskStatus::Error { detail }) => {
+                    if detail.contains("checksum mismatch") {
+                        return Ok(Ok(false));
+                    }
+                    return Ok(Err(Refusal::new(
+                        "hardware_failed",
+                        format!(
+                            "the disk resize of {}/qemu/{} failed: {detail}",
+                            target.node, target.vmid
+                        ),
+                    )));
+                }
+                // Still running, or the node does not know it yet.
+                Ok(_) => unreadable = None,
+                Err(
+                    error @ (fleet_provider_proxmox::PveApiError::Auth
+                    | fleet_provider_proxmox::PveApiError::Forbidden { .. }),
+                ) => {
+                    return Ok(Err(Refusal::new(
+                        "hardware_failed",
+                        format!(
+                            "the disk resize task of {}/qemu/{} could not be read: {error}; its outcome is unknown",
+                            target.node, target.vmid
+                        ),
+                    )));
+                }
+                Err(error) => unreadable = Some(error.to_string()),
+            }
+            if started.elapsed() >= self.hardware_task_timeout {
+                return Ok(Err(Refusal::new(
+                    "hardware_failed",
+                    format!(
+                        "the disk resize of {}/qemu/{} did not finish within {} seconds{}; the guest is retained for cleanup",
+                        target.node,
+                        target.vmid,
+                        self.hardware_task_timeout.as_secs(),
+                        unreadable.map_or_else(String::new, |error| format!(
+                            " (the task could not be read: {error})"
+                        ))
+                    ),
+                )));
+            }
+            tokio::time::sleep(POLL_INTERVAL).await;
+        }
+    }
+
+    /// Step 1c (issue #372): gives the clone the template's cores and memory
+    /// and grows its boot disk to at least the template's `diskGib`, on the
+    /// provision's own new guest only (the caller skips pool members and a
+    /// resumed guest that already started: a running guest takes a config
+    /// change as `pending`). The same read that decides the writes checks
+    /// the guest is the `fm-lab-<record>` clone and no template. Each write
+    /// is conditional on the config digest it was read at and is repeated
+    /// only when the config differs, so a resume repeats nothing. A server
+    /// error or a stale digest re-reads and retries once per kind, and the
+    /// whole step is bounded by time and by the number of writes. The resize
+    /// is a PVE task: it is polled to its exit status. A disk is never
+    /// shrunk, and a guest whose boot disk, memory format, or socket layout
+    /// cannot be understood is refused rather than guessed at. The result
+    /// is confirmed by reading the config again. The guest's filesystem is
+    /// the image's business: Fleet grows the disk, not the partition.
+    #[allow(clippy::too_many_lines)]
+    async fn apply_clone_hardware(
+        &self,
+        operations: &Operations,
+        target: &HardwareTarget<'_>,
+        content: &fleet_core::LabTemplateContent,
+    ) -> Result<Result<(), Refusal>, String> {
+        #[derive(Clone, Copy, PartialEq, Eq)]
+        enum Write {
+            Config,
+            Resize,
+        }
+        let (node, vmid) = (target.node, target.vmid);
+        let wanted_mib = u64::from(content.disk_gib) * 1024;
+        let wanted_audio = content
+            .audio
+            .as_ref()
+            .map(|audio| fleet_provider_proxmox::PveAudio {
+                device: audio.device.clone(),
+                driver: audio.driver.clone(),
+            });
+        let audio_label = wanted_audio.as_ref().map_or_else(
+            || "unchanged".to_owned(),
+            fleet_provider_proxmox::PveAudio::to_property,
+        );
+        let where_ = format!("{node}/qemu/{vmid}");
+        let name = format!("fm-lab-{}", target.record_id);
+        let refuse = |reason: &'static str, detail: String| Ok(Err(Refusal::new(reason, detail)));
+        let failed =
+            |action: &str, privileges: &str, error: &fleet_provider_proxmox::PveApiError| {
+                let cause = match error {
+                    fleet_provider_proxmox::PveApiError::Auth
+                    | fleet_provider_proxmox::PveApiError::Forbidden { .. } => {
+                        format!("the token needs {privileges} on /vms/{vmid} ({error})")
+                    }
+                    fleet_provider_proxmox::PveApiError::Http { status: 400, .. } => {
+                        format!("PVE rejected the requested value ({error})")
+                    }
+                    _ => format!(
+                        "PVE refused it; the config may still be locked or changing ({error})"
+                    ),
+                };
+                Refusal::new(
+                    "hardware_failed",
+                    format!("the clone {where_} could not {action}: {cause}"),
+                )
+            };
+        let started = std::time::Instant::now();
+        let mut retried = [false; 2];
+        let mut last_write: Option<(Write, std::time::Instant)> = None;
+        let mut writes = 0_u32;
+        loop {
+            if operations
+                .cancel_requested(target.operation_id)
+                .await
+                .map_err(|error| error.to_string())?
+            {
+                return refuse(
+                    "cancelled",
+                    format!(
+                        "cancelled while applying the hardware of {where_}; the guest is retained for cleanup"
+                    ),
+                );
+            }
+            if started.elapsed() >= HARDWARE_TIMEOUT || writes >= HARDWARE_MAX_WRITES {
+                return refuse(
+                    "hardware_failed",
+                    format!(
+                        "the clone {where_} did not settle on the template's hardware ({} cores, {} MiB, {} GiB disk, audio {}) after {writes} writes; the guest is retained for cleanup",
+                        content.cores, content.memory_mib, content.disk_gib, audio_label
+                    ),
+                );
+            }
+            let hardware = match self.read_clone_hardware(target).await {
+                Ok(hardware) => hardware,
+                Err(refusal) => return Ok(Err(refusal)),
+            };
+            if hardware.template || hardware.name.as_deref() != Some(name.as_str()) {
+                return refuse(
+                    "conflict",
+                    format!(
+                        "{where_} is {} named {}, not this provision's clone; its hardware is left unchanged",
+                        if hardware.template {
+                            "a template"
+                        } else {
+                            "a guest"
+                        },
+                        hardware.name.as_deref().unwrap_or("nothing")
+                    ),
+                );
+            }
+            // The capacity reservation counts `content.cores` vCPUs, so what
+            // the guest boots with must equal it: `vcpus` when set, else
+            // `sockets * cores`. Fleet writes `cores` only on a single-socket
+            // guest without `vcpus`, where it is that count.
+            let multi = hardware.sockets > 1 || hardware.vcpus.is_some();
+            let effective = hardware
+                .vcpus
+                .unwrap_or_else(|| hardware.sockets.saturating_mul(hardware.cores));
+            let cores = (!multi && hardware.cores != content.cores).then_some(content.cores);
+            let memory = (hardware.memory_mib != content.memory_mib).then_some(content.memory_mib);
+            // The audio device rides the same config write. A template that
+            // declares none leaves whatever the image has.
+            let audio = wanted_audio.as_ref().filter(|wanted| {
+                hardware.audio_unreadable || hardware.audio.as_ref() != Some(*wanted)
+            });
+            if memory.is_some() && hardware.memory_has_options {
+                return refuse(
+                    "hardware_unsupported",
+                    format!(
+                        "the clone {where_} has a memory setting with options (such as a maximum), which Fleet does not rewrite; give the image template a plain memory size or a template with the same size ({} MiB)",
+                        content.memory_mib
+                    ),
+                );
+            }
+            if multi && effective != content.cores {
+                return refuse(
+                    "hardware_unsupported",
+                    format!(
+                        "the clone {where_} boots with {effective} vCPUs ({} sockets, {} cores, vcpus {}), not the template's {}; Fleet sets cores only on a single-socket guest without a vcpus setting, so give the image a matching CPU layout",
+                        hardware.sockets,
+                        hardware.cores,
+                        hardware
+                            .vcpus
+                            .map_or_else(|| "unset".to_owned(), |vcpus| vcpus.to_string()),
+                        content.cores
+                    ),
+                );
+            }
+            if memory.is_some_and(|memory| hardware.balloon_mib.is_some_and(|b| b > memory)) {
+                return refuse(
+                    "hardware_unsupported",
+                    format!(
+                        "the clone {where_} has a balloon target of {} MiB, above the template's {} MiB memory, which PVE refuses; give the image a balloon target within the template's memory",
+                        hardware.balloon_mib.unwrap_or_default(),
+                        content.memory_mib
+                    ),
+                );
+            }
+            let Some(disk) = hardware.boot_disk.clone() else {
+                return refuse(
+                    "hardware_unsupported",
+                    format!(
+                        "the clone {where_} has no single boot disk Fleet can identify (no `boot` order or `bootdisk` names one of several disks), so its size is not checked"
+                    ),
+                );
+            };
+            let Some(size_mib) = disk.size_mib else {
+                return refuse(
+                    "hardware_unsupported",
+                    format!(
+                        "the size of the boot disk {} of {where_} is not stated in its config, so it is not checked",
+                        disk.key
+                    ),
+                );
+            };
+            let grow = size_mib < wanted_mib;
+            if cores.is_none() && memory.is_none() && audio.is_none() && !grow {
+                return Ok(Ok(()));
+            }
+            // What is still wrong right after the write that should have
+            // fixed it is waited out, never written again, within a bound.
+            let next = if cores.is_some() || memory.is_some() || audio.is_some() {
+                Write::Config
+            } else {
+                Write::Resize
+            };
+            if let Some((kind, at)) = last_write
+                && kind == next
+            {
+                if at.elapsed() >= self.hardware_confirm_timeout {
+                    return refuse(
+                        "hardware_failed",
+                        format!(
+                            "the clone {where_} does not report the template's hardware ({} cores, {} MiB, {} GiB disk, audio {}) after the update; the guest is retained for cleanup",
+                            content.cores, content.memory_mib, content.disk_gib, audio_label
+                        ),
+                    );
+                }
+                tokio::time::sleep(POLL_INTERVAL).await;
+                continue;
+            }
+            let Some(digest) = hardware.digest.as_deref() else {
+                return refuse(
+                    "hardware_failed",
+                    format!(
+                        "the config of {where_} carries no digest, so its hardware is not changed unconditionally"
+                    ),
+                );
+            };
+            match next {
+                Write::Config => {
+                    match self
+                        .client
+                        .qemu_set_hardware(
+                            target.request.clone(),
+                            node,
+                            vmid,
+                            cores,
+                            memory,
+                            audio,
+                            digest,
+                        )
+                        .await
+                    {
+                        Ok(()) => {
+                            writes += 1;
+                            last_write = Some((next, std::time::Instant::now()));
+                        }
+                        // A config rewritten after the read (a stale digest,
+                        // a brief lock) is read again and tried once more.
+                        Err(fleet_provider_proxmox::PveApiError::Http { status, .. })
+                            if (500..600).contains(&status)
+                                && !std::mem::replace(&mut retried[0], true) => {}
+                        Err(error) => {
+                            let privileges = [
+                                (cores.is_some(), "VM.Config.CPU"),
+                                (memory.is_some(), "VM.Config.Memory"),
+                                (audio.is_some(), "VM.Config.HWType"),
+                            ]
+                            .iter()
+                            .filter_map(|(needed, privilege)| needed.then_some(*privilege))
+                            .collect::<Vec<_>>()
+                            .join(" and ");
+                            let action = format!(
+                                "set its {}",
+                                [
+                                    (cores.is_some(), "cores"),
+                                    (memory.is_some(), "memory"),
+                                    (audio.is_some(), "audio device"),
+                                ]
+                                .iter()
+                                .filter_map(|(needed, what)| needed.then_some(*what))
+                                .collect::<Vec<_>>()
+                                .join(" and ")
+                            );
+                            return Ok(Err(failed(&action, &privileges, &error)));
+                        }
+                    }
+                }
+                Write::Resize => {
+                    let action =
+                        format!("resize its disk {} to {} GiB", disk.key, content.disk_gib);
+                    match self
+                        .client
+                        .qemu_resize_disk(
+                            target.request.clone(),
+                            node,
+                            vmid,
+                            &disk.key,
+                            content.disk_gib,
+                            digest,
+                        )
+                        .await
+                    {
+                        Ok(task) => {
+                            writes += 1;
+                            let mut done = true;
+                            if let Some(upid) = task {
+                                record_task_link(
+                                    self.links.as_ref(),
+                                    target.account_id,
+                                    &upid,
+                                    target.operation_id,
+                                )
+                                .await;
+                                match self.wait_resize_task(operations, target, &upid).await? {
+                                    Ok(finished) => done = finished,
+                                    Err(refusal) => return Ok(Err(refusal)),
+                                }
+                            }
+                            if done {
+                                last_write = Some((next, std::time::Instant::now()));
+                            } else if std::mem::replace(&mut retried[1], true) {
+                                // A stale digest again: the config keeps
+                                // changing under the step.
+                                return refuse(
+                                    "hardware_failed",
+                                    format!(
+                                        "the clone {where_} could not {action}: its config kept changing (stale digest)"
+                                    ),
+                                );
+                            }
+                        }
+                        Err(fleet_provider_proxmox::PveApiError::Http { status, .. })
+                            if (500..600).contains(&status)
+                                && !std::mem::replace(&mut retried[1], true) => {}
+                        Err(error) => {
+                            return Ok(Err(failed(&action, "VM.Config.Disk", &error)));
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// Reads the new guest's config until it exists and carries no lock,
+    /// bounded by [`CLONE_SETTLE_TIMEOUT`], honoring cancellation, and
+    /// recording progress about once a minute while it waits. While the
+    /// config is unreadable it also reads the recorded `qmclone` task (#310):
+    /// a failed task removes the target's config, so waiting for it could
+    /// only end at the bound. A task that stopped with an error, or stopped
+    /// cleanly yet left no config, refuses at once as `clone_task_failed`.
+    async fn settled_clone_config(
+        &self,
+        operations: &Operations,
+        operation_id: &str,
+        request: &fleet_provider_proxmox::PveHttpRequest,
+        clone_upid: Option<&str>,
+        node: &str,
+        vmid: u32,
+    ) -> Result<Result<fleet_provider_proxmox::PveQemuConfigFlags, Refusal>, String> {
+        let started = std::time::Instant::now();
+        let mut reported: Option<std::time::Instant> = None;
+        // A stored UPID that does not parse cannot be polled: say so, and
+        // wait on the config alone within the bound.
+        let clone_upid = clone_upid.and_then(|raw| {
+            match fleet_provider_proxmox::Upid::parse(raw) {
+                Ok(upid) => Some(upid),
+                Err(detail) => {
+                    eprintln!(
+                        "the recorded clone task id of {node}/qemu/{vmid} is malformed ({detail}); waiting on the config alone"
+                    );
+                    None
+                }
+            }
+        });
+        // Consecutive unreadable-config reads while the clone task reads OK.
+        let mut task_ok_misses = 0_u32;
+        loop {
+            if operations
+                .cancel_requested(operation_id)
+                .await
+                .map_err(|error| error.to_string())?
+            {
+                return Ok(Err(Refusal::new(
+                    "cancelled",
+                    format!(
+                        "cancelled while waiting for the clone {node}/qemu/{vmid} to finish; the guest is retained for cleanup"
+                    ),
+                )));
+            }
+            // PVE writes the target's config inside the forked qmclone
+            // worker, after the clone call returns: an early read can find
+            // no config yet (HTTP 500) or miss the node. Those are retried
+            // within the bound; a refused token or an unreadable answer
+            // fails at once.
+            let waiting_on = match self
+                .client
+                .qemu_config_flags(request.clone(), node, vmid)
+                .await
+            {
+                Ok(config) => match config.lock.clone() {
+                    None => return Ok(Ok(config)),
+                    Some(lock) => {
+                        task_ok_misses = 0;
+                        format!("{lock} lock")
+                    }
+                },
+                Err(
+                    error @ (fleet_provider_proxmox::PveApiError::Http { .. }
+                    | fleet_provider_proxmox::PveApiError::Transport(
+                        fleet_provider_proxmox::PveTransportError::Connect { .. },
+                    )),
+                ) => {
+                    if let Some(upid) = &clone_upid {
+                        match self.client.task_status(request.clone(), upid).await {
+                            Ok(fleet_provider_proxmox::TaskStatus::Error { detail }) => {
+                                return Ok(Err(Refusal::new(
+                                    "clone_task_failed",
+                                    format!(
+                                        "the clone task for {node}/qemu/{vmid} failed: {detail}; the provision is recorded as failed at clone, and cleanup releases the reserved target and removes any partial guest"
+                                    ),
+                                )));
+                            }
+                            // The task ended cleanly, so the config should
+                            // exist. A read that predates the task's end
+                            // proves nothing, so only a read after the OK
+                            // was seen counts: a definite "does not exist"
+                            // answer then refuses; any other failure must
+                            // repeat once more first (a transient error
+                            // must not read as a missing guest).
+                            Ok(fleet_provider_proxmox::TaskStatus::Ok) => {
+                                task_ok_misses += 1;
+                                let missing = matches!(
+                                    &error,
+                                    fleet_provider_proxmox::PveApiError::Http { status: 500, detail }
+                                        if detail.contains("does not exist")
+                                );
+                                if (missing && task_ok_misses >= 2) || task_ok_misses >= 3 {
+                                    return Ok(Err(Refusal::new(
+                                        "clone_task_failed",
+                                        format!(
+                                            "the clone task for {node}/qemu/{vmid} finished OK but its config stays unreadable ({error}); the provision is recorded as failed at clone, and cleanup releases the reserved target and removes the guest if one exists"
+                                        ),
+                                    )));
+                                }
+                            }
+                            // Still running, rotated out, or unreadable:
+                            // keep waiting within the bound.
+                            Ok(_) | Err(_) => task_ok_misses = 0,
+                        }
+                    }
+                    format!("config not readable yet: {error}")
+                }
+                Err(error) => {
+                    return Err(format!("the clone's config is unreadable: {error}"));
+                }
+            };
+            if started.elapsed() >= CLONE_SETTLE_TIMEOUT {
+                return Ok(Err(Refusal::new(
+                    "clone_unsettled",
+                    format!(
+                        "{node}/qemu/{vmid} has not settled after {} seconds ({waiting_on}); the guest is retained for cleanup",
+                        CLONE_SETTLE_TIMEOUT.as_secs()
+                    ),
+                )));
+            }
+            if reported.is_none_or(|at| at.elapsed() >= CLONE_PROGRESS_INTERVAL) {
+                reported = Some(std::time::Instant::now());
+                operations
+                    .record_progress(
+                        operation_id,
+                        Some(1),
+                        Some(3),
+                        Some(&format!(
+                            "waiting for the clone {node}/qemu/{vmid} to finish ({waiting_on}; {} s so far)",
+                            started.elapsed().as_secs()
+                        )),
+                    )
+                    .await
+                    .map_err(|error| error.to_string())?;
+            }
+            tokio::time::sleep(POLL_INTERVAL).await;
+        }
+    }
+
+    /// Selects the account for a lease provision that named none (FM-715):
+    /// the candidates are the trusted accounts (confirmed fingerprint and a
+    /// stored token) whose cluster reports the pinned image's template VMID
+    /// as a template, since the clone runs on the template's node. Exactly
+    /// one candidate is placed; none or several are refused with an
+    /// explanation.
+    async fn place_account(
+        &self,
+        image_version_id: &str,
+    ) -> Result<Result<String, Refusal>, String> {
+        use fleet_application::lab_placement::{PlacementCandidate, select_candidate};
+        if self.placement.is_none() {
+            return Ok(Err(Refusal::new(
+                "placement_unavailable",
+                "this controller has no Lab placement configured; pass an account".to_owned(),
+            )));
+        }
+        let Some(source_vmid) = self
+            .artifacts
+            .template_vmid(image_version_id)
+            .await
+            .map_err(|detail| format!("the image artifact is unreadable: {detail}"))?
+        else {
+            return Ok(Err(Refusal::new(
+                "artifact_missing",
+                format!(
+                    "the pinned image version {image_version_id} has no recorded build artifact; build and promote it before provisioning"
+                ),
+            )));
+        };
+        let accounts = self
+            .accounts
+            .list()
+            .await
+            .map_err(|detail| format!("the Proxmox accounts are unreadable: {detail}"))?;
+        let mut candidates = Vec::new();
+        // Confirmed non-candidates (untrusted, or no such template) are
+        // `skipped`; accounts whose answer is unknown are `unresolved`, and
+        // any of those refuses automatic selection: a same-VMID template
+        // there could be the one the sole visible match is not.
+        let mut skipped = Vec::new();
+        let mut unresolved = Vec::new();
+        for account in accounts {
+            if account.fingerprint.is_none() {
+                skipped.push(format!("{}: no confirmed fingerprint", account.name));
+                continue;
+            }
+            match self.credentials.load(&account.id).await {
+                Ok(Some(_)) => {}
+                Ok(None) => {
+                    skipped.push(format!("{}: no stored API token", account.name));
+                    continue;
+                }
+                Err(_) => {
+                    unresolved.push(format!("{}: the credential store failed", account.name));
+                    continue;
+                }
+            }
+            let (bound, secret) = match self.bound(&account.id).await {
+                Ok(bound) => bound,
+                Err(_) => {
+                    unresolved.push(format!("{}: the account is unreadable", account.name));
+                    continue;
+                }
+            };
+            let Ok(resources) = self
+                .client
+                .list_guest_resources(pve_request(&bound, secret))
+                .await
+            else {
+                unresolved.push(format!(
+                    "{}: the cluster's resources are unreadable",
+                    account.name
+                ));
+                continue;
+            };
+            match resources.iter().find(|resource| {
+                resource.vmid == Some(source_vmid) && resource.kind == "qemu-template"
+            }) {
+                Some(template) if template.node.is_some() => {
+                    candidates.push(PlacementCandidate {
+                        account_id: account.id.clone(),
+                        account_name: account.name.clone(),
+                        node: template.node.clone().unwrap_or_default(),
+                    });
+                }
+                _ => skipped.push(format!(
+                    "{}: no template qemu/{source_vmid} in its cluster",
+                    account.name
+                )),
+            }
+        }
+        Ok(select_candidate(candidates, &skipped, &unresolved)
+            .map(|candidate| candidate.account_id)
+            .map_err(|refusal| Refusal::new(refusal.reason(), refusal.to_string())))
+    }
+
+    /// Reserves the template's capacity on `node` for the record's lease in
+    /// one transaction (FM-715). The node's capacity observation is
+    /// refreshed first; when the refresh fails the stored observation
+    /// decides, and a stale one refuses. A lease that already holds its
+    /// reservation (a resumed provision) keeps it.
+    async fn reserve_capacity(
+        &self,
+        record: &fleet_application::lab::ProvisionRecord,
+        content: &fleet_core::LabTemplateContent,
+        node: &str,
+        account_id: &str,
+        operation_id: &str,
+        request: &fleet_provider_proxmox::PveHttpRequest,
+    ) -> Result<Result<(), Refusal>, String> {
+        use fleet_application::lab_placement::{
+            CapacityDemand, ReservationRequest, ReservationState, ReserveOutcome,
+            reservation_audit, reservation_facts,
+        };
+        use fleet_provider_proxmox::ProxmoxSource as _;
+        let (Some(placement), Some(lease_id)) = (&self.placement, record.lease_id.as_deref())
+        else {
+            return Ok(Ok(()));
+        };
+        let Some(storage) = placement
+            .storage
+            .template_storage(&content.image_version_id)
+            .await
+            .map_err(|detail| format!("the image's storage pool is unreadable: {detail}"))?
+        else {
+            let refusal = Refusal::new(
+                "storage_unknown",
+                format!(
+                    "the storage pool of the pinned image version {} is unknown; refusing to place without it",
+                    content.image_version_id
+                ),
+            );
+            audit_placement_refusal(placement, lease_id, operation_id, node, &refusal).await;
+            return Ok(Err(refusal));
+        };
+        let wanted = ReservationRequest {
+            lease_id: lease_id.to_owned(),
+            account_id: account_id.to_owned(),
+            node: node.to_owned(),
+            demand: CapacityDemand::for_template(content, &storage),
+        };
+        if let Some(existing) = placement
+            .reservations
+            .for_lease(lease_id)
+            .await
+            .map_err(|detail| format!("the capacity reservation is unreadable: {detail}"))?
+            && existing.state == ReservationState::Held
+        {
+            // A resumed provision keeps its reservation only where, and for
+            // what, the clone will run: the template can move between nodes,
+            // and a re-promotion can change the pinned build's storage pool.
+            if let Err(mismatch) = wanted.covered_by(&existing) {
+                let refusal = Refusal::new(mismatch.reason(), mismatch.to_string());
+                audit_placement_refusal(placement, lease_id, operation_id, node, &refusal).await;
+                return Ok(Err(refusal));
+            }
+            return Ok(Ok(()));
+        }
+        // A failed or partial refresh is not fatal and replaces nothing: the
+        // stored observation decides, and the transaction refuses it once it
+        // is stale.
+        if let Ok(discovery) = self.client.discover(request.clone()).await {
+            let observed_at = fleet_core::SystemClock::now_unix_millis();
+            for capacity in discovery.node_capacities.into_iter().filter(|capacity| {
+                capacity.node == node
+                    && capacity.cpu_count.is_some()
+                    && capacity.memory_total_bytes.is_some()
+                    && capacity.memory_used_bytes.is_some()
+                    && !capacity.storages.is_empty()
+            }) {
+                let observation = fleet_application::proxmox::ProxmoxNodeCapacity {
+                    node: capacity.node,
+                    cpu_usage_ratio: capacity.cpu_usage_ratio,
+                    cpu_count: capacity.cpu_count,
+                    memory_used_bytes: capacity.memory_used_bytes,
+                    memory_total_bytes: capacity.memory_total_bytes,
+                    storages: capacity
+                        .storages
+                        .into_iter()
+                        .map(
+                            |storage| fleet_application::proxmox::ProxmoxStorageCapacity {
+                                storage: storage.storage,
+                                used_bytes: storage.used_bytes,
+                                total_bytes: storage.total_bytes,
+                            },
+                        )
+                        .collect(),
+                    observed_at,
+                };
+                placement
+                    .reservations
+                    .record_observation(account_id, &observation)
+                    .await
+                    .map_err(|detail| {
+                        format!("the capacity observation is unwritable: {detail}")
+                    })?;
+            }
+        }
+        let outcome = placement
+            .reservations
+            .reserve(
+                &wanted,
+                &placement.policy,
+                fleet_core::SystemClock::now_unix_millis(),
+            )
+            .await
+            .map_err(|detail| format!("the capacity reservation failed: {detail}"))?;
+        let (event, facts, result) = match outcome {
+            ReserveOutcome::Reserved(reservation) => (
+                "lab_capacity_reserved",
+                reservation_facts(&reservation),
+                Ok(()),
+            ),
+            ReserveOutcome::Refused(refusal) => (
+                "lab_placement_refused",
+                vec![
+                    ("node", node.to_owned()),
+                    ("reason", refusal.reason().to_owned()),
+                ],
+                Err(Refusal::new(refusal.reason(), refusal.to_string())),
+            ),
+        };
+        let _ = placement
+            .audit
+            .record_intent(&reservation_audit(
+                fleet_auth::LAN_PRINCIPAL_ID,
+                lease_id,
+                Some(operation_id),
+                event,
+                &facts,
+            ))
+            .await;
+        Ok(result)
+    }
+}
+
+impl ProvisionExecutor {
+    /// Step 1 for a pooled template version (FM-717): binds one free member
+    /// of the pool to the lease (or re-finds the one already bound) in one
+    /// storage transaction that also records it on the provision record,
+    /// then checks the live guest before anything starts it: it must still
+    /// be the verified QEMU guest, by its recorded name, and pass the
+    /// cleanup guard. Answers the node, VMID, and name. The outer error is
+    /// an infrastructure failure; the inner one a classified refusal.
+    async fn claim_pool_member(
+        &self,
+        pools: &dyn fleet_application::lab_pool::LabPoolPort,
+        pool: &fleet_application::lab_pool::LabPool,
+        lease_id: &str,
+        record_id: &str,
+        operation_id: &str,
+        request: &fleet_provider_proxmox::PveHttpRequest,
+    ) -> Result<Result<(String, u32, String), Refusal>, String> {
+        let now = fleet_core::SystemClock::now_unix_millis();
+        // The intent precedes the claim, and is required: a claim the
+        // audit sink refused is not made.
+        if let Some(audit) = &self.audit {
+            audit
+                .record_intent(&fleet_application::lab_pool::member_audit(
+                    fleet_auth::LAN_PRINCIPAL_ID,
+                    &pool.id,
+                    Some(operation_id),
+                    "lab_pool_claim_requested",
+                    &[("leaseId", lease_id.to_owned())],
+                ))
+                .await
+                .map_err(|detail| format!("the pool claim audit failed: {detail}"))?;
+        }
+        let member = match pools
+            .claim(&pool.id, lease_id, record_id, now)
+            .await
+            .map_err(|error| format!("the pool claim failed: {error}"))?
+        {
+            fleet_application::lab_pool::ClaimOutcome::Claimed(member) => member,
+            fleet_application::lab_pool::ClaimOutcome::Exhausted => {
+                return Ok(Err(Refusal::new(
+                    "pool_exhausted",
+                    format!(
+                        "every member of pool {} is leased, filling, draining, or quarantined; retry once a lease is released, or fill the pool",
+                        pool.id
+                    ),
+                )));
+            }
+        };
+        if let Some(audit) = &self.audit {
+            // Best effort: the member row is the truth.
+            let _ = audit
+                .record_intent(&fleet_application::lab_pool::member_audit(
+                    fleet_auth::LAN_PRINCIPAL_ID,
+                    &pool.id,
+                    Some(operation_id),
+                    "lab_pool_member_claimed",
+                    &[
+                        ("vmid", member.vmid.to_string()),
+                        ("leaseId", lease_id.to_owned()),
+                    ],
+                ))
+                .await;
+        }
+        let vmid = member.vmid;
+        let (decision, resources) = self.destroy_guard(request.clone(), vmid).await?;
+        if let Err(refusal) = decision {
+            return Ok(Err(Refusal::new(
+                "pool_member_unverified",
+                format!("pool member {vmid} must not be leased: {refusal}"),
+            )));
+        }
+        let recorded = member.name.clone().unwrap_or_default();
+        let Some((node, name)) = resources
+            .iter()
+            .find(|resource| resource.vmid == Some(vmid))
+            .filter(|guest| {
+                guest.kind == "qemu" && guest.name.as_deref() == Some(recorded.as_str())
+            })
+            .and_then(|guest| guest.node.clone().map(|node| (node, recorded.clone())))
+        else {
+            return Ok(Err(Refusal::new(
+                "pool_member_unverified",
+                format!(
+                    "pool member {vmid} is no longer the QEMU guest {recorded:?} its fill verified; its cleanup will quarantine it"
+                ),
+            )));
+        };
+        if member.node.as_deref() != Some(node.as_str()) {
+            // The guest moved: the record and the member follow it, so
+            // cleanup reverts it where it lives now.
+            let _ = pools.set_member_node(&member.id, &node, now).await;
+            let mut moved = self
+                .provisions
+                .get(record_id)
+                .await
+                .map_err(|detail| format!("the provision record is unreadable: {detail}"))?;
+            moved.node = Some(node.clone());
+            self.provisions
+                .update(&moved)
+                .await
+                .map_err(|detail| format!("the provision record is unwritable: {detail}"))?;
+        }
+        Ok(Ok((node, vmid, name)))
+    }
+}
+
+impl ProvisionExecutor {
     #[allow(clippy::too_many_lines)]
     async fn execute_linked(
         &self,
@@ -1426,10 +3770,7 @@ impl ProvisionExecutor {
             .as_str()
             .ok_or("the payload carries no recordId")?
             .to_owned();
-        let account_id = payload["accountId"]
-            .as_str()
-            .ok_or("the payload carries no accountId")?
-            .to_owned();
+        let requested_account = payload["accountId"].as_str().map(str::to_owned);
         let lease_id = payload["leaseId"]
             .as_str()
             .ok_or("the payload carries no leaseId")?
@@ -1451,12 +3792,34 @@ impl ProvisionExecutor {
         }
         if !matches!(
             lease.state,
-            fleet_core::LeaseState::Provisioning | fleet_core::LeaseState::Ready
+            fleet_core::LeaseState::Provisioning
+                | fleet_core::LeaseState::Booting
+                | fleet_core::LeaseState::Bootstrapping
+                | fleet_core::LeaseState::Ready
         ) {
             return Err(format!(
                 "the linked lease is in {} and cannot be provisioned",
                 lease.state.id()
             ));
+        }
+        if record.state == fleet_core::GuestState::Ready
+            && lease.state == fleet_core::LeaseState::Ready
+        {
+            return operations.complete(&operation.id, "succeeded", Some(&serde_json::json!({
+                "recordId": record.id, "machineId": record.machine_id, "endpointId": record.endpoint_id,
+                "node": record.node, "vmid": record.vmid, "state": "ready"
+            }).to_string()), None).await.map(|_| ()).map_err(|error| error.to_string());
+        }
+        if record.state == fleet_core::GuestState::NeverReady {
+            return self
+                .fail(
+                    operations,
+                    &operation.id,
+                    &record.id,
+                    "never_ready",
+                    record.failed_step.as_deref().unwrap_or("readiness"),
+                )
+                .await;
         }
         let version = self
             .templates
@@ -1466,15 +3829,144 @@ impl ProvisionExecutor {
 
         // The account is the API endpoint only: the PVE node that holds the
         // template comes from the cluster's resources, never from the
-        // account's host. FM-711's placement epic owns multi-account
-        // selection.
+        // account's host. The caller's account wins; a resumed record keeps
+        // the account it recorded; otherwise placement selects the one
+        // account that reaches the pinned template (FM-715).
+        // FM-717: a pooled template version leases a member, reached
+        // through the pool's account; placement does not apply.
+        let pool = match &self.pools {
+            Some(pools) => pools
+                .for_template_version(&record.template_version_id)
+                .await
+                .map_err(|error| format!("the pool is unreadable: {error}"))?,
+            None => None,
+        };
+        // A record that already holds a guest of its own (a clone target
+        // reserved before the pool existed) finishes as a clone; only a
+        // record without one, or one whose guest is this lease's member,
+        // is pooled.
+        let pool = match (pool, &self.pools) {
+            (Some(pool), Some(pools)) if record.vmid.is_some() || record.clone_upid.is_some() => {
+                let bound = pools
+                    .member_for_lease(&lease_id)
+                    .await
+                    .map_err(|error| format!("the pool member is unreadable: {error}"))?;
+                bound.is_some().then_some(pool)
+            }
+            (pool, _) => pool,
+        };
+        if let Some(pool) = &pool
+            && requested_account
+                .as_deref()
+                .is_some_and(|account| account != pool.account_id)
+        {
+            return complete_failure(
+                operations,
+                &operation.id,
+                "pool_account_mismatch",
+                &format!(
+                    "the template version is pooled through account {}; provision without --account, or with that account",
+                    pool.account_id
+                ),
+            )
+            .await;
+        }
+        let account_id = match pool
+            .as_ref()
+            .map(|pool| pool.account_id.clone())
+            .or(requested_account)
+            .or_else(|| record.account_id.clone())
+        {
+            Some(account_id) => account_id,
+            None => match self
+                .place_account(&version.content.image_version_id)
+                .await?
+            {
+                Ok(account_id) => account_id,
+                Err(refusal) => {
+                    if let Some(placement) = &self.placement {
+                        let _ = placement
+                            .audit
+                            .record_intent(&fleet_application::lab_placement::reservation_audit(
+                                fleet_auth::LAN_PRINCIPAL_ID,
+                                &lease_id,
+                                Some(&operation.id),
+                                "lab_placement_refused",
+                                &[("reason", refusal.reason.to_owned())],
+                            ))
+                            .await;
+                    }
+                    return complete_failure(
+                        operations,
+                        &operation.id,
+                        refusal.reason,
+                        &refusal.detail,
+                    )
+                    .await;
+                }
+            },
+        };
         let (account, secret) = self.bound(&account_id).await?;
         let request = pve_request(&account, secret);
+        // FM-713: the account is recorded before the clone, so cleanup
+        // destroys the guest through the same account even after a crash.
+        let mut record = record;
+        if record.account_id.as_deref() != Some(account_id.as_str()) {
+            record.account_id = Some(account_id.clone());
+            self.provisions
+                .update(&record)
+                .await
+                .map_err(|detail| format!("the provision record is unwritable: {detail}"))?;
+        }
 
         // Step 1: clone from the pinned image into a reserved VMID, unless
         // the record's clone already started (resume instead of creating a
         // second VM).
-        let (node, vmid) = if record.clone_upid.is_some() {
+        let pooled = match (&self.pools, &pool) {
+            (Some(pools), Some(pool)) => {
+                operations
+                    .record_progress(
+                        &operation.id,
+                        Some(0),
+                        Some(3),
+                        Some("leasing a pool member"),
+                    )
+                    .await
+                    .map_err(|error| error.to_string())?;
+                match self
+                    .claim_pool_member(
+                        pools.as_ref(),
+                        pool,
+                        &lease_id,
+                        &record.id,
+                        &operation.id,
+                        &request,
+                    )
+                    .await?
+                {
+                    Ok(claimed) => Some(claimed),
+                    Err(refusal) => {
+                        return complete_failure(
+                            operations,
+                            &operation.id,
+                            refusal.reason,
+                            &refusal.detail,
+                        )
+                        .await;
+                    }
+                }
+            }
+            _ => None,
+        };
+        // The name the started guest must carry: a pool member's recorded
+        // name, else this provision's clone name.
+        let guest_name = pooled.as_ref().map_or_else(
+            || format!("fm-lab-{}", record.id),
+            |(_, _, name)| name.clone(),
+        );
+        let (node, vmid) = if let Some((node, vmid, _)) = &pooled {
+            (node.clone(), *vmid)
+        } else if record.clone_upid.is_some() {
             let (Some(node), Some(vmid)) = (record.node.clone(), record.vmid) else {
                 return Err("the provision record started a clone but carries no target".to_owned());
             };
@@ -1529,7 +4021,7 @@ impl ProvisionExecutor {
             match self
                 .clone_into_reserved_target(
                     &record,
-                    &version.content.image_version_id,
+                    &version.content,
                     &account_id,
                     &operation.id,
                     &request,
@@ -1556,7 +4048,97 @@ impl ProvisionExecutor {
             .await
             .map_err(|detail| format!("the provision record is unreadable: {detail}"))?;
 
-        // Step 2: start the guest (idempotent when already running).
+        // Step 1b: the clone has landed and carries no inherited
+        // protection flag before anything starts it. A pool member is the
+        // operator's guest: Lab never destroys it, so its protection stays.
+        if pooled.is_none()
+            && let Err(refusal) = self
+                .unprotect_clone(operations, &operation.id, &request, &record, &node, vmid)
+                .await?
+        {
+            let step = if refusal.reason == "unprotect_failed" {
+                "unprotect"
+            } else {
+                "clone"
+            };
+            return self
+                .fail_at(operations, &operation.id, &record.id, step, &refusal)
+                .await;
+        }
+        // Step 1c (issue #372): the clone gets the template's cores, memory,
+        // and disk (the image template's hardware is only a starting
+        // point), so the guest matches what the capacity reservation held.
+        // A pool member's hardware is the operator's, and a record past
+        // `provisioning` already started its guest, where a config change
+        // would only be `pending` until the next boot.
+        if pooled.is_none()
+            && record.state == fleet_core::GuestState::Provisioning
+            && let Err(refusal) = self
+                .apply_clone_hardware(
+                    operations,
+                    &HardwareTarget {
+                        operation_id: &operation.id,
+                        request: &request,
+                        account_id: &account_id,
+                        record_id: &record.id,
+                        node: &node,
+                        vmid,
+                    },
+                    &version.content,
+                )
+                .await
+                .unwrap_or_else(|detail| Err(Refusal::new("hardware_failed", detail)))
+        {
+            return self
+                .fail_at(operations, &operation.id, &record.id, "hardware", &refusal)
+                .await;
+        }
+
+        let mut record = record;
+        // The deadline was first set when the saga started (#302), so the
+        // sweeper can compensate an interruption before this step. The boot
+        // window starts fresh here; a resumed boot (already `booting`) keeps
+        // the deadline it set.
+        let boot_deadline = fleet_core::SystemClock::now_unix_millis()
+            .saturating_add(i64::from(version.content.readiness_deadline_seconds) * 1_000);
+        if record.state == fleet_core::GuestState::Booting {
+            record.readiness_deadline_at.get_or_insert(boot_deadline);
+        } else {
+            record.readiness_deadline_at = Some(boot_deadline);
+        }
+        // The sweeper may have compensated the lease while the clone ran
+        // (#302); a lease that left the saga must not be booted.
+        let mut booting_lease = self.leases.get(&lease_id).await?;
+        if !matches!(
+            booting_lease.state,
+            fleet_core::LeaseState::Provisioning
+                | fleet_core::LeaseState::Booting
+                | fleet_core::LeaseState::Bootstrapping
+                | fleet_core::LeaseState::Ready
+        ) {
+            return Err(format!(
+                "lease {lease_id} is {} and no longer awaiting its guest",
+                booting_lease.state.id()
+            ));
+        }
+        record.state = fleet_core::GuestState::Booting;
+        self.provisions.update(&record).await?;
+        if booting_lease.state != fleet_core::LeaseState::Ready {
+            booting_lease.state = fleet_core::LeaseState::Booting;
+            self.leases.update(&booting_lease).await?;
+        }
+
+        // Step 2: start the guest (idempotent when already running), unless
+        // the provision was cancelled since the clone settled.
+        if operations
+            .cancel_requested(&operation.id)
+            .await
+            .map_err(|error| error.to_string())?
+        {
+            return self
+                .fail(operations, &operation.id, &record.id, "cancelled", "boot")
+                .await;
+        }
         operations
             .record_progress(
                 &operation.id,
@@ -1575,64 +4157,155 @@ impl ProvisionExecutor {
                 fleet_provider_proxmox::LifecycleAction::Start,
             )
             .await;
-        // A refused start stays tolerated (the guest may already run); an
-        // accepted one is linked like every other task Fleet starts.
+        // A refusal is idempotent only when live provider state confirms
+        // this already-owned guest is running.
         if let Ok(upid) = &started {
             record_task_link(self.links.as_ref(), &account_id, upid, &operation.id).await;
+        } else {
+            let running = self
+                .client
+                .list_guest_resources(request.clone())
+                .await
+                .map_err(|_| "the boot state is unreadable")?
+                .iter()
+                .any(|guest| {
+                    guest.vmid == Some(vmid)
+                        && guest.kind == "qemu"
+                        && guest.name.as_deref() == Some(guest_name.as_str())
+                        && guest.status.as_deref() == Some("running")
+                });
+            if !running {
+                return self
+                    .fail(
+                        operations,
+                        &operation.id,
+                        &record.id,
+                        "provision_failed",
+                        "boot",
+                    )
+                    .await;
+            }
         }
 
-        // Step 3: the readiness probe. The guest-agent probe polls the
-        // FM-601 agent data; the deadline comes from the template.
-        let deadline =
-            std::time::Duration::from_secs(u64::from(version.content.readiness_deadline_seconds));
-        let started = std::time::Instant::now();
+        // Step 3: obtain a usable IP from normalized FM-601 agent data.
         loop {
-            let cancelled = operations
+            if operations
                 .cancel_requested(&operation.id)
                 .await
-                .unwrap_or(false);
-            if cancelled {
-                return complete_failure(
-                    operations,
-                    &operation.id,
-                    "cancelled",
-                    &format!(
-                        "cancelled while waiting for readiness; the guest {node}/qemu/{vmid} keeps running and its state is recorded"
-                    ),
-                )
-                .await;
+                .map_err(|error| error.to_string())?
+            {
+                return self
+                    .fail(
+                        operations,
+                        &operation.id,
+                        &record.id,
+                        "cancelled",
+                        "guest_ip",
+                    )
+                    .await;
             }
-            // The agent probe: the guest answers `agent/info` when ready.
-            let agent_ready = self
-                .client
-                .guest_agent_info(request.clone(), &node, vmid)
-                .await
-                .is_ok();
-            if agent_ready {
+            let remaining = record
+                .readiness_deadline_at
+                .unwrap_or(0)
+                .saturating_sub(fleet_core::SystemClock::now_unix_millis());
+            if remaining <= 0 {
+                return self
+                    .fail(
+                        operations,
+                        &operation.id,
+                        &record.id,
+                        "never_ready",
+                        "guest_ip",
+                    )
+                    .await;
+            }
+            let budget = Duration::from_millis(u64::try_from(remaining).unwrap_or(0));
+            let discovery = tokio::time::timeout(
+                budget,
+                self.client
+                    .guest_agent_network(request.clone(), &node, vmid),
+            )
+            .await;
+            let ip = match discovery {
+                Ok(agent) => Some(&agent)
+                    .filter(|agent| agent.online)
+                    .and_then(|agent| {
+                        agent
+                            .interfaces
+                            .iter()
+                            .flat_map(|interface| &interface.addresses)
+                            .filter_map(|address| address.parse::<std::net::Ipv4Addr>().ok())
+                            .find(|ip| {
+                                !ip.is_loopback()
+                                    && !ip.is_link_local()
+                                    && !ip.is_unspecified()
+                                    && !ip.is_multicast()
+                                    && !ip.is_broadcast()
+                            })
+                    })
+                    .map(|ip| ip.to_string()),
+                _ => None,
+            };
+            if let Some(ip) = ip {
+                // Keep the originally associated endpoint stable on resume.
+                if record.machine_id.is_some() && record.guest_ipv4.as_deref() != Some(ip.as_str())
+                {
+                    return self
+                        .fail(
+                            operations,
+                            &operation.id,
+                            &record.id,
+                            "never_ready",
+                            "guest_ip_changed",
+                        )
+                        .await;
+                }
+                record.guest_ipv4 = Some(ip);
+                self.provisions.update(&record).await?;
                 break;
             }
-            if started.elapsed() >= deadline {
-                // never_ready: an explicit recorded failure, never a hang.
-                let mut updated = record.clone();
-                updated.state = fleet_core::GuestState::NeverReady;
-                updated.node = Some(node.clone());
-                updated.vmid = Some(vmid);
-                self.provisions
-                    .update(&updated)
-                    .await
-                    .map_err(|detail| format!("the record update failed: {detail}"))?;
-                return complete_failure(
+            tokio::time::sleep(POLL_INTERVAL.min(budget)).await;
+        }
+        let (Some(readiness), Some(audit)) = (&self.readiness, &self.audit) else {
+            return self
+                .fail(
                     operations,
                     &operation.id,
+                    &record.id,
                     "never_ready",
-                    &format!(
-                        "the readiness deadline expired without the probe passing; the guest {node}/qemu/{vmid} is recorded as never_ready"
-                    ),
+                    "readiness_adapter",
                 )
                 .await;
+        };
+        let mut bootstrapping_lease = self.leases.get(&lease_id).await?;
+        bootstrapping_lease.state = fleet_core::LeaseState::Bootstrapping;
+        self.leases.update(&bootstrapping_lease).await?;
+        let bootstrap = fleet_application::lab::LabBootstrap {
+            provisions: self.provisions.as_ref(),
+            readiness: readiness.as_ref(),
+            audit: audit.as_ref(),
+            authorizer: &fleet_auth::LanAllowAllAuthorizer,
+            principal: &fleet_application::authz::ActingPrincipal {
+                id: fleet_auth::LAN_PRINCIPAL_ID.to_owned(),
+            },
+        };
+        let record = match bootstrap
+            .run(operations, &operation.id, record, &version.content)
+            .await
+        {
+            Ok(record) => record,
+            Err(failure) => {
+                return self
+                    .fail(
+                        operations,
+                        &operation.id,
+                        &record_id,
+                        "never_ready",
+                        failure.step,
+                    )
+                    .await;
             }
-            tokio::time::sleep(POLL_INTERVAL).await;
-        }
+        };
 
         // Ready: record the state; the TTL clock starts here.
         let (ready_at, lease_expires_at) = if let Some(lease_id) = record.lease_id.as_deref() {
@@ -1687,6 +4360,9 @@ impl ProvisionExecutor {
                 Some(
                     &serde_json::json!({
                         "recordId": record.id,
+                        "machineId": record.machine_id,
+                        "endpointId": record.endpoint_id,
+                        "readyProjectOperationId": record.ready_project_operation_id,
                         "node": node,
                         "vmid": vmid,
                         "state": "ready"
@@ -1704,7 +4380,39 @@ impl ProvisionExecutor {
 #[async_trait::async_trait]
 impl OperationExecutor for ProvisionExecutor {
     async fn execute(&self, operations: &Operations, operation: &Operation) -> Result<(), String> {
-        self.execute_linked(operations, operation).await
+        let outcome = self.execute_linked(operations, operation).await;
+        let payload: serde_json::Value =
+            serde_json::from_str(operation.payload_json.as_deref().unwrap_or("null"))
+                .unwrap_or_default();
+        if let Some(record_id) = payload["recordId"].as_str() {
+            let failed = outcome.is_err()
+                || operations
+                    .get_state(&operation.id)
+                    .await
+                    .map_err(|error| error.to_string())?
+                    == "failed";
+            if failed {
+                let record = self.provisions.get(record_id).await?;
+                let step = record.failed_step.as_deref().unwrap_or(match record.state {
+                    fleet_core::GuestState::Provisioning => "clone",
+                    fleet_core::GuestState::Booting => "boot",
+                    _ => "readiness",
+                });
+                self.persist_failure(record_id, step).await?;
+                if outcome.is_err() {
+                    return self
+                        .fail(
+                            operations,
+                            &operation.id,
+                            record_id,
+                            "provision_failed",
+                            step,
+                        )
+                        .await;
+                }
+            }
+        }
+        outcome
     }
 }
 
@@ -1714,6 +4422,9 @@ impl OperationExecutor for ProvisionExecutor {
 pub struct LabDispatch {
     fallback: Arc<dyn OperationExecutor>,
     provision: Arc<ProvisionExecutor>,
+    cleanup: Option<Arc<crate::lab_cleanup::LabCleanupExecutor>>,
+    leases: Option<Arc<dyn fleet_application::lab::LeasePort>>,
+    provisions: Option<Arc<dyn fleet_application::lab::ProvisionPort>>,
 }
 
 impl LabDispatch {
@@ -1723,6 +4434,222 @@ impl LabDispatch {
         Self {
             fallback,
             provision,
+            cleanup: None,
+            leases: None,
+            provisions: None,
+        }
+    }
+
+    /// Routes `lab.cleanup` to the cleanup executor (FM-713), and
+    /// compensates terminal provision failures through it.
+    #[must_use]
+    pub fn with_cleanup(
+        mut self,
+        cleanup: Arc<crate::lab_cleanup::LabCleanupExecutor>,
+        leases: Arc<dyn fleet_application::lab::LeasePort>,
+        provisions: Arc<dyn fleet_application::lab::ProvisionPort>,
+    ) -> Self {
+        self.cleanup = Some(cleanup);
+        self.leases = Some(leases);
+        self.provisions = Some(provisions);
+        self
+    }
+
+    /// Runs a `lab.exec` (FM-720): re-checks that the lease is still ready
+    /// and unexpired, then runs the command on its Lab-owned machine
+    /// through the SSH exec path (same output bounds and redaction as
+    /// machine exec). The operation keeps its `lab.exec` identity; only the
+    /// payload handed to the SSH executor is resolved here.
+    async fn exec(&self, operations: &Operations, operation: &Operation) -> Result<(), String> {
+        let refuse = |reason: &str, detail: String| {
+            let error = serde_json::json!({ "reason": reason, "detail": detail }).to_string();
+            async move {
+                operations
+                    .complete(&operation.id, "failed", None, Some(&error))
+                    .await
+                    .map(|_| ())
+                    .map_err(|error| error.to_string())
+            }
+        };
+        let (Some(leases), Some(provisions)) = (&self.leases, &self.provisions) else {
+            return refuse(
+                "lab_unavailable",
+                "the Lab stores are not configured".to_owned(),
+            )
+            .await;
+        };
+        let payload: serde_json::Value = serde_json::from_str(
+            operation
+                .payload_json
+                .as_deref()
+                .ok_or("the operation carries no payload")?,
+        )
+        .map_err(|error| format!("the payload is not a Lab exec: {error}"))?;
+        let lease_id = payload["leaseId"].as_str().unwrap_or_default();
+        let lease = leases.get(lease_id).await?;
+        if let Err(detail) = fleet_application::lab::lease_exec_ready(
+            &lease,
+            fleet_core::SystemClock::now_unix_millis(),
+        ) {
+            return refuse("lease_not_ready", detail).await;
+        }
+        let record = match &lease.provision_id {
+            Some(id) => Some(provisions.get(id).await?),
+            None => None,
+        };
+        let Some((machine_id, endpoint_id)) =
+            record.and_then(|record| record.machine_id.zip(record.endpoint_id))
+        else {
+            return refuse(
+                "no_lab_machine",
+                "the lease's guest has no registered Lab machine".to_owned(),
+            )
+            .await;
+        };
+        let mut ssh = operation.clone();
+        ssh.kind = "ssh.exec".to_owned();
+        // An interactive-session run (#397): the same supervisor as a
+        // detached command, started as the interactive user in its desktop
+        // session, waited for inside one SSH exec. The rule was applied when
+        // the operation was created; it is checked again here because the
+        // payload is data.
+        let session = payload["session"].as_str().unwrap_or("service");
+        if session != "service" {
+            let guest_os = payload["guestOs"].as_str().unwrap_or("linux");
+            let user = payload["interactiveUser"].as_str().unwrap_or_default();
+            let resolved = fleet_core::ExecSession::from_id(session).and_then(|session| {
+                session.resolve(
+                    fleet_core::GuestOs::from_id(guest_os)?,
+                    Some(user).filter(|user| !user.is_empty()),
+                )
+            });
+            let user = match resolved {
+                Ok(Some(user)) => user.to_owned(),
+                Ok(None) => String::new(),
+                Err(detail) => return refuse("invalid_session", detail).await,
+            };
+            if let Err(detail) = fleet_core::validate_interactive_user_name(&user) {
+                return refuse("invalid_session", detail).await;
+            }
+            let seconds = payload["timeoutSeconds"]
+                .as_u64()
+                .unwrap_or(60)
+                .clamp(1, fleet_application::lab::MAX_LAB_EXEC_INTERACTIVE_SECONDS);
+            let script = fleet_provider_ssh::detached::interactive_start_script(
+                payload["script"].as_str().unwrap_or_default(),
+                true,
+            );
+            let metadata = fleet_provider_ssh::detached::interactive_start_metadata(
+                &operation.id,
+                seconds,
+                &user,
+            );
+            ssh.payload_json = Some(
+                serde_json::json!({
+                    "machineId": machine_id,
+                    "endpointId": endpoint_id,
+                    "auth": {"type": "agent"},
+                    "script": script,
+                    "arguments": metadata.arguments,
+                    "guestOs": "windows",
+                    // The guest bound, the start and the wait margin.
+                    "timeoutSeconds": seconds + fleet_application::lab::INTERACTIVE_EXEC_MARGIN_SECONDS,
+                })
+                .to_string(),
+            );
+            return self.fallback.execute(operations, &ssh).await;
+        }
+        ssh.payload_json = Some(
+            serde_json::json!({
+                "machineId": machine_id,
+                "endpointId": endpoint_id,
+                "auth": {"type": "agent"},
+                "script": payload["script"],
+                // An operation queued before the field existed is Linux.
+                "guestOs": payload["guestOs"].as_str().unwrap_or("linux"),
+                "timeoutSeconds": payload["timeoutSeconds"]
+                    .as_u64()
+                    .unwrap_or(60)
+                    .min(fleet_application::lab::MAX_LAB_EXEC_TIMEOUT_SECONDS),
+            })
+            .to_string(),
+        );
+        self.fallback.execute(operations, &ssh).await
+    }
+
+    /// After a provision ends failed or cancelled, a lease that owns a guest
+    /// moves to `releasing` with its cleanup queued, even when the readiness
+    /// failure already made it `failed` (terminal, so it could never be
+    /// released and its guest would leak). A lease that never allocated a
+    /// guest ends `failed`.
+    async fn compensate(&self, operations: &Operations, operation: &Operation) {
+        let (Some(leases), Some(provisions)) = (&self.leases, &self.provisions) else {
+            return;
+        };
+        let Ok(finished) = operations
+            .get(
+                &fleet_auth::LanAllowAllAuthorizer,
+                fleet_auth::LAN_PRINCIPAL_ID,
+                &operation.id,
+            )
+            .await
+        else {
+            return;
+        };
+        if !matches!(finished.state.as_str(), "failed" | "cancelled") {
+            return;
+        }
+        let Some(lease_id) = operation
+            .payload_json
+            .as_deref()
+            .and_then(|raw| serde_json::from_str::<serde_json::Value>(raw).ok())
+            .and_then(|payload| payload["leaseId"].as_str().map(str::to_owned))
+        else {
+            return;
+        };
+        let Ok(mut lease) = leases.get(&lease_id).await else {
+            return;
+        };
+        let record = match &lease.provision_id {
+            Some(id) => provisions.get(id).await.ok(),
+            None => None,
+        };
+        // Only a record linking back to this lease is its guest.
+        let allocated = fleet_application::lab::lease_allocated(&lease, record.as_ref());
+        match fleet_application::lab::provision_compensation(lease.state, allocated) {
+            Some(fleet_core::LeaseState::Releasing) => {
+                lease.state = fleet_core::LeaseState::Releasing;
+                if leases.update(&lease).await.is_ok() {
+                    let _ = operations
+                        .create_lab_cleanup(
+                            &fleet_auth::LanAllowAllAuthorizer,
+                            fleet_auth::LAN_PRINCIPAL_ID,
+                            &lease.id,
+                            &fleet_application::lab::cleanup_operation(
+                                &lease,
+                                Some(operation.id.clone()),
+                            ),
+                        )
+                        .await;
+                }
+            }
+            Some(state) => {
+                lease.state = state;
+                let _ = leases.update(&lease).await;
+            }
+            None => {}
+        }
+        // The failed provision ends its record too, so a VMID it reserved is
+        // free for later leases (#303). A failure here is not lost: the
+        // sweeper ends any in-flight record of a lease that left the saga.
+        if let Some(record) = &record
+            && fleet_application::lab::provision_to_abandon(&lease, record)
+            && let Err(error) = provisions.abandon(&record.id).await
+        {
+            eprintln!(
+                "ending abandoned provision {} failed (the sweeper retries): {error}",
+                record.id
+            );
         }
     }
 }
@@ -1730,10 +4657,603 @@ impl LabDispatch {
 #[async_trait::async_trait]
 impl OperationExecutor for LabDispatch {
     async fn execute(&self, operations: &Operations, operation: &Operation) -> Result<(), String> {
-        if operation.kind == "lab.provision" {
-            self.provision.execute(operations, operation).await
-        } else {
-            self.fallback.execute(operations, operation).await
+        match (operation.kind.as_str(), &self.cleanup) {
+            ("lab.provision", _) => {
+                let result = self.provision.execute(operations, operation).await;
+                self.compensate(operations, operation).await;
+                self.provision.release_unallocated(operation).await;
+                result
+            }
+            ("lab.cleanup", Some(cleanup)) => cleanup.execute(operations, operation).await,
+            ("lab.exec", _) => self.exec(operations, operation).await,
+            _ => self.fallback.execute(operations, operation).await,
+        }
+    }
+}
+
+#[cfg(test)]
+mod destroy_tests {
+    use super::*;
+    use axum::{body::Body, http::Request};
+    use fleet_application::authz::{AccessRequest, Authorizer, Decision, Permission, ReasonId};
+    use fleet_application::proxmox::{CredentialStoreError, NewProxmoxAccount, ProxmoxAccountPort};
+    use fleet_provider_proxmox::{
+        PveHttpMethod, PveHttpRequest, PveHttpResponse, PveTransport, PveTransportError,
+    };
+    use fleet_storage_sqlite::{
+        AuditSink, OperationRepository, ProxmoxAccountRepository, ProxmoxTaskLinkRepository, Store,
+    };
+    use serde_json::{Value, json};
+    use std::sync::Mutex;
+    use tower::ServiceExt;
+
+    const STOP: &str = "UPID:pve:0015523F:0C6DF532:6AAFE1EC:qmstop:101:fleet@pve!test:";
+    const DESTROY: &str = "UPID:pve:0015523F:0C6DF532:6AAFE1EC:qmdestroy:101:fleet@pve!test:";
+    #[derive(Debug)]
+    struct Transport {
+        template: bool,
+        template_after_stop: std::sync::atomic::AtomicBool,
+        absent: bool,
+        task_error: bool,
+        stop_error: bool,
+        stop_running: bool,
+        seen: Mutex<Vec<String>>,
+        cancel_on_recheck: Mutex<Option<(Arc<Operations>, String)>>,
+    }
+    #[async_trait::async_trait]
+    impl PveTransport for Transport {
+        async fn execute(
+            &self,
+            request: PveHttpRequest,
+        ) -> Result<PveHttpResponse, PveTransportError> {
+            let path = request.path;
+            self.seen.lock().unwrap().push(path.clone());
+            let recheck = path == "/api2/json/cluster/resources"
+                && self
+                    .seen
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .filter(|path| path.as_str() == "/api2/json/cluster/resources")
+                    .count()
+                    == 2;
+            if recheck {
+                let cancellation = self.cancel_on_recheck.lock().unwrap().take();
+                if let Some((operations, id)) = cancellation {
+                    operations
+                        .cancel(&Policy(false), "anonymous-lan-admin", &id)
+                        .await
+                        .unwrap();
+                }
+            }
+            let mut status = 200;
+            let body = if path == "/api2/json/version" {
+                json!({"data":{"version":"9.0.3"}})
+            } else if path == "/api2/json/cluster/resources" {
+                if self.absent {
+                    json!({"data":[]})
+                } else {
+                    json!({"data":[{"id":"qemu/101","type":"qemu","vmid":101,"node":"pve","status":"running","template":u8::from(self.template || (self.template_after_stop.load(std::sync::atomic::Ordering::Relaxed) && self.seen.lock().unwrap().iter().any(|path| path.ends_with("/status/stop"))))}]})
+                }
+            } else if path.ends_with("/status/stop") {
+                assert_eq!(request.method, PveHttpMethod::Post);
+                json!({"data":STOP})
+            } else if path.ends_with("/config") {
+                if self.absent {
+                    status = 500;
+                    json!({"message":"Configuration file 'nodes/pve/qemu-server/101.conf' does not exist\n"})
+                } else {
+                    json!({"data":{"template":0}})
+                }
+            } else if request.method == PveHttpMethod::Delete {
+                assert_eq!(path, "/api2/json/nodes/pve/qemu/101?purge=0");
+                json!({"data":DESTROY})
+            } else if path.contains("/tasks/") {
+                let stop = path.contains("qmstop");
+                if stop && self.stop_running {
+                    json!({"data":{"status":"running"}})
+                } else {
+                    json!({"data":{"status":"stopped","exitstatus":if (stop && self.stop_error) || (!stop && self.task_error) {"ERROR: disk locked"} else {"OK"}}})
+                }
+            } else {
+                panic!("unexpected path {path}")
+            };
+            Ok(PveHttpResponse {
+                status,
+                body: body.to_string().into_bytes(),
+            })
+        }
+        async fn execute_with_body(
+            &self,
+            request: PveHttpRequest,
+            _: Vec<u8>,
+        ) -> Result<PveHttpResponse, PveTransportError> {
+            self.execute(request).await
+        }
+    }
+    #[derive(Debug)]
+    struct Secret;
+    #[async_trait::async_trait]
+    impl ProxmoxCredentialStore for Secret {
+        async fn load(&self, _: &str) -> Result<Option<String>, CredentialStoreError> {
+            Ok(Some("fixture-secret".into()))
+        }
+        async fn store(&self, _: &str, _: &str) -> Result<(), CredentialStoreError> {
+            unreachable!()
+        }
+        async fn clear(&self, _: &str) -> Result<(), CredentialStoreError> {
+            unreachable!()
+        }
+    }
+    #[derive(Debug)]
+    struct Artifacts(bool);
+    #[async_trait::async_trait]
+    impl fleet_application::lab::ImageArtifactPort for Artifacts {
+        async fn template_vmid(&self, _: &str) -> Result<Option<u32>, String> {
+            unreachable!()
+        }
+        async fn promoted_template_vmids(&self) -> Result<Vec<u32>, String> {
+            Ok(if self.0 { vec![101] } else { vec![] })
+        }
+    }
+    #[derive(Debug)]
+    struct Policy(bool);
+    impl Authorizer for Policy {
+        fn decide(&self, request: AccessRequest<'_>) -> Decision {
+            if self.0 && request.action == Permission::ProxmoxDestructive {
+                Decision::deny(ReasonId::UnknownAction)
+            } else {
+                Decision::allow()
+            }
+        }
+    }
+    /// A scripted pool membership lookup: one answer per call, the last one
+    /// repeating.
+    #[derive(Debug)]
+    struct Members(Mutex<Vec<Result<Option<String>, String>>>);
+    impl Members {
+        fn new(answers: Vec<Result<Option<String>, String>>) -> Arc<Self> {
+            Arc::new(Self(Mutex::new(answers)))
+        }
+    }
+    #[async_trait::async_trait]
+    impl fleet_application::operation::PoolMemberLookup for Members {
+        async fn pool_of(&self, _: &str, vmid: u32) -> Result<Option<String>, String> {
+            assert_eq!(vmid, 101);
+            let mut answers = self.0.lock().unwrap();
+            if answers.len() > 1 {
+                answers.remove(0)
+            } else {
+                answers[0].clone()
+            }
+        }
+    }
+    struct Harness {
+        _dir: tempfile::TempDir,
+        operations: Arc<Operations>,
+        account: String,
+        executor: ProxmoxDestructiveExecutor,
+        links: Arc<ProxmoxTaskLinkRepository>,
+        transport: Arc<Transport>,
+    }
+    impl Harness {
+        async fn new(
+            template: bool,
+            promoted: bool,
+            absent: bool,
+            task_error: bool,
+            stop_error: bool,
+            stop_running: bool,
+        ) -> Self {
+            let dir = tempfile::tempdir().unwrap();
+            let store = Store::open(&dir.path().join("fleet.db")).await.unwrap();
+            let pool = store.pool().clone();
+            let accounts = Arc::new(ProxmoxAccountRepository::new(pool.clone()));
+            let account = accounts
+                .create(&NewProxmoxAccount {
+                    name: "fixture".into(),
+                    host: "pve.test".into(),
+                    port: None,
+                    token_id: "fleet@pve!test".into(),
+                })
+                .await
+                .unwrap();
+            accounts
+                .set_fingerprint(&account.id, Some("fixture-pin".into()))
+                .await
+                .unwrap();
+            let operations = Arc::new(Operations::new(
+                Arc::new(OperationRepository::new(pool.clone())),
+                Arc::new(AuditSink::new(pool.clone())),
+            ));
+            let links = Arc::new(ProxmoxTaskLinkRepository::new(pool));
+            let transport = Arc::new(Transport {
+                template,
+                template_after_stop: std::sync::atomic::AtomicBool::new(false),
+                absent,
+                task_error,
+                stop_error,
+                stop_running,
+                seen: Mutex::new(vec![]),
+                cancel_on_recheck: Mutex::new(None),
+            });
+            let executor = ProxmoxDestructiveExecutor::new(
+                accounts,
+                Arc::new(Secret),
+                fleet_provider_proxmox::ProxmoxClient::new(transport.clone()),
+            )
+            .with_image_artifacts(Arc::new(Artifacts(promoted)))
+            .with_task_links(links.clone());
+            Self {
+                _dir: dir,
+                operations,
+                account: account.id,
+                executor,
+                links,
+                transport,
+            }
+        }
+        /// The same harness with the executor's pool membership lookup set.
+        fn with_members(self, members: Arc<Members>) -> Self {
+            Self {
+                executor: self.executor.with_pool_members(members),
+                ..self
+            }
+        }
+        /// Runs a reviewed operation of `kind` with `params` to its end.
+        async fn run_kind(&self, kind: &str, params: Value) -> Operation {
+            let payload = json!({"accountId":self.account,"node":"pve","vmid":101,"timeoutSeconds":30,"params":params}).to_string();
+            let operation = self
+                .operations
+                .create(
+                    &Policy(false),
+                    "anonymous-lan-admin",
+                    &fleet_application::operation::NewOperation {
+                        kind: kind.into(),
+                        payload_json: Some(payload.clone()),
+                        review_token: Some(fleet_application::operation::review_token_for(
+                            kind, &payload,
+                        )),
+                        idempotency_key: None,
+                        deadline_at: None,
+                        correlation_id: None,
+                    },
+                )
+                .await
+                .unwrap();
+            self.operations
+                .claim_only_execute(&self.executor, &operation.id, "pool-test")
+                .await
+                .unwrap();
+            self.operations
+                .get(&Policy(false), "anonymous-lan-admin", &operation.id)
+                .await
+                .unwrap()
+        }
+        fn error_reason(operation: &Operation) -> String {
+            serde_json::from_str::<Value>(operation.error_json.as_deref().unwrap_or("{}"))
+                .ok()
+                .and_then(|error| error["reason"].as_str().map(str::to_owned))
+                .unwrap_or_default()
+        }
+        fn app(&self, deny: bool) -> axum::Router {
+            let mut state = fleet_api::operations::ApiState::for_document();
+            state.operations = self.operations.clone();
+            state.authorizer = Arc::new(Policy(deny));
+            fleet_api::router(Arc::new(state)).layer(axum::Extension(fleet_api::ActingPrincipal {
+                id: "anonymous-lan-admin".into(),
+            }))
+        }
+        async fn post(&self, suffix: &str, body: Value, deny: bool) -> (u16, Value) {
+            let request = Request::post(format!(
+                "/api/v1/proxmox/accounts/{}/guests/101/destroy/{suffix}",
+                self.account
+            ))
+            .header("content-type", "application/json")
+            .body(Body::from(body.to_string()))
+            .unwrap();
+            let response = self.app(deny).oneshot(request).await.unwrap();
+            let status = response.status().as_u16();
+            let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .unwrap();
+            (status, serde_json::from_slice(&bytes).unwrap())
+        }
+        async fn create_operation(&self, timeout: u64) -> Operation {
+            let payload = json!({"accountId":self.account,"node":"pve","vmid":101,"timeoutSeconds":timeout,"params":{"purge":false}}).to_string();
+            let new = fleet_application::operation::NewOperation {
+                kind: "proxmox.guest.destroy".into(),
+                payload_json: Some(payload.clone()),
+                review_token: Some(fleet_application::operation::review_token_for(
+                    "proxmox.guest.destroy",
+                    &payload,
+                )),
+                idempotency_key: None,
+                deadline_at: None,
+                correlation_id: None,
+            };
+            self.operations
+                .create(&Policy(false), "anonymous-lan-admin", &new)
+                .await
+                .unwrap()
+        }
+        async fn run(&self, timeout: u64) -> Operation {
+            let operation = self.create_operation(timeout).await;
+            self.operations
+                .claim_only_execute(&self.executor, &operation.id, "destroy-test")
+                .await
+                .unwrap();
+            self.operations
+                .get(&Policy(false), "anonymous-lan-admin", &operation.id)
+                .await
+                .unwrap()
+        }
+    }
+    #[tokio::test]
+    async fn destroy_review_gate_permission_and_changed_params() {
+        let h = Harness::new(false, false, false, false, false, false).await;
+        let generic = Request::post("/api/v1/operations")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                json!({"kind":"proxmox.guest.destroy","payloadJson":"{}"}).to_string(),
+            ))
+            .unwrap();
+        assert_eq!(
+            h.app(false)
+                .oneshot(generic)
+                .await
+                .unwrap()
+                .status()
+                .as_u16(),
+            400
+        );
+        let body = json!({"node":"pve","params":{"purge":false}});
+        assert_eq!(h.post("review", body.clone(), true).await.0, 403);
+        assert_eq!(
+            h.post(
+                "review",
+                json!({"node":"pve","params":{"skiplock":true}}),
+                false
+            )
+            .await
+            .0,
+            400
+        );
+        let (status, review) = h.post("review", body, false).await;
+        assert_eq!(status, 200);
+        let run = json!({"node":"pve","params":{"purge":false},"timeoutSeconds":300,"reviewToken":review["data"]["reviewToken"]});
+        let mut bad = run.clone();
+        bad["reviewToken"] = json!("wrong");
+        assert_eq!(h.post("run", bad, false).await.0, 400);
+        let mut changed = run.clone();
+        changed["params"]["purge"] = json!(true);
+        assert_eq!(h.post("run", changed, false).await.0, 400);
+        assert_eq!(h.post("run", run.clone(), true).await.0, 403);
+        let (status, accepted) = h.post("run", run, false).await;
+        assert_eq!(status, 202);
+        assert!(h.transport.seen.lock().unwrap().is_empty());
+        let id = accepted["data"]["id"].as_str().unwrap();
+        h.operations
+            .claim_only_execute(&h.executor, id, "api-test")
+            .await
+            .unwrap();
+        assert_eq!(
+            h.operations
+                .get(&Policy(false), "anonymous-lan-admin", id)
+                .await
+                .unwrap()
+                .state,
+            "succeeded"
+        );
+    }
+    #[tokio::test]
+    async fn destroy_stops_first_and_links_both_tasks() {
+        let h = Harness::new(false, false, false, false, false, false).await;
+        let operation = h.run(30).await;
+        assert_eq!(operation.state, "succeeded");
+        {
+            let seen = h.transport.seen.lock().unwrap();
+            assert!(
+                seen.iter()
+                    .position(|p| p.ends_with("/status/stop"))
+                    .unwrap()
+                    < seen.iter().position(|p| p.contains("?purge=")).unwrap()
+            );
+        }
+        let links = h
+            .links
+            .operations_for(&h.account, &[STOP.into(), DESTROY.into()])
+            .await
+            .unwrap();
+        assert_eq!(links.len(), 2);
+        assert!(links.values().all(|id| id == &operation.id));
+    }
+    #[tokio::test]
+    async fn destroy_refuses_templates_and_promoted_artifacts_before_stop() {
+        for (template, promoted) in [(true, false), (false, true)] {
+            let h = Harness::new(template, promoted, false, false, false, false).await;
+            assert_eq!(h.run(30).await.state, "failed");
+            assert!(
+                !h.transport
+                    .seen
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .any(|p| p.ends_with("/status/stop") || p.contains("?purge="))
+            );
+        }
+    }
+    /// #368: a destroy or snapshot delete queued for a VMID that was no pool
+    /// member at creation is refused at execution once a fill registered it,
+    /// before any Proxmox call.
+    #[tokio::test]
+    async fn a_pool_member_is_refused_at_execution_before_any_proxmox_call() {
+        for (kind, params) in [
+            ("proxmox.guest.destroy", json!({"purge": false})),
+            (
+                "proxmox.guest.snapshot-delete",
+                json!({"snapshot": "baseline"}),
+            ),
+        ] {
+            let h = Harness::new(false, false, false, false, false, false)
+                .await
+                .with_members(Members::new(vec![Ok(Some("pool-1".to_owned()))]));
+            let done = h.run_kind(kind, params).await;
+            assert_eq!(done.state, "failed", "{kind}");
+            assert_eq!(Harness::error_reason(&done), "pool_member", "{kind}");
+            assert!(
+                h.transport.seen.lock().unwrap().is_empty(),
+                "{kind}: nothing reached Proxmox: {:?}",
+                h.transport.seen.lock().unwrap()
+            );
+        }
+    }
+    #[tokio::test]
+    async fn an_unreadable_pool_membership_fails_closed() {
+        for (kind, params) in [
+            ("proxmox.guest.destroy", json!({"purge": false})),
+            (
+                "proxmox.guest.snapshot-delete",
+                json!({"snapshot": "baseline"}),
+            ),
+        ] {
+            let h = Harness::new(false, false, false, false, false, false)
+                .await
+                .with_members(Members::new(vec![Err("database is locked".to_owned())]));
+            let done = h.run_kind(kind, params).await;
+            assert_eq!(done.state, "failed", "{kind}");
+            assert_eq!(
+                Harness::error_reason(&done),
+                "pool_membership_unreadable",
+                "{kind}"
+            );
+            assert!(h.transport.seen.lock().unwrap().is_empty(), "{kind}");
+        }
+    }
+    #[tokio::test]
+    async fn a_vmid_registered_while_the_destroy_stops_it_is_not_deleted() {
+        // Not a member at the start, a member by the time the stop is done.
+        let h = Harness::new(false, false, false, false, false, false)
+            .await
+            .with_members(Members::new(vec![Ok(None), Ok(Some("pool-1".to_owned()))]));
+        let done = h
+            .run_kind("proxmox.guest.destroy", json!({"purge": false}))
+            .await;
+        assert_eq!(done.state, "failed");
+        assert!(
+            done.error_json
+                .as_deref()
+                .unwrap_or_default()
+                .contains("pool_member"),
+            "{:?}",
+            done.error_json
+        );
+        let seen = h.transport.seen.lock().unwrap().clone();
+        assert!(seen.iter().any(|p| p.ends_with("/status/stop")), "{seen:?}");
+        assert!(
+            !seen.iter().any(|p| p.contains("?purge=")),
+            "no delete was submitted: {seen:?}"
+        );
+    }
+    #[tokio::test]
+    async fn a_non_member_is_destroyed_as_before() {
+        let h = Harness::new(false, false, true, false, false, false)
+            .await
+            .with_members(Members::new(vec![Ok(None)]));
+        assert_eq!(
+            h.run_kind("proxmox.guest.destroy", json!({"purge": false}))
+                .await
+                .state,
+            "succeeded"
+        );
+    }
+    #[tokio::test]
+    async fn destroy_absence_succeeds_and_task_error_fails() {
+        let h = Harness::new(false, false, true, false, false, false).await;
+        assert_eq!(h.run(30).await.state, "succeeded");
+        assert!(
+            !h.transport
+                .seen
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|p| p.contains("?purge="))
+        );
+        let h = Harness::new(false, false, false, true, false, false).await;
+        assert_eq!(h.run(30).await.state, "failed");
+    }
+    #[tokio::test]
+    async fn destroy_review_accepts_omitted_options() {
+        let h = Harness::new(false, false, true, false, false, false).await;
+        let (status, review) = h.post("review", json!({"node":"pve"}), false).await;
+        assert_eq!(status, 200);
+        let (status, accepted) = h.post("run", json!({"node":"pve","reviewToken":review["data"]["reviewToken"],"timeoutSeconds":300}), false).await;
+        assert_eq!(status, 202);
+        let id = accepted["data"]["id"].as_str().unwrap();
+        h.operations
+            .claim_only_execute(&h.executor, id, "omitted-options-test")
+            .await
+            .unwrap();
+        assert_eq!(
+            h.operations
+                .get(&Policy(false), "anonymous-lan-admin", id)
+                .await
+                .unwrap()
+                .state,
+            "succeeded"
+        );
+    }
+    #[tokio::test]
+    async fn destroy_rechecks_cluster_template_state_after_stop() {
+        let h = Harness::new(false, false, false, false, false, false).await;
+        h.transport
+            .template_after_stop
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+        let operation = h.run(30).await;
+        assert_eq!(operation.state, "failed");
+        assert!(
+            !h.transport
+                .seen
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|path| path.contains("?purge="))
+        );
+    }
+    #[tokio::test]
+    async fn destroy_honors_cancellation_during_post_stop_lookup() {
+        let h = Harness::new(false, false, false, false, false, false).await;
+        let operation = h.create_operation(30).await;
+        *h.transport.cancel_on_recheck.lock().unwrap() =
+            Some((h.operations.clone(), operation.id.clone()));
+        h.operations
+            .claim_only_execute(&h.executor, &operation.id, "cancel-test")
+            .await
+            .unwrap();
+        assert!(
+            !h.transport
+                .seen
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|path| path.contains("?purge=")),
+            "a cancellation during the final resource lookup must prevent DELETE"
+        );
+        assert!(h.operations.cancel_requested(&operation.id).await.unwrap());
+    }
+    #[tokio::test]
+    async fn destroy_never_deletes_after_failed_or_timed_out_stop() {
+        for (error, running) in [(true, false), (false, true)] {
+            let h = Harness::new(false, false, false, false, error, running).await;
+            assert_eq!(h.run(1).await.state, "failed");
+            assert!(
+                !h.transport
+                    .seen
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .any(|p| p.contains("?purge="))
+            );
         }
     }
 }

@@ -4,13 +4,15 @@
 //! A recipe row is always a **draft**: saving an edit of a published
 //! version creates a new draft, and publishing freezes an immutable
 //! version identified by its content digest — the same content published
-//! twice is the same version. Builds reference an immutable version id,
+//! twice with the same options is the same version (the audited
+//! insecure-TLS opt-in, #284, is part of the digest). Builds reference an immutable version id,
 //! never a mutable draft, so a build of a since-edited recipe is
 //! reproducible.
 //!
 //! The content is stored verbatim and Fleet never re-validates Packer's
-//! own fields: `packer validate` is the authority, and unknown fields pass
-//! through untouched. Secrets never enter recipes — variables that would
+//! own syntax: `packer validate` is the authority. Build execution additionally
+//! restricts provisioning to supported embedded inputs so local files cannot
+//! bypass the immutable snapshot. Secrets never enter recipes — variables that would
 //! carry them ride `-var-file` from secret references at build time.
 #![warn(missing_docs)]
 
@@ -22,7 +24,46 @@ use serde::{Deserialize, Serialize};
 
 use crate::authz::{AccessRequest, ActingPrincipal, Authorizer, Decision, Permission, authorize};
 use crate::operation::AuditPort;
-pub use fleet_core::{RecipeContent, RecipeVersion};
+pub use fleet_core::{ImageBuildRecord, ImageBuildTemplate, RecipeContent, RecipeVersion};
+
+/// A concurrent build invalidated promotion evidence at the transactional gate.
+pub const PROMOTION_BUILD_REJECTED: &str =
+    "promotion requires the latest matching successful build record";
+/// A build cursor does not belong to the requested history.
+pub const BUILD_CURSOR_INVALID: &str = "the cursor names no build in this history";
+
+/// A bounded build-history request.
+#[derive(Debug, Default)]
+pub struct BuildPageRequest {
+    /// Optional recipe filter.
+    pub recipe: Option<String>,
+    /// Optional immutable version filter.
+    pub version: Option<String>,
+    /// Last build identity from the preceding page.
+    pub cursor: Option<String>,
+    /// Requested page size; zero uses the default and values are capped at 200.
+    pub limit: u32,
+}
+
+/// A page of build records in descending timestamp and identity order.
+#[derive(Debug)]
+pub struct BuildPage {
+    /// Matching records.
+    pub items: Vec<ImageBuildRecord>,
+    /// Continuation identity when additional records exist.
+    pub next_cursor: Option<String>,
+    /// Effective page size.
+    pub limit: u32,
+}
+
+/// Options for [`Images::publish_with`].
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct PublishOptions {
+    /// Lets the version build with `insecure_skip_tls_verify` (#284): the
+    /// token then reaches whatever answers at the recipe's address, so
+    /// this is an explicit, audited exception to certificate pinning.
+    pub allow_insecure_tls: bool,
+}
 
 /// A stored recipe draft.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -47,9 +88,70 @@ pub struct NewRecipe {
     pub content: RecipeContent,
 }
 
+/// The error `RecipePort::build_target_account` returns when several accounts
+/// match the recipe's endpoint and none was requested.
+pub const TARGET_ACCOUNT_AMBIGUOUS: &str = "target_account_ambiguous";
+
 /// The recipe storage port.
 #[async_trait]
 pub trait RecipePort: fmt::Debug + Send + Sync {
+    /// Resolves a unique target account from an explicit identity or the
+    /// frozen recipe endpoint. A target that matches no account stays
+    /// unbound (`Ok(None)`).
+    ///
+    /// # Errors
+    /// Fails on a repository error, an explicit identity that does not match
+    /// the endpoint, or (with no explicit identity) several matching
+    /// accounts, which returns [`TARGET_ACCOUNT_AMBIGUOUS`].
+    async fn build_target_account(
+        &self,
+        _version: &RecipeVersion,
+        _requested: Option<&str>,
+    ) -> Result<Option<String>, String> {
+        Err("build target resolution is not supported".to_owned())
+    }
+
+    /// Inserts a running build snapshot before invoking the provider.
+    ///
+    /// # Errors
+    /// Fails on duplicate identity or storage failure.
+    async fn start_build(&self, _record: &ImageBuildRecord) -> Result<(), String> {
+        Err("build records are not supported by this repository".to_owned())
+    }
+    /// Completes a running build exactly once, preserving frozen inputs.
+    ///
+    /// # Errors
+    /// Fails when the record is unknown, terminal or storage fails.
+    async fn finish_build(&self, _record: &ImageBuildRecord) -> Result<(), String> {
+        Err("build records are not supported by this repository".to_owned())
+    }
+    /// Reads a build by identity.
+    ///
+    /// # Errors
+    /// Fails when unknown or storage fails.
+    async fn get_build(&self, _id: &str) -> Result<ImageBuildRecord, String> {
+        Err("build record not found".to_owned())
+    }
+    /// Lists builds newest first, optionally filtered by recipe and version.
+    ///
+    /// # Errors
+    /// Fails on storage failure.
+    async fn list_builds(
+        &self,
+        _recipe: Option<&str>,
+        _version: Option<&str>,
+    ) -> Result<Vec<ImageBuildRecord>, String> {
+        Err("build records are not supported by this repository".to_owned())
+    }
+
+    /// Queries at most the requested page plus one continuation record.
+    ///
+    /// # Errors
+    /// Fails on an invalid cursor or storage failure.
+    async fn list_build_page(&self, _query: &BuildPageRequest) -> Result<BuildPage, String> {
+        Err("build pagination is not supported by this repository".to_owned())
+    }
+
     /// Creates a draft, minting its identity.
     ///
     /// # Errors
@@ -104,14 +206,20 @@ pub trait RecipePort: fmt::Debug + Send + Sync {
     /// Fails when the backend errors.
     async fn list_versions(&self, recipe_id: &str) -> Result<Vec<RecipeVersion>, String>;
     /// Records the promotion, demoting the recipe's other promoted
-    /// version explicitly (the demotion is part of the same commit).
+    /// version explicitly (the demotion is part of the same commit), and
+    /// pins `build_id`, the build record that justified it, as the
+    /// version's clone source. The backend refuses with
+    /// [`PROMOTION_BUILD_REJECTED`] when that build is no longer the
+    /// version's latest successful, matching record.
     ///
     /// # Errors
     ///
-    /// Fails when the version is unknown or the backend errors.
+    /// Fails when the version is unknown, the build is rejected, or the
+    /// backend errors.
     async fn promote(
         &self,
         version_id: &str,
+        build_id: &str,
         promoted_by: &str,
         promoted_at: i64,
     ) -> Result<RecipeVersion, String>;
@@ -121,18 +229,6 @@ pub trait RecipePort: fmt::Debug + Send + Sync {
     ///
     /// Fails when the backend errors.
     async fn promoted_version(&self, recipe_id: &str) -> Result<Option<RecipeVersion>, String>;
-}
-
-/// The gate's evidence: the terminal state and artifact of a version's
-/// latest build operation, queried by the adapter.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct BuildEvidence {
-    /// The version the build built.
-    pub version_id: String,
-    /// The build operation's terminal state.
-    pub state: String,
-    /// The recorded artifact id, when the build produced one.
-    pub artifact_id: Option<String>,
 }
 
 /// A use-case rejection, mapped onto public API errors by the adapter.
@@ -180,18 +276,444 @@ impl fmt::Display for RecipeUseCaseError {
 
 impl std::error::Error for RecipeUseCaseError {}
 
+/// The secret-record namespace image builds may read (#517). A build's
+/// secret variables name records called `images/<name>`; every other record
+/// (provider tokens, held values, Git credentials) is refused.
+pub const SECRET_NAMESPACE: &str = "images/";
+
+/// Checks that a build secret reference names an `images/<name>` record.
+/// The reference is the record *name*, not its opaque id: ids carry no
+/// namespace, so a record outside the namespace could not be told apart.
+///
+/// # Errors
+///
+/// Returns a message safe to show (it never quotes the reference or a
+/// value) and names the fix.
+pub fn check_secret_reference(reference: &str) -> Result<(), String> {
+    let name = reference.strip_prefix(SECRET_NAMESPACE).unwrap_or("");
+    let valid = !name.is_empty()
+        && name.len() <= 128
+        && name
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-'))
+        && !name.starts_with('.');
+    if valid {
+        Ok(())
+    } else {
+        Err(format!(
+            "image build secrets must be referenced by the name of a secret record in the {SECRET_NAMESPACE}<name> namespace (letters, digits, '.', '_', '-'); \
+             create a record named {SECRET_NAMESPACE}<name> and reference it by that name instead of by record id"
+        ))
+    }
+}
+
+/// The longest secret value accepted (64 KiB: a private key fits).
+pub const MAX_SECRET_VALUE_LEN: usize = 64 * 1024;
+
+/// Normalizes a caller's secret name to the record reference. The short
+/// name (`foo`) and the full reference (`images/foo`) are both accepted.
+fn secret_reference(name: &str) -> Result<String, RecipeUseCaseError> {
+    let reference = if name.starts_with(SECRET_NAMESPACE) {
+        name.to_owned()
+    } else {
+        format!("{SECRET_NAMESPACE}{name}")
+    };
+    check_secret_reference(&reference).map_err(|detail| RecipeUseCaseError::Invalid { detail })?;
+    Ok(reference)
+}
+
+/// The outcome of writing an image secret.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ImageSecretWrite {
+    /// The record name (`images/<name>`), the value to put in a build's
+    /// secret variable.
+    pub reference: String,
+    /// Whether an existing record's value was replaced.
+    pub replaced: bool,
+}
+
+/// The `images/<name>` secret records, over the encrypted secret store.
+/// Values go in and are never returned; names are the whole read surface.
+#[async_trait]
+pub trait ImageSecretPort: fmt::Debug + Send + Sync {
+    /// The names (`images/<name>`) of the live records in the namespace.
+    async fn list(&self) -> Result<Vec<String>, String>;
+    /// Creates or replaces the record; true when one was replaced.
+    async fn set(
+        &self,
+        reference: &str,
+        value: &fleet_core::SensitiveString,
+    ) -> Result<bool, String>;
+    /// Deletes the record; false when there was none.
+    async fn delete(&self, reference: &str) -> Result<bool, String>;
+}
+
 /// The image-recipe use cases.
 #[derive(Debug)]
 pub struct Images {
     recipes: Arc<dyn RecipePort>,
     audit: Arc<dyn AuditPort>,
+    build_addresses: Option<Arc<dyn BuildAddressPort>>,
+    build_address_pool_configured: bool,
+    secrets: Option<Arc<dyn ImageSecretPort>>,
 }
 
 impl Images {
     /// Composes the service from its ports.
     #[must_use]
     pub fn new(recipes: Arc<dyn RecipePort>, audit: Arc<dyn AuditPort>) -> Self {
-        Self { recipes, audit }
+        Self {
+            recipes,
+            audit,
+            build_addresses: None,
+            build_address_pool_configured: false,
+            secrets: None,
+        }
+    }
+
+    /// Gives the service the store for `images/<name>` build secrets
+    /// (#520). Without one, the secret use cases refuse with a clear
+    /// reason.
+    #[must_use]
+    pub fn with_secrets(mut self, port: Arc<dyn ImageSecretPort>) -> Self {
+        self.secrets = Some(port);
+        self
+    }
+
+    fn secret_port(&self) -> Result<&Arc<dyn ImageSecretPort>, RecipeUseCaseError> {
+        self.secrets
+            .as_ref()
+            .ok_or_else(|| RecipeUseCaseError::Invalid {
+                detail:
+                    "the controller runs without a secret store; image build secrets cannot be managed"
+                        .to_owned(),
+            })
+    }
+
+    /// Lists the names of the `images/<name>` secret records. Values are
+    /// never readable.
+    ///
+    /// # Errors
+    ///
+    /// Fails on denial or a backend failure.
+    pub async fn list_secrets(
+        &self,
+        authorizer: &dyn Authorizer,
+        principal: &ActingPrincipal,
+    ) -> Result<Vec<String>, RecipeUseCaseError> {
+        authorize(
+            authorizer,
+            AccessRequest {
+                principal_id: &principal.id,
+                action: Permission::ImagesRead,
+                resource: None,
+            },
+        )
+        .map_err(RecipeUseCaseError::Denied)?;
+        let Some(port) = &self.secrets else {
+            return Ok(Vec::new());
+        };
+        let mut names = port
+            .list()
+            .await
+            .map_err(|detail| RecipeUseCaseError::Backend {
+                context: "image secrets",
+                detail,
+            })?;
+        names.sort();
+        Ok(names)
+    }
+
+    /// Creates or replaces the `images/<name>` secret record. The value is
+    /// write-only: it reaches the store and nothing else. The audit trail
+    /// carries the name and the outcome, never the value.
+    ///
+    /// # Errors
+    ///
+    /// Fails on denial, a malformed name or value, or a backend failure.
+    pub async fn set_secret(
+        &self,
+        authorizer: &dyn Authorizer,
+        principal: &ActingPrincipal,
+        name: &str,
+        value: &fleet_core::SensitiveString,
+    ) -> Result<ImageSecretWrite, RecipeUseCaseError> {
+        // Authorization comes first: a denied caller learns nothing about
+        // which names are well formed.
+        authorize(
+            authorizer,
+            AccessRequest {
+                principal_id: &principal.id,
+                action: Permission::ImagesConfig,
+                resource: None,
+            },
+        )
+        .map_err(RecipeUseCaseError::Denied)?;
+        let reference = secret_reference(name)?;
+        let text = value.expose();
+        if text.trim().is_empty() || text.len() > MAX_SECRET_VALUE_LEN {
+            return Err(RecipeUseCaseError::Invalid {
+                detail: format!(
+                    "the secret value must be non-empty and at most {MAX_SECRET_VALUE_LEN} bytes"
+                ),
+            });
+        }
+        let port = self.secret_port()?;
+        self.audit_event(
+            principal,
+            Permission::ImagesConfig,
+            Some(&reference),
+            "image_secret_setting",
+            &[("name", reference.as_str())],
+        )
+        .await?;
+        let outcome = port.set(&reference, value).await;
+        let (event, replaced_fact) = match &outcome {
+            Ok(true) => ("image_secret_set", Some("true")),
+            Ok(false) => ("image_secret_set", Some("false")),
+            Err(_) => ("image_secret_set_failed", None),
+        };
+        let mut facts = vec![("name", reference.as_str())];
+        if let Some(replaced) = replaced_fact {
+            facts.push(("replaced", replaced));
+        }
+        let audited = self
+            .audit_event(
+                principal,
+                Permission::ImagesConfig,
+                Some(&reference),
+                event,
+                &facts,
+            )
+            .await;
+        let replaced = outcome.map_err(|detail| RecipeUseCaseError::Backend {
+            context: "image secrets",
+            detail,
+        })?;
+        audited?;
+        Ok(ImageSecretWrite {
+            reference,
+            replaced,
+        })
+    }
+
+    /// Deletes the `images/<name>` secret record. A build that still
+    /// references it fails at its next run with a clear message.
+    ///
+    /// # Errors
+    ///
+    /// Fails on denial, a malformed name, an unknown record, or a backend
+    /// failure.
+    pub async fn delete_secret(
+        &self,
+        authorizer: &dyn Authorizer,
+        principal: &ActingPrincipal,
+        name: &str,
+    ) -> Result<String, RecipeUseCaseError> {
+        // Authorization comes first: a denied caller learns nothing about
+        // which names are well formed.
+        authorize(
+            authorizer,
+            AccessRequest {
+                principal_id: &principal.id,
+                action: Permission::ImagesConfig,
+                resource: None,
+            },
+        )
+        .map_err(RecipeUseCaseError::Denied)?;
+        let reference = secret_reference(name)?;
+        let port = self.secret_port()?;
+        self.audit_event(
+            principal,
+            Permission::ImagesConfig,
+            Some(&reference),
+            "image_secret_deleting",
+            &[("name", reference.as_str())],
+        )
+        .await?;
+        let outcome = port.delete(&reference).await;
+        let event = match &outcome {
+            Ok(true) => "image_secret_deleted",
+            Ok(false) => "image_secret_delete_refused",
+            Err(_) => "image_secret_delete_failed",
+        };
+        let audited = self
+            .audit_event(
+                principal,
+                Permission::ImagesConfig,
+                Some(&reference),
+                event,
+                &[("name", reference.as_str())],
+            )
+            .await;
+        let existed = outcome.map_err(|detail| RecipeUseCaseError::Backend {
+            context: "image secrets",
+            detail,
+        })?;
+        audited?;
+        if existed {
+            Ok(reference)
+        } else {
+            Err(RecipeUseCaseError::NotFound {
+                what: format!("image secret {reference}"),
+            })
+        }
+    }
+
+    /// Gives the service the build address pool's store, so operators can
+    /// list and clear held and quarantined addresses (#402).
+    #[must_use]
+    pub fn with_build_addresses(
+        mut self,
+        port: Arc<dyn BuildAddressPort>,
+        pool_configured: bool,
+    ) -> Self {
+        self.build_addresses = Some(port);
+        self.build_address_pool_configured = pool_configured;
+        self
+    }
+
+    /// Lists the build addresses that are held or quarantined.
+    ///
+    /// # Errors
+    ///
+    /// Fails on denial or a backend failure.
+    pub async fn list_build_addresses(
+        &self,
+        authorizer: &dyn Authorizer,
+        principal: &ActingPrincipal,
+        now: i64,
+    ) -> Result<Vec<BuildAddressRecord>, RecipeUseCaseError> {
+        authorize(
+            authorizer,
+            AccessRequest {
+                principal_id: &principal.id,
+                action: Permission::ImagesRead,
+                resource: None,
+            },
+        )
+        .map_err(RecipeUseCaseError::Denied)?;
+        let Some(port) = &self.build_addresses else {
+            return Ok(Vec::new());
+        };
+        port.list_unavailable(now)
+            .await
+            .map_err(|detail| RecipeUseCaseError::Backend {
+                context: "build addresses",
+                detail,
+            })
+    }
+
+    /// Ends one address's quarantine early, after the operator removed the
+    /// stranded VM. Audited before and after the change.
+    ///
+    /// # Errors
+    ///
+    /// Fails on denial, a malformed or unquarantined address, an address a
+    /// live build holds, or a backend failure.
+    pub async fn clear_build_address(
+        &self,
+        authorizer: &dyn Authorizer,
+        principal: &ActingPrincipal,
+        address: &str,
+        now: i64,
+    ) -> Result<std::net::Ipv4Addr, RecipeUseCaseError> {
+        authorize(
+            authorizer,
+            AccessRequest {
+                principal_id: &principal.id,
+                action: Permission::ImagesConfig,
+                resource: Some(address),
+            },
+        )
+        .map_err(RecipeUseCaseError::Denied)?;
+        let parsed: std::net::Ipv4Addr =
+            address.parse().map_err(|_| RecipeUseCaseError::Invalid {
+                detail: "the address is not an IPv4 address".to_owned(),
+            })?;
+        let canonical = parsed.to_string();
+        let not_quarantined = || RecipeUseCaseError::NotFound {
+            what: if self.build_address_pool_configured {
+                format!("quarantined build address {canonical}")
+            } else {
+                format!(
+                    "quarantined build address {canonical} (no build address pool is configured)"
+                )
+            },
+        };
+        let Some(port) = &self.build_addresses else {
+            return Err(not_quarantined());
+        };
+        // The intent precedes the change; the outcome event follows it
+        // whatever the outcome, so a refusal leaves no orphaned intent.
+        self.audit_event(
+            principal,
+            Permission::ImagesConfig,
+            Some(&canonical),
+            "image_build_address_clearing",
+            &[("address", canonical.as_str())],
+        )
+        .await?;
+        let outcome = port.clear_quarantine(parsed, now).await.map_err(|detail| {
+            RecipeUseCaseError::Backend {
+                context: "build addresses",
+                detail,
+            }
+        });
+        let (event, facts, result): (&str, Vec<(&str, String)>, Result<(), RecipeUseCaseError>) =
+            match &outcome {
+                Ok(ClearQuarantine::Cleared { operation_id }) => (
+                    "image_build_address_cleared",
+                    vec![
+                        ("prior_status", "quarantined".to_owned()),
+                        ("holder_operation", operation_id.clone()),
+                    ],
+                    Ok(()),
+                ),
+                Ok(ClearQuarantine::Held { operation_id }) => (
+                    "image_build_address_clear_refused",
+                    vec![
+                        ("reason", "held".to_owned()),
+                        ("prior_status", "held".to_owned()),
+                        ("holder_operation", operation_id.clone()),
+                    ],
+                    Err(RecipeUseCaseError::Conflict {
+                        detail: format!("{canonical} is held by a running build"),
+                    }),
+                ),
+                Ok(ClearQuarantine::NotQuarantined) => (
+                    "image_build_address_clear_refused",
+                    vec![("reason", "not_quarantined".to_owned())],
+                    Err(not_quarantined()),
+                ),
+                Err(_) => (
+                    "image_build_address_clear_failed",
+                    vec![("reason", "backend".to_owned())],
+                    Ok(()),
+                ),
+            };
+        let mut all = vec![("address", canonical.clone())];
+        all.extend(facts);
+        let borrowed: Vec<(&str, &str)> = all.iter().map(|(k, v)| (*k, v.as_str())).collect();
+        let audited = self
+            .audit_event(
+                principal,
+                Permission::ImagesConfig,
+                Some(&canonical),
+                event,
+                &borrowed,
+            )
+            .await;
+        outcome?;
+        result?;
+        audited.map_err(|error| match error {
+            RecipeUseCaseError::Backend { context, detail } => RecipeUseCaseError::Backend {
+                context,
+                detail: format!("the quarantine was cleared but its audit failed: {detail}"),
+            },
+            other => other,
+        })?;
+        Ok(parsed)
     }
 
     /// Lists the recipe drafts.
@@ -252,7 +774,7 @@ impl Images {
             Permission::ImagesConfig,
             None,
             "image_recipe_creating",
-            Some(("name", new.content.name.as_str())),
+            &[("name", new.content.name.as_str())],
         )
         .await?;
         self.recipes.create(&new, now).await.map_err(|detail| {
@@ -322,7 +844,7 @@ impl Images {
             Permission::ImagesConfig,
             Some(id),
             "image_recipe_updating",
-            None,
+            &[],
         )
         .await?;
         self.recipes
@@ -369,7 +891,7 @@ impl Images {
             Permission::ImagesConfig,
             Some(id),
             "image_recipe_deleting",
-            None,
+            &[],
         )
         .await?;
         self.recipes.delete(id).await.map_err(|detail| {
@@ -387,8 +909,11 @@ impl Images {
     }
 
     /// Publishes a draft: freezes an immutable version identified by its
-    /// content digest. The same content published twice yields the same
-    /// version, so publishing is idempotent by construction.
+    /// content digest. The same content published twice with the same
+    /// options yields the same version, so publishing is idempotent by
+    /// construction. The insecure-TLS opt-in is a build input: with it, the
+    /// same content is a different version, whose `content_digest` (the
+    /// version digest) covers the opt-in too.
     ///
     /// # Errors
     ///
@@ -400,6 +925,33 @@ impl Images {
         recipe_id: &str,
         now: i64,
     ) -> Result<RecipeVersion, RecipeUseCaseError> {
+        self.publish_with(
+            authorizer,
+            principal,
+            recipe_id,
+            now,
+            PublishOptions::default(),
+        )
+        .await
+    }
+
+    /// Publishes a draft with explicit publication options. The only one
+    /// today is the audited `insecure_skip_tls_verify` opt-in (#284): it is
+    /// refused for a recipe that does not skip TLS verification, recorded
+    /// on the publication's audit intent, and part of the version digest.
+    ///
+    /// # Errors
+    ///
+    /// Fails on denial, an unknown recipe, a meaningless opt-in, or a
+    /// backend failure.
+    pub async fn publish_with(
+        &self,
+        authorizer: &dyn Authorizer,
+        principal: &ActingPrincipal,
+        recipe_id: &str,
+        now: i64,
+        options: PublishOptions,
+    ) -> Result<RecipeVersion, RecipeUseCaseError> {
         authorize(
             authorizer,
             AccessRequest {
@@ -410,9 +962,17 @@ impl Images {
         )
         .map_err(RecipeUseCaseError::Denied)?;
         let recipe = self.require_recipe(recipe_id).await?;
+        if options.allow_insecure_tls && !fleet_core::requests_insecure_tls(&recipe.content.content)
+        {
+            return Err(RecipeUseCaseError::Invalid {
+                detail: "the recipe does not set insecure_skip_tls_verify, so allowInsecureTls \
+                         would have no effect; builds already pin the account's certificate"
+                    .to_owned(),
+            });
+        }
         let digest = recipe
             .content
-            .content_digest()
+            .version_digest(options.allow_insecure_tls)
             .map_err(|detail| RecipeUseCaseError::Invalid { detail })?;
         let version = RecipeVersion {
             id: format!("{}@{}", recipe.id, &digest[..16]),
@@ -427,13 +987,21 @@ impl Images {
             published_at: now,
             promoted_at: None,
             promoted_by: None,
+            promoted_build_id: None,
+            allow_insecure_tls: options.allow_insecure_tls,
         };
+        let mut metadata = vec![("digest", version.content_digest.as_str())];
+        if version.allow_insecure_tls {
+            // The opt-in is the reviewable fact: it lands on the intent,
+            // before the version exists.
+            metadata.push(("allow_insecure_tls", "true"));
+        }
         self.audit_event(
             principal,
             Permission::ImagesConfig,
             Some(recipe_id),
             "image_recipe_publishing",
-            Some(("digest", version.content_digest.as_str())),
+            &metadata,
         )
         .await?;
         self.recipes
@@ -445,15 +1013,9 @@ impl Images {
             })
     }
 
-    /// Promotes one version as the recipe's built image, after the gate:
-    /// the version's build operation must have completed successfully
-    /// with a recorded artifact, verified against the operation record —
-    /// never assumed from the version row. At most one promoted version
-    /// per recipe; promoting a second demotes the first explicitly.
-    ///
-    /// `build_outcome` is the gate's evidence: the caller (the adapter)
-    /// queries the operation record for the version's latest build and
-    /// passes its terminal state and artifact id here.
+    /// Promotes a version only when its latest immutable build record has
+    /// matching inputs and a successful output template. Evidence is loaded
+    /// from the repository; callers cannot supply or forge it.
     ///
     /// # Errors
     ///
@@ -464,7 +1026,6 @@ impl Images {
         authorizer: &dyn Authorizer,
         principal: &ActingPrincipal,
         version_id: &str,
-        build_outcome: Option<BuildEvidence>,
         now: i64,
     ) -> Result<RecipeVersion, RecipeUseCaseError> {
         authorize(
@@ -492,42 +1053,55 @@ impl Images {
                     }
                 }
             })?;
-        // The gate: a build that completed successfully with a recorded
-        // artifact. Without it, promotion refuses with the reason.
-        let Some(evidence) = build_outcome else {
+        let records = self
+            .recipes
+            .list_build_page(&BuildPageRequest {
+                version: Some(version_id.to_owned()),
+                limit: 1,
+                ..Default::default()
+            })
+            .await
+            .map_err(|detail| RecipeUseCaseError::Backend {
+                context: "builds",
+                detail,
+            })?;
+        let Some(record) = records.items.first() else {
             return Err(RecipeUseCaseError::Invalid {
-                detail: "the version has no build operation; build it before promoting".to_owned(),
+                detail: "the version has no build record; build it before promoting".to_owned(),
             });
         };
-        if evidence.version_id != version_id || evidence.state != "succeeded" {
-            return Err(RecipeUseCaseError::Invalid {
-                detail: format!(
-                    "the version's latest build is {} ({}); only a successful build can be promoted",
-                    evidence.version_id, evidence.state
-                ),
-            });
-        }
-        if evidence.artifact_id.is_none() {
-            return Err(RecipeUseCaseError::Invalid {
-                detail: "the version's build recorded no artifact; promotion requires one"
-                    .to_owned(),
-            });
+        if record.version_id != version_id
+            || record.content_digest != version.content_digest
+            || record.outcome != "succeeded"
+            || record.ended_at.is_none()
+            || record.template.is_none()
+        {
+            return Err(RecipeUseCaseError::Invalid { detail: "promotion requires the latest build record to have matching inputs and a successful template output".to_owned() });
         }
         self.audit_event(
             principal,
             Permission::ImagesConfig,
             Some(version_id),
             "image_version_promoting",
-            Some(("digest", version.content_digest.as_str())),
+            &[
+                ("digest", version.content_digest.as_str()),
+                ("build", record.id.as_str()),
+            ],
         )
         .await?;
         let promoted = self
             .recipes
-            .promote(version_id, &principal.id, now)
+            .promote(version_id, &record.id, &principal.id, now)
             .await
-            .map_err(|detail| RecipeUseCaseError::Backend {
-                context: "versions",
-                detail,
+            .map_err(|detail| {
+                if detail == PROMOTION_BUILD_REJECTED {
+                    RecipeUseCaseError::Invalid { detail }
+                } else {
+                    RecipeUseCaseError::Backend {
+                        context: "versions",
+                        detail,
+                    }
+                }
             })?;
         // The completion audit follows the committed promotion: an audit
         // failure here is surfaced as a backend error naming the committed
@@ -537,7 +1111,10 @@ impl Images {
             Permission::ImagesConfig,
             Some(version_id),
             "image_version_promoted",
-            Some(("digest", version.content_digest.as_str())),
+            &[
+                ("digest", version.content_digest.as_str()),
+                ("build", record.id.as_str()),
+            ],
         )
         .await
         .map_err(|error| match error {
@@ -616,6 +1193,107 @@ impl Images {
             })
     }
 
+    /// Reads build history through the centralized images.read permission.
+    ///
+    /// # Errors
+    /// Fails on denial or storage failure.
+    pub async fn list_builds(
+        &self,
+        authorizer: &dyn Authorizer,
+        principal: &ActingPrincipal,
+        recipe: Option<&str>,
+        version: Option<&str>,
+    ) -> Result<Vec<ImageBuildRecord>, RecipeUseCaseError> {
+        authorize(
+            authorizer,
+            AccessRequest {
+                principal_id: &principal.id,
+                action: Permission::ImagesRead,
+                resource: version.or(recipe),
+            },
+        )
+        .map_err(RecipeUseCaseError::Denied)?;
+        self.recipes
+            .list_builds(recipe, version)
+            .await
+            .map_err(|detail| RecipeUseCaseError::Backend {
+                context: "builds",
+                detail,
+            })
+    }
+
+    /// Reads a bounded build page through centralized authorization.
+    ///
+    /// # Errors
+    /// Fails on denial, an invalid cursor or storage failure.
+    pub async fn list_build_page(
+        &self,
+        authorizer: &dyn Authorizer,
+        principal: &ActingPrincipal,
+        mut query: BuildPageRequest,
+    ) -> Result<BuildPage, RecipeUseCaseError> {
+        authorize(
+            authorizer,
+            AccessRequest {
+                principal_id: &principal.id,
+                action: Permission::ImagesRead,
+                resource: query.version.as_deref().or(query.recipe.as_deref()),
+            },
+        )
+        .map_err(RecipeUseCaseError::Denied)?;
+        query.limit = if query.limit == 0 {
+            50
+        } else {
+            query.limit.min(200)
+        };
+        self.recipes
+            .list_build_page(&query)
+            .await
+            .map_err(|detail| {
+                if detail == BUILD_CURSOR_INVALID {
+                    RecipeUseCaseError::Invalid { detail }
+                } else {
+                    RecipeUseCaseError::Backend {
+                        context: "builds",
+                        detail,
+                    }
+                }
+            })
+    }
+
+    /// Reads one build through the centralized images.read permission.
+    ///
+    /// # Errors
+    /// Fails on denial, missing record or storage failure.
+    pub async fn get_build(
+        &self,
+        authorizer: &dyn Authorizer,
+        principal: &ActingPrincipal,
+        id: &str,
+    ) -> Result<ImageBuildRecord, RecipeUseCaseError> {
+        authorize(
+            authorizer,
+            AccessRequest {
+                principal_id: &principal.id,
+                action: Permission::ImagesRead,
+                resource: Some(id),
+            },
+        )
+        .map_err(RecipeUseCaseError::Denied)?;
+        self.recipes.get_build(id).await.map_err(|detail| {
+            if detail.contains("not found") {
+                RecipeUseCaseError::NotFound {
+                    what: format!("build {id}"),
+                }
+            } else {
+                RecipeUseCaseError::Backend {
+                    context: "builds",
+                    detail,
+                }
+            }
+        })
+    }
+
     async fn require_recipe(&self, id: &str) -> Result<Recipe, RecipeUseCaseError> {
         self.recipes.get(id).await.map_err(|detail| {
             if detail.contains("not found") {
@@ -637,7 +1315,7 @@ impl Images {
         action: Permission,
         recipe_id: Option<&str>,
         event: &str,
-        fact: Option<(&str, &str)>,
+        facts: &[(&str, &str)],
     ) -> Result<(), RecipeUseCaseError> {
         let mut metadata = crate::audit::AuditMetadata::default();
         metadata
@@ -646,7 +1324,7 @@ impl Images {
                 context: "audit",
                 detail: error.to_string(),
             })?;
-        if let Some((key, value)) = fact {
+        for (key, value) in facts {
             metadata
                 .insert(key, value)
                 .map_err(|error| RecipeUseCaseError::Backend {
@@ -669,5 +1347,182 @@ impl Images {
                 context: "audit",
                 detail,
             })
+    }
+}
+
+/// How long an address stays out of allocation after a build that did not
+/// end verifiably (24 hours). Packer removes its VM on a clean failure or
+/// cancel; when it could not report that, the VM may still hold the address.
+pub const BUILD_ADDRESS_QUARANTINE_MILLIS: i64 = 24 * 60 * 60 * 1000;
+
+/// A build address allocation failed (#337).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum BuildAddressError {
+    /// The pool has too few free addresses for the build.
+    Exhausted,
+    /// The repository failed; the detail is for logs, never for the build
+    /// record.
+    Storage(String),
+}
+
+impl fmt::Display for BuildAddressError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Exhausted => f.write_str("the build address pool is exhausted"),
+            Self::Storage(detail) => write!(f, "the build address store failed: {detail}"),
+        }
+    }
+}
+
+impl std::error::Error for BuildAddressError {}
+
+/// The transactional allocation of Fleet-assigned build addresses (#337).
+///
+/// A held address belongs to exactly one live operation. The operation's own
+/// state is authoritative, like the Lab capacity reservations: a held row
+/// whose operation is terminal or unknown no longer counts, so a lost release
+/// can never strand an address, and allocation reclaims such rows in its own
+/// transaction.
+#[async_trait]
+pub trait BuildAddressPort: fmt::Debug + Send + Sync {
+    /// Holds `count` free addresses of `pool` for the operation, in one
+    /// transaction. Asking again for the same operation and count returns
+    /// the addresses it already holds. Addresses released longest ago are
+    /// preferred, so a guest that is still being destroyed is not handed
+    /// straight to the next build.
+    ///
+    /// # Errors
+    /// [`BuildAddressError::Exhausted`] when the pool has fewer free
+    /// addresses than `count`; storage failure otherwise.
+    async fn allocate(
+        &self,
+        operation_id: &str,
+        pool: &fleet_core::BuildAddressPool,
+        count: usize,
+        now_millis: i64,
+    ) -> Result<Vec<std::net::Ipv4Addr>, BuildAddressError>;
+
+    /// Releases every address the operation holds. Idempotent.
+    ///
+    /// With `quarantine`, the addresses also stay out of allocation for
+    /// [`BUILD_ADDRESS_QUARANTINE_MILLIS`]. Use it when the build did not
+    /// end verifiably: Packer may not have removed its VM, which may still
+    /// answer on the address, and the next build would connect to it.
+    ///
+    /// # Errors
+    /// Fails on a storage error.
+    async fn release(
+        &self,
+        operation_id: &str,
+        now_millis: i64,
+        quarantine: bool,
+    ) -> Result<usize, String>;
+
+    /// Releases every held address whose operation is terminal or unknown,
+    /// for startup. The holder died without releasing, so nothing says its
+    /// VM is gone: these addresses are quarantined. Returns how many were
+    /// released.
+    ///
+    /// # Errors
+    /// Fails on a storage error.
+    async fn reconcile(&self, now_millis: i64) -> Result<usize, String>;
+
+    /// Lists the addresses that are out of allocation at `now_millis`: held
+    /// by a live operation, or quarantined. One entry per address, ordered
+    /// by address. Read-only.
+    ///
+    /// # Errors
+    /// Fails on a storage error.
+    async fn list_unavailable(&self, now_millis: i64) -> Result<Vec<BuildAddressRecord>, String>;
+
+    /// Ends the quarantine of one address early (#402). Holds whose
+    /// operation is terminal or unknown are reclaimed first, so a dead
+    /// holder's address can be cleared too (the operator vouches that its
+    /// VM is gone). An address a live operation holds is never cleared.
+    ///
+    /// # Errors
+    /// Fails on a storage error.
+    async fn clear_quarantine(
+        &self,
+        address: std::net::Ipv4Addr,
+        now_millis: i64,
+    ) -> Result<ClearQuarantine, String>;
+}
+
+/// Why a build address is out of allocation (#402).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BuildAddressStatus {
+    /// A live operation holds it.
+    Held,
+    /// Released without a verified end; not handed out until its hold ends.
+    Quarantined,
+}
+
+impl BuildAddressStatus {
+    /// The wire name.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Held => "held",
+            Self::Quarantined => "quarantined",
+        }
+    }
+}
+
+/// One build address that is out of allocation (#402).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct BuildAddressRecord {
+    /// The IPv4 address.
+    pub address: std::net::Ipv4Addr,
+    /// Why it is unavailable.
+    pub status: BuildAddressStatus,
+    /// The operation that holds it, or held it when it was quarantined.
+    pub operation_id: String,
+    /// When it was taken (held) or released (quarantined), Unix millis.
+    pub since: i64,
+    /// When a quarantine ends on its own, Unix millis; `None` while held.
+    pub until: Option<i64>,
+}
+
+/// The outcome of clearing one address's quarantine (#402).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ClearQuarantine {
+    /// The quarantine was ended; the address can be allocated again.
+    Cleared {
+        /// The operation whose build held the address.
+        operation_id: String,
+    },
+    /// A live operation holds the address.
+    Held {
+        /// The holding operation.
+        operation_id: String,
+    },
+    /// The address is not quarantined.
+    NotQuarantined,
+}
+
+#[cfg(test)]
+mod secret_reference_tests {
+    use super::check_secret_reference;
+
+    #[test]
+    fn only_images_namespace_names_pass() {
+        for ok in ["images/token", "images/a.b_c-1"] {
+            assert!(check_secret_reference(ok).is_ok(), "{ok}");
+        }
+        for bad in [
+            "",
+            "images/",
+            "external/acct",
+            "coolify-env-hold/x",
+            "proxmox/acct",
+            "0190a1b2-0000-7000-8000-000000000000",
+            "images/../external/acct",
+            "images/a/b",
+            "images/.hidden",
+            "images/a b",
+        ] {
+            assert!(check_secret_reference(bad).is_err(), "{bad}");
+        }
     }
 }

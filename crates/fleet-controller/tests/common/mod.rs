@@ -78,6 +78,18 @@ impl Drop for TestSshd {
 /// start surfaces immediately instead of failing every test later on the
 /// first SSH probe with a misleading error.
 pub fn start_sshd() -> TestSshd {
+    start_sshd_inner(None)
+}
+
+/// Like [`start_sshd`], but every session sshd opens sees `HOME` set to
+/// `home` (sshd's `SetEnv`). A suite that installs files under `~/.local/bin`
+/// on the "remote" side gets a private tree per test instead of racing other
+/// runs through the developer's real home.
+pub fn start_sshd_with_home(home: &std::path::Path) -> TestSshd {
+    start_sshd_inner(Some(home))
+}
+
+fn start_sshd_inner(home: Option<&std::path::Path>) -> TestSshd {
     let _guard = acquire_startup_lock();
     let dir = tempfile::tempdir().unwrap();
     let host_key = dir.path().join("host_ed25519");
@@ -113,6 +125,9 @@ pub fn start_sshd() -> TestSshd {
     let host_key_display = host_key.display().to_string();
     let authz_display = authz.display().to_string();
     let dir_display = dir.path().display().to_string();
+    let set_env = home
+        .map(|home| format!("SetEnv HOME={}\n", home.display()))
+        .unwrap_or_default();
     std::fs::write(
         &sshd_config,
         format!(
@@ -125,6 +140,7 @@ pub fn start_sshd() -> TestSshd {
              UsePAM no\n\
              StrictModes no\n\
              PidFile {dir_display}/sshd.pid\n\
+             {set_env}\
              Subsystem sftp internal-sftp\n"
         ),
     )

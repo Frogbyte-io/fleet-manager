@@ -63,7 +63,7 @@ pub enum PrivilegeTier {
     Discover,
     /// Guest lifecycle: start, stop, shutdown, reboot.
     Operate,
-    /// Snapshot, rollback, snapshot delete, clone, template, task cancel.
+    /// Snapshot, rollback, snapshot delete, clone, template, destroy, task cancel.
     Destructive,
     /// Lab leases: clone a pinned image, start it, probe readiness.
     Lab,
@@ -443,6 +443,54 @@ pub const PROXMOX_PRIVILEGE_TABLE: &[PrivilegeRequirement] = &[
         note: "Snapshot removal.",
     },
     PrivilegeRequirement {
+        id: "proxmox.guest.destroy",
+        capability: "proxmox.guest.destroy",
+        tier: PrivilegeTier::Destructive,
+        endpoint: "DELETE /nodes/{node}/qemu/{vmid}",
+        majors: BOTH,
+        scope: PrivilegeScope::Guest,
+        privileges: &["VM.Allocate"],
+        matching: PrivilegeMatch::All,
+        required: true,
+        note: "QEMU destroy; purge is optional. No skiplock or unreferenced-disk deletion.",
+    },
+    PrivilegeRequirement {
+        id: "proxmox.guest.destroy.list",
+        capability: "proxmox.guest.destroy",
+        tier: PrivilegeTier::Destructive,
+        endpoint: "GET /cluster/resources",
+        majors: BOTH,
+        scope: PrivilegeScope::Guest,
+        privileges: &["VM.Audit"],
+        matching: PrivilegeMatch::All,
+        required: true,
+        note: "Live template guard and running-state lookup.",
+    },
+    PrivilegeRequirement {
+        id: "proxmox.guest.destroy.config",
+        capability: "proxmox.guest.destroy",
+        tier: PrivilegeTier::Destructive,
+        endpoint: "GET /nodes/{node}/qemu/{vmid}/config",
+        majors: BOTH,
+        scope: PrivilegeScope::Guest,
+        privileges: &["VM.Audit"],
+        matching: PrivilegeMatch::All,
+        required: true,
+        note: "Provider template refusal and precise already-absent classification.",
+    },
+    PrivilegeRequirement {
+        id: "proxmox.guest.destroy.stop",
+        capability: "proxmox.guest.destroy",
+        tier: PrivilegeTier::Destructive,
+        endpoint: "POST /nodes/{node}/qemu/{vmid}/status/stop",
+        majors: BOTH,
+        scope: PrivilegeScope::Guest,
+        privileges: &["VM.PowerMgmt"],
+        matching: PrivilegeMatch::All,
+        required: true,
+        note: "A running guest must stop before destroy.",
+    },
+    PrivilegeRequirement {
         id: "proxmox.guest.clone.list",
         capability: "proxmox.guest.clone",
         tier: PrivilegeTier::Destructive,
@@ -610,6 +658,78 @@ pub const PROXMOX_PRIVILEGE_TABLE: &[PrivilegeRequirement] = &[
         matching: PrivilegeMatch::All,
         required: true,
         note: "Checked for every netN bridge of the template.",
+    },
+    PrivilegeRequirement {
+        id: "lab.provision.clone-config",
+        capability: "lab.provision",
+        tier: PrivilegeTier::Lab,
+        endpoint: "GET /nodes/{node}/qemu/{vmid}/config",
+        majors: BOTH,
+        scope: PrivilegeScope::NewGuest,
+        privileges: &["VM.Audit"],
+        matching: PrivilegeMatch::All,
+        required: true,
+        note: "After the clone the executor reads the new guest's config: it waits for the clone lock to clear and checks the guest's Fleet name and protection flag.",
+    },
+    PrivilegeRequirement {
+        id: "lab.provision.unprotect",
+        capability: "lab.provision",
+        tier: PrivilegeTier::Lab,
+        endpoint: "PUT /nodes/{node}/qemu/{vmid}/config",
+        majors: BOTH,
+        scope: PrivilegeScope::NewGuest,
+        privileges: &["VM.Config.Options"],
+        matching: PrivilegeMatch::All,
+        required: true,
+        note: "A clone copies the template's protection flag, and PVE refuses to delete a protected guest; the executor clears it (protection=0, a general option) on its own new guest so cleanup can destroy it (issue #290).",
+    },
+    PrivilegeRequirement {
+        id: "lab.provision.hardware-config",
+        capability: "lab.provision",
+        tier: PrivilegeTier::Lab,
+        endpoint: "PUT /nodes/{node}/qemu/{vmid}/config",
+        majors: BOTH,
+        scope: PrivilegeScope::NewGuest,
+        privileges: &["VM.Config.CPU", "VM.Config.Memory"],
+        matching: PrivilegeMatch::All,
+        required: true,
+        note: "A clone keeps the image template's cores and memory; when they differ from the Lab template's, the executor sets cores (VM.Config.CPU) and memory (VM.Config.Memory) on its own new guest, conditional on the config digest, so the guest matches what the capacity reservation held (issue #372). Nothing is written, and neither privilege is used, when they already match.",
+    },
+    PrivilegeRequirement {
+        id: "lab.provision.hardware-audio",
+        capability: "lab.provision",
+        tier: PrivilegeTier::Lab,
+        endpoint: "PUT /nodes/{node}/qemu/{vmid}/config",
+        majors: BOTH,
+        scope: PrivilegeScope::NewGuest,
+        privileges: &["VM.Config.HWType"],
+        matching: PrivilegeMatch::All,
+        required: false,
+        note: "When the Lab template declares a virtual audio device and the clone's audio0 differs, the executor sets audio0 in the same config write as cores and memory, on its own new guest (issue #398). qemu-server lists audio0 among the hardware-type options, which need VM.Config.HWType. Opt-in: only templates that declare audio use it, so it never gates the Lab tier; without it a provision of such a template fails at the hardware step naming the privilege. Nothing is written, and the privilege is not used, when the clone already matches or the template declares no audio.",
+    },
+    PrivilegeRequirement {
+        id: "lab.provision.hardware-resize",
+        capability: "lab.provision",
+        tier: PrivilegeTier::Lab,
+        endpoint: "PUT /nodes/{node}/qemu/{vmid}/resize",
+        majors: BOTH,
+        scope: PrivilegeScope::NewGuest,
+        privileges: &["VM.Config.Disk"],
+        matching: PrivilegeMatch::All,
+        required: true,
+        note: "When the clone's boot disk is smaller than the Lab template's disk size, the executor grows it to that size on its own new guest, conditional on the config digest (issue #372). A disk is never shrunk; nothing is resized, and the privilege is not used, when the disk is large enough.",
+    },
+    PrivilegeRequirement {
+        id: "lab.provision.hardware-resize-storage",
+        capability: "lab.provision",
+        tier: PrivilegeTier::Lab,
+        endpoint: "PUT /nodes/{node}/qemu/{vmid}/resize",
+        majors: BOTH,
+        scope: PrivilegeScope::Storage,
+        privileges: &["Datastore.AllocateSpace"],
+        matching: PrivilegeMatch::All,
+        required: true,
+        note: "The resize also needs space on the disk's storage. PVE checks it inside the forked resize worker, not before the task starts, so a missing privilege shows up as a failed task's exit status (\"Permission check failed (/storage/..., Datastore.AllocateSpace)\"), not an HTTP 403 (issue #372). Fleet's token already holds it there for the clone.",
     },
     PrivilegeRequirement {
         id: "lab.provision.start",
@@ -1212,6 +1332,7 @@ mod tests {
             "proxmox.guest.snapshot",
             "proxmox.guest.snapshot-revert",
             "proxmox.guest.snapshot-delete",
+            "proxmox.guest.destroy",
             "proxmox.guest.clone",
             "proxmox.guest.template",
             "proxmox.task-cancel",
@@ -1221,6 +1342,99 @@ mod tests {
                 PROXMOX_PRIVILEGE_TABLE.iter().any(|r| r.capability == kind),
                 "{kind} is missing from the table"
             );
+        }
+    }
+
+    #[test]
+    fn destroy_requires_allocate_audit_and_power_on_both_majors() {
+        for major in [8, 9] {
+            for (id, privilege) in [
+                ("proxmox.guest.destroy", "VM.Allocate"),
+                ("proxmox.guest.destroy.list", "VM.Audit"),
+                ("proxmox.guest.destroy.config", "VM.Audit"),
+                ("proxmox.guest.destroy.stop", "VM.PowerMgmt"),
+            ] {
+                let row = requirements_for_major(major)
+                    .find(|row| row.id == id)
+                    .unwrap();
+                assert_eq!(row.privileges, &[privilege]);
+                assert_eq!(row.tier, PrivilegeTier::Destructive);
+                assert!(row.required);
+            }
+        }
+    }
+
+    #[test]
+    fn lab_reads_and_unprotects_only_its_new_guest_on_both_majors() {
+        // Issue #290: a clone inherits the template's protection flag. The
+        // executor clears it on the new guest, never on the template.
+        for major in [8, 9] {
+            for (id, privilege) in [
+                ("lab.provision.clone-config", "VM.Audit"),
+                ("lab.provision.unprotect", "VM.Config.Options"),
+                ("lab.provision.hardware-resize", "VM.Config.Disk"),
+            ] {
+                let row = requirements_for_major(major)
+                    .find(|row| row.id == id)
+                    .unwrap();
+                assert_eq!(row.privileges, &[privilege]);
+                assert_eq!(row.tier, PrivilegeTier::Lab);
+                assert_eq!(row.scope, PrivilegeScope::NewGuest);
+                assert!(row.required);
+            }
+            assert!(
+                requirements_for_major(major)
+                    .filter(|row| row.tier == PrivilegeTier::Lab
+                        && row.scope != PrivilegeScope::NewGuest)
+                    .all(|row| !row.privileges.contains(&"VM.Config.Options")),
+                "{major}.x: Lab never needs VM.Config.Options outside its new guests"
+            );
+        }
+    }
+
+    #[test]
+    fn lab_sets_a_clones_hardware_only_on_its_new_guest_on_both_majors() {
+        // Issue #372: cores and memory are set through the config update,
+        // the disk through the resize; each needs its own privilege, and only
+        // on the new guest, never on the template.
+        for major in [8, 9] {
+            let config = requirements_for_major(major)
+                .find(|row| row.id == "lab.provision.hardware-config")
+                .unwrap();
+            assert_eq!(config.privileges, &["VM.Config.CPU", "VM.Config.Memory"]);
+            assert_eq!(config.matching, PrivilegeMatch::All);
+            for id in [
+                "lab.provision.hardware-config",
+                "lab.provision.hardware-resize",
+            ] {
+                let row = requirements_for_major(major)
+                    .find(|row| row.id == id)
+                    .unwrap();
+                assert_eq!(row.tier, PrivilegeTier::Lab);
+                assert_eq!(row.scope, PrivilegeScope::NewGuest);
+                assert!(row.required);
+            }
+            let audio = requirements_for_major(major)
+                .find(|row| row.id == "lab.provision.hardware-audio")
+                .unwrap();
+            assert_eq!(audio.privileges, &["VM.Config.HWType"]);
+            // Only templates with audio use it: it is reported, never a gate.
+            assert!(!audio.required);
+            assert_eq!(audio.tier, PrivilegeTier::Lab);
+            assert_eq!(audio.scope, PrivilegeScope::NewGuest);
+            for privilege in [
+                "VM.Config.CPU",
+                "VM.Config.Memory",
+                "VM.Config.Disk",
+                "VM.Config.HWType",
+            ] {
+                assert!(
+                    requirements_for_major(major)
+                        .filter(|row| row.scope != PrivilegeScope::NewGuest)
+                        .all(|row| !row.privileges.contains(&privilege)),
+                    "{major}.x: nothing outside the new guest needs {privilege}"
+                );
+            }
         }
     }
 
@@ -1391,7 +1605,8 @@ mod tests {
     #[test]
     fn lab_provision_needs_vm_audit_to_find_its_template() {
         // Every lab privilege except VM.Audit, propagated from the root:
-        // /cluster/resources would hide the template, so lab is missing.
+        // /cluster/resources would hide the template (and the config read
+        // after the clone would fail, issue #290), so lab is missing.
         let without_audit: Vec<(&str, bool)> = PROXMOX_PRIVILEGE_TABLE
             .iter()
             .filter(|r| r.tier == PrivilegeTier::Lab)
@@ -1405,24 +1620,48 @@ mod tests {
             assert_eq!(lab.status, PrivilegeStatus::Missing, "{major}.x");
             assert_eq!(
                 lab.missing,
-                vec![MissingPrivileges {
-                    privileges: vec!["VM.Audit".to_owned()],
-                    any_of: false,
-                    path: "/vms/{vmid}".to_owned(),
-                    capabilities: vec!["lab.provision".to_owned()],
-                }],
+                ["/vms/{vmid}", "/vms/{newid}"]
+                    .map(|path| MissingPrivileges {
+                        privileges: vec!["VM.Audit".to_owned()],
+                        any_of: false,
+                        path: path.to_owned(),
+                        capabilities: vec!["lab.provision".to_owned()],
+                    })
+                    .to_vec(),
                 "{major}.x"
             );
 
-            // VM.Audit on the template itself makes it visible.
-            let tiers = evaluate_tiers(
-                major,
-                &map(&[("/", &without_audit), ("/vms/9000", &[("VM.Audit", false)])]),
+            // The template (120, existing) and the reserved clone target
+            // (9000, free) are distinct VMIDs. VM.Audit on the template
+            // alone makes it visible, but the post-clone config read still
+            // lacks VM.Audit on the clone target.
+            let in_use = BTreeMap::from([(120, true), (9000, false)]);
+            let template_only = map(&[("/", &without_audit), ("/vms/120", &[("VM.Audit", false)])]);
+            let tiers = evaluate_tiers_with_vmids(major, &template_only, Some(&in_use));
+            let lab = tier(&tiers, PrivilegeTier::Lab);
+            assert_eq!(lab.status, PrivilegeStatus::Missing, "{major}.x");
+            assert_eq!(
+                check(lab, "lab.provision.template-lookup").granted_on,
+                ["/vms/120"]
             );
+            assert!(
+                check(lab, "lab.provision.clone-config")
+                    .granted_on
+                    .is_empty(),
+                "{major}.x"
+            );
+
+            // VM.Audit on the clone target as well grants the tier.
+            let both = map(&[
+                ("/", &without_audit),
+                ("/vms/120", &[("VM.Audit", false)]),
+                ("/vms/9000", &[("VM.Audit", false)]),
+            ]);
+            let tiers = evaluate_tiers_with_vmids(major, &both, Some(&in_use));
             let lab = tier(&tiers, PrivilegeTier::Lab);
             assert_eq!(lab.status, PrivilegeStatus::Granted, "{major}.x");
             assert_eq!(
-                check(lab, "lab.provision.template-lookup").granted_on,
+                check(lab, "lab.provision.clone-config").granted_on,
                 ["/vms/9000"]
             );
         }

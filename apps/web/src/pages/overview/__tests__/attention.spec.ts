@@ -4,6 +4,9 @@ import type { OperationDto } from '@frogbyte-io/fleet-api-client'
 
 import {
   activity,
+  domainRows,
+  serviceRenewalRows,
+  serviceHealthRows,
   driftRows,
   EXPIRING_WINDOW_MS,
   kpis,
@@ -11,7 +14,9 @@ import {
   machineRows,
   onboardingRows,
   operationRows,
+  orphanRows,
   proxmoxRows,
+  requestRows,
   sortAttention,
   templatePinRows,
 } from '../attention'
@@ -38,10 +43,47 @@ describe('attention sources', () => {
       { id: 'lease-later-001', state: 'ready', purpose: 'long', expiresAt: NOW + EXPIRING_WINDOW_MS + 60_000, createdAt: 3 },
     ], NOW)
     expect(rows.map(r => [r.source, r.severity, r.to])).toEqual([
-      ['lease-cleanup', 'err', '/lab'],
+      ['lease-cleanup', 'err', { path: '/lab', query: { lease: 'lease-cleanup-1' } }],
       ['lease-expiring', 'warn', '/lab'],
     ])
+    expect(rows[0]!.detail).toContain('It still owns resources')
     expect(rows[1]!.title).toContain('in 10 min')
+  })
+
+  it('names where a cleanup_failed lease\'s guest remains, linking to that lease', () => {
+    const rows = leaseRows(
+      [{ id: 'lease-cleanup-1', state: 'cleanup_failed', purpose: 'old', expiresAt: null, createdAt: 1 }],
+      NOW,
+      new Map([['lease-cleanup-1', { node: 'pve-a', vmid: 9001 }]]),
+    )
+    expect(rows[0]!.detail).toBe('Its guest remains on pve-a · VMID 9001 (old). Fix the cause, then retry its cleanup.')
+    expect(rows[0]!.to).toEqual({ path: '/lab', query: { lease: 'lease-cleanup-1' } })
+  })
+
+  it('lists orphan Lab guests with the node from the guest lists, newest report once', () => {
+    const report = (id: string, resource: string, vmid: string, occurredAt: number) =>
+      ({ id, resource, occurredAt, metadata: { event: 'lab_orphan_guest', vmid } })
+    const events = [
+      report('e1', 'fm-lab-0001', '9001', 10),
+      report('e2', 'fm-lab-0001', '9001', 20),
+      report('e3', 'fm-lab-0002', '9002', 30),
+      { id: 'e4', resource: 'lease-1', occurredAt: 40, metadata: { event: 'lab_lease_created' } },
+    ]
+    const rows = orphanRows(events, { guests: [{ name: 'fm-lab-0001', vmid: 9001, node: 'pve-a' }], complete: true })
+    // fm-lab-0002 is no longer listed by any account, and every list is whole: it is gone.
+    expect(rows).toHaveLength(1)
+    expect(rows[0]).toMatchObject({ source: 'lab-orphan', severity: 'warn', title: 'Orphan Lab guest fm-lab-0001', to: '/proxmox', at: 20 })
+    expect(rows[0]!.detail).toContain('Remains on pve-a · VMID 9001')
+  })
+
+  it('keeps an orphan it cannot place while a guest list is missing', () => {
+    const rows = orphanRows(
+      [{ id: 'e1', resource: 'fm-lab-0002', occurredAt: 1, metadata: { event: 'lab_orphan_guest', vmid: '9002' } }],
+      { guests: [], complete: false },
+    )
+    expect(rows).toHaveLength(1)
+    expect(rows[0]!.detail).toContain('unknown node')
+    expect(rows[0]!.detail).toContain('VMID 9002')
   })
 
   it('flags blocked operations with their recorded reason, linking to the operation', () => {
@@ -51,6 +93,15 @@ describe('attention sources', () => {
     ] as OperationDto[])
     expect(rows).toHaveLength(1)
     expect(rows[0]).toMatchObject({ detail: 'frogenv approval pending', to: { path: '/operations', query: { op: 'op-1' } } })
+  })
+
+  it('flags only pending action requests, linking to the request in the inbox', () => {
+    const rows = requestRows([
+      { id: 'r1', actionId: 'coolify.application.redeploy', target: 'app', requester: 'agent', reason: 'fix', state: 'pending', createdAt: 3 },
+      { id: 'r2', actionId: 'coolify.application.redeploy', target: 'app', requester: 'agent', reason: 'fix', state: 'denied', createdAt: 4 },
+    ])
+    expect(rows).toHaveLength(1)
+    expect(rows[0]).toMatchObject({ source: 'request-pending', severity: 'warn', to: { path: '/requests', query: { request: 'r1' } }, at: 3 })
   })
 
   it('flags changed and unconfirmed Proxmox fingerprints, linking to Proxmox', () => {
@@ -137,5 +188,67 @@ describe('kpis and activity', () => {
     )
     expect(feed.map(i => [i.key, i.tone])).toEqual([['audit:a1', 'err'], ['op:op-1', 'info']])
     expect(feed[0]!.detail).toBe('me · denied')
+  })
+
+  it('raises one row per domain with a warning, carrying the most serious one', () => {
+    const rows = domainRows([
+      { key: 'ok.example', warnings: [] },
+      {
+        key: 'soon.example',
+        warnings: [
+          { code: 'auto_renew_off_expiring', severity: 'err', message: 'Auto-renew is off and the domain expires in 4 days.' },
+          { code: 'registrar_mismatch', severity: 'warn', message: 'The registry lists the registrar as X.' },
+        ],
+      },
+      { key: 'drift.example', warnings: [{ code: 'expiry_changed', severity: 'info', message: 'Expiry changed.' }] },
+    ])
+    expect(rows.map(r => [r.key, r.source, r.severity, r.to])).toEqual([
+      ['domain:soon.example', 'domain', 'err', { path: '/registry/domains', query: { open: 'soon.example' } }],
+      ['domain:drift.example', 'domain', 'info', { path: '/registry/domains', query: { open: 'drift.example' } }],
+    ])
+    expect(rows[0]!.detail).toBe('Auto-renew is off and the domain expires in 4 days. (1 more)')
+  })
+
+  it('flags services renewing within two weeks', () => {
+    const now = Date.UTC(2026, 9, 16, 12)
+    const service = (key: string, fields: Record<string, unknown>) => ({ id: key, key, name: key, type: 'service', fields, links: [], relations: [], tags: [] })
+    const rows = serviceRenewalRows([
+      service('far', { name: 'Far', renewal: '2027-01-01' }),
+      service('soon', { name: 'Soon', renewal: '2026-10-20', cost: '9.00 EUR', billingPeriod: 'monthly' }),
+      service('late', { name: 'Late', renewal: '2026-10-01' }),
+      service('none', { name: 'None' }),
+    ], now)
+    // A passed date is the Services view's business, not the queue's.
+    expect(rows.map(r => [r.key, r.severity, r.to])).toEqual([
+      ['service-renewal:soon', 'warn', { path: '/registry/services', query: { entry: 'soon' } }],
+    ])
+    expect(rows[0]!.title).toBe('Soon renews in 4 days')
+    expect(rows[0]!.detail).toContain('€9.00 / month')
+  })
+
+  it('flags unhealthy services and failed deploys, never stale-only ones', () => {
+    const svc = (id: string, state: string, extra: Record<string, unknown> = {}) => ({ id, name: id, state, stale: false, lastDeploy: null, ...extra })
+    const deploy = (status: string, stale = false) => ({ deploymentUuid: 'd', status, stale })
+    const rows = serviceHealthRows([
+      svc('ok', 'running', { lastDeploy: deploy('finished') }),
+      svc('bad', 'degraded'),
+      svc('recovering', 'degraded', { stale: true }),
+      svc('off', 'stopped', { stale: true }),
+      svc('stale', 'running', { stale: true }),
+      svc('failed', 'running', { lastDeploy: deploy('failed', true) }),
+      svc('down', 'stopped', { lastDeploy: deploy('failed') }),
+    ], NOW)
+    expect(rows.map(r => [r.key.replace(/^service-/, ''), r.severity])).toEqual([
+      ['unhealthy:bad', 'err'],
+      ['unhealthy:recovering', 'warn'],
+      ['unhealthy:off', 'info'],
+      ['deploy-failed:failed', 'warn'],
+      ['unhealthy:down', 'info'],
+      ['deploy-failed:down', 'err'],
+    ])
+    expect(rows[0]!.to).toBe('/services/bad')
+    expect(rows[2]!.detail).toContain('stale')
+    expect(rows[3]!.detail).toContain('still running')
+    expect(rows[3]!.detail).toContain('deployment data is stale')
   })
 })

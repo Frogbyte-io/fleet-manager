@@ -12,10 +12,20 @@
 //! local-filesystem constraint.
 #![warn(missing_docs)]
 
+pub mod action_requests;
 pub mod audit;
+pub mod build_addresses;
+pub mod coolify_observations;
+pub mod credentials;
+pub mod dns_observations;
+pub mod external_accounts;
 pub mod guest_links;
 pub mod images;
 pub mod lab;
+pub mod lab_artifacts;
+pub mod lab_detached;
+pub mod lab_placement;
+pub mod lab_pool;
 pub mod machines;
 pub mod nodes;
 pub mod onboarding;
@@ -23,14 +33,26 @@ pub mod operations;
 pub mod projects;
 pub mod proxmox;
 pub mod proxmox_task_links;
+pub mod registry;
+pub mod registry_observations;
 pub mod skill_catalog;
 pub mod skills;
 pub mod source;
 
+pub use action_requests::ActionRequestRepository;
 pub use audit::{AuditLedger, AuditSink};
+pub use build_addresses::BuildAddressRepository;
+pub use coolify_observations::CoolifyObservationRepository;
+pub use credentials::CredentialRepository;
+pub use dns_observations::DnsObservationRepository;
+pub use external_accounts::ExternalAccountRepository;
 pub use guest_links::GuestLinkRepository;
 pub use images::RecipeRepository;
 pub use lab::{LabRepository, LeaseRepository};
+pub use lab_artifacts::LabArtifactRepository;
+pub use lab_detached::DetachedExecRepository;
+pub use lab_placement::CapacityRepository;
+pub use lab_pool::LabPoolRepository;
 pub use machines::MachineRepository;
 pub use nodes::NodeRepository;
 pub use onboarding::OnboardingRepository;
@@ -38,6 +60,8 @@ pub use operations::OperationRepository;
 pub use projects::ProjectRepository;
 pub use proxmox::ProxmoxAccountRepository;
 pub use proxmox_task_links::ProxmoxTaskLinkRepository;
+pub use registry::RegistryRepository;
+pub use registry_observations::ObservationRepository;
 pub use skill_catalog::SkillCatalogRepository;
 pub use skills::SkillsRepository;
 pub use source::SourceRepository;

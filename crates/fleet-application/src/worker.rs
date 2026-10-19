@@ -267,8 +267,11 @@ impl Operations {
                     "failed",
                     None,
                     Some(
-                        &serde_json::json!({ "reason": "step_failed", "detail": detail })
-                            .to_string(),
+                        &serde_json::json!({
+                            "reason": "step_failed",
+                            "detail": fleet_core::scrub_failure_detail(&detail),
+                        })
+                        .to_string(),
                     ),
                 )
                 .await

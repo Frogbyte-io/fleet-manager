@@ -22,9 +22,15 @@
 #![warn(missing_docs)]
 
 pub mod adapter;
+pub mod delegated;
 pub mod node;
 
 pub use adapter::LanAllowAllAuthorizer;
+pub use delegated::{
+    CredentialRejection, DELEGATED_LAB_LOOP, DelegatedAction, DelegatedCallerResolver,
+    DelegatedTokenCrypto, RejectedCredential, ResourceRule, ScopedAuthorizer,
+    resolve_delegated_caller,
+};
 pub use node::HmacNodeCrypto;
 
 use std::fmt;
@@ -97,6 +103,8 @@ pub enum Principal {
     AnonymousLanAdmin,
     /// A user authenticated by Tailscale Serve.
     TailscaleUser,
+    /// A delegated, scoped credential (ADR 0011).
+    DelegatedCredential,
 }
 
 impl Principal {
@@ -109,6 +117,7 @@ impl Principal {
         match self {
             Self::AnonymousLanAdmin => LAN_PRINCIPAL_ID,
             Self::TailscaleUser => "tailscale-user",
+            Self::DelegatedCredential => "delegated-credential",
         }
     }
 }
@@ -192,6 +201,11 @@ impl Caller {
 /// handler or provider that needs "the caller" reads the [`Caller`]
 /// extension, and authorization downstream decides what the principal may do.
 pub async fn resolve_lan_caller(mut request: Request, next: Next) -> Response {
+    // A delegated credential already resolved the caller: it narrows, and
+    // the listener's administrator resolution must not replace it.
+    if request.extensions().get::<Caller>().is_some() {
+        return next.run(request).await;
+    }
     let remote_addr = request
         .extensions()
         .get::<axum::extract::ConnectInfo<SocketAddr>>()
@@ -236,6 +250,11 @@ pub async fn resolve_tailscale_serve_caller(
     mut request: Request,
     next: Next,
 ) -> Response {
+    // A delegated credential already resolved the caller (see
+    // `resolve_delegated_caller`); the Tailscale login is not consulted.
+    if request.extensions().get::<Caller>().is_some() {
+        return next.run(request).await;
+    }
     let remote_addr = request
         .extensions()
         .get::<axum::extract::ConnectInfo<SocketAddr>>()

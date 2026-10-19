@@ -288,7 +288,11 @@ M6 can start after M2 and the M1 operation/security kernel, but Lab waits for M3
 
 ### M7 — Fleet Lab
 
+Status: complete (2026-10-09 — FM-700–FM-743 closed; the [FM-742 exit-gate evidence](https://github.com/Frogbyte-io/fleet-manager/issues/266) is recorded in [`docs/planning/m7-acceptance.md`](planning/m7-acceptance.md#evidence)). The USB/hardware sub-epic ([#16](https://github.com/Frogbyte-io/fleet-manager/issues/16)) and Windows in-guest support remain later sub-epics.
+
 Outcome: humans and agents can obtain, use, and release disposable Linux development/test environments without leaked VMs.
+
+Operator runbook: [`docs/operations/lab.md`](operations/lab.md).
 
 - Packer image-build provider using its documented CLI, with version probing, bounded/redacted output, contract fixtures, and a license/distribution review before Fleet bundles any Packer binary.
 - Image recipes stored as modern `.pkr.json` plus versioned provisioning assets and Fleet metadata. The web app provides a structured editor for the supported Proxmox subset and an advanced raw-JSON editor that preserves unknown fields.
@@ -306,12 +310,22 @@ Exit gate: a human or agent can request a disposable Linux environment from a ma
 
 ### M8 — Authentication and agent/CI hardening
 
+Status: in progress (2026-10-09). The Release QA Linux slice below has landed on `dev`: scoped delegated Lab credentials ([ADR 0011](adr/0011-delegated-lab-credentials.md), #392/#435), retry-safe lease creation and lease lookup (#395/#432), `lab put` (#393/#434), and detached long-running exec (#394/#438). The rest of M8 (first-run bootstrap, web sessions, refusing anonymous LAN administration) has not started, so the exit gate is not met.
+
 Outcome: when Fleet must operate outside the initial fully trusted LAN, anonymous administration can be replaced by authenticated, least-privileged human, agent, and CI identities without changing application use cases.
 
 - First-run controller bootstrap, web session and CLI credential flows, plus delegated short-lived agent/CI credentials scoped by project, node/tag, action, resource limits, TTL, and owner.
 - Preserve `fleetctl --output json` and official Fleet skills as the agent interface; do not add an MCP server without a new demonstrated need and plan revision.
 - Read/write command separation, high-impact confirmation policy, rate/concurrency limits, and prompt-injection threat tests.
 - CI integration and autonomous Lab workflows with owner/purpose linkage and artifact handoff.
+- Design that slice against [Release QA](https://github.com/Frogbyte-io/release-qa) as the reference consumer. Its planned Fleet adapter (Release QA Stage 8) lives in that repository and binds only to Fleet APIs that are implemented when it starts. It is expected to acquire a Lab lease through `fleetctl lab --output json`, run the unchanged `release-qa run` in the guest, collect evidence, and release the lease. Release QA keeps test outcomes, reports, and its GitHub gate. Fleet only provisions, executes, collects, and cleans up. The adapter needs:
+  - a scoped CI identity that can create, exec in, and destroy leases from an allowed template only;
+  - a lease purpose that carries the Release QA candidate and run IDs (a convention within the existing free-text purpose);
+  - a way to run suites longer than the 900-second exec bound;
+  - download of collected Lab artifacts by that scoped CI identity, so evidence reaches the CI runner;
+  - a way to get the release candidate into the guest without a GitHub credential reaching it: the CI runner downloads and verifies the candidate, `fleetctl lab put` copies it into the lease, and the runner (which already holds the GitHub token) uploads the collected evidence. This replaces the earlier plan to deliver GitHub upload credentials to the guest.
+
+  Fleet adds no Release QA-specific code. This slice covers Linux guests only. Windows guests and exclusive USB hardware stay out of it until the Lab sub-epics for them land.
 - Richer audit query/export and policy simulation.
 
 Exit gate: authenticated deployment no longer relies on LAN trust; a restricted agent identity can create and destroy an allowed Lab lease but cannot execute on production, administer Fleet, read secrets, or retain a VM.
@@ -336,6 +350,22 @@ Outcome: the web app is a complete fleet console, and skills are managed across 
 Exit gate: every Developer Fleet, Proxmox, and Lab workflow available in `fleetctl` is operable from the console, with the same authorization and audit. A new global skill version reaches every reachable machine with Skills Manager through one reviewed rollout; drift is shown for the rest. Fleet never reads or writes Skills Manager's database or library files directly.
 
 M9 depends only on landed M1–M4, M6, and M7 contracts and may run in parallel with M6/M7 real-host acceptance.
+
+### M10 — Registry, running services, and brokered provider actions
+
+Status: complete on `dev` (2026-10-19); ADR 0016 accepted. Detailed plan and issue breakdown: [planning/m10-registry-services.md](planning/m10-registry-services.md). Boundaries: [ADR 0016](adr/0016-descriptive-registry-and-action-broker.md).
+
+Outcome: one place to answer "what do we have, where is it, what does it cost, and how does it connect", for humans and agents, and a way for agents to request provider changes without holding provider keys.
+
+- A generic, descriptive Registry in Fleet Git: `RegistryType` and `RegistryEntry` resources, built-in `domain` and `service` types, natural keys, relations, and no secrets. Registry resources are never applied.
+- Agents edit the Registry with `fleetctl registry` in a Fleet Git checkout and publish by direct push or pull request, per the `registry.changeMode` setting. Registry-only revisions auto-activate.
+- Domain enrichment from public RDAP and DNS lookups, shown as drift and suggestions; domains and third-party services are otherwise maintained by hand.
+- Running services observed from Coolify and Docker, joined with Registry entries; Coolify lifecycle, settings, and deploy-from-template actions.
+- An action broker: agents create action requests, policy keyed on risk class decides `auto`, `approve`, or `deny`, and Fleet runs approved Coolify and Cloudflare actions with credentials it holds and never returns.
+
+Exit gate: an agent finds a domain or service with `fleetctl registry find`, records a change through `fleetctl registry publish`, and sees it active without a manual step; the console shows domains, third-party services, and running services; an agent-requested DNS change runs only after approval, and no provider token appears in any output.
+
+M10 depends on M4 Fleet Git source fetch and activation, and on the M9 console. Registrar or vendor sync, Resend, and key provisioning into Frogenv are not part of it.
 
 ### Later — scale, convenience, and additional providers
 
@@ -363,13 +393,14 @@ M0 Foundation
        M3 project readiness ------------------------+
        minimal profile/template contracts ----------+
   M1-M4 + M6 + M7 APIs -> M9 Fleet Console v2 + fleet-wide skills
+  M4 desired state + M9 console -> M10 Registry + running services + action broker
 ```
 
 The critical path is M0 → M1 → M2 → M3 for the complete Developer Fleet release, then M6 plus the Packer/image-version slice of M7 for the first Lab release. Full M4 GitOps and Docker are not Lab prerequisites. Tailscale discovery is optional. Agents use skills and `fleetctl`; MCP is not on the roadmap.
 
 ## Recommended GitHub milestones and epic issues
 
-Use the milestone names M0–M8 above. Each epic should be a tracking issue containing only dependency/status checklists; implementation work remains in narrow linked issues.
+Use the milestone names M0–M10 above. Each epic should be a tracking issue containing only dependency/status checklists; implementation work remains in narrow linked issues.
 
 | Milestone | Recommended epics |
 |---|---|
@@ -383,6 +414,7 @@ Use the milestone names M0–M8 above. Each epic should be a tracking issue cont
 | M7 | Packer recipe editor/build/version/promotion; minimal Lab templates/readiness; leases and cleanup; Lab CLI/skills/project workflow; later Windows guest and hardware slices |
 | M8 | Optional authenticated deployment; agent/CI identity hardening and delegation; autonomous Lab/CI workflows; policy/audit administration |
 | M9 | Console foundation; fleet inventory console; fleet-wide skills; Lab and images console; settings/Proxmox/projects/audit/access |
+| M10 | Foundations (plan, ADR, provider accounts); Registry; domain and service views; running services (Coolify and Docker); agent action broker |
 
 Issue-ready work for M0–M2 is in [planning/initial-issues.md](planning/initial-issues.md). Use its issue template for later milestones.
 
@@ -420,7 +452,7 @@ Issue-ready work for M0–M2 is in [planning/initial-issues.md](planning/initial
 
 ## Explicitly outside Fleet Manager
 
-- Generic enterprise RMM, endpoint surveillance, patch compliance, helpdesk, or asset/license management
+- Generic enterprise RMM, endpoint surveillance, patch compliance, helpdesk, or asset/license management. The descriptive, manually maintained Registry (M10, ADR 0016) is in scope because agents need it for discovery; compliance, seat tracking, discovery agents, and procurement are not
 - A Proxmox replacement, hypervisor console, storage/network configuration suite, or full backup UI
 - A Portainer replacement, Compose authoring platform, image registry, or build service
 - Browser automation; use Playwright or a project-selected runner
@@ -430,7 +462,7 @@ Issue-ready work for M0–M2 is in [planning/initial-issues.md](planning/initial
 - A dedicated MCP server in the initial roadmap; agents use Fleet skills over `fleetctl --output json`
 - Distribution of VM disk images or licensed operating-system media; a future catalog distributes build recipes and metadata
 - A dotfile manager; use chezmoi if dotfile convergence is requested
-- A secrets-management platform; Fleet stores only the credentials it must use and delegates project secrets to Frogenv or another provider
+- A secrets-management platform; Fleet stores only the credentials it must use and delegates project secrets to Frogenv or another provider. Brokered provider actions (M10) run with credentials Fleet holds and never return them
 - A general package/configuration manager such as Ansible, Nix, or Chef
 - A generic dynamic plugin SDK in the early product
 - A native desktop application containing core logic

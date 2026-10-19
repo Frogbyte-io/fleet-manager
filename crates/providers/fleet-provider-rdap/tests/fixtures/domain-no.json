@@ -1,0 +1,99 @@
+{
+ "objectClassName": "domain",
+ "ldhName": "norid.no",
+ "rdapConformance": [
+  "rdap_level_0",
+  "rdap_objectTag_level_0",
+  "norid_level_0"
+ ],
+ "events": [
+  {
+   "eventAction": "registration",
+   "eventDate": "1999-11-14T23:00:00Z"
+  },
+  {
+   "eventAction": "last changed",
+   "eventDate": "2025-11-15T02:17:53Z"
+  }
+ ],
+ "entities": [
+  {
+   "objectClassName": "entity",
+   "roles": [
+    "technical"
+   ],
+   "vcardArray": [
+    "vcard",
+    [
+     [
+      "version",
+      {},
+      "text",
+      "4.0"
+     ],
+     [
+      "fn",
+      {},
+      "text",
+      "REDACTED"
+     ]
+    ]
+   ]
+  },
+  {
+   "objectClassName": "entity",
+   "roles": [
+    "registrar"
+   ],
+   "publicIds": [
+    {
+     "identifier": "919477822",
+     "type": "Norwegian organization number"
+    },
+    {
+     "identifier": "reg1103",
+     "type": "Norid registrar ID"
+    }
+   ],
+   "vcardArray": [
+    "vcard",
+    [
+     [
+      "version",
+      {},
+      "text",
+      "4.0"
+     ],
+     [
+      "fn",
+      {},
+      "text",
+      "SIKT - KUNNSKAPSSEKTORENS TJENESTELEVERAND\u00d8R"
+     ]
+    ]
+   ]
+  }
+ ],
+ "nameservers": [
+  {
+   "objectClassName": "nameserver",
+   "ldhName": "y.nic.no"
+  },
+  {
+   "objectClassName": "nameserver",
+   "ldhName": "z.nic.no"
+  },
+  {
+   "objectClassName": "nameserver",
+   "ldhName": "auth03.svg.ns.norid.no"
+  },
+  {
+   "objectClassName": "nameserver",
+   "ldhName": "auth01.trd.ns.norid.no"
+  },
+  {
+   "objectClassName": "nameserver",
+   "ldhName": "auth02.osl.ns.norid.no"
+  }
+ ]
+}

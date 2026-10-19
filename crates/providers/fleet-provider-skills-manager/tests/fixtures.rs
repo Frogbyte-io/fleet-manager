@@ -159,3 +159,37 @@ fn a_deadline_kill_is_not_success() {
     assert!(!outcome.succeeded());
     assert_eq!(outcome.failure_code(), None);
 }
+
+#[test]
+fn the_failure_detail_cuts_on_a_char_boundary_after_redaction() {
+    let outcome = CliOutcome {
+        stderr: format!("https://user:hunter2@host.invalid/ {}", "€".repeat(500)),
+        stdout: String::new(),
+        exit_code: Some(1),
+        killed_by_deadline: false,
+    };
+    let detail = failure_detail(&outcome);
+    assert!(!detail.contains("hunter2"), "{detail}");
+    assert_eq!(detail.chars().count(), 300);
+}
+
+#[test]
+fn the_json_message_is_redacted_and_bounded() {
+    let message = format!("https://user:p@ss@host.invalid/ {}", "€".repeat(500));
+    let outcome = CliOutcome {
+        stderr: serde_json::json!({"ok": false, "message": message}).to_string(),
+        stdout: String::new(),
+        exit_code: Some(1),
+        killed_by_deadline: false,
+    };
+    let detail = failure_detail(&outcome);
+    assert!(!detail.contains("ss@"), "{detail}");
+    assert_eq!(detail.chars().count(), 300);
+    // A window cut inside multibyte text, with a schemeless credential.
+    let long = CliOutcome {
+        stderr: format!("deploy:hunter2pw@host {}", "€".repeat(5_000)),
+        ..outcome
+    };
+    let detail = failure_detail(&long);
+    assert!(!detail.contains("hunter2"), "{detail}");
+}

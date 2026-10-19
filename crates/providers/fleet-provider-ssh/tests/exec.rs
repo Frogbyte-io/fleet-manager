@@ -17,13 +17,18 @@ use std::time::Duration;
 /// The lock file is scoped to the uid: an unrelated user's leftover lock
 /// on a shared machine must not break this suite, and the file's mode is
 /// 0600 so no other user can hold or tamper with it.
-fn startup_lock_path() -> std::path::PathBuf {
+fn named_lock_path(name: &str) -> std::path::PathBuf {
     let user = std::env::var("USER")
         .unwrap_or_else(|_| std::env::var("LOGNAME").unwrap_or_else(|_| "unknown".to_owned()));
-    std::env::temp_dir().join(format!("fleet-test-sshd-startup-{user}.lock"))
+    std::env::temp_dir().join(format!("fleet-test-{name}-{user}.lock"))
 }
 
 fn acquire_startup_lock() -> std::fs::File {
+    acquire_startup_lock_named("sshd-startup")
+}
+
+fn acquire_startup_lock_named(name: &str) -> std::fs::File {
+    let lock_path = named_lock_path(name);
     // The mode is set atomically at creation (OpenOptionsExt::mode applies
     // to newly created files), so no window exists where another user
     // could open the lock. A stale pre-existing file from an older run is
@@ -38,12 +43,12 @@ fn acquire_startup_lock() -> std::fs::File {
             .create(true)
             .truncate(false)
             .mode(0o600)
-            .open(startup_lock_path());
+            .open(&lock_path);
         let file = match file {
             Ok(file) => file,
             Err(error) => panic!("the startup lock file must open: {error}"),
         };
-        std::fs::set_permissions(startup_lock_path(), std::fs::Permissions::from_mode(0o600))
+        std::fs::set_permissions(&lock_path, std::fs::Permissions::from_mode(0o600))
             .expect("the startup lock file must be ours to chmod");
         file.lock().expect("the startup lock must acquire");
         file
@@ -55,7 +60,7 @@ fn acquire_startup_lock() -> std::fs::File {
             .write(true)
             .create(true)
             .truncate(false)
-            .open(startup_lock_path())
+            .open(&lock_path)
             .expect("the startup lock file must open");
         file.lock().expect("the startup lock must acquire");
         file
@@ -126,6 +131,7 @@ fn start_sshd() -> TestSshd {
              KbdInteractiveAuthentication no\n\
              UsePAM no\n\
              StrictModes no\n\
+             MaxAuthTries 64\n\
              PidFile {dir_display}/sshd.pid\n\
              Subsystem sftp internal-sftp\n"
         ),
@@ -162,6 +168,7 @@ fn start_sshd() -> TestSshd {
 
 fn spec(sshd: &TestSshd) -> SshConnectionSpec {
     SshConnectionSpec {
+        guest_os: fleet_core::GuestOs::default(),
         host: "127.0.0.1".to_owned(),
         port: sshd.port,
         user: whoami(),
@@ -341,6 +348,7 @@ fn the_limiter_saturates_without_starting_sessions() {
     let dir = tempfile::tempdir().unwrap();
     let provider = SshProvider::new(dir.path().to_path_buf()).unwrap();
     let refused = SshConnectionSpec {
+        guest_os: fleet_core::GuestOs::default(),
         host: "127.0.0.1".to_owned(),
         port: 1,
         user: whoami(),
@@ -355,4 +363,269 @@ fn the_limiter_saturates_without_starting_sessions() {
         Duration::from_secs(1),
     );
     assert_eq!(limiter.held(), 0, "a finished attempt releases its permit");
+}
+
+/// FM-721: a guest file arrives byte for byte, hostile paths never reach a
+/// remote shell, and the guest's refusals are outcomes, not errors.
+#[test]
+fn a_file_copies_byte_for_byte_and_refusals_are_outcomes() {
+    use fleet_provider_ssh::{FetchOutcome, fetch_file};
+
+    let sshd = start_sshd();
+    let dir = tempfile::tempdir().unwrap();
+    let provider = SshProvider::new(dir.path().to_path_buf()).unwrap();
+    provider
+        .pin(
+            &provider
+                .probe_host_key("127.0.0.1", sshd.port, Duration::from_secs(10))
+                .unwrap(),
+        )
+        .unwrap();
+    let guest = tempfile::tempdir().unwrap();
+    // Binary content, under a name a shell would mangle.
+    let hostile = guest.path().join("a b; $(touch pwned) 'q'.bin");
+    let content: Vec<u8> = (0..=255_u8).cycle().take(200_000).collect();
+    std::fs::write(&hostile, &content).unwrap();
+    let limiter = ExecutionLimiter::new(4);
+    let fetch = |path: &std::path::Path, max: u64| {
+        let mut sink = Vec::new();
+        let outcome = fetch_file(
+            &provider,
+            &limiter,
+            &spec(&sshd),
+            &path.display().to_string(),
+            max,
+            Duration::from_secs(30),
+            &mut sink,
+        )
+        .unwrap();
+        (outcome, sink)
+    };
+
+    let (outcome, bytes) = fetch(&hostile, 1_000_000);
+    assert_eq!(outcome, FetchOutcome::Fetched { bytes: 200_000 });
+    assert_eq!(bytes, content);
+    // Had the path reached the remote shell, `touch pwned` would have run in
+    // the login user's home directory (the copy keeps the remote default
+    // working directory).
+    let home = std::path::PathBuf::from(std::env::var("HOME").unwrap());
+    assert!(!home.join("pwned").exists(), "the path reached a shell");
+
+    // Exactly at the cap is fine; one byte over is refused.
+    assert_eq!(
+        fetch(&hostile, 200_000).0,
+        FetchOutcome::Fetched { bytes: 200_000 }
+    );
+    assert_eq!(fetch(&hostile, 199_999).0, FetchOutcome::TooLarge);
+    assert_eq!(
+        fetch(&guest.path().join("absent"), 10).0,
+        FetchOutcome::Missing
+    );
+    assert_eq!(fetch(guest.path(), 10).0, FetchOutcome::NotAFile);
+    assert_eq!(limiter.held(), 0, "every copy releases its permit");
+}
+
+/// A sink that refuses writes after a few bytes, like a full disk.
+struct FullDisk(usize);
+
+impl std::io::Write for FullDisk {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        if self.0 == 0 {
+            return Err(std::io::Error::other("no space left on device"));
+        }
+        let take = buf.len().min(self.0);
+        self.0 -= take;
+        Ok(take)
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+/// FM-721: a sink failure kills the session at once (instead of leaving the
+/// remote side blocked on a full pipe until the deadline) and is reported
+/// as its own outcome; the session slot is released.
+#[test]
+fn a_sink_failure_ends_the_copy_at_once() {
+    use fleet_provider_ssh::{FetchOutcome, fetch_file};
+
+    let sshd = start_sshd();
+    let dir = tempfile::tempdir().unwrap();
+    let provider = SshProvider::new(dir.path().to_path_buf()).unwrap();
+    provider
+        .pin(
+            &provider
+                .probe_host_key("127.0.0.1", sshd.port, Duration::from_secs(10))
+                .unwrap(),
+        )
+        .unwrap();
+    let guest = tempfile::tempdir().unwrap();
+    // Far more than a pipe buffer, so the remote side would block.
+    let big = guest.path().join("big.bin");
+    std::fs::write(&big, vec![1_u8; 8 * 1024 * 1024]).unwrap();
+    let limiter = ExecutionLimiter::new(1);
+    let started = std::time::Instant::now();
+    let outcome = fetch_file(
+        &provider,
+        &limiter,
+        &spec(&sshd),
+        &big.display().to_string(),
+        64 * 1024 * 1024,
+        Duration::from_secs(60),
+        &mut FullDisk(1024),
+    )
+    .unwrap();
+    assert!(
+        matches!(&outcome, FetchOutcome::SinkFailed { detail } if detail.contains("no space")),
+        "{outcome:?}"
+    );
+    assert!(
+        started.elapsed() < Duration::from_secs(20),
+        "the session was not killed: {:?}",
+        started.elapsed()
+    );
+    assert_eq!(limiter.held(), 0, "the copy releases its permit");
+}
+
+/// Marks the throwaway key so a leftover from an interrupted run is replaced.
+const DEFAULT_KEY_MARKER: &str = "fleet-test-default-key";
+
+/// The passwd home directory: OpenSSH resolves `~` from the passwd entry,
+/// not from `$HOME`.
+fn passwd_home() -> Option<std::path::PathBuf> {
+    let uid = Command::new("id").arg("-u").output().ok()?;
+    let uid = String::from_utf8(uid.stdout).ok()?;
+    let entry = Command::new("getent")
+        .args(["passwd", uid.trim()])
+        .output()
+        .ok()?;
+    let entry = String::from_utf8(entry.stdout).ok()?;
+    let home = entry.trim().split(':').nth(5)?;
+    Some(std::path::PathBuf::from(home))
+}
+
+/// Installs a throwaway `~/.ssh/id_ecdsa` for the length of one test and
+/// removes it on drop. The default identity files cannot be redirected to a
+/// temporary directory. `id_ecdsa` is a default identity file that is rarely
+/// present; the guard refuses to touch one it did not create (recognised by
+/// the marker comment) and replaces its own leftover from a killed run. While
+/// it exists, any other ssh client of this user also offers it.
+struct DefaultKey {
+    private: std::path::PathBuf,
+    public_text: String,
+    created_dir: Option<std::path::PathBuf>,
+    _lock: std::fs::File,
+}
+
+impl DefaultKey {
+    fn install() -> Option<Self> {
+        let ssh_dir = passwd_home()?.join(".ssh");
+        let lock = acquire_startup_lock_named("default-key");
+        let private = ssh_dir.join("id_ecdsa");
+        let public = std::path::PathBuf::from(format!("{}.pub", private.display()));
+        let leftover = std::fs::read_to_string(&public)
+            .is_ok_and(|text| text.trim_end().ends_with(DEFAULT_KEY_MARKER));
+        let present = |path: &std::path::Path| std::fs::symlink_metadata(path).is_ok();
+        if leftover {
+            let _ = std::fs::remove_file(&private);
+            let _ = std::fs::remove_file(&public);
+        } else if present(&private) || present(&public) {
+            return None;
+        }
+        let created_dir = if ssh_dir.exists() {
+            None
+        } else {
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::DirBuilderExt as _;
+                std::fs::DirBuilder::new()
+                    .mode(0o700)
+                    .create(&ssh_dir)
+                    .ok()?;
+            }
+            #[cfg(not(unix))]
+            std::fs::create_dir_all(&ssh_dir).ok()?;
+            Some(ssh_dir)
+        };
+        let generated = Command::new("ssh-keygen")
+            .args([
+                "-t",
+                "ecdsa",
+                "-N",
+                "",
+                "-q",
+                "-C",
+                DEFAULT_KEY_MARKER,
+                "-f",
+            ])
+            .arg(&private)
+            .output()
+            .ok()?;
+        if !generated.status.success() {
+            return None;
+        }
+        let public_text = std::fs::read_to_string(&public).ok()?;
+        Some(Self {
+            private,
+            public_text,
+            created_dir,
+            _lock: lock,
+        })
+    }
+}
+
+impl Drop for DefaultKey {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.private);
+        let _ = std::fs::remove_file(format!("{}.pub", self.private.display()));
+        if let Some(dir) = &self.created_dir {
+            let _ = std::fs::remove_dir(dir);
+        }
+    }
+}
+
+/// #362: agent authentication falls back to the controller user's default
+/// identity file, as plain OpenSSH does. The sshd authorizes only that file's
+/// key, so a login proves it was offered whatever agent the test runs under.
+/// Opt-in: it writes a throwaway key into the real `~/.ssh` (OpenSSH resolves
+/// `~` from the passwd entry, so a temporary `HOME` cannot redirect it). Set
+/// `FLEET_TEST_REAL_SSH_HOME=1` to run it. By default the suite never writes
+/// under the real `~/.ssh`; the config-level fallback is covered by the
+/// `agent_auth_offers_agent_keys_and_default_files` unit test.
+#[test]
+fn agent_auth_falls_back_to_the_default_identity_file() {
+    if std::env::var("FLEET_TEST_REAL_SSH_HOME").as_deref() != Ok("1") {
+        eprintln!("skipped: set FLEET_TEST_REAL_SSH_HOME=1 to write a throwaway key into ~/.ssh");
+        return;
+    }
+    let key = DefaultKey::install()
+        .expect("FLEET_TEST_REAL_SSH_HOME=1 needs ~/.ssh/id_ecdsa free and the home usable");
+    let sshd = start_sshd();
+    std::fs::write(
+        sshd.keys_dir.path().join("authorized_keys"),
+        &key.public_text,
+    )
+    .unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let provider = SshProvider::new(dir.path().to_path_buf()).unwrap();
+    let observation = provider
+        .probe_host_key("127.0.0.1", sshd.port, Duration::from_secs(10))
+        .unwrap();
+    provider.pin(&observation).unwrap();
+    let agent_spec = SshConnectionSpec {
+        guest_os: fleet_core::GuestOs::default(),
+        auth: SshAuth::Agent,
+        ..spec(&sshd)
+    };
+    let result = execute_script(
+        &provider,
+        &ExecutionLimiter::new(1),
+        &agent_spec,
+        "echo reached",
+        &ScriptMetadata::default(),
+        Duration::from_secs(30),
+    )
+    .unwrap();
+    assert!(result.stdout.contains("reached"), "{result:?}");
 }

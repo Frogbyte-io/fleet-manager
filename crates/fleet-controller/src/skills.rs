@@ -2190,17 +2190,7 @@ printf '%s\n' "$fleet_show"
 }
 
 fn redact_output(text: &str) -> String {
-    let trimmed = text.trim();
-    let bounded = if trimmed.len() > 3_000 {
-        let mut end = 3_000;
-        while !trimmed.is_char_boundary(end) {
-            end -= 1;
-        }
-        &trimmed[..end]
-    } else {
-        trimmed
-    };
-    fleet_provider_skills_manager::redact(bounded)
+    crate::exec::scrub_and_bound_with(text.trim(), false, fleet_provider_skills_manager::redact).0
 }
 
 /// The kind-dispatching wrapper the controller composes: the skills kinds
@@ -2586,5 +2576,26 @@ mod tests {
             fleet_application::skills::SkillsAvailability::Unsupported
         ));
         assert_eq!(snapshot.cli_version, None);
+    }
+}
+
+#[cfg(test)]
+mod redact_bound_tests {
+    /// #357: a credential that straddles the result bound is redacted
+    /// before the bound cuts, never half kept.
+    #[test]
+    fn a_credential_at_the_bound_is_redacted_not_cut() {
+        for secret_line in [
+            "https://user:hunter2pw@host.invalid/repo.git",
+            "user:hunter2pw@host.invalid",
+        ] {
+            for pad in [2_970, 2_985, 2_995, 3_000] {
+                let text = format!("{} {secret_line}\n", "x".repeat(pad));
+                let out = super::redact_output(&text);
+                assert!(!out.contains("hunter2"), "pad {pad}: {out}");
+                assert!(!out.contains("user:"), "pad {pad}: {out}");
+                assert!(out.len() <= 3_000 + "…".len(), "pad {pad}: {}", out.len());
+            }
+        }
     }
 }

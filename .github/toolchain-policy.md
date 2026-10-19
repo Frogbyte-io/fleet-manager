@@ -13,6 +13,7 @@ exactly one place. Bumping one is a one-line edit.
 | Corepack | [`toolchain.env`](toolchain.env) `COREPACK_VERSION` | 0.35.0 | installed explicitly, not taken from the Node bundle |
 | cargo-deny | [`toolchain.env`](toolchain.env) `CARGO_DENY_VERSION` | 0.20.2 | `cargo install --locked` |
 | gitleaks | [`toolchain.env`](toolchain.env) `GITLEAKS_VERSION` and `GITLEAKS_SHA256` | 8.30.1 | pinned release archive, checksum verified |
+| PowerShell 7 | [`toolchain.env`](toolchain.env) `POWERSHELL_VERSION` and `POWERSHELL_SHA256` | 7.6.7 | pinned release tarball, checksum verified, unpacked under the runner temp directory (no root); only the `rust-linux` job |
 
 `.github/actions/setup-toolchain` is the only place CI installs any of them. A
 job that needs a toolchain uses that action; it never names a version.

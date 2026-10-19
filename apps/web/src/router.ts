@@ -51,6 +51,11 @@ export const routes: RouteRecordRaw[] = [
     meta: { title: 'Operations', group: 'Control' },
   },
   {
+    path: '/requests',
+    component: () => import('./pages/requests/RequestsPage.vue'),
+    meta: { title: 'Approval inbox', group: 'Control' },
+  },
+  {
     path: '/settings',
     component: () => import('./pages/settings/SettingsPage.vue'),
     meta: { title: 'Settings', group: 'Control' },
@@ -59,6 +64,21 @@ export const routes: RouteRecordRaw[] = [
     path: '/proxmox',
     component: () => import('./pages/proxmox/ProxmoxPage.vue'),
     meta: { title: 'Proxmox', group: 'Infrastructure' },
+  },
+  {
+    path: '/services',
+    component: () => import('./pages/services/ServicesPage.vue'),
+    meta: { title: 'Services', group: 'Infrastructure' },
+  },
+  {
+    path: '/services/new',
+    component: () => import('./pages/services/new/NewSitePage.vue'),
+    meta: { title: 'Deploy a site', group: 'Infrastructure' },
+  },
+  {
+    path: '/services/:id',
+    component: () => import('./pages/services/ServiceDetailPage.vue'),
+    meta: { title: 'Service', group: 'Infrastructure' },
   },
   {
     path: '/tailnet',
@@ -84,6 +104,21 @@ export const routes: RouteRecordRaw[] = [
     path: '/images',
     component: () => import('./pages/images/ImagesPage.vue'),
     meta: { title: 'Images', group: 'Work' },
+  },
+  {
+    path: '/registry',
+    component: () => import('./pages/registry/RegistryPage.vue'),
+    meta: { title: 'Registry', group: 'Work' },
+  },
+  {
+    path: '/registry/domains',
+    component: () => import('./pages/registry/domains/DomainsPage.vue'),
+    meta: { title: 'Domains', group: 'Work' },
+  },
+  {
+    path: '/registry/services',
+    component: () => import('./pages/registry/services/ServicesPage.vue'),
+    meta: { title: 'Services', group: 'Work' },
   },
   {
     path: '/audit',

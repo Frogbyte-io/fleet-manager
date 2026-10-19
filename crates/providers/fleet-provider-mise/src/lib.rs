@@ -226,7 +226,7 @@ pub fn failure_detail(outcome: &CliOutcome) -> String {
 /// from CLI output before it becomes an observation or audit detail.
 #[must_use]
 pub fn redact(text: &str) -> String {
-    let cleaned = fleet_core::flatten_control_characters(text);
-    let with_urls = fleet_core::redact_url_credentials(&cleaned);
-    fleet_core::redact_schemeless_credentials(&with_urls)
+    // Credentials first, so a credential wrapped in control characters is
+    // still one token; then flatten control noise.
+    fleet_core::flatten_control_characters(&fleet_core::redact_credentials(text))
 }

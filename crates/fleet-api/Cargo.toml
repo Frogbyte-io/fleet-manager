@@ -9,6 +9,7 @@ publish.workspace = true
 [dependencies]
 async-trait = "0.1.92"
 axum = "0.8.9"
+base64 = "0.22.1"
 fleet-application = { version = "0.1.0", path = "../fleet-application" }
 fleet-auth = { version = "0.1.0", path = "../fleet-auth" }
 fleet-core = { path = "../fleet-core" }
@@ -16,17 +17,18 @@ futures-util = "0.3.31"
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.151"
 sha2 = "0.10"
-tokio = { version = "1.53.1", features = ["time", "macros", "rt", "net"] }
+tokio = { version = "1.53.1", features = ["time", "macros", "rt", "net", "io-util"] }
 utoipa = { version = "5.5.0", features = ["axum_extras"] }
 utoipa-axum = "0.2.0"
 
 [dev-dependencies]
+fleet-application = { path = "../fleet-application", features = ["test-support"] }
 async-trait = "0.1.92"
 fleet-storage-sqlite = { path = "../fleet-storage-sqlite" }
 http = "1.3.1"
 http-body-util = "0.1.3"
 tempfile = "3.27.0"
-tokio = { version = "1.49.0", features = ["macros", "rt"] }
+tokio = { version = "1.49.0", features = ["macros", "rt", "rt-multi-thread"] }
 tower = { version = "0.5.2", features = ["util"] }
 
 [[bin]]

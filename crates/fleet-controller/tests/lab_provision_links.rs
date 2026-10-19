@@ -32,6 +32,9 @@ const START_UPID: &str = "UPID:pve:00155300:0C6DF600:6AAFE1F0:qmstart:104:root@p
 #[derive(Debug, Default)]
 struct Transport {
     paths: Mutex<Vec<String>>,
+    /// The name the clone request gave the new guest, which its config
+    /// then carries.
+    clone_name: Mutex<Option<String>>,
 }
 
 #[async_trait]
@@ -39,8 +42,12 @@ impl PveTransport for Transport {
     async fn execute_with_body(
         &self,
         request: PveHttpRequest,
-        _body: Vec<u8>,
+        body: Vec<u8>,
     ) -> Result<PveHttpResponse, PveTransportError> {
+        if request.path.ends_with("/clone") {
+            let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
+            *self.clone_name.lock().unwrap() = body["name"].as_str().map(str::to_owned);
+        }
         self.execute(request).await
     }
 
@@ -59,6 +66,15 @@ impl PveTransport for Transport {
             format!(r#"{{"data":"{CLONE_UPID}"}}"#)
         } else if path.ends_with("/status/start") {
             format!(r#"{{"data":"{START_UPID}"}}"#)
+        } else if path == "/api2/json/nodes/pve/qemu/104/config" {
+            // The finished clone, without an inherited protection flag.
+            let name = self.clone_name.lock().unwrap().clone().unwrap();
+            // With the template's hardware, so none is applied (#372).
+            serde_json::json!({ "data": {
+                "name": name, "digest": "0123abcd", "cores": 2, "memory": "2048",
+                "boot": "order=scsi0", "scsi0": "local-lvm:vm-104-disk-0,size=20G",
+            } })
+            .to_string()
         } else {
             // The agent probe and anything else: refused, so the guest
             // never reports ready.
@@ -150,10 +166,17 @@ async fn the_provision_executor_links_its_clone_and_start_tasks_to_the_operation
         bootstrap_project_id: None,
         readiness_probe: ReadinessProbe::GuestAgent,
         readiness_command: None,
+        ssh_user: "root".to_owned(),
+        ssh_port: 22,
+        ssh_trust_mode: "tofu".to_owned(),
+        ssh_fingerprint: None,
         // Zero: the first failed agent probe ends the saga as never_ready.
         readiness_deadline_seconds: 0,
         ttl_seconds: 3_600,
         cleanup: CleanupStrategy::Destroy,
+        audio: None,
+        guest_os: fleet_core::GuestOs::default(),
+        interactive_user: None,
     };
     let template: LabTemplate = LabTemplatePort::create(
         labs.as_ref(),
@@ -199,6 +222,7 @@ async fn the_provision_executor_links_its_clone_and_start_tasks_to_the_operation
             template_version_id: version.id.clone(),
             lease_id: Some(lease.id.clone()),
             idempotency_key: None,
+            readiness_deadline_at: None,
         },
         now,
     )

@@ -3,6 +3,8 @@ import { onBeforeUnmount, onMounted, ref, shallowRef, watch } from 'vue'
 
 import type { EditorView } from 'codemirror'
 
+import { cspNonce } from '../cspNonce'
+
 // The raw `.pkr.json` editor: CodeMirror 6 with JSON highlighting and
 // lint, loaded only when the Images page opens. A plain textarea stands in
 // while it loads, if it fails to load, and under unit tests.
@@ -26,12 +28,16 @@ onMounted(async () => {
     ])
     if (!host.value)
       return
+    // CodeMirror injects its theme as a <style>; the controller's CSP only
+    // admits it with the page's nonce.
+    const nonce = cspNonce()
     view.value = new EditorView({
       parent: host.value,
       state: EditorState.create({
         doc: model.value,
         extensions: [
           basicSetup,
+          ...(nonce ? [EditorView.cspNonce.of(nonce)] : []),
           json(),
           lintGutter(),
           linter(jsonParseLinter()),
@@ -72,7 +78,7 @@ onBeforeUnmount(() => view.value?.destroy())
   <div
     v-show="view"
     ref="host"
-    class="overflow-hidden rounded-sm border border-fc-line"
+    class="min-w-0 overflow-hidden rounded-sm border border-fc-line"
     data-testid="raw-codemirror"
   />
   <textarea

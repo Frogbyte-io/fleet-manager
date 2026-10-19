@@ -9,7 +9,7 @@ use axum::{
     http::StatusCode,
 };
 use fleet_application::lab::{
-    LabTemplate, LabTemplateVersion, LabUseCaseError, NewLabTemplate, ProvisionRecord,
+    LabTemplate, LabTemplateVersion, LabUseCaseError, NewLabTemplate, ProvisionView,
 };
 use std::str::FromStr as _;
 
@@ -22,7 +22,7 @@ use crate::error::{ApiError, ApiErrorResponse};
 
 /// Extracts the Lab use cases from the API state, or answers with the
 /// standard envelope when the controller was composed without one.
-fn lab_or_error(
+pub(crate) fn lab_or_error(
     state: &crate::operations::ApiState,
     correlation_id: CorrelationId,
 ) -> Result<Arc<fleet_application::lab::Lab>, ApiErrorResponse> {
@@ -38,11 +38,17 @@ fn lab_or_error(
 }
 
 /// Maps a Lab use-case outcome onto the public error envelope, once.
-fn map_lab_error(error: &LabUseCaseError, correlation_id: CorrelationId) -> ApiErrorResponse {
+pub(crate) fn map_lab_error(
+    error: &LabUseCaseError,
+    correlation_id: CorrelationId,
+) -> ApiErrorResponse {
     let (status, code, retry): (StatusCode, &str, RetryClass) = match error {
         LabUseCaseError::Denied(_) => (StatusCode::FORBIDDEN, "denied", RetryClass::Never),
         LabUseCaseError::NotFound { .. } => (StatusCode::NOT_FOUND, "not_found", RetryClass::Never),
         LabUseCaseError::Conflict { .. } => (StatusCode::CONFLICT, "conflict", RetryClass::Never),
+        LabUseCaseError::Busy { .. } => {
+            (StatusCode::SERVICE_UNAVAILABLE, "busy", RetryClass::Backoff)
+        }
         LabUseCaseError::PinRefused { .. } => {
             (StatusCode::CONFLICT, "lab_pin_refused", RetryClass::Never)
         }
@@ -71,6 +77,25 @@ fn map_lab_error(error: &LabUseCaseError, correlation_id: CorrelationId) -> ApiE
     ApiError::new(&public, correlation_id).with_status(status)
 }
 
+/// A virtual audio device (Proxmox `audio0`).
+#[derive(Clone, Debug, Serialize, Deserialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct LabAudioDto {
+    /// The device model: `ich9-intel-hda`, `intel-hda`, or `AC97`.
+    pub device: String,
+    /// The host backend: `none` (no host audio).
+    pub driver: String,
+}
+
+impl From<fleet_core::LabAudio> for LabAudioDto {
+    fn from(audio: fleet_core::LabAudio) -> Self {
+        Self {
+            device: audio.device,
+            driver: audio.driver,
+        }
+    }
+}
+
 /// One template draft.
 #[derive(Clone, Debug, Serialize, ToSchema)]
 #[serde(rename_all = "camelCase")]
@@ -95,12 +120,27 @@ pub struct LabTemplateDto {
     pub readiness_probe: String,
     /// The SSH probe command, when pinned.
     pub readiness_command: Option<String>,
+    /// The SSH account preconfigured in the image.
+    pub ssh_user: String,
+    /// The guest SSH listener port.
+    pub ssh_port: u16,
+    /// Host-key trust: tofu or pinned.
+    pub ssh_trust_mode: String,
+    /// Public OpenSSH SHA256 fingerprint for pinned trust.
+    pub ssh_fingerprint: Option<String>,
     /// The readiness deadline in seconds.
     pub readiness_deadline_seconds: u32,
     /// The default TTL in seconds, beginning at ready.
     pub ttl_seconds: u32,
     /// The cleanup strategy.
     pub cleanup: String,
+    /// The virtual audio device every guest gets, when declared.
+    pub audio: Option<LabAudioDto>,
+    /// The guest's operating system: `linux` or `windows`.
+    pub guest_os: String,
+    /// The local account whose desktop session `--session interactive`
+    /// runs in (a name only, never a password); Windows guests only.
+    pub interactive_user: Option<String>,
     /// The published version this draft descends from, when any.
     pub published_from: Option<String>,
     /// When the draft was created.
@@ -122,9 +162,16 @@ impl From<LabTemplate> for LabTemplateDto {
             bootstrap_project_id: template.content.bootstrap_project_id,
             readiness_probe: template.content.readiness_probe.id().to_owned(),
             readiness_command: template.content.readiness_command,
+            ssh_user: template.content.ssh_user,
+            ssh_port: template.content.ssh_port,
+            ssh_trust_mode: template.content.ssh_trust_mode,
+            ssh_fingerprint: template.content.ssh_fingerprint,
             readiness_deadline_seconds: template.content.readiness_deadline_seconds,
             ttl_seconds: template.content.ttl_seconds,
             cleanup: template.content.cleanup.id().to_owned(),
+            audio: template.content.audio.map(Into::into),
+            guest_os: template.content.guest_os.id().to_owned(),
+            interactive_user: template.content.interactive_user,
             published_from: template.published_from,
             created_at: template.created_at,
             updated_at: template.updated_at,
@@ -174,12 +221,27 @@ pub struct LabTemplateContentDto {
     pub readiness_probe: String,
     /// The SSH probe command, when pinned.
     pub readiness_command: Option<String>,
+    /// The SSH account preconfigured in the image.
+    pub ssh_user: String,
+    /// The guest SSH listener port.
+    pub ssh_port: u16,
+    /// Host-key trust: tofu or pinned.
+    pub ssh_trust_mode: String,
+    /// Public OpenSSH SHA256 fingerprint for pinned trust.
+    pub ssh_fingerprint: Option<String>,
     /// The readiness deadline in seconds.
     pub readiness_deadline_seconds: u32,
     /// The default TTL in seconds.
     pub ttl_seconds: u32,
     /// The cleanup strategy.
     pub cleanup: String,
+    /// The virtual audio device every guest gets, when declared.
+    pub audio: Option<LabAudioDto>,
+    /// The guest's operating system: `linux` or `windows`.
+    pub guest_os: String,
+    /// The local account whose desktop session `--session interactive`
+    /// runs in (a name only, never a password); Windows guests only.
+    pub interactive_user: Option<String>,
 }
 
 impl From<LabTemplateVersion> for LabTemplateVersionDto {
@@ -198,9 +260,16 @@ impl From<LabTemplateVersion> for LabTemplateVersionDto {
                 bootstrap_project_id: version.content.bootstrap_project_id,
                 readiness_probe: version.content.readiness_probe.id().to_owned(),
                 readiness_command: version.content.readiness_command,
+                ssh_user: version.content.ssh_user,
+                ssh_port: version.content.ssh_port,
+                ssh_trust_mode: version.content.ssh_trust_mode,
+                ssh_fingerprint: version.content.ssh_fingerprint,
                 readiness_deadline_seconds: version.content.readiness_deadline_seconds,
                 ttl_seconds: version.content.ttl_seconds,
                 cleanup: version.content.cleanup.id().to_owned(),
+                audio: version.content.audio.map(Into::into),
+                guest_os: version.content.guest_os.id().to_owned(),
+                interactive_user: version.content.interactive_user,
             },
             image_digest: version.image_digest,
             published_by: version.published_by,
@@ -233,10 +302,23 @@ pub struct ProvisionRecordDto {
     pub created_at: i64,
     /// When the record was last updated.
     pub updated_at: i64,
+    /// What became of the guest: `not_allocated`, `present`, `destroyed`
+    /// (cleanup removed it), `kept` (released with keep), or
+    /// `returned_to_pool` or `quarantined_in_pool` (a pool member, not an
+    /// orphan). The node and VMID stay as history after it is
+    /// gone, so `state` alone does not say the guest still exists.
+    pub guest: String,
+    /// The linked lease's state, when a lease links back to the record.
+    pub lease_state: Option<String>,
 }
 
-impl From<ProvisionRecord> for ProvisionRecordDto {
-    fn from(record: ProvisionRecord) -> Self {
+impl From<ProvisionView> for ProvisionRecordDto {
+    fn from(view: ProvisionView) -> Self {
+        let ProvisionView {
+            record,
+            guest,
+            lease_state,
+        } = view;
         Self {
             id: record.id,
             template_version_id: record.template_version_id,
@@ -248,11 +330,15 @@ impl From<ProvisionRecord> for ProvisionRecordDto {
             ready_at: record.ready_at,
             created_at: record.created_at,
             updated_at: record.updated_at,
+            guest: guest.id().to_owned(),
+            lease_state: lease_state.map(|state| state.id().to_owned()),
         }
     }
 }
 
-/// The create/update request.
+/// The create/update request. An update replaces the whole draft: an
+/// optional field that is omitted (for example `interactiveUser`, `audio`,
+/// `guestOs`) is cleared or reset to its default, not kept.
 #[derive(Debug, Deserialize, ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct SaveLabTemplateRequest {
@@ -274,12 +360,49 @@ pub struct SaveLabTemplateRequest {
     pub readiness_probe: String,
     /// The SSH probe command, when pinned.
     pub readiness_command: Option<String>,
+    /// The SSH account preconfigured in the image.
+    #[serde(default = "default_lab_ssh_user")]
+    pub ssh_user: String,
+    /// The guest SSH listener port.
+    #[serde(default = "default_lab_ssh_port")]
+    pub ssh_port: u16,
+    /// Host-key trust: tofu or pinned.
+    #[serde(default = "default_lab_ssh_trust_mode")]
+    pub ssh_trust_mode: String,
+    /// Public OpenSSH SHA256 fingerprint for pinned trust.
+    #[serde(default)]
+    pub ssh_fingerprint: Option<String>,
     /// The readiness deadline in seconds.
     pub readiness_deadline_seconds: u32,
     /// The default TTL in seconds.
     pub ttl_seconds: u32,
     /// The cleanup strategy.
     pub cleanup: String,
+    /// The virtual audio device every guest gets. Absent leaves the clone
+    /// as the image has it.
+    #[serde(default)]
+    pub audio: Option<LabAudioDto>,
+    /// The guest's operating system: `linux` (the default) or `windows`.
+    #[serde(default = "default_lab_guest_os")]
+    pub guest_os: String,
+    /// The local account whose desktop session `--session interactive`
+    /// runs in: a name only, never a password. Windows guests only.
+    #[serde(default)]
+    pub interactive_user: Option<String>,
+}
+
+fn default_lab_guest_os() -> String {
+    fleet_core::GuestOs::default().id().to_owned()
+}
+
+fn default_lab_ssh_user() -> String {
+    fleet_core::LabTemplateContent::default().ssh_user
+}
+fn default_lab_ssh_port() -> u16 {
+    fleet_core::LabTemplateContent::default().ssh_port
+}
+fn default_lab_ssh_trust_mode() -> String {
+    fleet_core::LabTemplateContent::default().ssh_trust_mode
 }
 
 impl SaveLabTemplateRequest {
@@ -291,6 +414,8 @@ impl SaveLabTemplateRequest {
             .map_err(|detail| crate::machines::invalid_request(&detail, correlation_id))?;
         let cleanup = fleet_core::CleanupStrategy::from_id(&self.cleanup)
             .map_err(|detail| crate::machines::invalid_request(&detail, correlation_id))?;
+        let guest_os = fleet_core::GuestOs::from_id(&self.guest_os)
+            .map_err(|detail| crate::machines::invalid_request(&detail, correlation_id))?;
         Ok(fleet_core::LabTemplateContent {
             name: self.name,
             description: self.description,
@@ -301,9 +426,19 @@ impl SaveLabTemplateRequest {
             bootstrap_project_id: self.bootstrap_project_id,
             readiness_probe: probe,
             readiness_command: self.readiness_command,
+            ssh_user: self.ssh_user,
+            ssh_port: self.ssh_port,
+            ssh_trust_mode: self.ssh_trust_mode,
+            ssh_fingerprint: self.ssh_fingerprint,
             readiness_deadline_seconds: self.readiness_deadline_seconds,
             ttl_seconds: self.ttl_seconds,
             cleanup,
+            audio: self.audio.map(|audio| fleet_core::LabAudio {
+                device: audio.device,
+                driver: audio.driver,
+            }),
+            guest_os,
+            interactive_user: self.interactive_user,
         })
     }
 }
@@ -567,7 +702,7 @@ pub async fn start_lab_provision(
     let idempotency_key = headers
         .get(crate::IDEMPOTENCY_KEY_HEADER)
         .and_then(|value| value.to_str().ok())
-        .map(|key| format!("{}:{key}", principal.id));
+        .map(str::to_owned);
     let record = lab
         .start_provision(
             state.authorizer.as_ref(),
@@ -579,15 +714,22 @@ pub async fn start_lab_provision(
         )
         .await
         .map_err(|error| map_lab_error(&error, correlation_id))?;
-    Ok((StatusCode::CREATED, Json(Resource::new(record.into()))))
+    // A standalone provision has no lease to speak for its guest.
+    let view = ProvisionView::new(record, None, None);
+    Ok((StatusCode::CREATED, Json(Resource::new(view.into()))))
 }
 
-/// The configured Proxmox account used to provision a lease.
+/// How to provision a lease: through an explicit Proxmox account, or through
+/// the one placement selects.
 #[derive(Debug, Deserialize, ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct StartLeaseProvisionRequest {
-    /// The identity of the explicitly configured Proxmox account.
-    pub account_id: String,
+    /// The identity of the explicitly configured Proxmox account. When
+    /// omitted, placement selects the one trusted account whose cluster
+    /// holds the pinned image's template; none or several fail the
+    /// provision operation with an explanation.
+    #[serde(default)]
+    pub account_id: Option<String>,
 }
 
 /// Starts provisioning the requested lease and queues its durable operation.
@@ -621,7 +763,11 @@ pub async fn start_lab_lease_provision(
 ) -> Result<(StatusCode, Json<Resource<crate::operations::OperationDto>>), ApiErrorResponse> {
     let lab = lab_or_error(&state, correlation_id)?;
     let principal = crate::operations::principal_or_error(principal, correlation_id)?;
-    if request.account_id.trim().is_empty() {
+    if request
+        .account_id
+        .as_deref()
+        .is_some_and(|account_id| account_id.trim().is_empty())
+    {
         return Err(map_lab_error(
             &LabUseCaseError::Invalid {
                 detail: "accountId must not be empty".to_owned(),
@@ -629,12 +775,14 @@ pub async fn start_lab_lease_provision(
             correlation_id,
         ));
     }
+    lab.check_provision_account(&principal, request.account_id.as_deref())
+        .map_err(|error| map_lab_error(&error, correlation_id))?;
     fleet_application::authz::authorize(
         state.authorizer.as_ref(),
         fleet_application::authz::AccessRequest {
             principal_id: &principal.id,
             action: fleet_application::authz::Permission::OperationCreate,
-            resource: None,
+            resource: Some("lab.provision"),
         },
     )
     .map_err(|decision| {
@@ -658,12 +806,14 @@ pub async fn start_lab_lease_provision(
             .events
             .publish(fleet_application::events::EventKind::LeaseChanged);
     }
-    let payload = serde_json::json!({
+    let mut payload = serde_json::json!({
         "recordId": provision.id,
         "leaseId": lease_id,
-        "accountId": request.account_id,
-    })
-    .to_string();
+    });
+    if let Some(account_id) = &request.account_id {
+        payload["accountId"] = serde_json::Value::String(account_id.clone());
+    }
+    let payload = payload.to_string();
     let operation = state
         .operations
         .create_lab_provision(
@@ -672,7 +822,10 @@ pub async fn start_lab_lease_provision(
             &lease_id,
             &fleet_application::operation::NewOperation {
                 kind: "lab.provision".to_owned(),
-                idempotency_key: Some(format!("{}:lab-lease-provision:{lease_id}", principal.id)),
+                idempotency_key: Some(fleet_application::lab::lease_provision_operation_key(
+                    &principal.id,
+                    &lease_id,
+                )),
                 deadline_at: None,
                 correlation_id: Some(correlation_id.to_string()),
                 payload_json: Some(payload),
@@ -707,7 +860,7 @@ pub async fn list_lab_provisions(
     let lab = lab_or_error(&state, correlation_id)?;
     let principal = crate::operations::principal_or_error(principal, correlation_id)?;
     let records = lab
-        .list_provisions(state.authorizer.as_ref(), &principal)
+        .list_provision_views(state.authorizer.as_ref(), &principal)
         .await
         .map_err(|error| map_lab_error(&error, correlation_id))?;
     let items: Vec<ProvisionRecordDto> = records.into_iter().map(Into::into).collect();
@@ -748,6 +901,11 @@ pub struct LeaseDto {
     pub ready_at: Option<i64>,
     /// When the lease's TTL expires, once ready.
     pub expires_at: Option<i64>,
+    /// Failed cleanup attempts so far (FM-713).
+    pub cleanup_attempts: u32,
+    /// When the next cleanup attempt is due (epoch millis), while a
+    /// releasing lease backs off after a failed attempt.
+    pub cleanup_next_at: Option<i64>,
 }
 
 impl From<fleet_application::lab::Lease> for LeaseDto {
@@ -765,6 +923,8 @@ impl From<fleet_application::lab::Lease> for LeaseDto {
             max_lifetime_at: lease.max_lifetime_at,
             ready_at: lease.ready_at,
             expires_at: lease.expires_at,
+            cleanup_attempts: lease.cleanup_attempts,
+            cleanup_next_at: lease.cleanup_next_at,
         }
     }
 }
@@ -792,11 +952,14 @@ pub struct CreateLeaseRequest {
     tag = "lab",
     operation_id = "createLabLease",
     request_body = CreateLeaseRequest,
+    params(("Idempotency-Key" = Option<String>, Header, description = "A caller-chosen key (1 to 128 printable ASCII characters), scoped to the caller. A retry with the same key and the same request (template version, purpose, project) returns the lease already created, with 200, in whatever state it has since reached (a failed or released lease is returned as it is: use a new key for a new attempt); the same key with a different request is a 409.")),
     responses(
         (status = 201, description = "The lease was created.", body = Resource<LeaseDto>),
-        (status = 400, description = "The request is malformed.", body = crate::error::ApiError),
+        (status = 200, description = "A replay: the lease this Idempotency-Key created earlier.", body = Resource<LeaseDto>),
+        (status = 400, description = "The request or the Idempotency-Key is malformed.", body = crate::error::ApiError),
         (status = 403, description = "The caller may not lease Lab guests.", body = crate::error::ApiError),
         (status = 404, description = "The version does not exist.", body = crate::error::ApiError),
+        (status = 409, description = "The Idempotency-Key was already used for a different request.", body = crate::error::ApiError),
         (status = 500, description = "A backend port failed.", body = crate::error::ApiError),
     )
 )]
@@ -804,12 +967,28 @@ pub async fn create_lab_lease(
     State(state): State<Arc<crate::operations::ApiState>>,
     principal: Option<Extension<crate::ActingPrincipal>>,
     Extension(correlation_id): Extension<CorrelationId>,
+    headers: axum::http::HeaderMap,
     Json(request): Json<CreateLeaseRequest>,
 ) -> Result<(StatusCode, Json<Resource<LeaseDto>>), ApiErrorResponse> {
     let lab = lab_or_error(&state, correlation_id)?;
     let principal = crate::operations::principal_or_error(principal, correlation_id)?;
-    let lease = lab
-        .create_lease(
+    // A present key that is not text is refused, not ignored: ignoring it
+    // would create a second lease on the retry the key was sent to prevent.
+    let idempotency_key = headers
+        .get(crate::IDEMPOTENCY_KEY_HEADER)
+        .map(|value| {
+            value.to_str().map_err(|_| {
+                map_lab_error(
+                    &LabUseCaseError::Invalid {
+                        detail: "the Idempotency-Key header must be printable ASCII".to_owned(),
+                    },
+                    correlation_id,
+                )
+            })
+        })
+        .transpose()?;
+    let (lease, created) = lab
+        .create_lease_idempotent(
             state.authorizer.as_ref(),
             &principal,
             fleet_application::lab::NewLease {
@@ -819,17 +998,53 @@ pub async fn create_lab_lease(
                 cleanup: fleet_core::CleanupStrategy::Destroy,
                 ttl_seconds: 3_600,
             },
+            idempotency_key,
             fleet_core::SystemClock::now_unix_millis(),
         )
         .await
         .map_err(|error| map_lab_error(&error, correlation_id))?;
+    if !created {
+        return Ok((StatusCode::OK, Json(Resource::new(lease.into()))));
+    }
     state
         .events
         .publish(fleet_application::events::EventKind::LeaseChanged);
     Ok((StatusCode::CREATED, Json(Resource::new(lease.into()))))
 }
 
-/// Lists the leases.
+/// Reads the list-leases query into a filter. `state` may repeat and each
+/// value may itself be a comma list; unknown states and repeated scalar
+/// parameters are refused.
+fn lease_filter(
+    pairs: Vec<(String, String)>,
+) -> Result<fleet_application::lab::LeaseFilter, String> {
+    let mut filter = fleet_application::lab::LeaseFilter::default();
+    for (name, value) in pairs {
+        let slot = match name.as_str() {
+            "projectId" => &mut filter.project_id,
+            "purpose" => &mut filter.purpose,
+            "purposePrefix" => &mut filter.purpose_prefix,
+            "owner" => &mut filter.owner,
+            "state" => {
+                for state in value.split(',') {
+                    let state = fleet_core::LeaseState::from_id(state.trim())
+                        .map_err(|_| format!("{state:?} is not a lease state"))?;
+                    if !filter.states.contains(&state) {
+                        filter.states.push(state);
+                    }
+                }
+                continue;
+            }
+            _ => continue,
+        };
+        if slot.replace(value).is_some() {
+            return Err(format!("{name} may be given only once"));
+        }
+    }
+    Ok(filter)
+}
+
+/// Lists the leases, narrowed by project, purpose, state, and owner.
 ///
 /// # Errors
 ///
@@ -839,8 +1054,16 @@ pub async fn create_lab_lease(
     path = "/lab/leases",
     tag = "lab",
     operation_id = "listLabLeases",
+    params(
+        ("projectId" = Option<String>, Query, description = "Only leases serving this project."),
+        ("purpose" = Option<String>, Query, description = "Only leases whose purpose is exactly this."),
+        ("purposePrefix" = Option<String>, Query, description = "Only leases whose purpose starts with this (case-sensitive)."),
+        ("state" = Option<String>, Query, description = "Only leases in these states: comma-separated (`state=ready,provisioning`) or repeated (`state=ready&state=provisioning`); an unknown state is a 400."),
+        ("owner" = Option<String>, Query, description = "Only leases owned by this principal."),
+    ),
     responses(
         (status = 200, description = "The leases, newest first.", body = Page<LeaseDto>),
+        (status = 400, description = "The query parameters are malformed.", body = crate::error::ApiError),
         (status = 403, description = "The caller may not read the Lab surface.", body = crate::error::ApiError),
         (status = 500, description = "A backend port failed.", body = crate::error::ApiError),
     )
@@ -849,11 +1072,29 @@ pub async fn list_lab_leases(
     State(state): State<Arc<crate::operations::ApiState>>,
     principal: Option<Extension<crate::ActingPrincipal>>,
     Extension(correlation_id): Extension<CorrelationId>,
+    params: Result<
+        axum::extract::Query<Vec<(String, String)>>,
+        axum::extract::rejection::QueryRejection,
+    >,
 ) -> Result<Json<Page<LeaseDto>>, ApiErrorResponse> {
+    let invalid = |detail: String| {
+        crate::machines::invalid_request(
+            &format!("the leases list query is malformed: {detail}"),
+            correlation_id,
+        )
+    };
+    let axum::extract::Query(pairs) = params.map_err(|rejection| invalid(rejection.to_string()))?;
+    let filter = lease_filter(pairs).map_err(invalid)?;
     let lab = lab_or_error(&state, correlation_id)?;
     let principal = crate::operations::principal_or_error(principal, correlation_id)?;
     let leases = lab
-        .list_leases(state.authorizer.as_ref(), &principal)
+        .search_leases(
+            state.authorizer.as_ref(),
+            &principal,
+            filter,
+            // A delegated credential sees only its own owner's leases.
+            fleet_application::authz::delegated_owner_identity(&principal.id),
+        )
         .await
         .map_err(|error| map_lab_error(&error, correlation_id))?;
     let items: Vec<LeaseDto> = leases.into_iter().map(Into::into).collect();
@@ -879,7 +1120,7 @@ pub async fn list_lab_leases(
     params(("leaseId" = String, Path, description = "The lease's identity.")),
     request_body = ReleaseLeaseRequest,
     responses(
-        (status = 200, description = "The lease entered releasing (or keeping).", body = Resource<LeaseDto>),
+        (status = 200, description = "The lease entered releasing (or keeping), and its `lab.cleanup` operation is queued: it destroys the guest (or keeps it) and completes the release, or leaves the lease `cleanup_failed` after its retries.", body = Resource<LeaseDto>),
         (status = 400, description = "The lease is already terminal.", body = crate::error::ApiError),
         (status = 403, description = "The caller may not release (or keep) the lease.", body = crate::error::ApiError),
         (status = 404, description = "The lease does not exist.", body = crate::error::ApiError),
@@ -895,6 +1136,12 @@ pub async fn release_lab_lease(
 ) -> Result<Json<Resource<LeaseDto>>, ApiErrorResponse> {
     let lab = lab_or_error(&state, correlation_id)?;
     let principal = crate::operations::principal_or_error(principal, correlation_id)?;
+    // The release owes a cleanup: refuse before the lease changes if the
+    // caller could not queue it.
+    state
+        .operations
+        .authorize_lab_cleanup(state.authorizer.as_ref(), &principal.id, Some(&lease_id))
+        .map_err(|error| crate::operations::map_use_case_error(&error, correlation_id))?;
     let lease = lab
         .release_lease(
             state.authorizer.as_ref(),
@@ -908,7 +1155,95 @@ pub async fn release_lab_lease(
     state
         .events
         .publish(fleet_application::events::EventKind::LeaseChanged);
+    queue_cleanup(&state, &principal.id, &lease, correlation_id).await?;
     Ok(Json(Resource::new(lease.into())))
+}
+
+/// Queues the `lab.cleanup` operation for a releasing lease (FM-713). The
+/// key names the cleanup attempt, so repeating a release never queues a
+/// second cleanup for the same attempt. A lease backing off after a failed
+/// attempt is not queued before its `cleanupNextAt`: the sweeper (FM-716)
+/// queues the retry when it is due, so repeated releases cannot burn the
+/// attempts. Answers the queued (or re-found) operation, or nothing when
+/// the attempt is not due yet.
+async fn queue_cleanup(
+    state: &crate::operations::ApiState,
+    principal_id: &str,
+    lease: &fleet_core::Lease,
+    correlation_id: CorrelationId,
+) -> Result<Option<fleet_application::operation::Operation>, ApiErrorResponse> {
+    if !fleet_application::lab::cleanup_due(lease, fleet_core::SystemClock::now_unix_millis()) {
+        return Ok(None);
+    }
+    state
+        .operations
+        .create_lab_cleanup(
+            state.authorizer.as_ref(),
+            principal_id,
+            &lease.id,
+            &fleet_application::lab::cleanup_operation(lease, Some(correlation_id.to_string())),
+        )
+        .await
+        .map(Some)
+        .map_err(|error| crate::operations::map_use_case_error(&error, correlation_id))
+}
+
+/// Re-arms the cleanup of a `cleanup_failed` lease once its cause is fixed
+/// (#292) and queues the next `lab.cleanup` attempt.
+///
+/// # Errors
+///
+/// Returns the public error envelope on refusal, an unknown lease, a lease
+/// that is not `cleanup_failed`, or a concurrent re-arm.
+#[utoipa::path(
+    post,
+    path = "/lab/leases/{leaseId}/cleanup/retry",
+    tag = "lab",
+    operation_id = "retryLabLeaseCleanup",
+    params(("leaseId" = String, Path, description = "The lease's identity.")),
+    responses(
+        (status = 202, description = "The lease is `releasing` again with a fresh round of cleanup attempts (its `cleanupAttempts` total is kept), and its next `lab.cleanup` operation is queued. A guest that is already gone counts as destroyed, so a guest removed by hand resolves the lease to `released`.", body = Resource<crate::operations::OperationDto>),
+        (status = 400, description = "The lease is not `cleanup_failed`.", body = crate::error::ApiError),
+        (status = 403, description = "The caller may not release the lease or queue its cleanup.", body = crate::error::ApiError),
+        (status = 404, description = "The lease does not exist.", body = crate::error::ApiError),
+        (status = 409, description = "The lease changed while its cleanup was being re-armed.", body = crate::error::ApiError),
+        (status = 500, description = "A backend port failed.", body = crate::error::ApiError),
+    )
+)]
+pub async fn retry_lab_lease_cleanup(
+    State(state): State<Arc<crate::operations::ApiState>>,
+    principal: Option<Extension<crate::ActingPrincipal>>,
+    Extension(correlation_id): Extension<CorrelationId>,
+    Path(lease_id): Path<String>,
+) -> Result<(StatusCode, Json<Resource<crate::operations::OperationDto>>), ApiErrorResponse> {
+    let lab = lab_or_error(&state, correlation_id)?;
+    let principal = crate::operations::principal_or_error(principal, correlation_id)?;
+    // The re-arm owes a cleanup: refuse before the lease changes if the
+    // caller could not queue it.
+    state
+        .operations
+        .authorize_lab_cleanup(state.authorizer.as_ref(), &principal.id, Some(&lease_id))
+        .map_err(|error| crate::operations::map_use_case_error(&error, correlation_id))?;
+    let lease = lab
+        .retry_cleanup(state.authorizer.as_ref(), &principal, &lease_id)
+        .await
+        .map_err(|error| map_lab_error(&error, correlation_id))?;
+    state
+        .events
+        .publish(fleet_application::events::EventKind::LeaseChanged);
+    // A re-armed lease is due at once, so the attempt is always queued.
+    let operation = queue_cleanup(&state, &principal.id, &lease, correlation_id)
+        .await?
+        .ok_or_else(|| {
+            map_lab_error(
+                &LabUseCaseError::Backend {
+                    context: "cleanup",
+                    detail: "the re-armed lease was not due".to_owned(),
+                },
+                correlation_id,
+            )
+        })?;
+    Ok((StatusCode::ACCEPTED, Json(Resource::new(operation.into()))))
 }
 
 /// The release request.
@@ -996,7 +1331,7 @@ pub async fn extend_lab_lease(
     tag = "lab",
     operation_id = "sweepLabLeases",
     responses(
-        (status = 200, description = "All expired leases transitioned into releasing. Claims commit and emit lease.changed immediately; if a later claim fails, earlier transitions remain committed and the handler returns 500. Retrying safely continues with leases that remain expired.", body = Page<LeaseDto>),
+        (status = 200, description = "All expired leases transitioned into releasing, each with its `lab.cleanup` operation queued. Claims commit and emit lease.changed immediately; if a later claim fails, earlier transitions remain committed and the handler returns 500. Retrying safely continues with leases that remain expired.", body = Page<LeaseDto>),
         (status = 403, description = "The caller may not lease Lab guests.", body = crate::error::ApiError),
         (status = 500, description = "A backend port failed. Earlier claims in this sweep may already be committed; retry to process the remaining expired leases.", body = crate::error::ApiError),
     )
@@ -1008,6 +1343,10 @@ pub async fn sweep_lab_leases(
 ) -> Result<Json<Page<LeaseDto>>, ApiErrorResponse> {
     let lab = lab_or_error(&state, correlation_id)?;
     let principal = crate::operations::principal_or_error(principal, correlation_id)?;
+    state
+        .operations
+        .authorize_lab_cleanup(state.authorizer.as_ref(), &principal.id, None)
+        .map_err(|error| crate::operations::map_use_case_error(&error, correlation_id))?;
     let released = lab
         .sweep_expired_with_progress(
             state.authorizer.as_ref(),
@@ -1021,6 +1360,9 @@ pub async fn sweep_lab_leases(
         )
         .await
         .map_err(|error| map_lab_error(&error, correlation_id))?;
+    for lease in &released {
+        queue_cleanup(&state, &principal.id, lease, correlation_id).await?;
+    }
     let items: Vec<LeaseDto> = released.into_iter().map(Into::into).collect();
     Ok(Json(Page {
         page: PageInfo {
@@ -1029,4 +1371,347 @@ pub async fn sweep_lab_leases(
         },
         items,
     }))
+}
+
+/// One lease with its guest's connection details (FM-720).
+#[derive(Clone, Debug, Serialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct LeaseDetailDto {
+    /// The lease.
+    #[serde(flatten)]
+    pub lease: LeaseDto,
+    /// The guest's provision state, once provisioning started.
+    pub provision_state: Option<String>,
+    /// The PVE node the guest runs on.
+    pub node: Option<String>,
+    /// The guest's VMID.
+    pub vmid: Option<u32>,
+    /// The guest's IPv4 address, once its agent reported one.
+    pub address: Option<String>,
+    /// The Lab-owned Fleet machine the guest was registered as.
+    pub machine_id: Option<String>,
+    /// That machine's SSH endpoint.
+    pub endpoint_id: Option<String>,
+    /// The saga step that failed, when provisioning failed.
+    pub failed_step: Option<String>,
+    /// The lease's last failed artifact collection, when any (FM-721).
+    /// Collection never changes the lease or holds up its cleanup.
+    pub collection_failure: Option<crate::lab_artifacts::CollectionFailureDto>,
+    /// The capacity Fleet reserved for the lease (FM-715), when it has one.
+    /// Null for a lease that reserved nothing, such as a pooled lease.
+    pub reservation: Option<LeaseReservationDto>,
+}
+
+/// A lease's capacity reservation: what it holds on a node.
+#[derive(Clone, Debug, Serialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct LeaseReservationDto {
+    /// The PVE node the capacity is reserved on.
+    pub node: String,
+    /// The Proxmox account the guest is cloned through.
+    pub account_id: String,
+    /// The storage pool the disk is allocated on.
+    pub storage_pool: String,
+    /// Reserved vCPU cores.
+    pub cores: u32,
+    /// Reserved memory, in bytes.
+    pub memory_bytes: u64,
+    /// Reserved disk, in bytes.
+    pub disk_bytes: u64,
+    /// The reservation record's state: `held` until it is released.
+    pub state: String,
+}
+
+impl From<fleet_application::lab_placement::CapacityReservation> for LeaseReservationDto {
+    fn from(reservation: fleet_application::lab_placement::CapacityReservation) -> Self {
+        use fleet_application::lab_placement::ReservationState;
+        let demand = reservation.demand;
+        Self {
+            node: reservation.node,
+            account_id: reservation.account_id,
+            storage_pool: demand.storage,
+            cores: demand.cores,
+            memory_bytes: u64::from(demand.memory_mib) * 1024 * 1024,
+            disk_bytes: u64::from(demand.disk_gib) * 1024 * 1024 * 1024,
+            state: match reservation.state {
+                ReservationState::Held => "held",
+                ReservationState::Released => "released",
+            }
+            .to_owned(),
+        }
+    }
+}
+
+/// Reads one lease with its guest's connection details.
+///
+/// # Errors
+///
+/// Returns the public error envelope on refusal or an unknown lease.
+#[utoipa::path(
+    get,
+    path = "/lab/leases/{leaseId}",
+    tag = "lab",
+    operation_id = "getLabLease",
+    params(("leaseId" = String, Path, description = "The lease's identity.")),
+    responses(
+        (status = 200, description = "The lease and, once provisioned, its guest.", body = Resource<LeaseDetailDto>),
+        (status = 403, description = "The caller may not read Lab leases.", body = crate::error::ApiError),
+        (status = 404, description = "The lease does not exist.", body = crate::error::ApiError),
+        (status = 500, description = "A backend port failed.", body = crate::error::ApiError),
+    )
+)]
+pub async fn get_lab_lease(
+    State(state): State<Arc<crate::operations::ApiState>>,
+    principal: Option<Extension<crate::ActingPrincipal>>,
+    Extension(correlation_id): Extension<CorrelationId>,
+    Path(lease_id): Path<String>,
+) -> Result<Json<Resource<LeaseDetailDto>>, ApiErrorResponse> {
+    let lab = lab_or_error(&state, correlation_id)?;
+    let principal = crate::operations::principal_or_error(principal, correlation_id)?;
+    let lease = lab
+        .get_lease(state.authorizer.as_ref(), &principal, &lease_id)
+        .await
+        .map_err(|error| map_lab_error(&error, correlation_id))?;
+    let record = match &lease.provision_id {
+        Some(id) => Some(
+            lab.get_provision(state.authorizer.as_ref(), &principal, id)
+                .await
+                .map_err(|error| map_lab_error(&error, correlation_id))?,
+        ),
+        None => None,
+    };
+    let collection_failure = crate::lab_artifacts::lease_collection_failure(
+        &state,
+        &principal,
+        &lease_id,
+        correlation_id,
+    )
+    .await?;
+    let reservation = lab
+        .lease_reservation(state.authorizer.as_ref(), &principal, &lease_id)
+        .await
+        .map_err(|error| map_lab_error(&error, correlation_id))?
+        .map(Into::into);
+    Ok(Json(Resource::new(LeaseDetailDto {
+        lease: lease.into(),
+        provision_state: record.as_ref().map(|record| record.state.id().to_owned()),
+        node: record.as_ref().and_then(|record| record.node.clone()),
+        vmid: record.as_ref().and_then(|record| record.vmid),
+        address: record.as_ref().and_then(|record| record.guest_ipv4.clone()),
+        machine_id: record.as_ref().and_then(|record| record.machine_id.clone()),
+        endpoint_id: record
+            .as_ref()
+            .and_then(|record| record.endpoint_id.clone()),
+        failed_step: record.and_then(|record| record.failed_step),
+        collection_failure,
+        reservation,
+    })))
+}
+
+/// A command to run on a ready lease's guest.
+#[derive(Debug, Deserialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct ExecLeaseRequest {
+    /// The shell script to run (at most 64 KiB). It is never audited.
+    pub script: String,
+    /// The deadline, in seconds (1–900; default 60; at most 810 with
+    /// `session` = `interactive`).
+    #[serde(default)]
+    pub timeout_seconds: Option<u64>,
+    /// `service` (the default) runs in the SSH login's session;
+    /// `interactive` runs in the template's interactive test user's
+    /// desktop session (Windows guests whose template declares one).
+    #[serde(default)]
+    pub session: Option<String>,
+}
+
+/// Parses the optional `session` field of an exec request.
+pub(crate) fn parse_session(
+    session: Option<&str>,
+    correlation_id: CorrelationId,
+) -> Result<fleet_core::ExecSession, ApiErrorResponse> {
+    session.map_or(Ok(fleet_core::ExecSession::Service), |value| {
+        fleet_core::ExecSession::from_id(value)
+            .map_err(|detail| crate::machines::invalid_request(&detail, correlation_id))
+    })
+}
+
+/// Runs a command on a ready lease's guest as a `lab.exec` operation. The
+/// result carries the exit code and stdout and stderr, each scrubbed of
+/// credentials (URL userinfo and `user:password@`) and bounded, as machine
+/// exec does. A truncated flag is true when output was dropped, whether by
+/// the transport or by the result bound.
+///
+/// # Errors
+///
+/// Returns the public error envelope on refusal, an unknown lease, a lease
+/// that is not ready, or an invalid command.
+#[utoipa::path(
+    post,
+    path = "/lab/leases/{leaseId}/exec",
+    tag = "lab",
+    operation_id = "execLabLease",
+    params(("leaseId" = String, Path, description = "The lease's identity.")),
+    request_body = ExecLeaseRequest,
+    responses(
+        (status = 202, description = "The command is queued as a `lab.exec` operation.", body = Resource<crate::operations::OperationDto>),
+        (status = 400, description = "The lease is not ready or has expired, its guest has no Lab machine, or the command is invalid.", body = crate::error::ApiError),
+        (status = 403, description = "The caller may not run commands on Lab leases.", body = crate::error::ApiError),
+        (status = 404, description = "The lease does not exist.", body = crate::error::ApiError),
+        (status = 500, description = "A backend port failed.", body = crate::error::ApiError),
+    )
+)]
+pub async fn exec_lab_lease(
+    State(state): State<Arc<crate::operations::ApiState>>,
+    principal: Option<Extension<crate::ActingPrincipal>>,
+    Extension(correlation_id): Extension<CorrelationId>,
+    Path(lease_id): Path<String>,
+    headers: axum::http::HeaderMap,
+    request: Result<Json<ExecLeaseRequest>, axum::extract::rejection::JsonRejection>,
+) -> Result<(StatusCode, Json<Resource<crate::operations::OperationDto>>), ApiErrorResponse> {
+    let lab = lab_or_error(&state, correlation_id)?;
+    let principal = crate::operations::principal_or_error(principal, correlation_id)?;
+    let Json(request) = request.map_err(|_| {
+        map_lab_error(
+            &LabUseCaseError::Invalid {
+                detail: "the request body must be valid JSON with a script".to_owned(),
+            },
+            correlation_id,
+        )
+    })?;
+    let mut new = lab
+        .exec_lease(
+            state.authorizer.as_ref(),
+            &principal,
+            &lease_id,
+            &request.script,
+            request.timeout_seconds.unwrap_or(60),
+            parse_session(request.session.as_deref(), correlation_id)?,
+            // A retried request with the same key returns the original
+            // command operation instead of running the script again.
+            headers
+                .get(crate::IDEMPOTENCY_KEY_HEADER)
+                .and_then(|value| value.to_str().ok()),
+            fleet_core::SystemClock::now_unix_millis(),
+        )
+        .await
+        .map_err(|error| map_lab_error(&error, correlation_id))?;
+    new.correlation_id = Some(correlation_id.to_string());
+    let operation = state
+        .operations
+        .create_lab_exec(state.authorizer.as_ref(), &principal.id, &lease_id, &new)
+        .await
+        .map_err(|error| crate::operations::map_use_case_error(&error, correlation_id))?;
+    Ok((StatusCode::ACCEPTED, Json(Resource::new(operation.into()))))
+}
+
+#[cfg(test)]
+mod template_mapping_tests {
+    use super::*;
+    use fleet_core::IdGenerator as _;
+
+    #[test]
+    fn a_resaved_draft_without_an_interactive_user_clears_it() {
+        let mut body = serde_json::json!({
+            "name":"lab", "description":"", "imageVersionId":"image-1", "cores":2,
+            "memoryMib":2048, "diskGib":20, "readinessProbe":"guest_agent",
+            "readinessDeadlineSeconds":120, "ttlSeconds":3600, "cleanup":"destroy",
+            "guestOs":"windows", "interactiveUser":"qa"
+        });
+        let with: SaveLabTemplateRequest = serde_json::from_value(body.clone()).unwrap();
+        let id = fleet_core::IdGenerator::next_correlation_id(&mut fleet_core::UuidV7Generator);
+        assert_eq!(
+            with.into_content(id).unwrap().interactive_user.as_deref(),
+            Some("qa")
+        );
+        body.as_object_mut().unwrap().remove("interactiveUser");
+        let without: SaveLabTemplateRequest = serde_json::from_value(body).unwrap();
+        assert_eq!(without.into_content(id).unwrap().interactive_user, None);
+    }
+
+    #[test]
+    fn template_ssh_settings_default_and_round_trip() {
+        let base = serde_json::json!({
+            "name":"lab", "description":"", "imageVersionId":"image-1", "cores":2,
+            "memoryMib":2048, "diskGib":20, "readinessProbe":"guest_agent",
+            "readinessDeadlineSeconds":120, "ttlSeconds":3600, "cleanup":"destroy"
+        });
+        let request: SaveLabTemplateRequest = serde_json::from_value(base.clone()).unwrap();
+        assert_eq!(
+            (
+                request.ssh_user.as_str(),
+                request.ssh_port,
+                request.ssh_trust_mode.as_str()
+            ),
+            ("root", 22, "tofu")
+        );
+        let mut configured = base;
+        configured["sshUser"] = serde_json::json!("developer");
+        configured["sshPort"] = serde_json::json!(2222);
+        configured["sshTrustMode"] = serde_json::json!("pinned");
+        configured["sshFingerprint"] =
+            serde_json::json!("SHA256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA");
+        let request: SaveLabTemplateRequest = serde_json::from_value(configured).unwrap();
+        let content = request
+            .into_content(fleet_core::UuidV7Generator.next_correlation_id())
+            .unwrap();
+        let dto = LabTemplateVersionDto::from(LabTemplateVersion {
+            id: "version".to_owned(),
+            template_id: "template".to_owned(),
+            name: "lab".to_owned(),
+            content,
+            image_digest: "digest".to_owned(),
+            published_by: "tester".to_owned(),
+            published_at: 0,
+        })
+        .content;
+        assert_eq!(dto.ssh_user, "developer");
+        assert_eq!(dto.ssh_port, 2222);
+        assert_eq!(dto.ssh_trust_mode, "pinned");
+        assert_eq!(
+            dto.ssh_fingerprint.as_deref(),
+            Some("SHA256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA")
+        );
+    }
+
+    #[test]
+    fn template_audio_is_optional_and_round_trips() {
+        let base = serde_json::json!({
+            "name":"lab", "description":"", "imageVersionId":"image-1", "cores":2,
+            "memoryMib":2048, "diskGib":20, "readinessProbe":"guest_agent",
+            "readinessDeadlineSeconds":120, "ttlSeconds":3600, "cleanup":"destroy"
+        });
+        let id = || fleet_core::UuidV7Generator.next_correlation_id();
+        let request: SaveLabTemplateRequest = serde_json::from_value(base.clone()).unwrap();
+        let content = request.into_content(id()).unwrap();
+        assert!(content.audio.is_none());
+        assert!(content.validate().is_ok());
+        let mut with = base.clone();
+        with["audio"] = serde_json::json!({"device": "ich9-intel-hda", "driver": "none"});
+        let request: SaveLabTemplateRequest = serde_json::from_value(with).unwrap();
+        let content = request.into_content(id()).unwrap();
+        assert!(content.validate().is_ok());
+        let dto = LabTemplateVersionDto::from(LabTemplateVersion {
+            id: "version".to_owned(),
+            template_id: "template".to_owned(),
+            name: "lab".to_owned(),
+            content,
+            image_digest: "digest".to_owned(),
+            published_by: "tester".to_owned(),
+            published_at: 0,
+        })
+        .content;
+        let audio = dto.audio.unwrap();
+        assert_eq!(
+            (audio.device.as_str(), audio.driver.as_str()),
+            ("ich9-intel-hda", "none")
+        );
+        // A device or driver outside the allow-list is refused by validation.
+        for (device, driver) in [("sb16", "none"), ("ich9-intel-hda", "spice")] {
+            let mut bad = base.clone();
+            bad["audio"] = serde_json::json!({"device": device, "driver": driver});
+            let request: SaveLabTemplateRequest = serde_json::from_value(bad).unwrap();
+            assert!(request.into_content(id()).unwrap().validate().is_err());
+        }
+    }
 }

@@ -1,12 +1,16 @@
-import { useQuery } from '@tanstack/vue-query'
+import { useQueries, useQuery } from '@tanstack/vue-query'
 import { useIntervalFn } from '@vueuse/core'
 import { computed, ref } from 'vue'
 
 import {
+  getLabLease,
   listAuditEvents,
+  listDomainObservations,
+  type DomainObservationViewDto,
   listMachines,
   listOnboardingDrafts,
   type AuditEventDto,
+  type LeaseDetailDto,
   type MachineDto,
   type OnboardingDraftDto,
 } from '@frogbyte-io/fleet-api-client'
@@ -14,20 +18,29 @@ import {
 import { useFleetDrift } from '../drift/useDrift'
 import { fetchAllPages, type PagedResponse } from '../fleet/useFleetInventory'
 import { useImages } from '../images/useImages'
-import { retryTransient, unwrap } from '../machine/api'
+import { leaseDetailKey } from '../lab/useLab'
+import { ApiRequestError, retryTransient, unwrap } from '../machine/api'
 import { useOperationsList } from '../operations/useOperations'
+import { usePendingRequests } from '../requests/useRequests'
 import { isFingerprintMismatch } from '../proxmox/proxmox'
 import { useProxmox } from '../proxmox/useProxmox'
+import { useRegistryEntries } from '../registry/useRegistry'
+import { useServices } from '../services/useServices'
 
 import {
   activity,
+  domainRows,
   driftRows,
   kpis,
   leaseRows,
   machineRows,
   onboardingRows,
+  orphanRows,
   operationRows,
   proxmoxRows,
+  requestRows,
+  serviceHealthRows,
+  serviceRenewalRows,
   sortAttention,
   templatePinRows,
 } from './attention'
@@ -38,7 +51,14 @@ import {
 // invalidates them, so the page stays live without polling.
 
 export const RECENT_AUDIT_KEY = ['audit', 'recent'] as const
+export const LAB_ORPHANS_KEY = ['audit', 'lab-orphans'] as const
 const AUDIT_LIMIT = 25
+/**
+ * Orphan reports are read from this window of `lab.lease` audit events. The
+ * sweeper reports an orphan once per controller run, so one older than the
+ * window shows again after the next restart.
+ */
+const ORPHAN_WINDOW_MS = 30 * 24 * 3600 * 1000
 
 function page<T>(response: { status: number, data: unknown }): T[] {
   if (response.status !== 200)
@@ -70,7 +90,39 @@ export function useOverview() {
     queryFn: async () => page<AuditEventDto>(await listAuditEvents({ limit: AUDIT_LIMIT })),
     retry: retryTransient,
   })
+  // The sweeper's orphan reports: `lab.lease` audit events, oldest first.
+  const orphanAudit = useQuery({
+    queryKey: LAB_ORPHANS_KEY,
+    queryFn: async () => {
+      const from = Date.now() - ORPHAN_WINDOW_MS
+      const { items, truncated } = await fetchAllPages<AuditEventDto>(async (cursor) => {
+        const response = await listAuditEvents({ action: 'lab.lease', from, limit: 200, cursor }) as { status: number, data: unknown }
+        if (response.status !== 200)
+          unwrap(response)
+        return response as PagedResponse<AuditEventDto>
+      })
+      return { items, truncated }
+    },
+    retry: retryTransient,
+    // No event announces an orphan report, so re-read on a slow clock.
+    refetchInterval: 60_000,
+  })
+  // Domains with a warning (FM-1020): expiry window, auto-renew, drift.
+  const domains = useQuery({
+    queryKey: ['registry', 'domain-attention'],
+    queryFn: async () => page<DomainObservationViewDto>(await listDomainObservations({ attention: true, limit: 200 })),
+    retry: retryTransient,
+    // Lookups run on the controller's schedule; no event announces them.
+    refetchInterval: 5 * 60_000,
+  })
+  // Services renewing soon (FM-1021). A failure (no active revision, no
+  // service type) quietly omits the rows. Shares the Services view's cache entry.
+  const services = useRegistryEntries('service', '')
+  // Unhealthy services and failed deploys (FM-1032). Shares the Services page's
+  // cache entry. An unreadable or unconfigured source quietly omits the rows.
+  const runningServices = useServices()
   const operations = useOperationsList()
+  const requests = usePendingRequests()
   const proxmox = useProxmox()
   const images = useImages()
   const drift = useFleetDrift()
@@ -80,17 +132,43 @@ export function useOverview() {
   useIntervalFn(() => (now.value = Date.now()), 30_000)
 
   const leases = computed(() => images.leases.data.value ?? [])
+
+  // Where each cleanup_failed lease's guest remains (shares the Lab drawer's cache).
+  const failingIds = computed(() => leases.value.filter(l => l.state === 'cleanup_failed').map(l => l.id))
+  const failingDetails = useQueries({
+    queries: computed(() => failingIds.value.map(id => ({
+      queryKey: leaseDetailKey(id),
+      queryFn: async () => unwrap<LeaseDetailDto>(await getLabLease(id)),
+      retry: retryTransient,
+    }))),
+  })
+  const remains = computed(() => new Map(failingDetails.value
+    .map(q => q.data)
+    .filter((d): d is LeaseDetailDto => !!d)
+    .map(d => [d.id, { node: d.node, vmid: d.vmid }])))
+
+  const guestIndex = computed(() => ({
+    guests: proxmox.views.value.flatMap(v => v.guests),
+    // With no account listed there is nothing to prove an orphan gone.
+    complete: proxmox.views.value.length > 0
+      && proxmox.views.value.every(v => v.state === 'pinned' && !v.guestsLoading && !v.guestsError && !v.guestsTruncated),
+  }))
   const operationList = computed(() => operations.data.value?.items ?? [])
 
   const attention = computed(() => {
     return sortAttention([
       ...machineRows(machines.data.value ?? []),
-      ...leaseRows(leases.value, now.value),
+      ...leaseRows(leases.value, now.value, remains.value),
+      ...orphanRows(orphanAudit.data.value?.items ?? [], guestIndex.value),
       ...operationRows(operationList.value),
+      ...requestRows(requests.data.value?.items ?? []),
       ...proxmoxRows(proxmox.views.value),
       ...onboardingRows(drafts.data.value ?? []),
       ...templatePinRows(images.templates.data.value ?? [], images.versions.value),
       ...driftRows(drift.query.data.value?.items ?? []),
+      ...domainRows(domains.data.value ?? []),
+      ...serviceRenewalRows(services.data.value?.items ?? [], now.value),
+      ...serviceHealthRows(runningServices.data.value?.items ?? [], now.value),
     ])
   })
 
@@ -99,13 +177,24 @@ export function useOverview() {
 
   // A source that failed to load is named, so an empty queue is never
   // mistaken for "all clear".
+  const servicesFailed = computed(() => {
+    const error = runningServices.error.value
+    return !!error && !(error instanceof ApiRequestError && (error.status === 403 || error.status === 503))
+  })
   const failures = computed(() => [
     machines.error.value && 'machines',
     drafts.error.value && 'onboarding drafts',
     operations.error.value && 'operations',
+    requests.error.value && 'action requests',
     proxmox.accounts.error.value && 'Proxmox accounts',
     drift.query.error.value && 'skill drift',
+    // Denied (no Coolify/Docker access) or unwired is not a failure to flag.
+    servicesFailed.value && 'running services',
+    domains.error.value && 'domain observations',
     images.leases.error.value && 'Lab leases',
+    orphanAudit.error.value && 'Lab orphan reports',
+    // Audit pages run oldest first, so a cut read misses the newest reports.
+    orphanAudit.data.value?.truncated && 'Lab orphan reports (too many events to read; the newest may be missing)',
     images.templates.error.value && 'Lab templates',
     images.loadError.value.some(([what]) => what === 'versions' || what === 'recipes') && 'image versions',
     [...proxmox.discoveryErrors.value.values(), ...proxmox.guestErrors.value.values()].some(e => e && !isFingerprintMismatch(e)) && 'Proxmox discovery',
@@ -115,9 +204,11 @@ export function useOverview() {
   const loading = computed(() => machines.isLoading.value
     || drift.query.isLoading.value
     || operations.isLoading.value
+    || requests.isLoading.value
     || drafts.isLoading.value
     || proxmox.loading.value
     || images.leases.isLoading.value
+    || orphanAudit.isLoading.value
     || images.templates.isLoading.value
     || images.loading.value)
 

@@ -135,6 +135,10 @@ pub enum Permission {
     /// Activate a validated candidate as the desired revision. A
     /// mutation: it changes what Fleet converges machines toward.
     SourceActivate,
+    /// Change the desired-state controller settings (Registry
+    /// auto-activation and change mode). A mutation: auto-activation
+    /// decides whether a revision goes live without a human.
+    SourceSettings,
     /// List Proxmox accounts and their discovery snapshots, and observe a
     /// host's certificate fingerprint. A read, but a
     /// topology-revealing one.
@@ -149,6 +153,12 @@ pub enum Permission {
     /// snapshot delete, clone, template conversion, or remote task
     /// cancellation. A mutation: it changes or destroys guest state.
     ProxmoxDestructive,
+    /// List external provider accounts (Coolify, Cloudflare) and their
+    /// last probe results. A read, but a topology-revealing one.
+    ExternalAccountRead,
+    /// Create, update, probe, or remove an external provider account. A
+    /// mutation: it stores, replaces, removes, or uses a credential.
+    ExternalAccountConfig,
     /// List and read image recipes and their published versions. A read,
     /// but a build-infrastructure-revealing one.
     ImagesRead,
@@ -172,6 +182,71 @@ pub enum Permission {
     /// Keep a Lab lease's VM out of automatic cleanup. An elevated
     /// mutation: it transfers a VM out of automatic cleanup.
     LabKeep,
+    /// Run a command on a ready Lab lease's guest (FM-720). A privileged
+    /// mutation: it executes on a machine, like machine exec.
+    LabExec,
+    /// Collect files from a ready Lab lease's guest, download stored Lab
+    /// artifacts, and record or expire them (FM-721). A privileged action:
+    /// it copies data off a machine and serves it.
+    LabArtifacts,
+    /// List the delegated credentials' metadata (never token values). A
+    /// read of who may act on Fleet's behalf.
+    CredentialRead,
+    /// Issue a delegated credential: a scoped, short-lived bearer token.
+    /// A mutation: it hands the holder access.
+    CredentialIssue,
+    /// Revoke a delegated credential. A mutation.
+    CredentialRevoke,
+    /// Use a published Lab template version, named `<templateId>/<versionId>`,
+    /// to create a lease. The catalog entry a delegated credential's
+    /// template allow-list is decided on.
+    LabTemplateUse,
+    /// List and read Lab leases, their guest details, and reservations. A
+    /// delegated credential reads its own leases only.
+    LabLeaseRead,
+    /// List and read Lab artifact metadata. A delegated credential reads its
+    /// own artifacts only.
+    LabArtifactRead,
+    /// Provision the guest of an already requested Lab lease. Distinct from
+    /// [`Permission::LabProvision`], which provisions a guest without a
+    /// lease and so leaves a VM no lease owns.
+    LabLeaseProvision,
+    /// Copy one file into a ready Lab lease's guest (#393). A privileged
+    /// mutation: it writes to a machine over SSH. Scoped CI identities that
+    /// run Release QA need it beside `lab.exec` and `lab.artifacts`.
+    LabPut,
+    /// Read the state, exit code, and bounded output tails of a detached Lab
+    /// command (#394). A read, but it exposes guest command output, so it is
+    /// risky like [`Permission::LabArtifacts`]. A delegated credential reads
+    /// its own owner's handles only.
+    LabExecRead,
+    /// List and read Registry types and entries, and their relations
+    /// (FM-1012). A read of descriptive, never-secret data: the Registry
+    /// holds no credentials, so it is not risky.
+    RegistryRead,
+    /// Ask the action broker to run a provider action (FM-1040). The
+    /// resource is the action id. A mutation: it records a durable request
+    /// and, for `auto` actions, starts the operation.
+    ActionRequest,
+    /// Approve a pending action request. Separate from
+    /// [`Permission::ActionRequest`] so a requester is never an approver by
+    /// default. A mutation: it starts the provider operation.
+    ActionApprove,
+    /// Deny a pending action request. Separate from
+    /// [`Permission::ActionApprove`]. A mutation.
+    ActionDeny,
+    /// List and read action requests, with their scrubbed parameters.
+    ActionRead,
+    /// Read DNS zones and records through a Cloudflare account, and compute
+    /// the preview of a record change (FM-1042). Risky: it sends the
+    /// account's token off the host. The change itself is an action request.
+    DnsRead,
+    /// Record RDAP and DNS observations against a Registry domain entry,
+    /// on demand or from the scheduled sweep (FM-1020). A mutation of
+    /// Fleet-side observations (never of Fleet Git) that makes outbound
+    /// public lookups. The resource is `<type>/<key>` for one entry and
+    /// absent for the whole sweep.
+    RegistryObserve,
 }
 
 impl Permission {
@@ -218,10 +293,13 @@ impl Permission {
         Permission::ApplyExecute,
         Permission::SourceFetch,
         Permission::SourceActivate,
+        Permission::SourceSettings,
         Permission::ProxmoxRead,
         Permission::ProxmoxConfig,
         Permission::ProxmoxOperate,
         Permission::ProxmoxDestructive,
+        Permission::ExternalAccountRead,
+        Permission::ExternalAccountConfig,
         Permission::ImagesRead,
         Permission::ImagesConfig,
         Permission::LabRead,
@@ -230,6 +308,24 @@ impl Permission {
         Permission::LabLease,
         Permission::LabExtend,
         Permission::LabKeep,
+        Permission::LabExec,
+        Permission::LabArtifacts,
+        Permission::CredentialRead,
+        Permission::CredentialIssue,
+        Permission::CredentialRevoke,
+        Permission::LabTemplateUse,
+        Permission::LabLeaseRead,
+        Permission::LabArtifactRead,
+        Permission::LabLeaseProvision,
+        Permission::LabPut,
+        Permission::LabExecRead,
+        Permission::RegistryRead,
+        Permission::ActionRequest,
+        Permission::ActionApprove,
+        Permission::ActionDeny,
+        Permission::ActionRead,
+        Permission::DnsRead,
+        Permission::RegistryObserve,
     ];
 
     /// The stable action id, as recorded in decisions and audit events.
@@ -275,10 +371,13 @@ impl Permission {
             Permission::ApplyExecute => "apply.execute",
             Permission::SourceFetch => "source.fetch",
             Permission::SourceActivate => "source.activate",
+            Permission::SourceSettings => "source.settings",
             Permission::ProxmoxRead => "proxmox.read",
             Permission::ProxmoxConfig => "proxmox.config",
             Permission::ProxmoxOperate => "proxmox.operate",
             Permission::ProxmoxDestructive => "proxmox.destructive",
+            Permission::ExternalAccountRead => "external_account.read",
+            Permission::ExternalAccountConfig => "external_account.config",
             Permission::ImagesRead => "images.read",
             Permission::ImagesConfig => "images.config",
             Permission::LabRead => "lab.read",
@@ -287,6 +386,24 @@ impl Permission {
             Permission::LabLease => "lab.lease",
             Permission::LabExtend => "lab.extend",
             Permission::LabKeep => "lab.keep",
+            Permission::LabExec => "lab.exec",
+            Permission::LabArtifacts => "lab.artifacts",
+            Permission::CredentialRead => "credential.read",
+            Permission::CredentialIssue => "credential.issue",
+            Permission::CredentialRevoke => "credential.revoke",
+            Permission::LabTemplateUse => "lab.template.use",
+            Permission::LabLeaseRead => "lab.lease.read",
+            Permission::LabArtifactRead => "lab.artifacts.read",
+            Permission::LabLeaseProvision => "lab.lease.provision",
+            Permission::LabPut => "lab.put",
+            Permission::LabExecRead => "lab.exec.read",
+            Permission::RegistryRead => "registry.read",
+            Permission::ActionRequest => "action.request",
+            Permission::ActionApprove => "action.approve",
+            Permission::ActionDeny => "action.deny",
+            Permission::ActionRead => "action.read",
+            Permission::DnsRead => "dns.read",
+            Permission::RegistryObserve => "registry.observe",
         }
     }
 
@@ -305,7 +422,11 @@ impl Permission {
             | Permission::NodeRead
             | Permission::ProjectsRead
             | Permission::ImagesRead
-            | Permission::LabRead => false,
+            | Permission::LabRead
+            | Permission::LabLeaseRead
+            | Permission::RegistryRead
+            | Permission::LabArtifactRead
+            | Permission::ActionRead => false,
             Permission::MachineReadSensitive
             | Permission::OperationCreate
             | Permission::OperationCancel
@@ -337,16 +458,33 @@ impl Permission {
             | Permission::ApplyExecute
             | Permission::SourceFetch
             | Permission::SourceActivate
+            | Permission::SourceSettings
             | Permission::ProxmoxRead
             | Permission::ProxmoxConfig
             | Permission::ProxmoxOperate
             | Permission::ProxmoxDestructive
+            | Permission::ExternalAccountRead
+            | Permission::ExternalAccountConfig
             | Permission::ImagesConfig
             | Permission::LabConfig
             | Permission::LabProvision
             | Permission::LabLease
             | Permission::LabExtend
-            | Permission::LabKeep => true,
+            | Permission::LabKeep
+            | Permission::LabExec
+            | Permission::LabArtifacts
+            | Permission::CredentialRead
+            | Permission::CredentialIssue
+            | Permission::CredentialRevoke
+            | Permission::LabTemplateUse
+            | Permission::LabLeaseProvision
+            | Permission::LabPut
+            | Permission::LabExecRead
+            | Permission::ActionRequest
+            | Permission::ActionApprove
+            | Permission::DnsRead
+            | Permission::ActionDeny
+            | Permission::RegistryObserve => true,
         }
     }
 
@@ -371,15 +509,26 @@ impl Permission {
             | Permission::ProjectsCreate
             | Permission::SourceFetch
             | Permission::SourceActivate
+            | Permission::SourceSettings
             | Permission::ProxmoxRead
             | Permission::ProxmoxConfig
             | Permission::ProxmoxOperate
             | Permission::ProxmoxDestructive
+            | Permission::ExternalAccountRead
+            | Permission::ExternalAccountConfig
             | Permission::ImagesRead
             | Permission::ImagesConfig
             | Permission::LabRead
             | Permission::LabConfig
-            | Permission::LabLease => false,
+            | Permission::LabLease
+            | Permission::CredentialRead
+            | Permission::CredentialIssue
+            | Permission::LabLeaseRead
+            | Permission::RegistryRead
+            | Permission::LabArtifactRead
+            | Permission::ActionRead
+            | Permission::DnsRead
+            | Permission::RegistryObserve => false,
             Permission::MachineReadSensitive
             | Permission::OperationCancel
             | Permission::SecretRead
@@ -406,7 +555,17 @@ impl Permission {
             | Permission::ApplyExecute
             | Permission::LabProvision
             | Permission::LabExtend
-            | Permission::LabKeep => true,
+            | Permission::LabKeep
+            | Permission::LabExec
+            | Permission::LabArtifacts
+            | Permission::CredentialRevoke
+            | Permission::LabTemplateUse
+            | Permission::LabLeaseProvision
+            | Permission::LabPut
+            | Permission::LabExecRead
+            | Permission::ActionRequest
+            | Permission::ActionApprove
+            | Permission::ActionDeny => true,
         }
     }
 }
@@ -432,6 +591,15 @@ pub enum ReasonId {
     MissingResource,
     /// The request is malformed: it names an action outside the catalog.
     UnknownAction,
+    /// A delegated credential's policy does not include the action.
+    ActionNotDelegated,
+    /// A delegated credential's policy includes the action, but not on this
+    /// resource (for example a template outside its allow-list).
+    OutOfScope,
+    /// The presented delegated credential is expired or revoked.
+    CredentialInactive,
+    /// The action broker's risk class for the action is `deny`.
+    RiskClassDeny,
 }
 
 impl ReasonId {
@@ -443,6 +611,10 @@ impl ReasonId {
             ReasonId::UnknownPrincipal => "policy.unknown_principal",
             ReasonId::MissingResource => "policy.missing_resource",
             ReasonId::UnknownAction => "policy.unknown_action",
+            ReasonId::ActionNotDelegated => "policy.action_not_delegated",
+            ReasonId::OutOfScope => "policy.out_of_scope",
+            ReasonId::CredentialInactive => "policy.credential_inactive",
+            ReasonId::RiskClassDeny => "policy.risk_class_deny",
         }
     }
 }
@@ -513,6 +685,50 @@ impl fmt::Display for Decision {
 pub struct ActingPrincipal {
     /// The stable principal id.
     pub id: String,
+}
+
+/// The prefix of a delegated credential's principal id:
+/// `credential:<owner>:<credentialId>` (ADR 0011).
+pub const DELEGATED_PRINCIPAL_PREFIX: &str = "credential:";
+
+/// The principal id of a delegated credential.
+#[must_use]
+pub fn delegated_principal_id(owner: &str, credential_id: &str) -> String {
+    format!("{DELEGATED_PRINCIPAL_PREFIX}{owner}:{credential_id}")
+}
+
+/// Whether the principal id names a delegated credential.
+#[must_use]
+pub fn is_delegated_principal(principal_id: &str) -> bool {
+    delegated_owner_identity(principal_id).is_some()
+}
+
+/// The ownership identity of a delegated principal, `credential:<owner>`,
+/// shared by every credential of one owner so token rotation keeps the
+/// owner's leases. `None` for any other principal.
+#[must_use]
+pub fn delegated_owner_identity(principal_id: &str) -> Option<&str> {
+    let rest = principal_id.strip_prefix(DELEGATED_PRINCIPAL_PREFIX)?;
+    let (owner, credential_id) = rest.split_once(':')?;
+    if owner.is_empty() || credential_id.is_empty() {
+        return None;
+    }
+    Some(&principal_id[..DELEGATED_PRINCIPAL_PREFIX.len() + owner.len()])
+}
+
+/// The owner a resource created by this principal records: the shared owner
+/// identity for a delegated credential, the principal id for any other.
+#[must_use]
+pub fn resource_owner(principal_id: &str) -> &str {
+    delegated_owner_identity(principal_id).unwrap_or(principal_id)
+}
+
+/// Whether the principal may see a resource recorded under `owner`. A
+/// delegated credential sees only its own owner's resources; other
+/// principals are decided by the catalog alone.
+#[must_use]
+pub fn owner_scope_permits(principal_id: &str, owner: &str) -> bool {
+    delegated_owner_identity(principal_id).is_none_or(|identity| identity == owner)
 }
 
 /// The authorization port. Exactly one implementation is active in a

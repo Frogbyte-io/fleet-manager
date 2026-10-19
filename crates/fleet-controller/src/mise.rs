@@ -527,6 +527,9 @@ async fn finish_json(
                 )
                 .await;
             };
+            // The parsed document is stored as the operation result: scrub
+            // every string (a tool's source URL can carry userinfo).
+            let parsed = redact_json_strings(parsed);
             let result_json = serde_json::json!({ field: parsed }).to_string();
             operations
                 .complete(operation_id, "succeeded", Some(&result_json), None)
@@ -599,20 +602,39 @@ async fn finish_cli(
     }
 }
 
+/// Applies the provider's credential redaction to every string key and
+/// value of a parsed JSON document. Each string is scrubbed within the same
+/// window as command output, so a hostile node cannot make one huge string
+/// expensive; the rest of an over-long string is dropped. Keys that redact to
+/// the same text collapse into one entry: mise keys are tool names, so a
+/// credential-bearing key is not expected.
+fn redact_json_strings(value: serde_json::Value) -> serde_json::Value {
+    use serde_json::Value;
+    match value {
+        Value::String(text) => Value::String(redact_string(&text)),
+        Value::Array(items) => Value::Array(items.into_iter().map(redact_json_strings).collect()),
+        Value::Object(map) => Value::Object(
+            map.into_iter()
+                .map(|(key, value)| (redact_string(&key), redact_json_strings(value)))
+                .collect(),
+        ),
+        other => other,
+    }
+}
+
+fn redact_string(text: &str) -> String {
+    let (window, cut) = crate::exec::scrub_window(text);
+    let mut redacted = fleet_provider_mise::redact(window);
+    if cut {
+        redacted.push('…');
+    }
+    redacted
+}
+
 /// Redacts credential-shaped userinfo from CLI output before it becomes a
 /// public result.
 fn redact_output(text: &str) -> String {
-    let trimmed = text.trim();
-    let bounded = if trimmed.len() > 3_000 {
-        let mut end = 3_000;
-        while !trimmed.is_char_boundary(end) {
-            end -= 1;
-        }
-        &trimmed[..end]
-    } else {
-        trimmed
-    };
-    fleet_provider_mise::redact(bounded)
+    crate::exec::scrub_and_bound_with(text.trim(), false, fleet_provider_mise::redact).0
 }
 
 /// The kind-dispatching wrapper the controller composes: the mise kinds
@@ -642,5 +664,49 @@ impl OperationExecutor for MiseDispatch {
             }
             _ => self.fallback.execute(operations, operation).await,
         }
+    }
+}
+
+#[cfg(test)]
+mod redact_bound_tests {
+    /// #357: a credential that straddles the result bound is redacted
+    /// before the bound cuts, never half kept.
+    #[test]
+    fn a_credential_at_the_bound_is_redacted_not_cut() {
+        for secret_line in [
+            "https://user:hunter2pw@host.invalid/repo.git",
+            "user:hunter2pw@host.invalid",
+        ] {
+            for pad in [2_970, 2_985, 2_995, 3_000] {
+                let text = format!("{} {secret_line}\n", "x".repeat(pad));
+                let out = super::redact_output(&text);
+                assert!(!out.contains("hunter2"), "pad {pad}: {out}");
+                assert!(!out.contains("user:"), "pad {pad}: {out}");
+                assert!(out.len() <= 3_000 + "…".len(), "pad {pad}: {}", out.len());
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod redact_json_tests {
+    #[test]
+    fn every_string_in_a_parsed_document_is_redacted() {
+        let parsed = serde_json::json!({
+            "node": [{
+                "version": "20.1.0",
+                "source": {"url": "https://user:hunter2pw@host.invalid/tool.git"},
+                "notes": ["fetched via deploy:hunter2pw@host.invalid:repo"],
+            }],
+            "https://user:hunter2pw@host.invalid/k": 1,
+        });
+        let out = super::redact_json_strings(parsed).to_string();
+        assert!(!out.contains("hunter2"), "{out}");
+        assert!(out.contains("20.1.0"), "{out}");
+        // A hostile node's huge string is windowed, not scrubbed whole.
+        let started = std::time::Instant::now();
+        let huge = super::redact_json_strings(serde_json::json!({"x": "@".repeat(1 << 20)}));
+        assert!(started.elapsed() < std::time::Duration::from_secs(5));
+        assert!(huge.to_string().len() < 20_000);
     }
 }

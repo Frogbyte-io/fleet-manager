@@ -14,12 +14,22 @@ pub mod artifacts;
 pub mod browser;
 pub mod builtin_skills;
 pub mod checkout;
+pub mod coolify_exec;
+pub mod dns_exec;
 pub mod exec;
+pub mod external_accounts_store;
 pub mod frogenv;
 pub mod gateway;
 pub mod git_credentials;
+pub mod image_secrets;
 pub mod images_exec;
 pub mod install;
+pub mod lab_artifacts_store;
+pub mod lab_cleanup;
+pub mod lab_detach_store;
+pub mod lab_pool;
+pub mod lab_put_store;
+pub mod lab_sweeper;
 pub mod mise;
 pub mod node_crypto;
 pub mod onboard;
@@ -27,8 +37,11 @@ pub mod proxmox_exec;
 pub mod proxmox_store;
 pub mod proxmox_tasks_store;
 pub mod ready;
+pub mod registry_enrich;
+pub mod site_exec;
 pub mod skills;
 pub mod source;
+pub mod source_poller;
 pub mod tailnet_store;
 pub mod worker;
 
@@ -80,6 +93,24 @@ pub struct NodeServices {
     /// The Git credential store for the desired source (FM-412); set by the
     /// binary once the secret store is open, absent otherwise.
     pub git_credentials: Option<Arc<dyn fleet_application::source::GitCredentialStore>>,
+    /// The external provider account use cases (FM-1001); set by the binary
+    /// once the secret store is open, absent otherwise.
+    pub external_accounts: Option<Arc<fleet_application::external_accounts::ExternalAccounts>>,
+    /// The DNS use cases (FM-1042); set by the binary once the secret store
+    /// is open, absent otherwise.
+    pub dns: Option<Arc<fleet_application::dns::Dns>>,
+    /// The Coolify read discovery use cases (FM-1030); set with the
+    /// external accounts, absent otherwise.
+    pub coolify_discovery: Option<Arc<fleet_application::coolify::CoolifyDiscovery>>,
+    /// The Coolify lifecycle use cases (FM-1033); set with the external
+    /// accounts, absent otherwise.
+    pub coolify_lifecycle: Option<Arc<fleet_application::coolify::lifecycle::CoolifyLifecycle>>,
+    /// The Coolify settings use cases (FM-1034); set with the lifecycle
+    /// use cases, absent otherwise.
+    pub coolify_settings: Option<Arc<fleet_application::coolify::settings::CoolifySettings>>,
+    /// The site-template use cases (FM-1035); set with the lifecycle use
+    /// cases, absent otherwise.
+    pub site_templates: Option<Arc<fleet_application::site_templates::SiteTemplates>>,
 }
 
 fn event_hub_for_services(
@@ -144,6 +175,12 @@ pub fn compose_node_services_with_events(
     );
     NodeServices {
         git_credentials: None,
+        external_accounts: None,
+        dns: None,
+        coolify_discovery: None,
+        coolify_lifecycle: None,
+        coolify_settings: None,
+        site_templates: None,
         nodes,
         gateway,
         events,
@@ -174,6 +211,48 @@ pub fn compose_onboarding(
     )
 }
 
+/// The Registry types Fleet ships, as the read model takes them. The
+/// source is the validator's built-in set, so the types the validator lets
+/// entries use and the types the read model lists cannot differ.
+///
+/// # Panics
+///
+/// Panics if a built-in spec cannot be serialized; the specs are plain
+/// data, so this would be a programming error caught by every test run.
+#[must_use]
+pub fn builtin_registry_types() -> Vec<fleet_application::registry::BuiltinRegistryType> {
+    fleet_schema::registry::RegistryContext::default()
+        .builtin_types
+        .into_iter()
+        .map(|builtin| fleet_application::registry::BuiltinRegistryType {
+            spec: serde_json::to_value(&builtin.spec)
+                .expect("a built-in Registry type spec is plain data and always serializes"),
+            name: builtin.name,
+        })
+        .collect()
+}
+
+/// Composes the desired-source use cases over the store, with the Registry
+/// read model attached so its cache follows every activation and rollback
+/// (FM-1012). The API surface and the source executor must share this
+/// composition: the executor performs the activation, the API serves the
+/// reads.
+#[must_use]
+pub fn compose_desired_source(db: &SqlitePool) -> fleet_application::source::DesiredSource {
+    let source = std::sync::Arc::new(fleet_storage_sqlite::SourceRepository::new(db.clone()));
+    let registry = fleet_application::registry::RegistryReadModel::new(
+        std::sync::Arc::new(fleet_storage_sqlite::RegistryRepository::new(db.clone())),
+        source.clone(),
+    )
+    .with_builtin_types(builtin_registry_types());
+    fleet_application::source::DesiredSource::new(
+        source.clone(),
+        std::sync::Arc::new(fleet_storage_sqlite::AuditSink::new(db.clone())),
+    )
+    .with_settings(source)
+    .with_registry(std::sync::Arc::new(registry))
+}
+
 /// Composes the server-side planning use cases (FM-407) over the store: the
 /// active desired revision, the machine's observations, and the skill
 /// catalog that supplies the built-in default's pinned version.
@@ -199,6 +278,64 @@ pub fn compose_planning(db: &SqlitePool) -> fleet_application::planning::Plannin
     )
 }
 
+/// The action broker's settings from the environment
+/// (`FLEET_ACTION_REQUEST_TTL_SECONDS`, `FLEET_ACTION_POLICY`).
+///
+/// # Errors
+///
+/// Fails on a malformed value, naming the variable.
+pub fn broker_settings_from_env() -> Result<fleet_application::broker::BrokerSettings, String> {
+    fleet_application::broker::BrokerSettings::from_env_values(
+        std::env::var(fleet_application::broker::REQUEST_TTL_VAR)
+            .ok()
+            .as_deref(),
+        std::env::var(fleet_application::broker::POLICY_VAR)
+            .ok()
+            .as_deref(),
+    )
+}
+
+/// The provider actions this controller offers through the broker. Providers
+/// register their actions here.
+fn compose_action_registry() -> Arc<fleet_application::broker::ActionRegistry> {
+    let mut registry = fleet_application::broker::ActionRegistry::new();
+    // FM-1042: `dns.record.upsert` and `dns.record.delete`, risk class
+    // `approve`.
+    for action in fleet_application::dns::dns_actions() {
+        registry
+            .register(action)
+            .expect("the DNS action ids are valid and unique");
+    }
+    // FM-1033: Coolify start, stop, restart, and redeploy. `stop` is
+    // `approve`; the rest are `auto`.
+    for action in fleet_application::coolify::lifecycle::lifecycle_actions() {
+        registry
+            .register(action)
+            .expect("the Coolify action ids are valid and unique");
+    }
+    // FM-1034: Coolify environment variables, domains, and health checks;
+    // all `approve`.
+    for action in fleet_application::coolify::settings::settings_actions() {
+        registry
+            .register(action)
+            .expect("the Coolify settings action ids are valid and unique");
+    }
+    // FM-1035: deploy a site from a template; `approve`.
+    for action in fleet_application::site_templates::site_actions() {
+        registry
+            .register(action)
+            .expect("the site-template action ids are valid and unique");
+    }
+    Arc::new(registry)
+}
+
+/// The operation kinds provider actions own. Every `Operations` instance (the
+/// API's and the worker's) declares them so none accepts them off the broker.
+#[must_use]
+pub fn brokered_operation_kinds() -> std::collections::BTreeSet<String> {
+    compose_action_registry().operation_kinds()
+}
+
 /// Builds the API state over an opened store, or a state whose backends
 /// answer nothing when the caller has none (tests). The authorization policy
 /// is the trusted-LAN adapter in both cases.
@@ -222,8 +359,12 @@ fn api_state(
     git_credentials: Option<Arc<dyn fleet_application::source::GitCredentialStore>>,
     events: Arc<fleet_application::events::EventHub>,
 ) -> fleet_api::operations::ApiState {
+    // One grant book joins the credential resolver (which registers the
+    // allow-list a request authenticated with) and the authorizer (which
+    // decides a delegated principal on it).
+    let grants = std::sync::Arc::new(fleet_application::credentials::GrantBook::new());
     let authorizer: std::sync::Arc<dyn fleet_application::authz::Authorizer> =
-        std::sync::Arc::new(fleet_auth::LanAllowAllAuthorizer);
+        std::sync::Arc::new(fleet_auth::ScopedAuthorizer::new(grants.clone()));
     if let Some(pool) = db {
         let operations =
             fleet_application::operation::Operations::new_with_events_and_catalog_rollout_targets(
@@ -231,7 +372,23 @@ fn api_state(
                 std::sync::Arc::new(fleet_storage_sqlite::AuditSink::new(pool.clone())),
                 events.clone(),
                 std::sync::Arc::new(fleet_storage_sqlite::MachineRepository::new(pool.clone())),
-            );
+            )
+            .with_pool_members(std::sync::Arc::new(
+                fleet_application::operation::PoolMembership(std::sync::Arc::new(
+                    fleet_storage_sqlite::LabPoolRepository::new(pool.clone()),
+                )),
+            ))
+            .with_lease_owners(std::sync::Arc::new(
+                fleet_storage_sqlite::LeaseRepository::new(pool.clone()),
+            ));
+        let credentials = fleet_application::credentials::Credentials::new(
+            std::sync::Arc::new(fleet_storage_sqlite::CredentialRepository::new(
+                pool.clone(),
+            )),
+            std::sync::Arc::new(fleet_storage_sqlite::AuditSink::new(pool.clone())),
+            std::sync::Arc::new(fleet_auth::DelegatedTokenCrypto::new()),
+            grants,
+        );
         let machines = fleet_application::machine::Machines::new(
             std::sync::Arc::new(fleet_storage_sqlite::MachineRepository::new(pool.clone())),
             std::sync::Arc::new(fleet_storage_sqlite::AuditSink::new(pool.clone())),
@@ -243,8 +400,23 @@ fn api_state(
         let audit = fleet_application::audit::AuditQueries::new(std::sync::Arc::new(
             fleet_storage_sqlite::AuditLedger::new(&pool),
         ));
+        // The kinds provider actions own run only through the broker.
+        let action_registry = compose_action_registry();
+        let operations =
+            std::sync::Arc::new(operations.with_brokered_kinds(action_registry.operation_kinds()));
+        let requests = fleet_application::broker::Broker::new(
+            std::sync::Arc::new(fleet_storage_sqlite::ActionRequestRepository::new(
+                pool.clone(),
+            )),
+            action_registry,
+            operations.clone(),
+            // `main` refuses to start on a malformed setting, so the
+            // fallback only serves test composition.
+            broker_settings_from_env().unwrap_or_default(),
+        )
+        .with_events(events.clone());
         return fleet_api::operations::ApiState {
-            operations: std::sync::Arc::new(operations),
+            operations,
             authorizer,
             system: std::sync::Arc::new(system),
             audit: Some(std::sync::Arc::new(audit)),
@@ -269,16 +441,29 @@ fn api_state(
             images,
             lab,
             desired: Some(std::sync::Arc::new({
-                let desired = fleet_application::source::DesiredSource::new(
-                    std::sync::Arc::new(fleet_storage_sqlite::SourceRepository::new(pool.clone())),
-                    std::sync::Arc::new(fleet_storage_sqlite::AuditSink::new(pool.clone())),
-                );
-                match git_credentials {
+                let desired = compose_desired_source(&pool);
+                let desired = match git_credentials {
                     Some(credentials) => desired.with_credentials(credentials),
+                    None => desired,
+                };
+                // FM-1020: the domain lookup enricher. `main` refuses to
+                // start on a malformed setting, so the fallback only
+                // serves test composition.
+                let enricher = desired.registry().cloned().and_then(|registry| {
+                    registry_enrich::compose_domain_enricher(
+                        &pool,
+                        registry,
+                        registry_enrich::enrich_settings_from_env().unwrap_or_default(),
+                    )
+                });
+                match enricher {
+                    Some(enricher) => desired.with_domain_enricher(enricher),
                     None => desired,
                 }
             })),
             planning: Some(std::sync::Arc::new(compose_planning(&pool))),
+            credentials: Some(std::sync::Arc::new(credentials)),
+            requests: Some(std::sync::Arc::new(requests)),
         };
     }
     // Without a store there is nothing to serve: the state's backends answer
@@ -303,6 +488,8 @@ fn api_state(
         lab: None,
         desired: None,
         planning: None,
+        credentials: None,
+        requests: None,
     }
 }
 
@@ -494,7 +681,53 @@ fn build_router_for_caller(
         services.and_then(|services| services.git_credentials.clone()),
         events,
     ));
-    let api_router = fleet_api::router(api_state.clone());
+    let credentials = api_state.credentials.clone();
+    let external_accounts = services.and_then(|services| services.external_accounts.clone());
+    let dns = services.and_then(|services| services.dns.clone());
+    let coolify_discovery = services.and_then(|services| services.coolify_discovery.clone());
+    let coolify_lifecycle = services.and_then(|services| services.coolify_lifecycle.clone());
+    let coolify_settings = services.and_then(|services| services.coolify_settings.clone());
+    let site_templates = services.and_then(|services| services.site_templates.clone());
+    let mut api_router = fleet_api::router(api_state.clone());
+    if let (Some(pool), Some(machines)) = (audit_db.as_ref(), api_state.machines.as_ref()) {
+        // The running-services surface (FM-1031), same shape: cached
+        // observations only, so it needs no secret store.
+        api_router = api_router.layer(axum::Extension(
+            external_accounts_store::compose_running_services(
+                pool,
+                machines.clone(),
+                api_state
+                    .desired
+                    .as_ref()
+                    .and_then(|desired| desired.registry().cloned()),
+            ),
+        ));
+    }
+    if let Some(coolify_discovery) = coolify_discovery {
+        // The Coolify discovery surface (FM-1030), same shape.
+        api_router = api_router.layer(axum::Extension(coolify_discovery));
+    }
+    if let Some(coolify_lifecycle) = coolify_lifecycle {
+        // The Coolify lifecycle and log surface (FM-1033), same shape.
+        api_router = api_router.layer(axum::Extension(coolify_lifecycle));
+    }
+    if let Some(coolify_settings) = coolify_settings {
+        // The Coolify settings surface (FM-1034), same shape.
+        api_router = api_router.layer(axum::Extension(coolify_settings));
+    }
+    if let Some(site_templates) = site_templates {
+        // The site-template surface (FM-1035), same shape.
+        api_router = api_router.layer(axum::Extension(site_templates));
+    }
+    if let Some(external_accounts) = external_accounts {
+        // The external accounts surface (FM-1001) takes its use cases as a
+        // request extension, so the shared API state stays untouched.
+        api_router = api_router.layer(axum::Extension(external_accounts));
+    }
+    if let Some(dns) = dns {
+        // The DNS surface (FM-1042) takes its use cases the same way.
+        api_router = api_router.layer(axum::Extension(dns));
+    }
     let shell = shell(settings).fallback(api_router);
     let web_index = std::fs::read(settings.web_dist.join("index.html"))
         .ok()
@@ -522,6 +755,13 @@ fn build_router_for_caller(
         router = router.nest("/api/node/v1", node_routes);
     }
     router = router.layer(middleware::from_fn_with_state(web_index, spa_fallback));
+    // A delegated credential (ADR 0011) is resolved before the listener's own
+    // caller: a valid token narrows the request to its principal, an invalid
+    // one is refused, and a request without one is decided as before.
+    let delegated = credentials.map(|credentials| fleet_auth::DelegatedCallerResolver {
+        credentials,
+        require_loopback_peer: tailscale_identity,
+    });
     if tailscale_identity {
         router = fleet_api::tailscale_serve_guard(router, fleet_auth::TailscaleServePeer);
     } else {
@@ -529,7 +769,17 @@ fn build_router_for_caller(
         // static, health, downloads, and the node surface. Public API
         // correlation stays scoped to its router; the node protocol has its
         // own correlation contract.
-        router = router.layer(middleware::from_fn(fleet_auth::resolve_lan_caller));
+        router = router
+            .layer(middleware::from_fn(
+                fleet_api::auth::reject_unauthenticated_caller,
+            ))
+            .layer(middleware::from_fn(fleet_auth::resolve_lan_caller));
+    }
+    if let Some(resolver) = delegated {
+        router = router.layer(middleware::from_fn_with_state(
+            resolver,
+            fleet_auth::resolve_delegated_caller,
+        ));
     }
     // Keep headers outside the identity gate so its early 401 responses keep
     // the controller's browser protections.
@@ -1037,6 +1287,115 @@ mod tailscale_identity_tests {
             .insert(ConnectInfo(SocketAddr::from(([127, 0, 0, 1], 5000))));
         let response = router.clone().oneshot(request).await.unwrap();
         assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn identity_listener_takes_a_delegated_bearer_from_the_trusted_peer_only() {
+        let web_dist = tempfile::tempdir().unwrap();
+        std::fs::write(web_dist.path().join("index.html"), "<html>fleet</html>").unwrap();
+        let store_dir = tempfile::tempdir().unwrap();
+        let store = fleet_storage_sqlite::Store::open(&store_dir.path().join("fleet.db"))
+            .await
+            .unwrap();
+        let settings = Settings {
+            listen: "127.0.0.1:8080".parse().unwrap(),
+            tailscale_serve_listen: Some("127.0.0.1:8081".parse().unwrap()),
+            web_dist: web_dist.path().to_path_buf(),
+            artifacts_dir: None,
+        };
+        let router = build_tailscale_serve_router(
+            &settings,
+            Some(store.pool().clone()),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            Arc::new(fleet_application::events::EventHub::new(8)),
+        );
+        let credentials = fleet_application::credentials::Credentials::new(
+            Arc::new(fleet_storage_sqlite::CredentialRepository::new(
+                store.pool().clone(),
+            )),
+            Arc::new(fleet_storage_sqlite::AuditSink::new(store.pool().clone())),
+            Arc::new(fleet_auth::DelegatedTokenCrypto::new()),
+            Arc::new(fleet_application::credentials::GrantBook::new()),
+        );
+        let issued = credentials
+            .issue(
+                &fleet_auth::LanAllowAllAuthorizer,
+                fleet_auth::LAN_PRINCIPAL_ID,
+                fleet_application::credentials::IssueCredential {
+                    owner: "release-qa".to_owned(),
+                    ttl_seconds: 600,
+                    templates: vec!["template-1".to_owned()],
+                    versions: vec![],
+                    label: String::new(),
+                },
+                fleet_core::SystemClock::now_unix_millis(),
+            )
+            .await
+            .unwrap();
+        let call = |peer: [u8; 4], token: Option<&str>, login: Option<&str>| {
+            let router = router.clone();
+            let token = token.map(str::to_owned);
+            let login = login.map(str::to_owned);
+            async move {
+                let mut builder = Request::builder().uri("/api/v1/credentials");
+                if let Some(token) = token {
+                    builder = builder.header("authorization", format!("Bearer {token}"));
+                }
+                if let Some(login) = login {
+                    builder = builder.header("tailscale-user-login", login);
+                }
+                let mut request = builder.body(Body::empty()).unwrap();
+                request
+                    .extensions_mut()
+                    .insert(ConnectInfo(SocketAddr::from((peer, 5000))));
+                router.oneshot(request).await.unwrap().status()
+            }
+        };
+        // Resolved as the credential (and so refused the credential
+        // surface), with no login: tagged devices have none.
+        assert_eq!(
+            call([127, 0, 0, 1], Some(&issued.token), None).await,
+            StatusCode::FORBIDDEN
+        );
+        // A Tailscale login beside the token does not widen it.
+        assert_eq!(
+            call(
+                [127, 0, 0, 1],
+                Some(&issued.token),
+                Some("alice@example.com")
+            )
+            .await,
+            StatusCode::FORBIDDEN
+        );
+        // Without the token that login is the administrator.
+        assert_eq!(
+            call([127, 0, 0, 1], None, Some("alice@example.com")).await,
+            StatusCode::OK
+        );
+        // Not from the trusted peer, a wrong token, or no identity at all.
+        assert_eq!(
+            call([10, 20, 30, 40], Some(&issued.token), None).await,
+            StatusCode::UNAUTHORIZED
+        );
+        assert_eq!(
+            call(
+                [127, 0, 0, 1],
+                Some(&format!("fmdc1.{}", "cd".repeat(32))),
+                Some("alice@example.com")
+            )
+            .await,
+            StatusCode::UNAUTHORIZED
+        );
+        assert_eq!(
+            call([127, 0, 0, 1], None, None).await,
+            StatusCode::UNAUTHORIZED
+        );
     }
 
     #[tokio::test]

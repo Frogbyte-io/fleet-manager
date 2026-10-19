@@ -7,7 +7,8 @@ export type FleetEventStatus = 'connecting' | 'live' | 'disconnected'
 // corresponding authorized API reads already held by the web query cache.
 const QUERY_KEYS: Record<string, readonly (readonly string[])[]> = {
   'machine.changed': [['fleet', 'machines'], ['machine'], ['machines', 'matrix'], ['skills', 'machines'], ['drift'], ['audit', 'recent']],
-  'operation.changed': [['operation'], ['operations', 'list'], ['drift'], ['images', 'build-operations'], ['audit', 'recent']],
+  'operation.changed': [['operation'], ['operations', 'list'], ['requests'], ['drift'], ['images', 'build-operations'], ['audit', 'recent']],
+  'request.changed': [['requests'], ['audit', 'recent']],
   'lease.changed': [['lab', 'leases'], ['lab', 'provisions'], ['audit', 'recent']],
   'onboarding.changed': [['add', 'drafts'], ['onboarding-draft'], ['audit', 'recent']],
   'proxmox.changed': [['audit', 'recent'], ['fleet', 'proxmox-accounts'], ['fleet', 'proxmox-discovery'], ['fleet', 'proxmox-guests'], ['machine']],

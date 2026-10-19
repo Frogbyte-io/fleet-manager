@@ -97,7 +97,9 @@ pub struct InstallPayload {
     pub connect_wait_seconds: Option<u64>,
     /// Extra environment for the installer, e.g. the layout overrides
     /// (`FLEETD_STATE_DIR`, `FLEETD_SYSTEMCTL`, …) containers and tests use.
-    /// Never carries secrets: this rides the argv-visible metadata blob.
+    /// Never carries secrets: this rides the argv-visible metadata blob. A
+    /// value whose key names a secret (token, password, key, ...) is still
+    /// scrubbed literally from failure details, as defense in depth.
     #[serde(default)]
     pub installer_env: Vec<(String, String)>,
 }
@@ -231,6 +233,7 @@ impl InstallExecutor {
                         &operation.id,
                         "invalid_request",
                         "supply artifactUrl and artifactSha256 together, or neither for the orchestrated install",
+                        &[],
                     )
                     .await;
             }
@@ -307,6 +310,7 @@ impl InstallExecutor {
             }
         };
 
+        let secrets = known_secrets(token.as_deref(), &payload.installer_env);
         let script = install_script(token.as_deref(), enrollment == Enrollment::Forced);
         operations
             .record_progress(
@@ -323,14 +327,21 @@ impl InstallExecutor {
             .run_install_script(
                 &spec,
                 &script,
-                &artifact_url,
-                &artifact_sha256,
+                (&artifact_url, &artifact_sha256),
                 &payload,
+                &secrets,
                 deadline,
             )
             .await
         {
-            return fail_operation(operations, &operation.id, "install_failed", &detail).await;
+            return fail_operation(
+                operations,
+                &operation.id,
+                "install_failed",
+                &detail,
+                &secrets,
+            )
+            .await;
         }
 
         let wait_seconds = payload
@@ -352,8 +363,14 @@ impl InstallExecutor {
             .wait_until_connected(&payload.machine_id, wait_seconds)
             .await
         {
-            return fail_operation(operations, &operation.id, "node_did_not_connect", &detail)
-                .await;
+            return fail_operation(
+                operations,
+                &operation.id,
+                "node_did_not_connect",
+                &detail,
+                &secrets,
+            )
+            .await;
         }
 
         // FM-212's verification: a connected node must also report facts.
@@ -386,7 +403,16 @@ impl InstallExecutor {
                     .map_err(|error| error.to_string())
             }
             Err(detail) => {
-                fail_operation(operations, &operation.id, "inventory_unverified", &detail).await
+                // The detail can carry the node's own payload; fail_operation
+                // scrubs and bounds it like every other stored output.
+                fail_operation(
+                    operations,
+                    &operation.id,
+                    "inventory_unverified",
+                    &detail,
+                    &secrets,
+                )
+                .await
             }
         }
     }
@@ -426,8 +452,9 @@ impl InstallExecutor {
             .is_some_and(|family| family.eq_ignore_ascii_case("linux"))
         {
             return Err(format!(
-                "the automated install supports linux; this machine reports os.family = {family:?}. \
-                 Discover the machine again, or supply artifactUrl and artifactSha256 explicitly"
+                "the automated install supports linux; this machine reports os.family = {:?}. \
+                 Discover the machine again, or supply artifactUrl and artifactSha256 explicitly",
+                family.as_deref().map(echo_fact),
             ));
         }
         let Some(architecture) = fact("host", "architecture") else {
@@ -440,7 +467,8 @@ impl InstallExecutor {
             "aarch64" | "arm64" => "linux-aarch64",
             other => {
                 return Err(format!(
-                    "the automated install supports x86_64 and aarch64; this machine reports {other:?}.                      Supply artifactUrl and artifactSha256 explicitly"
+                    "the automated install supports x86_64 and aarch64; this machine reports {:?}.                      Supply artifactUrl and artifactSha256 explicitly",
+                    echo_fact(other)
                 ));
             }
         };
@@ -513,9 +541,12 @@ impl InstallExecutor {
             .map(|status| status == fleet_protocol::wire::ResultStatus::Succeeded)
             .unwrap_or(false);
         if !succeeded {
+            // Cut the body to a small bound first: a compact payload with no
+            // whitespace would otherwise lose everything to the scrub window.
+            let body = String::from_utf8_lossy(&result.payload);
             return Err(format!(
                 "the node refused the inventory request: {}",
-                String::from_utf8_lossy(&result.payload)
+                cut_at_char_boundary(&body, REFUSAL_BODY_BYTES)
             ));
         }
         let facts = crate::gateway::ingest_inventory_report(
@@ -523,7 +554,8 @@ impl InstallExecutor {
             machine_id,
             &result.payload,
         )
-        .await?;
+        .await?
+        .facts;
         if facts == 0 {
             return Err(
                 "the node reported an empty inventory; check the service's journal".to_owned(),
@@ -548,9 +580,9 @@ impl InstallExecutor {
         &self,
         spec: &fleet_provider_ssh::SshConnectionSpec,
         script: &str,
-        artifact_url: &str,
-        artifact_sha256: &str,
+        (artifact_url, artifact_sha256): (&str, &str),
         payload: &InstallPayload,
+        secrets: &[String],
         deadline: Duration,
     ) -> Result<(), String> {
         let metadata = fleet_provider_ssh::ScriptMetadata {
@@ -603,7 +635,7 @@ impl InstallExecutor {
                 result
                     .exit_code
                     .map_or_else(|| "with no exit code".to_owned(), |code| code.to_string()),
-                first_lines(&result.stderr, &result.stdout),
+                first_lines(&result.stderr, &result.stdout, secrets),
             ));
         }
         Ok(())
@@ -648,6 +680,14 @@ enum Enrollment {
     Upgrade,
 }
 
+/// A node-reported fact echoed into an error: node text is untrusted, so it
+/// is scrubbed, flattened and cut to a short prefix.
+fn echo_fact(value: &str) -> String {
+    const ECHO_LIMIT: usize = 64;
+    let (scrubbed, _) = fleet_core::scrub_and_bound_with(value, false, str::to_owned);
+    scrubbed.chars().take(ECHO_LIMIT).collect()
+}
+
 /// The install script. The enrollment token, when there is one, is
 /// interpolated into the script text — stdin-delivered, never argv — and
 /// piped straight into `fleetd enroll --token-stdin` by install.sh. The
@@ -684,15 +724,66 @@ fn origin_of(artifact_url: &str) -> String {
     format!("{scheme}://{authority}")
 }
 
+/// Secrets shorter than this are not scrubbed literally: a short value would
+/// mangle ordinary output and is not a credential.
+const MIN_SECRET_LEN: usize = 8;
+
+/// Whether an installer environment name says its value is a secret.
+fn is_secret_name(name: &str) -> bool {
+    let name = name.to_ascii_uppercase();
+    ["TOKEN", "SECRET", "PASSWORD", "PASSWD", "KEY", "CREDENTIAL"]
+        .iter()
+        .any(|word| name.contains(word))
+}
+
+/// The values this install knows to be secret: the enrollment token (never
+/// `user:password@` shaped, so the pattern scrub cannot see it if install.sh
+/// echoes it) and installer environment values whose names say they are
+/// secrets. Layout overrides such as `FLEETD_STATE_DIR` are not secrets and
+/// stay readable in failure details.
+fn known_secrets(token: Option<&str>, installer_env: &[(String, String)]) -> Vec<String> {
+    token
+        .into_iter()
+        .map(str::to_owned)
+        .chain(
+            installer_env
+                .iter()
+                .filter(|(name, _)| is_secret_name(name))
+                .map(|(_, value)| value.clone()),
+        )
+        .filter(|value| value.len() >= MIN_SECRET_LEN)
+        .collect()
+}
+
+/// Replaces every literal occurrence of a known secret, longest first so a
+/// secret that contains another is not left half visible.
+fn scrub_known(text: &str, secrets: &[String]) -> String {
+    let mut ordered: Vec<&String> = secrets.iter().collect();
+    ordered.sort_by_key(|secret| std::cmp::Reverse(secret.len()));
+    ordered.into_iter().fold(text.to_owned(), |text, secret| {
+        text.replace(secret.as_str(), "[redacted]")
+    })
+}
+
 /// The first informative line of remote output for a failure detail.
-fn first_lines(stderr: &str, stdout: &str) -> String {
+fn first_lines(stderr: &str, stdout: &str, secrets: &[String]) -> String {
+    // Scrub before choosing and cutting the line, so a credential that
+    // straddles the 300-byte cut is redacted, never half kept.
     let pick = |text: &str| -> Option<String> {
-        text.lines()
+        let (scrubbed, _) = crate::exec::scrub_and_bound_with(text.trim_start(), false, |text| {
+            scrub_known(text, secrets)
+        });
+        scrubbed
+            .lines()
             .map(str::trim)
             .find(|line| !line.is_empty())
             .map(|line| {
                 if line.len() > 300 {
-                    format!("{}…", &line[..300])
+                    let mut end = 300;
+                    while !line.is_char_boundary(end) {
+                        end -= 1;
+                    }
+                    format!("{}…", &line[..end])
                 } else {
                     line.to_owned()
                 }
@@ -703,13 +794,31 @@ fn first_lines(stderr: &str, stdout: &str) -> String {
         .unwrap_or_else(|| "no remote output".to_owned())
 }
 
+/// How much of a node's refusal body is kept before scrubbing.
+const REFUSAL_BODY_BYTES: usize = 4096;
+
+/// The prefix of `text` of at most `max` bytes, cut at a char boundary.
+fn cut_at_char_boundary(text: &str, max: usize) -> &str {
+    let mut end = max.min(text.len());
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    &text[..end]
+}
+
 /// Completes an operation as a failed step with a bounded, honest reason.
 async fn fail_operation(
     operations: &Operations,
     operation_id: &str,
     reason: &str,
     detail: &str,
+    secrets: &[String],
 ) -> Result<(), String> {
+    // Whatever the detail quotes (a node's payload, a transport error), it is
+    // scrubbed of credentials and known secrets and bounded before storing.
+    let detail =
+        crate::exec::scrub_and_bound_with(detail.trim(), false, |text| scrub_known(text, secrets))
+            .0;
     let error_json = serde_json::json!({ "reason": reason, "detail": detail }).to_string();
     operations
         .complete(operation_id, "failed", None, Some(&error_json))
@@ -734,4 +843,126 @@ fn file_sha256(path: &std::path::Path) -> Result<String, String> {
             let _ = write!(text, "{byte:02x}");
             text
         }))
+}
+
+#[cfg(test)]
+mod first_lines_tests {
+    use super::{first_lines, known_secrets, scrub_known};
+
+    /// #357: the first remote line is scrubbed before it is cut at the
+    /// 300-byte bound, so a credential at the bound is never half kept.
+    #[test]
+    fn a_credential_at_the_line_bound_is_redacted_not_cut() {
+        for pad in [250, 270, 285, 295, 300] {
+            let line = format!("{} https://user:hunter2pw@host.invalid/x", "x".repeat(pad));
+            let out = first_lines(&line, "", &[]);
+            assert!(!out.contains("hunter2"), "pad {pad}: {out}");
+            assert!(!out.contains("user:"), "pad {pad}: {out}");
+        }
+    }
+
+    #[test]
+    fn leading_blank_output_does_not_hide_the_first_line() {
+        let out = first_lines(&format!("{}\nreal failure", " \n".repeat(3_000)), "", &[]);
+        assert_eq!(out, "real failure");
+    }
+
+    #[test]
+    fn stdout_is_scrubbed_when_stderr_is_empty_and_multibyte_cuts_safely() {
+        let out = first_lines("", &format!("{} user:hunter2pw@host", "é".repeat(200)), &[]);
+        assert!(!out.contains("hunter2"), "{out}");
+        assert_eq!(first_lines("", "", &[]), "no remote output");
+    }
+
+    /// #381: the enrollment token and secret-named installer env values are
+    /// not `user:password@` shaped; they are scrubbed literally, also at the
+    /// cut. Layout overrides stay readable.
+    #[test]
+    fn known_secrets_are_scrubbed_literally_even_at_the_bound() {
+        let secrets = known_secrets(
+            Some("tok_AbC123xyz"),
+            &[
+                ("API_KEY".to_owned(), "k-9f8e7d6c".to_owned()),
+                ("FLEETD_STATE_DIR".to_owned(), "/var/lib/fleetd".to_owned()),
+                ("FLEETD_SYSTEMCTL".to_owned(), "/bin/true".to_owned()),
+                ("SHORT_TOKEN".to_owned(), "abc".to_owned()),
+            ],
+        );
+        assert_eq!(secrets.len(), 2, "only secrets are scrubbed: {secrets:?}");
+        for pad in [250, 285, 295, 300] {
+            let line = format!(
+                "{} echo tok_AbC123xyz k-9f8e7d6c /var/lib/fleetd",
+                "x".repeat(pad)
+            );
+            let out = first_lines(&line, "", &secrets);
+            assert!(!out.contains("AbC123"), "pad {pad}: {out}");
+            assert!(!out.contains("9f8e7d"), "pad {pad}: {out}");
+        }
+        let out = first_lines("mkdir /var/lib/fleetd/state: denied", "", &secrets);
+        assert!(out.contains("/var/lib/fleetd"), "{out}");
+        assert_eq!(scrub_known("a tok_AbC123xyz b", &secrets), "a [redacted] b");
+    }
+}
+
+#[cfg(test)]
+mod inventory_detail_tests {
+    use super::{REFUSAL_BODY_BYTES, cut_at_char_boundary, known_secrets, scrub_known};
+
+    fn scrub(detail: &str, secrets: &[String]) -> String {
+        crate::exec::scrub_and_bound_with(detail.trim(), false, |t| scrub_known(t, secrets)).0
+    }
+
+    /// #406: a node's refusal payload carrying a credential-shaped string is
+    /// scrubbed, and a long one is bounded, before it is stored.
+    #[test]
+    fn the_failure_detail_is_scrubbed_and_bounded() {
+        let payload =
+            r#"{"remote":"https://user:secret@host.invalid/","proxy":"user:secret@proxy.invalid"}"#;
+        let out = scrub(
+            &format!("the node refused the inventory request: {payload}"),
+            &[],
+        );
+        assert!(!out.contains("secret"), "{out}");
+        assert!(out.contains("the node refused"), "{out}");
+        let long = format!(
+            "refused: {} https://user:secret@host.invalid/",
+            "x ".repeat(5_000)
+        );
+        let out = scrub(&long, &[]);
+        assert!(!out.contains("secret"), "{out}");
+        assert!(out.len() <= 3_000 + "…".len(), "{}", out.len());
+    }
+
+    /// A known secret is removed literally even when it has no credential shape.
+    #[test]
+    fn a_known_secret_is_scrubbed_literally() {
+        let secrets = known_secrets(Some("tok_FakeValue12345"), &[]);
+        let out = scrub("refused: tok_FakeValue12345 was seen", &secrets);
+        assert!(!out.contains("tok_FakeValue12345"), "{out}");
+    }
+
+    /// A 20 KiB compact refusal body (no whitespace) keeps a bounded, scrubbed
+    /// prefix instead of collapsing to an ellipsis.
+    #[test]
+    fn a_large_compact_refusal_keeps_a_bounded_prefix() {
+        let body = format!(
+            r#"{{"remote":"https://user:secret@host.invalid/","pad":"{}"}}"#,
+            "a".repeat(20 * 1024)
+        );
+        let cut = cut_at_char_boundary(&body, REFUSAL_BODY_BYTES);
+        assert!(cut.len() <= REFUSAL_BODY_BYTES);
+        let out = scrub(
+            &format!("the node refused the inventory request: {cut}"),
+            &[],
+        );
+        assert!(out.contains("the node refused"), "{out}");
+        assert!(out.contains("remote"), "{out}");
+        assert!(!out.contains("secret"), "{out}");
+        assert!(out.len() > 100, "{}", out.len());
+    }
+
+    #[test]
+    fn the_cut_respects_char_boundaries() {
+        assert_eq!(cut_at_char_boundary("aé", 2), "a");
+    }
 }

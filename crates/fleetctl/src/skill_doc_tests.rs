@@ -96,6 +96,16 @@ fn summarize(line: &str) -> String {
         // the real request code uses.
         Command::Status => format!("local fleetd socket (GET {SYSTEM_PATH} only with --url)"),
         Command::Events => format!("GET {EVENTS_PATH} (event stream)"),
+        // Registry edits run on a local Fleet Git checkout and send nothing.
+        Command::Registry(action) if action.is_local() => {
+            format!("local Fleet Git checkout: {action:?}")
+        }
+        // `env set` reads its values from stdin or a file while building the
+        // request; the documented line is only checked to parse.
+        Command::Services(super::services::ServicesAction::Settings(
+            super::services::settings::SettingsAction::EnvSet { .. },
+        )) => "POST /api/v1/services/{id}/settings/env (values read from stdin, never an argument)"
+            .to_owned(),
         command => {
             let (method, path, query, body) = request_for(command).unwrap_or_else(|error| {
                 panic!("documented command has no request: {line}\n{error}")

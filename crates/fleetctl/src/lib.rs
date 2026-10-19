@@ -12,7 +12,12 @@
 
 use std::fmt;
 
+pub mod accounts;
+pub mod dns;
 mod proxmox_tasks;
+pub mod registry;
+pub mod requests;
+pub mod services;
 
 /// One controller request in transport-neutral form: method, path, query,
 /// and body.
@@ -85,6 +90,12 @@ pub enum Command {
     /// The node and Fleet read status. Prefers the node's local socket
     /// unless `--url` names the controller explicitly.
     Status,
+    /// Per-command usage requested with `--help`/`-h`; answered locally,
+    /// never sent to the controller.
+    Help {
+        /// The usage text to print.
+        text: String,
+    },
     /// The system view.
     System,
     /// Tail payload-free fleet invalidation events from the controller.
@@ -432,6 +443,15 @@ pub enum Command {
     DesiredSourceCredential,
     /// List the recorded desired revisions.
     DesiredHistory,
+    /// Read the Registry settings (auto-activation and change mode).
+    DesiredSettings,
+    /// Change the Registry settings; only the named ones change.
+    DesiredSettingsSet {
+        /// `registry.autoActivate`, when given.
+        auto_activate: Option<bool>,
+        /// `registry.changeMode` (`direct` or `pull-request`), when given.
+        change_mode: Option<String>,
+    },
     /// Fetch, activate, or roll back a desired revision as a durable
     /// operation.
     DesiredMutate {
@@ -642,6 +662,17 @@ pub enum Command {
         /// The SSH port; 22 when omitted.
         port: Option<u16>,
     },
+    /// External provider accounts (Coolify, Cloudflare): `accounts ...`.
+    Accounts(accounts::AccountsAction),
+    /// Running services (Coolify, Docker, Registry joined): `services ...`.
+    Services(services::ServicesAction),
+    /// The descriptive Registry: reads over the API, edits in a local
+    /// checkout of the Fleet repository: `registry ...`.
+    Registry(registry::RegistryAction),
+    /// The action broker's approval inbox: `requests ...` (FM-1041).
+    Requests(requests::RequestsAction),
+    /// DNS zones, records, and brokered record changes: `dns ...` (FM-1042).
+    Dns(dns::DnsAction),
     /// List the configured Proxmox accounts.
     ProxmoxAccounts,
     /// Create a Proxmox account. The token secret is read from standard
@@ -723,7 +754,7 @@ pub enum Command {
     /// Review then run a destructive-adjacent operation on a guest.
     ProxmoxDestructive {
         /// The action: snapshot, snapshot-revert, snapshot-delete, clone,
-        /// template, or task-cancel.
+        /// template, destroy, or task-cancel.
         action: String,
         /// The account's identity.
         account_id: String,
@@ -731,7 +762,8 @@ pub enum Command {
         node: String,
         /// The guest's VMID.
         vmid: u32,
-        /// The action-specific parameters, as JSON on standard input.
+        /// The action-specific parameters as JSON. Destroy derives these
+        /// from its flags; other actions read them from standard input.
         params: Option<String>,
         /// Wait for the operation to finish.
         wait: bool,
@@ -740,6 +772,20 @@ pub enum Command {
     },
     /// List image recipe drafts.
     ImagesRecipes,
+    /// Lists immutable build records, optionally filtered by version.
+    ImagesBuilds {
+        /// Immutable recipe version filter.
+        version_id: Option<String>,
+        /// Maximum records per page.
+        limit: Option<u32>,
+        /// Continuation build identity.
+        cursor: Option<String>,
+    },
+    /// Reads one immutable build record.
+    ImagesBuildShow {
+        /// Build identity.
+        build_id: String,
+    },
     /// Create an image recipe draft. The recipe content is read from
     /// standard input as JSON.
     ImagesCreate {
@@ -758,6 +804,9 @@ pub enum Command {
     ImagesPublish {
         /// The recipe's identity.
         recipe_id: String,
+        /// The audited opt-in that lets the version build with
+        /// `insecure_skip_tls_verify` (#284).
+        allow_insecure_tls: bool,
     },
     /// List a recipe's published versions.
     ImagesVersions {
@@ -790,6 +839,15 @@ pub enum Command {
         ttl_seconds: u32,
         /// The cleanup strategy.
         cleanup: String,
+        /// The virtual audio device model (driver `none`), when declared.
+        audio: Option<String>,
+        /// The guest operating system (`linux` or `windows`), when declared.
+        guest_os: Option<String>,
+        /// The SSH account preconfigured in the image, when not `root`.
+        ssh_user: Option<String>,
+        /// The local Windows account whose desktop session
+        /// `--session interactive` runs in (a name, never a password).
+        interactive_user: Option<String>,
     },
     /// Publish a Lab template draft.
     LabPublish {
@@ -801,23 +859,166 @@ pub enum Command {
         /// The template version's identity.
         version_id: String,
     },
-    /// Start provisioning a requested lease with its configured Proxmox account.
+    /// Start provisioning a requested lease, through a configured Proxmox
+    /// account or the one placement selects.
     LabLeaseProvision {
         /// The lease to provision.
         lease_id: String,
-        /// The configured Proxmox account to use.
-        account_id: String,
+        /// The configured Proxmox account to use; placement selects one when
+        /// absent.
+        account_id: Option<String>,
     },
     /// List the provisioning records.
     LabProvisions,
-    /// List the Lab leases.
-    LabLeases,
+    /// List the Lab leases, narrowed by the filters given.
+    LabLeases {
+        /// Only leases serving this project.
+        project: Option<String>,
+        /// Only leases whose purpose is exactly this.
+        purpose: Option<String>,
+        /// Only leases whose purpose starts with this.
+        purpose_prefix: Option<String>,
+        /// Only leases in these states.
+        states: Vec<String>,
+        /// Only leases owned by this principal.
+        owner: Option<String>,
+    },
     /// Create a Lab lease from a published template version.
     LabLeaseCreate {
         /// The template version to lease from.
         version_id: String,
         /// The purpose the lease records.
         purpose: String,
+        /// The project the lease serves, when given.
+        project: Option<String>,
+        /// A key that makes a retried creation return the same lease.
+        idempotency_key: Option<String>,
+    },
+    /// Create a lease and provision it in one step (FM-720), optionally
+    /// waiting until it is ready.
+    LabNew {
+        /// The published template version.
+        version_id: String,
+        /// What the lease is for.
+        purpose: String,
+        /// The project it serves, when any.
+        project: Option<String>,
+        /// The Proxmox account; the only trusted account when omitted.
+        account: Option<String>,
+        /// A key that makes a retried creation return the same lease.
+        idempotency_key: Option<String>,
+        /// Wait until the lease is ready (or failed).
+        wait: bool,
+        /// How long to wait, in seconds.
+        timeout: Option<u64>,
+    },
+    /// One lease with its guest's connection details.
+    LabStatus {
+        /// The lease's identity.
+        lease_id: String,
+    },
+    /// Run a command on a ready lease's guest.
+    LabExec {
+        /// The lease's identity.
+        lease_id: String,
+        /// The command, shell-quoted from the words after `--`.
+        script: String,
+        /// The command's deadline, in seconds.
+        timeout: Option<u64>,
+        /// Wait for the result and exit with the command's exit code.
+        wait: bool,
+        /// `interactive` runs in the template's interactive user's desktop
+        /// session (Windows); absent is the SSH login's own session.
+        session: Option<String>,
+    },
+    /// Start a command that outlives one exec and return its handle (#394).
+    LabExecDetach {
+        /// The lease's identity.
+        lease_id: String,
+        /// The command, shell-quoted from the words after `--`.
+        script: String,
+        /// The bound in seconds; the controller defaults and caps it at
+        /// the lease's remaining TTL.
+        timeout: Option<u64>,
+        /// A key making a retry return the same handle.
+        idempotency_key: Option<String>,
+        /// `interactive` runs in the template's interactive user's desktop
+        /// session (Windows); absent is the SSH login's own session.
+        session: Option<String>,
+    },
+    /// The state, exit code, and output tails of a detached command.
+    LabExecStatus {
+        /// The handle `lab exec --detach` returned.
+        handle: String,
+        /// Poll until the command reaches a terminal state, then exit with
+        /// its exit code.
+        wait: bool,
+        /// How long `--wait` polls, in seconds.
+        timeout: Option<u64>,
+    },
+    /// Release a lease and optionally wait until its cleanup finished.
+    LabDestroy {
+        /// The lease's identity.
+        lease_id: String,
+        /// Keep the VM out of automatic cleanup (elevated).
+        keep: bool,
+        /// Wait until the lease is released (or `cleanup_failed`).
+        wait: bool,
+        /// How long to wait, in seconds.
+        timeout: Option<u64>,
+    },
+    /// List the Lab pools (FM-717).
+    LabPools,
+    /// Show one Lab pool and its members.
+    LabPoolShow {
+        /// The pool's identity.
+        pool_id: String,
+    },
+    /// Create a pool for a template version whose cleanup is `revert`.
+    LabPoolCreate {
+        /// The published template version.
+        template_version_id: String,
+        /// The Proxmox account the members are reached through.
+        account_id: String,
+        /// The baseline snapshot name.
+        baseline: String,
+        /// The declared size.
+        size: u64,
+    },
+    /// Delete an empty pool.
+    LabPoolDelete {
+        /// The pool's identity.
+        pool_id: String,
+    },
+    /// Register guests as pool members and queue their verification.
+    LabPoolFill {
+        /// The pool's identity.
+        pool_id: String,
+        /// The members' VMIDs.
+        vmids: Vec<u64>,
+        /// Wait for the verification and report its outcome.
+        wait: bool,
+        /// How long to wait, in seconds.
+        timeout: Option<u64>,
+    },
+    /// Drain the named members from a pool, or every member with `--all`.
+    LabPoolDrain {
+        /// The pool's identity.
+        pool_id: String,
+        /// The members' VMIDs; empty with `all`.
+        vmids: Vec<u64>,
+        /// Drain every member.
+        all: bool,
+    },
+    /// Re-arm the cleanup of a `cleanup_failed` lease and queue its next
+    /// attempt, optionally waiting for that attempt to finish.
+    LabCleanupRetry {
+        /// The lease's identity.
+        lease_id: String,
+        /// Wait for the queued cleanup attempt and report the lease.
+        wait: bool,
+        /// How long to wait, in seconds.
+        timeout: Option<u64>,
     },
     /// Release a lease (or keep its VM with the elevated permission).
     LabLeaseRelease {
@@ -835,6 +1036,90 @@ pub enum Command {
     },
     /// Run the expiry sweeper.
     LabSweep,
+    /// Issue a delegated credential (ADR 0011). The token is printed once.
+    CredentialsIssue {
+        /// The owner label of the leases it creates.
+        owner: String,
+        /// The lifetime in seconds.
+        ttl_seconds: u64,
+        /// Allowed Lab template ids.
+        templates: Vec<String>,
+        /// Allowed Lab template version ids.
+        versions: Vec<String>,
+        /// A free-text label.
+        label: String,
+    },
+    /// List the delegated credentials' metadata. Tokens are never listed.
+    CredentialsList,
+    /// Revoke a delegated credential.
+    CredentialsRevoke {
+        /// The credential's identity.
+        credential_id: String,
+    },
+    /// List stored Lab artifacts, narrowed by lease and/or project (FM-721).
+    LabArtifacts {
+        /// Only artifacts from this lease.
+        lease: Option<String>,
+        /// Only artifacts from leases serving this project.
+        project: Option<String>,
+        /// The `nextCursor` of the previous page.
+        cursor: Option<String>,
+        /// The page size.
+        limit: Option<u32>,
+    },
+    /// Copy declared guest files from a ready lease into the artifact store.
+    LabCollect {
+        /// The lease's identity.
+        lease_id: String,
+        /// The absolute guest paths to copy.
+        paths: Vec<String>,
+        /// Wait for the collection and exit non-zero unless every path was
+        /// stored.
+        wait: bool,
+        /// How long to wait, in seconds.
+        timeout: Option<u64>,
+    },
+    /// Copy one local regular file into a ready lease's guest.
+    LabPut {
+        /// The lease's identity.
+        lease_id: String,
+        /// The local file to send.
+        local_path: String,
+        /// The absolute guest path to create.
+        guest_path: String,
+        /// Replace an existing regular file at the guest path.
+        overwrite: bool,
+        /// Wait for the copy and exit non-zero unless it succeeded.
+        wait: bool,
+        /// How long to wait, in seconds.
+        timeout: Option<u64>,
+    },
+    /// Download one artifact, verify its sha256, and write it to a file.
+    LabArtifactGet {
+        /// The artifact's identity.
+        artifact_id: String,
+        /// Where to write it.
+        out: String,
+    },
+    /// List the names of the `images/<name>` build secrets.
+    ImagesSecretList,
+    /// Create or replace one build secret; the value is read from stdin.
+    ImagesSecretSet {
+        /// The record name without the `images/` prefix.
+        name: String,
+    },
+    /// Delete one build secret.
+    ImagesSecretRemove {
+        /// The record name without the `images/` prefix.
+        name: String,
+    },
+    /// List the build addresses that are held or quarantined.
+    ImagesAddresses,
+    /// End the quarantine of one build address early.
+    ImagesAddressClear {
+        /// The quarantined IPv4 address.
+        address: String,
+    },
     /// Promote one version as the recipe's built image.
     ImagesPromote {
         /// The version's identity.
@@ -849,6 +1134,8 @@ pub enum Command {
     ImagesBuild {
         /// The published recipe version to build.
         version_id: String,
+        /// The target account recorded in immutable build provenance.
+        account_id: Option<String>,
         /// Wait for the build to finish.
         wait: bool,
         /// How long to wait, in seconds.
@@ -978,6 +1265,16 @@ pub fn parse(args: &[String]) -> Result<Invocation, CliError> {
     }
 
     let words: Vec<&str> = rest.iter().map(String::as_str).collect();
+    if let Some(text) = help_text(&words) {
+        return Ok(Invocation {
+            url,
+            url_explicit,
+            socket,
+            output,
+            command: Command::Help { text },
+        });
+    }
+    reject_flag_as_id(&words)?;
     let command = match words.as_slice() {
         ["status"] => Command::Status,
         ["system"] => Command::System,
@@ -1035,6 +1332,8 @@ pub fn parse(args: &[String]) -> Result<Invocation, CliError> {
             credential_ref: Some((*reference).to_owned()),
         },
         ["desired", "history"] => Command::DesiredHistory,
+        ["desired", "settings"] => Command::DesiredSettings,
+        ["desired", "settings", "set", rest @ ..] => parse_desired_settings_set(rest)?,
         [
             "desired",
             verb @ ("fetch" | "activate" | "rollback"),
@@ -1089,11 +1388,17 @@ pub fn parse(args: &[String]) -> Result<Invocation, CliError> {
             parse_install_node(machine_id, rest, &url)?
         }
         ["tailnet", verb, rest @ ..] => parse_tailnet_command(verb, rest)?,
+        ["accounts", rest @ ..] => accounts::parse(rest, &mut output)?,
+        ["registry", rest @ ..] => registry::parse(rest, &mut output)?,
+        ["requests", rest @ ..] => requests::parse(rest, &mut output)?,
+        ["dns", rest @ ..] => dns::parse(rest, &mut output)?,
+        ["services", rest @ ..] => services::parse(rest, &mut output)?,
         ["proxmox", "tasks", rest @ ..] => proxmox_tasks::parse(rest, &mut output)?,
         ["proxmox", "privileges", rest @ ..] => proxmox_privileges::parse(rest, &mut output)?,
         ["proxmox", verb, rest @ ..] => parse_proxmox_command(verb, rest)?,
         ["images", verb, rest @ ..] => parse_images_command(verb, rest)?,
         ["lab", verb, rest @ ..] => parse_lab_command(verb, rest)?,
+        ["credentials", verb, rest @ ..] => parse_credentials_command(verb, rest)?,
         ["projects", verb, rest @ ..] => parse_projects_command(verb, rest)?,
         _ => return Err(CliError { message: usage() }),
     };
@@ -1104,6 +1409,57 @@ pub fn parse(args: &[String]) -> Result<Invocation, CliError> {
         output,
         command,
     })
+}
+
+/// Parses `credentials issue|list|revoke` (ADR 0011).
+fn parse_credentials_command(verb: &str, rest: &[&str]) -> Result<Command, CliError> {
+    match (verb, rest) {
+        ("list", []) => Ok(Command::CredentialsList),
+        ("revoke", [credential_id]) if !credential_id.starts_with('-') => {
+            Ok(Command::CredentialsRevoke {
+                credential_id: (*credential_id).to_owned(),
+            })
+        }
+        ("issue", flags) => {
+            let (mut owner, mut ttl_seconds, mut label) = (None, None, String::new());
+            let (mut templates, mut versions) = (Vec::new(), Vec::new());
+            let mut words = flags.iter().copied();
+            while let Some(flag) = words.next() {
+                let mut value = |name: &str| -> Result<String, CliError> {
+                    words.next().map(str::to_owned).ok_or_else(|| CliError {
+                        message: format!("{name} requires a value"),
+                    })
+                };
+                match flag {
+                    "--owner" => owner = Some(value("--owner")?),
+                    "--ttl" => {
+                        let raw = value("--ttl")?;
+                        ttl_seconds = Some(raw.parse::<u64>().map_err(|_| CliError {
+                            message: format!("--ttl must be a number of seconds, not {raw:?}"),
+                        })?);
+                    }
+                    "--template" => templates.push(value("--template")?),
+                    "--version" => versions.push(value("--version")?),
+                    "--label" => label = value("--label")?,
+                    other => return Err(unknown_lab_flag(other)),
+                }
+            }
+            let owner = owner.ok_or_else(|| CliError {
+                message: format!("credentials issue requires --owner\n\n{}", usage()),
+            })?;
+            let ttl_seconds = ttl_seconds.ok_or_else(|| CliError {
+                message: format!("credentials issue requires --ttl\n\n{}", usage()),
+            })?;
+            Ok(Command::CredentialsIssue {
+                owner,
+                ttl_seconds,
+                templates,
+                versions,
+                label,
+            })
+        }
+        _ => Err(CliError { message: usage() }),
+    }
 }
 
 /// Parses `desired fetch|activate|rollback`: the revision arguments and
@@ -1141,6 +1497,37 @@ fn parse_desired_mutation(verb: &str, rest: &[&str]) -> Result<Command, CliError
         content_digest: positional.get(1).map(|digest| (*digest).to_owned()),
         wait,
         timeout,
+    })
+}
+
+/// Parses `desired settings set`: `--auto-activate true|false` and
+/// `--change-mode direct|pull-request`, at least one.
+fn parse_desired_settings_set(rest: &[&str]) -> Result<Command, CliError> {
+    let mut auto_activate = None;
+    let mut change_mode = None;
+    let mut words = rest.iter();
+    while let Some(word) = words.next() {
+        match (*word, words.next()) {
+            ("--auto-activate", Some(&"true")) => auto_activate = Some(true),
+            ("--auto-activate", Some(&"false")) => auto_activate = Some(false),
+            ("--change-mode", Some(&mode @ ("direct" | "pull-request"))) => {
+                change_mode = Some(mode.to_owned());
+            }
+            _ => {
+                return Err(CliError {
+                    message: "usage: fleetctl desired settings set [--auto-activate true|false] [--change-mode direct|pull-request]".to_owned(),
+                });
+            }
+        }
+    }
+    if auto_activate.is_none() && change_mode.is_none() {
+        return Err(CliError {
+            message: "name at least one of --auto-activate or --change-mode".to_owned(),
+        });
+    }
+    Ok(Command::DesiredSettingsSet {
+        auto_activate,
+        change_mode,
     })
 }
 
@@ -1650,13 +2037,360 @@ fn parse_tailnet_command(verb: &str, rest: &[&str]) -> Result<Command, CliError>
 
 /// Parses one `fleetctl lab` subcommand.
 #[allow(clippy::too_many_lines)]
+/// Parses a numeric flag value.
+fn lab_number(name: &str, value: Option<&str>) -> Result<u64, CliError> {
+    let value = value.ok_or_else(|| CliError {
+        message: format!("--{name} requires a value"),
+    })?;
+    value.parse().map_err(|_| CliError {
+        message: format!("--{name} must be a number, not {value:?}"),
+    })
+}
+
+fn unknown_lab_flag(flag: &str) -> CliError {
+    CliError {
+        message: format!("unknown flag {flag:?}; see the usage below\n\n{}", usage()),
+    }
+}
+
+/// `lab create <template-version> --purpose <text> [--project <id>]
+/// [--account <id>] [--idempotency-key <key>] [--wait] [--timeout <s>]`.
+fn parse_lab_new(rest: &[&str]) -> Result<Command, CliError> {
+    let (version_id, flags) = rest
+        .split_first()
+        .ok_or_else(|| CliError { message: usage() })?;
+    let (mut purpose, mut project, mut account, mut wait, mut timeout) =
+        (None, None, None, false, None);
+    let mut idempotency_key = None;
+    let mut flags = flags.iter().copied();
+    while let Some(flag) = flags.next() {
+        let mut value = |name: &str| {
+            flags.next().map(str::to_owned).ok_or_else(|| CliError {
+                message: format!("--{name} requires a value"),
+            })
+        };
+        match flag {
+            "--purpose" => purpose = Some(value("purpose")?),
+            "--project" => project = Some(value("project")?),
+            "--account" => account = Some(value("account")?),
+            "--idempotency-key" => idempotency_key = Some(value("idempotency-key")?),
+            "--wait" => wait = true,
+            "--timeout" => timeout = Some(lab_number("timeout", flags.next())?),
+            other => return Err(unknown_lab_flag(other)),
+        }
+    }
+    Ok(Command::LabNew {
+        version_id: (*version_id).to_owned(),
+        purpose: purpose.ok_or_else(|| CliError {
+            message: "--purpose is required: record what the lease is for".to_owned(),
+        })?,
+        project,
+        account,
+        idempotency_key,
+        wait,
+        timeout,
+    })
+}
+
+/// `lab exec <lease> [--session interactive] [--timeout <s>] [--wait] --
+/// <command> [args...]`, or
+/// `lab exec <lease> --detach [--timeout <s>] [--idempotency-key <key>]
+/// [--script] -- <command> [args...]`; with `--script` the one word after
+/// `--` is sent untouched (a PowerShell script for a Windows lease).
+fn parse_lab_exec(rest: &[&str]) -> Result<Command, CliError> {
+    let (lease_id, flags) = rest
+        .split_first()
+        .ok_or_else(|| CliError { message: usage() })?;
+    let (mut timeout, mut wait, mut words) = (None, false, Vec::new());
+    let (mut detach, mut idempotency_key) = (false, None);
+    let (mut raw, mut session) = (false, None);
+    let mut flags = flags.iter().copied();
+    while let Some(flag) = flags.next() {
+        match flag {
+            "--wait" => wait = true,
+            "--session" => {
+                let value = flags.next().ok_or_else(|| CliError {
+                    message: "--session needs a value: service or interactive".to_owned(),
+                })?;
+                if !matches!(value, "service" | "interactive") {
+                    return Err(CliError {
+                        message: "--session must be service or interactive".to_owned(),
+                    });
+                }
+                session = Some(value.to_owned());
+            }
+            "--detach" => detach = true,
+            "--script" => raw = true,
+            "--timeout" => timeout = Some(lab_number("timeout", flags.next())?),
+            "--idempotency-key" => {
+                idempotency_key = Some(
+                    flags
+                        .next()
+                        .ok_or_else(|| CliError {
+                            message: "--idempotency-key needs a value".to_owned(),
+                        })?
+                        .to_owned(),
+                );
+            }
+            "--" => {
+                words = flags.by_ref().collect();
+                break;
+            }
+            other => return Err(unknown_lab_flag(other)),
+        }
+    }
+    if words.is_empty() {
+        return Err(CliError {
+            message: "a command must follow `--`".to_owned(),
+        });
+    }
+    // The default joins the words into one POSIX shell command. `--script`
+    // sends the one word after `--` exactly as given, which is how a command
+    // for a Windows guest (PowerShell, where POSIX quoting is wrong) is sent.
+    let script = if raw {
+        let [only] = words.as_slice() else {
+            return Err(CliError {
+                message: "--script takes exactly one word after `--`: the script text".to_owned(),
+            });
+        };
+        (*only).to_owned()
+    } else {
+        shell_join(&words)
+    };
+    if detach {
+        if wait {
+            return Err(CliError {
+                message: "--detach returns a handle at once; poll it with `lab exec-status <handle> --wait`"
+                    .to_owned(),
+            });
+        }
+        return Ok(Command::LabExecDetach {
+            lease_id: (*lease_id).to_owned(),
+            script,
+            timeout,
+            idempotency_key,
+            session,
+        });
+    }
+    if idempotency_key.is_some() {
+        return Err(CliError {
+            message: "--idempotency-key applies to `lab exec --detach`".to_owned(),
+        });
+    }
+    Ok(Command::LabExec {
+        lease_id: (*lease_id).to_owned(),
+        script,
+        timeout,
+        wait,
+        session,
+    })
+}
+
+/// `lab exec-status <handle> [--wait] [--timeout <s>]`.
+fn parse_lab_exec_status(rest: &[&str]) -> Result<Command, CliError> {
+    let (handle, flags) = rest
+        .split_first()
+        .ok_or_else(|| CliError { message: usage() })?;
+    let (mut wait, mut timeout) = (false, None);
+    let mut flags = flags.iter().copied();
+    while let Some(flag) = flags.next() {
+        match flag {
+            "--wait" => wait = true,
+            "--timeout" => timeout = Some(lab_number("timeout", flags.next())?),
+            other => return Err(unknown_lab_flag(other)),
+        }
+    }
+    if handle.is_empty()
+        || handle.len() > 64
+        || !handle
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'-')
+    {
+        return Err(CliError {
+            message: "a detached-exec handle is 1 to 64 letters, digits, `-` or `_`".to_owned(),
+        });
+    }
+    Ok(Command::LabExecStatus {
+        handle: (*handle).to_owned(),
+        wait,
+        timeout,
+    })
+}
+
+/// `lab destroy <lease> [--keep] [--wait] [--timeout <s>]`.
+fn parse_lab_destroy(rest: &[&str]) -> Result<Command, CliError> {
+    let (lease_id, flags) = rest
+        .split_first()
+        .ok_or_else(|| CliError { message: usage() })?;
+    let (mut keep, mut wait, mut timeout) = (false, false, None);
+    let mut flags = flags.iter().copied();
+    while let Some(flag) = flags.next() {
+        match flag {
+            "--keep" => keep = true,
+            "--wait" => wait = true,
+            "--timeout" => timeout = Some(lab_number("timeout", flags.next())?),
+            other => return Err(unknown_lab_flag(other)),
+        }
+    }
+    Ok(Command::LabDestroy {
+        lease_id: (*lease_id).to_owned(),
+        keep,
+        wait,
+        timeout,
+    })
+}
+
+/// `lab pool list|show|create|delete|fill|drain` (FM-717).
+fn parse_lab_pool(rest: &[&str]) -> Result<Command, CliError> {
+    let value = |flag: &str, value: Option<&str>| {
+        value.map(str::to_owned).ok_or_else(|| CliError {
+            message: format!("{flag} requires a value"),
+        })
+    };
+    match rest {
+        ["list"] => Ok(Command::LabPools),
+        ["show", pool_id] => Ok(Command::LabPoolShow {
+            pool_id: (*pool_id).to_owned(),
+        }),
+        ["delete", pool_id] => Ok(Command::LabPoolDelete {
+            pool_id: (*pool_id).to_owned(),
+        }),
+        ["create", flags @ ..] => {
+            let (mut version, mut account, mut baseline, mut size) = (None, None, None, None);
+            let mut flags = flags.iter().copied();
+            while let Some(flag) = flags.next() {
+                match flag {
+                    "--template-version" => version = Some(value(flag, flags.next())?),
+                    "--account" => account = Some(value(flag, flags.next())?),
+                    "--baseline" => baseline = Some(value(flag, flags.next())?),
+                    "--size" => size = Some(lab_number("size", flags.next())?),
+                    other => return Err(unknown_lab_flag(other)),
+                }
+            }
+            let missing = |name: &str| CliError {
+                message: format!("lab pool create requires {name}\n\n{}", usage()),
+            };
+            Ok(Command::LabPoolCreate {
+                template_version_id: version.ok_or_else(|| missing("--template-version"))?,
+                account_id: account.ok_or_else(|| missing("--account"))?,
+                baseline: baseline.ok_or_else(|| missing("--baseline"))?,
+                size: size.ok_or_else(|| missing("--size"))?,
+            })
+        }
+        ["fill", pool_id, flags @ ..] => {
+            let (mut vmids, mut wait, mut timeout) = (Vec::new(), false, None);
+            let mut flags = flags.iter().copied();
+            while let Some(flag) = flags.next() {
+                match flag {
+                    "--vmid" => vmids.push(lab_number("vmid", flags.next())?),
+                    "--wait" => wait = true,
+                    "--timeout" => timeout = Some(lab_number("timeout", flags.next())?),
+                    other => return Err(unknown_lab_flag(other)),
+                }
+            }
+            Ok(Command::LabPoolFill {
+                pool_id: (*pool_id).to_owned(),
+                vmids,
+                wait,
+                timeout,
+            })
+        }
+        ["drain", pool_id, flags @ ..] => {
+            let (mut vmids, mut all) = (Vec::new(), false);
+            let mut flags = flags.iter().copied();
+            while let Some(flag) = flags.next() {
+                match flag {
+                    "--vmid" => vmids.push(lab_number("vmid", flags.next())?),
+                    "--all" => all = true,
+                    other => return Err(unknown_lab_flag(other)),
+                }
+            }
+            if all != vmids.is_empty() {
+                return Err(CliError {
+                    message: format!(
+                        "lab pool drain needs --vmid <vmid>... or --all, not both\n\n{}",
+                        usage()
+                    ),
+                });
+            }
+            Ok(Command::LabPoolDrain {
+                pool_id: (*pool_id).to_owned(),
+                vmids,
+                all,
+            })
+        }
+        _ => Err(CliError { message: usage() }),
+    }
+}
+
+/// `lab cleanup-retry <lease> [--wait] [--timeout <s>]`.
+fn parse_lab_cleanup_retry(rest: &[&str]) -> Result<Command, CliError> {
+    let (lease_id, flags) = rest
+        .split_first()
+        .ok_or_else(|| CliError { message: usage() })?;
+    let (mut wait, mut timeout) = (false, None);
+    let mut flags = flags.iter().copied();
+    while let Some(flag) = flags.next() {
+        match flag {
+            "--wait" => wait = true,
+            "--timeout" => timeout = Some(lab_number("timeout", flags.next())?),
+            other => return Err(unknown_lab_flag(other)),
+        }
+    }
+    Ok(Command::LabCleanupRetry {
+        lease_id: (*lease_id).to_owned(),
+        wait,
+        timeout,
+    })
+}
+
+/// Joins words into one POSIX shell command, single-quoting every word
+/// that is not plainly safe, so `lab exec <lease> -- echo "a b"` runs
+/// exactly those two words remotely.
+#[must_use]
+pub fn shell_join(words: &[&str]) -> String {
+    words
+        .iter()
+        .map(|word| {
+            if !word.is_empty()
+                && word
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || b"-_./=:,@%+".contains(&b))
+            {
+                (*word).to_owned()
+            } else {
+                format!("'{}'", word.replace('\'', "'\\''"))
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+#[allow(clippy::too_many_lines)]
 fn parse_lab_command(verb: &str, rest: &[&str]) -> Result<Command, CliError> {
     match verb {
         "templates" => match rest {
             [] => Ok(Command::LabTemplates),
             _ => Err(CliError { message: usage() }),
         },
-        "create" => {
+        // `lab create <template-version>` creates a lease (FM-720); the
+        // template form, recognised by its flags, is the deprecated alias of
+        // `lab template-create`.
+        "create" if rest.first().is_some_and(|first| !first.starts_with("--")) => {
+            parse_lab_new(rest)
+        }
+        "status" => match rest {
+            [lease_id] => Ok(Command::LabStatus {
+                lease_id: (*lease_id).to_owned(),
+            }),
+            _ => Err(CliError { message: usage() }),
+        },
+        "exec" => parse_lab_exec(rest),
+        "exec-status" => parse_lab_exec_status(rest),
+        "destroy" => parse_lab_destroy(rest),
+        "cleanup-retry" => parse_lab_cleanup_retry(rest),
+        "pool" => parse_lab_pool(rest),
+        "create" | "template-create" => {
             let mut name = None;
             let mut description = None;
             let mut image_version_id = None;
@@ -1668,6 +2402,10 @@ fn parse_lab_command(verb: &str, rest: &[&str]) -> Result<Command, CliError> {
             let mut readiness_deadline_seconds = None;
             let mut ttl_seconds = None;
             let mut cleanup = None;
+            let mut audio = None;
+            let mut guest_os = None;
+            let mut ssh_user = None;
+            let mut interactive_user = None;
             let mut flags = rest.iter().copied();
             while let Some(flag) = flags.next() {
                 match flag {
@@ -1753,6 +2491,46 @@ fn parse_lab_command(verb: &str, rest: &[&str]) -> Result<Command, CliError> {
                             message: format!("--ttl must be a number, not {value:?}"),
                         })?);
                     }
+                    "--audio" => {
+                        audio = Some(
+                            flags
+                                .next()
+                                .ok_or_else(|| CliError {
+                                    message: "--audio requires a value".to_owned(),
+                                })?
+                                .to_owned(),
+                        );
+                    }
+                    "--guest-os" => {
+                        guest_os = Some(
+                            flags
+                                .next()
+                                .ok_or_else(|| CliError {
+                                    message: "--guest-os requires a value".to_owned(),
+                                })?
+                                .to_owned(),
+                        );
+                    }
+                    "--interactive-user" => {
+                        interactive_user = Some(
+                            flags
+                                .next()
+                                .ok_or_else(|| CliError {
+                                    message: "--interactive-user requires a value".to_owned(),
+                                })?
+                                .to_owned(),
+                        );
+                    }
+                    "--ssh-user" => {
+                        ssh_user = Some(
+                            flags
+                                .next()
+                                .ok_or_else(|| CliError {
+                                    message: "--ssh-user requires a value".to_owned(),
+                                })?
+                                .to_owned(),
+                        );
+                    }
                     "--cleanup" => {
                         cleanup = Some(
                             flags
@@ -1805,6 +2583,10 @@ fn parse_lab_command(verb: &str, rest: &[&str]) -> Result<Command, CliError> {
                 cleanup: cleanup.ok_or_else(|| CliError {
                     message: "--cleanup is required".to_owned(),
                 })?,
+                audio,
+                guest_os,
+                ssh_user,
+                interactive_user,
             })
         }
         "publish" => match rest {
@@ -1820,9 +2602,13 @@ fn parse_lab_command(verb: &str, rest: &[&str]) -> Result<Command, CliError> {
             _ => Err(CliError { message: usage() }),
         },
         "provision-lease" => match rest {
+            [lease_id] => Ok(Command::LabLeaseProvision {
+                lease_id: (*lease_id).to_owned(),
+                account_id: None,
+            }),
             [lease_id, "--account", account_id] => Ok(Command::LabLeaseProvision {
                 lease_id: (*lease_id).to_owned(),
-                account_id: (*account_id).to_owned(),
+                account_id: Some((*account_id).to_owned()),
             }),
             _ => Err(CliError { message: usage() }),
         },
@@ -1830,17 +2616,8 @@ fn parse_lab_command(verb: &str, rest: &[&str]) -> Result<Command, CliError> {
             [] => Ok(Command::LabProvisions),
             _ => Err(CliError { message: usage() }),
         },
-        "leases" => match rest {
-            [] => Ok(Command::LabLeases),
-            _ => Err(CliError { message: usage() }),
-        },
-        "lease" => match rest {
-            [version_id, "--purpose", purpose] => Ok(Command::LabLeaseCreate {
-                version_id: (*version_id).to_owned(),
-                purpose: (*purpose).to_owned(),
-            }),
-            _ => Err(CliError { message: usage() }),
-        },
+        "leases" => parse_lab_leases(rest),
+        "lease" => parse_lab_lease(rest),
         "release" => match rest {
             [lease_id] => Ok(Command::LabLeaseRelease {
                 lease_id: (*lease_id).to_owned(),
@@ -1873,13 +2650,240 @@ fn parse_lab_command(verb: &str, rest: &[&str]) -> Result<Command, CliError> {
             [] => Ok(Command::LabSweep),
             _ => Err(CliError { message: usage() }),
         },
+        "artifacts" => parse_lab_artifacts(rest),
+        "collect" => parse_lab_collect(rest),
+        "put" => parse_lab_put(rest),
+        "artifact-get" => match rest {
+            [artifact_id, "--out", out] if !artifact_id.starts_with("--") => {
+                Ok(Command::LabArtifactGet {
+                    artifact_id: (*artifact_id).to_owned(),
+                    out: (*out).to_owned(),
+                })
+            }
+            _ => Err(CliError { message: usage() }),
+        },
         _ => Err(CliError { message: usage() }),
     }
 }
 
+/// `lab leases [--project <id>] [--purpose <text>] [--purpose-prefix <text>]
+/// [--state <state>[,<state>]]... [--owner <id>]`.
+fn parse_lab_leases(rest: &[&str]) -> Result<Command, CliError> {
+    let (mut project, mut purpose, mut purpose_prefix, mut owner) = (None, None, None, None);
+    let mut states = Vec::new();
+    let mut flags = rest.iter().copied();
+    while let Some(flag) = flags.next() {
+        let mut value = |name: &str| {
+            flags.next().map(str::to_owned).ok_or_else(|| CliError {
+                message: format!("--{name} requires a value"),
+            })
+        };
+        match flag {
+            "--project" => project = Some(value("project")?),
+            "--purpose" => purpose = Some(value("purpose")?),
+            "--purpose-prefix" => purpose_prefix = Some(value("purpose-prefix")?),
+            "--owner" => owner = Some(value("owner")?),
+            "--state" => states.extend(
+                value("state")?
+                    .split(',')
+                    .map(|state| state.trim().to_owned()),
+            ),
+            other => return Err(unknown_lab_flag(other)),
+        }
+    }
+    Ok(Command::LabLeases {
+        project,
+        purpose,
+        purpose_prefix,
+        states,
+        owner,
+    })
+}
+
+/// `lab lease <template-version> --purpose <text> [--project <id>]
+/// [--idempotency-key <key>]`.
+fn parse_lab_lease(rest: &[&str]) -> Result<Command, CliError> {
+    let (version_id, flags) = rest
+        .split_first()
+        .ok_or_else(|| CliError { message: usage() })?;
+    if version_id.starts_with("--") {
+        return Err(CliError { message: usage() });
+    }
+    let (mut purpose, mut project, mut idempotency_key) = (None, None, None);
+    let mut flags = flags.iter().copied();
+    while let Some(flag) = flags.next() {
+        let mut value = |name: &str| {
+            flags.next().map(str::to_owned).ok_or_else(|| CliError {
+                message: format!("--{name} requires a value"),
+            })
+        };
+        match flag {
+            "--purpose" => purpose = Some(value("purpose")?),
+            "--project" => project = Some(value("project")?),
+            "--idempotency-key" => idempotency_key = Some(value("idempotency-key")?),
+            _ => return Err(CliError { message: usage() }),
+        }
+    }
+    Ok(Command::LabLeaseCreate {
+        version_id: (*version_id).to_owned(),
+        purpose: purpose.ok_or_else(|| CliError { message: usage() })?,
+        project,
+        idempotency_key,
+    })
+}
+
+/// `lab artifacts [--lease <id>] [--project <id>] [--cursor <id>] [--limit <n>]`.
+fn parse_lab_artifacts(rest: &[&str]) -> Result<Command, CliError> {
+    let (mut lease, mut project, mut cursor, mut limit) = (None, None, None, None);
+    let mut flags = rest.iter().copied().peekable();
+    while let Some(flag) = flags.next() {
+        let mut value = |name: &str| {
+            flags
+                .next_if(|value| !value.starts_with('-'))
+                .map(str::to_owned)
+                .ok_or_else(|| CliError {
+                    message: format!("--{name} requires a value"),
+                })
+        };
+        match flag {
+            "--lease" => lease = Some(value("lease")?),
+            "--project" => project = Some(value("project")?),
+            "--cursor" => cursor = Some(value("cursor")?),
+            "--limit" => {
+                let raw = value("limit")?;
+                limit = Some(raw.parse::<u32>().map_err(|_| CliError {
+                    message: format!("--limit must be a number, not {raw:?}"),
+                })?);
+            }
+            other => return Err(unknown_lab_flag(other)),
+        }
+    }
+    Ok(Command::LabArtifacts {
+        lease,
+        project,
+        cursor,
+        limit,
+    })
+}
+
+/// `lab collect <lease> <path>... [--wait] [--timeout <s>]`.
+fn parse_lab_collect(rest: &[&str]) -> Result<Command, CliError> {
+    let (lease_id, words) = rest
+        .split_first()
+        .ok_or_else(|| CliError { message: usage() })?;
+    if lease_id.starts_with("--") {
+        return Err(CliError { message: usage() });
+    }
+    let (mut paths, mut wait, mut timeout) = (Vec::new(), false, None);
+    let mut words = words.iter().copied();
+    while let Some(word) = words.next() {
+        match word {
+            "--wait" => wait = true,
+            "--timeout" => timeout = Some(lab_number("timeout", words.next())?),
+            other if other.starts_with("--") => return Err(unknown_lab_flag(other)),
+            path => paths.push(path.to_owned()),
+        }
+    }
+    if paths.is_empty() {
+        return Err(CliError {
+            message: "name at least one absolute guest path to collect".to_owned(),
+        });
+    }
+    Ok(Command::LabCollect {
+        lease_id: (*lease_id).to_owned(),
+        paths,
+        wait,
+        timeout,
+    })
+}
+
+/// `lab put <lease> <local-path> <guest-path> [--overwrite] [--wait] [--timeout <s>]`.
+fn parse_lab_put(rest: &[&str]) -> Result<Command, CliError> {
+    let (mut positionals, mut overwrite, mut wait, mut timeout) = (Vec::new(), false, false, None);
+    let mut words = rest.iter().copied();
+    while let Some(word) = words.next() {
+        match word {
+            "--overwrite" => overwrite = true,
+            "--wait" => wait = true,
+            "--timeout" => timeout = Some(lab_number("timeout", words.next())?),
+            other if other.starts_with("--") => return Err(unknown_lab_flag(other)),
+            word => positionals.push(word),
+        }
+    }
+    let [lease_id, local_path, guest_path] = positionals.as_slice() else {
+        return Err(CliError { message: usage() });
+    };
+    Ok(Command::LabPut {
+        lease_id: (*lease_id).to_owned(),
+        local_path: (*local_path).to_owned(),
+        guest_path: (*guest_path).to_owned(),
+        overwrite,
+        wait,
+        timeout,
+    })
+}
+
+/// Validates a build secret name for use as a path segment: the short
+/// name, with an optional `images/` prefix removed. The controller applies
+/// the same rule; checking here keeps free text out of the URL.
+fn image_secret_name(name: &str) -> Result<String, CliError> {
+    let short = name.strip_prefix("images/").unwrap_or(name);
+    let valid = !short.is_empty()
+        && short.len() <= 128
+        && !short.starts_with('.')
+        && short
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-'));
+    if valid {
+        Ok(short.to_owned())
+    } else {
+        Err(CliError {
+            message: "a secret name uses letters, digits, '.', '_' and '-' (the images/ prefix is optional)"
+                .to_owned(),
+        })
+    }
+}
+
 /// Parses one `fleetctl images` subcommand.
+#[allow(clippy::too_many_lines)]
 fn parse_images_command(verb: &str, rest: &[&str]) -> Result<Command, CliError> {
     match verb {
+        "builds" => {
+            let mut version_id = None;
+            let mut limit = None;
+            let mut cursor = None;
+            let mut flags = rest.iter().copied();
+            while let Some(flag) = flags.next() {
+                let value = flags
+                    .next()
+                    .filter(|value| !value.is_empty() && !value.starts_with('-'))
+                    .ok_or_else(|| CliError {
+                        message: format!("{flag} requires a value"),
+                    })?;
+                match flag {
+                    "--version" => version_id = Some(value.to_owned()),
+                    "--cursor" => cursor = Some(value.to_owned()),
+                    "--limit" => {
+                        limit = Some(value.parse().map_err(|_| CliError {
+                            message: "--limit must be a number".to_owned(),
+                        })?);
+                    }
+                    _ => return Err(CliError { message: usage() }),
+                }
+            }
+            Ok(Command::ImagesBuilds {
+                version_id,
+                limit,
+                cursor,
+            })
+        }
+        "build-show" => match rest {
+            [id] => Ok(Command::ImagesBuildShow {
+                build_id: (*id).to_owned(),
+            }),
+            _ => Err(CliError { message: usage() }),
+        },
+
         "recipes" => match rest {
             [] => Ok(Command::ImagesRecipes),
             _ => Err(CliError { message: usage() }),
@@ -1908,6 +2912,11 @@ fn parse_images_command(verb: &str, rest: &[&str]) -> Result<Command, CliError> 
         "publish" => match rest {
             [recipe_id] => Ok(Command::ImagesPublish {
                 recipe_id: (*recipe_id).to_owned(),
+                allow_insecure_tls: false,
+            }),
+            [recipe_id, "--allow-insecure-tls"] => Ok(Command::ImagesPublish {
+                recipe_id: (*recipe_id).to_owned(),
+                allow_insecure_tls: true,
             }),
             _ => Err(CliError { message: usage() }),
         },
@@ -1915,6 +2924,31 @@ fn parse_images_command(verb: &str, rest: &[&str]) -> Result<Command, CliError> 
             [recipe_id] => Ok(Command::ImagesVersions {
                 recipe_id: (*recipe_id).to_owned(),
             }),
+            _ => Err(CliError { message: usage() }),
+        },
+        "addresses" => match rest {
+            [] => Ok(Command::ImagesAddresses),
+            _ => Err(CliError { message: usage() }),
+        },
+        "secret" => match rest {
+            ["list"] => Ok(Command::ImagesSecretList),
+            ["set", name] => Ok(Command::ImagesSecretSet {
+                name: image_secret_name(name)?,
+            }),
+            ["rm", name] => Ok(Command::ImagesSecretRemove {
+                name: image_secret_name(name)?,
+            }),
+            _ => Err(CliError { message: usage() }),
+        },
+        "address-clear" => match rest {
+            [address] => {
+                let parsed: std::net::Ipv4Addr = address.parse().map_err(|_| CliError {
+                    message: "address-clear takes an IPv4 address".to_owned(),
+                })?;
+                Ok(Command::ImagesAddressClear {
+                    address: parsed.to_string(),
+                })
+            }
             _ => Err(CliError { message: usage() }),
         },
         "promote" => match rest {
@@ -1931,12 +2965,22 @@ fn parse_images_command(verb: &str, rest: &[&str]) -> Result<Command, CliError> 
         },
         "build" => {
             let mut version_id = None;
+            let mut account_id = None;
             let mut wait = false;
             let mut timeout = None;
             let mut flags = rest.iter().copied();
             while let Some(flag) = flags.next() {
                 match flag {
                     "--wait" => wait = true,
+                    "--account" => {
+                        let value = flags
+                            .next()
+                            .filter(|value| !value.is_empty() && !value.starts_with('-'))
+                            .ok_or_else(|| CliError {
+                                message: "--account requires an account id".to_owned(),
+                            })?;
+                        account_id = Some(value.to_owned());
+                    }
                     "--timeout" => {
                         let value = flags.next().ok_or_else(|| CliError {
                             message: "--timeout requires a value".to_owned(),
@@ -1962,6 +3006,7 @@ fn parse_images_command(verb: &str, rest: &[&str]) -> Result<Command, CliError> 
                 version_id: version_id.ok_or_else(|| CliError {
                     message: "a version id is required".to_owned(),
                 })?,
+                account_id,
                 wait,
                 timeout,
             })
@@ -2097,6 +3142,52 @@ fn parse_proxmox_command(verb: &str, rest: &[&str]) -> Result<Command, CliError>
             }
             _ => Err(CliError { message: usage() }),
         },
+        "destroy" => {
+            let [account_id, node, vmid, flags @ ..] = rest else {
+                return Err(CliError { message: "Usage: fleetctl proxmox destroy <account> <node> <vmid> [--purge] [--wait] [--timeout <s>]".to_owned() });
+            };
+            let vmid = vmid
+                .parse::<u32>()
+                .ok()
+                .filter(|id| (100..=999_999_999).contains(id))
+                .ok_or_else(|| CliError {
+                    message: "the VMID must be an integer in 100..=999999999".to_owned(),
+                })?;
+            let mut wait = false;
+            let mut purge = false;
+            let mut timeout = None;
+            let mut flags = flags.iter().copied();
+            while let Some(flag) = flags.next() {
+                match flag {
+                    "--wait" => wait = true,
+                    "--purge" => purge = true,
+                    "--timeout" => {
+                        timeout = Some(
+                            flags
+                                .next()
+                                .and_then(|value| value.parse().ok())
+                                .ok_or_else(|| CliError {
+                                    message: "--timeout requires a number".to_owned(),
+                                })?,
+                        );
+                    }
+                    _ => {
+                        return Err(CliError {
+                            message: format!("unrecognized destroy flag {flag:?}"),
+                        });
+                    }
+                }
+            }
+            Ok(Command::ProxmoxDestructive {
+                action: "destroy".to_owned(),
+                account_id: (*account_id).to_owned(),
+                node: (*node).to_owned(),
+                vmid,
+                params: Some(serde_json::json!({"purge": purge}).to_string()),
+                wait,
+                timeout,
+            })
+        }
         "snapshot" | "snapshot-revert" | "snapshot-delete" | "clone" | "template"
         | "task-cancel" => {
             let mut account_id = None;
@@ -2296,9 +3387,165 @@ fn parse_skills_catalog(rest: &[&str]) -> Result<Command, CliError> {
     }
 }
 
+/// The usage lines for one command: those of `words`' group and verb, the
+/// group's lines when the verb has none, the whole usage otherwise. `None`
+/// unless `--help`/`-h` appears among the command's own arguments.
+fn help_text(words: &[&str]) -> Option<String> {
+    let (group, args) = words.split_first()?;
+    // Everything after `--` belongs to a remote command (`lab exec ... -- ls -h`).
+    let own = args.split(|word| *word == "--").next().unwrap_or(&[]);
+    if !own.iter().any(|word| matches!(*word, "--help" | "-h")) {
+        return None;
+    }
+    let full = usage();
+    let word_at = |line: &str, index: usize| -> Vec<String> {
+        line.split_whitespace()
+            .nth(index)
+            .map(|word| word.split('|').map(str::to_owned).collect())
+            .unwrap_or_default()
+    };
+    let in_group: Vec<&str> = full
+        .lines()
+        .filter(|line| line.starts_with("  "))
+        .filter(|line| word_at(line, 0).iter().any(|word| word == group))
+        .collect();
+    if in_group.is_empty() {
+        // An unknown command group is the ordinary unknown-command error.
+        return None;
+    }
+    // Narrow by each leading word that names a verb (`lab pool create`),
+    // stopping at the first that matches no usage line (an id, a flag).
+    let mut shown = in_group;
+    for (depth, word) in args.iter().enumerate() {
+        if word.starts_with('-') {
+            break;
+        }
+        let narrowed: Vec<&str> = shown
+            .iter()
+            .copied()
+            .filter(|line| {
+                word_at(line, depth + 1).iter().any(|name| {
+                    name == word
+                        // `lab create` is also the deprecated alias of `lab template-create`.
+                        || (depth == 0
+                            && *group == "lab"
+                            && *word == "create"
+                            && name == "template-create")
+                })
+            })
+            .collect();
+        if narrowed.is_empty() {
+            break;
+        }
+        shown = narrowed;
+    }
+    shown.dedup();
+    Some(format!("Usage:\n{}", shown.join("\n")))
+}
+
+/// Verbs whose id positional sits at the given word index, so a leading
+/// `-` there is a mistyped flag, never an id.
+const ID_POSITIONALS: &[(&str, &[&str], usize)] = &[
+    ("operations", &["get", "cancel"], 2),
+    (
+        "machines",
+        &["get", "link-guest", "unlink-guest", "install-node"],
+        2,
+    ),
+    (
+        "projects",
+        &[
+            "get",
+            "update",
+            "delete",
+            "discover",
+            "record",
+            "ready",
+            "clone",
+            "pull",
+            "status",
+            "write-config",
+        ],
+        2,
+    ),
+    (
+        "proxmox",
+        &[
+            "delete",
+            "observe",
+            "confirm",
+            "discover",
+            "nodes",
+            "privileges",
+            "guests",
+            "tasks",
+            "observe-guest",
+        ],
+        2,
+    ),
+    (
+        "images",
+        &[
+            "build-show",
+            "publish",
+            "versions",
+            "build",
+            "version",
+            "promote",
+            "address-clear",
+        ],
+        2,
+    ),
+    ("desired", &["fetch", "activate", "rollback"], 2),
+    (
+        "lab",
+        &[
+            "status",
+            "exec",
+            "destroy",
+            "cleanup-retry",
+            "publish",
+            "provision",
+            "provision-lease",
+            "release",
+            "extend",
+            "lease",
+            "collect",
+            "put",
+            "artifact-get",
+        ],
+        2,
+    ),
+    ("lab", &["pool"], 3),
+];
+
+/// Refuses an id positional that starts with `-`: an unknown flag is a
+/// usage error, never a request for an id like `--bogus`.
+fn reject_flag_as_id(words: &[&str]) -> Result<(), CliError> {
+    let [group, verb, ..] = words else {
+        return Ok(());
+    };
+    for (name, verbs, index) in ID_POSITIONALS {
+        if name != group || !verbs.contains(verb) {
+            continue;
+        }
+        // `lab pool list`/`create` take no id.
+        if *index == 3 && !matches!(words.get(2), Some(&("show" | "delete" | "fill" | "drain"))) {
+            continue;
+        }
+        if let Some(word) = words.get(*index)
+            && word.starts_with('-')
+        {
+            return Err(unknown_lab_flag(word));
+        }
+    }
+    Ok(())
+}
+
 fn usage() -> String {
     format!(
-        "Usage: fleetctl [--url <controller>] [--socket <path>] [--output json|text] <command>\n\nCommands:\n  status\n  system\n  events [--output json|text]\n  operations list [--limit <n>]\n  operations get <id>\n  operations cancel <id>\n  audit list [--actor <id>] [--action <id>] [--resource <id>] [--outcome <id>] [--from <epoch-ms>] [--to <epoch-ms>] [--cursor <seq>] [--limit <n>] [--output json|text]\n  machines list [--tag <tag>] [--group <group>] [--capability <ns:name>] [--status <state>] [--cursor <id>] [--limit <n>]\n  machines get <id>\n  machines link-guest <id> --account <account-id> --kind qemu|lxc --vmid <vmid>\n  machines unlink-guest <id>\n  machines onboard create --user <user> --host <host> [--port <n>] [--name <name>] [--description <text>] [--tag <tag>]... [--group <group>]... --auth agent|identity-file [--identity <path>]\n  machines onboard list [--limit <n>]\n  machines onboard get <draft-id>\n  machines onboard test <draft-id> [--wait] [--timeout <seconds>]\n  machines onboard discover <draft-id> [--wait] [--timeout <seconds>]\n  machines onboard confirm <draft-id> --fingerprint <SHA256:...>\n  machines onboard add <draft-id>\n  machines onboard cancel <draft-id>\n  projects list [--remote-prefix <p>] [--name-substring <s>] [--limit <n>]\n  projects get <id>\n  projects create --remote <url> --name <name> [--description <text>]\n  projects update <id> --name <name> [--description <text>]\n  projects delete <id>\n  projects discover <id> <machine-id> --endpoint <endpoint-id> --auth agent|identity-file [--identity <path>] [--wait] [--timeout <s>]\n  projects record <id> <machine-id> (the discovery result is read from stdin)\n  projects ready <id> <machine-id> --root <path> [--dry-run] --endpoint <endpoint-id> --auth agent|identity-file [--identity <path>] [--wait] [--timeout <s>]\n  projects clone <id> <machine-id> --root <path> [--branch <name>] --endpoint <endpoint-id> --auth agent|identity-file [--identity <path>] [--wait] [--timeout <s>]\n  projects pull <id> <machine-id> --root <path> --endpoint <endpoint-id> --auth agent|identity-file [--identity <path>] [--wait] [--timeout <s>]\n  projects status <id> <machine-id> --root <path> --endpoint <endpoint-id> --auth agent|identity-file [--identity <path>] [--wait] [--timeout <s>]\n  projects write-config <id> <machine-id> --root <path> --file <name> --endpoint <endpoint-id> --auth agent|identity-file [--identity <path>] [--wait] [--timeout <s>] (contents from stdin)\n  skills list <machine-id>\n  skills matrix\n  plan <machine-id>\n  apply-plan <machine-id> --plan-id <id> [--approve <order>:<kind>]... --endpoint <endpoint-id> --auth agent|identity-file [--identity <path>] [--wait] [--timeout <s>]\n  desired status\n  desired source [set <remote> [--credential <ref>]]\n  desired source credential (the Git token or private key is read from stdin; prints the reference)\n  desired history\n  desired fetch <commit-sha> [--wait] [--timeout <s>]\n  desired activate|rollback <commit-sha> <content-digest> [--wait] [--timeout <s>]\n  desired resources [--kind <kind>] [--cursor <id>] [--limit <n>]\n  skills catalog list|get <id>|create --content-json <json>|update <id> --content-json <json>|publish <id>|versions <id>|plan --request-json <json>|rollout --request-json <json>\n  skills probe <machine-id> --endpoint <endpoint-id> --auth agent|identity-file [--identity <path>] [--skills-root <path>] [--artifact-url <url> --artifact-sha256 <digest>] [--wait] [--timeout <s>]\n  skills deploy <machine-id> --skill <id> --agent <id>... --endpoint <endpoint-id> --auth agent|identity-file [--identity <path>] [--skills-root <path>] [--dry-run] [--wait] [--timeout <s>]\n  skills undeploy <machine-id> --skill <id> --agent <id>... --endpoint <endpoint-id> --auth agent|identity-file [--identity <path>] [--skills-root <path>] [--dry-run] [--wait] [--timeout <s>]\n  skills install <machine-id> --reference <ref> [--local|--git] [--name <name>] [--sync|--sync-preset <ref>] --endpoint <endpoint-id> --auth agent|identity-file [--wait] [--timeout <s>]\n  skills update|check <machine-id> [--reference <ref>] --endpoint <endpoint-id> --auth agent|identity-file [--wait] [--timeout <s>] (omitting --reference means --all)\n  skills remove <machine-id> --reference <ref>|--reference-batch <ref>... --yes [--dry-run] --endpoint <endpoint-id> --auth agent|identity-file [--wait] [--timeout <s>]\n  skills adopt <machine-id> --path <path> [--path-batch <path>]... [--source-url <url>] [--git-subpath <path>] [--dry-run] --endpoint <endpoint-id> --auth agent|identity-file\n  skills set-source <machine-id> --reference <ref> --source-url <url> [--path <subpath>] [--branch <branch>] [--force] --endpoint <endpoint-id> --auth agent|identity-file\n  skills preset-create <machine-id> --reference <name> [--description <text>] [--icon <id>] --endpoint <endpoint-id> --auth agent|identity-file\n  skills preset-update <machine-id> --reference <preset> (--name <name>|--description <text>|--icon <id>) --endpoint <endpoint-id> --auth agent|identity-file\n  skills preset-delete <machine-id> --reference <preset> --yes [--dry-run] --endpoint <endpoint-id> --auth agent|identity-file\n  skills preset-add-skill|preset-remove-skill <machine-id> --reference <preset> --path <skill> --endpoint <endpoint-id> --auth agent|identity-file\n  skills preset-deploy|preset-undeploy <machine-id> --reference <preset> [--agent <id>]... [--dry-run] --endpoint <endpoint-id> --auth agent|identity-file\n  frogenv status|setup|login|request|sync <machine-id> --endpoint <endpoint-id> --auth agent|identity-file [--identity <path>] [--wait] [--timeout <s>]\n  frogenv run <machine-id> --root <path> --endpoint <endpoint-id> --auth agent|identity-file [--identity <path>] [--wait] [--timeout <s>] -- <command> [args...]\n  mise inventory|status <machine-id> --endpoint <endpoint-id> --auth agent|identity-file [--identity <path>] [--wait] [--timeout <s>]\n  mise install <machine-id> --tool <name> --version <pin> --endpoint <endpoint-id> --auth agent|identity-file [--identity <path>] [--wait] [--timeout <s>]\n  mise exec <machine-id> --root <path> --endpoint <endpoint-id> --auth agent|identity-file [--wait] [--timeout <s>] -- <command> [args...]\n  apply <machine-id> --plan-id <id> --endpoint <endpoint-id> --auth agent|identity-file [--identity <path>] [--wait] [--timeout <s>] (the plan JSON is read from stdin)\n  tailnet status\n  tailnet configure --client-id <id> (the client secret is read from stdin)\n  tailnet clear\n  tailnet devices [--limit <n>]\n  tailnet import <node-id> --user <user> [--port <n>]\n  proxmox accounts\n  proxmox create --name <name> --host <host> [--port <n>] --token-id <id> (the token secret is read from stdin)\n  proxmox delete <account-id>\n  proxmox observe <account-id>\n  proxmox confirm <account-id> --fingerprint <SHA256>\n  proxmox discover <account-id>\n  proxmox nodes <account-id>\n  proxmox privileges <account-id> [--output json|text]\n  proxmox guests <account-id>\n  proxmox tasks <account-id> [--node <node>] [--vmid <vmid>] [--status running|ok|error|unknown] [--cursor <upid>] [--limit <n>] [--output json|text]\n  proxmox observe-guest <account-id> <vmid> --machine <machine-id>\n  proxmox start|stop|shutdown|reboot --account <account-id> --node <node> --vmid <vmid> [--wait] [--timeout <s>]\n  proxmox snapshot|snapshot-revert|snapshot-delete|clone|template|task-cancel --account <account-id> --node <node> --vmid <vmid> [--wait] [--timeout <s>] (the action parameters are read as JSON from stdin)\n  images recipes\n  images create --name <name> --description <text> --node <node> --storage-pool <pool> --source iso|clone (the recipe content is read as JSON from stdin)\n  images publish <recipe-id>\n  images versions <recipe-id>\n  images build <version-id> [--wait] [--timeout <s>]\n  images version <version-id>\n  images promote <version-id>\n  lab templates\n  lab create --name <name> --description <text> --image-version <version-id> --cores <n> --memory <mib> --disk <gib> --probe guest_agent|ssh_exec|project_ready --readiness-deadline <s> --ttl <s> --cleanup destroy|revert|keep\n  lab publish <template-id>\n  lab provision <template-version-id>\n  lab provision-lease <lease-id> --account <account-id>\n  lab provisions\n  lab leases\n  lab lease <template-version-id> --purpose <text>\n  lab release <lease-id> [--keep]\n  lab extend <lease-id> --seconds <n>\n  lab sweep\n  images version <version-id>\n  images promote <version-id>\n  machines install-node <machine-id> --endpoint <endpoint-id> --auth agent|identity-file [--identity <path>] [--artifact-url <url> --artifact-sha256 <digest>] [--controller-url <url>] [--install-timeout <s>] [--connect-timeout <s>] [--wait] [--timeout <s>]\n\n`status` prefers the node's local socket (default {DEFAULT_SOCKET}); `--url` selects the controller endpoint for other commands. `events` uses the selected listener's configured caller resolver; in identity mode, set `--url` to the authenticated Tailscale Serve endpoint. The default controller URL is {DEFAULT_URL}."
+        "Usage: fleetctl [--url <controller>] [--socket <path>] [--output json|text] <command>\n\nCommands:\n  status\n  system\n  events [--output json|text]\n  operations list [--limit <n>]\n  operations get <id>\n  operations cancel <id>\n  audit list [--actor <id>] [--action <id>] [--resource <id>] [--outcome <id>] [--from <epoch-ms>] [--to <epoch-ms>] [--cursor <seq>] [--limit <n>] [--output json|text]\n  machines list [--tag <tag>] [--group <group>] [--capability <ns:name>] [--status <state>] [--cursor <id>] [--limit <n>]\n  machines get <id>\n  machines link-guest <id> --account <account-id> --kind qemu|lxc --vmid <vmid>\n  machines unlink-guest <id>\n  machines onboard create --user <user> --host <host> [--port <n>] [--name <name>] [--description <text>] [--tag <tag>]... [--group <group>]... --auth agent|identity-file [--identity <path>]\n  machines onboard list [--limit <n>]\n  machines onboard get <draft-id>\n  machines onboard test <draft-id> [--wait] [--timeout <seconds>]\n  machines onboard discover <draft-id> [--wait] [--timeout <seconds>]\n  machines onboard confirm <draft-id> --fingerprint <SHA256:...>\n  machines onboard add <draft-id>\n  machines onboard cancel <draft-id>\n  projects list [--remote-prefix <p>] [--name-substring <s>] [--limit <n>]\n  projects get <id>\n  projects create --remote <url> --name <name> [--description <text>]\n  projects update <id> --name <name> [--description <text>]\n  projects delete <id>\n  projects discover <id> <machine-id> --endpoint <endpoint-id> --auth agent|identity-file [--identity <path>] [--wait] [--timeout <s>]\n  projects record <id> <machine-id> (the discovery result is read from stdin)\n  projects ready <id> <machine-id> --root <path> [--dry-run] --endpoint <endpoint-id> --auth agent|identity-file [--identity <path>] [--wait] [--timeout <s>]\n  projects clone <id> <machine-id> --root <path> [--branch <name>] --endpoint <endpoint-id> --auth agent|identity-file [--identity <path>] [--wait] [--timeout <s>]\n  projects pull <id> <machine-id> --root <path> --endpoint <endpoint-id> --auth agent|identity-file [--identity <path>] [--wait] [--timeout <s>]\n  projects status <id> <machine-id> --root <path> --endpoint <endpoint-id> --auth agent|identity-file [--identity <path>] [--wait] [--timeout <s>]\n  projects write-config <id> <machine-id> --root <path> --file <name> --endpoint <endpoint-id> --auth agent|identity-file [--identity <path>] [--wait] [--timeout <s>] (contents from stdin)\n  skills list <machine-id>\n  skills matrix\n  plan <machine-id>\n  apply-plan <machine-id> --plan-id <id> [--approve <order>:<kind>]... --endpoint <endpoint-id> --auth agent|identity-file [--identity <path>] [--wait] [--timeout <s>]\n  desired status\n  desired source [set <remote> [--credential <ref>]]\n  desired source credential (the Git token or private key is read from stdin; prints the reference)\n  desired history\n  desired settings [set [--auto-activate true|false] [--change-mode direct|pull-request]]\n  desired fetch <commit-sha> [--wait] [--timeout <s>]\n  desired activate|rollback <commit-sha> <content-digest> [--wait] [--timeout <s>]\n  desired resources [--kind <kind>] [--cursor <id>] [--limit <n>]\n{registry_usage}\n  skills catalog list|get <id>|create --content-json <json>|update <id> --content-json <json>|publish <id>|versions <id>|plan --request-json <json>|rollout --request-json <json>\n  skills probe <machine-id> --endpoint <endpoint-id> --auth agent|identity-file [--identity <path>] [--skills-root <path>] [--artifact-url <url> --artifact-sha256 <digest>] [--wait] [--timeout <s>]\n  skills deploy <machine-id> --skill <id> --agent <id>... --endpoint <endpoint-id> --auth agent|identity-file [--identity <path>] [--skills-root <path>] [--dry-run] [--wait] [--timeout <s>]\n  skills undeploy <machine-id> --skill <id> --agent <id>... --endpoint <endpoint-id> --auth agent|identity-file [--identity <path>] [--skills-root <path>] [--dry-run] [--wait] [--timeout <s>]\n  skills install <machine-id> --reference <ref> [--local|--git] [--name <name>] [--sync|--sync-preset <ref>] --endpoint <endpoint-id> --auth agent|identity-file [--wait] [--timeout <s>]\n  skills update|check <machine-id> [--reference <ref>] --endpoint <endpoint-id> --auth agent|identity-file [--wait] [--timeout <s>] (omitting --reference means --all)\n  skills remove <machine-id> --reference <ref>|--reference-batch <ref>... --yes [--dry-run] --endpoint <endpoint-id> --auth agent|identity-file [--wait] [--timeout <s>]\n  skills adopt <machine-id> --path <path> [--path-batch <path>]... [--source-url <url>] [--git-subpath <path>] [--dry-run] --endpoint <endpoint-id> --auth agent|identity-file\n  skills set-source <machine-id> --reference <ref> --source-url <url> [--path <subpath>] [--branch <branch>] [--force] --endpoint <endpoint-id> --auth agent|identity-file\n  skills preset-create <machine-id> --reference <name> [--description <text>] [--icon <id>] --endpoint <endpoint-id> --auth agent|identity-file\n  skills preset-update <machine-id> --reference <preset> (--name <name>|--description <text>|--icon <id>) --endpoint <endpoint-id> --auth agent|identity-file\n  skills preset-delete <machine-id> --reference <preset> --yes [--dry-run] --endpoint <endpoint-id> --auth agent|identity-file\n  skills preset-add-skill|preset-remove-skill <machine-id> --reference <preset> --path <skill> --endpoint <endpoint-id> --auth agent|identity-file\n  skills preset-deploy|preset-undeploy <machine-id> --reference <preset> [--agent <id>]... [--dry-run] --endpoint <endpoint-id> --auth agent|identity-file\n  frogenv status|setup|login|request|sync <machine-id> --endpoint <endpoint-id> --auth agent|identity-file [--identity <path>] [--wait] [--timeout <s>]\n  frogenv run <machine-id> --root <path> --endpoint <endpoint-id> --auth agent|identity-file [--identity <path>] [--wait] [--timeout <s>] -- <command> [args...]\n  mise inventory|status <machine-id> --endpoint <endpoint-id> --auth agent|identity-file [--identity <path>] [--wait] [--timeout <s>]\n  mise install <machine-id> --tool <name> --version <pin> --endpoint <endpoint-id> --auth agent|identity-file [--identity <path>] [--wait] [--timeout <s>]\n  mise exec <machine-id> --root <path> --endpoint <endpoint-id> --auth agent|identity-file [--wait] [--timeout <s>] -- <command> [args...]\n  apply <machine-id> --plan-id <id> --endpoint <endpoint-id> --auth agent|identity-file [--identity <path>] [--wait] [--timeout <s>] (the plan JSON is read from stdin)\n  tailnet status\n  tailnet configure --client-id <id> (the client secret is read from stdin)\n  tailnet clear\n  tailnet devices [--limit <n>]\n  tailnet import <node-id> --user <user> [--port <n>]\n  accounts list [--kind coolify|cloudflare] [--limit <n>] [--cursor <id>] [--output json|text]\n  accounts get <account-id>\n  accounts create --kind coolify|cloudflare --label <label> [--base-url <url>] [--account-id <cloudflare-account-id>] [--notes <text>] (the token is read from stdin)\n  accounts update <account-id> [--label <label>] [--base-url <url>] [--account-id <id>] [--notes <text>] [--rotate-token] (with --rotate-token the new token is read from stdin)\n  accounts delete <account-id>\n  accounts probe <account-id>\n  services list [--source coolify|docker] [--machine <machine-id>] [--query <text>] [--limit <n>] [--cursor <id>] [--output json|text]\n  services get <service-id> [--output json|text]\n  services start|stop|restart|redeploy <service-id> [--reason <text>] [--idempotency-key <key>] [--wait-approval[=<duration>]] (files a brokered Coolify action request; stop is approve, the rest run at once; redeploy is for applications; with --wait-approval the answer is {{outcome, request, result}}, exit 0 executed, 2 still_pending, 1 otherwise)\n  services templates [--output json|text] (the built-in site templates, each pinned by version and digest)\n  services deploy --template <id> --account <account-id> --server <uuid|name> --project <uuid|name> --environment <name> --domain <host> [--repo <https url> --branch <name>] [--name <name>] [--destination <uuid>] [--dns --dns-target <address|host> [--dns-type A|AAAA|CNAME] [--dns-account <id|label>]] [--reason <text>] [--idempotency-key <key>] [--wait-approval[=<duration>]] (files an approve-class request that creates the Coolify resource, sets the domain, and starts the first deployment; Git templates need a public https repository and a branch; after a success it prints the `fleetctl registry set` patch; --dns also files a Cloudflare DNS request for the domain)\n  services logs <service-id> [--deployment <uuid>] [--lines <n>] (a bounded, redacted deployment log tail; needs a Coolify token with read:sensitive and external_account.config)\n  services settings <service-id> [--output json|text] (environment variable names and flags, never values; an application's domains and health check)\n  services env list <service-id> [--output json|text]\n  services env set <service-id> (--stdin|--file <path>) [--key <name>] [--preview] [--buildtime|--no-buildtime] [--runtime|--no-runtime] [--multiline|--no-multiline] [--literal|--no-literal] [--shown-once|--no-shown-once] [--redeploy] [--reason <text>] [--idempotency-key <key>] [--wait-approval[=<duration>]] (values are read from stdin or a file, never from arguments: with --key the whole input is that variable's value, otherwise KEY=VALUE lines; files an approve-class request that shows names and flags only)\n  services env unset <service-id> <name>... [--preview] [--redeploy] [--reason <text>] [--idempotency-key <key>] [--wait-approval[=<duration>]]\n  services domains set <service-id> (<url>...|--clear) [--redeploy] [--reason <text>] [--idempotency-key <key>] [--wait-approval[=<duration>]] (applications only; files a request with a before/after preview)\n  services health set <service-id> [--enabled|--disabled] [--path <p>] [--port <n>] [--host <h>] [--method GET|HEAD|POST|OPTIONS] [--scheme http|https] [--return-code <n>] [--response-text <t>] [--interval <s>] [--timeout <s>] [--retries <n>] [--start-period <s>] [--redeploy] [--reason <text>] [--idempotency-key <key>] [--wait-approval[=<duration>]] (applications only)\n  requests list [--state pending|approved|denied|expired|executing|succeeded|failed] [--limit <n>] [--output json|text]\n  requests get <request-id> [--wait[=<duration>]] [--output json|text] (a wait is 1s to 1h, default 5m; the answer is {{outcome: executed|denied|expired|failed|still_pending, request}}; exit 0 executed, 2 still_pending, 1 otherwise)\n  requests approve <request-id>\n  requests deny <request-id> [--note <text>]\n  dns zones [--account <id|label>] [--output json|text]\n  dns records <fqdn> [--type A|AAAA|CNAME|TXT|MX|...] [--account <id|label>] [--output json|text]\n  dns observations <fqdn> [--output json|text] (the records last read through Cloudflare, without calling it)\n  dns set <fqdn> --type A|AAAA|CNAME|TXT|MX --content <value> [--ttl <1|60..86400>] [--proxied|--no-proxied] [--priority <n>] [--replaces <existing-value>|--add] [--account <id|label>] [--reason <text>] [--idempotency-key <key>] [--wait-approval[=<duration>]] (files an action request with a preview; the default risk class is approve; with --wait-approval the answer is {{outcome, request, result}}, exit 0 executed, 2 still_pending, 1 otherwise)\n  dns delete <fqdn> --type <type> --content <value> [--priority <n>] [--account <id|label>] [--reason <text>] [--idempotency-key <key>] [--wait-approval[=<duration>]]\n  proxmox accounts\n  proxmox create --name <name> --host <host> [--port <n>] --token-id <id> (the token secret is read from stdin)\n  proxmox delete <account-id>\n  proxmox observe <account-id>\n  proxmox confirm <account-id> --fingerprint <SHA256>\n  proxmox discover <account-id>\n  proxmox nodes <account-id>\n  proxmox privileges <account-id> [--output json|text]\n  proxmox guests <account-id>\n  proxmox tasks <account-id> [--node <node>] [--vmid <vmid>] [--status running|ok|error|unknown] [--cursor <upid>] [--limit <n>] [--output json|text]\n  proxmox observe-guest <account-id> <vmid> --machine <machine-id>\n  proxmox start|stop|shutdown|reboot --account <account-id> --node <node> --vmid <vmid> [--wait] [--timeout <s>]\n  proxmox destroy <account> <node> <vmid> [--purge] [--wait] [--timeout <s>]\n  proxmox snapshot|snapshot-revert|snapshot-delete|clone|template|task-cancel --account <account-id> --node <node> --vmid <vmid> [--wait] [--timeout <s>] (the action parameters are read as JSON from stdin)\n  images builds [--version <id>] [--limit <n>] [--cursor <id>]\n  images build-show <id>\n  images recipes\n  images create --name <name> --description <text> --node <node> --storage-pool <pool> --source iso|clone (the recipe content is read as JSON from stdin)\n  images publish <recipe-id> [--allow-insecure-tls]\n  images versions <recipe-id>\n  images secret set <name> (the secret value is read from stdin, minus one trailing newline; writes images/<name>, never echoed)\n  images secret list\n  images secret rm <name>\n  images addresses\n  images address-clear <ipv4>\n  images build <version-id> [--account <account-id>] [--wait] [--timeout <s>]\n  images version <version-id>\n  images promote <version-id>\n  lab templates\n  lab create <template-version-id> --purpose <text> [--project <id>] [--account <id>] [--idempotency-key <key>] [--wait] [--timeout <s>]\n  lab status <lease-id>\n  lab exec <lease-id> [--session service|interactive] [--timeout <s>] [--wait] [--script] -- <command> [args...] (with --script: exactly one word, the script text, sent untouched)\n  lab exec <lease-id> --detach [--session service|interactive] [--timeout <s>] [--idempotency-key <key>] [--script] -- <command> [args...] (with --script: exactly one word)\n  lab exec-status <handle> [--wait] [--timeout <s>]\n  lab destroy <lease-id> [--keep] [--wait] [--timeout <s>]\n  lab cleanup-retry <lease-id> [--wait] [--timeout <s>]\n  lab pool list\n  lab pool show <pool-id>\n  lab pool create --template-version <version-id> --account <account-id> --baseline <snapshot> --size <n>\n  lab pool delete <pool-id>\n  lab pool fill <pool-id> --vmid <vmid>... [--wait] [--timeout <s>]\n  lab pool drain <pool-id> --vmid <vmid>...|--all\n  lab template-create --name <name> --description <text> --image-version <version-id> --cores <n> --memory <mib> --disk <gib> --probe guest_agent|ssh_exec|project_ready --readiness-deadline <s> --ttl <s> --cleanup destroy|revert|keep [--audio ich9-intel-hda|intel-hda|AC97] [--guest-os linux|windows] [--ssh-user <account>] [--interactive-user <local-account>]\n  lab publish <template-id>\n  lab provision <template-version-id>\n  lab provision-lease <lease-id> [--account <account-id>]\n  lab artifacts [--lease <lease-id>] [--project <id>] [--cursor <id>] [--limit <n>]\n  lab collect <lease-id> <absolute-guest-path>... [--wait] [--timeout <s>]\n  lab put <lease-id> <local-path> <absolute-guest-path> [--overwrite] [--wait] [--timeout <s>]\n  lab artifact-get <artifact-id> --out <file>\n  lab provisions\n  lab leases [--project <id>] [--purpose <text>] [--purpose-prefix <text>] [--state <state>[,<state>]]... [--owner <id>]\n  lab lease <template-version-id> --purpose <text> [--project <id>] [--idempotency-key <key>]\n  lab release <lease-id> [--keep]\n  lab extend <lease-id> --seconds <n>\n  lab sweep\n  credentials issue --owner <label> --ttl <seconds> [--template <id>]... [--version <id>]... [--label <text>] (the token is printed once; use it as FLEET_TOKEN)\n  credentials list\n  credentials revoke <credential-id>\n  images version <version-id>\n  images promote <version-id>\n  machines install-node <machine-id> --endpoint <endpoint-id> --auth agent|identity-file [--identity <path>] [--artifact-url <url> --artifact-sha256 <digest>] [--controller-url <url>] [--install-timeout <s>] [--connect-timeout <s>] [--wait] [--timeout <s>]\n\nSet FLEET_TOKEN to a delegated credential token to act as that credential; the token is never printed.\n\n`status` prefers the node's local socket (default {DEFAULT_SOCKET}); `--url` selects the controller endpoint for other commands. `events` uses the selected listener's configured caller resolver; in identity mode, set `--url` to the authenticated Tailscale Serve endpoint. The default controller URL is {DEFAULT_URL}.",
+        registry_usage = registry::usage_block()
     )
 }
 
@@ -2581,9 +3828,38 @@ fn parse_onboard_stage(id: &str, rest: &[&str], discover: bool) -> Result<Comman
 /// error's envelope code, when the controller produced one, is included so
 /// scripts can branch on it.
 pub fn run(invocation: &Invocation) -> Result<String, CliError> {
+    run_with_exit(invocation).map(|(text, _)| text)
+}
+
+/// [`run`], with the process exit code the result implies: `lab exec
+/// --wait` mirrors the remote command's exit code, and `lab create --wait`
+/// and `lab destroy --wait` fail when the lease did not reach the state
+/// they waited for, as does `lab cleanup-retry --wait` when its attempt did
+/// not release the lease, and `lab collect --wait` fails unless every path
+/// was stored. Everything else is 0.
+///
+/// # Errors
+///
+/// As [`run`].
+#[allow(clippy::too_many_lines)]
+pub fn run_with_exit(invocation: &Invocation) -> Result<(String, u8), CliError> {
+    // Help never builds a client: no request can leave the process.
+    if let Command::Help { text } = &invocation.command {
+        return Ok((text.clone(), 0));
+    }
+    // Registry edits, validation, and publishing run on the local checkout,
+    // with no controller call (publish reads one setting).
+    if let Command::Registry(action) = &invocation.command
+        && action.is_local()
+    {
+        return registry::run_local(action, invocation);
+    }
+    // A malformed FLEET_TOKEN fails before any request, naming the variable
+    // and never its value.
+    bearer_token()?;
     if invocation.command == Command::Events {
         stream_events(invocation)?;
-        return Ok(String::new());
+        return Ok((String::new(), 0));
     }
     if invocation.command == Command::Status && !invocation.url_explicit {
         // The local route: the daemon's constrained status surface, reached
@@ -2597,18 +3873,20 @@ pub fn run(invocation: &Invocation) -> Result<String, CliError> {
                 message: "the node's local surface is only available on Unix platforms".to_owned(),
             });
         };
-        return render_routed(invocation, &body, "local");
+        return render_routed(invocation, &body, "local").map(|text| (text, 0));
     }
     if invocation.command == Command::Status {
         // The explicit direct-controller override.
         let client = http_client()?;
-        let response = client
-            .get(format!("{}{SYSTEM_PATH}", invocation.url))
-            .header("x-correlation-id", uuid::Uuid::now_v7().to_string())
-            .send()
-            .map_err(|error| CliError {
-                message: format!("the controller did not answer: {error}"),
-            })?;
+        let response = with_credential(
+            client
+                .get(format!("{}{SYSTEM_PATH}", invocation.url))
+                .header("x-correlation-id", uuid::Uuid::now_v7().to_string()),
+        )?
+        .send()
+        .map_err(|error| CliError {
+            message: format!("the controller did not answer: {error}"),
+        })?;
         let status = reqwest::StatusCode::as_u16(&response.status());
         let body: Value = response.json().map_err(|error| CliError {
             message: format!("the controller's answer was not JSON: {error}"),
@@ -2620,15 +3898,37 @@ pub fn run(invocation: &Invocation) -> Result<String, CliError> {
                 message: format!("the controller refused ({status}, {code}): {message}"),
             });
         }
-        return render_routed(invocation, &body, "controller");
+        return render_routed(invocation, &body, "controller").map(|text| (text, 0));
+    }
+
+    if let Command::LabArtifactGet { artifact_id, out } = &invocation.command {
+        let body = download_artifact(invocation, artifact_id, out)?;
+        return Ok((render(invocation, &body), 0));
     }
 
     let correlation_id = uuid::Uuid::now_v7().to_string();
     let client = http_client()?;
 
+    if matches!(invocation.command, Command::LabPut { .. }) {
+        return run_lab_put(invocation, &client, correlation_id);
+    }
+
+    // `lab create` without --account resolves the account before the
+    // lease exists, so a refusal leaves no orphaned requested lease.
+    // A delegated credential cannot list Proxmox accounts, so with one the
+    // controller's placement selects the account.
+    let lab_account = match &invocation.command {
+        Command::LabNew { account: None, .. } if bearer_token()?.is_some() => None,
+        Command::LabNew { account: None, .. } => Some(only_trusted_account(&client, invocation)?),
+        Command::LabNew {
+            account: Some(account),
+            ..
+        } => Some(account.clone()),
+        _ => None,
+    };
     let (method, path, query, request_body) = request_for(&invocation.command)?;
 
-    let body = send(
+    let body = send_with_key(
         &client,
         invocation,
         method,
@@ -2636,18 +3936,407 @@ pub fn run(invocation: &Invocation) -> Result<String, CliError> {
         &query,
         request_body.as_ref(),
         correlation_id,
+        lease_idempotency_key(&invocation.command),
     )?;
+    let keyed = lease_idempotency_key(&invocation.command).is_some();
     let body = follow_skills_matrix_pages(&client, invocation, body)?;
     let body = follow_wait_stage(&client, invocation, body)?;
     let body = follow_review(&client, invocation, body)?;
     let body = follow_install_wait(&client, invocation, body)?;
     let body = follow_checkout_wait(&client, invocation, body)?;
+    let body = follow_lab(&client, invocation, body, lab_account.as_deref(), keyed)?;
+    if let Command::Services(action) = &invocation.command
+        && let Some(wait) = action.filing_wait()
+    {
+        // A deploy may also queue a DNS request for its domain (FM-1035),
+        // before any wait, so both requests wait for approval together.
+        let dns = match action {
+            services::ServicesAction::Deploy(args) => {
+                services::deploy::file_dns(&client, invocation, args)
+            }
+            _ => None,
+        };
+        let (mut answer, exit) = requests::finish_filed_request(&client, invocation, &body, wait)?;
+        if matches!(action, services::ServicesAction::Deploy(_)) {
+            services::deploy::annotate(&mut answer, dns);
+        }
+        return Ok((render(invocation, &answer), exit));
+    }
+    if let Command::Dns(dns::DnsAction::Change { wait, .. }) = &invocation.command {
+        let (answer, exit) = requests::finish_filed_request(&client, invocation, &body, *wait)?;
+        return Ok((render(invocation, &answer), exit));
+    }
+    if let Command::Requests(requests::RequestsAction::Get {
+        id,
+        wait: Some(bound),
+    }) = &invocation.command
+    {
+        let (outcome, request) = requests::wait_for_outcome(&client, invocation, id, *bound)?;
+        let answer = requests::outcome_body(outcome, &request);
+        return Ok((render(invocation, &answer), outcome.exit_code()));
+    }
     let payload = if body.get("items").is_some() {
         body
     } else {
         body.get("data").cloned().unwrap_or(body)
     };
-    Ok(render(invocation, &payload))
+    let exit = lab_exit_code(&invocation.command, &payload);
+    Ok((render(invocation, &payload), exit))
+}
+
+/// `lab put`: uploads the file, then follows the operation when asked to.
+fn run_lab_put(
+    invocation: &Invocation,
+    client: &reqwest::blocking::Client,
+    correlation_id: String,
+) -> Result<(String, u8), CliError> {
+    let Command::LabPut {
+        lease_id,
+        local_path,
+        guest_path,
+        overwrite,
+        ..
+    } = &invocation.command
+    else {
+        unreachable!("only `lab put` is routed here");
+    };
+    let body = upload_lab_file(
+        invocation,
+        lease_id,
+        local_path,
+        guest_path,
+        *overwrite,
+        correlation_id,
+    )?;
+    let body = follow_lab(client, invocation, body, None, false)?;
+    let payload = body.get("data").cloned().unwrap_or(body);
+    let exit = lab_exit_code(&invocation.command, &payload);
+    Ok((render(invocation, &payload), exit))
+}
+
+/// The exit code a Lab command's result implies (see [`run_with_exit`]).
+fn lab_exit_code(command: &Command, payload: &Value) -> u8 {
+    match command {
+        Command::LabExec { wait: true, .. } => payload["exitCode"]
+            .as_i64()
+            .map_or(1, |code| u8::try_from(code.clamp(0, 255)).unwrap_or(1)),
+        Command::LabExecStatus { wait: true, .. } => {
+            if payload["state"] == "exited" {
+                payload["exitCode"]
+                    .as_i64()
+                    .map_or(1, |code| u8::try_from(code.clamp(0, 255)).unwrap_or(1))
+            } else {
+                // Lost, failed to start, or the lease ended: the command
+                // did not finish.
+                1
+            }
+        }
+        Command::LabNew { wait: true, .. } => u8::from(payload["state"] != "ready"),
+        Command::LabDestroy { wait: true, .. } | Command::LabCleanupRetry { wait: true, .. } => {
+            u8::from(payload["state"] != "released")
+        }
+        Command::LabCollect { wait: true, .. } | Command::LabPut { wait: true, .. } => {
+            u8::from(payload["state"] != "succeeded")
+        }
+        // A fill that quarantined a member is reported, not hidden.
+        Command::LabPoolFill { wait: true, .. } => u8::from(
+            payload["state"] != "succeeded"
+                || payload["quarantined"]
+                    .as_array()
+                    .is_some_and(|quarantined| !quarantined.is_empty()),
+        ),
+        _ => 0,
+    }
+}
+
+fn get_lease(
+    client: &reqwest::blocking::Client,
+    invocation: &Invocation,
+    lease_id: &str,
+) -> Result<Value, CliError> {
+    send(
+        client,
+        invocation,
+        reqwest::Method::GET,
+        &format!("/api/v1/lab/leases/{lease_id}"),
+        &[],
+        None,
+        uuid::Uuid::now_v7().to_string(),
+    )
+}
+
+/// Polls one lease until its state is one of `done` or the timeout passes;
+/// answers the lease detail body.
+fn wait_for_lease(
+    client: &reqwest::blocking::Client,
+    invocation: &Invocation,
+    lease_id: &str,
+    done: &[&str],
+    timeout_secs: u64,
+) -> Result<Value, CliError> {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(timeout_secs);
+    loop {
+        let body = get_lease(client, invocation, lease_id)?;
+        let state = body["data"]["state"].as_str().unwrap_or_default();
+        if done.contains(&state) {
+            return Ok(body);
+        }
+        if std::time::Instant::now() >= deadline {
+            return Err(CliError {
+                message: format!(
+                    "the lease {lease_id} is still {state} after {timeout_secs}s; check `fleetctl lab status {lease_id}`"
+                ),
+            });
+        }
+        std::thread::sleep(std::time::Duration::from_secs(2));
+    }
+}
+
+/// The follow-up steps of the one-command Lab flow (FM-720).
+#[allow(clippy::too_many_lines)]
+fn follow_lab(
+    client: &reqwest::blocking::Client,
+    invocation: &Invocation,
+    body: Value,
+    account: Option<&str>,
+    keyed: bool,
+) -> Result<Value, CliError> {
+    match &invocation.command {
+        Command::LabNew { wait, timeout, .. } => {
+            let lease_id = body["data"]["id"].as_str().unwrap_or_default().to_owned();
+            let provision_body = account.map_or_else(
+                || serde_json::json!({}),
+                |account| serde_json::json!({ "accountId": account }),
+            );
+            // A keyed retry may find a lease an earlier attempt already
+            // provisioned: only a still-`requested` lease is provisioned.
+            if !keyed || body["data"]["state"] == "requested" {
+                send(
+                    client,
+                    invocation,
+                    reqwest::Method::POST,
+                    &format!("/api/v1/lab/leases/{lease_id}/provision"),
+                    &[],
+                    Some(&provision_body),
+                    uuid::Uuid::now_v7().to_string(),
+                )?;
+            }
+            if *wait {
+                wait_for_lease(
+                    client,
+                    invocation,
+                    &lease_id,
+                    &["ready", "failed", "releasing", "released", "cleanup_failed"],
+                    timeout.unwrap_or(900),
+                )
+            } else {
+                get_lease(client, invocation, &lease_id)
+            }
+        }
+        Command::LabExec {
+            wait: true,
+            timeout,
+            session,
+            ..
+        } => {
+            let operation_id = body["data"]["id"].as_str().unwrap_or_default().to_owned();
+            let (data, output) = wait_for_operation_output(
+                client,
+                invocation,
+                &operation_id,
+                // An interactive run's SSH session outlasts its bound by 90 s.
+                timeout.unwrap_or(60).saturating_add(
+                    if session.as_deref() == Some("interactive") {
+                        120
+                    } else {
+                        60
+                    },
+                ),
+            )?;
+            Ok(serde_json::json!({ "data": {
+                "operationId": operation_id,
+                "state": data["state"],
+                "exitCode": output["exitCode"],
+                "stdout": output["stdout"],
+                "stderr": output["stderr"],
+                "truncatedStdout": output["truncatedStdout"],
+                "truncatedStderr": output["truncatedStderr"],
+                "reason": output["reason"],
+                "detail": output["detail"],
+            }}))
+        }
+        Command::LabExecStatus {
+            handle,
+            wait: true,
+            timeout,
+        } => {
+            let timeout_secs = timeout.unwrap_or(3_600);
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(timeout_secs);
+            let mut body = body;
+            loop {
+                if body["data"]["terminal"] == true {
+                    return Ok(body);
+                }
+                if std::time::Instant::now() >= deadline {
+                    return Err(CliError {
+                        message: format!(
+                            "the detached command {handle} is still {} after {timeout_secs}s; poll again with `fleetctl lab exec-status {handle}`",
+                            body["data"]["state"].as_str().unwrap_or("unknown")
+                        ),
+                    });
+                }
+                std::thread::sleep(std::time::Duration::from_secs(2));
+                body = send(
+                    client,
+                    invocation,
+                    reqwest::Method::GET,
+                    &format!("/api/v1/lab/detached-execs/{handle}"),
+                    &[],
+                    None,
+                    uuid::Uuid::now_v7().to_string(),
+                )?;
+            }
+        }
+        Command::LabPoolFill {
+            wait: true,
+            timeout,
+            ..
+        } => {
+            let operation_id = body["data"]["id"].as_str().unwrap_or_default().to_owned();
+            let (data, output) = wait_for_operation_output(
+                client,
+                invocation,
+                &operation_id,
+                timeout.unwrap_or(900),
+            )?;
+            Ok(serde_json::json!({ "data": {
+                "operationId": operation_id,
+                "state": data["state"],
+                "available": output["available"],
+                "quarantined": output["quarantined"],
+                "pending": output["pending"],
+                "reason": output["reason"],
+                "detail": output["detail"],
+            }}))
+        }
+        Command::LabCollect {
+            wait: true,
+            timeout,
+            ..
+        } => {
+            let operation_id = body["data"]["id"].as_str().unwrap_or_default().to_owned();
+            let (data, output) = wait_for_operation_output(
+                client,
+                invocation,
+                &operation_id,
+                timeout.unwrap_or(660),
+            )?;
+            Ok(serde_json::json!({ "data": {
+                "operationId": operation_id,
+                "state": data["state"],
+                "artifacts": output["artifacts"],
+                "failures": output["failures"],
+                "reason": output["reason"],
+                "detail": output["detail"],
+            }}))
+        }
+        Command::LabPut {
+            wait: true,
+            timeout,
+            ..
+        } => {
+            let operation_id = body["data"]["id"].as_str().unwrap_or_default().to_owned();
+            let (data, output) = wait_for_operation_output(
+                client,
+                invocation,
+                &operation_id,
+                timeout.unwrap_or(900),
+            )?;
+            Ok(serde_json::json!({ "data": {
+                "operationId": operation_id,
+                "state": data["state"],
+                "guestPath": output["guestPath"],
+                "sizeBytes": output["sizeBytes"],
+                "sha256": output["sha256"],
+                "reason": output["reason"],
+                "detail": output["detail"],
+            }}))
+        }
+        Command::LabDestroy {
+            lease_id,
+            wait: true,
+            timeout,
+            ..
+        } => wait_for_lease(
+            client,
+            invocation,
+            lease_id,
+            &["released", "cleanup_failed"],
+            timeout.unwrap_or(900),
+        ),
+        Command::LabCleanupRetry {
+            lease_id,
+            wait: true,
+            timeout,
+        } => {
+            // Wait for this attempt only: a failed one backs off for
+            // minutes, so waiting for `released` could outlast any bound.
+            let operation_id = body["data"]["id"].as_str().unwrap_or_default().to_owned();
+            wait_for_operation(client, invocation, &operation_id, timeout.unwrap_or(900))?;
+            get_lease(client, invocation, lease_id)
+        }
+        _ => Ok(body),
+    }
+}
+
+/// The single trusted Proxmox account, when exactly one exists; otherwise
+/// the caller must pass `--account`.
+fn only_trusted_account(
+    client: &reqwest::blocking::Client,
+    invocation: &Invocation,
+) -> Result<String, CliError> {
+    // Every page: a trusted account on a later page must count.
+    let mut trusted: Vec<String> = Vec::new();
+    let mut cursor: Option<String> = None;
+    loop {
+        let query: Vec<(&str, String)> = cursor
+            .iter()
+            .map(|cursor| ("cursor", cursor.clone()))
+            .collect();
+        let body = send(
+            client,
+            invocation,
+            reqwest::Method::GET,
+            "/api/v1/proxmox/accounts",
+            &query,
+            None,
+            uuid::Uuid::now_v7().to_string(),
+        )?;
+        trusted.extend(
+            body["items"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter(|account| account["fingerprint"].is_string())
+                .filter_map(|account| account["id"].as_str().map(str::to_owned)),
+        );
+        match body["page"]["nextCursor"].as_str() {
+            Some(next) if Some(next) != cursor.as_deref() => cursor = Some(next.to_owned()),
+            _ => break,
+        }
+    }
+    match trusted.as_slice() {
+        [only] => Ok(only.clone()),
+        [] => Err(CliError {
+            message: "no trusted Proxmox account exists; add and confirm one first".to_owned(),
+        }),
+        _ => Err(CliError {
+            message: format!(
+                "{} trusted Proxmox accounts exist; pass --account <id>",
+                trusted.len()
+            ),
+        }),
+    }
 }
 
 fn follow_skills_matrix_pages(
@@ -2780,6 +4469,11 @@ fn event_stream_request(
     if let Some(cursor) = last_event_id {
         request = request.header("last-event-id", cursor);
     }
+    // The token was validated before any request; an unusable one adds no
+    // header rather than failing mid-stream.
+    if let Ok(Some(token)) = bearer_token() {
+        request = request.header(reqwest::header::AUTHORIZATION, token);
+    }
     request.send()
 }
 
@@ -2883,9 +4577,9 @@ mod skill_doc_tests;
 #[cfg(test)]
 mod event_output_tests {
     use super::{
-        Command, Output, event_stream_http_error, event_stream_request, merge_skills_matrix_pages,
-        parse, parse_skills_command, read_sse_events, render_catalog, render_skills,
-        render_stream_event, request_for, retryable_event_stream_status,
+        Command, Output, event_stream_http_error, event_stream_request, lab_exit_code,
+        merge_skills_matrix_pages, parse, parse_skills_command, read_sse_events, render_catalog,
+        render_skills, render_stream_event, request_for, retryable_event_stream_status,
     };
     use std::io::{BufRead as _, Write as _};
     use std::net::TcpListener;
@@ -2941,6 +4635,451 @@ mod event_output_tests {
         assert_eq!(path, "/api/v1/proxmox/accounts/account-1/discovery");
         assert!(query.is_empty());
         assert!(body.is_none());
+    }
+
+    /// Every `lab` subcommand answers `--help`/`-h` with its usage, exit 0,
+    /// and never contacts the controller.
+    #[test]
+    fn lab_subcommand_help_makes_no_request() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let subcommands = [
+            "templates",
+            "create",
+            "template-create",
+            "status",
+            "exec",
+            "destroy",
+            "cleanup-retry",
+            "pool",
+            "publish",
+            "provision",
+            "provision-lease",
+            "provisions",
+            "leases",
+            "lease",
+            "release",
+            "extend",
+            "sweep",
+            "artifacts",
+            "collect",
+            "put",
+            "artifact-get",
+        ];
+        for sub in subcommands {
+            for flag in ["--help", "-h"] {
+                for args in [vec!["lab", sub, flag], vec!["lab", sub, "lease-1", flag]] {
+                    let mut argv = vec!["--url".to_owned(), url.clone()];
+                    argv.extend(args.iter().map(ToString::to_string));
+                    let invocation = parse(&argv).unwrap();
+                    assert!(
+                        matches!(invocation.command, Command::Help { .. }),
+                        "{args:?}"
+                    );
+                    let (text, code) = super::run_with_exit(&invocation).unwrap();
+                    assert_eq!(code, 0, "{args:?}");
+                    assert!(text.starts_with("Usage:\n  lab "), "{args:?}: {text}");
+                    assert!(
+                        text.lines().skip(1).all(|line| line.starts_with("  lab ")),
+                        "{args:?}: {text}"
+                    );
+                    assert!(text.lines().count() <= 7, "{args:?}: not narrowed: {text}");
+                    let exact = text.lines().skip(1).any(|line| {
+                        line.split_whitespace()
+                            .nth(1)
+                            .is_some_and(|word| word.split('|').any(|name| name == sub))
+                    });
+                    assert!(exact, "{args:?}: {text}");
+                }
+            }
+        }
+        for sub in ["list", "show", "create", "delete", "fill", "drain"] {
+            let argv: Vec<String> = ["lab", "pool", sub, "--help"].map(str::to_owned).into();
+            let invocation = parse(&argv).unwrap();
+            assert!(
+                matches!(invocation.command, Command::Help { ref text } if text.contains("lab pool"))
+            );
+        }
+        // After `--` the words belong to the remote command.
+        let exec = parse(&["lab", "exec", "lease-1", "--", "ls", "-h"].map(str::to_owned)).unwrap();
+        assert!(matches!(exec.command, Command::LabExec { .. }));
+        // No connection was ever attempted.
+        assert_eq!(
+            listener.accept().unwrap_err().kind(),
+            std::io::ErrorKind::WouldBlock
+        );
+    }
+
+    #[test]
+    fn a_flag_is_never_taken_as_an_id() {
+        for args in [
+            vec!["lab", "destroy", "--bogus"],
+            vec!["lab", "status", "-x"],
+            vec!["lab", "cleanup-retry", "--bogus"],
+            vec!["lab", "release", "--bogus"],
+            vec!["lab", "pool", "show", "--bogus"],
+            vec!["lab", "destroy", "lease-1", "--bogus"],
+            vec!["machines", "get", "--bogus"],
+            vec!["operations", "cancel", "--bogus"],
+        ] {
+            let argv: Vec<String> = args.iter().map(ToString::to_string).collect();
+            let error = parse(&argv).unwrap_err();
+            assert!(
+                error.message.contains("unknown flag"),
+                "{args:?}: {}",
+                error.message
+            );
+        }
+    }
+
+    #[test]
+    fn help_is_narrowed_to_the_verb_and_unknown_groups_still_fail() {
+        let help = |args: &[&str]| {
+            let argv: Vec<String> = args.iter().map(ToString::to_string).collect();
+            match parse(&argv).unwrap().command {
+                Command::Help { text } => text,
+                other => panic!("{args:?}: {other:?}"),
+            }
+        };
+        let destroy = help(&["lab", "destroy", "--help"]);
+        assert_eq!(
+            destroy,
+            "Usage:\n  lab destroy <lease-id> [--keep] [--wait] [--timeout <s>]"
+        );
+        assert_eq!(help(&["lab", "leases", "-h"]).lines().count(), 2);
+        assert_eq!(help(&["lab", "pool", "create", "-h"]).lines().count(), 2);
+        assert!(help(&["lab", "-h"]).lines().count() > 10);
+        assert_eq!(help(&["images", "version", "-h"]).lines().count(), 2);
+        assert!(help(&["proxmox", "tasks", "-h"]).contains("proxmox tasks"));
+        // A typo plus `-h` is the ordinary unknown-command error.
+        let argv: Vec<String> = ["bogus", "-h"].map(str::to_owned).into();
+        assert!(parse(&argv).is_err());
+        // After `--` the words belong to the remote command.
+        let exec = parse(
+            &[
+                "frogenv",
+                "run",
+                "m",
+                "--root",
+                "/r",
+                "--endpoint",
+                "e",
+                "--auth",
+                "agent",
+                "--",
+                "ls",
+                "-h",
+            ]
+            .map(str::to_owned),
+        )
+        .unwrap();
+        assert!(!matches!(exec.command, Command::Help { .. }));
+    }
+
+    #[test]
+    fn help_for_other_command_groups_is_answered_locally() {
+        for args in [
+            vec!["machines", "get", "--help"],
+            vec!["projects", "delete", "-h"],
+            vec!["operations", "cancel", "--help"],
+        ] {
+            let argv: Vec<String> = args.iter().map(ToString::to_string).collect();
+            assert!(
+                matches!(parse(&argv).unwrap().command, Command::Help { .. }),
+                "{args:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn lab_leases_filters_become_query_parameters() {
+        let args = [
+            "lab",
+            "leases",
+            "--purpose",
+            "run-1",
+            "--purpose-prefix",
+            "release-qa:",
+            "--state",
+            "ready,provisioning",
+            "--state",
+            "requested",
+            "--owner",
+            "ci",
+        ]
+        .iter()
+        .map(ToString::to_string)
+        .collect::<Vec<_>>();
+        let (method, path, query, body) = request_for(&parse(&args).unwrap().command).unwrap();
+        assert_eq!(method, reqwest::Method::GET);
+        assert_eq!(path, "/api/v1/lab/leases");
+        assert_eq!(
+            query,
+            vec![
+                ("purpose", "run-1".to_owned()),
+                ("purposePrefix", "release-qa:".to_owned()),
+                ("owner", "ci".to_owned()),
+                ("state", "ready".to_owned()),
+                ("state", "provisioning".to_owned()),
+                ("state", "requested".to_owned()),
+            ]
+        );
+        assert!(body.is_none());
+        let bare = ["lab", "leases", "--state"]
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>();
+        assert!(
+            parse(&bare)
+                .unwrap_err()
+                .message
+                .contains("--state requires a value")
+        );
+    }
+
+    #[test]
+    fn a_lease_idempotency_key_rides_a_header_not_the_body() {
+        for verb in ["lease", "create"] {
+            let args = [
+                "lab",
+                verb,
+                "tv-1",
+                "--purpose",
+                "p",
+                "--idempotency-key",
+                "run-7",
+            ]
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>();
+            let command = parse(&args).unwrap().command;
+            assert_eq!(super::lease_idempotency_key(&command), Some("run-7"));
+            let (_, _, _, body) = request_for(&command).unwrap();
+            assert!(!body.unwrap().to_string().contains("run-7"));
+        }
+        let none = ["lab", "create", "tv-1", "--purpose", "p"]
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            super::lease_idempotency_key(&parse(&none).unwrap().command),
+            None
+        );
+    }
+
+    #[test]
+    fn detached_exec_parses_requests_and_keys_like_the_other_lab_commands() {
+        let parsed = |args: &[&str]| {
+            let argv: Vec<String> = args.iter().map(ToString::to_string).collect();
+            parse(&argv)
+        };
+        let command = parsed(&[
+            "lab",
+            "exec",
+            "lease-1",
+            "--detach",
+            "--timeout",
+            "5400",
+            "--idempotency-key",
+            "run-7",
+            "--",
+            "sh",
+            "-c",
+            "make test",
+        ])
+        .unwrap()
+        .command;
+        assert_eq!(super::lease_idempotency_key(&command), Some("run-7"));
+        let (method, path, _, body) = request_for(&command).unwrap();
+        assert_eq!(method, reqwest::Method::POST);
+        assert_eq!(path, "/api/v1/lab/leases/lease-1/exec-detached");
+        let body = body.unwrap();
+        assert_eq!(body["script"], "sh -c 'make test'");
+        assert_eq!(body["timeoutSeconds"], 5400);
+        assert!(!body.to_string().contains("run-7"));
+        // The bound is the controller's default when not given.
+        let command = parsed(&["lab", "exec", "lease-1", "--detach", "--", "true"])
+            .unwrap()
+            .command;
+        assert!(
+            request_for(&command)
+                .unwrap()
+                .3
+                .unwrap()
+                .get("timeoutSeconds")
+                .is_none()
+        );
+
+        let status = parsed(&[
+            "lab",
+            "exec-status",
+            "handle-1",
+            "--wait",
+            "--timeout",
+            "90",
+        ])
+        .unwrap()
+        .command;
+        assert!(matches!(
+            &status,
+            Command::LabExecStatus { handle, wait: true, timeout: Some(90) } if handle == "handle-1"
+        ));
+        let (method, path, _, body) = request_for(&status).unwrap();
+        assert_eq!(method, reqwest::Method::GET);
+        assert_eq!(path, "/api/v1/lab/detached-execs/handle-1");
+        assert!(body.is_none());
+        // Only an exited command's code is the exit code; any other terminal
+        // state is a failure.
+        let exit = |state: &str, code: i64| {
+            super::lab_exit_code(
+                &status,
+                &serde_json::json!({"state": state, "exitCode": code}),
+            )
+        };
+        assert_eq!(exit("exited", 0), 0);
+        assert_eq!(exit("exited", 9), 9);
+        for state in ["lost", "failed_to_start", "lease_ended"] {
+            assert_eq!(exit(state, 0), 1, "{state}");
+        }
+
+        for args in [
+            vec!["lab", "exec", "lease-1", "--detach", "--wait", "--", "true"],
+            vec![
+                "lab",
+                "exec",
+                "lease-1",
+                "--idempotency-key",
+                "k",
+                "--",
+                "true",
+            ],
+            vec!["lab", "exec", "lease-1", "--detach"],
+            vec!["lab", "exec", "lease-1", "--detach", "--idempotency-key"],
+            vec!["lab", "exec-status"],
+            vec!["lab", "exec-status", "h", "--bogus"],
+        ] {
+            assert!(parsed(&args).is_err(), "{args:?}");
+        }
+    }
+
+    #[test]
+    fn lab_cleanup_retry_posts_the_rearm_route() {
+        let args = ["lab", "cleanup-retry", "lease-1"]
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>();
+        let invocation = parse(&args).unwrap();
+        let (method, path, query, body) = request_for(&invocation.command).unwrap();
+
+        assert_eq!(method, reqwest::Method::POST);
+        assert_eq!(path, "/api/v1/lab/leases/lease-1/cleanup/retry");
+        assert!(query.is_empty());
+        assert!(body.is_none());
+        // Only an attempt that released the lease is a success.
+        let waited = Command::LabCleanupRetry {
+            lease_id: "lease-1".to_owned(),
+            wait: true,
+            timeout: None,
+        };
+        assert_eq!(
+            lab_exit_code(&waited, &serde_json::json!({ "state": "released" })),
+            0
+        );
+        assert_eq!(
+            lab_exit_code(&waited, &serde_json::json!({ "state": "releasing" })),
+            1
+        );
+    }
+
+    #[test]
+    fn lab_pool_commands_map_to_the_pool_routes() {
+        let request = |words: &[&str]| {
+            let args = words.iter().map(ToString::to_string).collect::<Vec<_>>();
+            request_for(&parse(&args).unwrap().command).unwrap()
+        };
+        let (method, path, _, body) = request(&["lab", "pool", "list"]);
+        assert_eq!(
+            (method, path.as_str()),
+            (reqwest::Method::GET, "/api/v1/lab/pools")
+        );
+        assert!(body.is_none());
+        let (method, path, _, _) = request(&["lab", "pool", "show", "pool-1"]);
+        assert_eq!(
+            (method, path.as_str()),
+            (reqwest::Method::GET, "/api/v1/lab/pools/pool-1")
+        );
+        let (method, path, _, body) = request(&[
+            "lab",
+            "pool",
+            "create",
+            "--template-version",
+            "version-1",
+            "--account",
+            "account-1",
+            "--baseline",
+            "baseline",
+            "--size",
+            "3",
+        ]);
+        assert_eq!(
+            (method, path.as_str()),
+            (reqwest::Method::POST, "/api/v1/lab/pools")
+        );
+        assert_eq!(
+            body.unwrap(),
+            serde_json::json!({
+                "templateVersionId": "version-1",
+                "accountId": "account-1",
+                "baselineSnapshot": "baseline",
+                "size": 3,
+            })
+        );
+        let (method, path, _, _) = request(&["lab", "pool", "delete", "pool-1"]);
+        assert_eq!(
+            (method, path.as_str()),
+            (reqwest::Method::DELETE, "/api/v1/lab/pools/pool-1")
+        );
+        let (method, path, _, body) = request(&[
+            "lab", "pool", "fill", "pool-1", "--vmid", "200", "--vmid", "201", "--wait",
+        ]);
+        assert_eq!(
+            (method, path.as_str()),
+            (reqwest::Method::POST, "/api/v1/lab/pools/pool-1/fill")
+        );
+        assert_eq!(body.unwrap(), serde_json::json!({ "vmids": [200, 201] }));
+        let (_, path, _, body) = request(&["lab", "pool", "drain", "pool-1", "--all"]);
+        assert_eq!(path, "/api/v1/lab/pools/pool-1/drain");
+        assert_eq!(body.unwrap(), serde_json::json!({ "all": true }));
+        let (_, _, _, body) = request(&["lab", "pool", "drain", "pool-1", "--vmid", "200"]);
+        assert_eq!(body.unwrap(), serde_json::json!({ "vmids": [200] }));
+        // Missing flags and unknown subcommands are usage errors.
+        for words in [
+            &["lab", "pool", "create", "--size", "3"][..],
+            &["lab", "pool", "fill", "pool-1", "--vmid"][..],
+            &["lab", "pool", "resize", "pool-1"][..],
+            // A whole-pool drain is never implied.
+            &["lab", "pool", "drain", "pool-1"][..],
+            &["lab", "pool", "drain", "pool-1", "--all", "--vmid", "200"][..],
+        ] {
+            let args = words.iter().map(ToString::to_string).collect::<Vec<_>>();
+            assert!(parse(&args).is_err(), "{words:?}");
+        }
+        // A fill that quarantined a member exits non-zero.
+        let waited = Command::LabPoolFill {
+            pool_id: "pool-1".to_owned(),
+            vmids: vec![200],
+            wait: true,
+            timeout: None,
+        };
+        let outcome = |quarantined: serde_json::Value| {
+            lab_exit_code(
+                &waited,
+                &serde_json::json!({ "state": "succeeded", "quarantined": quarantined }),
+            )
+        };
+        assert_eq!(outcome(serde_json::json!([])), 0);
+        assert_eq!(outcome(serde_json::json!([200])), 1);
     }
 
     fn fake_controller(status: u16, body: &'static str) -> (String, thread::JoinHandle<String>) {
@@ -3043,6 +5182,44 @@ mod event_output_tests {
         );
         assert!(body.is_none());
         assert!(parse(&strings(&["desired", "resources", "--bogus"])).is_err());
+    }
+
+    #[test]
+    fn desired_settings_commands_read_and_patch_the_registry_settings() {
+        let strings = |words: &[&str]| words.iter().map(|w| (*w).to_owned()).collect::<Vec<_>>();
+        let read = parse(&strings(&["desired", "settings"])).unwrap();
+        let (method, path, _, body) = request_for(&read.command).unwrap();
+        assert_eq!(method, reqwest::Method::GET);
+        assert_eq!(path, "/api/v1/desired/settings");
+        assert!(body.is_none());
+        let set = parse(&strings(&[
+            "desired",
+            "settings",
+            "set",
+            "--auto-activate",
+            "false",
+            "--change-mode",
+            "direct",
+        ]))
+        .unwrap();
+        let (method, path, _, body) = request_for(&set.command).unwrap();
+        assert_eq!(method, reqwest::Method::PUT);
+        assert_eq!(path, "/api/v1/desired/settings");
+        assert_eq!(
+            body.unwrap(),
+            serde_json::json!({"autoActivate": false, "changeMode": "direct"})
+        );
+        assert!(parse(&strings(&["desired", "settings", "set"])).is_err());
+        assert!(
+            parse(&strings(&[
+                "desired",
+                "settings",
+                "set",
+                "--change-mode",
+                "push"
+            ]))
+            .is_err()
+        );
     }
 
     #[test]
@@ -3724,6 +5901,9 @@ fn render(invocation: &Invocation, payload: &Value) -> String {
             | Command::DesiredSourceSet { .. }
             | Command::DesiredSourceCredential => render_desired_source(payload),
             Command::DesiredHistory => render_desired_history(payload),
+            Command::DesiredSettings | Command::DesiredSettingsSet { .. } => {
+                render_desired_settings(payload)
+            }
             Command::DesiredResources { .. } => render_desired_resources(payload),
             Command::MachinesOnboardList { .. }
             | Command::MachinesOnboardGet { .. }
@@ -3742,13 +5922,21 @@ fn render(invocation: &Invocation, payload: &Value) -> String {
             | Command::ProjectsGet { .. }
             | Command::ProjectsDiscover { .. }
             | Command::ProjectsRecord { .. } => render_projects(Some(payload)),
+            Command::ImagesBuilds { .. } => render_image_builds(Some(payload)),
             Command::ImagesRecipes
+            | Command::ImagesBuildShow { .. }
             | Command::ImagesCreate { .. }
             | Command::ImagesPublish { .. }
             | Command::ImagesVersions { .. }
             | Command::ImagesVersion { .. }
             | Command::ImagesPromote { .. }
+            | Command::ImagesAddressClear { .. }
             | Command::ImagesBuild { .. } => render_images(Some(payload)),
+            Command::ImagesAddresses => render_build_addresses(payload),
+            Command::ImagesSecretList => render_image_secrets(payload),
+            Command::ImagesSecretSet { .. } | Command::ImagesSecretRemove { .. } => {
+                render_images(Some(payload))
+            }
             Command::TailnetStatus
             | Command::TailnetConfigure { .. }
             | Command::TailnetClear
@@ -3762,11 +5950,67 @@ fn render(invocation: &Invocation, payload: &Value) -> String {
             | Command::ProxmoxGuests { .. }
             | Command::ProxmoxObserveGuest { .. } => render_proxmox(Some(payload)),
             Command::ProxmoxNodes { .. } => render_proxmox_nodes(Some(payload)),
+            Command::Accounts(_) => accounts::render(payload),
+            Command::Registry(_) => registry::render(payload),
+            Command::Requests(_) => requests::render(payload),
+            Command::Dns(_) => dns::render(payload),
+            Command::Services(ref action) => services::render_for(action, payload),
             Command::ProxmoxTasks { .. } => proxmox_tasks::render(payload),
             Command::ProxmoxPrivileges { .. } => proxmox_privileges::render(payload),
+            Command::LabArtifacts { .. } => render_lab_artifacts(payload),
+            Command::CredentialsIssue { .. }
+            | Command::CredentialsList
+            | Command::CredentialsRevoke { .. } => render_credentials(payload),
+            Command::LabPools | Command::LabPoolShow { .. } | Command::LabPoolCreate { .. } => {
+                render_lab_pools(payload)
+            }
             _ => render_text(Some(payload)),
         },
     }
+}
+
+fn render_credentials(payload: &Value) -> String {
+    use std::fmt::Write as _;
+    let line = |output: &mut String, item: &Value| {
+        let _ = writeln!(
+            output,
+            "{}  {}  {}  expires {}  templates [{}]  versions [{}]",
+            item["id"].as_str().unwrap_or("?"),
+            item["owner"].as_str().unwrap_or("?"),
+            item["status"].as_str().unwrap_or("?"),
+            item["expiresAt"],
+            join_strings(&item["templates"]),
+            join_strings(&item["versions"]),
+        );
+    };
+    let mut output = String::new();
+    if let Some(items) = payload["items"].as_array() {
+        if items.is_empty() {
+            return "No delegated credentials.\n".to_owned();
+        }
+        for item in items {
+            line(&mut output, item);
+        }
+        return output;
+    }
+    line(&mut output, payload);
+    if let Some(token) = payload["token"].as_str() {
+        let _ = writeln!(
+            output,
+            "Token (shown once; store it now, it cannot be read again):\n{token}"
+        );
+    }
+    output
+}
+
+fn join_strings(value: &Value) -> String {
+    value
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 fn render_desired_status(payload: &Value) -> String {
@@ -3845,6 +6089,14 @@ fn render_desired_source(payload: &Value) -> String {
         let _ = writeln!(output, "Credential reference: {reference}");
     }
     output
+}
+
+fn render_desired_settings(payload: &Value) -> String {
+    format!(
+        "registry.autoActivate: {}\nregistry.changeMode: {}\n",
+        payload["autoActivate"].as_bool().unwrap_or(true),
+        payload["changeMode"].as_str().unwrap_or("pull-request"),
+    )
 }
 
 fn render_desired_history(payload: &Value) -> String {
@@ -3969,6 +6221,7 @@ fn request_for(command: &Command) -> Result<RequestShape, CliError> {
         // `status` took one of the two routes above.
         Command::Status => unreachable!("the status command returned before dispatch"),
         Command::Events => unreachable!("the events command streams before request dispatch"),
+        Command::Help { .. } => unreachable!("help is answered before request dispatch"),
         Command::System => (
             reqwest::Method::GET,
             "/api/v1/system".to_owned(),
@@ -4015,6 +6268,30 @@ fn request_for(command: &Command) -> Result<RequestShape, CliError> {
                 "value": read_stdin_to_eof("the Git credential (token or private key)")?,
             })),
         ),
+        Command::DesiredSettings => (
+            reqwest::Method::GET,
+            "/api/v1/desired/settings".to_owned(),
+            Vec::new(),
+            None,
+        ),
+        Command::DesiredSettingsSet {
+            auto_activate,
+            change_mode,
+        } => {
+            let mut body = serde_json::Map::new();
+            if let Some(value) = auto_activate {
+                body.insert("autoActivate".to_owned(), Value::Bool(*value));
+            }
+            if let Some(mode) = change_mode {
+                body.insert("changeMode".to_owned(), Value::String(mode.clone()));
+            }
+            (
+                reqwest::Method::PUT,
+                "/api/v1/desired/settings".to_owned(),
+                Vec::new(),
+                Some(Value::Object(body)),
+            )
+        }
         Command::DesiredHistory => (
             reqwest::Method::GET,
             "/api/v1/desired/history".to_owned(),
@@ -4691,6 +6968,13 @@ fn request_for(command: &Command) -> Result<RequestShape, CliError> {
                 .unwrap_or_default(),
             None,
         ),
+        Command::Requests(action) => requests::request(action),
+        Command::Dns(action) => dns::request(action),
+        Command::Services(action) => services::request(action)?,
+        Command::Accounts(action) => {
+            accounts::request(action, || read_stdin_line("the provider API token"))?
+        }
+        Command::Registry(action) => registry::request(action),
         Command::ProxmoxAccounts => (
             reqwest::Method::GET,
             "/api/v1/proxmox/accounts".to_owned(),
@@ -4813,6 +7097,30 @@ fn request_for(command: &Command) -> Result<RequestShape, CliError> {
                 })),
             )
         }
+        Command::ImagesBuilds {
+            version_id,
+            limit,
+            cursor,
+        } => {
+            let mut query: Vec<_> = version_id
+                .iter()
+                .map(|id| ("versionId", id.clone()))
+                .collect();
+            query.extend(limit.iter().map(|limit| ("limit", limit.to_string())));
+            query.extend(cursor.iter().map(|cursor| ("cursor", cursor.clone())));
+            (
+                reqwest::Method::GET,
+                "/api/v1/images/builds".to_owned(),
+                query,
+                None,
+            )
+        }
+        Command::ImagesBuildShow { build_id } => (
+            reqwest::Method::GET,
+            format!("/api/v1/images/builds/{build_id}"),
+            Vec::new(),
+            None,
+        ),
         Command::ImagesRecipes => (
             reqwest::Method::GET,
             "/api/v1/images/recipes".to_owned(),
@@ -4838,11 +7146,16 @@ fn request_for(command: &Command) -> Result<RequestShape, CliError> {
                 "content": read_stdin_to_eof("the recipe content as JSON")?,
             })),
         ),
-        Command::ImagesPublish { recipe_id } => (
+        Command::ImagesPublish {
+            recipe_id,
+            allow_insecure_tls,
+        } => (
             reqwest::Method::POST,
             format!("/api/v1/images/recipes/{recipe_id}/publish"),
             Vec::new(),
-            None,
+            // Without the opt-in the request stays body-less, exactly as
+            // before the option existed.
+            allow_insecure_tls.then(|| serde_json::json!({ "allowInsecureTls": true })),
         ),
         Command::ImagesVersions { recipe_id } => (
             reqwest::Method::GET,
@@ -4868,6 +7181,10 @@ fn request_for(command: &Command) -> Result<RequestShape, CliError> {
             readiness_deadline_seconds,
             ttl_seconds,
             cleanup,
+            audio,
+            guest_os,
+            ssh_user,
+            interactive_user,
         } => {
             let mut body = serde_json::json!({
                 "name": name,
@@ -4883,6 +7200,18 @@ fn request_for(command: &Command) -> Result<RequestShape, CliError> {
             });
             if let Some(command) = &readiness_command {
                 body["readinessCommand"] = serde_json::json!(command);
+            }
+            if let Some(guest_os) = &guest_os {
+                body["guestOs"] = serde_json::json!(guest_os);
+            }
+            if let Some(ssh_user) = &ssh_user {
+                body["sshUser"] = serde_json::json!(ssh_user);
+            }
+            if let Some(user) = &interactive_user {
+                body["interactiveUser"] = serde_json::json!(user);
+            }
+            if let Some(device) = &audio {
+                body["audio"] = serde_json::json!({ "device": device, "driver": "none" });
             }
             (
                 reqwest::Method::POST,
@@ -4910,7 +7239,10 @@ fn request_for(command: &Command) -> Result<RequestShape, CliError> {
             reqwest::Method::POST,
             format!("/api/v1/lab/leases/{lease_id}/provision"),
             Vec::new(),
-            Some(serde_json::json!({ "accountId": account_id })),
+            Some(match account_id {
+                Some(account_id) => serde_json::json!({ "accountId": account_id }),
+                None => serde_json::json!({}),
+            }),
         ),
         Command::LabProvisions => (
             reqwest::Method::GET,
@@ -4918,15 +7250,57 @@ fn request_for(command: &Command) -> Result<RequestShape, CliError> {
             Vec::new(),
             None,
         ),
-        Command::LabLeases => (
-            reqwest::Method::GET,
-            "/api/v1/lab/leases".to_owned(),
-            Vec::new(),
-            None,
-        ),
+        Command::LabLeases {
+            project,
+            purpose,
+            purpose_prefix,
+            states,
+            owner,
+        } => {
+            let mut query = Vec::new();
+            for (name, value) in [
+                ("projectId", project),
+                ("purpose", purpose),
+                ("purposePrefix", purpose_prefix),
+                ("owner", owner),
+            ] {
+                if let Some(value) = value {
+                    query.push((name, value.clone()));
+                }
+            }
+            query.extend(states.iter().map(|state| ("state", state.clone())));
+            (
+                reqwest::Method::GET,
+                "/api/v1/lab/leases".to_owned(),
+                query,
+                None,
+            )
+        }
         Command::LabLeaseCreate {
             version_id,
             purpose,
+            project,
+            ..
+        } => {
+            let mut body = serde_json::json!({
+                "templateVersionId": version_id,
+                "purpose": purpose,
+            });
+            if let Some(project) = project {
+                body["projectId"] = serde_json::json!(project);
+            }
+            (
+                reqwest::Method::POST,
+                "/api/v1/lab/leases".to_owned(),
+                Vec::new(),
+                Some(body),
+            )
+        }
+        Command::LabNew {
+            version_id,
+            purpose,
+            project,
+            ..
         } => (
             reqwest::Method::POST,
             "/api/v1/lab/leases".to_owned(),
@@ -4934,13 +7308,129 @@ fn request_for(command: &Command) -> Result<RequestShape, CliError> {
             Some(serde_json::json!({
                 "templateVersionId": version_id,
                 "purpose": purpose,
+                "projectId": project,
             })),
         ),
-        Command::LabLeaseRelease { lease_id, keep } => (
+        Command::LabStatus { lease_id } => (
+            reqwest::Method::GET,
+            format!("/api/v1/lab/leases/{lease_id}"),
+            Vec::new(),
+            None,
+        ),
+        Command::LabExec {
+            lease_id,
+            script,
+            timeout,
+            session,
+            ..
+        } => {
+            let mut body = serde_json::json!({
+                "script": script,
+                "timeoutSeconds": timeout.unwrap_or(60),
+            });
+            if let Some(session) = session {
+                body["session"] = serde_json::json!(session);
+            }
+            (
+                reqwest::Method::POST,
+                format!("/api/v1/lab/leases/{lease_id}/exec"),
+                Vec::new(),
+                Some(body),
+            )
+        }
+        Command::LabExecDetach {
+            lease_id,
+            script,
+            timeout,
+            session,
+            ..
+        } => {
+            let mut body = serde_json::json!({ "script": script });
+            if let Some(timeout) = timeout {
+                body["timeoutSeconds"] = serde_json::json!(timeout);
+            }
+            if let Some(session) = session {
+                body["session"] = serde_json::json!(session);
+            }
+            (
+                reqwest::Method::POST,
+                format!("/api/v1/lab/leases/{lease_id}/exec-detached"),
+                Vec::new(),
+                Some(body),
+            )
+        }
+        Command::LabExecStatus { handle, .. } => (
+            reqwest::Method::GET,
+            format!("/api/v1/lab/detached-execs/{handle}"),
+            Vec::new(),
+            None,
+        ),
+        Command::LabDestroy { lease_id, keep, .. }
+        | Command::LabLeaseRelease { lease_id, keep } => (
             reqwest::Method::POST,
             format!("/api/v1/lab/leases/{lease_id}/release"),
             Vec::new(),
             Some(serde_json::json!({ "keep": keep })),
+        ),
+        Command::LabCleanupRetry { lease_id, .. } => (
+            reqwest::Method::POST,
+            format!("/api/v1/lab/leases/{lease_id}/cleanup/retry"),
+            Vec::new(),
+            None,
+        ),
+        Command::LabPools => (
+            reqwest::Method::GET,
+            "/api/v1/lab/pools".to_owned(),
+            Vec::new(),
+            None,
+        ),
+        Command::LabPoolShow { pool_id } => (
+            reqwest::Method::GET,
+            format!("/api/v1/lab/pools/{pool_id}"),
+            Vec::new(),
+            None,
+        ),
+        Command::LabPoolCreate {
+            template_version_id,
+            account_id,
+            baseline,
+            size,
+        } => (
+            reqwest::Method::POST,
+            "/api/v1/lab/pools".to_owned(),
+            Vec::new(),
+            Some(serde_json::json!({
+                "templateVersionId": template_version_id,
+                "accountId": account_id,
+                "baselineSnapshot": baseline,
+                "size": size,
+            })),
+        ),
+        Command::LabPoolDelete { pool_id } => (
+            reqwest::Method::DELETE,
+            format!("/api/v1/lab/pools/{pool_id}"),
+            Vec::new(),
+            None,
+        ),
+        Command::LabPoolFill { pool_id, vmids, .. } => (
+            reqwest::Method::POST,
+            format!("/api/v1/lab/pools/{pool_id}/fill"),
+            Vec::new(),
+            Some(serde_json::json!({ "vmids": vmids })),
+        ),
+        Command::LabPoolDrain {
+            pool_id,
+            vmids,
+            all,
+        } => (
+            reqwest::Method::POST,
+            format!("/api/v1/lab/pools/{pool_id}/drain"),
+            Vec::new(),
+            Some(if *all {
+                serde_json::json!({ "all": true })
+            } else {
+                serde_json::json!({ "vmids": vmids })
+            }),
         ),
         Command::LabLeaseExtend {
             lease_id,
@@ -4957,6 +7447,99 @@ fn request_for(command: &Command) -> Result<RequestShape, CliError> {
             Vec::new(),
             None,
         ),
+        Command::CredentialsIssue {
+            owner,
+            ttl_seconds,
+            templates,
+            versions,
+            label,
+        } => (
+            reqwest::Method::POST,
+            "/api/v1/credentials".to_owned(),
+            Vec::new(),
+            Some(serde_json::json!({
+                "owner": owner,
+                "ttlSeconds": ttl_seconds,
+                "templates": templates,
+                "versions": versions,
+                "label": label,
+            })),
+        ),
+        Command::CredentialsList => (
+            reqwest::Method::GET,
+            "/api/v1/credentials".to_owned(),
+            Vec::new(),
+            None,
+        ),
+        Command::CredentialsRevoke { credential_id } => (
+            reqwest::Method::POST,
+            format!("/api/v1/credentials/{credential_id}/revoke"),
+            Vec::new(),
+            None,
+        ),
+        Command::LabArtifacts {
+            lease,
+            project,
+            cursor,
+            limit,
+        } => (
+            reqwest::Method::GET,
+            "/api/v1/lab/artifacts".to_owned(),
+            lease
+                .iter()
+                .map(|lease| ("leaseId", lease.clone()))
+                .chain(project.iter().map(|project| ("projectId", project.clone())))
+                .chain(cursor.iter().map(|cursor| ("cursor", cursor.clone())))
+                .chain(limit.iter().map(|limit| ("limit", limit.to_string())))
+                .collect(),
+            None,
+        ),
+        Command::LabCollect {
+            lease_id, paths, ..
+        } => (
+            reqwest::Method::POST,
+            format!("/api/v1/lab/leases/{lease_id}/artifacts/collect"),
+            Vec::new(),
+            Some(serde_json::json!({ "paths": paths })),
+        ),
+        Command::LabArtifactGet { .. } => {
+            unreachable!("artifact-get downloads before request dispatch")
+        }
+        Command::LabPut { .. } => unreachable!("put uploads before request dispatch"),
+        Command::ImagesSecretList => (
+            reqwest::Method::GET,
+            "/api/v1/images/secrets".to_owned(),
+            Vec::new(),
+            None,
+        ),
+        Command::ImagesSecretSet { name } => (
+            reqwest::Method::POST,
+            "/api/v1/images/secrets".to_owned(),
+            Vec::new(),
+            // The value comes from stdin only, never from an argument.
+            Some(serde_json::json!({
+                "name": name,
+                "value": read_stdin_secret("the secret value")?,
+            })),
+        ),
+        Command::ImagesSecretRemove { name } => (
+            reqwest::Method::DELETE,
+            format!("/api/v1/images/secrets/{name}"),
+            Vec::new(),
+            None,
+        ),
+        Command::ImagesAddresses => (
+            reqwest::Method::GET,
+            "/api/v1/images/build-addresses".to_owned(),
+            Vec::new(),
+            None,
+        ),
+        Command::ImagesAddressClear { address } => (
+            reqwest::Method::POST,
+            format!("/api/v1/images/build-addresses/{address}/clear"),
+            Vec::new(),
+            None,
+        ),
         Command::ImagesPromote { version_id } => (
             reqwest::Method::POST,
             format!("/api/v1/images/versions/{version_id}/promote"),
@@ -4969,12 +7552,17 @@ fn request_for(command: &Command) -> Result<RequestShape, CliError> {
             Vec::new(),
             None,
         ),
-        Command::ImagesBuild { version_id, .. } => (
+        Command::ImagesBuild {
+            version_id,
+            account_id,
+            ..
+        } => (
             reqwest::Method::POST,
             "/api/v1/images/builds".to_owned(),
             Vec::new(),
             Some(serde_json::json!({
                 "versionId": version_id,
+                "accountId": account_id,
                 "timeoutSeconds": 14400,
             })),
         ),
@@ -5085,6 +7673,37 @@ fn read_stdin_to_end(what: &str) -> Result<String, CliError> {
         });
     }
     Ok(document)
+}
+
+/// Reads a secret value from standard input to EOF, removing exactly one
+/// trailing `\n` or `\r\n` (the newline `echo` or a terminal adds) and
+/// nothing else: interior and further trailing whitespace is the value, so
+/// a PEM key keeps the same bytes the console would send.
+fn read_stdin_secret(what: &str) -> Result<String, CliError> {
+    use std::io::Read as _;
+    let mut text = String::new();
+    std::io::stdin()
+        .read_to_string(&mut text)
+        .map_err(|error| CliError {
+            message: format!("cannot read {what} from stdin: {error}"),
+        })?;
+    finish_secret(text, what)
+}
+
+/// Strips one trailing newline; refuses an empty or blank value.
+fn finish_secret(mut text: String, what: &str) -> Result<String, CliError> {
+    if text.ends_with('\n') {
+        text.pop();
+        if text.ends_with('\r') {
+            text.pop();
+        }
+    }
+    if text.trim().is_empty() {
+        return Err(CliError {
+            message: format!("{what} must not be empty"),
+        });
+    }
+    Ok(text)
 }
 
 fn read_stdin_line(what: &str) -> Result<String, CliError> {
@@ -5298,31 +7917,125 @@ fn send(
     body: Option<&Value>,
     correlation_id: String,
 ) -> Result<Value, CliError> {
-    let mut request = client
-        .request(method, format!("{}{}", invocation.url, path))
-        .header("x-correlation-id", correlation_id);
+    send_with_key(
+        client,
+        invocation,
+        method,
+        path,
+        query,
+        body,
+        correlation_id,
+        None,
+    )
+}
+
+/// The `--idempotency-key` of a lease creation command.
+fn lease_idempotency_key(command: &Command) -> Option<&str> {
+    match command {
+        Command::LabNew {
+            idempotency_key, ..
+        }
+        | Command::LabLeaseCreate {
+            idempotency_key, ..
+        }
+        | Command::LabExecDetach {
+            idempotency_key, ..
+        } => idempotency_key.as_deref(),
+        _ => None,
+    }
+}
+
+/// [`send`] with an `Idempotency-Key` header when a key is given.
+#[allow(clippy::too_many_arguments)]
+fn send_with_key(
+    client: &reqwest::blocking::Client,
+    invocation: &Invocation,
+    method: reqwest::Method,
+    path: &str,
+    query: &[(&'static str, String)],
+    body: Option<&Value>,
+    correlation_id: String,
+    idempotency_key: Option<&str>,
+) -> Result<Value, CliError> {
+    send_classified(
+        client,
+        invocation,
+        method,
+        path,
+        query,
+        body,
+        correlation_id,
+        idempotency_key,
+        None,
+    )
+    .map_err(|(error, _transient)| error)
+}
+
+/// [`send_with_key`] with an optional cap on this one request's time, and a
+/// failure that says whether it was transient: the controller did not
+/// answer, or answered 5xx (a retry may succeed), as opposed to a refusal
+/// or a malformed answer (it will not).
+#[allow(clippy::too_many_arguments)]
+fn send_classified(
+    client: &reqwest::blocking::Client,
+    invocation: &Invocation,
+    method: reqwest::Method,
+    path: &str,
+    query: &[(&'static str, String)],
+    body: Option<&Value>,
+    correlation_id: String,
+    idempotency_key: Option<&str>,
+    timeout: Option<std::time::Duration>,
+) -> Result<Value, (CliError, bool)> {
+    let permanent = |error: CliError| (error, false);
+    let mut request = with_credential(
+        client
+            .request(method, format!("{}{}", invocation.url, path))
+            .header("x-correlation-id", correlation_id),
+    )
+    .map_err(permanent)?;
+    if let Some(key) = idempotency_key {
+        request = request.header("idempotency-key", key);
+    }
+    if let Some(timeout) = timeout {
+        request = request.timeout(timeout);
+    }
     if !query.is_empty() {
         request = request.query(query);
     }
     if let Some(body) = body {
         request = request.json(body);
     }
-    let response = request.send().map_err(|error| CliError {
-        message: format!("the controller did not answer: {error}"),
+    let response = request.send().map_err(|error| {
+        (
+            CliError {
+                message: format!("the controller did not answer: {error}"),
+            },
+            true,
+        )
     })?;
     let status = reqwest::StatusCode::as_u16(&response.status());
     if status == 204 {
         return Ok(Value::Null);
     }
-    let body: Value = response.json().map_err(|error| CliError {
-        message: format!("the controller's answer was not JSON: {error}"),
+    let server_error = (500..600).contains(&status);
+    let body: Value = response.json().map_err(|error| {
+        (
+            CliError {
+                message: format!("the controller's answer was not JSON: {error}"),
+            },
+            server_error,
+        )
     })?;
     if !(200..300).contains(&status) {
         let code = body["code"].as_str().unwrap_or("unknown");
         let message = body["message"].as_str().unwrap_or("no detail");
-        return Err(CliError {
-            message: format!("the controller refused ({status}, {code}): {message}"),
-        });
+        return Err((
+            CliError {
+                message: format!("the controller refused ({status}, {code}): {message}"),
+            },
+            server_error,
+        ));
     }
     Ok(body)
 }
@@ -5330,6 +8043,27 @@ fn send(
 /// Polls one operation to a terminal state, answering its body. Polling
 /// ends at the caller's bound; a still-running operation is an error, not a
 /// hang.
+/// Polls an operation to a terminal state and answers its data with its
+/// decoded `resultJson` (or, on failure, `errorJson`).
+fn wait_for_operation_output(
+    client: &reqwest::blocking::Client,
+    invocation: &Invocation,
+    operation_id: &str,
+    timeout_secs: u64,
+) -> Result<(Value, Value), CliError> {
+    let finished = wait_for_operation(client, invocation, operation_id, timeout_secs)?;
+    let data = finished["data"].clone();
+    let parse = |field: &str| {
+        data[field]
+            .as_str()
+            .and_then(|raw| serde_json::from_str::<Value>(raw).ok())
+    };
+    let output = parse("resultJson")
+        .or_else(|| parse("errorJson"))
+        .unwrap_or(Value::Null);
+    Ok((data, output))
+}
+
 fn wait_for_operation(
     client: &reqwest::blocking::Client,
     invocation: &Invocation,
@@ -5362,13 +8096,306 @@ fn wait_for_operation(
     }
 }
 
-fn http_client() -> Result<reqwest::blocking::Client, CliError> {
-    reqwest::blocking::Client::builder()
-        .timeout(std::time::Duration::from_secs(30))
+/// Downloads one Lab artifact to `out` (FM-721): the bytes stream into a
+/// sibling temporary file while they are hashed, and only bytes whose size
+/// and sha256 match the artifact's metadata (and the response's `ETag`)
+/// are moved into place.
+fn download_artifact(
+    invocation: &Invocation,
+    artifact_id: &str,
+    out: &str,
+) -> Result<Value, CliError> {
+    let client = http_client()?;
+    let metadata = send(
+        &client,
+        invocation,
+        reqwest::Method::GET,
+        &format!("/api/v1/lab/artifacts/{artifact_id}"),
+        &[],
+        None,
+        uuid::Uuid::now_v7().to_string(),
+    )?;
+    let expected = metadata["data"]["sha256"]
+        .as_str()
+        .unwrap_or_default()
+        .to_owned();
+    let expected_size = metadata["data"]["sizeBytes"]
+        .as_u64()
+        .ok_or_else(|| CliError {
+            message: format!("the artifact {artifact_id} has no recorded size"),
+        })?;
+    let mut response = with_credential(
+        reqwest::blocking::Client::builder()
+            .timeout(std::time::Duration::from_secs(3_600))
+            .redirect(if bearer_token()?.is_some() {
+                reqwest::redirect::Policy::none()
+            } else {
+                reqwest::redirect::Policy::default()
+            })
+            .build()
+            .map_err(|error| CliError {
+                message: format!("cannot build an HTTP client: {error}"),
+            })?
+            .get(format!(
+                "{}/api/v1/lab/artifacts/{artifact_id}/content",
+                invocation.url
+            ))
+            .header("x-correlation-id", uuid::Uuid::now_v7().to_string()),
+    )?
+    .send()
+    .map_err(|error| CliError {
+        message: format!("the controller did not answer: {error}"),
+    })?;
+    let status = reqwest::StatusCode::as_u16(&response.status());
+    if !(200..300).contains(&status) {
+        let body: Value = response.json().unwrap_or(Value::Null);
+        let code = body["code"].as_str().unwrap_or("unknown");
+        let message = body["message"].as_str().unwrap_or("no detail");
+        return Err(CliError {
+            message: format!("the controller refused ({status}, {code}): {message}"),
+        });
+    }
+    let etag = response
+        .headers()
+        .get("etag")
+        .and_then(|value| value.to_str().ok())
+        .map(str::to_owned);
+    if etag.as_deref() != Some(format!("\"sha256:{expected}\"").as_str()) {
+        return Err(CliError {
+            message: format!(
+                "the download's digest header {etag:?} does not match the artifact's sha256 {expected}"
+            ),
+        });
+    }
+    let (size, actual) = write_verified(&mut response, out, &expected, expected_size)?;
+    Ok(serde_json::json!({
+        "id": artifact_id,
+        "out": out,
+        "sizeBytes": size,
+        "sha256": actual,
+        "verified": true,
+    }))
+}
+
+/// Streams one local regular file to `POST /lab/leases/{id}/files` and
+/// answers the queued operation. The file is hashed first so the controller
+/// can check what it received against the digest declared here; its bytes
+/// are never held in memory.
+fn upload_lab_file(
+    invocation: &Invocation,
+    lease_id: &str,
+    local_path: &str,
+    guest_path: &str,
+    overwrite: bool,
+    correlation_id: String,
+) -> Result<Value, CliError> {
+    use sha2::Digest as _;
+    use std::io::Seek as _;
+    let unreadable = |error: std::io::Error| CliError {
+        message: format!("cannot read {local_path}: {error}"),
+    };
+    let mut file = std::fs::File::open(local_path).map_err(unreadable)?;
+    let size = {
+        let meta = file.metadata().map_err(unreadable)?;
+        if !meta.is_file() {
+            return Err(CliError {
+                message: format!("{local_path} is not a regular file"),
+            });
+        }
+        meta.len()
+    };
+    let mut hasher = sha2::Sha256::new();
+    std::io::copy(&mut file, &mut hasher).map_err(unreadable)?;
+    file.rewind().map_err(unreadable)?;
+    let sha256 = hasher
+        .finalize()
+        .iter()
+        .fold(String::with_capacity(64), |mut text, byte| {
+            use std::fmt::Write as _;
+            let _ = write!(text, "{byte:02x}");
+            text
+        });
+    // A delegated credential is never carried along a redirect.
+    let client = reqwest::blocking::Client::builder()
+        .timeout(std::time::Duration::from_hours(6))
+        .redirect(if bearer_token()?.is_some() {
+            reqwest::redirect::Policy::none()
+        } else {
+            reqwest::redirect::Policy::default()
+        })
         .build()
         .map_err(|error| CliError {
             message: format!("cannot build an HTTP client: {error}"),
-        })
+        })?;
+    let mut query = vec![("path", guest_path.to_owned())];
+    if overwrite {
+        query.push(("overwrite", "true".to_owned()));
+    }
+    let response = with_credential(
+        client
+            .post(format!(
+                "{}/api/v1/lab/leases/{lease_id}/files",
+                invocation.url
+            ))
+            .query(&query)
+            .header("x-correlation-id", correlation_id)
+            .header("x-content-sha256", sha256)
+            .header("content-type", "application/octet-stream")
+            .body(reqwest::blocking::Body::sized(file, size)),
+    )?
+    .send()
+    .map_err(|error| CliError {
+        message: format!("the controller did not answer: {error}"),
+    })?;
+    let status = reqwest::StatusCode::as_u16(&response.status());
+    let body: Value = response.json().map_err(|error| CliError {
+        message: format!("the controller's answer was not JSON: {error}"),
+    })?;
+    if !(200..300).contains(&status) {
+        let code = body["code"].as_str().unwrap_or("unknown");
+        let message = body["message"].as_str().unwrap_or("no detail");
+        return Err(CliError {
+            message: format!("the controller refused ({status}, {code}): {message}"),
+        });
+    }
+    Ok(body)
+}
+
+/// Streams a download into a sibling temporary file while hashing it, and
+/// moves it to `out` only when its size and sha256 match; answers both.
+fn write_verified(
+    response: &mut reqwest::blocking::Response,
+    out: &str,
+    expected: &str,
+    expected_size: u64,
+) -> Result<(u64, String), CliError> {
+    use sha2::Digest as _;
+    use std::fmt::Write as _;
+    use std::io::{Read as _, Write as _};
+
+    let target = std::path::Path::new(out);
+    let partial = target.with_file_name(format!(
+        ".{}.part-{}",
+        target
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("artifact"),
+        uuid::Uuid::now_v7()
+    ));
+    let fail = |message: String| {
+        let _ = std::fs::remove_file(&partial);
+        CliError { message }
+    };
+    // Owner-only: an exec log or a collected file can be sensitive.
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        options.mode(0o600);
+    }
+    let mut file = options.open(&partial).map_err(|error| CliError {
+        message: format!("cannot write {}: {error}", partial.display()),
+    })?;
+    let mut hasher = sha2::Sha256::new();
+    let mut size: u64 = 0;
+    let mut chunk = vec![0_u8; 64 * 1024];
+    loop {
+        let read = response
+            .read(&mut chunk)
+            .map_err(|error| fail(format!("the download broke off: {error}")))?;
+        if read == 0 {
+            break;
+        }
+        size += read as u64;
+        // Never write more than the artifact's recorded size.
+        if size > expected_size {
+            return Err(fail(format!(
+                "the controller sent more than the artifact's {expected_size} bytes; nothing was written to {out}"
+            )));
+        }
+        hasher.update(&chunk[..read]);
+        file.write_all(&chunk[..read])
+            .map_err(|error| fail(format!("cannot write {}: {error}", partial.display())))?;
+    }
+    file.sync_all()
+        .map_err(|error| fail(format!("cannot write {}: {error}", partial.display())))?;
+    drop(file);
+    let actual = hasher
+        .finalize()
+        .iter()
+        .fold(String::with_capacity(64), |mut text, byte| {
+            let _ = write!(text, "{byte:02x}");
+            text
+        });
+    if actual != expected || size != expected_size {
+        return Err(fail(format!(
+            "the downloaded bytes ({size} bytes, sha256 {actual}) do not match the artifact ({expected_size} bytes, sha256 {expected}); nothing was written to {out}"
+        )));
+    }
+    // `rename` replaces an existing file on Unix; Windows needs it removed
+    // first for the same overwrite behaviour.
+    #[cfg(windows)]
+    if target.is_file() {
+        std::fs::remove_file(target)
+            .map_err(|error| fail(format!("cannot replace {out}: {error}")))?;
+    }
+    std::fs::rename(&partial, target)
+        .map_err(|error| fail(format!("cannot move the download to {out}: {error}")))?;
+    Ok((size, actual))
+}
+
+/// The environment variable that carries a delegated credential token.
+pub const TOKEN_ENV: &str = "FLEET_TOKEN";
+
+/// The bearer token from [`TOKEN_ENV`], when set and non-empty. It is read
+/// when a request is built and goes nowhere else: it is not stored in the
+/// invocation, printed, or put in an error message.
+fn bearer_token() -> Result<Option<reqwest::header::HeaderValue>, CliError> {
+    let Ok(raw) = std::env::var(TOKEN_ENV) else {
+        return Ok(None);
+    };
+    let raw = raw.trim();
+    if raw.is_empty() {
+        return Ok(None);
+    }
+    let shaped = raw.strip_prefix("fmdc1.").is_some_and(|hex| {
+        hex.len() == 64 && hex.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
+    });
+    if !shaped {
+        return Err(CliError {
+            message: format!("{TOKEN_ENV} is not a Fleet delegated credential token"),
+        });
+    }
+    let mut value =
+        reqwest::header::HeaderValue::from_str(&format!("Bearer {raw}")).map_err(|_| CliError {
+            message: format!("{TOKEN_ENV} is not a Fleet delegated credential token"),
+        })?;
+    // Keeps the value out of any debug output of the request.
+    value.set_sensitive(true);
+    Ok(Some(value))
+}
+
+/// Adds the delegated credential to a request when one is configured.
+fn with_credential(
+    request: reqwest::blocking::RequestBuilder,
+) -> Result<reqwest::blocking::RequestBuilder, CliError> {
+    Ok(match bearer_token()? {
+        Some(value) => request.header(reqwest::header::AUTHORIZATION, value),
+        None => request,
+    })
+}
+
+fn http_client() -> Result<reqwest::blocking::Client, CliError> {
+    let mut builder =
+        reqwest::blocking::Client::builder().timeout(std::time::Duration::from_secs(30));
+    // A credential is never carried along a redirect.
+    if bearer_token()?.is_some() {
+        builder = builder.redirect(reqwest::redirect::Policy::none());
+    }
+    builder.build().map_err(|error| CliError {
+        message: format!("cannot build an HTTP client: {error}"),
+    })
 }
 
 /// Reads the node's local status surface over the Unix socket, without any
@@ -5547,6 +8574,38 @@ fn render_text(value: Option<&Value>) -> String {
     }
 }
 
+/// Renders a Lab artifact page as human text; exposed for contract tests.
+#[doc(hidden)]
+#[must_use]
+pub fn render_lab_artifacts(payload: &Value) -> String {
+    let items = payload["items"].as_array().cloned().unwrap_or_default();
+    let mut lines = vec![format!(
+        "{:<38} {:<9} {:>10} {:<16} NAME",
+        "ID", "KIND", "BYTES", "SHA256"
+    )];
+    for item in &items {
+        lines.push(format!(
+            "{:<38} {:<9} {:>10} {:<16} {}",
+            item["id"].as_str().unwrap_or("-"),
+            item["kind"].as_str().unwrap_or("-"),
+            item["sizeBytes"]
+                .as_u64()
+                .map_or_else(|| "-".to_owned(), |size| size.to_string()),
+            item["sha256"]
+                .as_str()
+                .map_or("-", |sha| sha.get(..16).unwrap_or(sha)),
+            item["name"].as_str().unwrap_or("-"),
+        ));
+    }
+    if items.is_empty() {
+        lines.push("(no Lab artifacts)".to_owned());
+    }
+    if let Some(next) = payload["page"]["nextCursor"].as_str() {
+        lines.push(format!("more: --cursor {next}"));
+    }
+    lines.join("\n")
+}
+
 fn operation_line(operation: &Value) -> String {
     format!(
         "{:<38} {:<10} {:<12}",
@@ -5696,6 +8755,55 @@ fn render_project_deleted() -> String {
 /// Which Lab surface a payload belongs to: the lists share the page
 /// envelope, so the renderer is scoped by command rather than guessing
 /// from the payload.
+/// Renders Lab pools (FM-717): one line per pool, then its members.
+fn render_lab_pools(payload: &Value) -> String {
+    use std::fmt::Write as _;
+    let pools: Vec<&Value> = match payload["items"].as_array() {
+        Some(items) => items.iter().collect(),
+        None => vec![payload],
+    };
+    if pools.is_empty() {
+        return "(no Lab pools)".to_owned();
+    }
+    let text = |value: &Value| value.as_str().unwrap_or("-").to_owned();
+    let mut lines = Vec::new();
+    for pool in pools {
+        let members = pool["members"].as_array().cloned().unwrap_or_default();
+        let available = members
+            .iter()
+            .filter(|member| member["state"] == "available")
+            .count();
+        lines.push(format!(
+            "{}  version {}  baseline {}  {available} available, {} of {} members",
+            text(&pool["id"]),
+            text(&pool["templateVersionId"]),
+            text(&pool["baselineSnapshot"]),
+            members.len(),
+            pool["size"]
+        ));
+        for member in members {
+            let mut line = format!(
+                "  {}  {}  {}  {}",
+                member["vmid"],
+                text(&member["state"]),
+                text(&member["node"]),
+                text(&member["name"])
+            );
+            if let Some(lease) = member["leaseId"].as_str() {
+                let _ = write!(line, "  lease {lease}");
+            }
+            if member["draining"] == true {
+                line.push_str("  draining");
+            }
+            if let Some(detail) = member["detail"].as_str() {
+                let _ = write!(line, "  ({detail})");
+            }
+            lines.push(line);
+        }
+    }
+    lines.join("\n")
+}
+
 #[derive(Clone, Copy, Debug)]
 enum LabSurface {
     /// The template drafts.
@@ -5745,8 +8853,8 @@ fn render_lab(value: Option<&Value>, surface: LabSurface) -> String {
             )]
         } else if is_provision {
             vec![format!(
-                "{:<38} {:<16} {:<10} {}",
-                "ID", "STATE", "VMID", "TEMPLATE VERSION"
+                "{:<38} {:<16} {:<18} {:<10} {}",
+                "ID", "STATE", "GUEST", "VMID", "TEMPLATE VERSION"
             )]
         } else {
             vec![format!(
@@ -5767,9 +8875,10 @@ fn render_lab(value: Option<&Value>, surface: LabSurface) -> String {
                 ));
             } else if is_provision {
                 lines.push(format!(
-                    "{:<38} {:<16} {:<10} {}",
+                    "{:<38} {:<16} {:<18} {:<10} {}",
                     item["id"].as_str().unwrap_or("-"),
                     item["state"].as_str().unwrap_or("-"),
+                    item["guest"].as_str().unwrap_or("-"),
                     item["vmid"]
                         .as_u64()
                         .map_or_else(|| "-".to_owned(), |v| v.to_string()),
@@ -5814,6 +8923,119 @@ pub fn render_images_for_test(value: &Value) -> String {
     render_images(Some(value))
 }
 
+/// Renders the held and quarantined build addresses; exposed for tests.
+#[doc(hidden)]
+#[must_use]
+pub fn render_build_addresses_for_test(value: &Value) -> String {
+    render_build_addresses(value)
+}
+
+/// Formats Unix milliseconds as `YYYY-MM-DD HH:MM:SS` UTC.
+fn utc_from_millis(millis: i64) -> String {
+    let secs = millis.div_euclid(1000);
+    let days = secs.div_euclid(86_400);
+    let rem = secs.rem_euclid(86_400);
+    // Civil date from days since 1970-01-01 (Howard Hinnant's algorithm).
+    let z = days + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z.rem_euclid(146_097);
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let day = doy - (153 * mp + 2) / 5 + 1;
+    let month = if mp < 10 { mp + 3 } else { mp - 9 };
+    let year = yoe + era * 400 + i64::from(month <= 2);
+    format!(
+        "{year:04}-{month:02}-{day:02} {:02}:{:02}:{:02}",
+        rem / 3600,
+        rem % 3600 / 60,
+        rem % 60
+    )
+}
+
+/// Renders the held and quarantined build addresses (#402).
+fn render_build_addresses(value: &Value) -> String {
+    let items = value.get("items").and_then(Value::as_array);
+    let mut lines = vec![format!(
+        "{:<16} {:<12} {:<38} {:<20} {}",
+        "ADDRESS", "STATUS", "OPERATION", "SINCE (UTC)", "UNTIL (UTC)"
+    )];
+    for item in items.into_iter().flatten() {
+        lines.push(format!(
+            "{:<16} {:<12} {:<38} {:<20} {}",
+            item["address"].as_str().unwrap_or("-"),
+            item["status"].as_str().unwrap_or("-"),
+            item["operationId"].as_str().unwrap_or("-"),
+            item["since"]
+                .as_i64()
+                .map_or("-".to_owned(), utc_from_millis),
+            item["until"]
+                .as_i64()
+                .map_or("-".to_owned(), utc_from_millis),
+        ));
+    }
+    if items.is_none_or(Vec::is_empty) {
+        lines.push("(no held or quarantined build addresses)".to_owned());
+    }
+    lines.join("\n")
+}
+
+/// Renders the build secret names. Values are never available.
+fn render_image_secrets(value: &Value) -> String {
+    let names: Vec<&str> = value
+        .get("items")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|item| item["reference"].as_str())
+        .collect();
+    if names.is_empty() {
+        "(no image build secrets)".to_owned()
+    } else {
+        names.join("\n")
+    }
+}
+
+fn render_image_builds(value: Option<&Value>) -> String {
+    let Some(items) = value
+        .and_then(|value| value.get("items"))
+        .and_then(Value::as_array)
+    else {
+        return String::new();
+    };
+    if items.is_empty() {
+        return "(no image builds)".to_owned();
+    }
+    let mut lines = vec![format!(
+        "{:<38} {:<38} {:<12} {}",
+        "ID", "VERSION", "OUTCOME", "TEMPLATE"
+    )];
+    for item in items {
+        let template = item
+            .get("template")
+            .filter(|template| !template.is_null())
+            .map_or_else(
+                || "-".to_owned(),
+                |template| {
+                    format!(
+                        "{}:{} {}",
+                        template["node"].as_str().unwrap_or("-"),
+                        template["vmid"],
+                        template["name"].as_str().unwrap_or("-")
+                    )
+                },
+            );
+        lines.push(format!(
+            "{:<38} {:<38} {:<12} {}",
+            item["id"].as_str().unwrap_or("-"),
+            item["versionId"].as_str().unwrap_or("-"),
+            item["outcome"].as_str().unwrap_or("-"),
+            template
+        ));
+    }
+    lines.join("\n")
+}
+
 fn render_images(value: Option<&Value>) -> String {
     let Some(value) = value else {
         return String::new();
@@ -5853,11 +9075,62 @@ fn render_images(value: Option<&Value>) -> String {
     lines.join("\n")
 }
 
+/// Applies the stdin secret rule to `text`; exposed for tests.
+///
+/// # Errors
+///
+/// Fails when the value is empty or blank.
+#[doc(hidden)]
+pub fn finish_secret_for_test(text: &str) -> Result<String, CliError> {
+    finish_secret(text.to_owned(), "the secret value")
+}
+
 /// Renders the Proxmox surface as human text; exposed for contract tests.
 #[doc(hidden)]
 #[must_use]
 pub fn render_proxmox_for_test(value: &Value) -> String {
     render_proxmox(Some(value))
+}
+
+/// Renders external account output as human text; exposed for tests.
+#[doc(hidden)]
+#[must_use]
+pub fn render_accounts_for_test(value: &Value) -> String {
+    accounts::render(value)
+}
+
+/// Method, path, query pairs, and JSON body of a request.
+pub type AccountsRequestForTest = (String, String, Vec<(String, String)>, Option<Value>);
+
+/// The controller request for an `accounts` subcommand, with the stdin
+/// token supplied by the caller; exposed for tests.
+///
+/// # Errors
+///
+/// Fails when the request cannot be built.
+#[doc(hidden)]
+pub fn accounts_request_for_test(
+    action: &accounts::AccountsAction,
+    token: &str,
+) -> Result<AccountsRequestForTest, CliError> {
+    let (method, path, query, body) = accounts::request(action, || Ok(token.to_owned()))?;
+    Ok((
+        method.to_string(),
+        path,
+        query
+            .into_iter()
+            .map(|(key, value)| (key.to_owned(), value))
+            .collect(),
+        body,
+    ))
+}
+
+/// Renders a requests page, request, or wait answer as human text; exposed
+/// for tests.
+#[doc(hidden)]
+#[must_use]
+pub fn render_requests_for_test(value: &Value) -> String {
+    requests::render(value)
 }
 
 /// Renders the Proxmox task-history page as human text; exposed for tests.
@@ -7268,4 +10541,137 @@ fn parse_apply_command(machine_id: &str, rest: &[&str]) -> Result<Command, CliEr
         wait,
         timeout,
     })
+}
+
+#[cfg(test)]
+mod proxmox_destroy_tests {
+    use super::*;
+    #[test]
+    fn positional_destroy_uses_review_flow_and_wait() {
+        let invocation = parse(
+            &[
+                "proxmox",
+                "destroy",
+                "account",
+                "pve",
+                "101",
+                "--purge",
+                "--wait",
+                "--timeout",
+                "42",
+            ]
+            .map(str::to_owned),
+        )
+        .unwrap();
+        let Command::ProxmoxDestructive {
+            action,
+            account_id,
+            node,
+            vmid,
+            params,
+            wait,
+            timeout,
+        } = invocation.command
+        else {
+            panic!("expected reviewed operation")
+        };
+        assert_eq!(
+            (action.as_str(), account_id.as_str(), node.as_str(), vmid),
+            ("destroy", "account", "pve", 101)
+        );
+        assert!(wait);
+        assert_eq!(timeout, Some(42));
+        assert_eq!(
+            serde_json::from_str::<Value>(&params.unwrap()).unwrap(),
+            serde_json::json!({"purge":true})
+        );
+    }
+    #[test]
+    fn destroy_reviews_runs_and_waits_over_http() {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let server = std::thread::spawn(move || {
+            let mut seen = Vec::new();
+            for response in [
+                serde_json::json!({"data":{"reviewToken":"review-token","params":{"purge":false}}}),
+                serde_json::json!({"data":{"id":"op-1","state":"pending"}}),
+                serde_json::json!({"data":{"id":"op-1","state":"succeeded"}}),
+            ] {
+                let (mut socket, _) = listener.accept().unwrap();
+                socket
+                    .set_read_timeout(Some(std::time::Duration::from_secs(5)))
+                    .unwrap();
+                let mut bytes = Vec::new();
+                loop {
+                    let mut chunk = [0; 4096];
+                    let count = socket.read(&mut chunk).unwrap();
+                    assert!(count > 0);
+                    bytes.extend_from_slice(&chunk[..count]);
+                    if let Some(end) = bytes.windows(4).position(|window| window == b"\r\n\r\n") {
+                        let headers = String::from_utf8_lossy(&bytes[..end]);
+                        let length = headers
+                            .lines()
+                            .find_map(|line| {
+                                line.to_ascii_lowercase()
+                                    .strip_prefix("content-length:")
+                                    .and_then(|length| length.trim().parse::<usize>().ok())
+                            })
+                            .unwrap_or(0);
+                        if bytes.len() >= end + 4 + length {
+                            break;
+                        }
+                    }
+                }
+                seen.push(String::from_utf8(bytes).unwrap());
+                let body = response.to_string();
+                write!(socket, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}", body.len(), body).unwrap();
+            }
+            seen
+        });
+        let invocation = parse(
+            &[
+                "--url", &url, "--output", "json", "proxmox", "destroy", "account", "pve", "101",
+                "--wait",
+            ]
+            .map(str::to_owned),
+        )
+        .unwrap();
+        let result: Value = serde_json::from_str(&run(&invocation).unwrap()).unwrap();
+        assert_eq!(result["state"], "succeeded");
+        let seen = server.join().unwrap();
+        assert!(
+            seen[0].starts_with("POST /api/v1/proxmox/accounts/account/guests/101/destroy/review ")
+        );
+        assert!(
+            seen[1].starts_with("POST /api/v1/proxmox/accounts/account/guests/101/destroy/run ")
+        );
+        assert!(seen[1].contains("review-token"));
+        assert!(seen[2].starts_with("GET /api/v1/operations/op-1 "));
+    }
+
+    #[test]
+    fn destroy_validates_pve_vmid_bounds() {
+        for id in ["100", "999999999"] {
+            assert!(
+                parse(&["proxmox", "destroy", "account", "pve", id].map(str::to_owned)).is_ok()
+            );
+        }
+        for id in ["1", "99", "1000000000", "4294967295"] {
+            assert!(
+                parse(&["proxmox", "destroy", "account", "pve", id].map(str::to_owned)).is_err(),
+                "accepted invalid PVE VMID {id}"
+            );
+        }
+    }
+    #[test]
+    fn destroy_rejects_invalid_target_and_flags() {
+        for args in [
+            vec!["proxmox", "destroy", "account", "pve", "0"],
+            vec!["proxmox", "destroy", "account", "pve", "101", "--skiplock"],
+            vec!["proxmox", "destroy", "account", "pve", "101", "--timeout"],
+        ] {
+            assert!(parse(&args.into_iter().map(str::to_owned).collect::<Vec<_>>()).is_err());
+        }
+    }
 }

@@ -13,21 +13,27 @@ use fleet_application::lab::{
     CloneTargetReservation, ImageArtifactPort, LabTemplate, LabTemplatePort, LabTemplateVersion,
     LeasePort, NewLabTemplate, NewLease, NewProvision, ProvisionPort, ProvisionRecord,
 };
+use fleet_application::lab_placement::{
+    CapacityReservationPort, ImageStoragePort, PlacementPolicy, ReservationState,
+};
 use fleet_application::operation::{NewOperation, Operations};
 use fleet_application::proxmox::{
     CredentialStoreError, NewProxmoxAccount, ProxmoxAccountPort, ProxmoxCredentialStore,
 };
 use fleet_core::{CleanupStrategy, GuestState, LabTemplateContent, ReadinessProbe};
 use fleet_provider_proxmox::{
-    ProxmoxClient, PveHttpRequest, PveHttpResponse, PveTransport, PveTransportError,
+    ProxmoxClient, PveHttpMethod, PveHttpRequest, PveHttpResponse, PveTransport, PveTransportError,
 };
 use fleet_storage_sqlite::{
-    AuditSink, LabRepository, LeaseRepository, OperationRepository, ProxmoxAccountRepository, Store,
+    AuditSink, CapacityRepository, LabRepository, LeaseRepository, OperationRepository,
+    ProxmoxAccountRepository, Store,
 };
 
 const FP: &str = "DC2C116EC9C7EA618AA4E41EFB9BDEE4AA3D81EB16388F2B360AABE283A76498";
 /// The account's API host: deliberately not a node name.
 const API_HOST: &str = "pve-api.example.test";
+/// FM-715: a second trusted account's API host that never answers.
+const UNREACHABLE_HOST: &str = "pve-unreachable.example.test";
 /// The node that holds the image template.
 const TEMPLATE_NODE: &str = "pve-b";
 /// The image template's VMID (the recorded build artifact).
@@ -46,6 +52,7 @@ const START_UPID: &str = "UPID:pve-b:00155300:0C6DF600:6AAFE1F0:qmstart:9000:fle
 #[derive(Clone, Debug)]
 struct Seen {
     path: String,
+    method: PveHttpMethod,
     body: Option<serde_json::Value>,
     /// The record's stored (node, VMID) when a clone or start request
     /// arrived.
@@ -62,6 +69,121 @@ struct Pve {
     seen: Mutex<Vec<Seen>>,
     /// The repository and record whose target the clone request observes.
     observe: Mutex<Option<(Arc<LabRepository>, String)>>,
+    ready_ip: bool,
+    /// The clone's config: whether it carries the inherited `protection`
+    /// flag (cleared by a PUT), how many more reads still report the
+    /// clone lock, and the name the clone request gave it.
+    clone_config: Mutex<CloneConfig>,
+    /// FM-715: the free memory (GiB of 32) node status reports, when the
+    /// capacity endpoints answer at all.
+    capacity: Mutex<Option<u64>>,
+    /// FM-715: the lease whose reservation state is recorded when the
+    /// `nextid` and clone requests arrive.
+    watch_reservation: Mutex<Option<(sqlx::SqlitePool, String)>>,
+    /// The (path, reservation held?) pairs those requests saw.
+    held_at: Mutex<Vec<(String, bool)>>,
+    /// #310: the clone task's scripted status answers, one per poll; the
+    /// last one repeats. Empty: the node answers nothing for the task.
+    clone_task: Mutex<Vec<&'static str>>,
+}
+
+#[derive(Debug, Default)]
+struct CloneConfig {
+    protected: bool,
+    refuse_unprotect: bool,
+    locked_reads: usize,
+    missing_reads: usize,
+    /// Reads that fail with a transient 503.
+    flaky_reads: usize,
+    forbid_read: bool,
+    no_digest: bool,
+    stale_puts: usize,
+    update_status: Option<u16>,
+    cloned: Option<(u32, String)>,
+    /// The settled config answers this name instead of the requested one.
+    foreign_name: Option<String>,
+    /// The settled config carries `template: 1`.
+    as_template: bool,
+    /// #372: the clone's hardware as the image template left it. `None`
+    /// means the template's own (2 cores, 2048 MiB, 20 GiB).
+    hardware: Option<Hardware>,
+    /// The clone's memory is a property string with a maximum.
+    memory_options: bool,
+    /// The config names no boot disk.
+    no_boot_disk: bool,
+    /// The config states no size for its boot disk.
+    no_disk_size: bool,
+    /// PVE answers every cores/memory update with this status.
+    set_status: Option<u16>,
+    /// #398: the clone's `audio0` as the image left it.
+    audio: Option<String>,
+    /// PVE accepts an `audio0` write but never reports it.
+    audio_ignored: bool,
+    /// PVE refuses an `audio0` write with this status (the hardware-type
+    /// privilege is checked per option).
+    audio_status: Option<u16>,
+    /// PVE answers every resize with this status (a permission refusal
+    /// comes before the task starts).
+    resize_status: Option<u16>,
+    /// Resize tasks that fail with a stale-digest exit status first.
+    resize_stale: usize,
+    /// Every resize task ends with this exit status and changes nothing.
+    resize_exit: Option<String>,
+    /// The resize tasks PVE started: UPID and exit status.
+    resize_tasks: Vec<(String, String)>,
+    /// How many resize requests arrived.
+    resize_calls: usize,
+    /// The config's cores are unreadable.
+    bad_hardware: bool,
+    /// The config has this many sockets.
+    sockets: Option<u32>,
+    /// A resize is accepted but changes nothing.
+    resize_ignored: bool,
+    /// PVE answers the resize with `{"data": null}` (no task) and applies it.
+    resize_no_task: bool,
+    /// Reads of the resize task that fail with a transient 503 first.
+    resize_poll_errors: usize,
+    /// The resize task never ends (`running`).
+    resize_running: bool,
+    /// The config update is refused as stale this many times (the config
+    /// moved under the step).
+    config_stale: usize,
+    /// The config's `vcpus` and `balloon`.
+    vcpus: Option<u32>,
+    balloon: Option<u32>,
+    /// A pool whose `lab.provision` operations are cancelled when the
+    /// resize task is first read.
+    cancel_on_resize_poll: Option<sqlx::SqlitePool>,
+    /// The digest every write must carry; each write moves it on.
+    digest_moves: u32,
+    /// Writes PVE accepted: `(kind, body)`.
+    writes: Vec<(String, serde_json::Value)>,
+}
+
+/// The hardware the suite's template asks for (`Harness` publishes 2 cores,
+/// 2048 MiB, and a 20 GiB disk): a clone that has it needs no update.
+const TEMPLATE_HARDWARE: Hardware = Hardware {
+    cores: 2,
+    memory_mib: 2048,
+    disk_gib: 20,
+};
+
+impl CloneConfig {
+    /// The digest the config answers and every write must carry.
+    fn digest(&self) -> String {
+        if self.digest_moves == 0 {
+            "0123abcd".to_owned()
+        } else {
+            format!("0123abcd{}", self.digest_moves)
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+struct Hardware {
+    cores: u32,
+    memory_mib: u32,
+    disk_gib: u32,
 }
 
 impl Pve {
@@ -80,7 +202,445 @@ impl Pve {
             next_vmid,
             seen: Mutex::new(Vec::new()),
             observe: Mutex::new(None),
+            ready_ip: false,
+            clone_config: Mutex::new(CloneConfig::default()),
+            capacity: Mutex::new(None),
+            watch_reservation: Mutex::new(None),
+            held_at: Mutex::new(Vec::new()),
+            clone_task: Mutex::new(Vec::new()),
         })
+    }
+
+    /// The template is protected, so its clone inherits the flag.
+    fn protected(self: Arc<Self>) -> Arc<Self> {
+        self.clone_config.lock().unwrap().protected = true;
+        self
+    }
+
+    /// The token lacks `VM.Config.Options` on the clone target.
+    fn refusing_unprotect(self: Arc<Self>) -> Arc<Self> {
+        self.clone_config.lock().unwrap().refuse_unprotect = true;
+        self
+    }
+
+    /// The clone's config does not exist yet for this many reads (PVE
+    /// writes it inside the forked qmclone worker).
+    fn missing_for(self: Arc<Self>, reads: usize) -> Arc<Self> {
+        self.clone_config.lock().unwrap().missing_reads = reads;
+        self
+    }
+
+    /// The config read fails with a transient 503 this many times.
+    fn flaky_for(self: Arc<Self>, reads: usize) -> Arc<Self> {
+        self.clone_config.lock().unwrap().flaky_reads = reads;
+        self
+    }
+
+    /// The clone task's status answers (`running`, `ok`, `error`,
+    /// `unknown`), one per poll; the last repeats.
+    fn clone_task(self: Arc<Self>, answers: &[&'static str]) -> Arc<Self> {
+        *self.clone_task.lock().unwrap() = answers.to_vec();
+        self
+    }
+
+    fn task_polls(&self) -> usize {
+        self.seen()
+            .iter()
+            .filter(|seen| seen.path.contains("/tasks/") && seen.path.ends_with("/status"))
+            .count()
+    }
+
+    fn config_reads(&self) -> usize {
+        self.seen()
+            .iter()
+            .filter(|seen| seen.path == CLONE_CONFIG && seen.method == PveHttpMethod::Get)
+            .count()
+    }
+
+    fn task_answer(&self) -> Option<String> {
+        let mut script = self.clone_task.lock().unwrap();
+        let next = if script.len() > 1 {
+            script.remove(0)
+        } else {
+            *script.first()?
+        };
+        Some(match next {
+            "running" => r#"{"data":{"status":"running"}}"#.to_owned(),
+            "ok" => r#"{"data":{"status":"stopped","exitstatus":"OK"}}"#.to_owned(),
+            "error" => {
+                r#"{"data":{"status":"stopped","exitstatus":"ERROR: storage full"}}"#.to_owned()
+            }
+            _ => r#"{"data":null}"#.to_owned(),
+        })
+    }
+
+    /// PVE answers every update with this HTTP status.
+    fn update_status(self: Arc<Self>, status: u16) -> Arc<Self> {
+        self.clone_config.lock().unwrap().update_status = Some(status);
+        self
+    }
+
+    /// PVE refuses this many digest-bound updates as stale.
+    fn stale_for(self: Arc<Self>, puts: usize) -> Arc<Self> {
+        self.clone_config.lock().unwrap().stale_puts = puts;
+        self
+    }
+
+    /// The clone's config carries no digest.
+    fn without_digest(self: Arc<Self>) -> Arc<Self> {
+        self.clone_config.lock().unwrap().no_digest = true;
+        self
+    }
+
+    /// The token lacks `VM.Audit` on the clone target.
+    fn forbidding_config_reads(self: Arc<Self>) -> Arc<Self> {
+        self.clone_config.lock().unwrap().forbid_read = true;
+        self
+    }
+
+    /// The settled config names another guest than the one requested.
+    fn named(self: Arc<Self>, name: &str) -> Arc<Self> {
+        self.clone_config.lock().unwrap().foreign_name = Some(name.to_owned());
+        self
+    }
+
+    /// The settled config is a template's.
+    fn as_template(self: Arc<Self>) -> Arc<Self> {
+        self.clone_config.lock().unwrap().as_template = true;
+        self
+    }
+
+    /// #372: the clone keeps this hardware from the image template.
+    fn imaged(self: Arc<Self>, cores: u32, memory_mib: u32, disk_gib: u32) -> Arc<Self> {
+        self.clone_config.lock().unwrap().hardware = Some(Hardware {
+            cores,
+            memory_mib,
+            disk_gib,
+        });
+        self
+    }
+
+    fn configure(self: Arc<Self>, change: impl FnOnce(&mut CloneConfig)) -> Arc<Self> {
+        change(&mut self.clone_config.lock().unwrap());
+        self
+    }
+
+    /// The hardware writes PVE accepted.
+    fn hardware_writes(&self) -> Vec<(String, serde_json::Value)> {
+        self.clone_config.lock().unwrap().writes.clone()
+    }
+
+    /// The clone's config stays locked for this many reads.
+    fn locked_for(self: Arc<Self>, reads: usize) -> Arc<Self> {
+        self.clone_config.lock().unwrap().locked_reads = reads;
+        self
+    }
+
+    /// The config updates (PUTs) PVE received, with their bodies.
+    fn config_updates(&self) -> Vec<Seen> {
+        self.seen()
+            .into_iter()
+            .filter(|seen| seen.method == PveHttpMethod::Put)
+            .collect()
+    }
+
+    /// `PUT …/config` with cores and/or memory (#372).
+    fn hardware_update(
+        config: &mut CloneConfig,
+        vmid: u32,
+        body: &serde_json::Value,
+    ) -> (u16, String) {
+        for key in body.as_object().unwrap().keys() {
+            assert!(
+                ["cores", "memory", "audio0", "digest"].contains(&key.as_str()),
+                "only cores, memory and audio0 are set: {body}"
+            );
+        }
+        if body.get("audio0").is_some()
+            && let Some(status) = config.audio_status
+        {
+            return (
+                status,
+                format!(
+                    r#"{{"data":null,"message":"Permission check failed (/vms/{vmid}, VM.Config.HWType)\n"}}"#
+                ),
+            );
+        }
+        if body["digest"] != config.digest().as_str() {
+            return (
+                500,
+                r#"{"data":null,"message":"checksum mismatch (file change by other user?)\n"}"#
+                    .to_owned(),
+            );
+        }
+        if config.config_stale > 0 {
+            config.config_stale -= 1;
+            config.digest_moves += 1;
+            return (
+                500,
+                r#"{"data":null,"message":"checksum mismatch (file change by other user?)\n"}"#
+                    .to_owned(),
+            );
+        }
+        if let Some(status) = config.set_status {
+            let message = match status {
+                403 => format!(
+                    r#"{{"data":null,"message":"Permission check failed (/vms/{vmid}, VM.Config.CPU)\n"}}"#
+                ),
+                400 => {
+                    r#"{"data":null,"errors":{"memory":"value must have a minimum value of 16"}}"#
+                        .to_owned()
+                }
+                _ => r#"{"data":null,"message":"VM is locked (clone)\n"}"#.to_owned(),
+            };
+            return (status, message);
+        }
+        let mut hardware = config.hardware.unwrap_or(TEMPLATE_HARDWARE);
+        if let Some(cores) = body.get("cores") {
+            hardware.cores = u32::try_from(cores.as_u64().unwrap()).unwrap();
+        }
+        if let Some(memory) = body.get("memory") {
+            hardware.memory_mib = u32::try_from(memory.as_u64().unwrap()).unwrap();
+        }
+        if let Some(audio) = body.get("audio0")
+            && !config.audio_ignored
+        {
+            config.audio = audio.as_str().map(str::to_owned);
+        }
+        config.hardware = Some(hardware);
+        config.digest_moves += 1;
+        config.writes.push(("config".to_owned(), body.clone()));
+        (200, r#"{"data":null}"#.to_owned())
+    }
+
+    /// `PUT …/resize` (#372). PVE checks permissions, then starts a task and
+    /// answers its UPID; the digest check, a shrink, and any other failure are
+    /// the task's exit status.
+    fn resize(&self, vmid: u32, body: &serde_json::Value) -> (u16, String) {
+        let mut config = self.clone_config.lock().unwrap();
+        assert_eq!(body["disk"], "scsi0", "{body}");
+        config.resize_calls += 1;
+        if let Some(status) = config.resize_status {
+            return (
+                status,
+                format!(
+                    r#"{{"data":null,"message":"Permission check failed (/vms/{vmid}, VM.Config.Disk)\n"}}"#
+                ),
+            );
+        }
+        let gib: u32 = body["size"]
+            .as_str()
+            .and_then(|size| size.strip_suffix('G'))
+            .and_then(|size| size.parse().ok())
+            .expect("an absolute size in GiB");
+        let mut hardware = config.hardware.unwrap_or(TEMPLATE_HARDWARE);
+        let exit = if config.resize_stale > 0 {
+            config.resize_stale -= 1;
+            // Another writer moved the config under the step.
+            config.digest_moves += 1;
+            "ERROR: checksum mismatch (file change by other user?)".to_owned()
+        } else if body["digest"] != config.digest().as_str() {
+            "ERROR: checksum mismatch (file change by other user?)".to_owned()
+        } else if let Some(exit) = config.resize_exit.clone() {
+            exit
+        } else if gib < hardware.disk_gib {
+            "ERROR: shrinking disks is not supported".to_owned()
+        } else {
+            if !config.resize_ignored {
+                hardware.disk_gib = gib;
+                config.hardware = Some(hardware);
+            }
+            config.digest_moves += 1;
+            config.writes.push(("resize".to_owned(), body.clone()));
+            "OK".to_owned()
+        };
+        if config.resize_no_task {
+            // Applied (or refused) synchronously: no task to poll.
+            return (200, r#"{"data":null}"#.to_owned());
+        }
+        let exit = if config.resize_running {
+            "running".to_owned()
+        } else {
+            exit
+        };
+        let upid = format!(
+            "UPID:pve-b:{:08X}:0C6DF532:6AAFE1EC:resize:{vmid}:fleet@pve!lab:",
+            config.resize_tasks.len() + 1
+        );
+        config.resize_tasks.push((upid.clone(), exit));
+        (200, format!(r#"{{"data":"{upid}"}}"#))
+    }
+
+    /// The status of a resize task, when the request names one.
+    fn resize_task_answer(&self, path: &str) -> Option<(u16, String)> {
+        let decoded = path
+            .replace("%3A", ":")
+            .replace("%40", "@")
+            .replace("%21", "!");
+        let mut config = self.clone_config.lock().unwrap();
+        let (_, exit) = config
+            .resize_tasks
+            .iter()
+            .find(|(upid, _)| decoded.contains(upid.as_str()))?
+            .clone();
+        if config.resize_poll_errors > 0 {
+            config.resize_poll_errors -= 1;
+            return Some((503, r#"{"data":null,"message":"unavailable"}"#.to_owned()));
+        }
+        if exit == "running" {
+            return Some((200, r#"{"data":{"status":"running"}}"#.to_owned()));
+        }
+        Some((
+            200,
+            serde_json::json!({"data": {"status": "stopped", "exitstatus": exit}}).to_string(),
+        ))
+    }
+
+    /// `GET`/`PUT …/qemu/{vmid}/config`: the scripted clone config.
+    fn config(
+        &self,
+        vmid: u32,
+        method: PveHttpMethod,
+        body: Option<&serde_json::Value>,
+    ) -> (u16, String) {
+        assert_ne!(
+            vmid, TEMPLATE_VMID,
+            "the template's config is never read or changed"
+        );
+        let mut config = self.clone_config.lock().unwrap();
+        if method == PveHttpMethod::Put && body.is_some_and(|body| body.get("protection").is_none())
+        {
+            return Self::hardware_update(&mut config, vmid, body.unwrap());
+        }
+        if method == PveHttpMethod::Put {
+            let body = body.expect("a config update carries a body");
+            assert_eq!(
+                body["protection"], 0,
+                "only the protection flag is cleared: {body}"
+            );
+            assert_eq!(
+                body["digest"], "0123abcd",
+                "the update is conditional: {body}"
+            );
+            assert_eq!(body.as_object().unwrap().len(), 2, "{body}");
+            if config.refuse_unprotect {
+                return (
+                    403,
+                    format!(
+                        r#"{{"data":null,"message":"Permission check failed (/vms/{vmid}, VM.Config.Options)\n"}}"#
+                    ),
+                );
+            }
+            if let Some(status) = config.update_status {
+                return (status, r#"{"data":null}"#.to_owned());
+            }
+            if config.stale_puts > 0 {
+                config.stale_puts -= 1;
+                return (
+                    500,
+                    r#"{"data":null,"message":"checksum mismatch (file change by other user?)\n"}"#
+                        .to_owned(),
+                );
+            }
+            config.protected = false;
+            config.digest_moves += 1;
+            return (200, r#"{"data":null}"#.to_owned());
+        }
+        if config.forbid_read {
+            return (
+                403,
+                format!(
+                    r#"{{"data":null,"message":"Permission check failed (/vms/{vmid}, VM.Audit)\n"}}"#
+                ),
+            );
+        }
+        if config.flaky_reads > 0 {
+            config.flaky_reads -= 1;
+            return (503, r#"{"data":null,"message":"unavailable"}"#.to_owned());
+        }
+        if config.missing_reads > 0 {
+            config.missing_reads -= 1;
+            return (
+                500,
+                format!(
+                    r#"{{"data":null,"message":"Configuration file 'nodes/{TEMPLATE_NODE}/qemu-server/{vmid}.conf' does not exist\n"}}"#
+                ),
+            );
+        }
+        let listed = self
+            .guests
+            .iter()
+            .find(|guest| guest["vmid"] == vmid)
+            .and_then(|guest| guest["name"].as_str().map(str::to_owned));
+        let cloned = config
+            .cloned
+            .as_ref()
+            .filter(|(id, _)| *id == vmid)
+            .map(|(_, name)| name.clone());
+        let Some(name) = listed.or(cloned) else {
+            return (
+                500,
+                format!(
+                    r#"{{"data":null,"message":"Configuration file 'nodes/{TEMPLATE_NODE}/qemu-server/{vmid}.conf' does not exist\n"}}"#
+                ),
+            );
+        };
+        if config.locked_reads > 0 {
+            config.locked_reads -= 1;
+            // While PVE clones, the target's config holds the lock (and,
+            // between disks, the name).
+            return (
+                200,
+                format!(r#"{{"data":{{"lock":"clone","name":"{name}","digest":"0000"}}}}"#),
+            );
+        }
+        let name = config.foreign_name.clone().unwrap_or(name);
+        let hardware = config.hardware.unwrap_or(TEMPLATE_HARDWARE);
+        let mut answer = serde_json::json!({
+            "name": name,
+            "cores": if config.bad_hardware {
+                serde_json::json!("many")
+            } else {
+                serde_json::json!(hardware.cores)
+            },
+            "digest": config.digest(),
+            "memory": if config.memory_options {
+                format!("current={},max=65536", hardware.memory_mib)
+            } else {
+                hardware.memory_mib.to_string()
+            },
+        });
+        if let Some(sockets) = config.sockets {
+            answer["sockets"] = serde_json::json!(sockets);
+        }
+        if let Some(vcpus) = config.vcpus {
+            answer["vcpus"] = serde_json::json!(vcpus);
+        }
+        if let Some(balloon) = config.balloon {
+            answer["balloon"] = serde_json::json!(balloon);
+        }
+        if !config.no_boot_disk {
+            let size = if config.no_disk_size {
+                String::new()
+            } else {
+                format!(",size={}G", hardware.disk_gib)
+            };
+            answer["scsi0"] = serde_json::json!(format!("local-lvm:vm-{vmid}-disk-0{size}"));
+            answer["boot"] = serde_json::json!("order=scsi0;net0");
+        }
+        if let Some(audio) = &config.audio {
+            answer["audio0"] = serde_json::json!(audio);
+        }
+        if config.protected {
+            answer["protection"] = serde_json::json!(1);
+        }
+        if config.no_digest {
+            answer.as_object_mut().unwrap().remove("digest");
+        }
+        if config.as_template {
+            answer["template"] = serde_json::json!(1);
+        }
+        (200, serde_json::json!({ "data": answer }).to_string())
     }
 
     fn seen(&self) -> Vec<Seen> {
@@ -136,11 +696,47 @@ impl PveTransport for Transport {
 }
 
 impl Transport {
+    /// FM-715: the node status and storage endpoints, when scripted.
+    fn capacity_answer(&self, path: &str) -> Option<String> {
+        let free_gib = (*self.0.capacity.lock().unwrap())?;
+        let node = path.strip_prefix("/api2/json/nodes/")?;
+        let gib: u64 = 1 << 30;
+        if node
+            .strip_suffix("/status")
+            .is_some_and(|node| !node.contains('/'))
+        {
+            return Some(
+                serde_json::json!({"data": {
+                    "cpu": 0.1, "cpuinfo": {"cpus": 8},
+                    "memory": {"total": 32 * gib, "used": (32 - free_gib) * gib}
+                }})
+                .to_string(),
+            );
+        }
+        if node
+            .strip_suffix("/storage")
+            .is_some_and(|node| !node.contains('/'))
+        {
+            return Some(
+                serde_json::json!({"data": [
+                    {"storage": "local-lvm", "used": 0, "total": 500 * gib}
+                ]})
+                .to_string(),
+            );
+        }
+        None
+    }
+
     async fn respond(
         &self,
         request: PveHttpRequest,
         body: Option<serde_json::Value>,
     ) -> Result<PveHttpResponse, PveTransportError> {
+        if request.host == UNREACHABLE_HOST {
+            return Err(PveTransportError::Connect {
+                detail: "unreachable".to_owned(),
+            });
+        }
         assert_eq!(request.host, API_HOST, "every call goes to the API host");
         let path = request.path.clone();
         let stored_target = if path.ends_with("/clone") || path.ends_with("/status/start") {
@@ -155,15 +751,86 @@ impl Transport {
         } else {
             None
         };
+        if path.ends_with("/clone")
+            && let Some(body) = &body
+        {
+            self.0.clone_config.lock().unwrap().cloned = Some((
+                u32::try_from(body["newid"].as_u64().unwrap()).unwrap(),
+                body["name"].as_str().unwrap().to_owned(),
+            ));
+        }
+        if path == "/api2/json/cluster/nextid" || path.ends_with("/clone") {
+            let watch = self.0.watch_reservation.lock().unwrap().clone();
+            if let Some((pool, lease_id)) = watch {
+                let held = CapacityRepository::new(pool)
+                    .for_lease(&lease_id)
+                    .await
+                    .unwrap()
+                    .is_some_and(|reservation| reservation.state == ReservationState::Held);
+                self.0.held_at.lock().unwrap().push((path.clone(), held));
+            }
+        }
         self.0.seen.lock().unwrap().push(Seen {
             path: path.clone(),
-            body,
+            method: request.method,
+            body: body.clone(),
             stored_target,
         });
-        let answer = if path == "/api2/json/version" {
+        if let Some(vmid) = path
+            .strip_suffix("/resize")
+            .and_then(|rest| rest.rsplit_once("/qemu/"))
+            .and_then(|(_, vmid)| vmid.parse::<u32>().ok())
+        {
+            let (status, answer) = self.0.resize(vmid, body.as_ref().expect("a resize body"));
+            return Ok(PveHttpResponse {
+                status,
+                body: answer.into_bytes(),
+            });
+        }
+        if let Some(vmid) = path
+            .strip_suffix("/config")
+            .and_then(|rest| rest.rsplit_once("/qemu/"))
+            .and_then(|(_, vmid)| vmid.parse::<u32>().ok())
+        {
+            let (status, answer) = self.0.config(vmid, request.method, body.as_ref());
+            return Ok(PveHttpResponse {
+                status,
+                body: answer.into_bytes(),
+            });
+        }
+        let task_status = path.contains("/tasks/") && path.ends_with("/status");
+        if task_status && path.contains("%3Aresize%3A") {
+            // The operator cancels while the resize task is being read.
+            let pool = self
+                .0
+                .clone_config
+                .lock()
+                .unwrap()
+                .cancel_on_resize_poll
+                .take();
+            if let Some(pool) = pool {
+                sqlx::query(
+                    "UPDATE operations SET cancel_requested = 1 WHERE kind = 'lab.provision'",
+                )
+                .execute(&pool)
+                .await
+                .unwrap();
+            }
+        }
+        if task_status && let Some((status, answer)) = self.0.resize_task_answer(&path) {
+            return Ok(PveHttpResponse {
+                status,
+                body: answer.into_bytes(),
+            });
+        }
+        let answer = if task_status && let Some(answer) = self.0.task_answer() {
+            answer
+        } else if path == "/api2/json/version" {
             r#"{"data":{"version":"9.0.3"}}"#.to_owned()
         } else if path == "/api2/json/cluster/resources" {
             self.0.resources()
+        } else if let Some(answer) = self.capacity_answer(&path) {
+            answer
         } else if path == "/api2/json/cluster/nextid" {
             // PVE's JSON formatter answers the integer as a string.
             format!(r#"{{"data":"{}"}}"#, self.0.next_vmid)
@@ -171,6 +838,10 @@ impl Transport {
             format!(r#"{{"data":"{}"}}"#, self.0.clone_upid)
         } else if path.ends_with("/status/start") {
             format!(r#"{{"data":"{START_UPID}"}}"#)
+        } else if self.0.ready_ip && path.ends_with("/agent/info") {
+            r#"{"data":{"result":{"version":"9"}}}"#.to_owned()
+        } else if self.0.ready_ip && path.ends_with("/agent/network-get-interfaces") {
+            r#"{"data":{"result":[{"name":"ens18","ip-addresses":[{"ip-address":"192.0.2.42","ip-address-type":"ipv4","prefix":24}]}]}}"#.to_owned()
         } else {
             // The agent probe: refused, so the zero readiness deadline
             // ends the saga as never_ready right after the start.
@@ -218,6 +889,28 @@ impl ImageArtifactPort for Artifacts {
     }
 }
 
+/// FM-715: every pinned image's template disk lives on `local-lvm`.
+#[derive(Debug)]
+struct LocalLvm;
+
+/// An image whose storage pool Fleet does not know.
+#[derive(Debug)]
+struct NoStorage;
+
+#[async_trait]
+impl ImageStoragePort for NoStorage {
+    async fn template_storage(&self, _: &str) -> Result<Option<String>, String> {
+        Ok(None)
+    }
+}
+
+#[async_trait]
+impl ImageStoragePort for LocalLvm {
+    async fn template_storage(&self, _: &str) -> Result<Option<String>, String> {
+        Ok(Some("local-lvm".to_owned()))
+    }
+}
+
 #[derive(Debug)]
 struct AllowAll;
 
@@ -235,10 +928,16 @@ struct Harness {
     operations: Arc<Operations>,
     account_id: String,
     version_id: String,
+    pool: sqlx::SqlitePool,
 }
 
 impl Harness {
     async fn new() -> Self {
+        Self::with_audio(None).await
+    }
+
+    /// As [`Self::new`], over a template that declares `audio` (#398).
+    async fn with_audio(audio: Option<fleet_core::LabAudio>) -> Self {
         let dir = tempfile::tempdir().unwrap();
         let store = Store::open(&dir.path().join("fleet.db")).await.unwrap();
         let pool = store.pool().clone();
@@ -269,9 +968,16 @@ impl Harness {
             bootstrap_project_id: None,
             readiness_probe: ReadinessProbe::GuestAgent,
             readiness_command: None,
+            ssh_user: "root".to_owned(),
+            ssh_port: 22,
+            ssh_trust_mode: "tofu".to_owned(),
+            ssh_fingerprint: None,
             readiness_deadline_seconds: 0,
             ttl_seconds: 3_600,
             cleanup: CleanupStrategy::Destroy,
+            audio,
+            guest_os: fleet_core::GuestOs::default(),
+            interactive_user: None,
         };
         let template: LabTemplate = LabTemplatePort::create(
             labs.as_ref(),
@@ -299,7 +1005,7 @@ impl Harness {
             .unwrap();
         let operations = Arc::new(Operations::new(
             Arc::new(OperationRepository::new(pool.clone())),
-            Arc::new(AuditSink::new(pool)),
+            Arc::new(AuditSink::new(pool.clone())),
         ));
         Self {
             _dir: dir,
@@ -309,6 +1015,7 @@ impl Harness {
             operations,
             account_id: account.id,
             version_id: version.id,
+            pool,
         }
     }
 
@@ -336,6 +1043,7 @@ impl Harness {
                 template_version_id: self.version_id.clone(),
                 lease_id: Some(lease.id.clone()),
                 idempotency_key: None,
+                readiness_deadline_at: None,
             },
             now,
         )
@@ -373,7 +1081,64 @@ impl Harness {
         lease_id: &str,
         record_id: &str,
     ) -> (String, Option<(String, String)>, ProvisionRecord) {
+        self.run_executor(pve, self.executor(pve, pinned), lease_id, record_id)
+            .await
+    }
+
+    async fn run_executor(
+        &self,
+        pve: &Arc<Pve>,
+        executor: fleet_controller::proxmox_exec::ProvisionExecutor,
+        lease_id: &str,
+        record_id: &str,
+    ) -> (String, Option<(String, String)>, ProvisionRecord) {
+        let account = self.account_id.clone();
+        self.run_with_account(pve, executor, lease_id, record_id, Some(&account))
+            .await
+    }
+
+    /// How many audit intents carry `event` in their metadata. The
+    /// operation's completion appends an outcome row to its latest intent,
+    /// so outcome rows are not counted.
+    async fn audit_events(&self, event: &str) -> usize {
+        let count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM audit_events WHERE outcome IS NULL AND metadata_json LIKE ?1",
+        )
+        .bind(format!("%\"{event}\"%"))
+        .fetch_one(&self.pool)
+        .await
+        .unwrap();
+        usize::try_from(count).unwrap()
+    }
+
+    /// FM-715: the executor with placement enabled over the real capacity
+    /// repository.
+    fn placed_executor(
+        &self,
+        pve: &Arc<Pve>,
+        policy: PlacementPolicy,
+    ) -> fleet_controller::proxmox_exec::ProvisionExecutor {
+        self.executor(pve, Some(TEMPLATE_VMID)).with_placement(
+            Arc::new(CapacityRepository::new(self.pool.clone())),
+            Arc::new(LocalLvm),
+            Arc::new(AuditSink::new(self.pool.clone())),
+            policy,
+        )
+    }
+
+    async fn run_with_account(
+        &self,
+        pve: &Arc<Pve>,
+        executor: fleet_controller::proxmox_exec::ProvisionExecutor,
+        lease_id: &str,
+        record_id: &str,
+        account: Option<&str>,
+    ) -> (String, Option<(String, String)>, ProvisionRecord) {
         *pve.observe.lock().unwrap() = Some((self.labs.clone(), record_id.to_owned()));
+        let mut payload = serde_json::json!({ "recordId": record_id, "leaseId": lease_id });
+        if let Some(account) = account {
+            payload["accountId"] = serde_json::Value::String(account.to_owned());
+        }
         let operation = self
             .operations
             .create_lab_provision(
@@ -385,14 +1150,7 @@ impl Harness {
                     idempotency_key: None,
                     deadline_at: None,
                     correlation_id: None,
-                    payload_json: Some(
-                        serde_json::json!({
-                            "recordId": record_id,
-                            "accountId": self.account_id,
-                            "leaseId": lease_id
-                        })
-                        .to_string(),
-                    ),
+                    payload_json: Some(payload.to_string()),
                     review_token: None,
                 },
             )
@@ -402,7 +1160,7 @@ impl Harness {
             self.operations.clone(),
             Arc::new(fleet_controller::proxmox_exec::LabDispatch::new(
                 Arc::new(fleet_application::worker::NoopExecutor),
-                Arc::new(self.executor(pve, pinned)),
+                Arc::new(executor),
             )),
             2,
         );
@@ -561,6 +1319,13 @@ async fn a_rerun_after_the_clone_started_does_not_clone_again() {
     let mut resumable = ProvisionPort::get(harness.labs.as_ref(), &record.id)
         .await
         .unwrap();
+    // The simulated interruption precedes terminal readiness failure on
+    // both rows; an actual failed lease is intentionally not resumable.
+    let mut resumable_lease = harness.leases.get(&lease_id).await.unwrap();
+    resumable_lease.state = fleet_core::LeaseState::Provisioning;
+    harness.leases.update(&resumable_lease).await.unwrap();
+    reopen(&harness, &record.id).await;
+    resumable.failed_step = None;
     resumable.state = GuestState::Provisioning;
     ProvisionPort::update(harness.labs.as_ref(), &resumable)
         .await
@@ -895,4 +1660,2345 @@ async fn the_cleanup_guard_refuses_templates_and_image_artifacts() {
         .guard_destroy_target(&harness.account_id, NEXT_VMID)
         .await
         .expect("a Lab clone may be destroyed");
+}
+
+#[derive(Debug)]
+struct ReadyPorts {
+    labs: Arc<LabRepository>,
+    fail: Option<&'static str>,
+    calls: Mutex<Vec<&'static str>>,
+}
+
+#[async_trait]
+impl fleet_application::lab::LabReadinessPort for ReadyPorts {
+    async fn trust(
+        &self,
+        record: &ProvisionRecord,
+        _content: &LabTemplateContent,
+        _remaining: std::time::Duration,
+    ) -> Result<bool, String> {
+        self.calls.lock().unwrap().push("trust");
+        let stored = ProvisionPort::get(self.labs.as_ref(), &record.id)
+            .await
+            .unwrap();
+        assert_eq!(stored.state, GuestState::Bootstrapping);
+        assert!(stored.machine_id.is_some());
+        if self.fail == Some("trust") {
+            Err("unsafe provider diagnostic".to_owned())
+        } else {
+            Ok(true)
+        }
+    }
+    async fn interactive_session(
+        &self,
+        _operations: &Operations,
+        _parent_id: &str,
+        _record: &ProvisionRecord,
+        user: &str,
+        _remaining: std::time::Duration,
+    ) -> Result<bool, String> {
+        self.calls.lock().unwrap().push("session");
+        assert_eq!(user, "qa");
+        if self.fail == Some("session") {
+            Err("unsafe session diagnostic".to_owned())
+        } else {
+            Ok(true)
+        }
+    }
+    async fn ssh_probe(
+        &self,
+        _operations: &Operations,
+        _parent_id: &str,
+        _record: &ProvisionRecord,
+        command: &str,
+        _guest_os: fleet_core::GuestOs,
+        _remaining: std::time::Duration,
+    ) -> Result<bool, String> {
+        self.calls.lock().unwrap().push("ssh");
+        assert_eq!(command, "test -f /tmp/ready");
+        if self.fail == Some("ssh") {
+            Err("unsafe SSH diagnostic".to_owned())
+        } else {
+            Ok(true)
+        }
+    }
+    async fn create_project(
+        &self,
+        operations: &Operations,
+        _parent_id: &str,
+        record: &ProvisionRecord,
+        project_id: &str,
+        _remaining: std::time::Duration,
+    ) -> Result<String, String> {
+        self.calls.lock().unwrap().push("create_project");
+        assert_eq!(project_id, "project-1");
+        if self.fail == Some("project") {
+            return Err("unsafe project diagnostic".to_owned());
+        }
+        let child = operations.create(&AllowAll, "tester", &NewOperation {
+            kind: "ready.workflow".to_owned(), idempotency_key: Some(format!("lab-ready:{}", record.id)),
+            deadline_at: record.readiness_deadline_at, correlation_id: Some(record.id.clone()), review_token: None,
+            payload_json: Some(serde_json::json!({"machineId": record.machine_id, "endpointId": record.endpoint_id, "auth":{"type":"agent"}, "remote":"example.org/demo", "root":"/tmp/demo", "timeoutSeconds":30}).to_string()),
+        }).await.map_err(|error| error.to_string())?;
+        Ok(child.id)
+    }
+    async fn project_verified(
+        &self,
+        operations: &Operations,
+        child_id: &str,
+        _remaining: std::time::Duration,
+    ) -> Result<bool, String> {
+        self.calls.lock().unwrap().push("verify");
+        let provisions = ProvisionPort::list(self.labs.as_ref()).await.unwrap();
+        assert!(
+            provisions
+                .iter()
+                .any(|record| record.ready_project_operation_id.as_deref() == Some(child_id)),
+            "child identity must be committed before execution"
+        );
+        if self.fail == Some("verify") {
+            return Err("unsafe verify diagnostic".to_owned());
+        }
+        if operations.get_state(child_id).await.unwrap() == "pending" {
+            operations
+                .claim_only_execute(&ProjectVerify, child_id, "test-project")
+                .await?;
+        }
+        Ok(operations.get_state(child_id).await.unwrap() == "succeeded")
+    }
+}
+
+#[derive(Debug)]
+struct ProjectVerify;
+#[async_trait]
+impl fleet_application::worker::OperationExecutor for ProjectVerify {
+    async fn execute(
+        &self,
+        operations: &Operations,
+        operation: &fleet_application::operation::Operation,
+    ) -> Result<(), String> {
+        operations
+            .complete(
+                &operation.id,
+                "succeeded",
+                Some(r#"{"ready":true,"completed":["verify"]}"#),
+                None,
+            )
+            .await
+            .map(|_| ())
+            .map_err(|error| error.to_string())
+    }
+}
+
+async fn ready_harness(
+    probe: ReadinessProbe,
+    project: bool,
+    fail: Option<&'static str>,
+) -> (Harness, String, ProvisionRecord, Arc<Pve>, Arc<ReadyPorts>) {
+    ready_harness_for(probe, project, fail, None).await
+}
+
+async fn ready_harness_for(
+    probe: ReadinessProbe,
+    project: bool,
+    fail: Option<&'static str>,
+    interactive_user: Option<&str>,
+) -> (Harness, String, ProvisionRecord, Arc<Pve>, Arc<ReadyPorts>) {
+    let harness = Harness::new().await;
+    let mut version = harness.labs.get_version(&harness.version_id).await.unwrap();
+    if let Some(user) = interactive_user {
+        version.content.guest_os = fleet_core::GuestOs::Windows;
+        version.content.interactive_user = Some(user.to_owned());
+    }
+    version.content.readiness_deadline_seconds = 30;
+    version.content.readiness_probe = probe;
+    version.content.readiness_command = Some("test -f /tmp/ready".to_owned());
+    version.content.bootstrap_project_id = project.then(|| "project-1".to_owned());
+    sqlx::query("UPDATE lab_template_versions SET content = ?2 WHERE id = ?1")
+        .bind(&version.id)
+        .bind(serde_json::to_string(&version.content).unwrap())
+        .execute(&harness.pool)
+        .await
+        .unwrap();
+    let (lease_id, mut record) = harness.record().await;
+    record.vmid = Some(NEXT_VMID);
+    record.node = Some(TEMPLATE_NODE.to_owned());
+    record.clone_upid = Some(CLONE_UPID.to_owned());
+    ProvisionPort::update(harness.labs.as_ref(), &record)
+        .await
+        .unwrap();
+    let mut pve = Pve::new(vec![guest(NEXT_VMID, &format!("fm-lab-{}", record.id))]);
+    Arc::get_mut(&mut pve).unwrap().ready_ip = true;
+    let ports = Arc::new(ReadyPorts {
+        labs: harness.labs.clone(),
+        fail,
+        calls: Mutex::new(Vec::new()),
+    });
+    (harness, lease_id, record, pve, ports)
+}
+
+#[tokio::test]
+async fn every_probe_registers_a_lab_machine_and_starts_ttl_only_after_bootstrap() {
+    for (probe, project, expected) in [
+        (ReadinessProbe::GuestAgent, false, vec!["trust"]),
+        (ReadinessProbe::SshExec, false, vec!["trust", "ssh"]),
+        (
+            ReadinessProbe::ProjectReady,
+            true,
+            vec!["trust", "create_project", "verify"],
+        ),
+        (
+            ReadinessProbe::GuestAgent,
+            true,
+            vec!["trust", "create_project", "verify"],
+        ),
+    ] {
+        let (harness, lease_id, record, pve, ports) = ready_harness(probe, project, None).await;
+        let executor = harness.executor(&pve, Some(TEMPLATE_VMID)).with_readiness(
+            ports.clone(),
+            Arc::new(AuditSink::new(harness.pool.clone())),
+        );
+        let (state, error, stored) = harness
+            .run_executor(&pve, executor, &lease_id, &record.id)
+            .await;
+        assert_eq!(state, "succeeded", "{error:?}");
+        assert_eq!(stored.state, GuestState::Ready);
+        assert_eq!(stored.guest_ipv4.as_deref(), Some("192.0.2.42"));
+        assert!(stored.machine_id.is_some());
+        assert!(stored.endpoint_id.is_some());
+        assert_eq!(*ports.calls.lock().unwrap(), expected);
+        let lease = harness.leases.get(&lease_id).await.unwrap();
+        assert_eq!(lease.state, fleet_core::LeaseState::Ready);
+        assert_eq!(lease.ready_at, stored.ready_at);
+        assert_eq!(
+            lease.expires_at,
+            stored.ready_at.map(|ready| ready + 3_600_000)
+        );
+        let executor = harness.executor(&pve, Some(TEMPLATE_VMID)).with_readiness(
+            ports.clone(),
+            Arc::new(AuditSink::new(harness.pool.clone())),
+        );
+        let (state, _, resumed) = harness
+            .run_executor(&pve, executor, &lease_id, &record.id)
+            .await;
+        assert_eq!(state, "succeeded");
+        assert_eq!(resumed.machine_id, stored.machine_id);
+        assert_eq!(
+            resumed.ready_project_operation_id,
+            stored.ready_project_operation_id
+        );
+        assert_eq!(
+            harness.leases.get(&lease_id).await.unwrap().expires_at,
+            lease.expires_at
+        );
+        assert_eq!(
+            *ports.calls.lock().unwrap(),
+            expected,
+            "a ready resume does no remote work"
+        );
+        assert!(pve.clones().is_empty());
+    }
+}
+
+#[tokio::test]
+async fn each_readiness_failure_names_the_step_and_retains_allocations() {
+    for (fail, step) in [
+        ("trust", "ssh_trust"),
+        ("ssh", "ssh_exec"),
+        ("project", "project_setup"),
+        ("verify", "project_ready"),
+    ] {
+        let (harness, lease_id, record, pve, ports) =
+            ready_harness(ReadinessProbe::SshExec, true, Some(fail)).await;
+        let executor = harness
+            .executor(&pve, Some(TEMPLATE_VMID))
+            .with_readiness(ports, Arc::new(AuditSink::new(harness.pool.clone())));
+        let (state, error, stored) = harness
+            .run_executor(&pve, executor, &lease_id, &record.id)
+            .await;
+        assert_eq!(state, "failed");
+        assert_eq!(stored.state, GuestState::NeverReady);
+        assert_eq!(stored.failed_step.as_deref(), Some(step));
+        assert_eq!(stored.vmid, Some(NEXT_VMID));
+        assert_eq!(stored.clone_upid.as_deref(), Some(CLONE_UPID));
+        assert!(stored.machine_id.is_some());
+        assert!(stored.endpoint_id.is_some());
+        assert!(stored.ready_at.is_none());
+        assert_eq!(
+            harness.leases.get(&lease_id).await.unwrap().state,
+            fleet_core::LeaseState::Failed
+        );
+        assert!(!error.unwrap().1.contains("unsafe"));
+        assert_eq!(
+            stored.ready_project_operation_id.is_some(),
+            fail == "verify"
+        );
+    }
+}
+
+#[tokio::test]
+async fn an_interactive_user_adds_a_session_step_that_names_its_failure() {
+    // Passing: the session step runs after SSH trust, once.
+    let (harness, lease_id, record, pve, ports) =
+        ready_harness_for(ReadinessProbe::GuestAgent, false, None, Some("qa")).await;
+    let executor = harness.executor(&pve, Some(TEMPLATE_VMID)).with_readiness(
+        ports.clone(),
+        Arc::new(AuditSink::new(harness.pool.clone())),
+    );
+    let (state, _, stored) = harness
+        .run_executor(&pve, executor, &lease_id, &record.id)
+        .await;
+    assert_eq!(state, "succeeded");
+    assert_eq!(stored.state, GuestState::Ready);
+    assert_eq!(*ports.calls.lock().unwrap(), vec!["trust", "session"]);
+
+    // A missing desktop session never passes readiness: it is a named failure.
+    let (harness, lease_id, record, pve, ports) = ready_harness_for(
+        ReadinessProbe::GuestAgent,
+        false,
+        Some("session"),
+        Some("qa"),
+    )
+    .await;
+    let executor = harness
+        .executor(&pve, Some(TEMPLATE_VMID))
+        .with_readiness(ports, Arc::new(AuditSink::new(harness.pool.clone())));
+    let (state, error, stored) = harness
+        .run_executor(&pve, executor, &lease_id, &record.id)
+        .await;
+    assert_eq!(state, "failed");
+    assert_eq!(stored.state, GuestState::NeverReady);
+    assert_eq!(stored.failed_step.as_deref(), Some("interactive_session"));
+    assert!(stored.ready_at.is_none());
+    assert!(!error.unwrap().1.contains("unsafe"));
+}
+
+#[derive(Debug, Default)]
+struct BudgetStep(Mutex<Vec<u64>>);
+
+#[async_trait]
+impl fleet_application::worker::OperationExecutor for BudgetStep {
+    async fn execute(
+        &self,
+        operations: &Operations,
+        operation: &fleet_application::operation::Operation,
+    ) -> Result<(), String> {
+        let payload: serde_json::Value =
+            serde_json::from_str(operation.payload_json.as_deref().unwrap()).unwrap();
+        self.0
+            .lock()
+            .unwrap()
+            .push(payload["timeoutSeconds"].as_u64().unwrap());
+        operations
+            .complete(&operation.id, "succeeded", Some("{}"), None)
+            .await
+            .map(|_| ())
+            .map_err(|e| e.to_string())
+    }
+}
+
+#[tokio::test]
+async fn production_readiness_adapter_bounds_children_and_refuses_stopped_parents() {
+    let harness = Harness::new().await;
+    let step = Arc::new(BudgetStep::default());
+    let executor = fleet_controller::proxmox_exec::LabReadinessExecutor::new(
+        step.clone(),
+        step.clone(),
+        Arc::new(fleet_storage_sqlite::MachineRepository::new(
+            harness.pool.clone(),
+        )),
+        harness.operations.clone(),
+        harness._dir.path().join("ssh"),
+        fleet_provider_ssh::ExecutionLimiter::new(2),
+    );
+    for stopped in [false, true] {
+        let parent = harness
+            .operations
+            .create(
+                &AllowAll,
+                "tester",
+                &NewOperation {
+                    kind: "ssh.exec".to_owned(),
+                    idempotency_key: None,
+                    deadline_at: None,
+                    correlation_id: None,
+                    review_token: None,
+                    payload_json: Some(serde_json::json!({"machineId":"machine", "endpointId":"endpoint", "auth":{"type":"agent"}, "script":"true", "timeoutSeconds":30}).to_string()),
+                },
+            )
+            .await
+            .unwrap();
+        if stopped {
+            harness
+                .operations
+                .cancel(&AllowAll, "tester", &parent.id)
+                .await
+                .unwrap();
+        }
+        let child = harness.operations.create(&AllowAll, "tester", &NewOperation {
+            kind: "ssh.exec".to_owned(), idempotency_key: None,
+            deadline_at: Some(fleet_core::SystemClock::now_unix_millis() + 5_000),
+            correlation_id: None, review_token: None,
+            payload_json: Some(serde_json::json!({"machineId":"machine", "endpointId":"endpoint", "auth":{"type":"agent"}, "script":"true", "timeoutSeconds":900, "labParentOperationId":parent.id}).to_string()),
+        }).await.unwrap();
+        harness
+            .operations
+            .claim_only_execute(&executor, &child.id, "tester")
+            .await
+            .unwrap();
+        assert_eq!(
+            harness.operations.get_state(&child.id).await.unwrap(),
+            if stopped { "failed" } else { "succeeded" }
+        );
+    }
+    let budgets = step.0.lock().unwrap();
+    assert_eq!(
+        budgets.len(),
+        1,
+        "a cancelled parent must never reach the executor"
+    );
+    assert!(
+        (1..=5).contains(&budgets[0]),
+        "nested CLI timeout must fit inside the Lab deadline"
+    );
+}
+
+#[derive(Debug)]
+struct CancelAfterClone {
+    parent: String,
+    calls: Mutex<Vec<(String, u64)>>,
+}
+
+#[async_trait]
+impl fleet_application::worker::OperationExecutor for CancelAfterClone {
+    async fn execute(
+        &self,
+        operations: &Operations,
+        operation: &fleet_application::operation::Operation,
+    ) -> Result<(), String> {
+        let payload: serde_json::Value =
+            serde_json::from_str(operation.payload_json.as_deref().unwrap()).unwrap();
+        self.calls.lock().unwrap().push((
+            operation.kind.clone(),
+            payload["timeoutSeconds"].as_u64().unwrap(),
+        ));
+        operations
+            .complete(&operation.id, "succeeded", Some("{}"), None)
+            .await
+            .map_err(|e| e.to_string())?;
+        if operation.kind == "projects.clone" {
+            operations
+                .cancel(&AllowAll, "tester", &self.parent)
+                .await
+                .map_err(|e| e.to_string())?;
+        }
+        Ok(())
+    }
+}
+
+async fn readiness_parent(operations: &Operations) -> fleet_application::operation::Operation {
+    operations.create(&AllowAll, "tester", &NewOperation {
+        kind: "ssh.exec".to_owned(), idempotency_key: None, deadline_at: None,
+        correlation_id: None, review_token: None,
+        payload_json: Some(serde_json::json!({"machineId":"machine", "endpointId":"endpoint", "auth":{"type":"agent"}, "script":"true", "timeoutSeconds":30}).to_string()),
+    }).await.unwrap()
+}
+
+#[tokio::test]
+async fn production_m3_child_bounds_nested_steps_and_stops_after_parent_cancellation() {
+    let harness = Harness::new().await;
+    let parent = readiness_parent(&harness.operations).await;
+    let steps = Arc::new(CancelAfterClone {
+        parent: parent.id.clone(),
+        calls: Mutex::new(Vec::new()),
+    });
+    let executor = fleet_controller::proxmox_exec::LabReadinessExecutor::new(
+        steps.clone(),
+        steps.clone(),
+        Arc::new(fleet_storage_sqlite::MachineRepository::new(
+            harness.pool.clone(),
+        )),
+        harness.operations.clone(),
+        harness._dir.path().join("ssh"),
+        fleet_provider_ssh::ExecutionLimiter::new(2),
+    );
+    let child = harness.operations.create(&AllowAll, "tester", &NewOperation {
+        kind:"ready.workflow".to_owned(), idempotency_key:None,
+        deadline_at:Some(fleet_core::SystemClock::now_unix_millis()+10_000), correlation_id:None, review_token:None,
+        payload_json:Some(serde_json::json!({"machineId":"machine", "endpointId":"endpoint", "auth":{"type":"agent"}, "remote":"https://example.test/demo.git", "root":"/tmp/demo", "timeoutSeconds":900, "labParentOperationId":parent.id}).to_string()),
+    }).await.unwrap();
+    harness
+        .operations
+        .claim_only_execute(&executor, &child.id, "tester")
+        .await
+        .unwrap();
+    assert_eq!(
+        harness.operations.get_state(&child.id).await.unwrap(),
+        "failed"
+    );
+    let calls = steps.calls.lock().unwrap();
+    assert!(calls.iter().any(|(kind, _)| kind == "projects.clone"));
+    assert!(
+        !calls
+            .iter()
+            .any(|(kind, _)| kind == "frogenv.setup" || kind == "tools.inventory")
+    );
+    assert!(calls.iter().all(|(_, seconds)| (1..=10).contains(seconds)));
+}
+
+#[derive(Debug)]
+struct SlowChild;
+#[async_trait]
+impl fleet_application::worker::OperationExecutor for SlowChild {
+    async fn execute(
+        &self,
+        _: &Operations,
+        _: &fleet_application::operation::Operation,
+    ) -> Result<(), String> {
+        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+        Err("bounded test child ended".to_owned())
+    }
+}
+
+#[tokio::test]
+async fn production_child_watchdog_survives_the_callers_timeout() {
+    use fleet_application::lab::LabReadinessPort as _;
+    let harness = Harness::new().await;
+    let parent = readiness_parent(&harness.operations).await;
+    let (_, mut record) = harness.record().await;
+    record.machine_id = Some("machine".to_owned());
+    record.endpoint_id = Some("endpoint".to_owned());
+    record.readiness_deadline_at = Some(fleet_core::SystemClock::now_unix_millis() + 250);
+    let readiness = fleet_controller::proxmox_exec::ProvisionReadiness::new(
+        Arc::new(fleet_storage_sqlite::MachineRepository::new(
+            harness.pool.clone(),
+        )),
+        Arc::new(fleet_storage_sqlite::ProjectRepository::new(
+            harness.pool.clone(),
+        )),
+        Arc::new(AuditSink::new(harness.pool.clone())),
+        Arc::new(SlowChild),
+        harness.operations.clone(),
+        harness._dir.path().join("ssh"),
+    );
+    assert!(
+        tokio::time::timeout(
+            std::time::Duration::from_millis(100),
+            readiness.ssh_probe(
+                &harness.operations,
+                &parent.id,
+                &record,
+                "true",
+                fleet_core::GuestOs::Linux,
+                std::time::Duration::from_millis(250)
+            )
+        )
+        .await
+        .is_err()
+    );
+    tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+    let children = harness
+        .operations
+        .list(&AllowAll, "tester", 100)
+        .await
+        .unwrap();
+    let child = children
+        .iter()
+        .find(|child| child.correlation_id.as_deref() == Some(&record.id))
+        .unwrap();
+    assert!(
+        child.cancel_requested,
+        "dropping the caller must not drop child cancellation"
+    );
+}
+
+#[tokio::test]
+async fn queue_claimed_m3_steps_inherit_the_persisted_lab_workflows_bound() {
+    let harness = Harness::new().await;
+    let parent = readiness_parent(&harness.operations).await;
+    let workflow = harness.operations.create(&AllowAll, "tester", &NewOperation {
+        kind: "ready.workflow".to_owned(), idempotency_key:None,
+        deadline_at: Some(fleet_core::SystemClock::now_unix_millis()+10_000), correlation_id: None, review_token:None,
+        payload_json:Some(serde_json::json!({"machineId":"machine", "endpointId":"endpoint", "auth":{"type":"agent"}, "remote":"https://example.test/demo.git", "root":"/tmp/demo", "timeoutSeconds":10, "labParentOperationId":parent.id}).to_string()),
+    }).await.unwrap();
+    let (_, record) = harness.record().await;
+    let mut record = harness
+        .labs
+        .ensure_guest_machine(&record.id, "root@192.0.2.20:22")
+        .await
+        .unwrap();
+    record.state = GuestState::Bootstrapping;
+    record.ready_project_operation_id = Some(workflow.id.clone());
+    record.readiness_deadline_at = Some(fleet_core::SystemClock::now_unix_millis() + 10_000);
+    ProvisionPort::update(harness.labs.as_ref(), &record)
+        .await
+        .unwrap();
+    let steps = Arc::new(BudgetStep::default());
+    let executor = fleet_controller::proxmox_exec::LabReadinessExecutor::new(
+        steps.clone(),
+        steps.clone(),
+        Arc::new(fleet_storage_sqlite::MachineRepository::new(
+            harness.pool.clone(),
+        )),
+        harness.operations.clone(),
+        harness._dir.path().join("ssh"),
+        fleet_provider_ssh::ExecutionLimiter::new(2),
+    )
+    .with_provisions(harness.labs.clone());
+    for stopped in [false, true] {
+        if stopped {
+            harness
+                .operations
+                .cancel(&AllowAll, "tester", &parent.id)
+                .await
+                .unwrap();
+        }
+        let child = harness.operations.create(&AllowAll, "tester", &NewOperation {
+            kind:"projects.clone".to_owned(), idempotency_key:None, deadline_at:None, correlation_id:None, review_token:None,
+            payload_json:Some(serde_json::json!({"machineId":record.machine_id, "endpointId":record.endpoint_id, "auth":{"type":"agent"}, "remote":"https://example.test/demo.git", "root":"/tmp/demo", "timeoutSeconds":600}).to_string()),
+        }).await.unwrap();
+        if stopped {
+            record.state = GuestState::NeverReady;
+            ProvisionPort::update(harness.labs.as_ref(), &record)
+                .await
+                .unwrap();
+        }
+        harness
+            .operations
+            .claim_only_execute(&executor, &child.id, "other-worker")
+            .await
+            .unwrap();
+        assert_eq!(
+            harness.operations.get_state(&child.id).await.unwrap(),
+            if stopped { "failed" } else { "succeeded" }
+        );
+    }
+    let calls = steps.0.lock().unwrap();
+    assert_eq!(calls.len(), 1);
+    assert!((1..=10).contains(&calls[0]));
+}
+
+// ── Issue #290: a clone of a protected template is unprotected ──────────
+
+/// The index of the first request whose path ends with `suffix`.
+fn first(pve: &Pve, suffix: &str) -> Option<usize> {
+    pve.paths().iter().position(|path| path.ends_with(suffix))
+}
+
+const CLONE_CONFIG: &str = "/api2/json/nodes/pve-b/qemu/9000/config";
+
+#[tokio::test]
+async fn a_clone_of_a_protected_template_is_unprotected_before_it_starts() {
+    let harness = Harness::new().await;
+    let (lease_id, record) = harness.record().await;
+    let pve = Pve::new(Vec::new()).protected();
+
+    let (state, error, stored) = harness
+        .run(&pve, Some(TEMPLATE_VMID), &lease_id, &record.id)
+        .await;
+
+    // The saga goes on past the unprotect step (to the never-answering
+    // agent probe).
+    assert_eq!(state, "failed");
+    assert_eq!(error.unwrap().0, "never_ready");
+    let updates = pve.config_updates();
+    assert_eq!(updates.len(), 1, "{:?}", pve.paths());
+    // Only the new guest's config, never the template's.
+    assert_eq!(updates[0].path, CLONE_CONFIG);
+    let paths = pve.paths();
+    let cloned = first(&pve, "/clone").unwrap();
+    let read = paths.iter().position(|path| path == CLONE_CONFIG).unwrap();
+    let put = pve
+        .seen()
+        .iter()
+        .position(|seen| seen.method == PveHttpMethod::Put)
+        .unwrap();
+    let started = first(&pve, "/status/start").unwrap();
+    assert!(cloned < read && read < put && put < started, "{paths:?}");
+    assert!(
+        !paths
+            .iter()
+            .any(|path| path.contains(&format!("/qemu/{TEMPLATE_VMID}/config"))),
+        "{paths:?}"
+    );
+    assert_eq!(stored.vmid, Some(NEXT_VMID));
+    assert_eq!(stored.failed_step.as_deref(), Some("guest_ip"));
+}
+
+#[tokio::test]
+async fn a_clone_without_the_flag_is_read_but_not_changed() {
+    let harness = Harness::new().await;
+    let (lease_id, record) = harness.record().await;
+    let pve = Pve::new(Vec::new());
+
+    let (_, error, _) = harness
+        .run(&pve, Some(TEMPLATE_VMID), &lease_id, &record.id)
+        .await;
+
+    assert_eq!(error.unwrap().0, "never_ready");
+    assert!(pve.config_updates().is_empty(), "{:?}", pve.paths());
+    let read = first(&pve, "/qemu/9000/config").unwrap();
+    assert!(read < first(&pve, "/status/start").unwrap());
+}
+
+#[tokio::test]
+async fn the_clone_lock_is_waited_out_before_the_flag_is_cleared() {
+    let harness = Harness::new().await;
+    let (lease_id, record) = harness.record().await;
+    let pve = Pve::new(Vec::new()).protected().locked_for(1);
+
+    let (_, error, _) = harness
+        .run(&pve, Some(TEMPLATE_VMID), &lease_id, &record.id)
+        .await;
+
+    assert_eq!(error.unwrap().0, "never_ready");
+    let reads = pve
+        .seen()
+        .iter()
+        .filter(|seen| seen.path == CLONE_CONFIG && seen.method == PveHttpMethod::Get)
+        .count();
+    assert_eq!(reads, 3, "the locked read is retried: {:?}", pve.paths()); // two settle reads, then the hardware check (#372)
+    assert_eq!(pve.config_updates().len(), 1);
+    let put = pve
+        .seen()
+        .iter()
+        .position(|seen| seen.method == PveHttpMethod::Put)
+        .unwrap();
+    assert!(put < first(&pve, "/status/start").unwrap());
+}
+
+#[tokio::test]
+async fn a_refused_unprotect_fails_the_provision_before_the_start() {
+    let harness = Harness::new().await;
+    let (lease_id, record) = harness.record().await;
+    let pve = Pve::new(Vec::new()).protected().refusing_unprotect();
+
+    let (state, error, stored) = harness
+        .run(&pve, Some(TEMPLATE_VMID), &lease_id, &record.id)
+        .await;
+
+    assert_eq!(state, "failed");
+    let (reason, detail) = error.unwrap();
+    assert_eq!(reason, "unprotect_failed");
+    assert!(
+        detail.contains("VM.Config.Options on /vms/9000"),
+        "{detail}"
+    );
+    assert_eq!(
+        step_of(&harness, &record.id).await.as_deref(),
+        Some("unprotect")
+    );
+    assert!(first(&pve, "/status/start").is_none(), "{:?}", pve.paths());
+    // The guest stays recorded, so cleanup still owns it.
+    assert_eq!(stored.state, GuestState::NeverReady);
+    assert_eq!(stored.failed_step.as_deref(), Some("unprotect"));
+    assert_eq!(stored.vmid, Some(NEXT_VMID));
+    assert_eq!(stored.clone_upid.as_deref(), Some(CLONE_UPID));
+}
+
+#[tokio::test]
+async fn a_settled_config_that_is_not_our_clone_is_never_updated_or_started() {
+    // The mock otherwise echoes the requested clone name, so these cases
+    // prove the identity check runs before the protection update.
+    let harness = Harness::new().await;
+    for pve in [
+        Pve::new(Vec::new()).protected().named("someone-else"),
+        Pve::new(Vec::new()).protected().as_template(),
+    ] {
+        let (lease_id, record) = harness.record().await;
+        let (state, error, stored) = harness
+            .run(&pve, Some(TEMPLATE_VMID), &lease_id, &record.id)
+            .await;
+
+        assert_eq!(state, "failed");
+        let (reason, detail) = error.unwrap();
+        assert_eq!(reason, "conflict", "{detail}");
+        assert!(detail.contains("left unchanged"), "{detail}");
+        assert_eq!(pve.clones().len(), 1, "{:?}", pve.paths());
+        assert!(first(&pve, CLONE_CONFIG).is_some(), "{:?}", pve.paths());
+        assert!(pve.config_updates().is_empty(), "{:?}", pve.paths());
+        assert!(first(&pve, "/status/start").is_none(), "{:?}", pve.paths());
+        assert_eq!(
+            step_of(&harness, &record.id).await.as_deref(),
+            Some("clone")
+        );
+        assert_eq!(stored.failed_step.as_deref(), Some("clone"));
+        assert_eq!(stored.vmid, Some(NEXT_VMID));
+    }
+}
+
+/// Reopens an ended record, which the port refuses to do (#303): the
+/// simulated interruption precedes the failure the run recorded.
+async fn reopen(harness: &Harness, record_id: &str) {
+    sqlx::query(
+        "UPDATE lab_provisions SET state = 'provisioning', failed_step = NULL WHERE id = ?1",
+    )
+    .bind(record_id)
+    .execute(&harness.pool)
+    .await
+    .unwrap();
+}
+
+/// Puts a run's record and lease back to `provisioning`, as if the
+/// controller had stopped after the clone was recorded.
+async fn interrupt(harness: &Harness, lease_id: &str, record_id: &str) {
+    let mut lease = harness.leases.get(lease_id).await.unwrap();
+    lease.state = fleet_core::LeaseState::Provisioning;
+    harness.leases.update(&lease).await.unwrap();
+    let mut record = ProvisionPort::get(harness.labs.as_ref(), record_id)
+        .await
+        .unwrap();
+    reopen(harness, record_id).await;
+    record.failed_step = None;
+    record.state = GuestState::Provisioning;
+    ProvisionPort::update(harness.labs.as_ref(), &record)
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn a_resumed_clone_is_neither_cloned_nor_unprotected_again() {
+    let harness = Harness::new().await;
+    let (lease_id, record) = harness.record().await;
+    let pve = Pve::new(Vec::new()).protected();
+    harness
+        .run(&pve, Some(TEMPLATE_VMID), &lease_id, &record.id)
+        .await;
+    assert_eq!(pve.config_updates().len(), 1);
+    interrupt(&harness, &lease_id, &record.id).await;
+
+    // The flag was cleared before the interruption: nothing to repeat.
+    let name = format!("fm-lab-{}", record.id);
+    let second = Pve::new(vec![guest(NEXT_VMID, &name)]);
+    let (_, error, stored) = harness
+        .run(&second, Some(TEMPLATE_VMID), &lease_id, &record.id)
+        .await;
+    assert_eq!(error.unwrap().0, "never_ready");
+    assert!(second.clones().is_empty(), "{:?}", second.paths());
+    assert!(second.config_updates().is_empty(), "{:?}", second.paths());
+    assert!(first(&second, "/status/start").is_some());
+    assert_eq!(stored.vmid, Some(NEXT_VMID));
+
+    // Interrupted between the clone and the unprotect: the resume clears
+    // the flag once, still without a second clone.
+    interrupt(&harness, &lease_id, &record.id).await;
+    let third = Pve::new(vec![guest(NEXT_VMID, &name)]).protected();
+    harness
+        .run(&third, Some(TEMPLATE_VMID), &lease_id, &record.id)
+        .await;
+    assert!(third.clones().is_empty(), "{:?}", third.paths());
+    let updates = third.config_updates();
+    assert_eq!(updates.len(), 1, "{:?}", third.paths());
+    assert_eq!(updates[0].path, CLONE_CONFIG);
+}
+
+#[tokio::test]
+async fn a_config_not_written_yet_is_retried_but_a_refused_read_fails_at_once() {
+    // PVE writes the clone's config inside the forked worker: an early read
+    // finds none yet, and the executor retries it.
+    let harness = Harness::new().await;
+    let (lease_id, record) = harness.record().await;
+    let pve = Pve::new(Vec::new()).protected().missing_for(1);
+    let (_, error, _) = harness
+        .run(&pve, Some(TEMPLATE_VMID), &lease_id, &record.id)
+        .await;
+    assert_eq!(error.unwrap().0, "never_ready");
+    let reads = pve
+        .seen()
+        .iter()
+        .filter(|seen| seen.path == CLONE_CONFIG && seen.method == PveHttpMethod::Get)
+        .count();
+    assert_eq!(reads, 3, "{:?}", pve.paths());
+    assert_eq!(pve.config_updates().len(), 1);
+
+    // Without VM.Audit on the clone target, no polling and no start.
+    let (lease_id, record) = harness.record().await;
+    let pve = Pve::new(Vec::new()).forbidding_config_reads();
+    let (state, _, stored) = harness
+        .run(&pve, Some(TEMPLATE_VMID), &lease_id, &record.id)
+        .await;
+    assert_eq!(state, "failed");
+    let reads = pve
+        .seen()
+        .iter()
+        .filter(|seen| seen.path == CLONE_CONFIG)
+        .count();
+    assert_eq!(reads, 1, "{:?}", pve.paths());
+    assert!(first(&pve, "/status/start").is_none(), "{:?}", pve.paths());
+    assert_eq!(stored.state, GuestState::NeverReady);
+    assert_eq!(stored.vmid, Some(NEXT_VMID));
+}
+
+#[tokio::test]
+async fn a_protected_clone_without_a_config_digest_is_never_updated_unconditionally() {
+    let harness = Harness::new().await;
+    let (lease_id, record) = harness.record().await;
+    let pve = Pve::new(Vec::new()).protected().without_digest();
+
+    let (state, error, stored) = harness
+        .run(&pve, Some(TEMPLATE_VMID), &lease_id, &record.id)
+        .await;
+
+    assert_eq!(state, "failed");
+    let (reason, detail) = error.unwrap();
+    assert_eq!(reason, "unprotect_failed");
+    assert!(detail.contains("digest"), "{detail}");
+    assert!(pve.config_updates().is_empty(), "{:?}", pve.paths());
+    assert!(first(&pve, "/status/start").is_none(), "{:?}", pve.paths());
+    assert_eq!(stored.failed_step.as_deref(), Some("unprotect"));
+}
+
+#[tokio::test]
+async fn a_stale_digest_is_reread_and_retried_once() {
+    // One stale refusal: the config is re-read and re-checked, and the
+    // second, digest-bound update lands before the start.
+    let harness = Harness::new().await;
+    let (lease_id, record) = harness.record().await;
+    let pve = Pve::new(Vec::new()).protected().stale_for(1);
+    let (_, error, _) = harness
+        .run(&pve, Some(TEMPLATE_VMID), &lease_id, &record.id)
+        .await;
+    assert_eq!(error.unwrap().0, "never_ready");
+    assert_eq!(pve.config_updates().len(), 2, "{:?}", pve.paths());
+    let reads = pve
+        .seen()
+        .iter()
+        .filter(|seen| seen.path == CLONE_CONFIG && seen.method == PveHttpMethod::Get)
+        .count();
+    assert_eq!(reads, 3, "{:?}", pve.paths());
+    assert!(first(&pve, "/status/start").is_some());
+
+    // Refused twice: the provision fails before the start.
+    let (lease_id, record) = harness.record().await;
+    let pve = Pve::new(Vec::new()).protected().stale_for(2);
+    let (_, error, stored) = harness
+        .run(&pve, Some(TEMPLATE_VMID), &lease_id, &record.id)
+        .await;
+    let (reason, detail) = error.unwrap();
+    assert_eq!(reason, "unprotect_failed");
+    // A server-side refusal, not a missing privilege.
+    assert!(!detail.contains("VM.Config.Options"), "{detail}");
+    assert!(detail.contains("locked or changing"), "{detail}");
+    assert_eq!(pve.config_updates().len(), 2, "{:?}", pve.paths());
+    assert!(first(&pve, "/status/start").is_none());
+    assert_eq!(stored.failed_step.as_deref(), Some("unprotect"));
+}
+
+/// The `step` of the latest failed `lab.provision` operation for a record.
+async fn step_of(harness: &Harness, record_id: &str) -> Option<String> {
+    let error: String = sqlx::query_scalar(
+        "SELECT error_json FROM operations WHERE kind = 'lab.provision' AND payload_json LIKE ? ORDER BY rowid DESC LIMIT 1",
+    )
+    .bind(format!("%{record_id}%"))
+    .fetch_one(&harness.pool)
+    .await
+    .unwrap();
+    serde_json::from_str::<serde_json::Value>(&error).unwrap()["step"]
+        .as_str()
+        .map(str::to_owned)
+}
+
+#[tokio::test]
+async fn a_permanent_client_error_on_the_update_is_not_retried() {
+    // A 404 (the guest went away between the read and the update) is not a
+    // stale digest: no re-read, no second update.
+    let harness = Harness::new().await;
+    let (lease_id, record) = harness.record().await;
+    let pve = Pve::new(Vec::new()).protected().update_status(404);
+    let (_, error, _) = harness
+        .run(&pve, Some(TEMPLATE_VMID), &lease_id, &record.id)
+        .await;
+    assert_eq!(error.unwrap().0, "unprotect_failed");
+    assert_eq!(pve.config_updates().len(), 1, "{:?}", pve.paths());
+    assert_eq!(
+        step_of(&harness, &record.id).await.as_deref(),
+        Some("unprotect")
+    );
+}
+
+// FM-715: placement and capacity reservation ---------------------------------
+
+#[tokio::test]
+async fn placement_selects_the_account_and_reserves_before_any_vmid_or_clone() {
+    let harness = Harness::new().await;
+    let (lease_id, record) = harness.record().await;
+    let pve = Pve::new(Vec::new());
+    *pve.capacity.lock().unwrap() = Some(16);
+    *pve.watch_reservation.lock().unwrap() = Some((harness.pool.clone(), lease_id.clone()));
+
+    let (_, error, stored) = harness
+        .run_with_account(
+            &pve,
+            harness.placed_executor(&pve, PlacementPolicy::default()),
+            &lease_id,
+            &record.id,
+            None,
+        )
+        .await;
+
+    // The reservation was already held when the VMID was requested and
+    // when the clone was.
+    let held_at = pve.held_at.lock().unwrap().clone();
+    assert_eq!(held_at.len(), 2, "{held_at:?}");
+    assert!(held_at.iter().all(|(_, held)| *held), "{held_at:?}");
+
+    // The saga ran to the agent probe as before (never_ready), through the
+    // one account that reaches the template.
+    assert_eq!(error.unwrap().0, "never_ready");
+    assert_eq!(
+        stored.account_id.as_deref(),
+        Some(harness.account_id.as_str())
+    );
+    assert_eq!(pve.clones().len(), 1);
+    let paths = pve.paths();
+    let observed = paths
+        .iter()
+        .position(|path| path == &format!("/api2/json/nodes/{TEMPLATE_NODE}/status"))
+        .expect("the template node's capacity is refreshed");
+    let nextid = paths
+        .iter()
+        .position(|path| path == "/api2/json/cluster/nextid")
+        .unwrap();
+    assert!(observed < nextid, "{paths:?}");
+    let reservation = CapacityRepository::new(harness.pool.clone())
+        .for_lease(&lease_id)
+        .await
+        .unwrap()
+        .expect("the lease holds a reservation");
+    assert_eq!(reservation.node, TEMPLATE_NODE);
+    assert_eq!(reservation.account_id, harness.account_id);
+    assert_eq!(
+        (
+            reservation.demand.cores,
+            reservation.demand.memory_mib,
+            reservation.demand.disk_gib,
+            reservation.demand.storage.as_str()
+        ),
+        (2, 2048, 20, "local-lvm")
+    );
+    // The guest was allocated: never_ready keeps the reservation for
+    // cleanup to release after the destroy.
+    assert_eq!(reservation.state, ReservationState::Held);
+}
+
+#[tokio::test]
+async fn insufficient_capacity_refuses_with_an_explanation_and_allocates_nothing() {
+    let harness = Harness::new().await;
+    let (first_lease, first) = harness.record().await;
+    let (second_lease, second) = harness.record().await;
+    let pve = Pve::new(Vec::new());
+    // 3 GiB free; the template wants 2 GiB.
+    *pve.capacity.lock().unwrap() = Some(3);
+
+    let (_, error, _) = harness
+        .run_with_account(
+            &pve,
+            harness.placed_executor(&pve, PlacementPolicy::default()),
+            &first_lease,
+            &first.id,
+            None,
+        )
+        .await;
+    assert_eq!(error.unwrap().0, "never_ready");
+    let clones_before = pve.clones().len();
+
+    // The first lease's reservation holds 2 GiB: 1 GiB is left.
+    let (state, error, stored) = harness
+        .run_with_account(
+            &pve,
+            harness.placed_executor(&pve, PlacementPolicy::default()),
+            &second_lease,
+            &second.id,
+            None,
+        )
+        .await;
+    assert_eq!(state, "failed");
+    let (reason, detail) = error.unwrap();
+    assert_eq!(reason, "insufficient_memory");
+    assert_eq!(
+        detail,
+        format!("insufficient memory on {TEMPLATE_NODE}: need 2048 MiB, 1024 free")
+    );
+    assert_eq!(pve.clones().len(), clones_before, "no clone was requested");
+    assert_eq!(stored.vmid, None, "no VMID was reserved");
+    // The refused lease never allocated a guest and holds nothing.
+    assert!(
+        CapacityRepository::new(harness.pool.clone())
+            .for_lease(&second_lease)
+            .await
+            .unwrap()
+            .is_none()
+    );
+}
+
+#[tokio::test]
+async fn an_unrefreshable_stale_observation_refuses_placement() {
+    let harness = Harness::new().await;
+    let (lease_id, record) = harness.record().await;
+    // The node status and storage endpoints fail, so the refresh is
+    // partial and replaces nothing; the stored observation is an hour old.
+    let pve = Pve::new(Vec::new());
+    CapacityRepository::new(harness.pool.clone())
+        .record_observation(
+            &harness.account_id,
+            &fleet_application::proxmox::ProxmoxNodeCapacity {
+                node: TEMPLATE_NODE.to_owned(),
+                cpu_usage_ratio: None,
+                cpu_count: Some(8),
+                memory_used_bytes: Some(0),
+                memory_total_bytes: Some(32 << 30),
+                storages: vec![fleet_application::proxmox::ProxmoxStorageCapacity {
+                    storage: "local-lvm".to_owned(),
+                    used_bytes: 0,
+                    total_bytes: 500 << 30,
+                }],
+                observed_at: fleet_core::SystemClock::now_unix_millis() - 3_600_000,
+            },
+        )
+        .await
+        .unwrap();
+
+    let (state, error, stored) = harness
+        .run_with_account(
+            &pve,
+            harness.placed_executor(&pve, PlacementPolicy::default()),
+            &lease_id,
+            &record.id,
+            Some(&harness.account_id),
+        )
+        .await;
+    assert_eq!(state, "failed");
+    let (reason, detail) = error.unwrap();
+    assert_eq!(reason, "capacity_stale", "{detail}");
+    assert!(
+        detail.contains("refusing to place on stale capacity"),
+        "{detail}"
+    );
+    assert!(pve.clones().is_empty());
+    assert_eq!(stored.vmid, None);
+
+    // A longer configured age accepts the same observation.
+    let (lease_id, record) = harness.record().await;
+    let (_, error, _) = harness
+        .run_with_account(
+            &pve,
+            harness.placed_executor(
+                &pve,
+                PlacementPolicy {
+                    max_observation_age_ms: 7_200_000,
+                    ..PlacementPolicy::default()
+                },
+            ),
+            &lease_id,
+            &record.id,
+            Some(&harness.account_id),
+        )
+        .await;
+    assert_eq!(error.unwrap().0, "never_ready");
+}
+
+#[tokio::test]
+async fn several_accounts_reaching_the_template_are_ambiguous() {
+    let harness = Harness::new().await;
+    let second = harness
+        .accounts
+        .create(&NewProxmoxAccount {
+            name: "pve-second".to_owned(),
+            host: API_HOST.to_owned(),
+            port: None,
+            token_id: "fleet@pve!lab2".to_owned(),
+        })
+        .await
+        .unwrap();
+    harness
+        .accounts
+        .set_fingerprint(&second.id, Some(FP.to_owned()))
+        .await
+        .unwrap();
+    let (lease_id, record) = harness.record().await;
+    let pve = Pve::new(Vec::new());
+    *pve.capacity.lock().unwrap() = Some(16);
+
+    let (state, error, stored) = harness
+        .run_with_account(
+            &pve,
+            harness.placed_executor(&pve, PlacementPolicy::default()),
+            &lease_id,
+            &record.id,
+            None,
+        )
+        .await;
+    assert_eq!(state, "failed");
+    let (reason, detail) = error.unwrap();
+    assert_eq!(reason, "placement_ambiguous");
+    assert!(
+        detail.contains("pve-main on pve-b, pve-second on pve-b"),
+        "{detail}"
+    );
+    assert!(pve.clones().is_empty());
+    assert_eq!(stored.account_id, None);
+}
+
+#[tokio::test]
+async fn a_failure_after_the_reservation_but_before_allocation_releases_it() {
+    let harness = Harness::new().await;
+    let (lease_id, record) = harness.record().await;
+    // Capacity fits, so the reservation is taken; then nextid hands out a
+    // promoted artifact's VMID and the provision fails before any guest
+    // is allocated.
+    let pve = Pve::scripted(Vec::new(), CLONE_UPID, GONE_ARTIFACT_VMID);
+    *pve.capacity.lock().unwrap() = Some(16);
+
+    let (state, error, stored) = harness
+        .run_with_account(
+            &pve,
+            harness.placed_executor(&pve, PlacementPolicy::default()),
+            &lease_id,
+            &record.id,
+            None,
+        )
+        .await;
+    assert_eq!(state, "failed");
+    assert_eq!(error.unwrap().0, "conflict");
+    assert_eq!(stored.vmid, None);
+    assert_eq!(
+        harness.leases.get(&lease_id).await.unwrap().state,
+        fleet_core::LeaseState::Failed
+    );
+    let reservation = CapacityRepository::new(harness.pool.clone())
+        .for_lease(&lease_id)
+        .await
+        .unwrap()
+        .expect("the reservation was taken before the failure");
+    assert_eq!(reservation.state, ReservationState::Released);
+    assert!(reservation.released_at.is_some());
+}
+
+#[tokio::test]
+async fn a_resumed_pending_clone_without_a_reservation_reserves_before_cloning() {
+    let harness = Harness::new().await;
+    let (lease_id, record) = harness.record().await;
+    // A run before FM-715 reserved the VMID and stopped before its clone.
+    harness
+        .labs
+        .reserve_clone_target(&record.id, TEMPLATE_NODE, 9005)
+        .await
+        .unwrap();
+    let pve = Pve::new(Vec::new());
+    *pve.capacity.lock().unwrap() = Some(16);
+    *pve.watch_reservation.lock().unwrap() = Some((harness.pool.clone(), lease_id.clone()));
+
+    let (_, error, stored) = harness
+        .run_with_account(
+            &pve,
+            harness.placed_executor(&pve, PlacementPolicy::default()),
+            &lease_id,
+            &record.id,
+            Some(&harness.account_id.clone()),
+        )
+        .await;
+    assert_eq!(error.unwrap().0, "never_ready");
+    assert_eq!(stored.vmid, Some(9005));
+    let held_at = pve.held_at.lock().unwrap().clone();
+    assert_eq!(held_at.len(), 1, "only the clone, no nextid: {held_at:?}");
+    assert!(
+        held_at[0].0.ends_with("/clone") && held_at[0].1,
+        "{held_at:?}"
+    );
+}
+
+#[tokio::test]
+async fn a_reservation_on_another_node_refuses_the_resumed_clone() {
+    use fleet_application::lab_placement::{CapacityDemand, ReservationRequest, ReserveOutcome};
+    let harness = Harness::new().await;
+    let (lease_id, record) = harness.record().await;
+    let capacity = CapacityRepository::new(harness.pool.clone());
+    let now = fleet_core::SystemClock::now_unix_millis();
+    // An earlier run reserved on pve-a; the template is now on pve-b.
+    capacity
+        .record_observation(
+            &harness.account_id,
+            &fleet_application::proxmox::ProxmoxNodeCapacity {
+                node: "pve-a".to_owned(),
+                cpu_usage_ratio: None,
+                cpu_count: Some(8),
+                memory_used_bytes: Some(0),
+                memory_total_bytes: Some(32 << 30),
+                storages: vec![fleet_application::proxmox::ProxmoxStorageCapacity {
+                    storage: "local-lvm".to_owned(),
+                    used_bytes: 0,
+                    total_bytes: 500 << 30,
+                }],
+                observed_at: now,
+            },
+        )
+        .await
+        .unwrap();
+    let outcome = capacity
+        .reserve(
+            &ReservationRequest {
+                lease_id: lease_id.clone(),
+                account_id: harness.account_id.clone(),
+                node: "pve-a".to_owned(),
+                demand: CapacityDemand {
+                    cores: 2,
+                    memory_mib: 2048,
+                    disk_gib: 20,
+                    storage: "local-lvm".to_owned(),
+                },
+            },
+            &PlacementPolicy::default(),
+            now,
+        )
+        .await
+        .unwrap();
+    assert!(matches!(outcome, ReserveOutcome::Reserved(_)));
+    let pve = Pve::new(Vec::new());
+    *pve.capacity.lock().unwrap() = Some(16);
+
+    let (state, error, stored) = harness
+        .run_with_account(
+            &pve,
+            harness.placed_executor(&pve, PlacementPolicy::default()),
+            &lease_id,
+            &record.id,
+            Some(&harness.account_id.clone()),
+        )
+        .await;
+    assert_eq!(state, "failed");
+    let (reason, detail) = error.unwrap();
+    assert_eq!(reason, "reservation_mismatch", "{detail}");
+    assert!(
+        detail.contains("node pve-a of account")
+            && detail.contains(&format!("node pve-b of account {}", harness.account_id)),
+        "the detail names the held and the requested node and account: {detail}"
+    );
+    assert!(pve.clones().is_empty());
+    assert_eq!(stored.vmid, None);
+    assert_eq!(harness.audit_events("lab_placement_refused").await, 1);
+}
+
+#[tokio::test]
+async fn a_reservation_on_another_storage_pool_refuses_the_resumed_clone() {
+    use fleet_application::lab_placement::{CapacityDemand, ReservationRequest, ReserveOutcome};
+    let harness = Harness::new().await;
+    let (lease_id, record) = harness.record().await;
+    let capacity = CapacityRepository::new(harness.pool.clone());
+    let now = fleet_core::SystemClock::now_unix_millis();
+    // An earlier run reserved on the template's node, but on the pool of a
+    // build that a re-promotion has since replaced.
+    capacity
+        .record_observation(
+            &harness.account_id,
+            &fleet_application::proxmox::ProxmoxNodeCapacity {
+                node: "pve-b".to_owned(),
+                cpu_usage_ratio: None,
+                cpu_count: Some(8),
+                memory_used_bytes: Some(0),
+                memory_total_bytes: Some(32 << 30),
+                storages: vec![fleet_application::proxmox::ProxmoxStorageCapacity {
+                    storage: "old-pool".to_owned(),
+                    used_bytes: 0,
+                    total_bytes: 500 << 30,
+                }],
+                observed_at: now,
+            },
+        )
+        .await
+        .unwrap();
+    let outcome = capacity
+        .reserve(
+            &ReservationRequest {
+                lease_id: lease_id.clone(),
+                account_id: harness.account_id.clone(),
+                node: "pve-b".to_owned(),
+                demand: CapacityDemand {
+                    cores: 2,
+                    memory_mib: 2048,
+                    disk_gib: 20,
+                    storage: "old-pool".to_owned(),
+                },
+            },
+            &PlacementPolicy::default(),
+            now,
+        )
+        .await
+        .unwrap();
+    assert!(matches!(outcome, ReserveOutcome::Reserved(_)));
+    let pve = Pve::new(Vec::new());
+    *pve.capacity.lock().unwrap() = Some(16);
+
+    let (state, error, stored) = harness
+        .run_with_account(
+            &pve,
+            harness.placed_executor(&pve, PlacementPolicy::default()),
+            &lease_id,
+            &record.id,
+            Some(&harness.account_id.clone()),
+        )
+        .await;
+    assert_eq!(state, "failed");
+    let (reason, detail) = error.unwrap();
+    assert_eq!(reason, "reservation_mismatch", "{detail}");
+    assert!(
+        detail.contains("on old-pool") && detail.contains("on local-lvm"),
+        "{detail}"
+    );
+    assert!(pve.clones().is_empty());
+    assert_eq!(stored.vmid, None);
+    assert_eq!(harness.audit_events("lab_placement_refused").await, 1);
+}
+
+#[tokio::test]
+async fn an_unknown_storage_pool_refuses_and_is_audited() {
+    let harness = Harness::new().await;
+    let (lease_id, record) = harness.record().await;
+    let pve = Pve::new(Vec::new());
+    *pve.capacity.lock().unwrap() = Some(16);
+    let executor = harness.executor(&pve, Some(TEMPLATE_VMID)).with_placement(
+        Arc::new(CapacityRepository::new(harness.pool.clone())),
+        Arc::new(NoStorage),
+        Arc::new(AuditSink::new(harness.pool.clone())),
+        PlacementPolicy::default(),
+    );
+
+    let (state, error, stored) = harness
+        .run_with_account(
+            &pve,
+            executor,
+            &lease_id,
+            &record.id,
+            Some(&harness.account_id.clone()),
+        )
+        .await;
+    assert_eq!(state, "failed");
+    let (reason, detail) = error.unwrap();
+    assert_eq!(reason, "storage_unknown", "{detail}");
+    assert!(pve.clones().is_empty());
+    assert_eq!(stored.vmid, None);
+    assert!(
+        CapacityRepository::new(harness.pool.clone())
+            .for_lease(&lease_id)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert_eq!(harness.audit_events("lab_placement_refused").await, 1);
+}
+
+#[tokio::test]
+async fn an_unreadable_trusted_cluster_refuses_automatic_selection() {
+    let harness = Harness::new().await;
+    let other = harness
+        .accounts
+        .create(&NewProxmoxAccount {
+            name: "pve-dark".to_owned(),
+            host: UNREACHABLE_HOST.to_owned(),
+            port: None,
+            token_id: "fleet@pve!lab3".to_owned(),
+        })
+        .await
+        .unwrap();
+    harness
+        .accounts
+        .set_fingerprint(&other.id, Some(FP.to_owned()))
+        .await
+        .unwrap();
+    // An untrusted account (no fingerprint) is a confirmed non-candidate
+    // and does not block selection on its own.
+    harness
+        .accounts
+        .create(&NewProxmoxAccount {
+            name: "pve-untrusted".to_owned(),
+            host: UNREACHABLE_HOST.to_owned(),
+            port: None,
+            token_id: "fleet@pve!lab4".to_owned(),
+        })
+        .await
+        .unwrap();
+    let (lease_id, record) = harness.record().await;
+    let pve = Pve::new(Vec::new());
+    *pve.capacity.lock().unwrap() = Some(16);
+
+    let (state, error, _) = harness
+        .run_with_account(
+            &pve,
+            harness.placed_executor(&pve, PlacementPolicy::default()),
+            &lease_id,
+            &record.id,
+            None,
+        )
+        .await;
+    assert_eq!(state, "failed");
+    let (reason, detail) = error.unwrap();
+    assert_eq!(reason, "placement_unresolved", "{detail}");
+    assert!(detail.contains("pve-dark"), "{detail}");
+    assert!(!detail.contains("pve-untrusted"), "{detail}");
+    assert!(pve.clones().is_empty());
+}
+
+/// #310: a clone task that failed, or finished with no config, fails the
+/// provision at `clone` without waiting; transient trouble and a config that
+/// lands late do not.
+#[tokio::test]
+async fn a_failed_clone_task_fails_at_clone_without_waiting() {
+    let harness = Harness::new().await;
+    let (lease_id, record) = harness.record().await;
+    let pve = Pve::new(Vec::new())
+        .missing_for(1_000)
+        .clone_task(&["error"]);
+    let (state, error, stored) = harness
+        .run(&pve, Some(TEMPLATE_VMID), &lease_id, &record.id)
+        .await;
+    assert_eq!(state, "failed");
+    let (reason, detail) = error.unwrap();
+    assert_eq!(reason, "clone_task_failed");
+    assert!(detail.contains("storage full"), "{detail}");
+    assert_eq!(pve.config_reads(), 1, "{:?}", pve.paths());
+    assert_eq!(pve.task_polls(), 1);
+    assert!(first(&pve, "/status/start").is_none());
+    assert_eq!(stored.state, GuestState::NeverReady);
+    assert_eq!(stored.failed_step.as_deref(), Some("clone"));
+    // The reserved target and the clone task stay recorded for cleanup.
+    assert_eq!(stored.vmid, Some(NEXT_VMID));
+    assert_eq!(stored.clone_upid.as_deref(), Some(CLONE_UPID));
+}
+
+#[tokio::test]
+async fn a_clean_clone_task_with_no_config_fails_after_a_second_read() {
+    let harness = Harness::new().await;
+    let (lease_id, record) = harness.record().await;
+    let pve = Pve::new(Vec::new()).missing_for(1_000).clone_task(&["ok"]);
+    let (_, error, stored) = harness
+        .run(&pve, Some(TEMPLATE_VMID), &lease_id, &record.id)
+        .await;
+    assert_eq!(error.unwrap().0, "clone_task_failed");
+    // The first read may predate the task's end; the second does not.
+    assert_eq!(pve.config_reads(), 2, "{:?}", pve.paths());
+    assert_eq!(stored.failed_step.as_deref(), Some("clone"));
+    assert_eq!(stored.vmid, Some(NEXT_VMID));
+}
+
+#[tokio::test]
+async fn a_config_that_lands_after_the_first_read_is_used() {
+    // The task finished between the read and the status poll.
+    let harness = Harness::new().await;
+    let (lease_id, record) = harness.record().await;
+    let pve = Pve::new(Vec::new()).missing_for(1).clone_task(&["ok"]);
+    let (_, error, _) = harness
+        .run(&pve, Some(TEMPLATE_VMID), &lease_id, &record.id)
+        .await;
+    assert_eq!(error.unwrap().0, "never_ready");
+    assert!(first(&pve, "/status/start").is_some());
+    assert_eq!(pve.config_reads(), 3);
+}
+
+#[tokio::test]
+async fn a_transient_read_error_after_a_clean_task_is_not_a_missing_guest() {
+    let harness = Harness::new().await;
+    let (lease_id, record) = harness.record().await;
+    let pve = Pve::new(Vec::new()).flaky_for(2).clone_task(&["ok"]);
+    let (_, error, _) = harness
+        .run(&pve, Some(TEMPLATE_VMID), &lease_id, &record.id)
+        .await;
+    assert_eq!(error.unwrap().0, "never_ready");
+    assert!(first(&pve, "/status/start").is_some());
+
+    // Only a second consecutive miss refuses, and the guest is kept for
+    // cleanup.
+    let (lease_id, record) = harness.record().await;
+    let pve = Pve::new(Vec::new()).flaky_for(1_000).clone_task(&["ok"]);
+    let (_, error, stored) = harness
+        .run(&pve, Some(TEMPLATE_VMID), &lease_id, &record.id)
+        .await;
+    let (reason, detail) = error.unwrap();
+    assert_eq!(reason, "clone_task_failed");
+    assert!(
+        detail.contains("removes the guest if one exists"),
+        "{detail}"
+    );
+    assert_eq!(pve.config_reads(), 3, "{:?}", pve.paths());
+    assert_eq!(stored.vmid, Some(NEXT_VMID));
+}
+
+#[tokio::test]
+async fn a_running_or_unknown_clone_task_keeps_waiting() {
+    // One 2 s poll each, inside the harness's 5 s bound.
+    for status in ["running", "unknown"] {
+        let harness = Harness::new().await;
+        let (lease_id, record) = harness.record().await;
+        let pve = Pve::new(Vec::new()).missing_for(1).clone_task(&[status]);
+        let (_, error, _) = harness
+            .run(&pve, Some(TEMPLATE_VMID), &lease_id, &record.id)
+            .await;
+        assert_eq!(error.unwrap().0, "never_ready", "{status}");
+        assert_eq!(pve.config_reads(), 3, "{status}: {:?}", pve.paths());
+        assert!(first(&pve, "/status/start").is_some(), "{status}");
+    }
+}
+
+#[tokio::test]
+async fn a_resumed_record_reads_its_recorded_clone_task() {
+    let harness = Harness::new().await;
+    let (lease_id, record) = harness.record().await;
+    let pve = Pve::new(Vec::new());
+    harness
+        .run(&pve, Some(TEMPLATE_VMID), &lease_id, &record.id)
+        .await;
+    interrupt(&harness, &lease_id, &record.id).await;
+
+    // The guest exists but its config never settles and the recorded task
+    // failed: the resume fails at clone and clones nothing again.
+    let name = format!("fm-lab-{}", record.id);
+    let second = Pve::new(vec![guest(NEXT_VMID, &name)])
+        .missing_for(1_000)
+        .clone_task(&["error"]);
+    let (_, error, stored) = harness
+        .run(&second, Some(TEMPLATE_VMID), &lease_id, &record.id)
+        .await;
+    assert_eq!(error.unwrap().0, "clone_task_failed");
+    assert!(second.clones().is_empty());
+    assert_eq!(stored.failed_step.as_deref(), Some("clone"));
+}
+
+#[tokio::test]
+async fn a_malformed_recorded_clone_task_id_is_not_polled() {
+    let harness = Harness::new().await;
+    let (lease_id, record) = harness.record().await;
+    let pve = Pve::new(Vec::new());
+    harness
+        .run(&pve, Some(TEMPLATE_VMID), &lease_id, &record.id)
+        .await;
+    interrupt(&harness, &lease_id, &record.id).await;
+    let mut stored = ProvisionPort::get(harness.labs.as_ref(), &record.id)
+        .await
+        .unwrap();
+    stored.clone_upid = Some("not-a-upid".to_owned());
+    ProvisionPort::update(harness.labs.as_ref(), &stored)
+        .await
+        .unwrap();
+
+    let name = format!("fm-lab-{}", record.id);
+    let second = Pve::new(vec![guest(NEXT_VMID, &name)])
+        .missing_for(1)
+        .clone_task(&["error"]);
+    let (_, error, _) = harness
+        .run(&second, Some(TEMPLATE_VMID), &lease_id, &record.id)
+        .await;
+    // The unparsable id is reported on stderr and the config alone settles.
+    assert_eq!(error.unwrap().0, "never_ready");
+    assert_eq!(second.task_polls(), 0, "{:?}", second.paths());
+}
+
+/// #372: the clone gets the template's cores, memory, and disk.
+#[tokio::test]
+async fn a_clone_that_already_has_the_templates_hardware_is_not_changed() {
+    let harness = Harness::new().await;
+    let (lease_id, record) = harness.record().await;
+    let pve = Pve::new(Vec::new());
+    let (_, error, stored) = harness
+        .run(&pve, Some(TEMPLATE_VMID), &lease_id, &record.id)
+        .await;
+    assert_eq!(error.unwrap().0, "never_ready");
+    assert!(pve.hardware_writes().is_empty(), "{:?}", pve.paths());
+    assert!(first(&pve, "/resize").is_none());
+    assert!(first(&pve, "/status/start").is_some());
+    assert_eq!(stored.vmid, Some(NEXT_VMID));
+    // One read settles the config, one checks the hardware: nothing more.
+    assert_eq!(pve.config_reads(), 2, "{:?}", pve.paths());
+}
+
+#[tokio::test]
+async fn the_templates_cores_memory_and_disk_are_applied_before_the_start() {
+    let harness = Harness::new().await;
+    let (lease_id, record) = harness.record().await;
+    let pve = Pve::new(Vec::new()).imaged(1, 1024, 8);
+    let (_, error, _) = harness
+        .run(&pve, Some(TEMPLATE_VMID), &lease_id, &record.id)
+        .await;
+    assert_eq!(error.unwrap().0, "never_ready");
+    let writes = pve.hardware_writes();
+    assert_eq!(writes.len(), 2, "{writes:?}");
+    // One conditional config update for cores and memory, then one resize
+    // to an absolute size, each at the digest the previous write left.
+    assert_eq!(writes[0].0, "config");
+    assert_eq!(
+        writes[0].1,
+        serde_json::json!({"cores": 2, "memory": 2048, "digest": "0123abcd"})
+    );
+    assert_eq!(writes[1].0, "resize");
+    assert_eq!(
+        writes[1].1,
+        serde_json::json!({"disk": "scsi0", "size": "20G", "digest": "0123abcd1"})
+    );
+    // Both landed before the guest started.
+    let paths = pve.paths();
+    let start = paths
+        .iter()
+        .position(|path| path.ends_with("/status/start"));
+    let resize = paths.iter().position(|path| path.ends_with("/resize"));
+    assert!(resize.unwrap() < start.unwrap(), "{paths:?}");
+}
+
+#[tokio::test]
+async fn only_what_differs_is_written_and_a_bigger_disk_is_never_shrunk() {
+    let harness = Harness::new().await;
+    // More cores than the template: set down; memory and disk match.
+    let (lease_id, record) = harness.record().await;
+    let pve = Pve::new(Vec::new()).imaged(4, 2048, 20);
+    harness
+        .run(&pve, Some(TEMPLATE_VMID), &lease_id, &record.id)
+        .await;
+    let writes = pve.hardware_writes();
+    assert_eq!(writes.len(), 1, "{writes:?}");
+    assert_eq!(
+        writes[0].1,
+        serde_json::json!({"cores": 2, "digest": "0123abcd"})
+    );
+
+    // A disk already over the template's size stays as it is.
+    let (lease_id, record) = harness.record().await;
+    let pve = Pve::new(Vec::new()).imaged(2, 2048, 40);
+    harness
+        .run(&pve, Some(TEMPLATE_VMID), &lease_id, &record.id)
+        .await;
+    assert!(pve.hardware_writes().is_empty(), "{:?}", pve.paths());
+    assert!(first(&pve, "/resize").is_none());
+}
+
+#[tokio::test]
+async fn a_refused_hardware_update_fails_the_provision_at_hardware_before_the_start() {
+    let harness = Harness::new().await;
+    for (privilege, pve) in [
+        (
+            "VM.Config.CPU",
+            Pve::new(Vec::new())
+                .imaged(1, 2048, 20)
+                .configure(|config| config.set_status = Some(403)),
+        ),
+        (
+            "VM.Config.Disk",
+            Pve::new(Vec::new())
+                .imaged(2, 2048, 8)
+                .configure(|config| config.resize_status = Some(403)),
+        ),
+    ] {
+        let (lease_id, record) = harness.record().await;
+        let (state, error, stored) = harness
+            .run(&pve, Some(TEMPLATE_VMID), &lease_id, &record.id)
+            .await;
+        assert_eq!(state, "failed", "{privilege}");
+        let (reason, detail) = error.unwrap();
+        assert_eq!(reason, "hardware_failed", "{privilege}");
+        assert!(detail.contains(privilege), "{detail}");
+        assert!(first(&pve, "/status/start").is_none(), "{privilege}");
+        // The guest stays recorded for cleanup, at the named step.
+        assert_eq!(stored.state, GuestState::NeverReady);
+        assert_eq!(stored.failed_step.as_deref(), Some("hardware"));
+        assert_eq!(stored.vmid, Some(NEXT_VMID));
+    }
+}
+
+#[tokio::test]
+async fn a_server_error_is_retried_once_and_then_refused() {
+    let harness = Harness::new().await;
+    let (lease_id, record) = harness.record().await;
+    let pve = Pve::new(Vec::new())
+        .imaged(1, 2048, 20)
+        .configure(|config| config.set_status = Some(500));
+    let (_, error, stored) = harness
+        .run(&pve, Some(TEMPLATE_VMID), &lease_id, &record.id)
+        .await;
+    assert_eq!(error.unwrap().0, "hardware_failed");
+    // The settle read, then one hardware read per try.
+    assert_eq!(pve.config_reads(), 3, "{:?}", pve.paths());
+    assert_eq!(stored.failed_step.as_deref(), Some("hardware"));
+}
+
+#[tokio::test]
+async fn a_guest_fleet_cannot_read_is_refused_rather_than_guessed_at() {
+    let harness = Harness::new().await;
+    for (what, pve) in [
+        (
+            "memory options",
+            Pve::new(Vec::new())
+                .imaged(2, 1024, 20)
+                .configure(|config| config.memory_options = true),
+        ),
+        (
+            "no boot disk",
+            Pve::new(Vec::new()).configure(|config| config.no_boot_disk = true),
+        ),
+        (
+            "no disk size",
+            Pve::new(Vec::new()).configure(|config| config.no_disk_size = true),
+        ),
+    ] {
+        let (lease_id, record) = harness.record().await;
+        let (state, error, stored) = harness
+            .run(&pve, Some(TEMPLATE_VMID), &lease_id, &record.id)
+            .await;
+        assert_eq!(state, "failed", "{what}");
+        assert_eq!(error.unwrap().0, "hardware_unsupported", "{what}");
+        assert!(pve.hardware_writes().is_empty(), "{what}");
+        assert!(first(&pve, "/status/start").is_none(), "{what}");
+        assert_eq!(stored.failed_step.as_deref(), Some("hardware"), "{what}");
+    }
+
+    // A memory property string that already has the template's size is
+    // fine: nothing needs rewriting.
+    let (lease_id, record) = harness.record().await;
+    let pve = Pve::new(Vec::new()).configure(|config| config.memory_options = true);
+    let (_, error, _) = harness
+        .run(&pve, Some(TEMPLATE_VMID), &lease_id, &record.id)
+        .await;
+    assert_eq!(error.unwrap().0, "never_ready");
+}
+
+#[tokio::test]
+async fn a_resumed_provision_repeats_no_hardware_write() {
+    let harness = Harness::new().await;
+    let (lease_id, record) = harness.record().await;
+    let pve = Pve::new(Vec::new()).imaged(1, 1024, 8);
+    harness
+        .run(&pve, Some(TEMPLATE_VMID), &lease_id, &record.id)
+        .await;
+    assert_eq!(pve.hardware_writes().len(), 2);
+    interrupt(&harness, &lease_id, &record.id).await;
+
+    // The guest now has what the first run gave it.
+    let name = format!("fm-lab-{}", record.id);
+    let second = Pve::new(vec![guest(NEXT_VMID, &name)]);
+    harness
+        .run(&second, Some(TEMPLATE_VMID), &lease_id, &record.id)
+        .await;
+    assert!(second.clones().is_empty());
+    assert!(second.hardware_writes().is_empty(), "{:?}", second.paths());
+}
+
+/// #372: PVE runs the resize as a task; its failures are the task's exit
+/// status, not an HTTP status.
+#[tokio::test]
+async fn a_failed_resize_task_fails_the_provision_with_its_exit_status() {
+    let harness = Harness::new().await;
+    let (lease_id, record) = harness.record().await;
+    let pve = Pve::new(Vec::new()).imaged(2, 2048, 8).configure(|config| {
+        config.resize_exit = Some("ERROR: unable to resize: no space left on device".to_owned());
+    });
+    let (state, error, stored) = harness
+        .run(&pve, Some(TEMPLATE_VMID), &lease_id, &record.id)
+        .await;
+    assert_eq!(state, "failed");
+    let (reason, detail) = error.unwrap();
+    assert_eq!(reason, "hardware_failed");
+    assert!(detail.contains("no space left on device"), "{detail}");
+    assert_eq!(stored.failed_step.as_deref(), Some("hardware"));
+    assert!(first(&pve, "/status/start").is_none());
+    // One task, one attempt: a real failure is not retried.
+    assert_eq!(
+        pve.clone_config.lock().unwrap().resize_calls,
+        1,
+        "{:?}",
+        pve.paths()
+    );
+}
+
+#[tokio::test]
+async fn a_stale_digest_in_the_resize_task_is_read_again_and_retried_once() {
+    let harness = Harness::new().await;
+    let (lease_id, record) = harness.record().await;
+    let pve = Pve::new(Vec::new())
+        .imaged(2, 2048, 8)
+        .configure(|config| config.resize_stale = 1);
+    let (_, error, _) = harness
+        .run(&pve, Some(TEMPLATE_VMID), &lease_id, &record.id)
+        .await;
+    assert_eq!(error.unwrap().0, "never_ready");
+    // The first task failed its digest check, the second landed.
+    assert_eq!(pve.clone_config.lock().unwrap().resize_calls, 2);
+    assert_eq!(pve.hardware_writes().len(), 1);
+    assert!(first(&pve, "/status/start").is_some());
+
+    // A digest that keeps changing is refused, not retried forever.
+    let (lease_id, record) = harness.record().await;
+    let pve = Pve::new(Vec::new())
+        .imaged(2, 2048, 8)
+        .configure(|config| config.resize_stale = 5);
+    let (state, error, stored) = harness
+        .run(&pve, Some(TEMPLATE_VMID), &lease_id, &record.id)
+        .await;
+    assert_eq!(state, "failed");
+    assert_eq!(error.unwrap().0, "hardware_failed");
+    assert_eq!(pve.clone_config.lock().unwrap().resize_calls, 2);
+    assert_eq!(stored.failed_step.as_deref(), Some("hardware"));
+}
+
+#[tokio::test]
+async fn an_unreadable_hardware_config_fails_at_hardware_not_as_a_generic_step() {
+    let harness = Harness::new().await;
+    let (lease_id, record) = harness.record().await;
+    let pve = Pve::new(Vec::new()).configure(|config| config.bad_hardware = true);
+    let (state, error, stored) = harness
+        .run(&pve, Some(TEMPLATE_VMID), &lease_id, &record.id)
+        .await;
+    assert_eq!(state, "failed");
+    assert_eq!(error.unwrap().0, "hardware_unsupported");
+    assert_eq!(stored.state, GuestState::NeverReady);
+    assert_eq!(stored.failed_step.as_deref(), Some("hardware"));
+    assert_eq!(stored.vmid, Some(NEXT_VMID));
+}
+
+#[tokio::test]
+async fn a_guest_that_would_not_boot_with_the_templates_vcpus_is_refused() {
+    let harness = Harness::new().await;
+    // The template asks for 2 vCPUs. Each of these boots with another count
+    // (or one Fleet cannot set), whatever its cores say.
+    for (what, imaged_cores, sockets, vcpus) in [
+        ("2 sockets of 1 core, cores differ", 1, Some(2), None),
+        ("2 sockets of 2 cores, cores match", 2, Some(2), None),
+        ("vcpus above", 4, None, Some(4)),
+        ("vcpus below", 2, None, Some(1)),
+    ] {
+        let (lease_id, record) = harness.record().await;
+        let pve = Pve::new(Vec::new())
+            .imaged(imaged_cores, 2048, 20)
+            .configure(|config| {
+                config.sockets = sockets;
+                config.vcpus = vcpus;
+            });
+        let (state, error, stored) = harness
+            .run(&pve, Some(TEMPLATE_VMID), &lease_id, &record.id)
+            .await;
+        // 2 sockets of 1 core is 2 vCPUs: fine, never refused.
+        let expected_ok = what.starts_with("2 sockets of 1");
+        if expected_ok {
+            assert_eq!(error.unwrap().0, "never_ready", "{what}");
+            assert!(pve.hardware_writes().is_empty(), "{what}");
+            continue;
+        }
+        assert_eq!(state, "failed", "{what}");
+        let (reason, detail) = error.unwrap();
+        assert_eq!(reason, "hardware_unsupported", "{what}");
+        assert!(detail.contains("vCPUs"), "{detail}");
+        assert!(pve.hardware_writes().is_empty(), "{what}");
+        assert!(first(&pve, "/status/start").is_none(), "{what}");
+        assert_eq!(stored.failed_step.as_deref(), Some("hardware"), "{what}");
+    }
+
+    // A layout that already gives the template's count needs no write, even
+    // with other cores per socket.
+    for (sockets, vcpus, cores) in [(Some(2), None, 1), (None, Some(2), 4)] {
+        let (lease_id, record) = harness.record().await;
+        let pve = Pve::new(Vec::new())
+            .imaged(cores, 2048, 20)
+            .configure(|config| {
+                config.sockets = sockets;
+                config.vcpus = vcpus;
+            });
+        let (_, error, _) = harness
+            .run(&pve, Some(TEMPLATE_VMID), &lease_id, &record.id)
+            .await;
+        assert_eq!(error.unwrap().0, "never_ready");
+        assert!(pve.hardware_writes().is_empty(), "{:?}", pve.paths());
+    }
+}
+
+#[tokio::test]
+async fn a_value_pve_rejects_is_named_as_such() {
+    let harness = Harness::new().await;
+    let (lease_id, record) = harness.record().await;
+    let pve = Pve::new(Vec::new())
+        .imaged(1, 2048, 20)
+        .configure(|config| config.set_status = Some(400));
+    let (_, error, _) = harness
+        .run(&pve, Some(TEMPLATE_VMID), &lease_id, &record.id)
+        .await;
+    let (reason, detail) = error.unwrap();
+    assert_eq!(reason, "hardware_failed");
+    assert!(detail.contains("rejected the requested value"), "{detail}");
+}
+
+#[tokio::test]
+async fn a_record_that_already_started_its_guest_is_not_changed_again() {
+    let harness = Harness::new().await;
+    let (lease_id, record) = harness.record().await;
+    let pve = Pve::new(Vec::new());
+    harness
+        .run(&pve, Some(TEMPLATE_VMID), &lease_id, &record.id)
+        .await;
+    interrupt(&harness, &lease_id, &record.id).await;
+    // The first run got as far as booting: a running guest takes a config
+    // change as `pending`, so the resume leaves the hardware alone.
+    let mut booting = ProvisionPort::get(harness.labs.as_ref(), &record.id)
+        .await
+        .unwrap();
+    booting.state = GuestState::Booting;
+    ProvisionPort::update(harness.labs.as_ref(), &booting)
+        .await
+        .unwrap();
+    let name = format!("fm-lab-{}", record.id);
+    let second = Pve::new(vec![guest(NEXT_VMID, &name)]).imaged(1, 1024, 8);
+    harness
+        .run(&second, Some(TEMPLATE_VMID), &lease_id, &record.id)
+        .await;
+    assert!(second.hardware_writes().is_empty(), "{:?}", second.paths());
+    assert!(first(&second, "/resize").is_none());
+}
+
+#[tokio::test]
+async fn a_balloon_above_the_new_memory_is_refused_before_any_write() {
+    let harness = Harness::new().await;
+    let (lease_id, record) = harness.record().await;
+    let pve = Pve::new(Vec::new())
+        .imaged(2, 4096, 20)
+        .configure(|config| config.balloon = Some(4096));
+    let (state, error, stored) = harness
+        .run(&pve, Some(TEMPLATE_VMID), &lease_id, &record.id)
+        .await;
+    assert_eq!(state, "failed");
+    let (reason, detail) = error.unwrap();
+    assert_eq!(reason, "hardware_unsupported");
+    assert!(detail.contains("balloon"), "{detail}");
+    assert!(pve.hardware_writes().is_empty());
+    assert_eq!(stored.failed_step.as_deref(), Some("hardware"));
+
+    // A balloon within the new memory (or off) is fine.
+    for balloon in [1024, 0] {
+        let (lease_id, record) = harness.record().await;
+        let pve = Pve::new(Vec::new())
+            .imaged(2, 4096, 20)
+            .configure(|config| config.balloon = Some(balloon));
+        let (_, error, _) = harness
+            .run(&pve, Some(TEMPLATE_VMID), &lease_id, &record.id)
+            .await;
+        assert_eq!(error.unwrap().0, "never_ready");
+        assert_eq!(pve.hardware_writes().len(), 1);
+    }
+}
+
+#[tokio::test]
+async fn a_resize_that_answers_no_task_is_taken_as_done() {
+    let harness = Harness::new().await;
+    let (lease_id, record) = harness.record().await;
+    let pve = Pve::new(Vec::new())
+        .imaged(2, 2048, 8)
+        .configure(|config| config.resize_no_task = true);
+    let (_, error, _) = harness
+        .run(&pve, Some(TEMPLATE_VMID), &lease_id, &record.id)
+        .await;
+    assert_eq!(error.unwrap().0, "never_ready");
+    assert_eq!(pve.hardware_writes().len(), 1);
+    assert_eq!(pve.task_polls(), 0, "{:?}", pve.paths());
+    assert!(first(&pve, "/status/start").is_some());
+}
+
+#[tokio::test]
+async fn a_transient_error_reading_the_resize_task_is_retried() {
+    let harness = Harness::new().await;
+    let (lease_id, record) = harness.record().await;
+    let pve = Pve::new(Vec::new())
+        .imaged(2, 2048, 8)
+        .configure(|config| config.resize_poll_errors = 1);
+    let (_, error, _) = harness
+        .run(&pve, Some(TEMPLATE_VMID), &lease_id, &record.id)
+        .await;
+    assert_eq!(error.unwrap().0, "never_ready");
+    assert_eq!(pve.hardware_writes().len(), 1);
+    assert_eq!(pve.clone_config.lock().unwrap().resize_calls, 1);
+}
+
+#[tokio::test]
+async fn a_resize_task_that_never_ends_times_out_keeping_the_guest() {
+    let harness = Harness::new().await;
+    let (lease_id, record) = harness.record().await;
+    let pve = Pve::new(Vec::new())
+        .imaged(2, 2048, 8)
+        .configure(|config| config.resize_running = true);
+    let executor = harness
+        .executor(&pve, Some(TEMPLATE_VMID))
+        .with_hardware_task_timeout(std::time::Duration::from_secs(1));
+    let (state, error, stored) = harness
+        .run_executor(&pve, executor, &lease_id, &record.id)
+        .await;
+    assert_eq!(state, "failed");
+    let (reason, detail) = error.unwrap();
+    assert_eq!(reason, "hardware_failed");
+    assert!(detail.contains("did not finish"), "{detail}");
+    assert_eq!(stored.failed_step.as_deref(), Some("hardware"));
+    assert_eq!(stored.vmid, Some(NEXT_VMID));
+    assert!(first(&pve, "/status/start").is_none());
+}
+
+#[tokio::test]
+async fn a_cancel_while_the_resize_task_runs_keeps_the_guest_for_cleanup() {
+    let harness = Harness::new().await;
+    let (lease_id, record) = harness.record().await;
+    let pool = harness.pool.clone();
+    let pve = Pve::new(Vec::new()).imaged(2, 2048, 8).configure(|config| {
+        config.resize_running = true;
+        config.cancel_on_resize_poll = Some(pool);
+    });
+    let (_, error, stored) = harness
+        .run(&pve, Some(TEMPLATE_VMID), &lease_id, &record.id)
+        .await;
+    let (reason, detail) = error.expect("a cancelled provision is reported");
+    assert_eq!(reason, "cancelled", "{detail}");
+    assert!(detail.contains("retained for cleanup"), "{detail}");
+    assert_eq!(stored.vmid, Some(NEXT_VMID));
+    assert_eq!(stored.failed_step.as_deref(), Some("hardware"));
+    assert!(first(&pve, "/status/start").is_none());
+}
+
+#[tokio::test]
+async fn a_missing_storage_privilege_is_the_resize_tasks_exit_status() {
+    let harness = Harness::new().await;
+    let (lease_id, record) = harness.record().await;
+    let pve = Pve::new(Vec::new()).imaged(2, 2048, 8).configure(|config| {
+        config.resize_exit = Some(
+            "ERROR: Permission check failed (/storage/local-lvm, Datastore.AllocateSpace)"
+                .to_owned(),
+        );
+    });
+    let (state, error, stored) = harness
+        .run(&pve, Some(TEMPLATE_VMID), &lease_id, &record.id)
+        .await;
+    assert_eq!(state, "failed");
+    let (reason, detail) = error.unwrap();
+    assert_eq!(reason, "hardware_failed");
+    assert!(detail.contains("Datastore.AllocateSpace"), "{detail}");
+    assert_eq!(stored.failed_step.as_deref(), Some("hardware"));
+}
+
+#[tokio::test]
+async fn a_clone_config_without_a_digest_fails_at_hardware_before_any_write() {
+    let harness = Harness::new().await;
+    let (lease_id, record) = harness.record().await;
+    let pve = Pve::new(Vec::new()).imaged(1, 1024, 8).without_digest();
+    let (state, error, stored) = harness
+        .run(&pve, Some(TEMPLATE_VMID), &lease_id, &record.id)
+        .await;
+    assert_eq!(state, "failed");
+    let (reason, detail) = error.unwrap();
+    assert_eq!(reason, "hardware_failed");
+    assert!(detail.contains("no digest"), "{detail}");
+    assert!(pve.config_updates().is_empty(), "{:?}", pve.paths());
+    assert_eq!(stored.failed_step.as_deref(), Some("hardware"));
+}
+
+#[tokio::test]
+async fn a_stale_digest_on_the_config_write_is_reread_and_retried() {
+    let harness = Harness::new().await;
+    let (lease_id, record) = harness.record().await;
+    let pve = Pve::new(Vec::new())
+        .imaged(1, 1024, 20)
+        .configure(|config| config.config_stale = 1);
+    let (_, error, _) = harness
+        .run(&pve, Some(TEMPLATE_VMID), &lease_id, &record.id)
+        .await;
+    assert_eq!(error.unwrap().0, "never_ready");
+    let writes = pve.hardware_writes();
+    assert_eq!(writes.len(), 1, "{writes:?}");
+    // The retry carries the digest of the config read again.
+    assert_eq!(writes[0].1["digest"], "0123abcd1");
+}
+
+fn audio(device: &str) -> fleet_core::LabAudio {
+    fleet_core::LabAudio {
+        device: device.to_owned(),
+        driver: "none".to_owned(),
+    }
+}
+
+/// #398: the template's audio device is written in the same config update
+/// as cores and memory, before the start.
+#[tokio::test]
+async fn the_templates_audio_device_joins_the_hardware_config_write() {
+    let harness = Harness::with_audio(Some(audio("ich9-intel-hda"))).await;
+    let (lease_id, record) = harness.record().await;
+    // The image differs in cores too: one write carries both.
+    let pve = Pve::new(Vec::new()).imaged(1, 2048, 20);
+    let (_, error, _) = harness
+        .run(&pve, Some(TEMPLATE_VMID), &lease_id, &record.id)
+        .await;
+    assert_eq!(error.unwrap().0, "never_ready");
+    let writes = pve.hardware_writes();
+    assert_eq!(writes.len(), 1, "{writes:?}");
+    assert_eq!(writes[0].0, "config");
+    assert_eq!(
+        writes[0].1,
+        serde_json::json!({
+            "cores": 2,
+            "audio0": "device=ich9-intel-hda,driver=none",
+            "digest": "0123abcd"
+        })
+    );
+    let paths = pve.paths();
+    let write = paths
+        .iter()
+        .position(|path| path.ends_with("/config") && path.contains("qemu/9000"));
+    assert!(write.is_some(), "{paths:?}");
+    assert!(first(&pve, "/status/start").is_some());
+    // Only audio differs: only audio is written.
+    let (lease_id, record) = harness.record().await;
+    let pve = Pve::new(Vec::new());
+    harness
+        .run(&pve, Some(TEMPLATE_VMID), &lease_id, &record.id)
+        .await;
+    let writes = pve.hardware_writes();
+    assert_eq!(writes.len(), 1, "{writes:?}");
+    assert_eq!(
+        writes[0].1,
+        serde_json::json!({"audio0": "device=ich9-intel-hda,driver=none", "digest": "0123abcd"})
+    );
+}
+
+#[tokio::test]
+async fn a_clone_that_already_has_the_declared_audio_is_not_changed() {
+    let harness = Harness::with_audio(Some(audio("ich9-intel-hda"))).await;
+    let (lease_id, record) = harness.record().await;
+    // PVE reports the property string in any key order.
+    let pve = Pve::new(Vec::new())
+        .configure(|config| config.audio = Some("driver=none,device=ich9-intel-hda".to_owned()));
+    harness
+        .run(&pve, Some(TEMPLATE_VMID), &lease_id, &record.id)
+        .await;
+    assert!(pve.hardware_writes().is_empty(), "{:?}", pve.paths());
+    assert!(first(&pve, "/status/start").is_some());
+}
+
+#[tokio::test]
+async fn a_template_without_audio_leaves_the_images_audio_device() {
+    let harness = Harness::new().await;
+    let (lease_id, record) = harness.record().await;
+    let pve = Pve::new(Vec::new())
+        .configure(|config| config.audio = Some("device=AC97,driver=spice".to_owned()));
+    harness
+        .run(&pve, Some(TEMPLATE_VMID), &lease_id, &record.id)
+        .await;
+    assert!(pve.hardware_writes().is_empty(), "{:?}", pve.paths());
+}
+
+#[tokio::test]
+async fn a_different_audio_device_on_the_clone_is_replaced() {
+    let harness = Harness::with_audio(Some(audio("intel-hda"))).await;
+    let (lease_id, record) = harness.record().await;
+    let pve = Pve::new(Vec::new())
+        .configure(|config| config.audio = Some("device=ich9-intel-hda,driver=spice".to_owned()));
+    harness
+        .run(&pve, Some(TEMPLATE_VMID), &lease_id, &record.id)
+        .await;
+    let writes = pve.hardware_writes();
+    assert_eq!(writes.len(), 1, "{writes:?}");
+    assert_eq!(
+        writes[0].1["audio0"],
+        serde_json::json!("device=intel-hda,driver=none")
+    );
+}
+
+#[tokio::test]
+async fn a_token_without_the_hardware_type_privilege_fails_at_hardware_naming_it() {
+    let harness = Harness::with_audio(Some(audio("ich9-intel-hda"))).await;
+    let (lease_id, record) = harness.record().await;
+    let pve = Pve::new(Vec::new()).configure(|config| config.audio_status = Some(403));
+    let (state, error, stored) = harness
+        .run(&pve, Some(TEMPLATE_VMID), &lease_id, &record.id)
+        .await;
+    assert_eq!(state, "failed");
+    let (reason, detail) = error.unwrap();
+    assert_eq!(reason, "hardware_failed");
+    assert!(detail.contains("VM.Config.HWType"), "{detail}");
+    assert!(first(&pve, "/status/start").is_none());
+    assert_eq!(stored.failed_step.as_deref(), Some("hardware"));
+    assert_eq!(stored.vmid, Some(NEXT_VMID));
+}
+
+#[tokio::test]
+async fn a_server_error_on_the_audio_write_is_retried_once() {
+    let harness = Harness::with_audio(Some(audio("ich9-intel-hda"))).await;
+    let (lease_id, record) = harness.record().await;
+    let pve = Pve::new(Vec::new()).configure(|config| config.audio_status = Some(500));
+    let (_, error, stored) = harness
+        .run(&pve, Some(TEMPLATE_VMID), &lease_id, &record.id)
+        .await;
+    assert_eq!(error.unwrap().0, "hardware_failed");
+    // The settle read, then one hardware read per try.
+    assert_eq!(pve.config_reads(), 3, "{:?}", pve.paths());
+    assert_eq!(stored.failed_step.as_deref(), Some("hardware"));
+}
+
+#[tokio::test]
+async fn audio_cores_and_memory_share_one_write_and_the_resize_follows() {
+    let harness = Harness::with_audio(Some(audio("ich9-intel-hda"))).await;
+    let (lease_id, record) = harness.record().await;
+    let pve = Pve::new(Vec::new()).imaged(1, 1024, 8);
+    harness
+        .run(&pve, Some(TEMPLATE_VMID), &lease_id, &record.id)
+        .await;
+    let writes = pve.hardware_writes();
+    assert_eq!(writes.len(), 2, "{writes:?}");
+    assert_eq!(writes[0].0, "config");
+    assert_eq!(
+        writes[0].1,
+        serde_json::json!({
+            "cores": 2,
+            "memory": 2048,
+            "audio0": "device=ich9-intel-hda,driver=none",
+            "digest": "0123abcd"
+        })
+    );
+    assert_eq!(writes[1].0, "resize");
+    assert_eq!(writes[1].1["size"], "20G");
+}
+
+#[tokio::test]
+async fn audio_that_pve_accepts_but_never_reports_fails_after_the_confirm_timeout() {
+    let harness = Harness::with_audio(Some(audio("ich9-intel-hda"))).await;
+    let (lease_id, record) = harness.record().await;
+    let pve = Pve::new(Vec::new()).configure(|config| config.audio_ignored = true);
+    let executor = harness
+        .executor(&pve, Some(TEMPLATE_VMID))
+        .with_hardware_confirm_timeout(std::time::Duration::from_secs(1));
+    let (state, error, stored) = harness
+        .run_executor(&pve, executor, &lease_id, &record.id)
+        .await;
+    assert_eq!(state, "failed");
+    let (reason, detail) = error.unwrap();
+    assert_eq!(reason, "hardware_failed");
+    assert!(
+        detail.contains("audio device=ich9-intel-hda,driver=none"),
+        "{detail}"
+    );
+    // Written once, never again.
+    assert_eq!(pve.hardware_writes().len(), 1);
+    assert_eq!(stored.failed_step.as_deref(), Some("hardware"));
+    assert!(first(&pve, "/status/start").is_none());
+}
+
+#[tokio::test]
+async fn an_unreadable_audio0_on_the_clone_is_replaced_only_when_the_template_declares_audio() {
+    for (declared, writes) in [(Some(audio("ich9-intel-hda")), 1), (None, 0)] {
+        let harness = Harness::with_audio(declared).await;
+        let (lease_id, record) = harness.record().await;
+        let pve =
+            Pve::new(Vec::new()).configure(|config| config.audio = Some("driver=none".to_owned()));
+        harness
+            .run(&pve, Some(TEMPLATE_VMID), &lease_id, &record.id)
+            .await;
+        assert_eq!(pve.hardware_writes().len(), writes, "{:?}", pve.paths());
+        assert!(first(&pve, "/status/start").is_some());
+    }
+}
+
+#[tokio::test]
+async fn a_403_on_audio_alone_names_only_the_audio_device_and_its_privilege() {
+    let harness = Harness::with_audio(Some(audio("ich9-intel-hda"))).await;
+    let (lease_id, record) = harness.record().await;
+    let pve = Pve::new(Vec::new()).configure(|config| config.audio_status = Some(403));
+    let (_, error, _) = harness
+        .run(&pve, Some(TEMPLATE_VMID), &lease_id, &record.id)
+        .await;
+    let (_, detail) = error.unwrap();
+    assert!(detail.contains("set its audio device"), "{detail}");
+    assert!(!detail.contains("cores"), "{detail}");
+    assert!(!detail.contains("VM.Config.CPU"), "{detail}");
 }

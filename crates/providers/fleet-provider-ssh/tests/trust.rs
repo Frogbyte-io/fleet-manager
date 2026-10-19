@@ -134,6 +134,7 @@ fn provider() -> (tempfile::TempDir, SshProvider) {
 
 fn spec(sshd: &TestSshd) -> SshConnectionSpec {
     SshConnectionSpec {
+        guest_os: fleet_core::GuestOs::default(),
         host: sshd.host.to_owned(),
         port: sshd.port,
         user: whoami(),
@@ -262,6 +263,7 @@ fn a_real_host_key_change_fails_the_connection() {
     std::thread::sleep(Duration::from_millis(800));
 
     let spec = SshConnectionSpec {
+        guest_os: fleet_core::GuestOs::default(),
         host: "127.0.0.1".to_owned(),
         port,
         user: user_name,

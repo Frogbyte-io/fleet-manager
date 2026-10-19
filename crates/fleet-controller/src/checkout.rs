@@ -33,7 +33,7 @@ use fleet_provider_ssh::{
     ExecutionLimiter, ScriptMetadata, SshAuth, SshConnectionSpec, SshProvider,
 };
 
-use crate::exec::{MAX_SCRIPT_TIMEOUT, RESULT_STRING_BOUND, resolve_ssh_endpoint};
+use crate::exec::{MAX_SCRIPT_TIMEOUT, resolve_ssh_endpoint};
 
 /// The deadline bound for one checkout action.
 pub const MAX_GIT_TIMEOUT: u64 = MAX_SCRIPT_TIMEOUT;
@@ -750,17 +750,7 @@ fn decode_status_line(line: &serde_json::Value) -> serde_json::Value {
 /// Redacts credential-shaped userinfo and control noise from tool output
 /// before it becomes a public result.
 fn redact_output(text: &str) -> String {
-    let trimmed = text.trim();
-    let bounded = if trimmed.len() > RESULT_STRING_BOUND {
-        let mut end = RESULT_STRING_BOUND;
-        while !trimmed.is_char_boundary(end) {
-            end -= 1;
-        }
-        &trimmed[..end]
-    } else {
-        trimmed
-    };
-    redact_remote_credential(bounded)
+    crate::exec::scrub_and_bound_with(text.trim(), false, redact_remote_credential).0
 }
 
 /// The test hook for the redaction path; production goes through
@@ -770,71 +760,11 @@ pub fn redact_output_for_test(text: &str) -> String {
     redact_output(text)
 }
 
-/// Replaces `user:password@` and `user@` userinfo in URLs with a marker.
+/// Replaces `user[:password]@` userinfo in URLs and `user:password@`
+/// patterns anywhere else with a marker, through the shared scrubber: one
+/// linear implementation instead of a private copy.
 fn redact_remote_credential(text: &str) -> String {
-    let mut redacted = String::with_capacity(text.len());
-    for (index, line) in text.split('\n').enumerate() {
-        if index > 0 {
-            redacted.push('\n');
-        }
-        redacted.push_str(&redact_line(line));
-    }
-    redacted
-}
-
-fn redact_line(line: &str) -> String {
-    // Scheme URLs: scheme://user[:pass]@host → scheme://***@host
-    let mut result = String::with_capacity(line.len());
-    let mut rest = line;
-    while let Some(position) = rest.find("://") {
-        let (before, after) = rest.split_at(position + 3);
-        result.push_str(before);
-        let authority_end = after.find(['/', '?', '#']).unwrap_or(after.len());
-        let authority = &after[..authority_end];
-        let tail = &after[authority_end..];
-        match authority.split_once('@') {
-            Some((_userinfo, host)) => {
-                result.push_str("***@");
-                result.push_str(host);
-            }
-            None => result.push_str(authority),
-        }
-        rest = tail;
-    }
-    result.push_str(rest);
-    // Anywhere else a `user:password@` pattern survives (scp-style remotes,
-    // error text), redact the password part in place.
-    while let Some(position) = find_credential(&result) {
-        let end = result[position..]
-            .find('@')
-            .map(|at| position + at)
-            .unwrap_or(result.len());
-        result.replace_range(position..end, "***");
-    }
-    result
-}
-
-/// Finds the next `user:password@` pattern's start, where the userinfo is
-/// not already redacted. The token begins after the nearest whitespace,
-/// slash, or quote before the `@`.
-fn find_credential(text: &str) -> Option<usize> {
-    let mut search = 0;
-    while let Some(offset) = text[search..].find('@') {
-        let at = search + offset;
-        let token_start = text[..at]
-            .char_indices()
-            .rev()
-            .find(|(_, c)| c.is_whitespace() || *c == '/' || *c == '"')
-            .map_or(0, |(index, c)| index + c.len_utf8());
-        let token = &text[token_start..at];
-        if token.split_once(':').is_some_and(|(user, password)| {
-            !user.is_empty() && !password.is_empty() && !token.ends_with("***")
-        }) {
-            return Some(token_start);
-        }
-        search = at + 1;
-    }
-    None
+    fleet_core::redact_credentials(text)
 }
 
 /// Validates an absolute checkout root: absolute-shaped, bounded, no `..`
@@ -868,5 +798,34 @@ impl OperationExecutor for CheckoutDispatch {
             | "projects.write-config" => self.checkout.execute(operations, operation).await,
             _ => self.fallback.execute(operations, operation).await,
         }
+    }
+}
+
+#[cfg(test)]
+mod redact_bound_tests {
+    /// #357: a credential that straddles the result bound is redacted
+    /// before the bound cuts, never half kept.
+    #[test]
+    fn a_credential_at_the_bound_is_redacted_not_cut() {
+        for secret_line in [
+            "https://user:hunter2pw@host.invalid/repo.git",
+            "user:hunter2pw@host.invalid",
+        ] {
+            for pad in [2_970, 2_985, 2_995, 3_000] {
+                let text = format!("{} {secret_line}\n", "x".repeat(pad));
+                let out = super::redact_output(&text);
+                assert!(!out.contains("hunter2"), "pad {pad}: {out}");
+                assert!(!out.contains("user:"), "pad {pad}: {out}");
+                assert!(out.len() <= 3_000 + "…".len(), "pad {pad}: {}", out.len());
+            }
+        }
+    }
+
+    /// The private scrubber looped forever on `a:'b@a:'b@c`; the shared one
+    /// terminates and redacts.
+    #[test]
+    fn quote_delimited_credentials_terminate_and_are_redacted() {
+        let out = super::redact_output("a:'b@a:'b@c user:hunter2pw@host");
+        assert!(!out.contains("hunter2"), "{out}");
     }
 }

@@ -57,7 +57,7 @@ function lease(overrides: Partial<LeaseDto> = {}): LeaseDto {
     purpose: 'ci flake hunt',
     projectId: null,
     state: 'ready',
-    cleanup: 'destroy',
+    cleanup: 'destroy', cleanupAttempts: 0, cleanupNextAt: null,
     ttlSeconds: 7200,
     createdAt: NOW - 600_000,
     readyAt: NOW - 300_000,
@@ -79,9 +79,14 @@ function template(overrides: Partial<LabTemplateDto> = {}): LabTemplateDto {
     bootstrapProjectId: null,
     readinessProbe: 'guest_agent',
     readinessCommand: null,
+    sshUser: 'root',
+    sshPort: 22,
+    sshTrustMode: 'tofu',
+    sshFingerprint: null,
     readinessDeadlineSeconds: 600,
     ttlSeconds: 7200,
     cleanup: 'destroy',
+    guestOs: 'linux',
     publishedFrom: 'v1',
     createdAt: 0,
     updatedAt: 0,
@@ -192,7 +197,8 @@ describe('LabPage', () => {
     const text = document.body.textContent ?? ''
     expect(text).toContain('ubuntu-dev')
     expect(text).not.toContain('unpublished')
-    const options = [...document.body.querySelectorAll('select[aria-label="Proxmox account"] option')].map(o => o.textContent)
+    const options = [...document.body.querySelectorAll('[data-testid="request-account"] option')].map(o => o.textContent?.trim())
+    expect(options[0]).toBe('Automatic placement')
     expect(options.some(o => o?.includes('integration-pve'))).toBe(true)
     expect(options.some(o => o?.includes('untrusted'))).toBe(false)
   })
@@ -208,12 +214,15 @@ describe('LabPage', () => {
     purpose.value = 'try new mise'
     purpose.dispatchEvent(new Event('input'))
     await flushPromises()
+    // Automatic placement by default: request, then provision without --account.
     expect(document.body.textContent).toContain(`fleetctl --output json lab lease v1 --purpose 'try new mise'`)
+    expect(document.body.querySelector('[data-testid="then-command"]')?.textContent).toContain('fleetctl --output json lab provision-lease LEASE_ID')
+    expect(document.body.textContent).not.toContain('--account')
 
     button('Request & provision').click()
     await flushPromises()
     expect(createLabLease).toHaveBeenCalledWith({ templateVersionId: 'v1', purpose: 'try new mise', projectId: null })
-    expect(startLabLeaseProvision).toHaveBeenCalledWith('new-lease', { accountId: 'acc-1' })
+    expect(startLabLeaseProvision).toHaveBeenCalledWith('new-lease', { accountId: null })
   })
 
   it('keeps a lease that was created even when provisioning fails to start', async () => {
@@ -251,7 +260,7 @@ describe('LabPage', () => {
     await flushPromises()
     expect(createLabLease).toHaveBeenCalledTimes(1)
     expect(startLabLeaseProvision).toHaveBeenCalledTimes(2)
-    expect(startLabLeaseProvision).toHaveBeenLastCalledWith('new-lease', { accountId: 'acc-1' })
+    expect(startLabLeaseProvision).toHaveBeenLastCalledWith('new-lease', { accountId: null })
   })
 
   it('shows no command until a purpose is entered', async () => {

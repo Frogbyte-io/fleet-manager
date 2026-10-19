@@ -225,6 +225,45 @@ pub struct StoredCredentialDto {
     pub credential_ref: String,
 }
 
+/// The Registry controller settings. Fleet does not enforce the change
+/// mode (the repository host's branch protection does); `fleetctl` and the
+/// `fleet` skill follow it.
+#[derive(Clone, Debug, Serialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct RegistrySettingsDto {
+    /// Whether a fetched, valid revision that changes only Registry
+    /// resources activates without a manual step.
+    pub auto_activate: bool,
+    /// How Registry edits should reach the default branch: `direct` or
+    /// `pull-request`.
+    pub change_mode: String,
+    /// Whether auto-activation is held because a rollback happened. A
+    /// manual activation releases the hold. Read-only.
+    pub auto_activate_hold: bool,
+}
+
+impl From<fleet_application::source::RegistrySettings> for RegistrySettingsDto {
+    fn from(settings: fleet_application::source::RegistrySettings) -> Self {
+        Self {
+            auto_activate: settings.auto_activate,
+            change_mode: settings.change_mode.as_str().to_owned(),
+            auto_activate_hold: settings.auto_activate_hold,
+        }
+    }
+}
+
+/// A partial change to the Registry settings; omitted fields stay.
+#[derive(Clone, Debug, Deserialize, ToSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct UpdateRegistrySettingsRequest {
+    /// Turns Registry-only auto-activation on or off.
+    #[serde(default)]
+    pub auto_activate: Option<bool>,
+    /// `direct` or `pull-request`.
+    #[serde(default)]
+    pub change_mode: Option<String>,
+}
+
 /// One recorded desired revision.
 #[derive(Clone, Debug, Serialize, ToSchema)]
 #[serde(rename_all = "camelCase")]
@@ -385,6 +424,74 @@ pub async fn store_desired_source_credential(
     ))
 }
 
+/// Reads the Registry settings (auto-activation and change mode).
+///
+/// # Errors
+///
+/// Returns an API error when authentication, authorization, or storage fails.
+#[utoipa::path(
+    get, path = "/desired/settings", tag = "desired", operation_id = "getRegistrySettings",
+    responses(
+        (status = 200, body = Resource<RegistrySettingsDto>),
+        (status = 403, description = "The caller may not read the desired state.", body = ApiError),
+        (status = 500, description = "The request could not be completed.", body = ApiError),
+        (status = 503, description = "The desired-state surface is not wired.", body = ApiError),
+    )
+)]
+pub async fn get_registry_settings(
+    State(state): State<Arc<ApiState>>,
+    acting: Option<Extension<crate::ActingPrincipal>>,
+    Extension(correlation_id): Extension<CorrelationId>,
+) -> Result<Json<Resource<RegistrySettingsDto>>, ApiErrorResponse> {
+    let acting = principal(acting, correlation_id)?;
+    let settings = service(&state, correlation_id)?
+        .registry_settings(state.authorizer.as_ref(), &acting.id)
+        .await
+        .map_err(|error| crate::projects::map_project_error(&error, correlation_id))?;
+    Ok(Json(Resource::new(settings.into())))
+}
+
+/// Changes the Registry settings. Authorized like activation and audited.
+///
+/// # Errors
+///
+/// Returns an API error when authentication, authorization, validation, or storage fails.
+#[utoipa::path(
+    put, path = "/desired/settings", tag = "desired", operation_id = "updateRegistrySettings",
+    request_body = UpdateRegistrySettingsRequest,
+    responses(
+        (status = 200, body = Resource<RegistrySettingsDto>),
+        (status = 400, description = "No setting was named, or a value is not allowed.", body = ApiError),
+        (status = 403, description = "The caller may not change the desired-state settings.", body = ApiError),
+        (status = 500, description = "The request could not be completed.", body = ApiError),
+        (status = 503, description = "The desired-state surface is not wired.", body = ApiError),
+    )
+)]
+pub async fn update_registry_settings(
+    State(state): State<Arc<ApiState>>,
+    acting: Option<Extension<crate::ActingPrincipal>>,
+    Extension(correlation_id): Extension<CorrelationId>,
+    Json(request): Json<UpdateRegistrySettingsRequest>,
+) -> Result<Json<Resource<RegistrySettingsDto>>, ApiErrorResponse> {
+    let acting = principal(acting, correlation_id)?;
+    let change_mode = request
+        .change_mode
+        .as_deref()
+        .map(fleet_application::source::ChangeMode::parse)
+        .transpose()
+        .map_err(|detail| crate::machines::invalid_request(&detail, correlation_id))?;
+    let settings = service(&state, correlation_id)?
+        .update_registry_settings(
+            state.authorizer.as_ref(),
+            &acting.id,
+            request.auto_activate,
+            change_mode,
+        )
+        .await
+        .map_err(|error| crate::projects::map_project_error(&error, correlation_id))?;
+    Ok(Json(Resource::new(settings.into())))
+}
+
 /// Lists the recorded desired revisions, newest first.
 ///
 /// # Errors
@@ -438,7 +545,13 @@ async fn start(
     let idempotency_key = headers
         .get(crate::IDEMPOTENCY_KEY_HEADER)
         .and_then(|value| value.to_str().ok())
-        .map(|key| format!("{}:{key}", acting.id));
+        .map(|key| {
+            fleet_application::idempotency::scoped_key(
+                fleet_application::idempotency::CALLER_KEY,
+                &acting.id,
+                &[key],
+            )
+        });
     let operation = state
         .operations
         .create(
@@ -463,7 +576,10 @@ async fn start(
     ))
 }
 
-/// Fetches a commit of the configured source as a candidate.
+/// Fetches a commit of the configured source as a candidate. This is the
+/// fetch-now endpoint a webhook or CI step calls after a push: post the
+/// pushed commit's full SHA. A valid Registry-only candidate then
+/// activates on its own when `registry.autoActivate` is on.
 ///
 /// # Errors
 ///

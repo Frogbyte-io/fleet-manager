@@ -84,6 +84,7 @@ fn preset(
         id: id.to_owned(),
         name: id.to_owned(),
         spec: serde_json::json!({"skillId": skill, "scope": scope, "deployTo": deploy_to, "denyAgents": []}),
+        source_path: None,
     }
 }
 
@@ -565,6 +566,7 @@ fn record(kind: &str, name: &str, spec: serde_json::Value) -> DesiredResourceRec
         id: format!("{kind}-{name}"),
         name: name.to_owned(),
         spec,
+        source_path: None,
     }
 }
 
@@ -635,6 +637,7 @@ impl Harness {
         let projects = ProjectRepository::new(self.store.pool().clone());
         let unrelated = projects
             .create(&NewProject {
+                fetch: fleet_core::RemoteFetch::default(),
                 remote: "github.com/acme/unrelated".to_owned(),
                 idempotency_key: None,
                 name: "unrelated".to_owned(),
@@ -830,4 +833,45 @@ async fn an_unmet_capability_requirement_is_reported_not_planned() {
             .iter()
             .all(|a| !a.difference.identity.starts_with("capability:"))
     );
+}
+
+#[tokio::test]
+async fn registry_resources_are_never_planned() {
+    let harness = harness().await;
+    harness.observe_skills(&[]).await;
+    harness.activate("empty", &[]).await;
+    let empty = harness.plan().await;
+    // Registry resources are descriptive: even a type and entry that name
+    // this very machine contribute no action or unactionable difference
+    // (ADR 0016).
+    harness
+        .activate(
+            "registry",
+            &[
+                record(
+                    "RegistryType",
+                    "vendor",
+                    serde_json::json!({
+                        "displayName": "Vendor",
+                        "key": "slug",
+                        "fields": {"slug": {"type": "string", "required": true}},
+                        "relations": ["runs-on"],
+                    }),
+                ),
+                record(
+                    "RegistryEntry",
+                    "vendor-aptabase",
+                    serde_json::json!({
+                        "type": "vendor",
+                        "fields": {"slug": "aptabase"},
+                        "relations": [{"type": "runs-on", "target": {"machine": "box"}}],
+                    }),
+                ),
+            ],
+        )
+        .await;
+    let with_registry = harness.plan().await;
+    assert!(with_registry.plan.actions.is_empty());
+    assert_eq!(with_registry.plan.actions, empty.plan.actions);
+    assert_eq!(with_registry.plan.unactionable, empty.plan.unactionable);
 }

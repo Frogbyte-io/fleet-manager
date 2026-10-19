@@ -3,31 +3,46 @@
 // No Vue imports, so every source is unit-tested directly.
 
 import type {
+  ActionRequestDto,
+  RegistryEntryDto,
+  AssociatedGuestDto,
+  DomainObservationViewDto,
+  AuditEventDto,
   LabTemplateDto,
+  LeaseDetailDto,
   MachineDriftDto,
   LeaseDto,
   MachineDto,
   OnboardingDraftDto,
   OperationDto,
   RecipeVersionDto,
+  RunningServiceDto,
 } from '@frogbyte-io/fleet-api-client'
 import type { RouteLocationRaw } from 'vue-router'
 
 import { driftView } from '../drift/drift'
 import { pinState } from '../images/images'
 import type { AccountView } from '../proxmox/proxmox'
+import { deployView, detailPath } from '../services/services'
+import { formatMicros, relativeDays, serviceRows, upcomingRenewals } from '../registry/services/services'
 
 export type Severity = 'err' | 'warn' | 'info'
 
 export type AttentionSource =
   | 'machine'
   | 'lease-cleanup'
+  | 'lab-orphan'
   | 'operation-blocked'
+  | 'request-pending'
   | 'proxmox-trust'
   | 'onboarding'
   | 'lease-expiring'
   | 'template-pin'
   | 'drift'
+  | 'domain'
+  | 'service-renewal'
+  | 'service-unhealthy'
+  | 'service-deploy-failed'
 
 export interface AttentionRow {
   key: string
@@ -98,17 +113,36 @@ export function driftRows(entries: Pick<MachineDriftDto, 'machineId' | 'machineN
   return rows
 }
 
-export function leaseRows(leases: Pick<LeaseDto, 'id' | 'state' | 'purpose' | 'expiresAt' | 'createdAt'>[], now: number): AttentionRow[] {
+/** Where a `cleanup_failed` lease's guest still is, from the lease detail. */
+export type LeaseRemains = Pick<LeaseDetailDto, 'node' | 'vmid'>
+
+/** `on pve-02 · VMID 9001`, or what is known of it. */
+function remainsText(remains: LeaseRemains | undefined): string {
+  if (!remains || (remains.node == null && remains.vmid == null))
+    return ''
+  const parts = [
+    remains.node != null ? `on ${remains.node}` : null,
+    remains.vmid != null ? `VMID ${remains.vmid}` : null,
+  ].filter(Boolean)
+  return parts.join(' · ')
+}
+
+export function leaseRows(
+  leases: Pick<LeaseDto, 'id' | 'state' | 'purpose' | 'expiresAt' | 'createdAt'>[],
+  now: number,
+  remains: Map<string, LeaseRemains> = new Map(),
+): AttentionRow[] {
   const rows: AttentionRow[] = []
   for (const lease of leases) {
     if (lease.state === 'cleanup_failed') {
+      const where = remainsText(remains.get(lease.id))
       rows.push({
         key: `lease-cleanup:${lease.id}`,
         source: 'lease-cleanup',
         severity: 'err',
         title: `Lab lease ${lease.id.slice(0, 12)} failed cleanup`,
-        detail: `It still owns resources (${lease.purpose}). Sweep retries the cleanup.`,
-        to: '/lab',
+        detail: `${where ? `Its guest remains ${where}` : 'It still owns resources'} (${lease.purpose}). Fix the cause, then retry its cleanup.`,
+        to: { path: '/lab', query: { lease: lease.id } },
         at: lease.createdAt,
       })
     }
@@ -124,6 +158,57 @@ export function leaseRows(leases: Pick<LeaseDto, 'id' | 'state' | 'purpose' | 'e
         at: lease.expiresAt,
       })
     }
+  }
+  return rows
+}
+
+/** The Proxmox guests the Overview could list, and whether that list is whole. */
+export interface GuestIndex {
+  guests: Pick<AssociatedGuestDto, 'name' | 'vmid' | 'node'>[]
+  /** Every account's guests listed without error or truncation. */
+  complete: boolean
+}
+
+/**
+ * Orphan Lab guests (FM-716): the sweeper's `lab_orphan_guest` audit events
+ * (action `lab.lease`, resource = the guest's name, `vmid` among the exposed
+ * facts). The audit DTO withholds the node, so it comes from the guest lists
+ * the Overview already reads; a guest no account lists any more is gone and
+ * drops out, but only when every list is whole.
+ */
+export function orphanRows(
+  events: Pick<AuditEventDto, 'id' | 'resource' | 'metadata' | 'occurredAt'>[],
+  guests: GuestIndex,
+): AttentionRow[] {
+  const newest = new Map<string, { name: string, vmid: string, at: number }>()
+  for (const event of events) {
+    const metadata = (event.metadata ?? {}) as Record<string, unknown>
+    if (metadata.event !== 'lab_orphan_guest' || !event.resource)
+      continue
+    const vmid = typeof metadata.vmid === 'string' ? metadata.vmid : ''
+    const key = `${event.resource}:${vmid}`
+    const seen = newest.get(key)
+    if (!seen || seen.at < event.occurredAt)
+      newest.set(key, { name: event.resource, vmid, at: event.occurredAt })
+  }
+  const rows: AttentionRow[] = []
+  for (const [key, orphan] of newest) {
+    const guest = guests.guests.find(g => g.name === orphan.name && (orphan.vmid === '' || String(g.vmid) === orphan.vmid))
+    if (!guest && guests.complete)
+      continue
+    const where = [
+      guest?.node ? `on ${guest.node}` : 'on an unknown node (not every Proxmox account\'s guests could be listed, so Fleet could not confirm it is gone)',
+      orphan.vmid ? `VMID ${orphan.vmid}` : null,
+    ].filter(Boolean).join(' · ')
+    rows.push({
+      key: `lab-orphan:${key}`,
+      source: 'lab-orphan',
+      severity: 'warn',
+      title: `Orphan Lab guest ${orphan.name}`,
+      detail: `Remains ${where}. No lease or provision owns it, and Fleet never deletes an orphan: check it, then remove it in Proxmox.`,
+      to: '/proxmox',
+      at: orphan.at,
+    })
   }
   return rows
 }
@@ -149,6 +234,21 @@ export function operationRows(operations: Pick<OperationDto, 'id' | 'kind' | 'st
       detail: blockedDetail(o),
       to: { path: '/operations', query: { op: o.id } },
       at: o.updatedAt,
+    }))
+}
+
+/** Action requests waiting for a person's decision (the approval inbox). */
+export function requestRows(requests: Pick<ActionRequestDto, 'id' | 'actionId' | 'target' | 'requester' | 'reason' | 'state' | 'createdAt'>[]): AttentionRow[] {
+  return requests
+    .filter(r => r.state === 'pending')
+    .map(r => ({
+      key: `request:${r.id}`,
+      source: 'request-pending',
+      severity: 'warn',
+      title: `${r.actionId} on ${r.target} awaits approval`,
+      detail: `${r.requester} asks: ${r.reason}`,
+      to: { path: '/requests', query: { request: r.id } },
+      at: r.createdAt,
     }))
 }
 
@@ -201,6 +301,94 @@ export function templatePinRows(
       to: { path: '/images', query: { select: `template:${template.id}` } },
       at: 0,
     })
+  }
+  return rows
+}
+
+/**
+ * Domains whose public RDAP/DNS lookups or recorded expiry need a person
+ * (FM-1020): expiring, auto-renew off, or drifted from Fleet Git. One row
+ * per domain, carrying its most serious warning; the Registry page shows
+ * the rest. Informational drift (a changed expiry after a renewal) alone
+ * stays out of the queue unless nothing more serious exists.
+ */
+export function domainRows(views: Pick<DomainObservationViewDto, 'key' | 'warnings'>[], now = 0): AttentionRow[] {
+  const rows: AttentionRow[] = []
+  for (const view of views) {
+    const top = view.warnings[0]
+    if (!top)
+      continue
+    const extra = view.warnings.length - 1
+    rows.push({
+      key: `domain:${view.key}`,
+      source: 'domain',
+      severity: top.severity === 'err' ? 'err' : top.severity === 'warn' ? 'warn' : 'info',
+      title: `Domain ${view.key} needs attention`,
+      detail: `${top.message}${extra > 0 ? ` (${extra} more)` : ''}`,
+      to: { path: '/registry/domains', query: { open: view.key } },
+      at: now,
+    })
+  }
+  return rows
+}
+
+/** Renewals of third-party services at most this many days away are flagged. */
+export const SERVICE_RENEWAL_WINDOW_DAYS = 14
+
+/**
+ * Services renewing within two weeks, one row per service. Passed renewal
+ * dates stay off the queue; the Services view flags them.
+ */
+export function serviceRenewalRows(entries: RegistryEntryDto[], now = Date.now()): AttentionRow[] {
+  return upcomingRenewals(serviceRows(entries, now), SERVICE_RENEWAL_WINDOW_DAYS).filter(r => r.state !== 'overdue').map(({ row, days }) => {
+    const cost = row.cost ? ` (${formatMicros(row.cost.micros, row.cost.currency)}${row.period === 'monthly' ? ' / month' : row.period === 'yearly' ? ' / year' : ''})` : ''
+    return {
+      key: `service-renewal:${row.key}`,
+      source: 'service-renewal' as const,
+      severity: 'warn' as const,
+      title: `${row.name} renews ${relativeDays(days)}`,
+      detail: `Renews ${row.renewal}${cost}.`,
+      to: { path: '/registry/services', query: { entry: row.key } },
+      at: now,
+    }
+  })
+}
+
+/**
+ * Running services (FM-1032) that are unhealthy or whose latest deployment
+ * failed. A degraded service is an error (a warning when its data is stale,
+ * since it may have recovered); a stopped one is information (it may be
+ * intended). A failed deployment is an error only when the service is not
+ * running, otherwise a warning (the previous version may still be serving).
+ * Data that is merely stale is labelled in the detail and never raised alone.
+ */
+export function serviceHealthRows(services: Pick<RunningServiceDto, 'id' | 'name' | 'state' | 'stale' | 'lastDeploy'>[], now = 0): AttentionRow[] {
+  const rows: AttentionRow[] = []
+  for (const service of services) {
+    const stale = service.stale ? ' (last known state; the data is stale)' : ''
+    if (service.state === 'degraded' || service.state === 'stopped') {
+      rows.push({
+        key: `service-unhealthy:${service.id}`,
+        source: 'service-unhealthy',
+        severity: service.state === 'degraded' ? (service.stale ? 'warn' : 'err') : 'info',
+        title: `${service.name} is ${service.state}`,
+        detail: `Reported ${service.state}${stale}.`,
+        to: detailPath(service.id),
+        at: now,
+      })
+    }
+    const deploy = deployView(service as RunningServiceDto)
+    if (deploy?.failed) {
+      rows.push({
+        key: `service-deploy-failed:${service.id}`,
+        source: 'service-deploy-failed',
+        severity: service.state === 'running' ? 'warn' : 'err',
+        title: `${service.name} deployment ${deploy.label.replace(' · stale', '')}`,
+        detail: `The latest deployment did not succeed${service.state === 'running' ? '; the service is still running' : ''}${service.lastDeploy?.stale ? ' (deployment data is stale)' : ''}.`,
+        to: detailPath(service.id),
+        at: now,
+      })
+    }
   }
   return rows
 }

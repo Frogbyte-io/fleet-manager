@@ -8,6 +8,7 @@ const listMachines = vi.fn()
 const listOnboardingDrafts = vi.fn()
 const listAuditEvents = vi.fn()
 const listOperations = vi.fn()
+const listActionRequests = vi.fn()
 const listProxmoxAccounts = vi.fn()
 const discoverProxmoxCluster = vi.fn()
 const listProxmoxGuests = vi.fn()
@@ -17,12 +18,15 @@ const listLabTemplates = vi.fn()
 const listLabLeases = vi.fn()
 const getSystemInfo = vi.fn()
 const listDesiredDrift = vi.fn()
+const getLabLease = vi.fn()
+const listRunningServices = vi.fn()
 
 vi.mock('@frogbyte-io/fleet-api-client', () => ({
   listMachines: (...a: unknown[]) => listMachines(...a),
   listOnboardingDrafts: (...a: unknown[]) => listOnboardingDrafts(...a),
   listAuditEvents: (...a: unknown[]) => listAuditEvents(...a),
   listOperations: (...a: unknown[]) => listOperations(...a),
+  listActionRequests: (...a: unknown[]) => listActionRequests(...a),
   listProxmoxAccounts: (...a: unknown[]) => listProxmoxAccounts(...a),
   discoverProxmoxCluster: (...a: unknown[]) => discoverProxmoxCluster(...a),
   listProxmoxGuests: (...a: unknown[]) => listProxmoxGuests(...a),
@@ -32,6 +36,8 @@ vi.mock('@frogbyte-io/fleet-api-client', () => ({
   listLabLeases: (...a: unknown[]) => listLabLeases(...a),
   getSystemInfo: (...a: unknown[]) => getSystemInfo(...a),
   listDesiredDrift: (...a: unknown[]) => listDesiredDrift(...a),
+  getLabLease: (...a: unknown[]) => getLabLease(...a),
+  listRunningServices: (...a: unknown[]) => listRunningServices(...a),
 }))
 
 import OverviewPage from '../OverviewPage.vue'
@@ -57,11 +63,13 @@ function everythingFine() {
   listOnboardingDrafts.mockResolvedValue(ok(page([])))
   listAuditEvents.mockResolvedValue(ok(page([])))
   listOperations.mockResolvedValue(ok(page([])))
+  listActionRequests.mockResolvedValue(ok(page([])))
   listProxmoxAccounts.mockResolvedValue(ok(page([])))
   listImageRecipes.mockResolvedValue(ok(page([])))
   listLabTemplates.mockResolvedValue(ok(page([])))
   listLabLeases.mockResolvedValue(ok(page([])))
   listDesiredDrift.mockResolvedValue(ok(page([])))
+  listRunningServices.mockResolvedValue(ok({ ...page([]), ambiguousServers: [], coverage: {}, evaluatedAt: 1 }))
   getSystemInfo.mockResolvedValue(ok({ service: 'fleet-controller', version: '0.1.0', trustMode: 'trusted-lan', trustWarning: '', storageOk: true, queuePending: 0, queueRunning: 0, currentPrincipal: 'me' }))
 }
 
@@ -84,7 +92,7 @@ function row(wrapper: Awaited<ReturnType<typeof mountPage>>, source: string) {
 enableAutoUnmount(afterEach)
 
 beforeEach(() => {
-  for (const mock of [listMachines, listOnboardingDrafts, listAuditEvents, listOperations, listProxmoxAccounts, discoverProxmoxCluster, listProxmoxGuests, listImageRecipes, listImageRecipeVersions, listLabTemplates, listLabLeases, getSystemInfo, listDesiredDrift])
+  for (const mock of [listMachines, listOnboardingDrafts, listAuditEvents, listOperations, listActionRequests, listProxmoxAccounts, discoverProxmoxCluster, listProxmoxGuests, listImageRecipes, listImageRecipeVersions, listLabTemplates, listLabLeases, getSystemInfo, listDesiredDrift, getLabLease, listRunningServices])
     mock.mockReset()
   everythingFine()
 })
@@ -93,6 +101,22 @@ describe('Overview attention queue', () => {
   it('says so when nothing needs attention', async () => {
     const wrapper = await mountPage()
     expect(wrapper.find('[data-testid="attention-empty"]').exists()).toBe(true)
+  })
+
+  it('lists a degraded service and a failed deploy, linking to the service', async () => {
+    const svc = (id: string, state: string, lastDeploy: unknown = null) => ({ id: `coolify:a:${id}`, name: id, state, stale: false, lastDeploy })
+    listRunningServices.mockResolvedValue(ok({ ...page([svc('api', 'degraded'), svc('web', 'running', { deploymentUuid: 'd', status: 'failed', stale: false }), svc('ok', 'running')]), ambiguousServers: [], coverage: {}, evaluatedAt: 1 }))
+    const wrapper = await mountPage()
+    expect(row(wrapper, 'service-unhealthy').text()).toContain('api is degraded')
+    expect(row(wrapper, 'service-unhealthy').attributes('href')).toBe('/services/coolify%3Aa%3Aapi')
+    expect(row(wrapper, 'service-deploy-failed').text()).toContain('web deployment failed')
+    expect(wrapper.findAll('[data-testid^="attention-service"]')).toHaveLength(2)
+  })
+
+  it('does not call a denied services read a failure', async () => {
+    listRunningServices.mockResolvedValue({ status: 403, data: { code: 'denied', message: 'no' }, headers: new Headers() })
+    const wrapper = await mountPage()
+    expect(wrapper.text()).not.toContain('running services')
   })
 
   it('lists an offline machine and links to it', async () => {
@@ -105,7 +129,44 @@ describe('Overview attention queue', () => {
   it('lists a cleanup_failed lease and links to Lab', async () => {
     listLabLeases.mockResolvedValue(ok(page([lease('lease-cf-000001', 'cleanup_failed', null)])))
     const wrapper = await mountPage()
-    expect(row(wrapper, 'lease-cleanup').attributes('href')).toBe('/lab')
+    expect(row(wrapper, 'lease-cleanup').attributes('href')).toBe('/lab?lease=lease-cf-000001')
+  })
+
+  it('names the node and VMID a cleanup_failed lease still holds', async () => {
+    listLabLeases.mockResolvedValue(ok(page([lease('lease-cf-000001', 'cleanup_failed', null)])))
+    getLabLease.mockResolvedValue(ok({ data: { ...lease('lease-cf-000001', 'cleanup_failed', null), node: 'pve-a', vmid: 9001 } }))
+    const wrapper = await mountPage()
+    expect(getLabLease).toHaveBeenCalledWith('lease-cf-000001')
+    expect(row(wrapper, 'lease-cleanup').text()).toContain('on pve-a · VMID 9001')
+  })
+
+  it('lists an orphan Lab guest the sweeper reported, from the lab.lease audit events', async () => {
+    listAuditEvents.mockImplementation(async (params: { action?: string }) => ok(page(params.action === 'lab.lease'
+      ? [{ id: 'e1', seq: 1, actor: 'controller', action: 'lab.lease', resource: 'fm-lab-0009', allowed: true, reason: 'allowed', occurredAt: NOW - 1000, metadata: { event: 'lab_orphan_guest', vmid: '9009' } }]
+      : [])))
+    const wrapper = await mountPage()
+    expect(listAuditEvents).toHaveBeenCalledWith(expect.objectContaining({ action: 'lab.lease' }))
+    // No Proxmox account lists guests, so nothing proves it gone: it stays, without a node.
+    expect(row(wrapper, 'lab-orphan').text()).toContain('unknown node')
+  })
+
+  it('keeps an orphan whose guest is still listed, with its node', async () => {
+    listAuditEvents.mockImplementation(async (params: { action?: string }) => ok(page(params.action === 'lab.lease'
+      ? [{ id: 'e1', seq: 1, actor: 'controller', action: 'lab.lease', resource: 'fm-lab-0009', allowed: true, reason: 'allowed', occurredAt: NOW - 1000, metadata: { event: 'lab_orphan_guest', vmid: '9009' } }]
+      : [])))
+    listProxmoxAccounts.mockResolvedValue(ok(page([{ id: 'acc1', name: 'example', host: 'pve', port: 8006, tokenId: 't', fingerprint: 'AA', fingerprintState: 'confirmed', createdAt: 0 }])))
+    discoverProxmoxCluster.mockResolvedValue(ok({ data: { accountId: 'acc1', pveVersion: '8.4', reportedCount: 0, warnings: [], observedAt: NOW, resources: [], nodeCapacities: [] } }))
+    listProxmoxGuests.mockResolvedValue(ok(page([{ id: 'g1', kind: 'qemu', name: 'fm-lab-0009', vmid: 9009, node: 'pve-b', macs: [], candidates: [], observedAt: 0, pveVersion: '8.4', warnings: [] }])))
+    const wrapper = await mountPage()
+    // Guests are asked for only once discovery verified the pin.
+    await vi.waitFor(async () => {
+      await flushPromises()
+      expect(wrapper.find('[data-testid="attention-lab-orphan"]').exists()).toBe(true)
+    })
+    const orphan = row(wrapper, 'lab-orphan')
+    expect(orphan.text()).toContain('Orphan Lab guest fm-lab-0009')
+    expect(orphan.text()).toContain('on pve-b · VMID 9009')
+    expect(orphan.attributes('href')).toBe('/proxmox')
   })
 
   it('lists an expiring lease and links to Lab', async () => {
@@ -120,6 +181,23 @@ describe('Overview attention queue', () => {
     const wrapper = await mountPage()
     expect(row(wrapper, 'operation-blocked').text()).toContain('approve frogenv')
     expect(row(wrapper, 'operation-blocked').attributes('href')).toBe('/operations?op=op-9')
+  })
+
+  it('lists a pending action request and links to it in the approval inbox', async () => {
+    listActionRequests.mockResolvedValue(ok(page([
+      { id: 'req-1', actionId: 'coolify.application.redeploy', target: 'app-1', requester: 'agent-7', reason: 'ship the fix', state: 'pending', createdAt: 5 },
+      { id: 'req-2', actionId: 'coolify.application.redeploy', target: 'app-2', requester: 'agent-7', reason: 'old', state: 'succeeded', createdAt: 4 },
+    ])))
+    const wrapper = await mountPage()
+    expect(row(wrapper, 'request-pending').text()).toContain('coolify.application.redeploy on app-1 awaits approval')
+    expect(row(wrapper, 'request-pending').attributes('href')).toBe('/requests?request=req-1')
+    expect(wrapper.findAll('[data-testid="attention-request-pending"]')).toHaveLength(1)
+  })
+
+  it('names action requests when they could not be loaded', async () => {
+    listActionRequests.mockResolvedValue(ok({ code: 'denied', message: 'no' }, 403))
+    const wrapper = await mountPage()
+    expect(wrapper.text()).toContain('action requests')
   })
 
   it('lists a changed Proxmox fingerprint and links to Proxmox', async () => {
@@ -206,5 +284,20 @@ describe('Overview figures and activity', () => {
     expect(wrapper.get('[data-testid="kpi-Running operations"]').text()).toContain('1')
     const feed = wrapper.get('[data-testid="activity"]').text()
     expect(feed.indexOf('image.build')).toBeLessThan(feed.indexOf('machines.create'))
+  })
+
+  it('keeps long unbroken activity tokens inside the page (truncated, full text in the title)', async () => {
+    const long = 'example.invalid/acme/a-very-long-repository-name-with-no-breaks-at-all-0123456789'
+    listMachines.mockResolvedValue(ok(page([])))
+    listOperations.mockResolvedValue(ok(page([])))
+    listAuditEvents.mockResolvedValue(ok(page([{ id: 'a1', seq: 1, occurredAt: NOW - 5000, action: 'projects.create', actor: 'me', resource: long, allowed: true, outcome: 'succeeded', reason: 'ok', metadata: {} }])))
+    const wrapper = await mountPage()
+    const row = wrapper.get('[data-testid="activity"] li')
+    const truncated = row.findAll('.truncate')
+    expect(truncated.length).toBeGreaterThan(0)
+    for (const el of truncated) expect(el.attributes('title')).toBe(el.text())
+    // Below xl the two-column grid must be a single minmax(0,1fr) track, or one long token widens the page.
+    const grid = wrapper.get('[data-testid="activity"]').element.closest('.grid')
+    expect(grid?.className).toContain('grid-cols-[minmax(0,1fr)]')
   })
 })

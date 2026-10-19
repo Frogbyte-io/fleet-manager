@@ -13,13 +13,20 @@
 //! Blocked/manual steps are a first-class outcome: a Frogenv approval
 //! requirement completes the workflow `blocked_manual_approval` with the
 //! remaining steps named, never a failure or a hang.
+//!
+//! Frogenv is declared, not assumed: the payload's `usesFrogenv` (default
+//! `true`) decides whether the Frogenv probe runs and its setup is
+//! planned. Lab bootstrap declares `false`. A declared project on a
+//! machine without the CLI fails `frogenv_missing` at the setup step.
 
 use std::sync::Arc;
 use std::time::Duration;
 
 use fleet_application::machine::MachinePort;
 use fleet_application::operation::{Operation, Operations};
-use fleet_application::ready::{ObservedState, ReadyStep, ToolRequest, plan_ready};
+use fleet_application::ready::{
+    FrogenvUse, ObservedState, ReadyStep, ToolRequest, plan_ready, step_refusal,
+};
 use fleet_application::worker::OperationExecutor;
 use fleet_provider_ssh::ExecutionLimiter;
 
@@ -54,6 +61,10 @@ struct ReadyPayload {
     auth: Auth,
     /// The project's normalized remote.
     remote: String,
+    /// How the remote is fetched. Absent (an operation queued before the
+    /// form was stored) means https.
+    #[serde(default)]
+    fetch: fleet_core::RemoteFetch,
     /// The checkout root the workflow targets.
     root: String,
     /// The tools the project declares, as pinned requests.
@@ -65,10 +76,29 @@ struct ReadyPayload {
     /// The agents the skill deploys to.
     #[serde(default)]
     agents: Vec<String>,
+    /// Whether the project uses Frogenv. Absent means `true`, the
+    /// behaviour before the declaration existed; Lab bootstrap sends
+    /// `false`.
+    #[serde(default = "uses_frogenv_by_default")]
+    uses_frogenv: bool,
     /// The deadline, in seconds, for the whole workflow. The step
     /// deadlines bound the real work; this one is the caller's ceiling.
     #[allow(dead_code)]
     timeout_seconds: u64,
+}
+
+fn uses_frogenv_by_default() -> bool {
+    true
+}
+
+impl ReadyPayload {
+    fn frogenv_use(&self) -> FrogenvUse {
+        if self.uses_frogenv {
+            FrogenvUse::Required
+        } else {
+            FrogenvUse::NotUsed
+        }
+    }
 }
 
 /// A pinned tool request inside the payload.
@@ -92,6 +122,7 @@ pub struct ReadyExecutor {
     inner: Arc<dyn OperationExecutor>,
     limiter: Arc<ExecutionLimiter>,
     work_dir: std::path::PathBuf,
+    lab_readiness: Option<(i64, String, String)>,
 }
 
 impl ReadyExecutor {
@@ -113,7 +144,57 @@ impl ReadyExecutor {
             inner,
             limiter,
             work_dir,
+            lab_readiness: None,
         }
+    }
+    /// Bounds Lab checkout observation and checks both parent and workflow
+    /// cancellation before starting and while waiting for the scan.
+    #[must_use]
+    pub fn with_lab_readiness(mut self, deadline: i64, parent: String, workflow: String) -> Self {
+        self.lab_readiness = Some((deadline, parent, workflow));
+        self
+    }
+
+    async fn wait_for_discovery<T>(
+        &self,
+        mut scan: tokio::task::JoinHandle<T>,
+    ) -> Result<T, String> {
+        loop {
+            tokio::select! {
+                result = &mut scan => return result.map_err(|_| "the discovery thread failed".to_owned()),
+                () = tokio::time::sleep(Duration::from_millis(50)), if self.lab_readiness.is_some() => {
+                    self.check_lab_readiness().await?;
+                }
+            }
+        }
+    }
+
+    async fn check_lab_readiness(&self) -> Result<Duration, String> {
+        let Some((deadline, parent, workflow)) = &self.lab_readiness else {
+            return Ok(fleet_provider_ssh::DISCOVERY_DEADLINE);
+        };
+        let millis = deadline.saturating_sub(fleet_core::SystemClock::now_unix_millis());
+        if millis <= 0 {
+            return Err("Lab readiness deadline expired".to_owned());
+        }
+        for id in [parent, workflow] {
+            let operation = self
+                .operations
+                .get(
+                    &fleet_auth::LanAllowAllAuthorizer,
+                    fleet_auth::LAN_PRINCIPAL_ID,
+                    id,
+                )
+                .await
+                .map_err(|_| "Lab parent unavailable")?;
+            if operation.cancel_requested
+                || !matches!(operation.state.as_str(), "pending" | "running")
+            {
+                return Err("Lab readiness was stopped".to_owned());
+            }
+        }
+        Ok(Duration::from_millis(u64::try_from(millis).unwrap_or(0))
+            .min(fleet_provider_ssh::DISCOVERY_DEADLINE))
     }
 }
 
@@ -159,7 +240,13 @@ impl ReadyExecutor {
             .skill_id
             .as_deref()
             .map(|skill_id| (skill_id, payload.agents.as_slice()));
-        let plan = plan_ready(&payload.root, &tools, skill, &observed);
+        let plan = plan_ready(
+            &payload.root,
+            &tools,
+            skill,
+            payload.frogenv_use(),
+            &observed,
+        );
         operations
             .record_progress(
                 &operation.id,
@@ -201,9 +288,28 @@ impl ReadyExecutor {
                     operations,
                     &operation.id,
                     step,
+                    STEP_FAILED,
                     "the workflow exceeded its deadline; the completed steps are durable and a retry re-runs only the remainder",
                     &completed,
                     &plan[index..],
+                )
+                .await;
+            }
+            // A step the machine positively cannot satisfy is refused by
+            // name before it runs, instead of failing generically. The
+            // refusal is deliberately at the step, not before the plan:
+            // the earlier steps (clone, tools) keep running exactly as
+            // they did before the refusal existed, and a retry after
+            // installing the CLI re-runs only the remainder.
+            if let Some(refusal) = step_refusal(step, &observed) {
+                return complete_failed(
+                    operations,
+                    &operation.id,
+                    step,
+                    refusal.reason(),
+                    refusal.detail(),
+                    &completed,
+                    &plan[index + 1..],
                 )
                 .await;
             }
@@ -225,6 +331,7 @@ impl ReadyExecutor {
                         operations,
                         &operation.id,
                         step,
+                        STEP_FAILED,
                         &reason,
                         &completed,
                         &plan[index + 1..],
@@ -255,7 +362,7 @@ impl ReadyExecutor {
         // sides are normalized, so a checkout under a different remote
         // spelling still matches.
         if let Ok(checkouts) = self.discover_checkouts(payload).await {
-            let project_remote = fleet_core::NormalizedRemote::parse(&payload.remote)
+            let project_remote = parse_payload_remote(&payload.remote)
                 .map(|normalized| normalized.as_str().to_owned())
                 .unwrap_or_else(|_| payload.remote.clone());
             observed.matching_checkout = checkouts
@@ -273,9 +380,18 @@ impl ReadyExecutor {
         if let Ok(status) = self.mise_status(payload).await {
             observed.mise_installed = status;
         }
-        // Frogenv's own status, when the CLI answers.
-        if let Ok(configured) = self.frogenv_configured(payload).await {
-            observed.frogenv_configured = Some(configured);
+        // Frogenv's own status, only when the project uses Frogenv: a
+        // project that does not never probes it, so a machine without the
+        // CLI records no failed status operation.
+        if payload.uses_frogenv {
+            match self.frogenv_configured(payload).await {
+                Ok(configured) => {
+                    observed.frogenv_installed = Some(true);
+                    observed.frogenv_configured = Some(configured);
+                }
+                Err(FrogenvProbe::NotInstalled) => observed.frogenv_installed = Some(false),
+                Err(FrogenvProbe::Unavailable) => {}
+            }
         }
         observed
     }
@@ -284,22 +400,18 @@ impl ReadyExecutor {
         &self,
         payload: &ReadyPayload,
     ) -> Result<Vec<DiscoveredCheckout>, String> {
+        self.check_lab_readiness().await?;
         let spec = self
             .resolve(&payload.machine_id, &payload.endpoint_id, &payload.auth)
             .await?;
         let provider = fleet_provider_ssh::SshProvider::new(self.work_dir.clone())
             .map_err(|error| error.to_string())?;
         let limiter = self.limiter.clone();
-        let discovery = tokio::task::spawn_blocking(move || {
-            fleet_provider_ssh::discover(
-                &provider,
-                &limiter,
-                &spec,
-                fleet_provider_ssh::DISCOVERY_DEADLINE,
-            )
-        })
-        .await
-        .map_err(|join_error| format!("the discovery thread failed: {join_error}"))?;
+        let budget = self.check_lab_readiness().await?;
+        let scan = tokio::task::spawn_blocking(move || {
+            fleet_provider_ssh::discover(&provider, &limiter, &spec, budget)
+        });
+        let discovery = self.wait_for_discovery(scan).await?;
         let checkouts = discovery.map_err(|error| error.to_string())?;
         Ok(checkouts
             .into_iter()
@@ -360,7 +472,7 @@ impl ReadyExecutor {
         Ok(installed)
     }
 
-    async fn frogenv_configured(&self, payload: &ReadyPayload) -> Result<bool, String> {
+    async fn frogenv_configured(&self, payload: &ReadyPayload) -> Result<bool, FrogenvProbe> {
         let operation = self
             .spawn_inner(
                 "frogenv.status",
@@ -372,14 +484,16 @@ impl ReadyExecutor {
                 })
                 .to_string(),
             )
-            .await?;
+            .await
+            .map_err(|_| FrogenvProbe::Unavailable)?;
         self.operations
             .claim_only_execute(
                 self.inner.as_ref(),
                 &operation.id,
                 fleet_auth::LAN_PRINCIPAL_ID,
             )
-            .await?;
+            .await
+            .map_err(|_| FrogenvProbe::Unavailable)?;
         let finished = self
             .operations
             .get(
@@ -388,13 +502,30 @@ impl ReadyExecutor {
                 &operation.id,
             )
             .await
-            .map_err(|error| error.to_string())?;
+            .map_err(|_| FrogenvProbe::Unavailable)?;
         if finished.state != "succeeded" {
-            return Err("the frogenv status observation did not succeed".to_owned());
+            // The fixed status script's own "no CLI" report is a positive
+            // observation; any other failure leaves the state unknown.
+            let error: serde_json::Value =
+                serde_json::from_str(finished.error_json.as_deref().unwrap_or("null"))
+                    .unwrap_or_default();
+            let not_installed = finished.state == "failed"
+                && error["reason"] == "status_failed"
+                && error["detail"].as_str().is_some_and(|detail| {
+                    // Any line: the transport may add its own stderr lines.
+                    detail
+                        .lines()
+                        .any(|line| line.trim() == crate::frogenv::NOT_INSTALLED_DETAIL)
+                });
+            return Err(if not_installed {
+                FrogenvProbe::NotInstalled
+            } else {
+                FrogenvProbe::Unavailable
+            });
         }
         let result: serde_json::Value =
             serde_json::from_str(&finished.result_json.unwrap_or_default())
-                .map_err(|error| error.to_string())?;
+                .map_err(|_| FrogenvProbe::Unavailable)?;
         Ok(result["status"]["configured"].as_bool() == Some(true))
     }
 
@@ -408,17 +539,26 @@ impl ReadyExecutor {
         workflow_deadline: std::time::Instant,
     ) -> StepOutcome {
         let (kind, payload_json) = match step {
-            ReadyStep::Clone { root } => (
-                "projects.clone",
-                serde_json::json!({
-                    "machineId": payload.machine_id,
-                    "endpointId": payload.endpoint_id,
-                    "auth": payload.auth,
-                    "remote": payload.remote,
-                    "root": root,
-                    "timeoutSeconds": 600,
-                }),
-            ),
+            ReadyStep::Clone { root } => {
+                // The payload carries the normalized identity; git needs a
+                // fetchable URL (#329). An unparseable remote is a named
+                // refusal, not a git error.
+                let remote = match clone_remote(&payload.remote, &payload.fetch) {
+                    Ok(remote) => remote,
+                    Err(detail) => return StepOutcome::Failed(detail),
+                };
+                (
+                    "projects.clone",
+                    serde_json::json!({
+                        "machineId": payload.machine_id,
+                        "endpointId": payload.endpoint_id,
+                        "auth": payload.auth,
+                        "remote": remote,
+                        "root": root,
+                        "timeoutSeconds": 600,
+                    }),
+                )
+            }
             ReadyStep::MiseInstall { tool, version } => (
                 "mise.install",
                 serde_json::json!({
@@ -551,6 +691,57 @@ impl ReadyExecutor {
     }
 }
 
+/// Why the Frogenv status probe gave no configuration answer.
+enum FrogenvProbe {
+    /// The fixed status script reported no Frogenv CLI on the machine.
+    NotInstalled,
+    /// The probe did not answer; the machine's Frogenv state is unknown.
+    Unavailable,
+}
+
+/// Parses the payload's remote, normally the stored identity
+/// (`host[:port]/path`). Parsed bare, its port colon would read as an scp
+/// separator and the port would become a path segment, so a bare identity is
+/// read as an https remote. A full URL or scp spelling is parsed as written.
+fn parse_payload_remote(remote: &str) -> Result<fleet_core::NormalizedRemote, String> {
+    // An `@` before the first `/` is a login (an scp or ssh spelling); one
+    // later is part of an identity's path.
+    let login = remote
+        .split('/')
+        .next()
+        .is_some_and(|authority| authority.contains('@'));
+    if remote.contains("://") || login {
+        fleet_core::NormalizedRemote::parse(remote)
+    } else {
+        fleet_core::NormalizedRemote::parse(&format!("https://{remote}"))
+    }
+}
+
+/// The URL the clone step hands to git, derived from the payload's remote
+/// (normally the stored normalized identity; see
+/// [`fleet_core::NormalizedRemote::clone_url`]).
+pub(crate) fn clone_remote(
+    remote: &str,
+    fetch: &fleet_core::RemoteFetch,
+) -> Result<String, String> {
+    fetch
+        .validate()
+        .map_err(|detail| format!("invalid_project_remote: {detail}"))?;
+    let normalized = parse_payload_remote(remote)
+        .map_err(|detail| format!("invalid_project_remote: {detail}"))?;
+    // A query or fragment is never part of a repository path; refuse it
+    // rather than let a `?token=` ride into the clone URL.
+    if normalized.as_str().contains(['?', '#']) {
+        return Err(
+            "invalid_project_remote: the remote path carries a query or fragment".to_owned(),
+        );
+    }
+    Ok(normalized.clone_url(fetch))
+}
+
+/// The workflow's generic failure reason, for a step that ran and failed.
+const STEP_FAILED: &str = "step_failed";
+
 /// One checkout observation, mirroring the provider's shape.
 struct DiscoveredCheckout {
     root: String,
@@ -579,7 +770,7 @@ async fn complete_blocked(
 ) -> Result<(), String> {
     let error_json = serde_json::json!({
         "reason": "blocked_manual_approval",
-        "detail": reason,
+        "detail": fleet_core::scrub_failure_detail(reason),
         "blockedAt": step.name(),
         "completed": completed,
         "remaining": remaining.iter().map(ToString::to_string).collect::<Vec<_>>(),
@@ -597,19 +788,20 @@ async fn complete_blocked(
         .map_err(|error| error.to_string())
 }
 
-/// Completes the workflow as a failure with the failing step, the
-/// completed steps, and the remaining steps named.
+/// Completes the workflow as a failure with the reason, the failing step,
+/// the completed steps, and the remaining steps named.
 async fn complete_failed(
     operations: &Operations,
     operation_id: &str,
     step: &ReadyStep,
     reason: &str,
+    detail: &str,
     completed: &[String],
     remaining: &[ReadyStep],
 ) -> Result<(), String> {
     let error_json = serde_json::json!({
-        "reason": "step_failed",
-        "detail": reason,
+        "reason": reason,
+        "detail": fleet_core::scrub_failure_detail(detail),
         "failedAt": step.name(),
         "completed": completed,
         "remaining": remaining.iter().map(ToString::to_string).collect::<Vec<_>>(),
@@ -667,5 +859,193 @@ impl OperationExecutor for ReadyDispatch {
             "ready.workflow" => self.ready.execute(operations, operation).await,
             _ => self.fallback.execute(operations, operation).await,
         }
+    }
+}
+
+#[cfg(test)]
+mod lab_discovery_tests {
+    use super::*;
+
+    #[derive(Debug)]
+    struct Noop;
+    #[async_trait::async_trait]
+    impl OperationExecutor for Noop {
+        async fn execute(&self, _: &Operations, _: &Operation) -> Result<(), String> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn clone_step_remote_is_fetchable_and_malformed_is_refused() {
+        use fleet_core::{FetchScheme, RemoteFetch};
+        let https = RemoteFetch::default();
+        assert_eq!(
+            clone_remote("github.com/Frogbyte-io/fleet-manager", &https).unwrap(),
+            "https://github.com/Frogbyte-io/fleet-manager"
+        );
+        // An https project, and one whose row predates the stored form,
+        // clone exactly as before.
+        assert_eq!(
+            clone_remote("git.example.test:8443/a/b", &https).unwrap(),
+            "https://git.example.test:8443/a/b"
+        );
+        // An scp-style project clones over ssh with its stored login user.
+        let scp = RemoteFetch {
+            scheme: FetchScheme::Scp,
+            user: Some("git".to_owned()),
+        };
+        assert_eq!(
+            clone_remote("git.example.test/a/b", &scp).unwrap(),
+            "git@git.example.test:a/b"
+        );
+        let ssh = RemoteFetch {
+            scheme: FetchScheme::Ssh,
+            user: Some("git".to_owned()),
+        };
+        assert_eq!(
+            clone_remote("git.example.test:2222/a/b", &ssh).unwrap(),
+            "ssh://git@git.example.test:2222/a/b"
+        );
+        let http = RemoteFetch {
+            scheme: FetchScheme::Http,
+            user: None,
+        };
+        assert_eq!(
+            clone_remote("git.example.test:3000/a/b", &http).unwrap(),
+            "http://git.example.test:3000/a/b"
+        );
+        assert!(
+            clone_remote("", &https)
+                .unwrap_err()
+                .starts_with("invalid_project_remote")
+        );
+    }
+
+    #[test]
+    fn a_payload_fetch_form_is_validated_and_a_path_at_sign_keeps_its_port() {
+        let forged = fleet_core::RemoteFetch {
+            scheme: fleet_core::FetchScheme::Ssh,
+            user: Some("x@evil:22/y".to_owned()),
+        };
+        assert!(
+            clone_remote("git.example.test/a/b", &forged)
+                .unwrap_err()
+                .starts_with("invalid_project_remote")
+        );
+        assert_eq!(
+            clone_remote(
+                "host.example.test:8443/a/b@c",
+                &fleet_core::RemoteFetch::default()
+            )
+            .unwrap(),
+            "https://host.example.test:8443/a/b@c"
+        );
+    }
+
+    #[test]
+    fn a_payload_without_a_fetch_form_clones_over_https() {
+        let payload: ReadyPayload = serde_json::from_value(serde_json::json!({
+            "machineId": "m", "endpointId": "e", "auth": {"type": "agent"},
+            "remote": "git.example.test/a/b", "root": "/r", "timeoutSeconds": 60,
+        }))
+        .unwrap();
+        assert_eq!(
+            clone_remote(&payload.remote, &payload.fetch).unwrap(),
+            "https://git.example.test/a/b"
+        );
+    }
+
+    #[tokio::test]
+    async fn discovery_uses_remaining_budget_and_stops_for_either_cancellation() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = fleet_storage_sqlite::Store::open(&dir.path().join("fleet.db"))
+            .await
+            .unwrap();
+        let operations = Arc::new(Operations::new(
+            Arc::new(fleet_storage_sqlite::OperationRepository::new(
+                store.pool().clone(),
+            )),
+            Arc::new(fleet_storage_sqlite::AuditSink::new(store.pool().clone())),
+        ));
+        for cancel_workflow in [false, true] {
+            let mut ids = Vec::new();
+            for _ in 0..2 {
+                ids.push(
+                    operations
+                        .create(
+                            &fleet_auth::LanAllowAllAuthorizer,
+                            fleet_auth::LAN_PRINCIPAL_ID,
+                            &fleet_application::operation::NewOperation {
+                                kind: "noop".to_owned(),
+                                idempotency_key: None,
+                                deadline_at: None,
+                                correlation_id: None,
+                                payload_json: None,
+                                review_token: None,
+                            },
+                        )
+                        .await
+                        .unwrap()
+                        .id,
+                );
+            }
+            let executor = ReadyExecutor::new(
+                Arc::new(fleet_storage_sqlite::MachineRepository::new(
+                    store.pool().clone(),
+                )),
+                operations.clone(),
+                Arc::new(Noop),
+                dir.path().join("ssh"),
+                ExecutionLimiter::new(1),
+            )
+            .with_lab_readiness(
+                fleet_core::SystemClock::now_unix_millis() + 2_000,
+                ids[0].clone(),
+                ids[1].clone(),
+            );
+            let budget = executor.check_lab_readiness().await.unwrap();
+            assert!(budget <= Duration::from_secs(2));
+            assert!(budget > Duration::ZERO);
+            let release = Arc::new(tokio::sync::Notify::new());
+            let worker_release = release.clone();
+            let scan = tokio::spawn(async move { worker_release.notified().await });
+            let cancel_id = ids[usize::from(cancel_workflow)].clone();
+            let cancel_operations = operations.clone();
+            tokio::spawn(async move {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+                cancel_operations
+                    .cancel(
+                        &fleet_auth::LanAllowAllAuthorizer,
+                        fleet_auth::LAN_PRINCIPAL_ID,
+                        &cancel_id,
+                    )
+                    .await
+                    .unwrap();
+            });
+            let result =
+                tokio::time::timeout(Duration::from_secs(1), executor.wait_for_discovery(scan))
+                    .await
+                    .unwrap();
+            assert!(result.unwrap_err().contains("stopped"));
+            release.notify_one();
+            assert!(executor.check_lab_readiness().await.is_err());
+        }
+        let expired = ReadyExecutor::new(
+            Arc::new(fleet_storage_sqlite::MachineRepository::new(
+                store.pool().clone(),
+            )),
+            operations,
+            Arc::new(Noop),
+            dir.path().join("ssh"),
+            ExecutionLimiter::new(1),
+        )
+        .with_lab_readiness(0, "absent".to_owned(), "absent".to_owned());
+        assert!(
+            expired
+                .check_lab_readiness()
+                .await
+                .unwrap_err()
+                .contains("expired")
+        );
     }
 }

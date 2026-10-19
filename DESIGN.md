@@ -101,11 +101,23 @@ word (uppercase); color never carries meaning alone.
 | Lab lease | `ready` | `--fc-ok` | `READY` |
 | Lab lease | `releasing`,`released` | `--fc-muted` | (API word) |
 | Lab lease | `failed`,`cleanup_failed` | `--fc-err` | (API word) |
+| Lab guest fate | `present` | `--fc-ok` | `PRESENT` |
+| Lab guest fate | `kept`,`returned_to_pool` | `--fc-info` | (API word) |
+| Lab guest fate | `quarantined_in_pool` | `--fc-warn` | (API word) |
+| Lab guest fate | `destroyed` | `--fc-muted` | `DESTROYED` |
+| Lab guest fate | `not_allocated`, unknown | `--fc-faint` | (API word) |
 | Operation | `pending`,`running`,`cancelling` | `--fc-info` | (API word) |
 | Operation | `succeeded` | `--fc-ok` | `SUCCEEDED` |
 | Operation | `failed`,`timed_out` | `--fc-err` | (API word) |
 | Operation | `cancelled` | `--fc-muted` | `CANCELLED` |
 | Operation | `blocked_manual_approval` | `--fc-warn` | `BLOCKED APPROVAL` |
+| Action request | `pending` | `--fc-warn` | `PENDING` |
+| Action request | `approved`,`executing` | `--fc-info` | (API word) |
+| Action request | `succeeded` | `--fc-ok` | `SUCCEEDED` |
+| Action request | `failed` | `--fc-err` | `FAILED` |
+| Action request | `denied` | `--fc-muted` | `DENIED` |
+| Action request | `expired` | `--fc-faint` | `EXPIRED` |
+| Action request risk | `approve`,`auto`,`deny` | `--fc-warn`,`--fc-muted`,`--fc-err` | `RISK <API word>` |
 
 ### Connection badges
 
@@ -189,7 +201,7 @@ The old sticky nav + hero is gone. The shell is sidebar + topbar + page.
   name. Groups with mono uppercase labels:
   - (no label) Overview
   - **Infrastructure**: Fleet, Proxmox, Tailnet, Containers
-  - **Work**: Projects, Skills, Lab, Images
+  - **Work**: Projects, Skills, Lab, Images, Registry
   - **Control**: Operations, Audit log, Settings
   Right-aligned mono counts; the Operations count uses the gradient badge
   when running/blocked > 0. Footer: controller readiness dot + version + a

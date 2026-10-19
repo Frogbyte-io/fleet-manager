@@ -18,6 +18,27 @@ services:
       # The entrypoint copies the mounted key here with owner-only permissions.
       # Healthchecks must read the same copy as the service process.
       FLEET_MASTER_KEY_FILE: /tmp/fleet-secrets/master_key
+      # Lab placement policy (FM-715); the defaults are the controller's own.
+      FLEET_LAB_MEMORY_OVERCOMMIT: ${FLEET_LAB_MEMORY_OVERCOMMIT:-1.0}
+      FLEET_LAB_CPU_OVERCOMMIT: ${FLEET_LAB_CPU_OVERCOMMIT:-1.0}
+      FLEET_LAB_CAPACITY_MAX_AGE_SECONDS: ${FLEET_LAB_CAPACITY_MAX_AGE_SECONDS:-300}
+      # Lab artifact retention and size cap (FM-721); the bytes stay on the
+      # data volume under /var/lib/fleet/lab-artifacts.
+      FLEET_LAB_ARTIFACT_RETENTION_SECONDS: ${FLEET_LAB_ARTIFACT_RETENTION_SECONDS:-604800}
+      FLEET_LAB_ARTIFACT_MAX_BYTES: ${FLEET_LAB_ARTIFACT_MAX_BYTES:-67108864}
+      # Opt-in proxy for Packer image builds (#339); empty means off. Never put
+      # credentials in it: the controller refuses a URL that carries them.
+      FLEET_IMAGE_BUILD_PROXY: ${FLEET_IMAGE_BUILD_PROXY:-}
+      FLEET_IMAGE_BUILD_NO_PROXY: ${FLEET_IMAGE_BUILD_NO_PROXY:-}
+      # Opt-in pool of Fleet-assigned build addresses (#337); empty means off.
+      # With it, `proxmox-clone` builds get a static address and the build
+      # guest no longer chooses where the controller connects. All of CIDR,
+      # range and gateway are required together; DNS is optional.
+      FLEET_IMAGE_BUILD_ADDRESS_POOL: ${FLEET_IMAGE_BUILD_ADDRESS_POOL:-}
+      FLEET_IMAGE_BUILD_ADDRESS_POOL_RANGE: ${FLEET_IMAGE_BUILD_ADDRESS_POOL_RANGE:-}
+      FLEET_IMAGE_BUILD_ADDRESS_POOL_GATEWAY: ${FLEET_IMAGE_BUILD_ADDRESS_POOL_GATEWAY:-}
+      FLEET_IMAGE_BUILD_ADDRESS_POOL_DNS: ${FLEET_IMAGE_BUILD_ADDRESS_POOL_DNS:-}
+      FLEET_IMAGE_BUILD_ADDRESS_POOL_REFUSE_ISO: ${FLEET_IMAGE_BUILD_ADDRESS_POOL_REFUSE_ISO:-}
     volumes:
       - fleet-data:/var/lib/fleet
     secrets:

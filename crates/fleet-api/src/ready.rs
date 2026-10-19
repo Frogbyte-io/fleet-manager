@@ -246,6 +246,7 @@ pub async fn start_ready_workflow(
         "auth": serde_json::to_value(&request.auth)
             .map_err(|error| crate::machines::invalid_request(&error.to_string(), correlation_id))?,
         "remote": project.remote,
+        "fetch": project.fetch,
         "root": root,
         "tools": request.tools,
         "skillId": request.skill_id,
@@ -257,7 +258,13 @@ pub async fn start_ready_workflow(
     let idempotency_key = headers
         .get(crate::IDEMPOTENCY_KEY_HEADER)
         .and_then(|value| value.to_str().ok())
-        .map(|key| format!("{}:{key}", principal.id));
+        .map(|key| {
+            fleet_application::idempotency::scoped_key(
+                fleet_application::idempotency::CALLER_KEY,
+                &principal.id,
+                &[key],
+            )
+        });
     let operation = state
         .operations
         .create(

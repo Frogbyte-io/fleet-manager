@@ -2622,8 +2622,27 @@ fn parsing_walks_the_images_forms() {
         .collect();
     assert!(matches!(
         fleetctl::parse(&args).unwrap().command,
-        fleetctl::Command::ImagesPublish { .. }
+        fleetctl::Command::ImagesPublish {
+            allow_insecure_tls: false,
+            ..
+        }
     ));
+    let args: Vec<String> = ["images", "publish", "rcp-1", "--allow-insecure-tls"]
+        .iter()
+        .map(ToString::to_string)
+        .collect();
+    assert!(matches!(
+        fleetctl::parse(&args).unwrap().command,
+        fleetctl::Command::ImagesPublish {
+            allow_insecure_tls: true,
+            ..
+        }
+    ));
+    let args: Vec<String> = ["images", "publish", "rcp-1", "--allow-insecure"]
+        .iter()
+        .map(ToString::to_string)
+        .collect();
+    assert!(fleetctl::parse(&args).is_err());
     let args: Vec<String> = ["images", "versions", "rcp-1"]
         .iter()
         .map(ToString::to_string)
@@ -2672,6 +2691,94 @@ fn parsing_walks_the_promotion_forms() {
 }
 
 #[test]
+fn image_secret_commands_take_names_only_never_values() {
+    let parse = |words: &[&str]| {
+        let args: Vec<String> = words.iter().map(ToString::to_string).collect();
+        fleetctl::parse(&args).map(|parsed| parsed.command)
+    };
+    assert!(matches!(
+        parse(&["images", "secret", "list"]).unwrap(),
+        fleetctl::Command::ImagesSecretList
+    ));
+    assert!(matches!(
+        parse(&["images", "secret", "set", "iso-pass"]).unwrap(),
+        fleetctl::Command::ImagesSecretSet { name } if name == "iso-pass"
+    ));
+    // The optional namespace prefix is folded into the short name.
+    assert!(matches!(
+        parse(&["images", "secret", "rm", "images/iso-pass"]).unwrap(),
+        fleetctl::Command::ImagesSecretRemove { name } if name == "iso-pass"
+    ));
+    // A value is never an argument: a second positional is refused, so a
+    // secret cannot reach argv or shell history.
+    assert!(parse(&["images", "secret", "set", "iso-pass", "hunter2"]).is_err());
+    assert!(parse(&["images", "secret", "set"]).is_err());
+    // The name is a path segment, so free text is refused.
+    for bad in ["../x", "a/b", "proxmox/acct", ".hidden", "a b", ""] {
+        assert!(parse(&["images", "secret", "set", bad]).is_err(), "{bad}");
+        assert!(parse(&["images", "secret", "rm", bad]).is_err(), "{bad}");
+    }
+}
+
+#[test]
+fn a_secret_from_stdin_loses_exactly_one_trailing_newline() {
+    let strip = |text: &str| fleetctl::finish_secret_for_test(text).unwrap();
+    assert_eq!(strip("hunter2\n"), "hunter2");
+    assert_eq!(strip("hunter2\r\n"), "hunter2");
+    assert_eq!(strip("hunter2"), "hunter2");
+    // A PEM's own final newline survives when a second one was added.
+    assert_eq!(strip("-----END KEY-----\n\n"), "-----END KEY-----\n");
+    assert_eq!(strip(" pad \n"), " pad ");
+    assert!(fleetctl::finish_secret_for_test("\n").is_err());
+    assert!(fleetctl::finish_secret_for_test("").is_err());
+}
+
+#[test]
+fn parsing_walks_the_build_address_forms() {
+    let parse = |words: &[&str]| {
+        let args: Vec<String> = words.iter().map(ToString::to_string).collect();
+        fleetctl::parse(&args).map(|parsed| parsed.command)
+    };
+    assert!(matches!(
+        parse(&["images", "addresses"]).unwrap(),
+        fleetctl::Command::ImagesAddresses
+    ));
+    assert!(matches!(
+        parse(&["images", "address-clear", "192.0.2.10"]).unwrap(),
+        fleetctl::Command::ImagesAddressClear { address } if address == "192.0.2.10"
+    ));
+    assert!(parse(&["images", "address-clear"]).is_err());
+    // The path segment is a validated IPv4, never free text.
+    for bad in ["../x", "192.0.2.10/clear", "::1", "nonsense"] {
+        assert!(parse(&["images", "address-clear", bad]).is_err(), "{bad}");
+    }
+    assert!(parse(&["images", "addresses", "extra"]).is_err());
+}
+
+#[test]
+fn text_output_renders_build_addresses() {
+    let page = json!({
+        "items": [{"address": "192.0.2.10", "status": "quarantined",
+                   "operationId": "op-1", "since": 1_800_000_000_000_i64,
+                   "until": 1_800_086_400_000_i64}],
+        "page": {"limit": 1, "nextCursor": null}
+    });
+    let text = fleetctl::render_build_addresses_for_test(&page);
+    assert!(
+        text.contains("192.0.2.10") && text.contains("quarantined"),
+        "{text}"
+    );
+    assert!(text.contains("2027-01-15 08:00:00"), "{text}");
+    assert!(text.contains("2027-01-16 08:00:00"), "{text}");
+    let empty = json!({"items": [], "page": {"limit": 0, "nextCursor": null}});
+    let text = fleetctl::render_build_addresses_for_test(&empty);
+    assert!(
+        text.contains("(no held or quarantined build addresses)"),
+        "{text}"
+    );
+}
+
+#[test]
 fn text_output_renders_lab_templates_and_provisions() {
     let page = json!({
         "items": [
@@ -2687,12 +2794,16 @@ fn text_output_renders_lab_templates_and_provisions() {
     let provisions = json!({
         "items": [
             {"id": "prv-1", "state": "provisioning", "vmid": null,
-             "templateVersionId": "tpl-1@abc"}
+             "guest": "not_allocated", "templateVersionId": "tpl-1@abc"},
+            {"id": "prv-2", "state": "ready", "vmid": 900,
+             "guest": "destroyed", "templateVersionId": "tpl-1@abc"}
         ],
         "page": {"limit": 50, "nextCursor": null}
     });
     let text = fleetctl::render_lab_provisions_for_test(&provisions);
     assert!(text.contains("provisioning"), "{text}");
+    assert!(text.contains("GUEST"), "{text}");
+    assert!(text.contains("destroyed"), "{text}");
 }
 
 #[test]
@@ -2809,20 +2920,119 @@ fn text_output_renders_lab_leases() {
 }
 
 #[test]
-fn parsing_walks_the_lease_forms() {
-    let args: Vec<String> = ["lab", "leases"].iter().map(ToString::to_string).collect();
+fn parsing_walks_the_lease_filters_and_the_idempotency_key() {
+    // Filters: exact purpose, prefix, repeatable/comma states, owner.
+    let args: Vec<String> = [
+        "lab",
+        "leases",
+        "--purpose-prefix",
+        "release-qa:v1.2",
+        "--state",
+        "ready,provisioning",
+        "--state",
+        "requested",
+        "--owner",
+        "ci",
+    ]
+    .iter()
+    .map(ToString::to_string)
+    .collect();
+    assert_eq!(
+        fleetctl::parse(&args).unwrap().command,
+        fleetctl::Command::LabLeases {
+            project: None,
+            purpose: None,
+            purpose_prefix: Some("release-qa:v1.2".to_owned()),
+            states: vec![
+                "ready".to_owned(),
+                "provisioning".to_owned(),
+                "requested".to_owned()
+            ],
+            owner: Some("ci".to_owned()),
+        }
+    );
+    let args: Vec<String> = [
+        "lab",
+        "lease",
+        "tpl-1@abc",
+        "--purpose",
+        "p",
+        "--idempotency-key",
+        "k1",
+    ]
+    .iter()
+    .map(ToString::to_string)
+    .collect();
     assert!(matches!(
         fleetctl::parse(&args).unwrap().command,
-        fleetctl::Command::LabLeases
+        fleetctl::Command::LabLeaseCreate { idempotency_key: Some(key), .. } if key == "k1"
     ));
+}
+
+#[test]
+#[allow(clippy::too_many_lines)]
+fn parsing_walks_the_lease_forms() {
+    let args: Vec<String> = ["lab", "leases"].iter().map(ToString::to_string).collect();
+    assert_eq!(
+        fleetctl::parse(&args).unwrap().command,
+        fleetctl::Command::LabLeases {
+            project: None,
+            purpose: None,
+            purpose_prefix: None,
+            states: Vec::new(),
+            owner: None,
+        }
+    );
+    let args: Vec<String> = ["lab", "leases", "--project", "proj-1"]
+        .iter()
+        .map(ToString::to_string)
+        .collect();
+    assert_eq!(
+        fleetctl::parse(&args).unwrap().command,
+        fleetctl::Command::LabLeases {
+            project: Some("proj-1".to_owned()),
+            purpose: None,
+            purpose_prefix: None,
+            states: Vec::new(),
+            owner: None,
+        }
+    );
     let args: Vec<String> = ["lab", "lease", "tpl-1@abc", "--purpose", "the demo"]
         .iter()
         .map(ToString::to_string)
         .collect();
-    assert!(matches!(
-        fleetctl::parse(&args).unwrap().command,
-        fleetctl::Command::LabLeaseCreate { .. }
-    ));
+    assert!(
+        matches!(
+            fleetctl::parse(&args).unwrap().command,
+            fleetctl::Command::LabLeaseCreate { project: None, .. }
+        ),
+        "the no-project lease create must parse without one"
+    );
+    let args: Vec<String> = [
+        "lab",
+        "lease",
+        "tpl-1@abc",
+        "--purpose",
+        "the demo",
+        "--project",
+        "proj-1",
+    ]
+    .iter()
+    .map(ToString::to_string)
+    .collect();
+    match fleetctl::parse(&args).unwrap().command {
+        fleetctl::Command::LabLeaseCreate {
+            version_id,
+            purpose,
+            project,
+            ..
+        } => {
+            assert_eq!(version_id, "tpl-1@abc");
+            assert_eq!(purpose, "the demo");
+            assert_eq!(project, Some("proj-1".to_owned()));
+        }
+        other => panic!("{other:?}"),
+    }
     let args: Vec<String> = ["lab", "release", "lease-1", "--keep"]
         .iter()
         .map(ToString::to_string)
@@ -2861,7 +3071,1294 @@ fn parsing_walks_the_lease_forms() {
         fleetctl::parse(&provision).unwrap().command,
         fleetctl::Command::LabLeaseProvision {
             lease_id: "lease-1".to_owned(),
-            account_id: "pve-1".to_owned(),
+            account_id: Some("pve-1".to_owned()),
         }
     );
+}
+
+#[test]
+fn provision_lease_without_an_account_leaves_it_to_placement() {
+    // FM-715: without an account, placement selects one.
+    let placed = ["lab", "provision-lease", "lease-1"]
+        .iter()
+        .map(ToString::to_string)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        fleetctl::parse(&placed).unwrap().command,
+        fleetctl::Command::LabLeaseProvision {
+            lease_id: "lease-1".to_owned(),
+            account_id: None,
+        }
+    );
+}
+
+#[tokio::test]
+#[allow(clippy::too_many_lines)]
+async fn image_build_history_round_trips_through_the_real_api_and_json_cli() {
+    use fleet_application::images::{NewRecipe, RecipePort as _};
+    use fleet_application::operation::OperationPort as _;
+    use fleet_core::{
+        ImageBuildRecord, ImageBuildTemplate, RecipeContent, RecipeSource, RecipeVersion,
+    };
+    use fleet_storage_sqlite::{OperationRepository, RecipeRepository, Store};
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::open(&dir.path().join("fleet.db")).await.unwrap();
+    let recipes = RecipeRepository::new(store.pool().clone());
+    let draft = recipes
+        .create(
+            &NewRecipe {
+                content: RecipeContent {
+                    name: "image".to_owned(),
+                    description: String::new(),
+                    node: "pve".to_owned(),
+                    storage_pool: Some("local-lvm".to_owned()),
+                    source: RecipeSource::Clone,
+                    content: "{}".to_owned(),
+                },
+            },
+            1000,
+        )
+        .await
+        .unwrap();
+    let version = RecipeVersion {
+        id: "image@digest".to_owned(),
+        recipe_id: draft.id.clone(),
+        name: "image".to_owned(),
+        description: String::new(),
+        content_digest: draft.content.content_digest().unwrap(),
+        content: "{}".to_owned(),
+        source: RecipeSource::Clone,
+        node: "pve".to_owned(),
+        storage_pool: "local-lvm".to_owned(),
+        published_at: 1001,
+        promoted_at: None,
+        promoted_by: None,
+        promoted_build_id: None,
+        allow_insecure_tls: false,
+    };
+    recipes.publish(&draft.id, &version).await.unwrap();
+    let operations = OperationRepository::new(store.pool().clone());
+    // A deliberately failed operation proves promotion reads first-class
+    // evidence, rather than inferring a result from the generic operation.
+    let operation = operations.create("image.build", None, None, None, Some(r#"{"versionId":"image@digest","secretVars":[{"name":"token","reference":"secret-reference"}]}"#)).await.unwrap();
+    operations
+        .transition(&operation.id, "running")
+        .await
+        .unwrap();
+    let mut build = ImageBuildRecord {
+        id: operation.id.clone(),
+        operation_id: operation.id,
+        recipe_id: draft.id,
+        version_id: version.id,
+        content_digest: version.content_digest,
+        asset_digests: vec!["asset-digest".to_owned()],
+        packer_version: None,
+        proxmox_plugin_version: None,
+        account_id: Some("account-1".to_owned()),
+        node: "pve".to_owned(),
+        storage_pool: "local-lvm".to_owned(),
+        started_at: 1002,
+        ended_at: None,
+        outcome: "running".to_owned(),
+        reason: None,
+        template: None,
+    };
+    recipes.start_build(&build).await.unwrap();
+    build.packer_version = Some("1.16.1".to_owned());
+    build.proxmox_plugin_version = Some("1.2.4".to_owned());
+    build.outcome = "succeeded".to_owned();
+    build.ended_at = Some(1003);
+    build.template = Some(ImageBuildTemplate {
+        node: "pve".to_owned(),
+        vmid: 120,
+        name: "image".to_owned(),
+    });
+    recipes.finish_build(&build).await.unwrap();
+    operations
+        .complete(
+            &build.operation_id,
+            "failed",
+            None,
+            Some(r#"{"reason":"test"}"#),
+        )
+        .await
+        .unwrap();
+
+    let settings = fleet_controller::Settings {
+        listen: "127.0.0.1:0".parse().unwrap(),
+        web_dist: dir.path().to_path_buf(),
+        artifacts_dir: None,
+        tailscale_serve_listen: None,
+    };
+    let images = std::sync::Arc::new(fleet_application::images::Images::new(
+        std::sync::Arc::new(recipes),
+        std::sync::Arc::new(fleet_storage_sqlite::AuditSink::new(store.pool().clone())),
+    ));
+    let router = fleet_controller::build_router(
+        &settings,
+        Some(store.pool().clone()),
+        None,
+        None,
+        None,
+        None,
+        None,
+        Some(&images),
+        None,
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        axum::serve(
+            listener,
+            router.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+        )
+        .await
+        .unwrap();
+    });
+    let run = |words: Vec<String>| async move {
+        let mut args = vec![
+            "--url".to_owned(),
+            format!("http://{address}"),
+            "--output".to_owned(),
+            "json".to_owned(),
+            "images".to_owned(),
+        ];
+        args.extend(words);
+        let invocation = fleetctl::parse(&args).unwrap();
+        tokio::task::spawn_blocking(move || fleetctl::run(&invocation))
+            .await
+            .unwrap()
+    };
+    let page: serde_json::Value = serde_json::from_str(
+        &run(vec![
+            "builds".to_owned(),
+            "--limit".to_owned(),
+            "1".to_owned(),
+        ])
+        .await
+        .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(page["page"]["limit"], 1);
+    assert_eq!(page["items"].as_array().unwrap().len(), 1);
+    assert!(page["page"]["nextCursor"].is_null());
+    assert!(
+        run(vec![
+            "builds".to_owned(),
+            "--cursor".to_owned(),
+            "unknown".to_owned()
+        ])
+        .await
+        .is_err()
+    );
+    let list: serde_json::Value = serde_json::from_str(
+        &run(vec![
+            "builds".to_owned(),
+            "--version".to_owned(),
+            build.version_id.clone(),
+        ])
+        .await
+        .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(list["items"][0]["id"], build.id);
+    let shown = run(vec!["build-show".to_owned(), build.id.clone()])
+        .await
+        .unwrap();
+    let shown: serde_json::Value = serde_json::from_str(&shown).unwrap();
+    assert_eq!(shown["template"]["vmid"], 120);
+    assert_eq!(shown["contentDigest"], build.content_digest);
+    let promoted: serde_json::Value = serde_json::from_str(
+        &run(vec!["promote".to_owned(), build.version_id.clone()])
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    assert!(promoted["promotedAt"].is_number());
+    let empty: serde_json::Value = serde_json::from_str(
+        &run(vec![
+            "builds".to_owned(),
+            "--version".to_owned(),
+            "other@version".to_owned(),
+        ])
+        .await
+        .unwrap(),
+    )
+    .unwrap();
+    assert!(empty["items"].as_array().unwrap().is_empty());
+    assert!(
+        run(vec!["build-show".to_owned(), "unknown".to_owned()])
+            .await
+            .unwrap_err()
+            .message
+            .contains("not_found")
+    );
+    for value in [&list, &shown] {
+        let public = value.to_string();
+        assert!(!public.contains("secretVars"));
+        assert!(!public.contains("secret-reference"));
+        assert!(!public.contains("var-file"));
+    }
+    server.abort();
+}
+
+#[test]
+fn image_build_history_commands_refuse_missing_and_extra_arguments() {
+    for words in [
+        vec!["images", "build", "version", "--account", "--wait"],
+        vec!["images", "build", "version", "--account", "--timeout", "10"],
+        vec!["images", "build", "version", "--account", ""],
+        vec!["images", "builds", "--version"],
+        vec!["images", "build-show"],
+        vec!["images", "build-show", "one", "two"],
+        vec!["images", "builds", "--unknown", "x"],
+    ] {
+        let args: Vec<String> = words.into_iter().map(str::to_owned).collect();
+        assert!(fleetctl::parse(&args).is_err());
+    }
+}
+
+fn lab_parse(words: &[&str]) -> Result<fleetctl::Command, String> {
+    let args: Vec<String> = words.iter().map(ToString::to_string).collect();
+    fleetctl::parse(&args)
+        .map(|invocation| invocation.command)
+        .map_err(|error| error.to_string())
+}
+
+#[test]
+fn the_one_command_lab_flow_parses() {
+    assert_eq!(
+        lab_parse(&[
+            "lab",
+            "create",
+            "tv-1",
+            "--purpose",
+            "flaky test",
+            "--project",
+            "p1",
+            "--wait",
+            "--timeout",
+            "600",
+        ])
+        .unwrap(),
+        fleetctl::Command::LabNew {
+            version_id: "tv-1".to_owned(),
+            purpose: "flaky test".to_owned(),
+            project: Some("p1".to_owned()),
+            account: None,
+            idempotency_key: None,
+            wait: true,
+            timeout: Some(600),
+        }
+    );
+    assert!(
+        lab_parse(&["lab", "create", "tv-1"])
+            .unwrap_err()
+            .contains("--purpose")
+    );
+    assert_eq!(
+        lab_parse(&["lab", "status", "lease-1"]).unwrap(),
+        fleetctl::Command::LabStatus {
+            lease_id: "lease-1".to_owned()
+        }
+    );
+    assert_eq!(
+        lab_parse(&[
+            "lab",
+            "exec",
+            "lease-1",
+            "--timeout",
+            "120",
+            "--wait",
+            "--",
+            "echo",
+            "a b",
+            "it's",
+        ])
+        .unwrap(),
+        fleetctl::Command::LabExec {
+            lease_id: "lease-1".to_owned(),
+            script: "echo 'a b' 'it'\\''s'".to_owned(),
+            timeout: Some(120),
+            wait: true,
+            session: None,
+        }
+    );
+    assert!(
+        lab_parse(&["lab", "exec", "lease-1"])
+            .unwrap_err()
+            .contains("`--`")
+    );
+    assert_eq!(
+        lab_parse(&[
+            "lab",
+            "cleanup-retry",
+            "lease-1",
+            "--wait",
+            "--timeout",
+            "300"
+        ])
+        .unwrap(),
+        fleetctl::Command::LabCleanupRetry {
+            lease_id: "lease-1".to_owned(),
+            wait: true,
+            timeout: Some(300),
+        }
+    );
+    assert!(lab_parse(&["lab", "cleanup-retry"]).is_err());
+    assert!(lab_parse(&["lab", "cleanup-retry", "lease-1", "--keep"]).is_err());
+    assert!(matches!(
+        lab_parse(&["lab", "destroy", "lease-1", "--keep", "--wait"]).unwrap(),
+        fleetctl::Command::LabDestroy {
+            keep: true,
+            wait: true,
+            ..
+        }
+    ));
+}
+
+#[test]
+fn the_template_form_of_lab_create_still_parses_and_has_a_new_name() {
+    let template = [
+        "--name",
+        "t",
+        "--description",
+        "d",
+        "--image-version",
+        "iv",
+        "--cores",
+        "2",
+        "--memory",
+        "2048",
+        "--disk",
+        "20",
+        "--probe",
+        "guest_agent",
+        "--readiness-deadline",
+        "300",
+        "--ttl",
+        "3600",
+        "--cleanup",
+        "destroy",
+    ];
+    for verb in ["create", "template-create"] {
+        let mut words = vec!["lab", verb];
+        words.extend(template);
+        assert!(
+            matches!(
+                lab_parse(&words).unwrap(),
+                fleetctl::Command::LabCreate { .. }
+            ),
+            "{verb}"
+        );
+    }
+}
+
+#[test]
+fn lab_exec_script_sends_the_one_word_untouched() {
+    // A PowerShell script: POSIX quoting would turn it into a string literal.
+    let script = "Write-Output \"hi $env:USERNAME\"; exit 3";
+    assert_eq!(
+        lab_parse(&["lab", "exec", "lease-1", "--script", "--wait", "--", script]).unwrap(),
+        fleetctl::Command::LabExec {
+            lease_id: "lease-1".to_owned(),
+            script: script.to_owned(),
+            timeout: None,
+            wait: true,
+            session: None,
+        }
+    );
+    // The interactive session option rides through to both exec forms.
+    assert!(matches!(
+        lab_parse(&["lab", "exec", "lease-1", "--session", "interactive", "--wait", "--", "notepad"]).unwrap(),
+        fleetctl::Command::LabExec { session: Some(session), wait: true, .. } if session == "interactive"
+    ));
+    assert!(matches!(
+        lab_parse(&["lab", "exec", "lease-1", "--detach", "--session", "interactive", "--", "notepad"]).unwrap(),
+        fleetctl::Command::LabExecDetach { session: Some(session), .. } if session == "interactive"
+    ));
+    assert!(lab_parse(&["lab", "exec", "lease-1", "--session"]).is_err());
+    assert!(
+        lab_parse(&["lab", "exec", "lease-1", "--session", "desktop", "--", "x"])
+            .unwrap_err()
+            .contains("service or interactive")
+    );
+    assert!(lab_parse(&["lab", "exec", "lease-1", "--session", "service", "--", "x"]).is_ok());
+    assert!(matches!(
+        lab_parse(&["lab", "exec", "lease-1", "--detach", "--script", "--", script]).unwrap(),
+        fleetctl::Command::LabExecDetach { script: sent, .. } if sent == script
+    ));
+    // Exactly one word: more would be ambiguous (joined how?).
+    assert!(
+        lab_parse(&["lab", "exec", "lease-1", "--script", "--", "a", "b"])
+            .unwrap_err()
+            .contains("exactly one word")
+    );
+}
+
+#[test]
+fn shell_join_quotes_only_what_needs_it() {
+    assert_eq!(fleetctl::shell_join(&["make", "test"]), "make test");
+    assert_eq!(
+        fleetctl::shell_join(&["printf", "%s\n", "$HOME"]),
+        "printf '%s\n' '$HOME'"
+    );
+    assert_eq!(fleetctl::shell_join(&[""]), "''");
+}
+
+/// A stub controller for `lab create`: the trusted-account lookup spans two
+/// pages, and every request is recorded so a test can prove what was (and
+/// was not) sent.
+fn lab_create_stub(
+    pages: [serde_json::Value; 2],
+) -> (
+    tokio::runtime::Runtime,
+    String,
+    std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+) {
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+    let recorded = seen.clone();
+    let address = runtime.block_on(async move {
+        let handler = move |request: axum::extract::Request| {
+            let recorded = recorded.clone();
+            let pages = pages.clone();
+            async move {
+                let method = request.method().clone();
+                let path = request.uri().path().to_owned();
+                let query = request.uri().query().unwrap_or_default().to_owned();
+                let body = axum::body::to_bytes(request.into_body(), 1 << 20)
+                    .await
+                    .unwrap();
+                recorded.lock().unwrap().push(format!(
+                    "{method} {path}?{query} {}",
+                    String::from_utf8_lossy(&body)
+                ));
+                let answer = match (method.as_str(), path.as_str()) {
+                    ("GET", "/api/v1/proxmox/accounts") if query.contains("cursor=c2") => {
+                        pages[1].clone()
+                    }
+                    ("GET", "/api/v1/proxmox/accounts") => pages[0].clone(),
+                    ("POST", "/api/v1/lab/leases") => json!({"data": {"id": "lease-1"}}),
+                    ("POST", "/api/v1/lab/leases/lease-1/provision") => {
+                        json!({"data": {"id": "prov-1"}})
+                    }
+                    ("GET", "/api/v1/lab/leases/lease-1") => {
+                        json!({"data": {"id": "lease-1", "state": "provisioning"}})
+                    }
+                    _ => json!({"code": "not_found", "message": path}),
+                };
+                axum::Json(answer)
+            }
+        };
+        let router = axum::Router::new().fallback(handler);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, router).await;
+        });
+        address
+    });
+    (runtime, format!("http://{address}"), seen)
+}
+
+fn lab_create(base_url: &str) -> Result<String, String> {
+    let args: Vec<String> = [
+        "--url",
+        base_url,
+        "--output",
+        "json",
+        "lab",
+        "create",
+        "tv-1",
+        "--purpose",
+        "demo",
+    ]
+    .iter()
+    .map(ToString::to_string)
+    .collect();
+    let invocation = fleetctl::parse(&args).unwrap();
+    fleetctl::run(&invocation).map_err(|error| error.message)
+}
+
+#[test]
+fn lab_create_finds_the_trusted_account_on_a_later_page() {
+    let (_runtime, base_url, seen) = lab_create_stub([
+        json!({"items": [{"id": "untrusted", "fingerprint": null}],
+               "page": {"nextCursor": "c2"}}),
+        json!({"items": [{"id": "pve-2", "fingerprint": "AA:BB"}],
+               "page": {"nextCursor": null}}),
+    ]);
+    lab_create(&base_url).unwrap();
+    let seen = seen.lock().unwrap().clone();
+    assert!(
+        seen[0].starts_with("GET /api/v1/proxmox/accounts? "),
+        "{seen:?}"
+    );
+    assert!(seen[1].contains("cursor=c2"), "{seen:?}");
+    assert!(seen[2].starts_with("POST /api/v1/lab/leases? "), "{seen:?}");
+    assert!(
+        seen[3].starts_with("POST /api/v1/lab/leases/lease-1/provision")
+            && seen[3].contains(r#""accountId":"pve-2""#),
+        "{seen:?}"
+    );
+}
+
+#[test]
+fn lab_create_refuses_an_ambiguous_account_before_creating_a_lease() {
+    // One trusted account per page: two in total, so the CLI must refuse,
+    // and must do so before any lease exists.
+    let (_runtime, base_url, seen) = lab_create_stub([
+        json!({"items": [{"id": "pve-1", "fingerprint": "AA:BB"}],
+               "page": {"nextCursor": "c2"}}),
+        json!({"items": [{"id": "pve-2", "fingerprint": "CC:DD"}],
+               "page": {"nextCursor": null}}),
+    ]);
+    let error = lab_create(&base_url).unwrap_err();
+    assert!(error.contains("2 trusted Proxmox accounts"), "{error}");
+    let seen = seen.lock().unwrap().clone();
+    assert_eq!(seen.len(), 2, "{seen:?}");
+    assert!(
+        seen.iter()
+            .all(|line| line.starts_with("GET /api/v1/proxmox/accounts"))
+    );
+
+    // No trusted account at all: refused, still with no lease request.
+    let (_runtime, base_url, seen) = lab_create_stub([
+        json!({"items": [], "page": {"nextCursor": null}}),
+        json!({"items": [], "page": {"nextCursor": null}}),
+    ]);
+    let error = lab_create(&base_url).unwrap_err();
+    assert!(error.contains("no trusted Proxmox account"), "{error}");
+    assert!(
+        !seen
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|line| line.starts_with("POST")),
+    );
+}
+
+/// A controller that accepts a cleanup re-arm, finishes its operation, and
+/// then reports the lease in `final_state`.
+fn cleanup_retry_stub(
+    final_state: &'static str,
+) -> (
+    tokio::runtime::Runtime,
+    String,
+    std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+) {
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+    let recorded = seen.clone();
+    let address = runtime.block_on(async move {
+        let handler = move |request: axum::extract::Request| {
+            let recorded = recorded.clone();
+            async move {
+                let method = request.method().clone();
+                let path = request.uri().path().to_owned();
+                recorded.lock().unwrap().push(format!("{method} {path}"));
+                let answer = match (method.as_str(), path.as_str()) {
+                    ("POST", "/api/v1/lab/leases/lease-1/cleanup/retry") => {
+                        json!({"data": {"id": "op-1", "kind": "lab.cleanup", "state": "pending"}})
+                    }
+                    ("GET", "/api/v1/operations/op-1") => {
+                        json!({"data": {"id": "op-1", "kind": "lab.cleanup", "state": "succeeded"}})
+                    }
+                    ("GET", "/api/v1/lab/leases/lease-1") => {
+                        json!({"data": {"id": "lease-1", "state": final_state}})
+                    }
+                    _ => json!({"code": "not_found", "message": path}),
+                };
+                axum::Json(answer)
+            }
+        };
+        let router = axum::Router::new().fallback(handler);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, router).await;
+        });
+        address
+    });
+    (runtime, format!("http://{address}"), seen)
+}
+
+#[test]
+fn lab_cleanup_retry_wait_follows_the_attempt_and_reports_the_lease() {
+    for (final_state, exit) in [("released", 0), ("releasing", 1)] {
+        let (_runtime, base_url, seen) = cleanup_retry_stub(final_state);
+        let args: Vec<String> = [
+            "--url",
+            &base_url,
+            "--output",
+            "json",
+            "lab",
+            "cleanup-retry",
+            "lease-1",
+            "--wait",
+        ]
+        .iter()
+        .map(ToString::to_string)
+        .collect();
+        let invocation = fleetctl::parse(&args).unwrap();
+        let (output, code) = fleetctl::run_with_exit(&invocation).unwrap();
+        assert_eq!(code, exit, "{final_state}: {output}");
+        let lease: serde_json::Value = serde_json::from_str(&output).unwrap();
+        assert_eq!(lease["state"], final_state);
+        assert_eq!(
+            seen.lock().unwrap().clone(),
+            [
+                "POST /api/v1/lab/leases/lease-1/cleanup/retry",
+                "GET /api/v1/operations/op-1",
+                "GET /api/v1/lab/leases/lease-1",
+            ]
+        );
+    }
+}
+
+#[test]
+#[allow(clippy::too_many_lines)]
+fn the_lab_artifact_commands_parse() {
+    assert_eq!(
+        lab_parse(&["lab", "artifacts"]).unwrap(),
+        fleetctl::Command::LabArtifacts {
+            lease: None,
+            project: None,
+            cursor: None,
+            limit: None,
+        }
+    );
+    assert_eq!(
+        lab_parse(&[
+            "lab",
+            "artifacts",
+            "--project",
+            "p1",
+            "--lease",
+            "l1",
+            "--limit",
+            "5",
+            "--cursor",
+            "a9",
+        ])
+        .unwrap(),
+        fleetctl::Command::LabArtifacts {
+            lease: Some("l1".to_owned()),
+            project: Some("p1".to_owned()),
+            cursor: Some("a9".to_owned()),
+            limit: Some(5),
+        }
+    );
+    assert_eq!(
+        lab_parse(&[
+            "lab",
+            "collect",
+            "lease-1",
+            "/var/log/syslog",
+            "/tmp/report.xml",
+            "--wait",
+            "--timeout",
+            "120",
+        ])
+        .unwrap(),
+        fleetctl::Command::LabCollect {
+            lease_id: "lease-1".to_owned(),
+            paths: vec!["/var/log/syslog".to_owned(), "/tmp/report.xml".to_owned()],
+            wait: true,
+            timeout: Some(120),
+        }
+    );
+    assert_eq!(
+        lab_parse(&[
+            "lab",
+            "put",
+            "lease-1",
+            "./app.deb",
+            "/opt/qa/app.deb",
+            "--overwrite",
+            "--wait",
+            "--timeout",
+            "900",
+        ])
+        .unwrap(),
+        fleetctl::Command::LabPut {
+            lease_id: "lease-1".to_owned(),
+            local_path: "./app.deb".to_owned(),
+            guest_path: "/opt/qa/app.deb".to_owned(),
+            overwrite: true,
+            wait: true,
+            timeout: Some(900),
+        }
+    );
+    assert_eq!(
+        lab_parse(&["lab", "put", "lease-1", "a", "/b"]).unwrap(),
+        fleetctl::Command::LabPut {
+            lease_id: "lease-1".to_owned(),
+            local_path: "a".to_owned(),
+            guest_path: "/b".to_owned(),
+            overwrite: false,
+            wait: false,
+            timeout: None,
+        }
+    );
+    assert_eq!(
+        lab_parse(&["lab", "artifact-get", "a1", "--out", "out.log"]).unwrap(),
+        fleetctl::Command::LabArtifactGet {
+            artifact_id: "a1".to_owned(),
+            out: "out.log".to_owned(),
+        }
+    );
+    for refused in [
+        &["lab", "collect", "lease-1"][..],
+        &["lab", "collect", "lease-1", "/x", "--force"],
+        &["lab", "put", "lease-1", "only-local"],
+        &["lab", "put", "lease-1", "a", "/b", "extra"],
+        &["lab", "put", "lease-1", "a", "/b", "--force"],
+        &["lab", "put", "--overwrite", "a", "/b"],
+        &["lab", "artifacts", "--lease"],
+        &["lab", "artifacts", "--machine", "m1"],
+        &["lab", "artifacts", "--lease", "--project", "p1"],
+        &["lab", "artifacts", "--limit", "many"],
+        &["lab", "artifact-get", "a1"],
+        &["lab", "artifact-get", "a1", "--out"],
+    ] {
+        assert!(lab_parse(refused).is_err(), "{refused:?}");
+    }
+}
+
+/// FM-721 end to end: the artifact routes over a real controller router
+/// and the CLI's verified download.
+#[test]
+#[allow(clippy::too_many_lines)]
+fn fleetctl_lists_and_downloads_lab_artifacts_with_digest_verification() {
+    use fleet_application::lab::{
+        LabTemplatePort, LabTemplateVersion, LeasePort, NewLabTemplate, NewLease,
+    };
+
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let data = dir.path().to_path_buf();
+    let (addr, lease_id, artifact_id, blob) = runtime.block_on(async {
+        let dist = tempfile::tempdir().unwrap();
+        let store = fleet_storage_sqlite::Store::open(&data.join("fleet.db"))
+            .await
+            .unwrap();
+        let pool = store.pool().clone();
+        let labs = std::sync::Arc::new(fleet_storage_sqlite::LabRepository::new(pool.clone()));
+        let leases = std::sync::Arc::new(fleet_storage_sqlite::LeaseRepository::new(pool.clone()));
+        let content = fleet_core::LabTemplateContent {
+            name: "lab-base".to_owned(),
+            description: String::new(),
+            image_version_id: "image-version-1".to_owned(),
+            cores: 2,
+            memory_mib: 2048,
+            disk_gib: 20,
+            bootstrap_project_id: None,
+            readiness_probe: fleet_core::ReadinessProbe::GuestAgent,
+            readiness_command: None,
+            ssh_user: "root".to_owned(),
+            ssh_port: 22,
+            ssh_trust_mode: "tofu".to_owned(),
+            ssh_fingerprint: None,
+            readiness_deadline_seconds: 0,
+            ttl_seconds: 3_600,
+            cleanup: fleet_core::CleanupStrategy::Destroy,
+            audio: None,
+            guest_os: fleet_core::GuestOs::default(),
+            interactive_user: None,
+        };
+        let template = LabTemplatePort::create(
+            labs.as_ref(),
+            &NewLabTemplate {
+                content: content.clone(),
+            },
+            1,
+        )
+        .await
+        .unwrap();
+        let version = labs
+            .publish(
+                &template.id,
+                &LabTemplateVersion {
+                    id: "template-version-1".to_owned(),
+                    template_id: template.id.clone(),
+                    name: content.name.clone(),
+                    content,
+                    image_digest: "sha256:abc".to_owned(),
+                    published_by: "tester".to_owned(),
+                    published_at: 1,
+                },
+            )
+            .await
+            .unwrap();
+        // A lease that never became ready: collection is refused.
+        let lease = leases
+            .create(
+                &NewLease {
+                    template_version_id: version.id.clone(),
+                    purpose: "artifacts".to_owned(),
+                    project_id: None,
+                    cleanup: fleet_core::CleanupStrategy::Destroy,
+                    ttl_seconds: 3_600,
+                },
+                "tester",
+                fleet_core::SystemClock::now_unix_millis(),
+            )
+            .await
+            .unwrap();
+        let blobs = std::sync::Arc::new(
+            fleet_controller::lab_artifacts_store::FsArtifactStore::open(
+                &data.join("lab-artifacts"),
+                1024 * 1024,
+            )
+            .unwrap(),
+        );
+        let artifacts = std::sync::Arc::new(fleet_application::lab_artifacts::LabArtifacts::new(
+            std::sync::Arc::new(fleet_storage_sqlite::LabArtifactRepository::new(
+                pool.clone(),
+            )),
+            blobs.clone(),
+            leases.clone(),
+            labs.clone(),
+            labs.clone(),
+            std::sync::Arc::new(fleet_storage_sqlite::AuditSink::new(pool.clone())),
+            fleet_application::lab_artifacts::ArtifactPolicy::default(),
+        ));
+        let artifact = artifacts
+            .record_exec_log(
+                &fleet_auth::LanAllowAllAuthorizer,
+                &fleet_application::authz::ActingPrincipal {
+                    id: "anonymous-lan-admin".to_owned(),
+                },
+                &lease.id,
+                "op-1",
+                "# lab exec op-1\n--- stdout ---\nhello\n",
+                fleet_core::SystemClock::now_unix_millis(),
+            )
+            .await
+            .unwrap();
+        let lab = std::sync::Arc::new(
+            fleet_application::lab::Lab::new(
+                labs.clone(),
+                labs.clone(),
+                leases.clone(),
+                std::sync::Arc::new(
+                    fleet_controller::proxmox_store::RecipeImagePinValidator::new(
+                        std::sync::Arc::new(fleet_storage_sqlite::RecipeRepository::new(
+                            pool.clone(),
+                        )),
+                    ),
+                ),
+                std::sync::Arc::new(fleet_storage_sqlite::ProjectRepository::new(pool.clone())),
+                std::sync::Arc::new(fleet_storage_sqlite::AuditSink::new(pool.clone())),
+            )
+            .with_artifacts(artifacts),
+        );
+        let settings = fleet_controller::Settings {
+            listen: "127.0.0.1:0".parse().unwrap(),
+            web_dist: dist.path().to_path_buf(),
+            artifacts_dir: None,
+            tailscale_serve_listen: None,
+        };
+        let router = fleet_controller::build_router(
+            &settings,
+            Some(pool.clone()),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some(&lab),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = axum::serve(
+            listener,
+            router.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+        );
+        // The server task owns the web dist and the store for as long as it
+        // serves; the runtime ends with the test.
+        tokio::spawn(async move {
+            let _keep = (dist, store);
+            let _ = server.await;
+        });
+        (
+            address,
+            lease.id,
+            artifact.id,
+            blobs.root().join(&artifact.location),
+        )
+    });
+    let url = format!("http://{addr}");
+    let run = |words: &[&str]| {
+        let mut args = vec!["--url", url.as_str(), "--output", "json"];
+        args.extend_from_slice(words);
+        let args: Vec<String> = args.iter().map(ToString::to_string).collect();
+        let invocation = fleetctl::parse(&args).unwrap();
+        std::thread::spawn(move || fleetctl::run(&invocation).map_err(|error| error.to_string()))
+            .join()
+            .unwrap()
+    };
+
+    let listed: serde_json::Value =
+        serde_json::from_str(&run(&["lab", "artifacts", "--lease", &lease_id]).unwrap()).unwrap();
+    assert_eq!(listed["items"][0]["id"], artifact_id.as_str());
+    assert_eq!(listed["items"][0]["kind"], "exec-log");
+    let sha256 = listed["items"][0]["sha256"].as_str().unwrap().to_owned();
+    let none: serde_json::Value =
+        serde_json::from_str(&run(&["lab", "artifacts", "--project", "nope"]).unwrap()).unwrap();
+    assert_eq!(none["items"].as_array().unwrap().len(), 0);
+
+    let out = dir.path().join("downloaded.log");
+    let got: serde_json::Value = serde_json::from_str(
+        &run(&[
+            "lab",
+            "artifact-get",
+            &artifact_id,
+            "--out",
+            out.to_str().unwrap(),
+        ])
+        .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(got["verified"], true);
+    assert_eq!(got["sha256"], sha256.as_str());
+    assert_eq!(
+        std::fs::read_to_string(&out).unwrap(),
+        "# lab exec op-1\n--- stdout ---\nhello\n"
+    );
+
+    // The raw route carries the digest headers.
+    let response =
+        reqwest::blocking::get(format!("{url}/api/v1/lab/artifacts/{artifact_id}/content"))
+            .unwrap();
+    assert_eq!(response.status(), 200);
+    assert_eq!(
+        response.headers()["etag"].to_str().unwrap(),
+        format!("\"sha256:{sha256}\"")
+    );
+    assert!(
+        response.headers()["repr-digest"]
+            .to_str()
+            .unwrap()
+            .starts_with("sha-256=:")
+    );
+
+    // A tampered blob is refused by the controller, and nothing is written.
+    std::fs::write(&blob, "# lab exec op-1\n--- stdout ---\nHELLO\n").unwrap();
+    let tampered = dir.path().join("tampered.log");
+    let refused = run(&[
+        "lab",
+        "artifact-get",
+        &artifact_id,
+        "--out",
+        tampered.to_str().unwrap(),
+    ])
+    .unwrap_err();
+    assert!(refused.contains("409"), "{refused}");
+    assert!(!tampered.exists());
+
+    // Collection needs a ready lease.
+    let refused = run(&["lab", "collect", &lease_id, "/var/log/syslog"]).unwrap_err();
+    assert!(refused.contains("400"), "{refused}");
+    let detail: serde_json::Value =
+        serde_json::from_str(&run(&["lab", "status", &lease_id]).unwrap()).unwrap();
+    // The detail carries the field, empty while nothing failed.
+    assert!(detail.get("collectionFailure").is_some(), "{detail}");
+    assert!(detail["collectionFailure"].is_null());
+    // `lab status` prints the reservation too (FM-715): null when none.
+    assert!(detail.get("reservation").is_some(), "{detail}");
+    assert!(detail["reservation"].is_null());
+}
+
+#[test]
+fn text_output_renders_lab_artifacts() {
+    let page = json!({
+        "items": [{
+            "id": "a1", "kind": "file", "sizeBytes": 42,
+            "sha256": "9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08",
+            "name": "/var/log/syslog"
+        }],
+        "page": { "nextCursor": "a1", "limit": 1 }
+    });
+    let text = fleetctl::render_lab_artifacts(&page);
+    assert!(text.contains("/var/log/syslog"), "{text}");
+    assert!(text.contains("9f86d081884c7d65"), "{text}");
+    assert!(text.contains("42"), "{text}");
+    assert!(text.contains("--cursor a1"), "{text}");
+    assert!(
+        fleetctl::render_lab_artifacts(&json!({ "items": [], "page": {} }))
+            .contains("(no Lab artifacts)")
+    );
+}
+
+/// #393: `lab put` streams the file with its digest and size, sends the
+/// guest path and overwrite flag as query parameters, and surfaces the
+/// controller's refusals. A tiny recording server stands in for the
+/// controller.
+#[test]
+#[allow(clippy::too_many_lines)]
+fn fleetctl_lab_put_streams_the_file_with_its_digest() {
+    use std::io::{Read as _, Write as _};
+
+    // One request per connection: read the head, then the body by its
+    // Content-Length, answer, and report both to the test.
+    fn serve_once(
+        status_line: &'static str,
+        answer: &'static str,
+    ) -> (String, std::sync::mpsc::Receiver<(String, Vec<u8>)>) {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let (sender, receiver) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut raw = Vec::new();
+            let mut chunk = [0_u8; 8192];
+            let head_end = loop {
+                let read = stream.read(&mut chunk).unwrap();
+                raw.extend_from_slice(&chunk[..read]);
+                if let Some(at) = raw.windows(4).position(|window| window == b"\r\n\r\n") {
+                    break at + 4;
+                }
+            };
+            let head = String::from_utf8_lossy(&raw[..head_end]).to_string();
+            let length: usize = head
+                .lines()
+                .find_map(|line| {
+                    line.to_ascii_lowercase()
+                        .strip_prefix("content-length:")
+                        .map(|value| value.trim().parse().unwrap())
+                })
+                .unwrap_or(0);
+            while raw.len() < head_end + length {
+                let read = stream.read(&mut chunk).unwrap();
+                raw.extend_from_slice(&chunk[..read]);
+            }
+            let body = raw[head_end..head_end + length].to_vec();
+            write!(
+                stream,
+                "HTTP/1.1 {status_line}\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{answer}",
+                answer.len()
+            )
+            .unwrap();
+            sender.send((head, body)).unwrap();
+        });
+        (url, receiver)
+    }
+
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("installer.bin");
+    let content = vec![0xAB_u8; 300_000];
+    std::fs::write(&file, &content).unwrap();
+    let expected = {
+        use sha2::Digest as _;
+        sha2::Sha256::digest(&content)
+            .iter()
+            .fold(String::new(), |mut text, byte| {
+                use std::fmt::Write as _;
+                let _ = write!(text, "{byte:02x}");
+                text
+            })
+    };
+    let run = |url: &str, words: &[&str]| {
+        let mut args = vec![
+            "--url".to_owned(),
+            url.to_owned(),
+            "--output".to_owned(),
+            "json".to_owned(),
+        ];
+        args.extend(words.iter().map(ToString::to_string));
+        fleetctl::run(&fleetctl::parse(&args).unwrap()).map_err(|error| error.to_string())
+    };
+
+    let (url, received) = serve_once(
+        "202 Accepted",
+        r#"{"data":{"id":"op-1","kind":"lab.put","state":"queued"}}"#,
+    );
+    let out = run(
+        &url,
+        &[
+            "lab",
+            "put",
+            "lease-1",
+            file.to_str().unwrap(),
+            "/opt/qa/installer.bin",
+            "--overwrite",
+        ],
+    )
+    .unwrap();
+    let payload: serde_json::Value = serde_json::from_str(&out).unwrap();
+    assert_eq!(payload["id"], "op-1");
+    let (head, body) = received.recv().unwrap();
+    assert!(
+        head.starts_with(
+            "POST /api/v1/lab/leases/lease-1/files?path=%2Fopt%2Fqa%2Finstaller.bin&overwrite=true "
+        ),
+        "{head}"
+    );
+    let lower = head.to_ascii_lowercase();
+    assert!(
+        lower.contains(&format!("x-content-sha256: {expected}")),
+        "{head}"
+    );
+    assert!(
+        lower.contains("content-type: application/octet-stream"),
+        "{head}"
+    );
+    assert!(lower.contains("content-length: 300000"), "{head}");
+    assert_eq!(body, content);
+
+    // The controller's refusal is reported with its status and code.
+    let (url, _received) = serve_once(
+        "413 Payload Too Large",
+        r#"{"code":"payload_too_large","message":"the file exceeds the 10-byte upload cap"}"#,
+    );
+    let refused = run(
+        &url,
+        &["lab", "put", "lease-1", file.to_str().unwrap(), "/opt/a"],
+    )
+    .unwrap_err();
+    assert!(
+        refused.contains("413") && refused.contains("payload_too_large"),
+        "{refused}"
+    );
+
+    // Local problems never reach the network.
+    let unreachable = "http://127.0.0.1:9";
+    assert!(
+        run(
+            unreachable,
+            &[
+                "lab",
+                "put",
+                "lease-1",
+                dir.path().to_str().unwrap(),
+                "/opt/a"
+            ],
+        )
+        .unwrap_err()
+        .contains("not a regular file")
+    );
+    assert!(
+        run(
+            unreachable,
+            &["lab", "put", "lease-1", "/no/such/file", "/opt/a"],
+        )
+        .unwrap_err()
+        .contains("cannot read")
+    );
+}
+
+#[test]
+fn lab_template_create_takes_an_optional_audio_device() {
+    let parse = |extra: &[&str]| {
+        let mut args: Vec<String> = [
+            "lab",
+            "template-create",
+            "--name",
+            "w",
+            "--description",
+            "d",
+            "--image-version",
+            "rcp-1@abc",
+            "--cores",
+            "2",
+            "--memory",
+            "2048",
+            "--disk",
+            "20",
+            "--probe",
+            "guest_agent",
+            "--readiness-deadline",
+            "300",
+            "--ttl",
+            "3600",
+            "--cleanup",
+            "destroy",
+        ]
+        .iter()
+        .map(ToString::to_string)
+        .collect();
+        args.extend(extra.iter().map(ToString::to_string));
+        fleetctl::parse(&args)
+    };
+    let fleetctl::Command::LabCreate { audio, .. } = parse(&[]).unwrap().command else {
+        panic!("a template create");
+    };
+    assert_eq!(audio, None);
+    let fleetctl::Command::LabCreate { audio, .. } =
+        parse(&["--audio", "ich9-intel-hda"]).unwrap().command
+    else {
+        panic!("a template create");
+    };
+    assert_eq!(audio.as_deref(), Some("ich9-intel-hda"));
+    assert!(parse(&["--audio"]).is_err());
+}
+
+#[test]
+fn lab_template_create_takes_an_optional_guest_os() {
+    let parse = |extra: &[&str]| {
+        let mut args: Vec<String> = [
+            "lab",
+            "template-create",
+            "--name",
+            "w",
+            "--description",
+            "d",
+            "--image-version",
+            "rcp-1@abc",
+            "--cores",
+            "2",
+            "--memory",
+            "2048",
+            "--disk",
+            "20",
+            "--probe",
+            "guest_agent",
+            "--readiness-deadline",
+            "300",
+            "--ttl",
+            "3600",
+            "--cleanup",
+            "destroy",
+        ]
+        .iter()
+        .map(ToString::to_string)
+        .collect();
+        args.extend(extra.iter().map(ToString::to_string));
+        fleetctl::parse(&args)
+    };
+    let fleetctl::Command::LabCreate { guest_os, .. } = parse(&[]).unwrap().command else {
+        panic!("a template create");
+    };
+    assert_eq!(guest_os, None);
+    let fleetctl::Command::LabCreate { guest_os, .. } =
+        parse(&["--guest-os", "windows"]).unwrap().command
+    else {
+        panic!("a template create");
+    };
+    assert_eq!(guest_os.as_deref(), Some("windows"));
+    assert!(parse(&["--guest-os"]).is_err());
+    let fleetctl::Command::LabCreate { ssh_user, .. } = parse(&[]).unwrap().command else {
+        panic!("a template create");
+    };
+    assert_eq!(ssh_user, None);
+    let fleetctl::Command::LabCreate { ssh_user, .. } =
+        parse(&["--ssh-user", "fleetadmin"]).unwrap().command
+    else {
+        panic!("a template create");
+    };
+    assert_eq!(ssh_user.as_deref(), Some("fleetadmin"));
+    assert!(parse(&["--ssh-user"]).is_err());
 }

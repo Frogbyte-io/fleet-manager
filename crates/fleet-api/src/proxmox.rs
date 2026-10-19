@@ -1140,7 +1140,13 @@ pub async fn start_proxmox_lifecycle(
     let idempotency_key = headers
         .get(crate::IDEMPOTENCY_KEY_HEADER)
         .and_then(|value| value.to_str().ok())
-        .map(|key| format!("{}:{key}", principal.id));
+        .map(|key| {
+            fleet_application::idempotency::scoped_key(
+                fleet_application::idempotency::CALLER_KEY,
+                &principal.id,
+                &[key],
+            )
+        });
     let operation = state
         .operations
         .create(
@@ -1257,6 +1263,22 @@ fn validate_destructive_params(action: &str, params: &serde_json::Value) -> Resu
             }
             Ok(())
         }
+        "destroy" => {
+            if params.is_null() {
+                return Ok(());
+            }
+            if !params.is_object()
+                || params
+                    .as_object()
+                    .is_some_and(|params| params.keys().any(|key| key != "purge"))
+            {
+                return Err("destroy parameters must be an object containing only purge".to_owned());
+            }
+            if params.get("purge").is_some_and(|value| !value.is_boolean()) {
+                return Err("destroy purge must be a boolean".to_owned());
+            }
+            Ok(())
+        }
         // `template` carries no parameters.
         _ => Ok(()),
     }
@@ -1276,7 +1298,7 @@ fn validate_destructive_params(action: &str, params: &serde_json::Value) -> Resu
     params(
         ("accountId" = String, Path, description = "The account's identity."),
         ("vmid" = u32, Path, description = "The guest's VMID."),
-        ("action" = String, Path, description = "The destructive action: snapshot, snapshot-revert, snapshot-delete, clone, template, or task-cancel.")
+        ("action" = String, Path, description = "The destructive action: snapshot, snapshot-revert, snapshot-delete, clone, template, destroy, or task-cancel.")
     ),
     request_body = ReviewProxmoxOperationRequest,
     responses(
@@ -1307,7 +1329,13 @@ pub async fn review_proxmox_operation(
     let principal = crate::operations::principal_or_error(principal, correlation_id)?;
     if !matches!(
         action.as_str(),
-        "snapshot" | "snapshot-revert" | "snapshot-delete" | "clone" | "template" | "task-cancel"
+        "snapshot"
+            | "snapshot-revert"
+            | "snapshot-delete"
+            | "clone"
+            | "template"
+            | "destroy"
+            | "task-cancel"
     ) {
         return Err(crate::machines::invalid_request(
             &format!("unrecognized destructive action {action:?}"),
@@ -1412,6 +1440,11 @@ pub struct StartReviewedProxmoxOperationRequest {
             description = "The caller may not operate Proxmox guests destructively.",
             body = crate::error::ApiError
         ),
+        (
+            status = 409,
+            description = "The guest is a Lab pool member (`pool_member`): destroy and snapshot-delete are refused until it is drained.",
+            body = crate::error::ApiError
+        ),
     )
 )]
 pub async fn start_reviewed_proxmox_operation(
@@ -1425,7 +1458,13 @@ pub async fn start_reviewed_proxmox_operation(
     let principal = crate::operations::principal_or_error(principal, correlation_id)?;
     if !matches!(
         action.as_str(),
-        "snapshot" | "snapshot-revert" | "snapshot-delete" | "clone" | "template" | "task-cancel"
+        "snapshot"
+            | "snapshot-revert"
+            | "snapshot-delete"
+            | "clone"
+            | "template"
+            | "destroy"
+            | "task-cancel"
     ) {
         return Err(crate::machines::invalid_request(
             &format!("unrecognized destructive action {action:?}"),
@@ -1466,7 +1505,13 @@ pub async fn start_reviewed_proxmox_operation(
     let idempotency_key = headers
         .get(crate::IDEMPOTENCY_KEY_HEADER)
         .and_then(|value| value.to_str().ok())
-        .map(|key| format!("{}:{key}", principal.id));
+        .map(|key| {
+            fleet_application::idempotency::scoped_key(
+                fleet_application::idempotency::CALLER_KEY,
+                &principal.id,
+                &[key],
+            )
+        });
     let operation = state
         .operations
         .create(

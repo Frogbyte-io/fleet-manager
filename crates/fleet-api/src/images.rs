@@ -144,6 +144,15 @@ pub struct RecipeVersionDto {
     pub promoted_at: Option<i64>,
     /// Who promoted the version, when any.
     pub promoted_by: Option<String>,
+    /// The build record the version's latest promotion pinned. Lab clones
+    /// that build's template; a later rebuild of the version does not change
+    /// it. Kept after a demotion. Null for a version never promoted, or
+    /// promoted before pins were recorded and not since.
+    pub promoted_build_id: Option<String>,
+    /// Whether the version was published with the audited opt-in that lets
+    /// it build with `insecure_skip_tls_verify` (#284). False for every
+    /// version published before the opt-in existed.
+    pub allow_insecure_tls: bool,
     /// The structured view of the version's content, when it carries a
     /// Proxmox builder block. `None` for non-JSON templates or builders
     /// outside the Proxmox family.
@@ -151,18 +160,28 @@ pub struct RecipeVersionDto {
 }
 
 /// The structured view: exactly the supported Proxmox field subset.
+///
+/// The `firstDisk*`, `networkBridge`, and `bootIso*` fields follow the
+/// Packer Proxmox plugin's schema (#278). The older fields keep their
+/// published `/api/v1` meaning: they read top-level builder keys, most of
+/// which the plugin does not accept, and are deprecated in favour of the
+/// new ones (the compatibility policy in this crate's README).
 #[derive(Clone, Debug, Serialize, ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct StructuredRecipeDto {
     /// The PVE node the recipe builds on.
     pub node: String,
-    /// The PVE storage pool the build writes to.
+    /// Deprecated: the builder's top-level `vm_storage_pool`/`storage_pool`,
+    /// which the plugin refuses. Use `firstDiskStoragePool`.
+    #[schema(deprecated)]
     pub storage_pool: String,
     /// What the recipe builds from: `iso` or `clone`.
     pub source: String,
-    /// The ISO file path, for the iso source.
+    /// Deprecated: the top-level `iso_file`. Use `bootIsoFile`.
+    #[schema(deprecated)]
     pub iso_file: Option<String>,
-    /// The ISO's storage pool, for the iso source.
+    /// Deprecated: the top-level `iso_storage_pool`. Use `bootIsoStoragePool`.
+    #[schema(deprecated)]
     pub iso_storage_pool: Option<String>,
     /// The guest to clone, for the clone source.
     pub clone_vm: Option<String>,
@@ -170,38 +189,85 @@ pub struct StructuredRecipeDto {
     pub cores: Option<u32>,
     /// The memory in MiB.
     pub memory: Option<u32>,
-    /// The disk size.
+    /// Deprecated: the top-level `disk_size`, which the plugin refuses. Use
+    /// `firstDiskSize`.
+    #[schema(deprecated)]
     pub disk_size: Option<String>,
-    /// The network bridge.
+    /// Deprecated: the top-level `bridge`, which the plugin refuses. Use
+    /// `networkBridge`.
+    #[schema(deprecated)]
     pub bridge: Option<String>,
-    /// The cloud-init user.
+    /// Deprecated: the top-level `ciuser`; the plugin has no such key.
+    #[schema(deprecated)]
     pub cloud_init_user: Option<String>,
-    /// The cloud-init SSH keys.
+    /// Deprecated: the top-level `sshkeys`; the plugin has no such key.
+    #[schema(deprecated)]
     pub ssh_keys: Option<String>,
+    /// The first disk's storage pool (`disks[0].storage_pool`). Absent when
+    /// the builder declares no disk: a clone then keeps its source's storage.
+    pub first_disk_storage_pool: Option<String>,
+    /// The first disk's size (`disks[0].disk_size`).
+    pub first_disk_size: Option<String>,
+    /// The first network adapter's bridge (`network_adapters[0].bridge`).
+    pub network_bridge: Option<String>,
+    /// The boot ISO (`boot_iso.iso_file`, or the deprecated top-level key).
+    pub boot_iso_file: Option<String>,
+    /// The boot ISO's storage pool (`boot_iso.iso_storage_pool`, or the
+    /// deprecated top-level key).
+    pub boot_iso_storage_pool: Option<String>,
 }
 
-impl From<fleet_core::StructuredRecipe> for StructuredRecipeDto {
-    fn from(structured: fleet_core::StructuredRecipe) -> Self {
-        Self {
+impl StructuredRecipeDto {
+    /// The view of `content`, when it has one: the plugin-schema fields from
+    /// fleet-core, and the deprecated fields read as `/api/v1` published them.
+    fn of(content: &str) -> Option<Self> {
+        let structured = fleet_core::StructuredRecipe::from_raw(content)?;
+        // The same builder fleet-core chose: the first proxmox-iso/clone.
+        let document: serde_json::Value = serde_json::from_str(content).ok()?;
+        let builder = document
+            .get("builders")
+            .and_then(serde_json::Value::as_array)?
+            .iter()
+            .find(|builder| {
+                matches!(
+                    builder.get("type").and_then(serde_json::Value::as_str),
+                    Some("proxmox-iso" | "proxmox-clone")
+                )
+            })?
+            .clone();
+        let legacy = |key: &str| {
+            builder
+                .get(key)
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_owned)
+        };
+        Some(Self {
             node: structured.node,
-            storage_pool: structured.storage_pool.unwrap_or_default(),
+            storage_pool: legacy("vm_storage_pool")
+                .or_else(|| legacy("storage_pool"))
+                .unwrap_or_default(),
             source: structured.source.id().to_owned(),
-            iso_file: structured.iso_file,
-            iso_storage_pool: structured.iso_storage_pool,
+            iso_file: legacy("iso_file"),
+            iso_storage_pool: legacy("iso_storage_pool"),
             clone_vm: structured.clone_vm,
             cores: structured.cores,
             memory: structured.memory,
-            disk_size: structured.disk_size,
-            bridge: structured.bridge,
-            cloud_init_user: structured.cloud_init_user,
-            ssh_keys: structured.ssh_keys,
-        }
+            disk_size: legacy("disk_size"),
+            bridge: legacy("bridge"),
+            cloud_init_user: legacy("ciuser"),
+            ssh_keys: legacy("sshkeys"),
+            first_disk_storage_pool: structured.storage_pool,
+            first_disk_size: structured.disk_size,
+            network_bridge: structured.bridge,
+            boot_iso_file: structured.iso_file,
+            boot_iso_storage_pool: structured.iso_storage_pool,
+        })
     }
 }
 
 impl From<RecipeVersion> for RecipeVersionDto {
     fn from(version: RecipeVersion) -> Self {
-        let structured = fleet_core::StructuredRecipe::from_raw(&version.content).map(Into::into);
+        let structured = StructuredRecipeDto::of(&version.content);
         Self {
             id: version.id,
             recipe_id: version.recipe_id,
@@ -215,6 +281,8 @@ impl From<RecipeVersion> for RecipeVersionDto {
             published_at: version.published_at,
             promoted_at: version.promoted_at,
             promoted_by: version.promoted_by,
+            promoted_build_id: version.promoted_build_id,
+            allow_insecure_tls: version.allow_insecure_tls,
             structured,
         }
     }
@@ -239,21 +307,12 @@ pub struct SaveRecipeRequest {
 }
 
 impl SaveRecipeRequest {
-    fn into_content(self) -> Result<RecipeContent, ApiErrorResponse> {
-        let source = RecipeSource::from_id(&self.source).map_err(|detail| {
-            let public = PublicError::new(
-                ErrorCode::from_str("invalid_request")
-                    .expect("the literal is valid error code syntax"),
-                detail,
-                RetryClass::Never,
-            );
-            ApiError::new(
-                &public,
-                CorrelationId::from_str("00000000-0000-0000-0000-000000000000")
-                    .expect("the literal is valid"),
-            )
-            .with_status(StatusCode::BAD_REQUEST)
-        })?;
+    fn into_content(
+        self,
+        correlation_id: CorrelationId,
+    ) -> Result<RecipeContent, ApiErrorResponse> {
+        let source = RecipeSource::from_id(&self.source)
+            .map_err(|detail| crate::machines::invalid_request(&detail, correlation_id))?;
         Ok(RecipeContent {
             name: self.name,
             description: self.description,
@@ -361,7 +420,7 @@ pub async fn create_image_recipe(
 ) -> Result<(StatusCode, Json<Resource<RecipeDto>>), ApiErrorResponse> {
     let images = images_or_error(&state, correlation_id)?;
     let principal = crate::operations::principal_or_error(principal, correlation_id)?;
-    let content = request.into_content()?;
+    let content = request.into_content(correlation_id)?;
     let recipe = images
         .create(
             state.authorizer.as_ref(),
@@ -434,7 +493,7 @@ pub async fn update_image_recipe(
 ) -> Result<Json<Resource<RecipeDto>>, ApiErrorResponse> {
     let images = images_or_error(&state, correlation_id)?;
     let principal = crate::operations::principal_or_error(principal, correlation_id)?;
-    let content = request.into_content()?;
+    let content = request.into_content(correlation_id)?;
     let recipe = images
         .update(
             state.authorizer.as_ref(),
@@ -479,20 +538,37 @@ pub async fn delete_image_recipe(
     Ok(StatusCode::NO_CONTENT)
 }
 
+/// The optional publish request (#284). An absent or empty body publishes
+/// with every option off, as before the body existed.
+#[derive(Debug, Default, Deserialize, ToSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct PublishRecipeRequest {
+    /// Lets the version build with `insecure_skip_tls_verify`. Without it,
+    /// a build of a recipe that skips TLS verification is refused, and
+    /// every other build pins the account's confirmed certificate for
+    /// Packer. Refused for a recipe that does not skip verification. The
+    /// opt-in is audited and part of the version digest.
+    #[serde(default)]
+    pub allow_insecure_tls: bool,
+}
+
 /// Publishes a draft: freezes an immutable version identified by its
 /// content digest. Idempotent by construction.
 ///
 /// # Errors
 ///
-/// Returns the public error envelope on refusal or an unknown recipe.
+/// Returns the public error envelope on refusal, a malformed body, or an
+/// unknown recipe.
 #[utoipa::path(
     post,
     path = "/images/recipes/{recipeId}/publish",
     tag = "images",
     operation_id = "publishImageRecipe",
     params(("recipeId" = String, Path, description = "The recipe's identity.")),
+    request_body = Option<PublishRecipeRequest>,
     responses(
         (status = 201, description = "The version was published.", body = Resource<RecipeVersionDto>),
+        (status = 400, description = "The body is malformed or the opt-in has no effect.", body = crate::error::ApiError),
         (status = 404, description = "The recipe does not exist.", body = crate::error::ApiError),
     )
 )]
@@ -501,15 +577,39 @@ pub async fn publish_image_recipe(
     principal: Option<Extension<crate::ActingPrincipal>>,
     Extension(correlation_id): Extension<CorrelationId>,
     Path(recipe_id): Path<String>,
+    body: axum::body::Bytes,
 ) -> Result<(StatusCode, Json<Resource<RecipeVersionDto>>), ApiErrorResponse> {
     let images = images_or_error(&state, correlation_id)?;
     let principal = crate::operations::principal_or_error(principal, correlation_id)?;
+    // The body is optional: clients that publish without one (or with an
+    // empty one under a JSON content type) keep the original behavior.
+    let request = if body.iter().all(u8::is_ascii_whitespace) {
+        PublishRecipeRequest::default()
+    } else {
+        let invalid = |detail: String| {
+            map_images_error(&RecipeUseCaseError::Invalid { detail }, correlation_id)
+        };
+        match serde_json::from_slice::<serde_json::Value>(&body) {
+            Ok(serde_json::Value::Null) => PublishRecipeRequest::default(),
+            Ok(value @ serde_json::Value::Object(_)) => serde_json::from_value(value)
+                .map_err(|error| invalid(format!("the publish request is invalid: {error}")))?,
+            Ok(_) => return Err(invalid("the publish request must be an object".to_owned())),
+            Err(error) => {
+                return Err(invalid(format!(
+                    "the publish request is not valid JSON: {error}"
+                )));
+            }
+        }
+    };
     let version = images
-        .publish(
+        .publish_with(
             state.authorizer.as_ref(),
             &principal,
             &recipe_id,
             fleet_core::SystemClock::now_unix_millis(),
+            fleet_application::images::PublishOptions {
+                allow_insecure_tls: request.allow_insecure_tls,
+            },
         )
         .await
         .map_err(|error| map_images_error(&error, correlation_id))?;
@@ -562,6 +662,8 @@ pub struct BuildImageRequest {
     pub version_id: String,
     /// The deadline, in seconds. Bounded by the executor.
     pub timeout_seconds: u64,
+    /// Target account override; otherwise resolved from the recipe endpoint.
+    pub account_id: Option<String>,
     /// The secret-backed build variables, as name/reference pairs. The
     /// values never enter argv, logs, or audit metadata.
     #[serde(default)]
@@ -574,7 +676,7 @@ pub struct BuildImageRequest {
 pub struct SecretVarDto {
     /// The Packer variable name.
     pub name: String,
-    /// The secret reference id.
+    /// The name of the secret record, which must be `images/<name>`.
     pub reference: String,
 }
 
@@ -622,6 +724,11 @@ pub async fn start_image_build(
             correlation_id,
         ));
     }
+    for var in &request.secret_vars {
+        if let Err(message) = fleet_application::images::check_secret_reference(&var.reference) {
+            return Err(crate::machines::invalid_request(&message, correlation_id));
+        }
+    }
     // The version must exist before the operation is queued: an invalid
     // build is a 404 here, not a worker failure later.
     if let Some(images) = &state.images {
@@ -633,12 +740,19 @@ pub async fn start_image_build(
     let payload = serde_json::json!({
         "versionId": request.version_id,
         "timeoutSeconds": request.timeout_seconds,
+        "accountId": request.account_id,
         "secretVars": request.secret_vars,
     });
     let idempotency_key = headers
         .get(crate::IDEMPOTENCY_KEY_HEADER)
         .and_then(|value| value.to_str().ok())
-        .map(|key| format!("{}:{key}", principal.id));
+        .map(|key| {
+            fleet_application::idempotency::scoped_key(
+                fleet_application::idempotency::CALLER_KEY,
+                &principal.id,
+                &[key],
+            )
+        });
     let operation = state
         .operations
         .create(
@@ -664,8 +778,8 @@ pub async fn start_image_build(
 }
 
 /// Promotes one version as the recipe's built image. The gate verifies
-/// the version's build operation completed successfully with a recorded
-/// artifact, queried from the operation record — never assumed.
+/// the latest immutable build record has matching inputs and a successful
+/// output template.
 ///
 /// # Errors
 ///
@@ -692,17 +806,11 @@ pub async fn promote_image_version(
 ) -> Result<Json<Resource<RecipeVersionDto>>, ApiErrorResponse> {
     let images = images_or_error(&state, correlation_id)?;
     let principal = crate::operations::principal_or_error(principal, correlation_id)?;
-    // The gate's evidence: the version's latest build operation, queried
-    // through the operation list by kind and payload, under the caller's
-    // own policy.
-    let build_outcome =
-        latest_build_evidence(&state, &principal.id, &version_id, correlation_id).await?;
     let version = images
         .promote(
             state.authorizer.as_ref(),
             &principal,
             &version_id,
-            build_outcome,
             fleet_core::SystemClock::now_unix_millis(),
         )
         .await
@@ -710,63 +818,288 @@ pub async fn promote_image_version(
     Ok(Json(Resource::new(version.into())))
 }
 
-/// Queries the operation record for the version's latest `image.build`:
-/// the gate's evidence. The operations are queried newest-first with
-/// pagination until the version's build is found or the list is
-/// exhausted, so a busy controller cannot hide a valid build behind a
-/// page boundary. Authorization and backend errors propagate.
-async fn latest_build_evidence(
-    state: &crate::operations::ApiState,
-    principal_id: &str,
-    version_id: &str,
-    correlation_id: CorrelationId,
-) -> Result<Option<fleet_application::images::BuildEvidence>, ApiErrorResponse> {
-    const PAGE_LIMIT: u32 = 100;
-    const MAX_PAGES: u32 = 20;
-    let mut offset = 0u32;
-    for _ in 0..MAX_PAGES {
-        let all = state
-            .operations
-            .list(state.authorizer.as_ref(), principal_id, PAGE_LIMIT)
-            .await
-            .map_err(|error| crate::operations::map_use_case_error(&error, correlation_id))?;
-        if all.is_empty() {
-            break;
-        }
-        let relevant: Vec<_> = all
-            .iter()
-            .skip(usize::try_from(offset).unwrap_or(all.len()))
-            .filter(|operation| operation.kind == "image.build")
-            .filter(|operation| {
-                operation
-                    .payload_json
-                    .as_deref()
-                    .and_then(|payload| serde_json::from_str::<serde_json::Value>(payload).ok())
-                    .is_some_and(|payload| payload["versionId"].as_str() == Some(version_id))
-            })
-            .collect();
-        if let Some(build) = relevant.first() {
-            let artifact_id = build
-                .result_json
-                .as_deref()
-                .and_then(|result| serde_json::from_str::<serde_json::Value>(result).ok())
-                .and_then(|result| {
-                    result["artifactId"]
-                        .as_str()
-                        .map(std::borrow::ToOwned::to_owned)
-                });
-            return Ok(Some(fleet_application::images::BuildEvidence {
-                version_id: version_id.to_owned(),
-                state: build.state.clone(),
-                artifact_id,
-            }));
-        }
-        if all.len() < usize::try_from(PAGE_LIMIT).unwrap_or(all.len()) {
-            break;
-        }
-        offset = offset.saturating_add(PAGE_LIMIT);
+/// One build address that is out of allocation (#402).
+#[derive(Clone, Debug, Serialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct BuildAddressDto {
+    /// The IPv4 address.
+    pub address: String,
+    /// `held` by a running build, or `quarantined` after a build that did
+    /// not end verifiably.
+    pub status: String,
+    /// The operation that holds the address, or held it when it was
+    /// quarantined.
+    pub operation_id: String,
+    /// When the address was taken or quarantined, Unix milliseconds.
+    pub since: i64,
+    /// When a quarantine ends on its own, Unix milliseconds; absent while
+    /// held.
+    pub until: Option<i64>,
+}
+
+/// The result of clearing a quarantine.
+#[derive(Clone, Debug, Serialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct ClearedBuildAddressDto {
+    /// The address that can be allocated again.
+    pub address: String,
+}
+
+/// Lists the build addresses that are held or quarantined.
+///
+/// # Errors
+///
+/// Returns the public error envelope on refusal or backend failure.
+#[utoipa::path(
+    get,
+    path = "/images/build-addresses",
+    tag = "images",
+    operation_id = "listImageBuildAddresses",
+    responses(
+        (status = 200, description = "The complete list of addresses out of allocation, by address. Not paginated: `page.limit` is the item count and `page.nextCursor` is always null. Empty without a build address pool.", body = Page<BuildAddressDto>),
+        (status = 403, description = "The caller may not read the image surface.", body = crate::error::ApiError),
+    )
+)]
+pub async fn list_image_build_addresses(
+    State(state): State<Arc<crate::operations::ApiState>>,
+    principal: Option<Extension<crate::ActingPrincipal>>,
+    Extension(correlation_id): Extension<CorrelationId>,
+) -> Result<Json<Page<BuildAddressDto>>, ApiErrorResponse> {
+    let images = images_or_error(&state, correlation_id)?;
+    let principal = crate::operations::principal_or_error(principal, correlation_id)?;
+    let records = images
+        .list_build_addresses(
+            state.authorizer.as_ref(),
+            &principal,
+            fleet_core::SystemClock::now_unix_millis(),
+        )
+        .await
+        .map_err(|error| map_images_error(&error, correlation_id))?;
+    let items: Vec<BuildAddressDto> = records
+        .into_iter()
+        .map(|record| BuildAddressDto {
+            address: record.address.to_string(),
+            status: record.status.as_str().to_owned(),
+            operation_id: record.operation_id,
+            since: record.since,
+            until: record.until,
+        })
+        .collect();
+    let limit = u32::try_from(items.len()).unwrap_or(u32::MAX);
+    Ok(Json(Page {
+        page: PageInfo {
+            next_cursor: None,
+            limit,
+        },
+        items,
+    }))
+}
+
+/// Ends the quarantine of one build address early. Remove the stranded VM
+/// first; Fleet does not probe for it.
+///
+/// # Errors
+///
+/// Returns the public error envelope on refusal, a malformed address, an
+/// address that is not quarantined, or an address a running build holds.
+#[utoipa::path(
+    post,
+    path = "/images/build-addresses/{address}/clear",
+    tag = "images",
+    operation_id = "clearImageBuildAddress",
+    params(("address" = String, Path, description = "The quarantined IPv4 address.")),
+    responses(
+        (status = 200, description = "The quarantine was cleared.", body = Resource<ClearedBuildAddressDto>),
+        (status = 400, description = "The address is not an IPv4 address.", body = crate::error::ApiError),
+        (status = 403, description = "The caller may not configure the image surface.", body = crate::error::ApiError),
+        (status = 404, description = "The address is not quarantined.", body = crate::error::ApiError),
+        (status = 409, description = "A running build holds the address.", body = crate::error::ApiError),
+    )
+)]
+pub async fn clear_image_build_address(
+    State(state): State<Arc<crate::operations::ApiState>>,
+    principal: Option<Extension<crate::ActingPrincipal>>,
+    Extension(correlation_id): Extension<CorrelationId>,
+    Path(address): Path<String>,
+) -> Result<Json<Resource<ClearedBuildAddressDto>>, ApiErrorResponse> {
+    let images = images_or_error(&state, correlation_id)?;
+    let principal = crate::operations::principal_or_error(principal, correlation_id)?;
+    let cleared = images
+        .clear_build_address(
+            state.authorizer.as_ref(),
+            &principal,
+            &address,
+            fleet_core::SystemClock::now_unix_millis(),
+        )
+        .await
+        .map_err(|error| map_images_error(&error, correlation_id))?;
+    Ok(Json(Resource::new(ClearedBuildAddressDto {
+        address: cleared.to_string(),
+    })))
+}
+
+/// The set-secret request. The value is write-only: it is never echoed,
+/// logged, audited, or readable afterwards.
+#[derive(Deserialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct SetImageSecretRequest {
+    /// The record name, without the `images/` prefix (`images/<name>` is
+    /// accepted too). Letters, digits, `.`, `_`, `-`.
+    pub name: String,
+    /// The secret value (write-only).
+    pub value: String,
+}
+
+impl std::fmt::Debug for SetImageSecretRequest {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SetImageSecretRequest")
+            .field("name", &self.name)
+            .field("value", &"[REDACTED]")
+            .finish()
     }
-    Ok(None)
+}
+
+/// One image build secret record: its name only.
+#[derive(Clone, Debug, Serialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct ImageSecretDto {
+    /// The record name (`images/<name>`): what a build's secret variable
+    /// references.
+    pub reference: String,
+    /// Whether the write replaced an existing record's value. Absent when
+    /// listing.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub replaced: Option<bool>,
+}
+
+/// Lists the names of the `images/<name>` build secrets. Values are never
+/// returned.
+///
+/// # Errors
+///
+/// Returns the public error envelope on refusal or backend failure.
+#[utoipa::path(
+    get,
+    path = "/images/secrets",
+    tag = "images",
+    operation_id = "listImageSecrets",
+    responses(
+        (status = 200, description = "The complete list of secret names, by name. Not paginated: `page.limit` is the item count and `page.nextCursor` is always null.", body = Page<ImageSecretDto>),
+        (status = 403, description = "The caller may not read the image surface.", body = crate::error::ApiError),
+    )
+)]
+pub async fn list_image_secrets(
+    State(state): State<Arc<crate::operations::ApiState>>,
+    principal: Option<Extension<crate::ActingPrincipal>>,
+    Extension(correlation_id): Extension<CorrelationId>,
+) -> Result<Json<Page<ImageSecretDto>>, ApiErrorResponse> {
+    let images = images_or_error(&state, correlation_id)?;
+    let principal = crate::operations::principal_or_error(principal, correlation_id)?;
+    let names = images
+        .list_secrets(state.authorizer.as_ref(), &principal)
+        .await
+        .map_err(|error| map_images_error(&error, correlation_id))?;
+    let items: Vec<ImageSecretDto> = names
+        .into_iter()
+        .map(|reference| ImageSecretDto {
+            reference,
+            replaced: None,
+        })
+        .collect();
+    let limit = u32::try_from(items.len()).unwrap_or(u32::MAX);
+    Ok(Json(Page {
+        page: PageInfo {
+            next_cursor: None,
+            limit,
+        },
+        items,
+    }))
+}
+
+/// Creates or replaces one `images/<name>` build secret. The value is
+/// write-only; the answer carries the record name only.
+///
+/// # Errors
+///
+/// Returns the public error envelope on refusal, a malformed name or
+/// value, or backend failure.
+#[utoipa::path(
+    post,
+    path = "/images/secrets",
+    tag = "images",
+    operation_id = "setImageSecret",
+    request_body = SetImageSecretRequest,
+    responses(
+        (status = 200, description = "The secret was stored; `replaced` says whether it overwrote an existing value.", body = Resource<ImageSecretDto>),
+        (status = 400, description = "The name or value is malformed.", body = crate::error::ApiError),
+        (status = 403, description = "The caller may not configure the image surface.", body = crate::error::ApiError),
+    )
+)]
+pub async fn set_image_secret(
+    State(state): State<Arc<crate::operations::ApiState>>,
+    principal: Option<Extension<crate::ActingPrincipal>>,
+    Extension(correlation_id): Extension<CorrelationId>,
+    body: Result<Json<SetImageSecretRequest>, axum::extract::rejection::JsonRejection>,
+) -> Result<Json<Resource<ImageSecretDto>>, ApiErrorResponse> {
+    let images = images_or_error(&state, correlation_id)?;
+    let principal = crate::operations::principal_or_error(principal, correlation_id)?;
+    // The rejection is never echoed: its text can quote the value.
+    let Json(request) = body.map_err(|_| {
+        crate::machines::invalid_request(
+            "the request body must be JSON with a name and a value",
+            correlation_id,
+        )
+    })?;
+    let written = images
+        .set_secret(
+            state.authorizer.as_ref(),
+            &principal,
+            &request.name,
+            &fleet_core::SensitiveString::new(request.value),
+        )
+        .await
+        .map_err(|error| map_images_error(&error, correlation_id))?;
+    Ok(Json(Resource::new(ImageSecretDto {
+        reference: written.reference,
+        replaced: Some(written.replaced),
+    })))
+}
+
+/// Deletes one `images/<name>` build secret.
+///
+/// # Errors
+///
+/// Returns the public error envelope on refusal, a malformed name, or an
+/// unknown secret.
+#[utoipa::path(
+    delete,
+    path = "/images/secrets/{name}",
+    tag = "images",
+    operation_id = "deleteImageSecret",
+    params(("name" = String, Path, description = "The record name without the `images/` prefix.")),
+    responses(
+        (status = 200, description = "The secret was deleted.", body = Resource<ImageSecretDto>),
+        (status = 400, description = "The name is malformed.", body = crate::error::ApiError),
+        (status = 403, description = "The caller may not configure the image surface.", body = crate::error::ApiError),
+        (status = 404, description = "No such secret.", body = crate::error::ApiError),
+    )
+)]
+pub async fn delete_image_secret(
+    State(state): State<Arc<crate::operations::ApiState>>,
+    principal: Option<Extension<crate::ActingPrincipal>>,
+    Extension(correlation_id): Extension<CorrelationId>,
+    Path(name): Path<String>,
+) -> Result<Json<Resource<ImageSecretDto>>, ApiErrorResponse> {
+    let images = images_or_error(&state, correlation_id)?;
+    let principal = crate::operations::principal_or_error(principal, correlation_id)?;
+    let reference = images
+        .delete_secret(state.authorizer.as_ref(), &principal, &name)
+        .await
+        .map_err(|error| map_images_error(&error, correlation_id))?;
+    Ok(Json(Resource::new(ImageSecretDto {
+        reference,
+        replaced: None,
+    })))
 }
 
 /// Reads one published version with its structured view.
@@ -799,4 +1132,193 @@ pub async fn get_image_version(
         .await
         .map_err(|error| map_images_error(&error, correlation_id))?;
     Ok(Json(Resource::new(version.into())))
+}
+
+/// Safe build provenance and outcome; credentials and work paths are excluded.
+#[derive(Clone, Debug, Serialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct ImageBuildDto {
+    /// Build identity.
+    pub id: String,
+    /// Durable operation identity.
+    pub operation_id: String,
+    /// Recipe identity.
+    pub recipe_id: String,
+    /// Immutable version identity.
+    pub version_id: String,
+    /// Frozen recipe digest.
+    pub content_digest: String,
+    /// Frozen provisioning asset digests.
+    pub asset_digests: Vec<String>,
+    /// Probed Packer version, when available.
+    pub packer_version: Option<String>,
+    /// Probed Proxmox plugin version, when available.
+    pub proxmox_plugin_version: Option<String>,
+    /// Resolved target account; absent when target binding failed.
+    pub account_id: Option<String>,
+    /// Frozen target node.
+    pub node: String,
+    /// Frozen target storage.
+    pub storage_pool: String,
+    /// Start time in epoch milliseconds.
+    pub started_at: i64,
+    /// End time in epoch milliseconds.
+    pub ended_at: Option<i64>,
+    /// Running, succeeded, failed or cancelled.
+    pub outcome: String,
+    /// Safe terminal reason code.
+    pub reason: Option<String>,
+    /// Output template identity.
+    pub template: Option<ImageBuildTemplateDto>,
+}
+
+/// A concrete output template identity.
+#[derive(Clone, Debug, Serialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct ImageBuildTemplateDto {
+    /// Template node.
+    pub node: String,
+    /// Template VMID.
+    pub vmid: u32,
+    /// Template name.
+    pub name: String,
+}
+
+impl From<fleet_core::ImageBuildRecord> for ImageBuildDto {
+    fn from(record: fleet_core::ImageBuildRecord) -> Self {
+        Self {
+            id: record.id,
+            operation_id: record.operation_id,
+            recipe_id: record.recipe_id,
+            version_id: record.version_id,
+            content_digest: record.content_digest,
+            asset_digests: record.asset_digests,
+            packer_version: record.packer_version,
+            proxmox_plugin_version: record.proxmox_plugin_version,
+            account_id: record.account_id,
+            node: record.node,
+            storage_pool: record.storage_pool,
+            started_at: record.started_at,
+            ended_at: record.ended_at,
+            outcome: record.outcome,
+            reason: record.reason,
+            template: record.template.map(|template| ImageBuildTemplateDto {
+                node: template.node,
+                vmid: template.vmid,
+                name: template.name,
+            }),
+        }
+    }
+}
+
+/// Build history filters.
+#[derive(Debug, Default, Deserialize, utoipa::IntoParams)]
+#[serde(rename_all = "camelCase")]
+pub struct BuildQuery {
+    /// Maximum records per page (default 50, maximum 200).
+    pub limit: Option<u32>,
+    /// Last build identity returned by the preceding page.
+    pub cursor: Option<String>,
+    /// Filter by recipe identity.
+    pub recipe_id: Option<String>,
+    /// Filter by immutable version identity.
+    pub version_id: Option<String>,
+}
+
+/// Lists recorded image builds under images.read.
+///
+/// # Errors
+/// Returns the standard error envelope on denial or backend failure.
+#[utoipa::path(get, path = "/images/builds", tag = "images", operation_id = "listImageBuilds",
+    params(BuildQuery), responses(
+        (status = 400, description = "Invalid build cursor.", body = crate::error::ApiError),
+        (status = 200, description = "Build records, newest first.", body = Page<ImageBuildDto>),
+        (status = 403, description = "Images read permission is required.", body = crate::error::ApiError)
+    ))]
+pub async fn list_image_builds(
+    State(state): State<Arc<crate::operations::ApiState>>,
+    principal: Option<Extension<crate::ActingPrincipal>>,
+    Extension(correlation_id): Extension<CorrelationId>,
+    Query(query): Query<BuildQuery>,
+) -> Result<Json<Page<ImageBuildDto>>, ApiErrorResponse> {
+    let images = images_or_error(&state, correlation_id)?;
+    let principal = crate::operations::principal_or_error(principal, correlation_id)?;
+    let records = images
+        .list_build_page(
+            state.authorizer.as_ref(),
+            &principal,
+            fleet_application::images::BuildPageRequest {
+                recipe: query.recipe_id,
+                version: query.version_id,
+                cursor: query.cursor,
+                limit: query.limit.unwrap_or_default(),
+            },
+        )
+        .await
+        .map_err(|error| map_images_error(&error, correlation_id))?;
+    let items: Vec<ImageBuildDto> = records.items.into_iter().map(Into::into).collect();
+    Ok(Json(Page {
+        page: PageInfo {
+            next_cursor: records.next_cursor,
+            limit: records.limit,
+        },
+        items,
+    }))
+}
+
+/// Reads one recorded image build under images.read.
+///
+/// # Errors
+/// Returns the standard error envelope on denial, missing record or backend failure.
+#[utoipa::path(get, path = "/images/builds/{buildId}", tag = "images", operation_id = "getImageBuild",
+    params(("buildId" = String, Path, description = "Build identity.")), responses(
+        (status = 200, description = "Safe build provenance and outcome.", body = Resource<ImageBuildDto>),
+        (status = 403, description = "Images read permission is required.", body = crate::error::ApiError),
+        (status = 404, description = "Build record not found.", body = crate::error::ApiError)
+    ))]
+pub async fn get_image_build(
+    State(state): State<Arc<crate::operations::ApiState>>,
+    principal: Option<Extension<crate::ActingPrincipal>>,
+    Extension(correlation_id): Extension<CorrelationId>,
+    Path(id): Path<String>,
+) -> Result<Json<Resource<ImageBuildDto>>, ApiErrorResponse> {
+    let images = images_or_error(&state, correlation_id)?;
+    let principal = crate::operations::principal_or_error(principal, correlation_id)?;
+    let record = images
+        .get_build(state.authorizer.as_ref(), &principal, &id)
+        .await
+        .map_err(|error| map_images_error(&error, correlation_id))?;
+    Ok(Json(Resource::new(record.into())))
+}
+
+#[cfg(test)]
+mod structured_dto_tests {
+    use super::StructuredRecipeDto;
+
+    #[test]
+    fn the_v1_fields_keep_their_published_meaning_beside_the_plugin_fields() {
+        let content = r#"{"builders": [{
+            "type": "proxmox-iso", "node": "pve",
+            "vm_storage_pool": "legacy-pool", "disk_size": "9G", "bridge": "vmbr9",
+            "ciuser": "dev", "sshkeys": "ssh-ed25519%20AAA", "iso_file": "local:iso/old.iso",
+            "boot_iso": {"iso_file": "local:iso/new.iso", "iso_storage_pool": "local"},
+            "disks": [{"type": "scsi", "storage_pool": "local-lvm", "disk_size": "20G"}],
+            "network_adapters": [{"model": "virtio", "bridge": "vmbr0"}]
+        }]}"#;
+        let dto = StructuredRecipeDto::of(content).expect("a structured view");
+        // /api/v1 (deprecated): top-level keys, as published.
+        assert_eq!(dto.storage_pool, "legacy-pool");
+        assert_eq!(dto.disk_size.as_deref(), Some("9G"));
+        assert_eq!(dto.bridge.as_deref(), Some("vmbr9"));
+        assert_eq!(dto.cloud_init_user.as_deref(), Some("dev"));
+        assert_eq!(dto.ssh_keys.as_deref(), Some("ssh-ed25519%20AAA"));
+        assert_eq!(dto.iso_file.as_deref(), Some("local:iso/old.iso"));
+        // The plugin schema (#278).
+        assert_eq!(dto.first_disk_storage_pool.as_deref(), Some("local-lvm"));
+        assert_eq!(dto.first_disk_size.as_deref(), Some("20G"));
+        assert_eq!(dto.network_bridge.as_deref(), Some("vmbr0"));
+        assert_eq!(dto.boot_iso_file.as_deref(), Some("local:iso/new.iso"));
+        assert_eq!(dto.boot_iso_storage_pool.as_deref(), Some("local"));
+        assert!(StructuredRecipeDto::of("source \"proxmox-iso\" \"x\" {}").is_none());
+    }
 }

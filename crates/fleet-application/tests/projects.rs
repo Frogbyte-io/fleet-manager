@@ -59,6 +59,7 @@ impl ProjectPort for FakeProjects {
         let created = Project {
             id: format!("project-{}", self.projects.lock().unwrap().len() + 1),
             remote: project.remote.clone(),
+            fetch: project.fetch.clone(),
             name: project.name.clone(),
             description: project.description.clone(),
             created_at: NOW,
@@ -245,6 +246,7 @@ async fn registration_normalizes_the_remote_and_stores_the_normalized_form() {
             &AllowAll,
             &principal(),
             NewProject {
+                fetch: fleet_core::RemoteFetch::default(),
                 remote: "https://github.com/Frogbyte-io/fleet-manager.git".to_owned(),
                 name: "fleet-manager".to_owned(),
                 description: String::new(),
@@ -269,6 +271,7 @@ async fn the_same_repository_under_a_different_spelling_is_a_conflict() {
             &AllowAll,
             &principal(),
             NewProject {
+                fetch: fleet_core::RemoteFetch::default(),
                 remote: "git@github.com:Frogbyte-io/fleet-manager.git".to_owned(),
                 name: "fleet-manager".to_owned(),
                 description: String::new(),
@@ -285,6 +288,7 @@ async fn the_same_repository_under_a_different_spelling_is_a_conflict() {
             &AllowAll,
             &principal(),
             NewProject {
+                fetch: fleet_core::RemoteFetch::default(),
                 remote: "https://github.com/Frogbyte-io/fleet-manager.git".to_owned(),
                 name: "the-same-repo".to_owned(),
                 description: String::new(),
@@ -319,6 +323,7 @@ async fn credential_bearing_remotes_are_refused_not_stored() {
             &AllowAll,
             &principal(),
             NewProject {
+                fetch: fleet_core::RemoteFetch::default(),
                 remote: "https://user:password@github.com/Frogbyte-io/secret.git".to_owned(),
                 name: "secret".to_owned(),
                 description: String::new(),
@@ -347,6 +352,7 @@ async fn the_read_model_carries_the_observed_checkouts_newest_first() {
             &AllowAll,
             &principal(),
             NewProject {
+                fetch: fleet_core::RemoteFetch::default(),
                 remote: "github.com/Frogbyte-io/fleet-manager".to_owned(),
                 name: "fleet-manager".to_owned(),
                 description: String::new(),
@@ -404,6 +410,7 @@ async fn deleting_a_project_removes_its_checkouts_but_touches_nothing_else() {
             &AllowAll,
             &principal(),
             NewProject {
+                fetch: fleet_core::RemoteFetch::default(),
                 remote: "github.com/Frogbyte-io/fleet-manager".to_owned(),
                 name: "fleet-manager".to_owned(),
                 description: String::new(),
@@ -456,6 +463,7 @@ async fn denied_callers_are_refused_without_touching_anything() {
                 &deny,
                 &principal(),
                 NewProject {
+                    fetch: fleet_core::RemoteFetch::default(),
                     remote: "github.com/a/b".to_owned(),
                     name: "x".to_owned(),
                     description: String::new(),
@@ -489,18 +497,21 @@ async fn a_malformed_registration_is_refused_before_any_write() {
     let fixture = compose();
     let cases = [
         NewProject {
+            fetch: fleet_core::RemoteFetch::default(),
             remote: "https://".to_owned(),
             name: "x".to_owned(),
             description: String::new(),
             idempotency_key: None,
         },
         NewProject {
+            fetch: fleet_core::RemoteFetch::default(),
             remote: "github.com/a/b".to_owned(),
             name: String::new(),
             description: String::new(),
             idempotency_key: None,
         },
         NewProject {
+            fetch: fleet_core::RemoteFetch::default(),
             remote: "github.com/a/b".to_owned(),
             name: "x".to_owned(),
             description: "d".repeat(600),
@@ -535,6 +546,7 @@ async fn the_list_narrows_by_remote_prefix_and_name_substring() {
                 &AllowAll,
                 &principal(),
                 NewProject {
+                    fetch: fleet_core::RemoteFetch::default(),
                     remote: remote.to_owned(),
                     name: name.to_owned(),
                     description: String::new(),
@@ -590,6 +602,7 @@ async fn an_idempotent_replay_returns_the_original_project() {
             &AllowAll,
             &principal(),
             NewProject {
+                fetch: fleet_core::RemoteFetch::default(),
                 remote: "github.com/Frogbyte-io/fleet-manager".to_owned(),
                 name: "fleet-manager".to_owned(),
                 description: String::new(),
@@ -608,6 +621,7 @@ async fn an_idempotent_replay_returns_the_original_project() {
             &AllowAll,
             &principal(),
             NewProject {
+                fetch: fleet_core::RemoteFetch::default(),
                 remote: "git@github.com:Frogbyte-io/fleet-manager.git".to_owned(),
                 name: "a-different-name".to_owned(),
                 description: String::new(),
@@ -631,4 +645,51 @@ fn the_normalized_remote_type_is_the_identity_anchor() {
     let a = NormalizedRemote::parse("git@github.com:Frogbyte-io/fleet-manager.git").unwrap();
     let b = NormalizedRemote::parse("https://github.com/Frogbyte-io/fleet-manager").unwrap();
     assert_eq!(a, b, "spellings fold to one identity");
+}
+
+#[tokio::test]
+async fn registration_stores_the_remotes_fetch_form_beside_its_identity() {
+    use fleet_core::{FetchScheme, RemoteFetch};
+
+    let fixture = compose();
+    let register = |remote: &str, name: &str| NewProject {
+        fetch: RemoteFetch::default(),
+        remote: remote.to_owned(),
+        name: name.to_owned(),
+        description: String::new(),
+        idempotency_key: None,
+    };
+    let scp = fixture
+        .projects
+        .register(
+            &AllowAll,
+            &principal(),
+            register("git@git.example.test:a/b.git", "scp"),
+            None,
+        )
+        .await
+        .unwrap();
+    assert_eq!(scp.remote, "git.example.test/a/b");
+    assert_eq!(scp.fetch.scheme, FetchScheme::Scp);
+    assert_eq!(scp.fetch.user.as_deref(), Some("git"));
+
+    let https = fixture
+        .projects
+        .register(
+            &AllowAll,
+            &principal(),
+            register("https://git.example.test/c/d.git", "https"),
+            None,
+        )
+        .await
+        .unwrap();
+    assert_eq!(https.fetch, RemoteFetch::default());
+
+    // The form is read back through the read model, not only stored.
+    let view = fixture
+        .projects
+        .get(&AllowAll, &principal(), &scp.id)
+        .await
+        .unwrap();
+    assert_eq!(view.fetch.scheme, FetchScheme::Scp);
 }

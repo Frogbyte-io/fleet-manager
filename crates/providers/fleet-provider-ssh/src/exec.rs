@@ -15,8 +15,7 @@
 //! because every concurrent session costs a file descriptor and a slot on
 //! the remote host.
 
-use std::io::{Read, Write as _};
-use std::process::Child;
+use std::io::Read;
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
@@ -174,7 +173,7 @@ impl ExecutionLimiter {
         })
     }
 
-    fn acquire(&self) -> bool {
+    pub(crate) fn acquire(&self) -> bool {
         let mut held = self.held.lock().unwrap();
         if *held >= self.max {
             return false;
@@ -183,7 +182,7 @@ impl ExecutionLimiter {
         true
     }
 
-    fn release(&self) {
+    pub(crate) fn release(&self) {
         let mut held = self.held.lock().unwrap();
         *held -= 1;
         self.released.notify_one();
@@ -227,6 +226,29 @@ pub fn execute_script(
     metadata: &ScriptMetadata,
     deadline: Duration,
 ) -> Result<ExecutionResult, SshProviderError> {
+    execute_script_with(
+        provider, limiter, endpoint, script, metadata, deadline, true,
+    )
+}
+
+/// [`execute_script`] with a choice about the Windows guest-side watchdog
+/// (#455), which stops the script's process tree at `deadline` because
+/// killing the local `ssh` does not. Pass `guest_watchdog: false` only for a
+/// script that bounds itself and must outlive the session, such as the start
+/// of a detached exec. It changes nothing on a Linux guest.
+///
+/// # Errors
+///
+/// As [`execute_script`].
+pub fn execute_script_with(
+    provider: &SshProvider,
+    limiter: &ExecutionLimiter,
+    endpoint: &SshConnectionSpec,
+    script: &str,
+    metadata: &ScriptMetadata,
+    deadline: Duration,
+    guest_watchdog: bool,
+) -> Result<ExecutionResult, SshProviderError> {
     if !limiter.acquire() {
         return Err(SshProviderError::Tool {
             tool: "ssh",
@@ -237,7 +259,14 @@ pub fn execute_script(
         });
         // The permit is deliberately not held: no process was started.
     }
-    let result = execute_script_inner(provider, endpoint, script, metadata, deadline);
+    let result = execute_script_inner(
+        provider,
+        endpoint,
+        script,
+        metadata,
+        deadline,
+        guest_watchdog,
+    );
     limiter.release();
     result
 }
@@ -248,52 +277,19 @@ fn execute_script_inner(
     script: &str,
     metadata: &ScriptMetadata,
     deadline: Duration,
+    guest_watchdog: bool,
 ) -> Result<ExecutionResult, SshProviderError> {
     let started = Instant::now();
-    let config_path = provider.write_config()?;
-    let blob = encode_metadata(metadata);
-
-    let mut command = std::process::Command::new("ssh");
-    command
-        .arg("-F")
-        .arg(&config_path)
-        .arg("-o")
-        .arg(format!("ConnectTimeout={}", deadline.as_secs().max(1)))
-        .arg("-T")
-        .arg("-p")
-        .arg(endpoint.port.to_string());
-    match &endpoint.auth {
-        crate::SshAuth::Agent => {}
-        crate::SshAuth::IdentityFile { path } => {
-            command.arg("-i").arg(path);
-        }
-    }
-    crate::add_ssh_destination(&mut command, endpoint);
-    command
-        // The remote shell parses exactly this: `bash -s --` and the inert
-        // blob.
-        .arg(format!("bash -s -- {blob}"))
-        .stdin(std::process::Stdio::piped())
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped());
-
-    let mut child: Child = command.spawn().map_err(|error| SshProviderError::Tool {
-        tool: "ssh",
-        detail: format!("cannot start: {error}"),
-    })?;
-    // The script rides stdin; the prologue decodes the blob from `$1`.
-    child
-        .stdin
-        .take()
-        .ok_or_else(|| SshProviderError::Tool {
-            tool: "ssh",
-            detail: "the ssh process has no stdin".to_owned(),
-        })?
-        .write_all(format!("{}{script}", remote_prologue()).as_bytes())
-        .map_err(|error| SshProviderError::Tool {
-            tool: "ssh",
-            detail: format!("cannot send the script: {error}"),
-        })?;
+    // The script rides stdin; nothing else is written after it.
+    let mut child = crate::shell::spawn_session(
+        provider,
+        endpoint,
+        metadata,
+        script,
+        deadline,
+        guest_watchdog,
+    )?;
+    drop(child.stdin.take());
 
     // Reader threads drain the pipes so a silent remote session cannot wedge
     // the deadline poll; killing the child closes the pipes and ends them.

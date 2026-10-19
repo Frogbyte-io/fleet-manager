@@ -20,18 +20,106 @@ fleetctl --output json projects ready <project-id> <machine-id> --root <path> --
   -> POST /api/v1/projects/project-id-example/ready body {"auth":{"type":"agent"},"dryRun":false,"endpointId":"endpoint-id-example","machineId":"machine-id-example","root":"/home/dev/src","timeoutSeconds":1800}
 fleetctl --output json lab templates
   -> GET /api/v1/lab/templates
-fleetctl --output json lab lease <template-version-id> --purpose "reproduce flaky test"
-  -> POST /api/v1/lab/leases body {"purpose":"reproduce flaky test","templateVersionId":"template-version-id-example"}
-fleetctl --output json lab provision-lease <lease-id> --account <account-id>
-  -> POST /api/v1/lab/leases/lease-id-example/provision body {"accountId":"account-id-example"}
-fleetctl --output json lab leases
-  -> GET /api/v1/lab/leases
-fleetctl --output json lab provisions
-  -> GET /api/v1/lab/provisions
+fleetctl --output json proxmox accounts
+  -> GET /api/v1/proxmox/accounts
+fleetctl --output json lab create <template-version-id> --project <project-id> --purpose "reproduce flaky test" --wait
+  -> POST /api/v1/lab/leases body {"projectId":"project-id-example","purpose":"reproduce flaky test","templateVersionId":"template-version-id-example"}
+fleetctl --output json lab exec <lease-id> --wait -- cargo test
+  -> POST /api/v1/lab/leases/lease-id-example/exec body {"script":"cargo test","timeoutSeconds":60}
+fleetctl --output json lab exec <lease-id> --detach --idempotency-key <key> -- ./run-suite.sh
+  -> POST /api/v1/lab/leases/lease-id-example/exec-detached body {"script":"./run-suite.sh"}
+fleetctl --output json lab exec-status <handle>
+  -> GET /api/v1/lab/detached-execs/handle-example
+fleetctl --output json lab exec-status <handle> --wait --timeout 3600
+  -> GET /api/v1/lab/detached-execs/handle-example
+fleetctl --output json lab status <lease-id>
+  -> GET /api/v1/lab/leases/lease-id-example
+fleetctl --output json lab collect <lease-id> /home/lab/out/report.xml --wait
+  -> POST /api/v1/lab/leases/lease-id-example/artifacts/collect body {"paths":["/home/lab/out/report.xml"]}
+fleetctl --output json lab artifacts --lease <lease-id>
+  -> GET /api/v1/lab/artifacts?leaseId=lease-id-example
 fleetctl --output json lab extend <lease-id> --seconds 3600
   -> POST /api/v1/lab/leases/lease-id-example/extend body {"bySeconds":3600}
+fleetctl --output json lab destroy <lease-id> --wait
+  -> POST /api/v1/lab/leases/lease-id-example/release body {"keep":false}
+fleetctl --output json lab lease <template-version-id> --purpose "reproduce flaky test"
+  -> POST /api/v1/lab/leases body {"purpose":"reproduce flaky test","templateVersionId":"template-version-id-example"}
+fleetctl --output json lab provision-lease <lease-id>
+  -> POST /api/v1/lab/leases/lease-id-example/provision body {}
+fleetctl --output json lab leases
+  -> GET /api/v1/lab/leases
+fleetctl --output json lab leases --purpose-prefix "release-qa:v1.2:" --state ready,provisioning --owner <principal-id>
+  -> GET /api/v1/lab/leases?purposePrefix=release-qa:v1.2:&owner=principal-id-example&state=ready&state=provisioning
+fleetctl --output json lab provisions
+  -> GET /api/v1/lab/provisions
 fleetctl --output json lab release <lease-id>
   -> POST /api/v1/lab/leases/lease-id-example/release body {"keep":false}
+fleetctl --output json registry types
+  -> GET /api/v1/registry/types
+fleetctl --output json registry find aptabase
+  -> GET /api/v1/registry/entries?q=aptabase
+fleetctl --output json registry list --type domain --tag client-x
+  -> GET /api/v1/registry/entries?type=domain&tag=client-x
+fleetctl --output json registry get domain/example.com
+  -> GET /api/v1/registry/entries/domain/example.com
+fleetctl --output json registry list --target domain/example.com --relation used-by
+  -> GET /api/v1/registry/entries?target=domain/example.com&relation=used-by
+fleetctl --output json registry set domain/example.com --field registrar=Webhuset --field autoRenew=true --field loginAt="1Password (Webhuset vault)"
+  -> local Fleet Git checkout: Set { reference: EntryRef { entry_type: "domain", key: "example.com" }, fields: [("registrar", "Webhuset"), ("autoRenew", "true"), ("loginAt", "1Password (Webhuset vault)")], notes: None, from_json: None, repo: None }
+fleetctl --output json registry set service/aptabase --field name=Aptabase --field vendor=Aptabase
+  -> local Fleet Git checkout: Set { reference: EntryRef { entry_type: "service", key: "aptabase" }, fields: [("name", "Aptabase"), ("vendor", "Aptabase")], notes: None, from_json: None, repo: None }
+fleetctl --output json registry relate domain/example.com used-by service/aptabase
+  -> local Fleet Git checkout: Relate { from: EntryRef { entry_type: "domain", key: "example.com" }, relation: "used-by", target: "service/aptabase", remove: false, repo: None }
+fleetctl --output json registry tags add domain/example.com client-x
+  -> local Fleet Git checkout: Tags { add: true, reference: EntryRef { entry_type: "domain", key: "example.com" }, tags: ["client-x"], repo: None }
+fleetctl --output json registry unset domain/example.com --field dnsHost
+  -> local Fleet Git checkout: Unset { reference: EntryRef { entry_type: "domain", key: "example.com" }, fields: ["dnsHost"], notes: false, repo: None }
+fleetctl --output json registry validate
+  -> local Fleet Git checkout: Validate { repo: None }
+fleetctl --output json registry publish -m "Record example.com registrar"
+  -> local Fleet Git checkout: Publish { message: "Record example.com registrar", change_mode: None, base: None, branch: None, repo: None }
+fleetctl --output json services list --source coolify
+  -> GET /api/v1/services?source=coolify
+fleetctl --output json services settings <service-id>
+  -> GET /api/v1/services/service-id-example/settings
+fleetctl --output json services logs <service-id> --lines 100
+  -> GET /api/v1/services/service-id-example/logs?lines=100
+fleetctl --output json services restart <service-id> --reason "pick up new config" --wait-approval=5m
+  -> POST /api/v1/services/service-id-example/actions/restart body {"reason":"pick up new config"}
+fleetctl --output json services stop <service-id> --reason "client asked to pause" --wait-approval
+  -> POST /api/v1/services/service-id-example/actions/stop body {"reason":"client asked to pause"}
+fleetctl --output json services start <service-id> --wait-approval
+  -> POST /api/v1/services/service-id-example/actions/start body {"reason":""}
+fleetctl --output json services redeploy <service-id> --wait-approval=10m
+  -> POST /api/v1/services/service-id-example/actions/redeploy body {"reason":""}
+fleetctl --output json services env list <service-id>
+  -> GET /api/v1/services/service-id-example/settings
+fleetctl --output json services env set <service-id> --stdin --redeploy --wait-approval=5m
+  -> POST /api/v1/services/{id}/settings/env (values read from stdin, never an argument)
+fleetctl --output json services env unset <service-id> OLD_FLAG --wait-approval
+  -> POST /api/v1/services/service-id-example/settings/env body {"changes":[{"isPreview":false,"key":"OLD_FLAG","op":"unset"}],"reason":"change environment variables of service-id-example"}
+fleetctl --output json services domains set <service-id> https://www.example.com --wait-approval=5m
+  -> POST /api/v1/services/service-id-example/settings/domains body {"domains":["https://www.example.com"],"reason":"change domains of service-id-example"}
+fleetctl --output json services health set <service-id> --enabled --path /healthz --wait-approval
+  -> POST /api/v1/services/service-id-example/settings/health body {"enabled":true,"path":"/healthz","reason":"change health check of service-id-example"}
+fleetctl --output json services templates
+  -> GET /api/v1/site-templates
+fleetctl --output json services deploy --template <template-id> --account <account-id> --server <server> --project <project> --environment production --domain www.example.com --dns --dns-target 203.0.113.10 --wait-approval=10m
+  -> POST /api/v1/site-deployments body {"accountId":"account-id-example","domain":"www.example.com","environmentName":"production","projectUuid":"project-example","reason":"","serverUuid":"server-example","templateId":"template-id-example"}
+fleetctl --output json dns zones
+  -> GET /api/v1/dns/zones
+fleetctl --output json dns records www.example.com
+  -> GET /api/v1/dns/records?name=www.example.com
+fleetctl --output json dns observations www.example.com
+  -> GET /api/v1/dns/observations?name=www.example.com
+fleetctl --output json dns set www.example.com --type A --content 203.0.113.10 --replaces 203.0.113.9 --reason "move to new host" --wait-approval=5m
+  -> POST /api/v1/dns/changes body {"content":"203.0.113.10","name":"www.example.com","operation":"upsert","reason":"move to new host","replaces":"203.0.113.9","type":"A"}
+fleetctl --output json dns delete old.example.com --type CNAME --content target.example.net --wait-approval
+  -> POST /api/v1/dns/changes body {"content":"target.example.net","name":"old.example.com","operation":"delete","reason":"requested with fleetctl dns","type":"CNAME"}
+fleetctl --output json requests list --state pending
+  -> GET /api/v1/requests?state=pending
+fleetctl --output json requests get <request-id> --wait=2m
+  -> GET /api/v1/requests/request-id-example
 fleetctl --output json operations list --limit 20
   -> GET /api/v1/operations?limit=20
 fleetctl --output json operations get <operation-id>

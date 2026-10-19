@@ -159,6 +159,33 @@ async fn deep_links_serve_the_web_shell() {
 }
 
 #[tokio::test]
+async fn query_string_deep_links_serve_the_web_shell_and_api_404s_stay_json() {
+    let dist = shell_dist();
+    let (address, _shutdown) = spawn(settings(dist.path()), None).await;
+    let browser_accept = "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8";
+    let (status, _, body) =
+        request_details_with_accept(address, "GET", "/lab?lease=x", Some(browser_accept)).await;
+    assert_eq!(status, 200);
+    assert_eq!(body, "<html>fleet shell</html>\n");
+
+    let (status, _, body) = request_details_with_accept(
+        address,
+        "GET",
+        "/api/v1/does-not-exist",
+        Some(browser_accept),
+    )
+    .await;
+    assert_eq!(status, 404);
+    assert!(body.contains("\"code\":\"not_found\""), "{body}");
+    assert!(!body.contains("fleet shell"), "{body}");
+
+    let (status, _, body) =
+        request_details_with_accept(address, "GET", "/assets/x.js", Some(browser_accept)).await;
+    assert_eq!(status, 404);
+    assert!(!body.contains("fleet shell"), "{body}");
+}
+
+#[tokio::test]
 async fn deep_links_keep_the_controller_security_headers() {
     let dist = shell_dist();
     let (address, _shutdown) = spawn(settings(dist.path()), None).await;

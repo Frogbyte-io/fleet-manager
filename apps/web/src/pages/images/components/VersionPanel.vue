@@ -15,7 +15,8 @@ import { errorMessage, isTerminal, unwrap } from '../../machine/api'
 import CopyFleetctl from '../../machine/components/CopyFleetctl.vue'
 import OperationStatus from '../../machine/components/OperationStatus.vue'
 import { buildCommand, buildResult, promoteCommand } from '../images'
-import { BUILD_OPERATIONS_KEY, trackBuild, versionsKey } from '../useImages'
+import { BUILD_OPERATIONS_KEY, BUILD_RECORDS_KEY, trackBuild, versionsKey } from '../useImages'
+import BuildHistory from './BuildHistory.vue'
 
 // One published version: build it through the operator-installed Packer
 // CLI, follow the build, and promote it on the evidence of a successful
@@ -53,7 +54,16 @@ watch(() => props.version.id, () => {
   concurrentAcknowledged.value = false
 })
 
-const varsValid = computed(() => secretVars.value.every(v => /^[A-Za-z_][\w-]*$/.test(v.name.trim()) && v.reference.trim() !== ''))
+// A build reads only `images/<name>` records, by name (the controller refuses the rest).
+const SECRET_NAME = /^images\/(?=[\w.-]{1,128}$)[\w-][\w.-]*$/
+const varsValid = computed(() => secretVars.value.every(v => /^[A-Za-z_][\w-]*$/.test(v.name.trim()) && SECRET_NAME.test(v.reference.trim())))
+
+/** Scrolls to the build secrets section further down the page. */
+function showSecrets() {
+  const section = document.getElementById('image-secrets')
+  section?.scrollIntoView({ block: 'start' })
+  section?.focus({ preventScroll: true })
+}
 const timeoutSeconds = computed(() => Math.min(MAX_TIMEOUT, Math.max(60, Math.round(timeoutMinutes.value * 60))))
 // fleetctl sends exactly this request only without secret variables and
 // with its fixed 4h deadline.
@@ -76,8 +86,12 @@ async function startBuild() {
       secretVars: secretVars.value.map(v => ({ name: v.name.trim(), reference: v.reference.trim() })),
     }), [202])
     trackBuild(operation.id, props.version.id)
+    followedSettled.value = false
     startedId.value = operation.id
-    await queryClient.invalidateQueries({ queryKey: BUILD_OPERATIONS_KEY })
+    await Promise.all([
+      queryClient.invalidateQueries({ queryKey: BUILD_OPERATIONS_KEY }),
+      queryClient.invalidateQueries({ queryKey: BUILD_RECORDS_KEY }),
+    ])
   }
   catch (caught) {
     error.value = errorMessage(caught)
@@ -87,8 +101,15 @@ async function startBuild() {
   }
 }
 
+// The followed build's record may be written after the start returns, so
+// the history keeps refreshing until that operation settles.
+const followedSettled = ref(false)
+const recordsLive = computed(() => buildRunning.value || (!!startedId.value && !followedSettled.value))
+
 function onBuildSettled() {
+  followedSettled.value = true
   void queryClient.invalidateQueries({ queryKey: BUILD_OPERATIONS_KEY })
+  void queryClient.invalidateQueries({ queryKey: BUILD_RECORDS_KEY })
 }
 
 // The operation followed on screen: this tab's latest start, else the
@@ -160,16 +181,16 @@ const structured = computed(() => props.version.structured ?? null)
     >
       <dt class="text-fc-faint">
         node / pool
-      </dt><dd>{{ structured.node }} · {{ structured.storagePool }}</dd>
+      </dt><dd>{{ structured.node }} · {{ structured.firstDiskStoragePool ?? (structured.source === 'clone' ? 'source storage' : '—') }}</dd>
       <dt class="text-fc-faint">
         {{ structured.source === 'clone' ? 'clone from' : 'iso' }}
-      </dt><dd>{{ structured.source === 'clone' ? structured.cloneVm ?? '—' : structured.isoFile ?? '—' }}</dd>
+      </dt><dd>{{ structured.source === 'clone' ? structured.cloneVm ?? '—' : structured.bootIsoFile ?? '—' }}</dd>
       <dt class="text-fc-faint">
         cores / memory
       </dt><dd>{{ structured.cores ?? '—' }} · {{ structured.memory ? `${structured.memory} MiB` : '—' }}</dd>
       <dt class="text-fc-faint">
         disk / bridge
-      </dt><dd>{{ structured.diskSize ?? '—' }} · {{ structured.bridge ?? '—' }}</dd>
+      </dt><dd>{{ structured.firstDiskSize ?? '—' }} · {{ structured.networkBridge ?? '—' }}</dd>
     </dl>
 
     <section class="space-y-2">
@@ -177,7 +198,15 @@ const structured = computed(() => props.version.structured ?? null)
         Build
       </h4>
       <p class="text-fc-muted">
-        Runs <span class="font-mono">packer validate</span>, then <span class="font-mono">packer build</span>, with the operator-installed CLI on the controller. Secret variables are passed by secret reference; their values never reach this page, argv, logs, or audit.
+        Runs <span class="font-mono">packer validate</span>, then <span class="font-mono">packer build</span>, with the operator-installed CLI on the controller. Secret variables name a build secret record (<span class="font-mono">images/…</span>); their values never reach this page, argv, logs, or audit.
+        <button
+          type="button"
+          class="text-fc-info hover:text-fc-ink"
+          data-testid="manage-secrets"
+          @click="showSecrets"
+        >
+          Manage build secrets ↓
+        </button>
       </p>
       <div
         v-for="(item, index) in secretVars"
@@ -193,8 +222,8 @@ const structured = computed(() => props.version.structured ?? null)
         <span class="text-fc-faint">←</span>
         <input
           v-model="item.reference"
-          placeholder="secret reference id"
-          aria-label="Secret reference id"
+          placeholder="secret name (images/…)"
+          aria-label="Secret name (images/…)"
           class="h-8 w-56 rounded-sm border border-input bg-background px-2 font-mono text-foreground"
         >
         <button
@@ -269,6 +298,11 @@ const structured = computed(() => props.version.structured ?? null)
         missing="fleetctl images build always sends the 4h deadline and no secret variables; this build has to start here."
       />
     </section>
+
+    <BuildHistory
+      :version="version"
+      :live="recordsLive"
+    />
 
     <section class="space-y-2">
       <h4 class="fc-kicker border-b border-fc-line pb-1">

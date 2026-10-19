@@ -19,8 +19,11 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 
-use crate::authz::{AccessRequest, ActingPrincipal, Authorizer, Decision, Permission, authorize};
-use crate::operation::AuditPort;
+use crate::authz::{
+    AccessRequest, ActingPrincipal, Authorizer, Decision, Permission, ReasonId, authorize,
+};
+use crate::operation::{AuditPort, PortFailure};
+use crate::project::ProjectPort;
 pub use fleet_core::{
     CleanupStrategy, GuestState, LabTemplateContent, ReadinessProbe, RecipeVersion,
 };
@@ -160,6 +163,19 @@ pub struct ProvisionRecord {
     pub clone_upid: Option<String>,
     /// The guest's IPv4 address, once the agent reported one.
     pub guest_ipv4: Option<String>,
+    /// The temporary Fleet machine, retained for cleanup.
+    pub machine_id: Option<String>,
+    /// The SSH endpoint belonging to that machine.
+    pub endpoint_id: Option<String>,
+    /// The durable M3 child operation, recorded before execution.
+    pub ready_project_operation_id: Option<String>,
+    /// Absolute readiness deadline, unchanged by a resumed execution.
+    pub readiness_deadline_at: Option<i64>,
+    /// The named saga step that failed, without provider output or secrets.
+    pub failed_step: Option<String>,
+    /// The Proxmox account the guest was cloned through, recorded before
+    /// the clone so cleanup destroys it through the same account.
+    pub account_id: Option<String>,
     /// The caller-scoped idempotency key, when one was supplied.
     pub idempotency_key: Option<String>,
     /// When the guest reached ready (epoch millis), when it did — the TTL
@@ -180,6 +196,9 @@ pub struct NewProvision {
     pub lease_id: Option<String>,
     /// The caller-scoped idempotency key, when one was supplied.
     pub idempotency_key: Option<String>,
+    /// The absolute readiness deadline (epoch millis), written with the
+    /// record itself so a crash cannot leave one without it (#360).
+    pub readiness_deadline_at: Option<i64>,
 }
 
 /// The provisioning storage port.
@@ -209,6 +228,16 @@ pub trait ProvisionPort: fmt::Debug + Send + Sync {
     ///
     /// Fails when unknown or the backend errors.
     async fn update(&self, record: &ProvisionRecord) -> Result<(), String>;
+    /// Ends a still-in-flight record as `never_ready` without touching its
+    /// node, VMID, clone task or other IDs, which cleanup needs: one
+    /// conditional write on the stored state, so it cannot overwrite what
+    /// a running saga committed meanwhile. Returns the record when it
+    /// changed, `None` when it was not in flight (or does not exist).
+    ///
+    /// # Errors
+    ///
+    /// Fails when the backend errors.
+    async fn abandon(&self, id: &str) -> Result<Option<ProvisionRecord>, String>;
     /// Atomically records provision readiness and, when linked, the lease's
     /// ready state and expiry. This prevents either row from becoming the
     /// sole source of truth after a partial write.
@@ -221,6 +250,30 @@ pub trait ProvisionPort: fmt::Debug + Send + Sync {
         record: &ProvisionRecord,
         lease_expires_at: Option<i64>,
     ) -> Result<(), String>;
+    /// Registers and associates one Lab-owned machine atomically, or returns
+    /// the existing association. The application authorizes and audits intent
+    /// before invoking this mutation.
+    async fn ensure_guest_machine(
+        &self,
+        _record_id: &str,
+        _reference: &str,
+    ) -> Result<ProvisionRecord, String> {
+        Err("Lab machine registration is unavailable".to_owned())
+    }
+
+    /// Reads the unique durable Lab association for a machine, including
+    /// terminal records whose queued children still need cancellation checks.
+    async fn find_by_machine_id(
+        &self,
+        machine_id: &str,
+    ) -> Result<Option<ProvisionRecord>, String> {
+        Ok(self
+            .list()
+            .await?
+            .into_iter()
+            .find(|record| record.machine_id.as_deref() == Some(machine_id)))
+    }
+
     /// Lists records, newest first.
     ///
     /// # Errors
@@ -246,8 +299,325 @@ pub trait ProvisionPort: fmt::Debug + Send + Sync {
     ) -> Result<CloneTargetReservation, String>;
 }
 
+/// Adapter contract for the existing SSH trust/exec and M3 operation paths.
+/// `false` means retryable unavailability; an error is terminal. Provider
+/// output must not be returned as an error because it may contain secrets.
+#[async_trait]
+pub trait LabReadinessPort: fmt::Debug + Send + Sync {
+    /// Observes and pins/compares the host key through FM-201.
+    async fn trust(
+        &self,
+        record: &ProvisionRecord,
+        content: &LabTemplateContent,
+        remaining: std::time::Duration,
+    ) -> Result<bool, String>;
+    /// Runs the template command through FM-202, succeeding only on exit 0.
+    async fn ssh_probe(
+        &self,
+        operations: &crate::operation::Operations,
+        _parent_id: &str,
+        record: &ProvisionRecord,
+        command: &str,
+        guest_os: fleet_core::GuestOs,
+        remaining: std::time::Duration,
+    ) -> Result<bool, String>;
+    /// Succeeds once the template's interactive test user has an Active
+    /// desktop session on the guest (#397). `false` retries until the
+    /// readiness deadline; the failure is then named `interactive_session`.
+    async fn interactive_session(
+        &self,
+        operations: &crate::operation::Operations,
+        _parent_id: &str,
+        record: &ProvisionRecord,
+        user: &str,
+        remaining: std::time::Duration,
+    ) -> Result<bool, String>;
+    /// Creates or re-finds a durable M3 child with a provision-scoped key.
+    async fn create_project(
+        &self,
+        operations: &crate::operation::Operations,
+        _parent_id: &str,
+        record: &ProvisionRecord,
+        project_id: &str,
+        remaining: std::time::Duration,
+    ) -> Result<String, String>;
+    /// Executes/polls that child and accepts only a successful verify step.
+    async fn project_verified(
+        &self,
+        operations: &crate::operation::Operations,
+        child_id: &str,
+        remaining: std::time::Duration,
+    ) -> Result<bool, String>;
+}
+
+/// A safe named readiness failure. External output is excluded.
+#[derive(Debug)]
+pub struct LabReadinessFailure {
+    /// The saga step that did not complete.
+    pub step: &'static str,
+}
+
+/// Executes Lab readiness policy using the existing adapter contracts.
+/// The absolute deadline and child identity are durable before remote work.
+pub struct LabBootstrap<'a> {
+    /// Provision persistence.
+    pub provisions: &'a dyn ProvisionPort,
+    /// SSH and ready-project adapters.
+    pub readiness: &'a dyn LabReadinessPort,
+    /// Mutation audit sink.
+    pub audit: &'a dyn AuditPort,
+    /// Active centralized authorization policy.
+    pub authorizer: &'a dyn Authorizer,
+    /// The controller's acting identity.
+    pub principal: &'a ActingPrincipal,
+}
+
+impl LabBootstrap<'_> {
+    /// Associates the guest, trusts SSH, runs the configured probe and applies
+    /// the bootstrap project. Returns the latest record; the caller commits
+    /// readiness and its TTL atomically only after this succeeds.
+    ///
+    /// # Errors
+    /// Returns the safe named step on denial, deadline, cancellation or failure.
+    pub async fn run(
+        &self,
+        operations: &crate::operation::Operations,
+        operation_id: &str,
+        record: ProvisionRecord,
+        content: &LabTemplateContent,
+    ) -> Result<ProvisionRecord, LabReadinessFailure> {
+        let record_id = record.id.clone();
+        let outcome = self
+            .run_inner(operations, operation_id, record, content)
+            .await;
+        if outcome.is_err()
+            && let Ok(record) = self.provisions.get(&record_id).await
+            && let Some(child) = record.ready_project_operation_id.as_deref()
+        {
+            let _ = operations
+                .cancel(self.authorizer, &self.principal.id, child)
+                .await;
+        }
+        outcome
+    }
+
+    // Keep the ordered saga transitions together for review.
+    #[allow(clippy::too_many_lines)]
+    async fn run_inner(
+        &self,
+        operations: &crate::operation::Operations,
+        operation_id: &str,
+        mut record: ProvisionRecord,
+        content: &LabTemplateContent,
+    ) -> Result<ProvisionRecord, LabReadinessFailure> {
+        let failure = |step| LabReadinessFailure { step };
+        self.remaining(operations, operation_id, &record, "machine_registration")
+            .await?;
+        content
+            .validate_ssh()
+            .map_err(|_| failure("ssh_configuration"))?;
+        let host = record
+            .guest_ipv4
+            .as_deref()
+            .ok_or_else(|| failure("guest_ip"))?;
+        host.parse::<std::net::Ipv4Addr>()
+            .map_err(|_| failure("guest_ip"))?;
+        for action in [Permission::LabProvision, Permission::MachineCreate] {
+            authorize(
+                self.authorizer,
+                AccessRequest {
+                    principal_id: &self.principal.id,
+                    action,
+                    resource: if action == Permission::LabProvision {
+                        Some(record.lease_id.as_deref().unwrap_or(&record.id))
+                    } else {
+                        None
+                    },
+                },
+            )
+            .map_err(|_| failure("machine_registration"))?;
+        }
+        self.audit
+            .record_intent(&crate::audit::AuditIntent {
+                actor: self.principal.id.clone(),
+                action: Permission::MachineCreate.id().to_owned(),
+                resource: Some(record.id.clone()),
+                decision: Decision::allow(),
+                correlation_id: Some(operation_id.to_owned()),
+                operation_id: Some(operation_id.to_owned()),
+                metadata: crate::audit::AuditMetadata::default(),
+            })
+            .await
+            .map_err(|_| failure("machine_registration"))?;
+        let reference = format!("{}@{host}:{}", content.ssh_user, content.ssh_port);
+        record = self
+            .provisions
+            .ensure_guest_machine(&record.id, &reference)
+            .await
+            .map_err(|_| failure("machine_registration"))?;
+        record.state = GuestState::Bootstrapping;
+        self.provisions
+            .update(&record)
+            .await
+            .map_err(|_| failure("bootstrapping"))?;
+        self.poll(
+            operations,
+            operation_id,
+            &record,
+            "ssh_trust",
+            |remaining| self.readiness.trust(&record, content, remaining),
+        )
+        .await?;
+        if content.readiness_probe == ReadinessProbe::SshExec {
+            let command = content
+                .readiness_command
+                .as_deref()
+                .filter(|value| !value.trim().is_empty())
+                .ok_or_else(|| failure("ssh_exec"))?;
+            self.poll(operations, operation_id, &record, "ssh_exec", |remaining| {
+                self.readiness.ssh_probe(
+                    operations,
+                    operation_id,
+                    &record,
+                    command,
+                    content.guest_os,
+                    remaining,
+                )
+            })
+            .await?;
+        }
+        if let Some(user) = content.interactive_user.as_deref() {
+            content
+                .validate_interactive_user()
+                .map_err(|_| failure("interactive_session"))?;
+            self.poll(
+                operations,
+                operation_id,
+                &record,
+                "interactive_session",
+                |remaining| {
+                    self.readiness.interactive_session(
+                        operations,
+                        operation_id,
+                        &record,
+                        user,
+                        remaining,
+                    )
+                },
+            )
+            .await?;
+        }
+        if content.readiness_probe == ReadinessProbe::ProjectReady
+            && content.bootstrap_project_id.is_none()
+        {
+            return Err(failure("project_ready"));
+        }
+        if let Some(project_id) = content.bootstrap_project_id.as_deref() {
+            if record.ready_project_operation_id.is_none() {
+                let remaining = self
+                    .remaining(operations, operation_id, &record, "project_setup")
+                    .await?;
+                let child = tokio::time::timeout(
+                    remaining,
+                    self.readiness.create_project(
+                        operations,
+                        operation_id,
+                        &record,
+                        project_id,
+                        remaining,
+                    ),
+                )
+                .await
+                .map_err(|_| failure("project_setup"))?
+                .map_err(|_| failure("project_setup"))?;
+                record.ready_project_operation_id = Some(child.clone());
+                if self.provisions.update(&record).await.is_err() {
+                    // Cancellation must not depend on the association write
+                    // having succeeded: this child is already durable.
+                    let _ = operations
+                        .cancel(self.authorizer, &self.principal.id, &child)
+                        .await;
+                    return Err(failure("project_setup"));
+                }
+            }
+            let child = record
+                .ready_project_operation_id
+                .as_deref()
+                .expect("recorded above");
+            self.poll(
+                operations,
+                operation_id,
+                &record,
+                "project_ready",
+                |remaining| {
+                    self.readiness
+                        .project_verified(operations, child, remaining)
+                },
+            )
+            .await?;
+        }
+        self.remaining(operations, operation_id, &record, "ready")
+            .await?;
+        Ok(record)
+    }
+
+    async fn poll<F, Fut>(
+        &self,
+        operations: &crate::operation::Operations,
+        operation_id: &str,
+        record: &ProvisionRecord,
+        step: &'static str,
+        mut attempt: F,
+    ) -> Result<(), LabReadinessFailure>
+    where
+        F: FnMut(std::time::Duration) -> Fut,
+        Fut: std::future::Future<Output = Result<bool, String>>,
+    {
+        loop {
+            let remaining = self
+                .remaining(operations, operation_id, record, step)
+                .await?;
+            match tokio::time::timeout(remaining, attempt(remaining)).await {
+                Ok(Ok(true)) => return Ok(()),
+                Ok(Ok(false)) => {
+                    tokio::time::sleep(remaining.min(std::time::Duration::from_secs(2))).await;
+                }
+                _ => return Err(LabReadinessFailure { step }),
+            }
+        }
+    }
+
+    async fn remaining(
+        &self,
+        operations: &crate::operation::Operations,
+        operation_id: &str,
+        record: &ProvisionRecord,
+        step: &'static str,
+    ) -> Result<std::time::Duration, LabReadinessFailure> {
+        if operations
+            .cancel_requested(operation_id)
+            .await
+            .map_err(|_| LabReadinessFailure { step })?
+        {
+            return Err(LabReadinessFailure { step: "cancelled" });
+        }
+        let millis = record
+            .readiness_deadline_at
+            .unwrap_or(0)
+            .saturating_sub(fleet_core::SystemClock::now_unix_millis());
+        if millis <= 0 {
+            return Err(LabReadinessFailure { step });
+        }
+        Ok(std::time::Duration::from_millis(
+            u64::try_from(millis).unwrap_or(0),
+        ))
+    }
+}
+
 /// The outcome of [`ProvisionPort::reserve_clone_target`].
 #[derive(Clone, Debug, Eq, PartialEq)]
+// Retain the existing port contract as the readiness record gains durable IDs.
+#[allow(clippy::large_enum_variant)]
 pub enum CloneTargetReservation {
     /// The record holds a reservation; it carries the stored node and VMID.
     Reserved(ProvisionRecord),
@@ -268,9 +638,11 @@ pub enum CloneTargetReservation {
 /// the cluster it clones in.
 #[async_trait]
 pub trait ImageArtifactPort: fmt::Debug + Send + Sync {
-    /// The template VMID recorded by the image version's latest successful
-    /// build. `None` when the version has no successful build, or when
-    /// that latest build recorded no artifact: an older build is never a
+    /// The template VMID of the build the image version's promotion pinned
+    /// (issue #281): a later rebuild never moves it. A version without a
+    /// pin (promoted before pins were recorded) falls back to its latest
+    /// successful build. `None` when there is no such build, or when that
+    /// latest build recorded no artifact: an older build is never a
     /// fallback.
     ///
     /// # Errors
@@ -279,7 +651,8 @@ pub trait ImageArtifactPort: fmt::Debug + Send + Sync {
     /// a VMID.
     async fn template_vmid(&self, image_version_id: &str) -> Result<Option<u32>, String>;
     /// The template VMIDs recorded by the successful builds of every
-    /// currently promoted image version.
+    /// currently promoted image version, plus every build a promotion
+    /// pinned, including a demoted version's (the pin outlives demotion).
     ///
     /// # Errors
     ///
@@ -287,9 +660,24 @@ pub trait ImageArtifactPort: fmt::Debug + Send + Sync {
     async fn promoted_template_vmids(&self) -> Result<Vec<u32>, String>;
 }
 
+/// A lease the principal may not see is reported as not found, so a
+/// delegated credential cannot probe another owner's lease ids.
+fn scope_lease(principal: &ActingPrincipal, lease: &Lease) -> Result<(), LabUseCaseError> {
+    if crate::authz::owner_scope_permits(&principal.id, &lease.owner) {
+        Ok(())
+    } else {
+        Err(LabUseCaseError::NotFound {
+            what: format!("lease {}", lease.id),
+        })
+    }
+}
+
 /// The Lab cleanup guard (issue #220): a VMID that is a template, or that
-/// matches a promoted image version's recorded build artifact, is never
-/// destroyed by Lab cleanup, whatever a provision record claims. Fleet has
+/// matches a protected image build artifact, is never destroyed by Lab
+/// cleanup, whatever a provision record claims. The protected artifacts are
+/// [`ImageArtifactPort::promoted_template_vmids`]: every successful build of
+/// a promoted image version, plus every build a promotion pinned, including
+/// a demoted version's (issue #281). Fleet has
 /// no Lab destroy path yet; the cleanup that FM-711 adds must call this
 /// with the cluster's live truth before it deletes anything. The
 /// provision executor already applies it before it resumes a record.
@@ -309,7 +697,7 @@ pub fn guard_destroy_target(
     }
     if promoted_template_vmids.contains(&vmid) {
         return Err(format!(
-            "VMID {vmid} is a promoted image's recorded build artifact; Lab cleanup never destroys an image template"
+            "VMID {vmid} is a protected image build artifact (a promoted version's build or a promotion's pinned build); Lab cleanup never destroys an image template"
         ));
     }
     Ok(())
@@ -330,9 +718,169 @@ pub struct NewLease {
     pub ttl_seconds: u32,
 }
 
+/// How `GET /lab/leases` narrows the leases. Every set field must match.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct LeaseFilter {
+    /// Only leases serving this project.
+    pub project_id: Option<String>,
+    /// Only leases whose purpose is exactly this.
+    pub purpose: Option<String>,
+    /// Only leases whose purpose starts with this (case-sensitive).
+    pub purpose_prefix: Option<String>,
+    /// Only leases in one of these states; empty means any.
+    pub states: Vec<LeaseState>,
+    /// Only leases owned by this principal.
+    pub owner: Option<String>,
+}
+
+impl LeaseFilter {
+    /// Whether the lease passes every set field.
+    #[must_use]
+    pub fn matches(&self, lease: &Lease) -> bool {
+        self.project_id
+            .as_deref()
+            .is_none_or(|id| lease.project_id.as_deref() == Some(id))
+            && self.purpose.as_deref().is_none_or(|p| lease.purpose == p)
+            && self
+                .purpose_prefix
+                .as_deref()
+                .is_none_or(|p| lease.purpose.starts_with(p))
+            && (self.states.is_empty() || self.states.contains(&lease.state))
+            && self.owner.as_deref().is_none_or(|o| lease.owner == o)
+    }
+}
+
+/// The caller-scoped key and canonical request fingerprint of a keyed
+/// lease creation. The scope is the principal id, as provision's is.
+fn lease_idempotency_scope(
+    principal: &ActingPrincipal,
+    key: &str,
+    new: &NewLease,
+) -> Result<(String, String), LabUseCaseError> {
+    let valid = !key.is_empty()
+        && key.chars().count() <= MAX_LEASE_IDEMPOTENCY_KEY_CHARS
+        && key.chars().all(|c| c.is_ascii_graphic());
+    if !valid {
+        return Err(LabUseCaseError::Invalid {
+            detail: format!(
+                "the idempotency key must be 1..={MAX_LEASE_IDEMPOTENCY_KEY_CHARS} printable ASCII characters"
+            ),
+        });
+    }
+    let fingerprint = serde_json::json!({
+        "templateVersionId": new.template_version_id,
+        "purpose": new.purpose,
+        "projectId": new.project_id,
+    })
+    .to_string();
+    // The principal id is length-prefixed, so no (principal, key) pair can
+    // spell another's scope, whatever characters either contains.
+    // A delegated credential's scope is its owner, so a retry with a rotated
+    // token of the same owner replays, and another owner never can.
+    let scope = crate::authz::resource_owner(&principal.id);
+    Ok((
+        crate::idempotency::scoped_key("lab-lease-create", scope, &[key]),
+        fingerprint,
+    ))
+}
+
+/// The provision-record key of a lease-bound provision, `{owner}:lab-lease:{id}`.
+///
+/// Unlike a caller's key, it is derived from the owner and a controller-minted
+/// lease id (a UUID, never containing ':'), and it ends in a fixed shape, so it
+/// reads back unambiguously from the right. It keeps its form so a lease that
+/// started provisioning before #433 still replays after the upgrade.
+fn lease_provision_record_key(principal_id: &str, lease_id: &str) -> String {
+    format!(
+        "{}:lab-lease:{lease_id}",
+        crate::authz::resource_owner(principal_id)
+    )
+}
+
+/// The operation key of a lease-bound provision, `{owner}:lab-lease-provision:{id}`,
+/// kept in its pre-#433 form for the reason [`lease_provision_record_key`] gives.
+#[must_use]
+pub fn lease_provision_operation_key(principal_id: &str, lease_id: &str) -> String {
+    format!(
+        "{}:lab-lease-provision:{lease_id}",
+        crate::authz::resource_owner(principal_id)
+    )
+}
+
+fn replayed_lease(
+    lease: Lease,
+    stored: &str,
+    fingerprint: &str,
+) -> Result<(Lease, bool), LabUseCaseError> {
+    if stored == fingerprint {
+        Ok((lease, false))
+    } else {
+        Err(LabUseCaseError::Conflict {
+            detail: "the idempotency key was already used for a different lease request".to_owned(),
+        })
+    }
+}
+
+/// The longest `Idempotency-Key` a lease creation accepts.
+pub const MAX_LEASE_IDEMPOTENCY_KEY_CHARS: usize = 128;
+
+/// The outcome of a keyed lease insert.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum KeyedLeaseCreate {
+    /// This call inserted the lease.
+    Created(Lease),
+    /// The key already named a lease (a retry, or a concurrent winner).
+    Replay {
+        /// The lease the key was first used for.
+        lease: Lease,
+        /// The canonical request fingerprint stored with it.
+        fingerprint: String,
+    },
+}
+
 /// The lease storage port.
 #[async_trait]
 pub trait LeasePort: fmt::Debug + Send + Sync {
+    /// Creates a lease carrying a caller-scoped idempotency key and the
+    /// canonical fingerprint of its request, atomically: when the key is
+    /// already taken, nothing is inserted and the holder is returned.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the backend errors or does not support keyed creation.
+    async fn create_keyed(
+        &self,
+        _lease: &NewLease,
+        _owner: &str,
+        _now: i64,
+        _key: &str,
+        _fingerprint: &str,
+    ) -> Result<KeyedLeaseCreate, String> {
+        Err("keyed lease creation is unavailable".to_owned())
+    }
+    /// The lease holding this caller-scoped idempotency key, with its
+    /// request fingerprint.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the backend errors or does not support keyed creation.
+    async fn find_by_idempotency_key(&self, _key: &str) -> Result<Option<(Lease, String)>, String> {
+        Err("keyed lease creation is unavailable".to_owned())
+    }
+    /// Lists the leases passing the filter, newest first. Backends should
+    /// filter in the query; the default filters the full list.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the backend errors.
+    async fn search(&self, filter: &LeaseFilter) -> Result<Vec<Lease>, String> {
+        Ok(self
+            .list(filter.project_id.as_deref())
+            .await?
+            .into_iter()
+            .filter(|lease| filter.matches(lease))
+            .collect())
+    }
     /// Creates a lease, minting its identity.
     ///
     /// # Errors
@@ -351,12 +899,12 @@ pub trait LeasePort: fmt::Debug + Send + Sync {
     ///
     /// Fails when unknown or the backend errors.
     async fn update(&self, lease: &Lease) -> Result<(), String>;
-    /// Lists leases, newest first.
+    /// Lists leases, newest first, narrowed by the project when given.
     ///
     /// # Errors
     ///
     /// Fails when the backend errors.
-    async fn list(&self) -> Result<Vec<Lease>, String>;
+    async fn list(&self, project_id: Option<&str>) -> Result<Vec<Lease>, String>;
     /// Lists the leases whose TTL has expired at `now`.
     ///
     /// # Errors
@@ -404,6 +952,55 @@ pub trait LeasePort: fmt::Debug + Send + Sync {
         observed_expires_at: i64,
         now: i64,
     ) -> Result<bool, String>;
+    /// Moves a lease to `to` only while it is still in `observed` with the
+    /// same provision link: the compare-and-set that keeps the sweeper's
+    /// compensation from overwriting a concurrent `complete_ready`, release,
+    /// or executor compensation. Returns whether this caller made the
+    /// transition.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the backend errors.
+    async fn transition(
+        &self,
+        id: &str,
+        observed: LeaseState,
+        provision_id: Option<&str>,
+        to: LeaseState,
+    ) -> Result<bool, String>;
+    /// Re-arms the cleanup of a `cleanup_failed` lease: moves it back to
+    /// `releasing` with `attempts` recorded and nothing scheduled,
+    /// conditional on the lease still being `cleanup_failed` with
+    /// `observed_attempts`, so two concurrent re-arms (or a re-arm racing
+    /// the attempt it queued) cannot overwrite each other. Returns whether
+    /// this caller made the transition.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the backend errors.
+    async fn rearm_cleanup(
+        &self,
+        id: &str,
+        observed_attempts: u32,
+        attempts: u32,
+    ) -> Result<bool, String>;
+    /// Stores a failed cleanup attempt that [`record_cleanup_failure`]
+    /// computed on `failed` (its state, attempt count, and next due time),
+    /// conditional on the stored lease still being `releasing` with
+    /// `observed_attempts`: the compare-and-set that keeps the sweeper's
+    /// abandoned-attempt path from overwriting a concurrent operator
+    /// release, re-arm, or keep switch, and two overlapping sweeps from both
+    /// counting one attempt (#361). Returns whether this caller made the
+    /// transition.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the backend errors.
+    async fn record_failed_cleanup(
+        &self,
+        observed_attempts: u32,
+        failed: &Lease,
+    ) -> Result<bool, String>;
 }
 
 /// Result of linking a provision record to a lease.
@@ -437,6 +1034,11 @@ pub enum LabUseCaseError {
         /// The conflict detail.
         detail: String,
     },
+    /// The controller is at capacity for this request; retry later.
+    Busy {
+        /// Why.
+        detail: String,
+    },
     /// The image pin was refused: the version is unknown or unpromoted.
     PinRefused {
         /// The refusal detail.
@@ -458,6 +1060,7 @@ impl fmt::Display for LabUseCaseError {
             Self::Invalid { detail } => write!(f, "invalid request: {detail}"),
             Self::NotFound { what } => write!(f, "not found: {what}"),
             Self::Conflict { detail } => write!(f, "conflict: {detail}"),
+            Self::Busy { detail } => write!(f, "busy: {detail}"),
             Self::PinRefused { detail } => write!(f, "the image pin was refused: {detail}"),
             Self::Backend { context, detail } => write!(f, "lab {context} failed: {detail}"),
         }
@@ -473,7 +1076,13 @@ pub struct Lab {
     provisions: Arc<dyn ProvisionPort>,
     leases: Arc<dyn LeasePort>,
     image_pins: Arc<dyn ImagePinValidator>,
+    projects: Arc<dyn ProjectPort>,
     audit: Arc<dyn AuditPort>,
+    artifacts: Option<Arc<crate::lab_artifacts::LabArtifacts>>,
+    puts: Option<Arc<crate::lab_put::LabPuts>>,
+    detached: Option<Arc<crate::lab_exec_detach::LabExecDetach>>,
+    pools: Option<Arc<crate::lab_pool::LabPools>>,
+    reservations: Option<Arc<dyn crate::lab_placement::CapacityReservationPort>>,
 }
 
 impl Lab {
@@ -484,6 +1093,7 @@ impl Lab {
         provisions: Arc<dyn ProvisionPort>,
         leases: Arc<dyn LeasePort>,
         image_pins: Arc<dyn ImagePinValidator>,
+        projects: Arc<dyn ProjectPort>,
         audit: Arc<dyn AuditPort>,
     ) -> Self {
         Self {
@@ -491,18 +1101,142 @@ impl Lab {
             provisions,
             leases,
             image_pins,
+            projects,
             audit,
+            artifacts: None,
+            puts: None,
+            detached: None,
+            pools: None,
+            reservations: None,
         }
     }
 
-    /// Creates a lease from a published template version: the lease
-    /// inherits the template's cleanup strategy and TTL, starts in
-    /// `requested`, and is audited. The provisioning saga is started by
-    /// the caller (the executor composes them).
+    /// Serves the read of a lease's capacity reservation (FM-715).
+    #[must_use]
+    pub fn with_reservations(
+        mut self,
+        reservations: Arc<dyn crate::lab_placement::CapacityReservationPort>,
+    ) -> Self {
+        self.reservations = Some(reservations);
+        self
+    }
+
+    /// The lease's capacity reservation, held or released, when it has one.
+    /// A read: it changes nothing, so it is authorized but not audited.
     ///
     /// # Errors
     ///
-    /// Fails on denial, an unknown version/lease, a lifecycle conflict, or a backend failure.
+    /// Fails on denial or a backend failure.
+    pub async fn lease_reservation(
+        &self,
+        authorizer: &dyn Authorizer,
+        principal: &ActingPrincipal,
+        lease_id: &str,
+    ) -> Result<Option<crate::lab_placement::CapacityReservation>, LabUseCaseError> {
+        authorize(
+            authorizer,
+            AccessRequest {
+                principal_id: &principal.id,
+                action: Permission::LabLeaseRead,
+                resource: Some(lease_id),
+            },
+        )
+        .map_err(LabUseCaseError::Denied)?;
+        if crate::authz::is_delegated_principal(&principal.id) {
+            // Administrators read any reservation; a delegated credential
+            // reads those of its own owner's leases.
+            let lease = self.leases.get(lease_id).await.map_err(|detail| {
+                if detail.contains("not found") {
+                    LabUseCaseError::NotFound {
+                        what: format!("lease {lease_id}"),
+                    }
+                } else {
+                    LabUseCaseError::Backend {
+                        context: "leases",
+                        detail,
+                    }
+                }
+            })?;
+            scope_lease(principal, &lease)?;
+        }
+        match &self.reservations {
+            Some(reservations) => {
+                reservations
+                    .for_lease(lease_id)
+                    .await
+                    .map_err(|detail| LabUseCaseError::Backend {
+                        context: "reservation",
+                        detail,
+                    })
+            }
+            None => Ok(None),
+        }
+    }
+
+    /// Serves the Lab pool use cases (FM-717) beside the Lab surface.
+    #[must_use]
+    pub fn with_pools(mut self, pools: Arc<crate::lab_pool::LabPools>) -> Self {
+        self.pools = Some(pools);
+        self
+    }
+
+    /// The Lab pool use cases, when the controller composed them.
+    #[must_use]
+    pub fn pools(&self) -> Option<&Arc<crate::lab_pool::LabPools>> {
+        self.pools.as_ref()
+    }
+
+    /// Serves the Lab artifact use cases (FM-721) beside the Lab surface.
+    #[must_use]
+    pub fn with_artifacts(mut self, artifacts: Arc<crate::lab_artifacts::LabArtifacts>) -> Self {
+        self.artifacts = Some(artifacts);
+        self
+    }
+
+    /// Serves the Lab put use cases (#393) beside the Lab surface.
+    #[must_use]
+    pub fn with_puts(mut self, puts: Arc<crate::lab_put::LabPuts>) -> Self {
+        self.puts = Some(puts);
+        self
+    }
+
+    /// The Lab put use cases, when the controller composed them.
+    #[must_use]
+    pub fn puts(&self) -> Option<&Arc<crate::lab_put::LabPuts>> {
+        self.puts.as_ref()
+    }
+
+    /// Serves the detached-exec use cases (#394) beside the Lab surface.
+    #[must_use]
+    pub fn with_detached(mut self, detached: Arc<crate::lab_exec_detach::LabExecDetach>) -> Self {
+        self.detached = Some(detached);
+        self
+    }
+
+    /// The detached-exec use cases, when the controller composed them.
+    #[must_use]
+    pub fn detached(&self) -> Option<&Arc<crate::lab_exec_detach::LabExecDetach>> {
+        self.detached.as_ref()
+    }
+
+    /// The Lab artifact use cases, when the controller composed them.
+    #[must_use]
+    pub fn artifacts(&self) -> Option<&Arc<crate::lab_artifacts::LabArtifacts>> {
+        self.artifacts.as_ref()
+    }
+
+    /// Creates a lease from a published template version: the lease
+    /// inherits the template's cleanup strategy, TTL, and bootstrap
+    /// project, starts in `requested`, and is audited. An explicit project
+    /// id that names an existing project overrides the inheritance; an
+    /// inherited bootstrap project that no longer exists fails the
+    /// creation so the caller can supply a replacement. The provisioning
+    /// saga is started by the caller (the executor composes them).
+    ///
+    /// # Errors
+    ///
+    /// Fails on denial, an unknown version/project/lease, a stale template
+    /// bootstrap project, a lifecycle conflict, or a backend failure.
     pub async fn create_lease(
         &self,
         authorizer: &dyn Authorizer,
@@ -510,6 +1244,33 @@ impl Lab {
         new: NewLease,
         now: i64,
     ) -> Result<Lease, LabUseCaseError> {
+        self.create_lease_idempotent(authorizer, principal, new, None, now)
+            .await
+            .map(|(lease, _)| lease)
+    }
+
+    /// [`Self::create_lease`] with an optional caller-scoped idempotency
+    /// key. A replay with the same key and the same request returns the
+    /// lease the key was first used for (`false`: nothing was created, and
+    /// nothing is claimed, audited as a creation, or queued); the same key
+    /// with a different request is a `Conflict`. The request is the
+    /// template version, the purpose, and the explicit project id (absent
+    /// and null are the same); the cleanup strategy and TTL come from the
+    /// template.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::create_lease`], plus `Invalid` for a malformed key and
+    /// `Conflict` for a key reused with a different request.
+    #[allow(clippy::too_many_lines)]
+    pub async fn create_lease_idempotent(
+        &self,
+        authorizer: &dyn Authorizer,
+        principal: &ActingPrincipal,
+        new: NewLease,
+        idempotency_key: Option<&str>,
+        now: i64,
+    ) -> Result<(Lease, bool), LabUseCaseError> {
         // The authorization precedes the read: a denied caller cannot
         // probe lease existence through NotFound versus Denied.
         authorize(
@@ -521,14 +1282,36 @@ impl Lab {
             },
         )
         .map_err(LabUseCaseError::Denied)?;
+        let keyed = idempotency_key
+            .map(|key| lease_idempotency_scope(principal, key, &new))
+            .transpose()?;
+        if let Some((key, fingerprint)) = &keyed
+            && let Some((lease, stored)) =
+                self.leases
+                    .find_by_idempotency_key(key)
+                    .await
+                    .map_err(|detail| LabUseCaseError::Backend {
+                        context: "leases",
+                        detail,
+                    })?
+        {
+            return replayed_lease(lease, &stored, fingerprint);
+        }
+        let delegated = crate::authz::is_delegated_principal(&principal.id);
         let version = self
             .templates
             .get_version(&new.template_version_id)
             .await
             .map_err(|detail| {
                 if detail.contains("not found") {
-                    LabUseCaseError::NotFound {
-                        what: format!("version {}", new.template_version_id),
+                    // A delegated credential gets the same refusal for an
+                    // unknown version as for one outside its allow-list.
+                    if delegated {
+                        LabUseCaseError::Denied(Decision::deny(ReasonId::OutOfScope))
+                    } else {
+                        LabUseCaseError::NotFound {
+                            what: format!("version {}", new.template_version_id),
+                        }
                     }
                 } else {
                     LabUseCaseError::Backend {
@@ -537,37 +1320,145 @@ impl Lab {
                     }
                 }
             })?;
+        // The template allow-list is a catalog decision on the template
+        // use, taken once the version names its template.
+        authorize(
+            authorizer,
+            AccessRequest {
+                principal_id: &principal.id,
+                action: Permission::LabTemplateUse,
+                resource: Some(&crate::credentials::template_use_resource(
+                    &version.template_id,
+                    &version.id,
+                )),
+            },
+        )
+        .map_err(LabUseCaseError::Denied)?;
+        if delegated
+            && (new.project_id.is_some() || version.content.cleanup == CleanupStrategy::Keep)
+        {
+            // A delegated credential leases the template as published: it
+            // names no project of its own, and cannot lease a template that
+            // retains its VM.
+            return Err(LabUseCaseError::Denied(Decision::deny(
+                ReasonId::OutOfScope,
+            )));
+        }
         if new.purpose.is_empty() || new.purpose.chars().count() > 512 {
             return Err(LabUseCaseError::Invalid {
                 detail: "the purpose must be 1..=512 characters".to_owned(),
             });
         }
-        // The lease inherits the template's frozen cleanup strategy and
-        // TTL: destroy/revert/keep behavior and the expiry deadline are
-        // data on the lease, not scattered constants.
-        let inherited = NewLease {
-            cleanup: version.content.cleanup,
-            ttl_seconds: version.content.ttl_seconds,
-            ..new
+        // An explicit project must exist. Without one, the lease inherits
+        // the template version's bootstrap project — which must also still
+        // exist: deleting a project leaves the frozen template versions
+        // pointing at it, and the lease's FK would otherwise reject the
+        // inherited id as an opaque backend failure.
+        let inherited = {
+            let project_id = self
+                .resolve_lease_project(
+                    new.project_id.as_deref(),
+                    version.content.bootstrap_project_id.as_deref(),
+                )
+                .await?;
+            NewLease {
+                project_id,
+                cleanup: version.content.cleanup,
+                ttl_seconds: version.content.ttl_seconds,
+                ..new
+            }
         };
+        let audit_fact = inherited.project_id.as_deref().map(|id| ("projectId", id));
         self.audit_event(
             principal,
             Permission::LabLease,
             Some(&version.id),
             "lab_lease_creating",
-            None,
+            audit_fact,
         )
         .await?;
-        self.leases
-            .create(&inherited, &principal.id, now)
+        let backend = |detail| LabUseCaseError::Backend {
+            context: "leases",
+            detail,
+        };
+        let Some((key, fingerprint)) = keyed else {
+            let lease = self
+                .leases
+                .create(&inherited, crate::authz::resource_owner(&principal.id), now)
+                .await
+                .map_err(backend)?;
+            return Ok((lease, true));
+        };
+        match self
+            .leases
+            .create_keyed(
+                &inherited,
+                crate::authz::resource_owner(&principal.id),
+                now,
+                &key,
+                &fingerprint,
+            )
             .await
-            .map_err(|detail| LabUseCaseError::Backend {
-                context: "leases",
-                detail,
-            })
+            .map_err(backend)?
+        {
+            KeyedLeaseCreate::Created(lease) => Ok((lease, true)),
+            // A concurrent request with the same key won the insert.
+            KeyedLeaseCreate::Replay {
+                lease,
+                fingerprint: stored,
+            } => {
+                // The intent event above was written before this call knew
+                // the insert would lose: mark it so the trail is truthful.
+                self.audit_event(
+                    principal,
+                    Permission::LabLease,
+                    Some(&version.id),
+                    "lab_lease_create_replayed",
+                    Some(("leaseId", lease.id.as_str())),
+                )
+                .await?;
+                replayed_lease(lease, &stored, &fingerprint)
+            }
+        }
     }
 
-    /// Lists the caller's leases (all leases in the trusted-LAN mode).
+    /// Resolves the lease's project linkage: an explicit id must exist,
+    /// and with none given the template version's bootstrap project must
+    /// also still exist — deleting a project leaves the frozen template
+    /// versions pointing at it, and the lease's FK would otherwise reject
+    /// the inherited id as an opaque backend failure.
+    ///
+    /// # Errors
+    ///
+    /// Returns `Invalid` when a referenced project is missing so the API
+    /// maps it to a 400, and `Backend` on a port failure.
+    async fn resolve_lease_project(
+        &self,
+        explicit: Option<&str>,
+        bootstrap: Option<&str>,
+    ) -> Result<Option<String>, LabUseCaseError> {
+        let (id, what) = match (explicit, bootstrap) {
+            (Some(id), _) => (id, format!("project {id} does not exist")),
+            (None, Some(id)) => (
+                id,
+                format!(
+                    "the template version's bootstrap project {id} no longer \
+                     exists; supply an explicit project id for the lease"
+                ),
+            ),
+            (None, None) => return Ok(None),
+        };
+        match self.projects.get(id).await {
+            Ok(_) => Ok(Some(id.to_owned())),
+            Err(PortFailure::NotFound { .. }) => Err(LabUseCaseError::Invalid { detail: what }),
+            Err(failure) => Err(LabUseCaseError::Backend {
+                context: "projects",
+                detail: failure.to_string(),
+            }),
+        }
+    }
+
+    /// Lists the leases, narrowed by the project when given.
     ///
     /// # Errors
     ///
@@ -576,18 +1467,65 @@ impl Lab {
         &self,
         authorizer: &dyn Authorizer,
         principal: &ActingPrincipal,
+        project_id: Option<&str>,
     ) -> Result<Vec<Lease>, LabUseCaseError> {
         authorize(
             authorizer,
             AccessRequest {
                 principal_id: &principal.id,
-                action: Permission::LabRead,
+                action: Permission::LabLeaseRead,
                 resource: None,
             },
         )
         .map_err(LabUseCaseError::Denied)?;
+        let mut leases =
+            self.leases
+                .list(project_id)
+                .await
+                .map_err(|detail| LabUseCaseError::Backend {
+                    context: "leases",
+                    detail,
+                })?;
+        // A delegated credential lists its own owner's leases only.
+        leases.retain(|lease| crate::authz::owner_scope_permits(&principal.id, &lease.owner));
+        Ok(leases)
+    }
+
+    /// Lists the leases passing the filter, newest first. `owner_scope`
+    /// forces the owner: the filter's owner can only narrow within it (a
+    /// different owner matches nothing), so a caller restricted to its own
+    /// leases cannot see others by asking.
+    ///
+    /// # Errors
+    ///
+    /// Fails on denial or a backend failure.
+    pub async fn search_leases(
+        &self,
+        authorizer: &dyn Authorizer,
+        principal: &ActingPrincipal,
+        mut filter: LeaseFilter,
+        owner_scope: Option<&str>,
+    ) -> Result<Vec<Lease>, LabUseCaseError> {
+        authorize(
+            authorizer,
+            AccessRequest {
+                principal_id: &principal.id,
+                action: Permission::LabLeaseRead,
+                resource: None,
+            },
+        )
+        .map_err(LabUseCaseError::Denied)?;
+        // A delegated credential is always scoped to its own owner, whatever
+        // the caller passed.
+        let owner_scope = crate::authz::delegated_owner_identity(&principal.id).or(owner_scope);
+        if let Some(scope) = owner_scope {
+            if filter.owner.as_deref().is_some_and(|owner| owner != scope) {
+                return Ok(Vec::new());
+            }
+            filter.owner = Some(scope.to_owned());
+        }
         self.leases
-            .list()
+            .search(&filter)
             .await
             .map_err(|detail| LabUseCaseError::Backend {
                 context: "leases",
@@ -610,12 +1548,12 @@ impl Lab {
             authorizer,
             AccessRequest {
                 principal_id: &principal.id,
-                action: Permission::LabRead,
+                action: Permission::LabLeaseRead,
                 resource: Some(id),
             },
         )
         .map_err(LabUseCaseError::Denied)?;
-        self.leases.get(id).await.map_err(|detail| {
+        let lease = self.leases.get(id).await.map_err(|detail| {
             if detail.contains("not found") {
                 LabUseCaseError::NotFound {
                     what: format!("lease {id}"),
@@ -626,7 +1564,141 @@ impl Lab {
                     detail,
                 }
             }
+        })?;
+        scope_lease(principal, &lease)?;
+        Ok(lease)
+    }
+
+    /// Validates a command for a ready lease's guest and answers the
+    /// `lab.exec` operation to queue (FM-720). The lease must be `ready`
+    /// and unexpired, and its guest must be a registered Lab machine. The
+    /// command itself is never audited: it may carry secrets.
+    ///
+    /// # Errors
+    ///
+    /// Fails on denial, an unknown lease, a lease that is not ready or has
+    /// expired, a guest without a Lab machine, or an invalid command.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn exec_lease(
+        &self,
+        authorizer: &dyn Authorizer,
+        principal: &ActingPrincipal,
+        id: &str,
+        script: &str,
+        timeout_seconds: u64,
+        session: fleet_core::ExecSession,
+        idempotency_key: Option<&str>,
+        now: i64,
+    ) -> Result<crate::operation::NewOperation, LabUseCaseError> {
+        authorize(
+            authorizer,
+            AccessRequest {
+                principal_id: &principal.id,
+                action: Permission::LabExec,
+                resource: Some(id),
+            },
+        )
+        .map_err(LabUseCaseError::Denied)?;
+        if script.trim().is_empty() || script.len() > MAX_LAB_EXEC_SCRIPT_BYTES {
+            return Err(LabUseCaseError::Invalid {
+                detail: format!(
+                    "the command must be non-empty and at most {MAX_LAB_EXEC_SCRIPT_BYTES} bytes"
+                ),
+            });
+        }
+        if timeout_seconds == 0 || timeout_seconds > MAX_LAB_EXEC_TIMEOUT_SECONDS {
+            return Err(LabUseCaseError::Invalid {
+                detail: format!("timeoutSeconds must be 1..={MAX_LAB_EXEC_TIMEOUT_SECONDS}"),
+            });
+        }
+        if session == fleet_core::ExecSession::Interactive
+            && timeout_seconds > MAX_LAB_EXEC_INTERACTIVE_SECONDS
+        {
+            return Err(LabUseCaseError::Invalid {
+                detail: format!(
+                    "an interactive exec's timeoutSeconds must be at most {MAX_LAB_EXEC_INTERACTIVE_SECONDS}; use exec-detached for longer commands"
+                ),
+            });
+        }
+        let lease = self.leases.get(id).await.map_err(|detail| {
+            if detail.contains("not found") {
+                LabUseCaseError::NotFound {
+                    what: format!("lease {id}"),
+                }
+            } else {
+                LabUseCaseError::Backend {
+                    context: "leases",
+                    detail,
+                }
+            }
+        })?;
+        scope_lease(principal, &lease)?;
+        lease_exec_ready(&lease, now).map_err(|detail| LabUseCaseError::Invalid { detail })?;
+        let record = match &lease.provision_id {
+            Some(provision) => Some(self.provisions.get(provision).await.map_err(|detail| {
+                LabUseCaseError::Backend {
+                    context: "provisions",
+                    detail,
+                }
+            })?),
+            None => None,
+        };
+        if record
+            .as_ref()
+            .is_none_or(|record| record.machine_id.is_none() || record.endpoint_id.is_none())
+        {
+            return Err(LabUseCaseError::Invalid {
+                detail: "the lease's guest has no registered Lab machine to run on".to_owned(),
+            });
+        }
+        let (guest_os, template_user) = self.guest_of(&lease).await?;
+        let interactive_user = session
+            .resolve(guest_os, template_user.as_deref())
+            .map_err(|detail| LabUseCaseError::Invalid { detail })?;
+        self.audit_event(
+            principal,
+            Permission::LabExec,
+            Some(id),
+            "lab_exec_requested",
+            Some(("session", session.id())),
+        )
+        .await?;
+        Ok(crate::operation::NewOperation {
+            kind: "lab.exec".to_owned(),
+            idempotency_key: idempotency_key
+                .map(|key| crate::idempotency::scoped_key("lab-exec", &principal.id, &[id, key])),
+            deadline_at: None,
+            correlation_id: None,
+            payload_json: Some(
+                serde_json::json!({
+                    "leaseId": id,
+                    "script": script,
+                    "timeoutSeconds": timeout_seconds,
+                    "guestOs": guest_os.id(),
+                    "session": session.id(),
+                    "interactiveUser": interactive_user,
+                })
+                .to_string(),
+            ),
+            review_token: None,
         })
+    }
+
+    /// The guest OS and interactive user of a lease's template version: the
+    /// OS selects the guest shell and the path rules, and the version is
+    /// immutable.
+    async fn guest_of(
+        &self,
+        lease: &Lease,
+    ) -> Result<(fleet_core::GuestOs, Option<String>), LabUseCaseError> {
+        self.templates
+            .get_version(&lease.template_version_id)
+            .await
+            .map(|version| (version.content.guest_os, version.content.interactive_user))
+            .map_err(|detail| LabUseCaseError::Backend {
+                context: "templates",
+                detail,
+            })
     }
 
     /// Releases a lease: transitions it into `releasing` and records the
@@ -675,6 +1747,7 @@ impl Lab {
                 }
             }
         })?;
+        scope_lease(principal, &lease)?;
         if lease.state.is_terminal() {
             return Err(LabUseCaseError::Invalid {
                 detail: format!("the lease {id} is already {}", lease.state.id()),
@@ -708,6 +1781,99 @@ impl Lab {
                 detail,
             })?;
         Ok(updated)
+    }
+
+    /// Re-arms the cleanup of a `cleanup_failed` lease once an operator has
+    /// fixed the cause (#292): the lease goes back to `releasing` with a
+    /// fresh round of [`MAX_CLEANUP_ATTEMPTS`] attempts and nothing
+    /// scheduled, so its next `lab.cleanup` is due at once. The caller
+    /// queues that operation. Re-arming needs `lab.lease`, the permission
+    /// that already queues the same cleanup through a release: it resumes
+    /// the release the lease recorded, with the same strategy and the same
+    /// destroy guards, and grants nothing a release does not.
+    ///
+    /// # Errors
+    ///
+    /// Fails on denial, an unknown lease, a lease that is not
+    /// `cleanup_failed` (invalid), a concurrent re-arm (conflict), or a
+    /// backend failure.
+    pub async fn retry_cleanup(
+        &self,
+        authorizer: &dyn Authorizer,
+        principal: &ActingPrincipal,
+        id: &str,
+    ) -> Result<Lease, LabUseCaseError> {
+        authorize(
+            authorizer,
+            AccessRequest {
+                principal_id: &principal.id,
+                action: Permission::LabLease,
+                resource: Some(id),
+            },
+        )
+        .map_err(LabUseCaseError::Denied)?;
+        let lease = self.leases.get(id).await.map_err(|detail| {
+            if detail.contains("not found") {
+                LabUseCaseError::NotFound {
+                    what: format!("lease {id}"),
+                }
+            } else {
+                LabUseCaseError::Backend {
+                    context: "leases",
+                    detail,
+                }
+            }
+        })?;
+        scope_lease(principal, &lease)?;
+        if lease.state != LeaseState::CleanupFailed {
+            return Err(LabUseCaseError::Invalid {
+                detail: format!(
+                    "the lease {id} is {}; only a cleanup_failed lease can retry its cleanup",
+                    lease.state.id()
+                ),
+            });
+        }
+        let mut rearmed = lease.clone();
+        rearm_cleanup(&mut rearmed);
+        let failed_attempts = lease.cleanup_attempts.to_string();
+        // The intent precedes the mutation; the completion is recorded only
+        // once this caller's compare-and-set won, so a concurrent loser
+        // leaves a request, never a re-arm that did not happen.
+        self.audit_event(
+            principal,
+            Permission::LabLease,
+            Some(id),
+            "lab_lease_cleanup_rearm_requested",
+            Some(("failedAttempts", &failed_attempts)),
+        )
+        .await?;
+        let won = self
+            .leases
+            .rearm_cleanup(id, lease.cleanup_attempts, rearmed.cleanup_attempts)
+            .await
+            .map_err(|detail| LabUseCaseError::Backend {
+                context: "leases",
+                detail,
+            })?;
+        if !won {
+            return Err(LabUseCaseError::Conflict {
+                detail: "the lease changed before its cleanup could be re-armed".to_owned(),
+            });
+        }
+        // The required audit is the intent above, recorded before the
+        // change. The completion record is best effort: the re-arm is
+        // committed, and failing here would return before the caller
+        // queues the cleanup the lease now owes.
+        let _ = self
+            .audit_event(
+                principal,
+                Permission::LabLease,
+                Some(id),
+                "lab_lease_cleanup_rearmed",
+                Some(("failedAttempts", &failed_attempts)),
+            )
+            .await;
+        Ok(rearmed)
     }
 
     /// Extends a ready lease by adding seconds to its existing expiry. The
@@ -747,6 +1913,7 @@ impl Lab {
                 }
             }
         })?;
+        scope_lease(principal, &lease)?;
         let observed_expires_at = lease.expires_at.ok_or_else(|| LabUseCaseError::Invalid {
             detail: "only ready leases with a TTL deadline can be extended".to_owned(),
         })?;
@@ -1191,11 +2358,18 @@ impl Lab {
         now: i64,
     ) -> Result<(ProvisionRecord, bool), LabUseCaseError> {
         let authorization_resource = lease_id.unwrap_or(version_id);
+        // A lease-bound provision is its own catalog action: provisioning
+        // without a lease would leave a VM no lease owns.
+        let provision_action = if lease_id.is_some() {
+            Permission::LabLeaseProvision
+        } else {
+            Permission::LabProvision
+        };
         authorize(
             authorizer,
             AccessRequest {
                 principal_id: &principal.id,
-                action: Permission::LabProvision,
+                action: provision_action,
                 resource: Some(authorization_resource),
             },
         )
@@ -1213,13 +2387,17 @@ impl Lab {
                     }
                 }
             })?;
+            scope_lease(principal, &lease)?;
             if lease.template_version_id != version_id {
                 return Err(LabUseCaseError::Invalid {
                     detail: "the lease uses a different template version".to_owned(),
                 });
             }
             if lease.state != LeaseState::Requested
-                && !(lease.state == LeaseState::Provisioning && lease.provision_id.is_some())
+                && !(matches!(
+                    lease.state,
+                    LeaseState::Provisioning | LeaseState::Booting | LeaseState::Bootstrapping
+                ) && lease.provision_id.is_some())
             {
                 return Err(LabUseCaseError::Conflict {
                     detail: format!("lease {lease_id} is not awaiting provisioning"),
@@ -1248,6 +2426,7 @@ impl Lab {
                 }
             })?;
         self.validate_pin(&version.content.image_version_id).await?;
+        // The audit trail keeps the established `lab.provision` action id.
         self.audit_event(
             principal,
             Permission::LabProvision,
@@ -1259,8 +2438,12 @@ impl Lab {
         // Idempotent replay: the caller-scoped key returns the in-flight
         // record instead of creating a second guest saga.
         let scoped_key = lease_id
-            .map(|id| format!("{}:lab-lease:{id}", principal.id))
-            .or_else(|| idempotency_key.map(|key| format!("{}:{key}", principal.id)));
+            .map(|id| lease_provision_record_key(&principal.id, id))
+            .or_else(|| {
+                idempotency_key.map(|key| {
+                    crate::idempotency::scoped_key("lab-provision", &principal.id, &[key])
+                })
+            });
         if let Some(key) = &scoped_key
             && let Some(existing) =
                 self.provisions
@@ -1286,6 +2469,15 @@ impl Lab {
                 .await?;
             return Ok((existing, changed));
         }
+        // The readiness deadline runs from the request (lab.md): part of the
+        // insert, so the sweeper can compensate a saga the controller died
+        // in before it booted a guest (#302) with no second write to lose
+        // (#360).
+        let readiness_deadline_at = now.saturating_add(
+            i64::from(version.content.readiness_deadline_seconds)
+                .saturating_mul(1_000)
+                .saturating_add(PRE_BOOT_ALLOWANCE_MILLIS),
+        );
         let provision = self
             .provisions
             .create(
@@ -1293,6 +2485,7 @@ impl Lab {
                     template_version_id: version_id.to_owned(),
                     lease_id: lease_id.map(str::to_owned),
                     idempotency_key: scoped_key,
+                    readiness_deadline_at: Some(readiness_deadline_at),
                 },
                 now,
             )
@@ -1305,6 +2498,26 @@ impl Lab {
             .attach_lease_provision(lease.as_ref(), &provision)
             .await?;
         Ok((provision, changed))
+    }
+
+    /// Refuses an explicit Proxmox account for a delegated credential.
+    ///
+    /// # Errors
+    ///
+    /// Fails with a denial when a delegated credential names an account.
+    pub fn check_provision_account(
+        &self,
+        principal: &ActingPrincipal,
+        account_id: Option<&str>,
+    ) -> Result<(), LabUseCaseError> {
+        // Placement picks the account for a delegated credential: naming
+        // one would reach Proxmox accounts the credential has no access to.
+        if account_id.is_some() && crate::authz::is_delegated_principal(&principal.id) {
+            return Err(LabUseCaseError::Denied(Decision::deny(
+                ReasonId::OutOfScope,
+            )));
+        }
+        Ok(())
     }
 
     /// Starts the provision saga attached to an existing lease.
@@ -1325,7 +2538,7 @@ impl Lab {
             authorizer,
             AccessRequest {
                 principal_id: &principal.id,
-                action: Permission::LabProvision,
+                action: Permission::LabLeaseProvision,
                 resource: Some(lease_id),
             },
         )
@@ -1342,6 +2555,7 @@ impl Lab {
                 }
             }
         })?;
+        scope_lease(principal, &lease)?;
         self.start_provision_with_outcome(
             authorizer,
             principal,
@@ -1411,6 +2625,57 @@ impl Lab {
             })
     }
 
+    /// Lists the provisioning records with the fate of each guest (#327),
+    /// newest first.
+    ///
+    /// # Errors
+    ///
+    /// Fails on denial or a backend failure.
+    pub async fn list_provision_views(
+        &self,
+        authorizer: &dyn Authorizer,
+        principal: &ActingPrincipal,
+    ) -> Result<Vec<ProvisionView>, LabUseCaseError> {
+        let records = self.list_provisions(authorizer, principal).await?;
+        let leases = self
+            .leases
+            .list(None)
+            .await
+            .map_err(|detail| LabUseCaseError::Backend {
+                context: "leases",
+                detail,
+            })?;
+        let by_provision: std::collections::HashMap<&str, &Lease> = leases
+            .iter()
+            .filter_map(|lease| lease.provision_id.as_deref().map(|id| (id, lease)))
+            .collect();
+        let mut views = Vec::with_capacity(records.len());
+        for record in records {
+            let lease = by_provision.get(record.id.as_str()).copied();
+            // Only a released pooled lease needs its member; the lookup
+            // failing fails the read rather than reading a member as gone.
+            let member = match (&self.pools, lease) {
+                (Some(pools), Some(lease))
+                    if lease.state == LeaseState::Released && may_be_pooled(&record) =>
+                {
+                    match (record.account_id.as_deref(), record.vmid) {
+                        (Some(account), Some(vmid)) => pools
+                            .member_for_guest(account, vmid)
+                            .await
+                            .map_err(|detail| LabUseCaseError::Backend {
+                                context: "pool members",
+                                detail,
+                            })?,
+                        _ => None,
+                    }
+                }
+                _ => None,
+            };
+            views.push(ProvisionView::new(record, lease, member.as_ref()));
+        }
+        Ok(views)
+    }
+
     /// Reads one provisioning record.
     ///
     /// # Errors
@@ -1426,12 +2691,12 @@ impl Lab {
             authorizer,
             AccessRequest {
                 principal_id: &principal.id,
-                action: Permission::LabRead,
+                action: Permission::LabLeaseRead,
                 resource: Some(id),
             },
         )
         .map_err(LabUseCaseError::Denied)?;
-        self.provisions.get(id).await.map_err(|detail| {
+        let record = self.provisions.get(id).await.map_err(|detail| {
             if detail.contains("not found") {
                 LabUseCaseError::NotFound {
                     what: format!("provision {id}"),
@@ -1442,7 +2707,30 @@ impl Lab {
                     detail,
                 }
             }
-        })
+        })?;
+        if crate::authz::is_delegated_principal(&principal.id) {
+            // A provision belongs to its lease's owner; one without a
+            // lease belongs to no credential.
+            let Some(lease_id) = record.lease_id.as_deref() else {
+                return Err(LabUseCaseError::NotFound {
+                    what: format!("provision {id}"),
+                });
+            };
+            let lease =
+                self.leases
+                    .get(lease_id)
+                    .await
+                    .map_err(|detail| LabUseCaseError::Backend {
+                        context: "leases",
+                        detail,
+                    })?;
+            if !crate::authz::owner_scope_permits(&principal.id, &lease.owner) {
+                return Err(LabUseCaseError::NotFound {
+                    what: format!("provision {id}"),
+                });
+            }
+        }
+        Ok(record)
     }
 
     async fn validate_pin(&self, version_id: &str) -> Result<RecipeVersion, LabUseCaseError> {
@@ -1529,9 +2817,828 @@ impl Lab {
     }
 }
 
+/// The failed cleanup attempts after which a releasing lease stops
+/// retrying and becomes `cleanup_failed`: it then visibly owns whatever is
+/// left on the host until an operator resolves it. An operator re-arm
+/// ([`rearm_cleanup`]) grants another round of this many attempts.
+pub const MAX_CLEANUP_ATTEMPTS: u32 = 5;
+
+/// The delay before the next cleanup attempt after `attempts` failed ones:
+/// one minute, doubling, capped at an hour.
+#[must_use]
+pub fn cleanup_backoff_millis(attempts: u32) -> i64 {
+    const MINUTE: i64 = 60_000;
+    let factor = 1_i64 << attempts.saturating_sub(1).min(6);
+    (MINUTE * factor).min(60 * MINUTE)
+}
+
+/// What one failed cleanup attempt does to its lease: it stays `releasing`
+/// with the next attempt scheduled, or, once the round's attempts are
+/// exhausted, becomes `cleanup_failed` with nothing scheduled.
+///
+/// `cleanup_attempts` counts every failed attempt over the lease's life and
+/// never goes back: each attempt's idempotency key names that count
+/// ([`cleanup_operation`]), so a count that went back would name an old
+/// attempt's operation instead of queuing a new one. Attempts therefore
+/// run in rounds of [`MAX_CLEANUP_ATTEMPTS`]: a round ends at the next
+/// multiple, and the backoff restarts with each round.
+pub fn record_cleanup_failure(lease: &mut Lease, now: i64) {
+    lease.cleanup_attempts = lease.cleanup_attempts.saturating_add(1);
+    let in_round = lease.cleanup_attempts % MAX_CLEANUP_ATTEMPTS;
+    if in_round == 0 {
+        lease.state = LeaseState::CleanupFailed;
+        lease.cleanup_next_at = None;
+    } else {
+        lease.state = LeaseState::Releasing;
+        lease.cleanup_next_at = Some(now.saturating_add(cleanup_backoff_millis(in_round)));
+    }
+}
+
+/// What an operator re-arm does to a `cleanup_failed` lease (#292): it is
+/// `releasing` again with a fresh round of [`MAX_CLEANUP_ATTEMPTS`]
+/// attempts and its next attempt due at once. The failed-attempt count is
+/// kept, so the next attempt's idempotency key is one no earlier attempt
+/// used. Fleet only ever raises the count, and a `cleanup_failed` lease
+/// ends on a round boundary; a count off it (after a change of the limit)
+/// is rounded up, never down onto an earlier key. A count lowered by
+/// editing the database by hand is outside that guarantee.
+pub fn rearm_cleanup(lease: &mut Lease) {
+    lease.state = LeaseState::Releasing;
+    lease.cleanup_attempts = lease
+        .cleanup_attempts
+        .max(1)
+        .next_multiple_of(MAX_CLEANUP_ATTEMPTS);
+    lease.cleanup_next_at = None;
+}
+
+/// Whether `record`, the record `lease` links to, is still in flight although
+/// the lease left the saga (compensated, failed, released, or in cleanup)
+/// and so must end `never_ready` (#303): a record left `provisioning` would
+/// hold its reserved VMID against every later lease. The two must link to
+/// each other, so a standalone or pooled record, or one another lease owns,
+/// is never touched. [`ProvisionPort::abandon`] performs the transition.
+#[must_use]
+pub fn provision_to_abandon(lease: &Lease, record: &ProvisionRecord) -> bool {
+    let lease_left_saga = !matches!(
+        lease.state,
+        LeaseState::Requested
+            | LeaseState::Provisioning
+            | LeaseState::Booting
+            | LeaseState::Bootstrapping
+            | LeaseState::Ready
+    );
+    let record_in_flight = matches!(
+        record.state,
+        GuestState::Provisioning
+            | GuestState::Provisioned
+            | GuestState::Booting
+            | GuestState::Bootstrapping
+    );
+    lease_left_saga
+        && record_in_flight
+        && lease.provision_id.as_deref() == Some(record.id.as_str())
+        && record.lease_id.as_deref() == Some(lease.id.as_str())
+}
+
+/// Where a lease goes after its provision failed or was cancelled: to
+/// `releasing` (cleanup owed) when the record allocated a guest, including
+/// from `failed`, whose terminal state would otherwise strand the guest; to
+/// `failed` when an in-flight lease never allocated one; otherwise nowhere.
+#[must_use]
+pub fn provision_compensation(state: LeaseState, allocated: bool) -> Option<LeaseState> {
+    let in_flight = matches!(
+        state,
+        LeaseState::Provisioning | LeaseState::Booting | LeaseState::Bootstrapping
+    );
+    match (in_flight || state == LeaseState::Failed, allocated) {
+        (true, true) => Some(LeaseState::Releasing),
+        (true, false) if in_flight => Some(LeaseState::Failed),
+        _ => None,
+    }
+}
+
+/// The largest command a Lab exec accepts.
+pub const MAX_LAB_EXEC_SCRIPT_BYTES: usize = 64 * 1024;
+/// The longest a Lab exec may run (the SSH exec bound).
+pub const MAX_LAB_EXEC_TIMEOUT_SECONDS: u64 = 900;
+/// The extra seconds an interactive-session `lab.exec` allows its SSH session
+/// beyond the command's bound: the start, the supervisor's kill and the
+/// output copy (#397).
+pub const INTERACTIVE_EXEC_MARGIN_SECONDS: u64 = 90;
+/// The longest bound of a synchronous interactive `lab.exec`: the SSH session
+/// must outlast it by [`INTERACTIVE_EXEC_MARGIN_SECONDS`] within the 900 s
+/// SSH ceiling. Longer commands use the detached pattern.
+pub const MAX_LAB_EXEC_INTERACTIVE_SECONDS: u64 =
+    MAX_LAB_EXEC_TIMEOUT_SECONDS - INTERACTIVE_EXEC_MARGIN_SECONDS;
+
+/// Whether a lease may run a command at `now`: it is `ready` and its TTL
+/// has not expired. Checked when the exec is requested and again when it
+/// runs.
+///
+/// # Errors
+///
+/// Answers why it may not.
+pub fn lease_exec_ready(lease: &Lease, now: i64) -> Result<(), String> {
+    if lease.state != LeaseState::Ready {
+        return Err(format!(
+            "the lease is {}; commands run only on a ready lease",
+            lease.state.id()
+        ));
+    }
+    // A ready lease always has a TTL deadline; one without is not trusted
+    // to run commands indefinitely.
+    match lease.expires_at {
+        Some(expires) if expires > now => {}
+        Some(_) => return Err("the lease has expired".to_owned()),
+        None => return Err("the lease has no expiry deadline".to_owned()),
+    }
+    Ok(())
+}
+
+/// How long past its readiness deadline an in-flight lease may stay before
+/// the sweeper compensates it: the provision executor enforces the deadline
+/// itself, so this only catches a provision that stopped running.
+/// The time a saga is given before it boots a guest (reservation, clone,
+/// pool claim), on top of its readiness deadline, before the sweeper may
+/// compensate it as stuck. The boot step starts the real readiness window.
+pub const PRE_BOOT_ALLOWANCE_MILLIS: i64 = 30 * 60 * 1000;
+/// The grace after a readiness deadline before the sweeper compensates.
+pub const STUCK_GRACE_MILLIS: i64 = 10 * 60 * 1000;
+
+/// Whether `record`, the record named by `lease.provision_id`, holds a guest
+/// that belongs to `lease`: it links back to the lease and allocated a VMID.
+/// Only then may compensation queue a cleanup for it; an inconsistent link
+/// must never move this lease to a cleanup that would destroy another
+/// lease's VM.
+#[must_use]
+pub fn lease_allocated(lease: &Lease, record: Option<&ProvisionRecord>) -> bool {
+    record.is_some_and(|record| {
+        record.lease_id.as_deref() == Some(lease.id.as_str()) && record.vmid.is_some()
+    })
+}
+
+/// Where the sweeper moves a lease whose provision stopped converging, if
+/// anywhere (FM-716). An in-flight lease is compensated once it is past its
+/// readiness deadline plus [`STUCK_GRACE_MILLIS`], or past its maximum
+/// lifetime (both inclusive, like the TTL and cleanup deadlines). A record
+/// counts as the lease's guest only when it links back to the lease
+/// ([`lease_allocated`]). A `failed` lease whose record still holds a guest
+/// is moved to cleanup at once: `failed` is terminal, so a crash between the failure and
+/// its compensation would otherwise strand the guest.
+#[must_use]
+pub fn stuck_compensation(
+    lease: &Lease,
+    record: Option<&ProvisionRecord>,
+    now: i64,
+) -> Option<LeaseState> {
+    let allocated = lease_allocated(lease, record);
+    let due = match lease.state {
+        LeaseState::Failed => true,
+        LeaseState::Provisioning | LeaseState::Booting | LeaseState::Bootstrapping => {
+            record
+                .and_then(|record| record.readiness_deadline_at)
+                .is_some_and(|deadline| deadline.saturating_add(STUCK_GRACE_MILLIS) <= now)
+                || lease.max_lifetime_at <= now
+        }
+        _ => false,
+    };
+    if due {
+        provision_compensation(lease.state, allocated)
+    } else {
+        None
+    }
+}
+
+/// Whether a Fleet-named Lab guest (`fm-lab-<record>`), listed through
+/// `account_id` with `vmid`, is accounted for by Lab state (FM-716): its
+/// record exists and names that account and VMID (the ones cleanup would
+/// destroy through), and the record is standalone, or its lease links back
+/// to it (`provision_id`) and still owns the
+/// guest (any state but `released` or `failed`), or the lease was released
+/// with `keep`. A record whose lease no longer exists owns nothing.
+#[must_use]
+pub fn guest_owned(
+    record: Option<&ProvisionRecord>,
+    lease: Option<&Lease>,
+    account_id: &str,
+    vmid: u32,
+) -> bool {
+    let Some(record) = record else {
+        return false;
+    };
+    if record.vmid != Some(vmid) || record.account_id.as_deref() != Some(account_id) {
+        return false;
+    }
+    if record.lease_id.is_none() {
+        return true;
+    }
+    // The lease must link back to this record: its cleanup destroys only the
+    // guest its own `provision_id` names.
+    lease
+        .filter(|lease| lease.provision_id.as_deref() == Some(record.id.as_str()))
+        .is_some_and(|lease| match lease.state {
+            LeaseState::Released => lease.cleanup == CleanupStrategy::Keep,
+            LeaseState::Failed => false,
+            _ => true,
+        })
+}
+
+/// What became of a provision's guest, derived from the record, its linked
+/// lease and, for a pooled guest, its pool member (#327). The lease is
+/// authoritative for ownership; the provision keeps its state, node, and
+/// VMID as history, so a record that reads `ready` for a guest cleanup
+/// destroyed is told apart by this.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ProvisionGuest {
+    /// No guest was cloned for the record (yet, or ever).
+    NotAllocated,
+    /// The guest exists, or its cleanup is still owed (a `failed` lease
+    /// included: its compensation is queued, so the guest still stands).
+    Present,
+    /// Cleanup destroyed the guest: the lease was released with `destroy`.
+    Destroyed,
+    /// The lease was released with `keep`: the guest stays, out of Lab
+    /// ownership.
+    Kept,
+    /// The guest is a pool member and went back to its pool (a pooled lease
+    /// reverts its member whatever strategy it recorded). The VMID is a
+    /// live pool member, not an orphan.
+    ReturnedToPool,
+    /// The guest is a pool member that the release left quarantined (a
+    /// pooled `keep`, or a failed revert). The VMID is a live pool member,
+    /// not an orphan.
+    QuarantinedInPool,
+}
+
+impl ProvisionGuest {
+    /// The stable string used in the API.
+    #[must_use]
+    pub const fn id(self) -> &'static str {
+        match self {
+            Self::NotAllocated => "not_allocated",
+            Self::Present => "present",
+            Self::Destroyed => "destroyed",
+            Self::Kept => "kept",
+            Self::ReturnedToPool => "returned_to_pool",
+            Self::QuarantinedInPool => "quarantined_in_pool",
+        }
+    }
+}
+
+/// Whether the record may name a pool member: a pooled provision records the
+/// member's VMID and account but never started a clone, so it carries no
+/// clone task. The caller still has to find the member.
+#[must_use]
+pub fn may_be_pooled(record: &ProvisionRecord) -> bool {
+    record.vmid.is_some() && record.account_id.is_some() && record.clone_upid.is_none()
+}
+
+/// The fate of `record`'s guest. Only a lease that links back to the record
+/// speaks for it, as in [`guest_owned`]. A pooled guest (`member`, found by
+/// the record's account and VMID for a record that [`may_be_pooled`]) is
+/// never destroyed, whatever strategy the lease recorded: released, it went
+/// back to its pool, or is quarantined there. Otherwise a lease released
+/// with `destroy` means the guest is gone, with `keep` that it was kept.
+/// Any other lease state, or no lease, leaves a cloned guest `present`,
+/// including a `failed` lease, whose guest stands until its compensation
+/// releases it (where [`guest_owned`] answers a different question: whether
+/// Lab still vouches for the guest).
+///
+/// A member drained from its pool after the release is no longer found, so
+/// the fate then falls back to the lease's recorded strategy.
+#[must_use]
+pub fn provision_guest(
+    record: &ProvisionRecord,
+    lease: Option<&Lease>,
+    member: Option<&crate::lab_pool::PoolMember>,
+) -> ProvisionGuest {
+    if record.vmid.is_none() {
+        return ProvisionGuest::NotAllocated;
+    }
+    let Some(cleanup) = lease
+        .filter(|lease| lease.provision_id.as_deref() == Some(record.id.as_str()))
+        .filter(|lease| lease.state == LeaseState::Released)
+        .map(|lease| lease.cleanup)
+    else {
+        return ProvisionGuest::Present;
+    };
+    if let Some(member) = member.filter(|_| may_be_pooled(record)) {
+        return if member.state == crate::lab_pool::MemberState::Quarantined {
+            ProvisionGuest::QuarantinedInPool
+        } else {
+            ProvisionGuest::ReturnedToPool
+        };
+    }
+    match cleanup {
+        CleanupStrategy::Destroy => ProvisionGuest::Destroyed,
+        CleanupStrategy::Keep => ProvisionGuest::Kept,
+        CleanupStrategy::Revert => ProvisionGuest::ReturnedToPool,
+    }
+}
+
+/// A provisioning record with the fate of its guest and its lease's state.
+#[derive(Clone, Debug)]
+pub struct ProvisionView {
+    /// The stored record.
+    pub record: ProvisionRecord,
+    /// What became of the guest.
+    pub guest: ProvisionGuest,
+    /// The linked lease's state, when a lease links back to the record.
+    pub lease_state: Option<LeaseState>,
+}
+
+impl ProvisionView {
+    /// Derives the view from the record, the lease that may link back to it,
+    /// and its pool member, when it is pooled.
+    #[must_use]
+    pub fn new(
+        record: ProvisionRecord,
+        lease: Option<&Lease>,
+        member: Option<&crate::lab_pool::PoolMember>,
+    ) -> Self {
+        let lease = lease.filter(|lease| lease.provision_id.as_deref() == Some(record.id.as_str()));
+        Self {
+            guest: provision_guest(&record, lease, member),
+            lease_state: lease.map(|lease| lease.state),
+            record,
+        }
+    }
+}
+
+/// Whether a releasing lease's next cleanup attempt may be queued at `now`:
+/// not before the backoff after a failed attempt has passed.
+#[must_use]
+pub fn cleanup_due(lease: &Lease, now: i64) -> bool {
+    lease.state == LeaseState::Releasing && lease.cleanup_next_at.is_none_or(|due| due <= now)
+}
+
+/// The `lab.cleanup` operation for a releasing lease's next attempt. The
+/// idempotency key names the attempt, so a repeated release or sweep never
+/// queues a second cleanup for the same attempt, while a retry after a
+/// failed attempt, or after an operator re-arm, queues a new one.
+#[must_use]
+pub fn cleanup_operation(
+    lease: &Lease,
+    correlation_id: Option<String>,
+) -> crate::operation::NewOperation {
+    crate::operation::NewOperation {
+        kind: "lab.cleanup".to_owned(),
+        idempotency_key: Some(format!(
+            "lab-cleanup:{}:{}",
+            lease.id, lease.cleanup_attempts
+        )),
+        deadline_at: None,
+        correlation_id,
+        payload_json: Some(serde_json::json!({ "leaseId": lease.id }).to_string()),
+        review_token: None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::guard_destroy_target;
+
+    #[test]
+    fn a_record_in_flight_is_abandoned_only_for_a_lease_that_left_the_saga() {
+        use super::provision_to_abandon;
+        use fleet_core::GuestState::{
+            Booting, Bootstrapping, NeverReady, Provisioned, Provisioning, Ready,
+        };
+        use fleet_core::LeaseState;
+        let lease = |state, link: Option<&str>| fleet_core::Lease {
+            id: "l1".to_owned(),
+            state,
+            provision_id: link.map(str::to_owned),
+            ..fleet_core::Lease::default()
+        };
+        let mut owned = record(Some(9000), Some("l1"));
+        // Every in-flight record state, but no other, is ended.
+        for (state, ends) in [
+            (Provisioning, true),
+            (Provisioned, true),
+            (Booting, true),
+            (Bootstrapping, true),
+            (Ready, false),
+            (NeverReady, false),
+        ] {
+            owned.state = state;
+            let gone = lease(LeaseState::Releasing, Some("r1"));
+            assert_eq!(provision_to_abandon(&gone, &owned), ends, "{state:?}");
+        }
+        // A lease still in the saga, or ready, keeps its record.
+        owned.state = Provisioning;
+        for state in [
+            LeaseState::Requested,
+            LeaseState::Provisioning,
+            LeaseState::Booting,
+            LeaseState::Bootstrapping,
+            LeaseState::Ready,
+        ] {
+            assert!(!provision_to_abandon(&lease(state, Some("r1")), &owned));
+        }
+        // Every state past the saga ends it.
+        for state in [
+            LeaseState::Failed,
+            LeaseState::Releasing,
+            LeaseState::Released,
+            LeaseState::CleanupFailed,
+        ] {
+            assert!(provision_to_abandon(&lease(state, Some("r1")), &owned));
+        }
+        // A record that does not link both ways is not this lease's: a
+        // pooled or standalone record, or one another lease owns.
+        let gone = lease(LeaseState::Released, Some("r1"));
+        assert!(!provision_to_abandon(&gone, &record(Some(9000), None)));
+        assert!(!provision_to_abandon(
+            &gone,
+            &record(Some(9000), Some("l2"))
+        ));
+        assert!(!provision_to_abandon(
+            &lease(LeaseState::Released, Some("r2")),
+            &owned
+        ));
+        assert!(!provision_to_abandon(
+            &lease(LeaseState::Released, None),
+            &owned
+        ));
+    }
+
+    #[test]
+    fn a_failed_provision_owes_cleanup_only_for_an_allocated_guest() {
+        use fleet_core::LeaseState::{
+            Booting, Failed, Provisioning, Ready, Released, Releasing, Requested,
+        };
+        assert_eq!(
+            super::provision_compensation(Provisioning, true),
+            Some(Releasing)
+        );
+        assert_eq!(
+            super::provision_compensation(Booting, true),
+            Some(Releasing)
+        );
+        // FM-714 marks a readiness failure `failed`; its guest still needs cleanup.
+        assert_eq!(super::provision_compensation(Failed, true), Some(Releasing));
+        assert_eq!(
+            super::provision_compensation(Provisioning, false),
+            Some(Failed)
+        );
+        assert_eq!(super::provision_compensation(Failed, false), None);
+        for state in [Requested, Ready, Releasing, Released] {
+            assert_eq!(
+                super::provision_compensation(state, true),
+                None,
+                "{state:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn cleanup_backs_off_then_gives_up_visibly() {
+        assert_eq!(super::cleanup_backoff_millis(1), 60_000);
+        assert_eq!(super::cleanup_backoff_millis(2), 120_000);
+        assert_eq!(super::cleanup_backoff_millis(40), 3_600_000);
+        let mut lease = fleet_core::Lease {
+            id: "l1".to_owned(),
+            state: fleet_core::LeaseState::Releasing,
+            ..fleet_core::Lease::default()
+        };
+        for attempt in 1..super::MAX_CLEANUP_ATTEMPTS {
+            super::record_cleanup_failure(&mut lease, 1_000);
+            assert_eq!(
+                lease.state,
+                fleet_core::LeaseState::Releasing,
+                "attempt {attempt}"
+            );
+            assert_eq!(
+                lease.cleanup_next_at,
+                Some(1_000 + super::cleanup_backoff_millis(attempt))
+            );
+        }
+        super::record_cleanup_failure(&mut lease, 2_000);
+        assert_eq!(lease.state, fleet_core::LeaseState::CleanupFailed);
+        assert_eq!(lease.cleanup_next_at, None);
+        // Not due again until the backoff passes.
+        lease.state = fleet_core::LeaseState::Releasing;
+        lease.cleanup_next_at = Some(5_000);
+        assert!(!super::cleanup_due(&lease, 4_999));
+        assert!(super::cleanup_due(&lease, 5_000));
+        lease.state = fleet_core::LeaseState::CleanupFailed;
+        // Each attempt gets its own idempotency key.
+        let key = super::cleanup_operation(&lease, None).idempotency_key;
+        assert_eq!(key.as_deref(), Some("lab-cleanup:l1:5"));
+    }
+
+    fn record(vmid: Option<u32>, lease_id: Option<&str>) -> super::ProvisionRecord {
+        super::ProvisionRecord {
+            id: "r1".to_owned(),
+            template_version_id: "tv1".to_owned(),
+            lease_id: lease_id.map(str::to_owned),
+            state: fleet_core::GuestState::default(),
+            node: vmid.map(|_| "pve".to_owned()),
+            vmid,
+            clone_upid: None,
+            guest_ipv4: None,
+            machine_id: None,
+            endpoint_id: None,
+            ready_project_operation_id: None,
+            readiness_deadline_at: Some(10_000),
+            failed_step: None,
+            account_id: Some("a1".to_owned()),
+            idempotency_key: None,
+            ready_at: None,
+            created_at: 0,
+            updated_at: 0,
+        }
+    }
+
+    #[test]
+    fn the_sweeper_compensates_stuck_and_failed_leases_by_what_they_allocated() {
+        use super::{STUCK_GRACE_MILLIS, stuck_compensation};
+        use fleet_core::LeaseState::{Booting, Failed, Provisioning, Ready, Releasing};
+        let lease = |state| fleet_core::Lease {
+            id: "l1".to_owned(),
+            state,
+            max_lifetime_at: i64::MAX,
+            ..fleet_core::Lease::default()
+        };
+        let past = 10_000 + STUCK_GRACE_MILLIS + 1;
+        let guest = record(Some(9000), Some("l1"));
+        let none = record(None, Some("l1"));
+        // Inside the grace the provision may still be running.
+        assert_eq!(
+            stuck_compensation(&lease(Provisioning), Some(&guest), 10_001),
+            None
+        );
+        assert_eq!(
+            stuck_compensation(&lease(Provisioning), Some(&guest), past),
+            Some(Releasing)
+        );
+        assert_eq!(
+            stuck_compensation(&lease(Booting), Some(&none), past),
+            Some(Failed)
+        );
+        // Both deadlines are inclusive: due the moment they are reached.
+        assert_eq!(
+            stuck_compensation(&lease(Provisioning), Some(&guest), past - 1),
+            Some(Releasing)
+        );
+        assert_eq!(
+            stuck_compensation(&lease(Provisioning), Some(&guest), past - 2),
+            None
+        );
+        // Past the maximum lifetime, whatever the deadline.
+        let mut old = lease(Booting);
+        old.max_lifetime_at = 5;
+        assert_eq!(stuck_compensation(&old, None, 5), Some(Failed));
+        assert_eq!(stuck_compensation(&old, None, 4), None);
+        // A failed lease still holding a guest is repaired at once; one
+        // that never allocated stays failed.
+        assert_eq!(
+            stuck_compensation(&lease(Failed), Some(&guest), 0),
+            Some(Releasing)
+        );
+        assert_eq!(stuck_compensation(&lease(Failed), Some(&none), past), None);
+        assert_eq!(stuck_compensation(&lease(Ready), Some(&guest), past), None);
+        // A record linked to another lease is not this lease's guest: no
+        // cleanup through this lease, only the unallocated outcome.
+        let foreign = record(Some(9000), Some("l2"));
+        assert_eq!(
+            stuck_compensation(&lease(Provisioning), Some(&foreign), past),
+            Some(Failed)
+        );
+        assert_eq!(stuck_compensation(&lease(Failed), Some(&foreign), 0), None);
+        // The executor's failure-path compensation shares the predicate.
+        assert!(super::lease_allocated(&lease(Failed), Some(&guest)));
+        assert!(!super::lease_allocated(&lease(Failed), Some(&foreign)));
+        assert!(!super::lease_allocated(&lease(Failed), Some(&none)));
+        assert!(!super::lease_allocated(&lease(Failed), None));
+    }
+
+    #[test]
+    fn a_guest_is_owned_only_through_its_records_account_and_vmid() {
+        use super::guest_owned;
+        use fleet_core::{CleanupStrategy, LeaseState};
+        let lease = |state, cleanup| fleet_core::Lease {
+            id: "l1".to_owned(),
+            state,
+            cleanup,
+            provision_id: Some("r1".to_owned()),
+            ..fleet_core::Lease::default()
+        };
+        let linked = record(Some(9000), Some("l1"));
+        let ready = lease(LeaseState::Ready, CleanupStrategy::Destroy);
+        assert!(guest_owned(Some(&linked), Some(&ready), "a1", 9000));
+        // The same VMID on another account is not this record's guest.
+        assert!(!guest_owned(Some(&linked), Some(&ready), "a2", 9000));
+        assert!(!guest_owned(Some(&linked), Some(&ready), "a1", 9001));
+        let mut unbound = linked.clone();
+        unbound.account_id = None;
+        assert!(!guest_owned(Some(&unbound), Some(&ready), "a1", 9000));
+        assert!(!guest_owned(None, None, "a1", 9000));
+        // Standalone records own their guest; a vanished lease owns nothing.
+        assert!(guest_owned(
+            Some(&record(Some(9000), None)),
+            None,
+            "a1",
+            9000
+        ));
+        assert!(!guest_owned(Some(&linked), None, "a1", 9000));
+        let kept = lease(LeaseState::Released, CleanupStrategy::Keep);
+        let destroyed = lease(LeaseState::Released, CleanupStrategy::Destroy);
+        let failed = lease(LeaseState::Failed, CleanupStrategy::Destroy);
+        assert!(guest_owned(Some(&linked), Some(&kept), "a1", 9000));
+        assert!(!guest_owned(Some(&linked), Some(&destroyed), "a1", 9000));
+        assert!(!guest_owned(Some(&linked), Some(&failed), "a1", 9000));
+        // A lease that points at another record does not own this guest.
+        let mut elsewhere = ready.clone();
+        elsewhere.provision_id = Some("r2".to_owned());
+        assert!(!guest_owned(Some(&linked), Some(&elsewhere), "a1", 9000));
+        elsewhere.provision_id = None;
+        assert!(!guest_owned(Some(&linked), Some(&elsewhere), "a1", 9000));
+    }
+
+    #[test]
+    fn a_provision_reports_what_became_of_its_guest() {
+        use super::{ProvisionGuest, provision_guest};
+        use fleet_core::{CleanupStrategy, LeaseState};
+        let lease = |state, cleanup, provision: &str| fleet_core::Lease {
+            id: "l1".to_owned(),
+            state,
+            cleanup,
+            provision_id: Some(provision.to_owned()),
+            ..fleet_core::Lease::default()
+        };
+        let cloned = record(Some(900), Some("l1"));
+        let released = |cleanup| lease(LeaseState::Released, cleanup, "r1");
+        assert_eq!(
+            provision_guest(&cloned, Some(&released(CleanupStrategy::Destroy)), None),
+            ProvisionGuest::Destroyed
+        );
+        assert_eq!(
+            provision_guest(&cloned, Some(&released(CleanupStrategy::Keep)), None),
+            ProvisionGuest::Kept
+        );
+        assert_eq!(
+            provision_guest(&cloned, Some(&released(CleanupStrategy::Revert)), None),
+            ProvisionGuest::ReturnedToPool
+        );
+        // A guest whose cleanup is owed, or whose lease is live, is present.
+        for state in [
+            LeaseState::Ready,
+            LeaseState::Releasing,
+            LeaseState::Failed,
+            LeaseState::CleanupFailed,
+        ] {
+            assert_eq!(
+                provision_guest(
+                    &cloned,
+                    Some(&lease(state, CleanupStrategy::Destroy, "r1")),
+                    None
+                ),
+                ProvisionGuest::Present,
+                "{state:?}"
+            );
+        }
+        // A lease linking to another record, or none, never vouches.
+        assert_eq!(
+            provision_guest(
+                &cloned,
+                Some(&lease(LeaseState::Released, CleanupStrategy::Destroy, "r2")),
+                None
+            ),
+            ProvisionGuest::Present
+        );
+        assert_eq!(
+            provision_guest(&cloned, None, None),
+            ProvisionGuest::Present
+        );
+        // Nothing cloned, nothing to destroy.
+        assert_eq!(
+            provision_guest(
+                &record(None, Some("l1")),
+                Some(&released(CleanupStrategy::Destroy)),
+                None
+            ),
+            ProvisionGuest::NotAllocated
+        );
+    }
+
+    #[test]
+    fn a_pooled_guest_is_never_reported_destroyed() {
+        use super::{ProvisionGuest, provision_guest};
+        use fleet_core::{CleanupStrategy, LeaseState};
+        let released = |cleanup| fleet_core::Lease {
+            id: "l1".to_owned(),
+            state: LeaseState::Released,
+            cleanup,
+            provision_id: Some("r1".to_owned()),
+            ..fleet_core::Lease::default()
+        };
+        // A pooled guest (no clone task, a member found) is never destroyed,
+        // whatever strategy the lease recorded.
+        let mut pooled = record(Some(901), Some("l1"));
+        pooled.clone_upid = None;
+        let member = |state| crate::lab_pool::PoolMember {
+            id: "m1".to_owned(),
+            pool_id: "p1".to_owned(),
+            account_id: "a1".to_owned(),
+            vmid: 901,
+            node: None,
+            name: None,
+            state,
+            lease_id: None,
+            draining: false,
+            detail: None,
+            created_at: 0,
+            updated_at: 0,
+        };
+        for strategy in [
+            CleanupStrategy::Destroy,
+            CleanupStrategy::Revert,
+            CleanupStrategy::Keep,
+        ] {
+            assert_eq!(
+                provision_guest(
+                    &pooled,
+                    Some(&released(strategy)),
+                    Some(&member(crate::lab_pool::MemberState::Available))
+                ),
+                ProvisionGuest::ReturnedToPool,
+                "{strategy:?}"
+            );
+            assert_eq!(
+                provision_guest(
+                    &pooled,
+                    Some(&released(strategy)),
+                    Some(&member(crate::lab_pool::MemberState::Quarantined))
+                ),
+                ProvisionGuest::QuarantinedInPool,
+                "{strategy:?}"
+            );
+        }
+        // A clone that started never reads as a member, even at its VMID.
+        let mut cloned_at_member = pooled.clone();
+        cloned_at_member.clone_upid = Some("UPID:pve:1:2:3:qmclone:120:u:".to_owned());
+        assert_eq!(
+            provision_guest(
+                &cloned_at_member,
+                Some(&released(CleanupStrategy::Destroy)),
+                Some(&member(crate::lab_pool::MemberState::Available))
+            ),
+            ProvisionGuest::Destroyed
+        );
+    }
+
+    #[test]
+    fn a_rearm_grants_a_fresh_round_under_new_idempotency_keys() {
+        use fleet_core::LeaseState::{CleanupFailed, Releasing};
+        let max = super::MAX_CLEANUP_ATTEMPTS;
+        let mut lease = fleet_core::Lease {
+            id: "l1".to_owned(),
+            state: Releasing,
+            ..fleet_core::Lease::default()
+        };
+        let mut keys = std::collections::HashSet::new();
+        let mut attempt = |lease: &mut fleet_core::Lease| {
+            let key = super::cleanup_operation(lease, None)
+                .idempotency_key
+                .unwrap();
+            assert!(keys.insert(key.clone()), "{key} was already used");
+            super::record_cleanup_failure(lease, 1_000);
+        };
+        for _ in 0..max {
+            attempt(&mut lease);
+        }
+        assert_eq!(lease.state, CleanupFailed);
+        assert_eq!(lease.cleanup_attempts, max);
+
+        super::rearm_cleanup(&mut lease);
+        assert_eq!(lease.state, Releasing);
+        assert_eq!(lease.cleanup_next_at, None);
+        assert!(super::cleanup_due(&lease, 0));
+        // The round restarts the backoff and runs the full budget again,
+        // each attempt under a key no earlier attempt used.
+        attempt(&mut lease);
+        assert_eq!(lease.state, Releasing);
+        assert_eq!(
+            lease.cleanup_next_at,
+            Some(1_000 + super::cleanup_backoff_millis(1))
+        );
+        for _ in 1..max {
+            attempt(&mut lease);
+        }
+        assert_eq!(lease.state, CleanupFailed);
+        assert_eq!(lease.cleanup_attempts, 2 * max);
+
+        // A count off the round boundary (after a change of the limit) is
+        // rounded up, never back onto a used key.
+        lease.cleanup_attempts = 0;
+        super::rearm_cleanup(&mut lease);
+        assert_eq!(lease.cleanup_attempts, max);
+        lease.cleanup_attempts = max + 2;
+        super::rearm_cleanup(&mut lease);
+        assert_eq!(lease.cleanup_attempts, 2 * max);
+    }
 
     #[test]
     fn the_cleanup_guard_refuses_templates_and_image_artifacts() {

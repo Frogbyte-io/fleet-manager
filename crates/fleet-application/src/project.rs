@@ -14,7 +14,7 @@ use std::fmt;
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use fleet_core::{CheckoutFact, NormalizedRemote, Project, ProjectView};
+use fleet_core::{CheckoutFact, NormalizedRemote, Project, ProjectView, RemoteFetch};
 
 use crate::authz::{AccessRequest, ActingPrincipal, Authorizer, Decision, Permission, authorize};
 use crate::operation::PortFailure;
@@ -85,6 +85,9 @@ pub trait ProjectPort: fmt::Debug + Send + Sync {
 pub struct NewProject {
     /// The normalized remote (set by the use case after parsing).
     pub remote: String,
+    /// How the remote is fetched (set by the use case after parsing; the
+    /// value a caller supplies is ignored).
+    pub fetch: RemoteFetch,
     /// The caller-scoped idempotency key, when one was supplied.
     pub idempotency_key: Option<String>,
     /// The mutable, unique display name.
@@ -186,7 +189,7 @@ impl Projects {
             },
         )
         .map_err(ProjectUseCaseError::Denied)?;
-        let remote = NormalizedRemote::parse(&new.remote)
+        let (remote, fetch) = NormalizedRemote::parse_with_fetch(&new.remote)
             .map_err(|detail| ProjectUseCaseError::Invalid { detail })?;
         validate_name(&new.name)?;
         if new.description.chars().count() > 512 {
@@ -197,7 +200,9 @@ impl Projects {
 
         // Idempotent replay: the same caller key returns the original
         // project instead of a conflict. The key is scoped to the caller.
-        let scoped_key = idempotency_key.map(|key| format!("{}:{key}", principal.id));
+        let scoped_key = idempotency_key.as_deref().map(|key| {
+            crate::idempotency::scoped_key(crate::idempotency::CALLER_KEY, &principal.id, &[key])
+        });
         if let Some(key) = &scoped_key
             && let Some(existing) = self
                 .port
@@ -238,6 +243,7 @@ impl Projects {
         .await?;
         let stored = NewProject {
             remote: remote.as_str().to_owned(),
+            fetch,
             name: new.name.clone(),
             description: new.description.clone(),
             idempotency_key: scoped_key,
@@ -471,6 +477,7 @@ pub fn assemble_view(project: Project, mut checkouts: Vec<CheckoutFact>) -> Proj
     ProjectView {
         id: project.id,
         remote: project.remote,
+        fetch: project.fetch,
         name: project.name,
         description: project.description,
         checkouts,

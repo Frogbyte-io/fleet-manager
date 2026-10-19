@@ -6,8 +6,11 @@
 
 #![warn(missing_docs)]
 
+mod action_request;
+mod build_address;
 mod difference;
 mod error;
+mod external_account;
 mod id;
 mod image;
 mod lab;
@@ -21,8 +24,25 @@ mod source;
 mod time;
 mod value;
 
+pub use action_request::{
+    ACTION_REQUEST_STATES, ActionRequestState, InvalidActionTransition, RiskClass,
+    action_request_deadline_passed, can_transition_action_request,
+    validate_action_request_transition,
+};
+pub use build_address::{
+    BUILD_ADDRESS_REASONS, BuildAddressPool, BuildAddressPoolError, MAX_BUILD_ADDRESS_DNS_SERVERS,
+    MAX_BUILD_ADDRESS_POOL_SIZE, REASON_ALLOCATION_FAILED, REASON_AUDIT_FAILED,
+    REASON_BUILDER_UNSUPPORTED, REASON_IPCONFIG_UNSUPPORTED, REASON_ISO_REFUSED,
+    REASON_NIC_REQUIRED, REASON_POOL_EXHAUSTED, build_addresses_needed, with_build_addresses,
+};
 pub use difference::{DifferenceSet, DifferenceState, FieldDifference, compare_field};
 pub use error::{ErrorCode, FleetError, ParseErrorCodeError, PublicError, RetryClass};
+pub use external_account::{
+    AccountFieldError, ExternalProviderKind, MAX_ACCOUNT_LABEL_LEN, MAX_ACCOUNT_NOTES_LEN,
+    MAX_BASE_URL_LEN, MAX_PROBE_DETAIL_LEN, MAX_TOKEN_SECRET_LEN, ParseProviderKindError,
+    ProbeReport, ProbeStatus, base_url_is_loopback, base_url_origin, bound_detail,
+    normalize_base_url, validate_label, validate_notes, validate_scope_id,
+};
 pub use id::{CorrelationId, IdGenerator, ParseIdError, ResourceId, UuidV7Generator};
 
 /// Tailscale Serve identity header names that may be recorded as audit evidence.
@@ -33,19 +53,24 @@ pub const TAILSCALE_IDENTITY_HEADER_NAMES: [&str; 3] = [
     "tailscale-user-profile-pic",
 ];
 pub use image::{
-    MAX_RECIPE_CONTENT_BYTES, RecipeContent, RecipeSource, RecipeVersion, StructuredRecipe,
+    ImageBuildRecord, ImageBuildTemplate, MAX_RECIPE_CONTENT_BYTES, RECIPE_REFUSAL_REASONS,
+    RecipeContent, RecipeSource, RecipeVersion, StructuredRecipe, recipe_build_refusal,
+    recipe_refusal_message, requests_insecure_tls,
 };
 pub use lab::{
-    CleanupStrategy, GuestState, LabTemplateContent, Lease, LeaseState,
-    MAX_LAB_LEASE_LIFETIME_MILLIS, ReadinessProbe,
+    CleanupStrategy, ExecSession, GuestOs, GuestState, LAB_AUDIO_DEVICES, LAB_AUDIO_DRIVERS,
+    LabAudio, LabTemplateContent, Lease, LeaseState, MAX_INTERACTIVE_USER_LEN,
+    MAX_LAB_LEASE_LIFETIME_MILLIS, ReadinessProbe, validate_interactive_user_name,
 };
-pub use machine::{CapabilityFact, CapabilityStatus, EndpointKind};
+pub use machine::{CapabilityFact, CapabilityStatus, EndpointKind, MAX_CAPABILITY_FACTS};
 pub use operation::{
     InvalidTransitionError, OperationState, can_transition, deadline_passed, validate_transition,
 };
-pub use project::{CheckoutFact, NormalizedRemote, Project, ProjectView};
+pub use project::{CheckoutFact, FetchScheme, NormalizedRemote, Project, ProjectView, RemoteFetch};
 pub use redact::{
-    flatten_control_characters, redact_schemeless_credentials, redact_url_credentials,
+    RESULT_STRING_BOUND, flatten_control_characters, redact_credentials, redact_json_strings,
+    redact_schemeless_credentials, redact_secret_pairs, redact_url_credentials,
+    scrub_and_bound_with, scrub_failure_detail, scrub_tail, scrub_window, trim_to_bound,
 };
 pub use sensitive::{SecretReference, SensitiveString};
 pub use skill_catalog::{

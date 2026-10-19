@@ -50,9 +50,28 @@ fn content(name: &str, image_version_id: &str) -> LabTemplateContent {
         bootstrap_project_id: None,
         readiness_probe: fleet_core::ReadinessProbe::GuestAgent,
         readiness_command: None,
+        ssh_user: "root".to_owned(),
+        ssh_port: 22,
+        ssh_trust_mode: "tofu".to_owned(),
+        ssh_fingerprint: None,
         readiness_deadline_seconds: 300,
         ttl_seconds: 3_600,
         cleanup: fleet_core::CleanupStrategy::Destroy,
+        audio: None,
+        guest_os: fleet_core::GuestOs::default(),
+        interactive_user: None,
+    }
+}
+
+fn sample_project(id: &str) -> fleet_core::Project {
+    fleet_core::Project {
+        id: id.to_owned(),
+        remote: format!("github.com/example/{id}.git"),
+        fetch: fleet_core::RemoteFetch::default(),
+        name: id.to_owned(),
+        description: String::new(),
+        created_at: NOW,
+        updated_at: NOW,
     }
 }
 
@@ -161,6 +180,8 @@ impl LabTemplatePort for FakeTemplates {
 struct FakeProvisions {
     records: Mutex<Vec<fleet_application::lab::ProvisionRecord>>,
     leases: Option<Arc<Mutex<Vec<fleet_application::lab::Lease>>>>,
+    /// Every `update` fails: a crash right after the insert (#360).
+    refuse_updates: bool,
 }
 
 impl FakeProvisions {
@@ -168,6 +189,7 @@ impl FakeProvisions {
         Self {
             records: Mutex::new(Vec::new()),
             leases: Some(leases),
+            refuse_updates: false,
         }
     }
 }
@@ -189,6 +211,12 @@ impl ProvisionPort for FakeProvisions {
             vmid: None,
             clone_upid: None,
             guest_ipv4: None,
+            machine_id: None,
+            endpoint_id: None,
+            ready_project_operation_id: None,
+            readiness_deadline_at: new.readiness_deadline_at,
+            failed_step: None,
+            account_id: None,
             ready_at: None,
             idempotency_key: new.idempotency_key.clone(),
             created_at: now,
@@ -209,6 +237,9 @@ impl ProvisionPort for FakeProvisions {
     }
 
     async fn update(&self, record: &fleet_application::lab::ProvisionRecord) -> Result<(), String> {
+        if self.refuse_updates {
+            return Err("the controller died after the insert".to_owned());
+        }
         let mut records = self.records.lock().unwrap();
         let stored = records
             .iter_mut()
@@ -216,6 +247,27 @@ impl ProvisionPort for FakeProvisions {
             .ok_or_else(|| format!("provision {} not found", record.id))?;
         *stored = record.clone();
         Ok(())
+    }
+
+    async fn abandon(
+        &self,
+        id: &str,
+    ) -> Result<Option<fleet_application::lab::ProvisionRecord>, String> {
+        let mut records = self.records.lock().unwrap();
+        let Some(stored) = records.iter_mut().find(|stored| stored.id == id) else {
+            return Ok(None);
+        };
+        if !matches!(
+            stored.state,
+            fleet_core::GuestState::Provisioning
+                | fleet_core::GuestState::Provisioned
+                | fleet_core::GuestState::Booting
+                | fleet_core::GuestState::Bootstrapping
+        ) {
+            return Ok(None);
+        }
+        stored.state = fleet_core::GuestState::NeverReady;
+        Ok(Some(stored.clone()))
     }
 
     async fn complete_ready(
@@ -310,6 +362,9 @@ struct FakeLeases {
     leases: Arc<Mutex<Vec<fleet_application::lab::Lease>>>,
     fail_claim_on_call: Mutex<Option<usize>>,
     claim_calls: Mutex<usize>,
+    /// Releases the lease inside the next re-arm, as a concurrent winner
+    /// would between the use case's read and its compare-and-set.
+    race_rearm: Mutex<bool>,
 }
 
 #[async_trait]
@@ -336,6 +391,7 @@ impl fleet_application::lab::LeasePort for FakeLeases {
             ready_at: None,
             expires_at: None,
             cleanup_attempts: 0,
+            cleanup_next_at: None,
         };
         leases.push(stored.clone());
         Ok(stored)
@@ -361,8 +417,21 @@ impl fleet_application::lab::LeasePort for FakeLeases {
         Ok(())
     }
 
-    async fn list(&self) -> Result<Vec<fleet_application::lab::Lease>, String> {
-        Ok(self.leases.lock().unwrap().clone())
+    async fn list(
+        &self,
+        project_id: Option<&str>,
+    ) -> Result<Vec<fleet_application::lab::Lease>, String> {
+        Ok(self
+            .leases
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|lease| match project_id {
+                None => true,
+                Some(id) => lease.project_id.as_deref() == Some(id),
+            })
+            .cloned()
+            .collect())
     }
 
     async fn expired(&self, now: i64) -> Result<Vec<fleet_application::lab::Lease>, String> {
@@ -451,6 +520,65 @@ impl fleet_application::lab::LeasePort for FakeLeases {
         stored.state = LeaseState::Releasing;
         Ok(true)
     }
+
+    async fn transition(
+        &self,
+        id: &str,
+        observed: LeaseState,
+        provision_id: Option<&str>,
+        to: LeaseState,
+    ) -> Result<bool, String> {
+        let mut leases = self.leases.lock().unwrap();
+        let Some(stored) = leases.iter_mut().find(|stored| stored.id == id) else {
+            return Ok(false);
+        };
+        if stored.state != observed || stored.provision_id.as_deref() != provision_id {
+            return Ok(false);
+        }
+        stored.state = to;
+        Ok(true)
+    }
+
+    async fn rearm_cleanup(
+        &self,
+        id: &str,
+        observed_attempts: u32,
+        attempts: u32,
+    ) -> Result<bool, String> {
+        let mut leases = self.leases.lock().unwrap();
+        let Some(stored) = leases.iter_mut().find(|stored| stored.id == id) else {
+            return Ok(false);
+        };
+        if std::mem::take(&mut *self.race_rearm.lock().unwrap()) {
+            stored.state = LeaseState::Released;
+        }
+        if stored.state != LeaseState::CleanupFailed || stored.cleanup_attempts != observed_attempts
+        {
+            return Ok(false);
+        }
+        stored.state = LeaseState::Releasing;
+        stored.cleanup_attempts = attempts;
+        stored.cleanup_next_at = None;
+        Ok(true)
+    }
+
+    async fn record_failed_cleanup(
+        &self,
+        observed_attempts: u32,
+        failed: &fleet_application::lab::Lease,
+    ) -> Result<bool, String> {
+        let mut leases = self.leases.lock().unwrap();
+        let Some(stored) = leases.iter_mut().find(|stored| stored.id == failed.id) else {
+            return Ok(false);
+        };
+        if stored.state != LeaseState::Releasing || stored.cleanup_attempts != observed_attempts {
+            return Ok(false);
+        }
+        stored.state = failed.state;
+        stored.cleanup_attempts = failed.cleanup_attempts;
+        stored.cleanup_next_at = failed.cleanup_next_at;
+        Ok(true)
+    }
 }
 
 /// The pin validator over a canned set of promoted versions.
@@ -494,6 +622,8 @@ impl ImagePinValidator for FakePins {
                 published_at: NOW,
                 promoted_at: Some(NOW),
                 promoted_by: Some("tester".to_owned()),
+                promoted_build_id: Some("build-1".to_owned()),
+                allow_insecure_tls: false,
             }))
     }
 }
@@ -501,11 +631,21 @@ impl ImagePinValidator for FakePins {
 #[derive(Debug, Default)]
 struct FakeAudit {
     intents: Mutex<Vec<AuditIntent>>,
+    /// Refuses the intents carrying this `event`.
+    refuse_event: Mutex<Option<String>>,
 }
 
 #[async_trait]
 impl AuditPort for FakeAudit {
     async fn record_intent(&self, intent: &AuditIntent) -> Result<(), String> {
+        if let Some(refused) = self.refuse_event.lock().unwrap().as_deref()
+            && intent
+                .metadata
+                .entries()
+                .any(|entry| entry == ("event", refused))
+        {
+            return Err("simulated audit refusal".to_owned());
+        }
         self.intents.lock().unwrap().push(intent.clone());
         Ok(())
     }
@@ -519,13 +659,120 @@ impl AuditPort for FakeAudit {
     }
 }
 
+/// Canned projects: the ids are fixed instances, the default fake has none.
+#[derive(Debug, Default)]
+struct FakeProjects {
+    known: Mutex<Vec<fleet_core::Project>>,
+}
+
+impl FakeProjects {
+    fn with(known: fleet_core::Project) -> Arc<Self> {
+        Arc::new(Self {
+            known: Mutex::new(vec![known]),
+        })
+    }
+}
+
+#[async_trait::async_trait]
+impl fleet_application::project::ProjectPort for FakeProjects {
+    async fn create(
+        &self,
+        _: &fleet_application::project::NewProject,
+    ) -> Result<fleet_core::Project, fleet_application::operation::PortFailure> {
+        Err(fleet_application::operation::PortFailure::Backend {
+            detail: "not needed".to_owned(),
+        })
+    }
+
+    async fn get(
+        &self,
+        id: &str,
+    ) -> Result<fleet_core::Project, fleet_application::operation::PortFailure> {
+        self.known
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|project| project.id == id)
+            .cloned()
+            .ok_or_else(|| fleet_application::operation::PortFailure::NotFound {
+                what: format!("project {id}"),
+            })
+    }
+
+    async fn list(
+        &self,
+        _: &fleet_application::project::ProjectFilter,
+        _: u32,
+    ) -> Result<Vec<fleet_core::Project>, fleet_application::operation::PortFailure> {
+        Err(fleet_application::operation::PortFailure::Backend {
+            detail: "not needed".to_owned(),
+        })
+    }
+
+    async fn update(
+        &self,
+        _: &str,
+        _: &str,
+        _: &str,
+    ) -> Result<fleet_core::Project, fleet_application::operation::PortFailure> {
+        Err(fleet_application::operation::PortFailure::Backend {
+            detail: "not needed".to_owned(),
+        })
+    }
+
+    async fn delete(&self, _: &str) -> Result<(), fleet_application::operation::PortFailure> {
+        Err(fleet_application::operation::PortFailure::Backend {
+            detail: "not needed".to_owned(),
+        })
+    }
+
+    async fn record_checkout(
+        &self,
+        _: &fleet_core::CheckoutFact,
+    ) -> Result<(), fleet_application::operation::PortFailure> {
+        Err(fleet_application::operation::PortFailure::Backend {
+            detail: "not needed".to_owned(),
+        })
+    }
+
+    async fn find_by_idempotency_key(
+        &self,
+        _: &str,
+    ) -> Result<Option<fleet_core::Project>, fleet_application::operation::PortFailure> {
+        Ok(None)
+    }
+
+    async fn find_by_remote(
+        &self,
+        _: &str,
+    ) -> Result<Option<fleet_core::Project>, fleet_application::operation::PortFailure> {
+        Ok(None)
+    }
+
+    async fn checkouts(
+        &self,
+        _: &str,
+    ) -> Result<Vec<fleet_core::CheckoutFact>, fleet_application::operation::PortFailure> {
+        Err(fleet_application::operation::PortFailure::Backend {
+            detail: "not needed".to_owned(),
+        })
+    }
+}
+
 fn service(pins: Arc<dyn ImagePinValidator>) -> (Lab, Arc<FakeTemplates>, Arc<FakeAudit>) {
     let templates = Arc::new(FakeTemplates::default());
     let audit = Arc::new(FakeAudit::default());
     let leases = Arc::new(FakeLeases::default());
     let provisions = Arc::new(FakeProvisions::with_leases(leases.leases.clone()));
     (
-        Lab::new(templates.clone(), provisions, leases, pins, audit.clone()),
+        Lab::new(
+            templates.clone(),
+            provisions,
+            leases,
+            pins,
+            Arc::new(FakeProjects::default()),
+            audit.clone(),
+        ),
         templates,
         audit,
     )
@@ -537,10 +784,116 @@ fn service_with_pins(pins: Arc<FakePins>) -> (Lab, Arc<FakeTemplates>, Arc<FakeA
     let leases = Arc::new(FakeLeases::default());
     let provisions = Arc::new(FakeProvisions::with_leases(leases.leases.clone()));
     (
-        Lab::new(templates.clone(), provisions, leases, pins, audit.clone()),
+        Lab::new(
+            templates.clone(),
+            provisions,
+            leases,
+            pins,
+            Arc::new(FakeProjects::default()),
+            audit.clone(),
+        ),
         templates,
         audit,
     )
+}
+
+/// #360: the readiness deadline is part of the insert, so a controller that
+/// dies right after creating the record leaves it with its deadline.
+#[tokio::test]
+async fn the_readiness_deadline_is_written_with_the_record() {
+    let templates = Arc::new(FakeTemplates::default());
+    let leases = Arc::new(FakeLeases::default());
+    let provisions = Arc::new(FakeProvisions {
+        refuse_updates: true,
+        ..FakeProvisions::with_leases(leases.leases.clone())
+    });
+    let lab = Lab::new(
+        templates,
+        provisions.clone(),
+        leases,
+        FakePins::with_promoted("rcp-1@abc"),
+        Arc::new(FakeProjects::default()),
+        Arc::new(FakeAudit::default()),
+    );
+    let template = lab
+        .create_template(
+            &AllowAll,
+            &principal(),
+            NewLabTemplate {
+                content: content("ubuntu-lab", "rcp-1@abc"),
+            },
+            NOW,
+        )
+        .await
+        .unwrap();
+    let version = lab
+        .publish_template(&AllowAll, &principal(), &template.id, NOW + 1)
+        .await
+        .unwrap();
+    let record = lab
+        .start_provision(&AllowAll, &principal(), &version.id, None, None, NOW + 2)
+        .await
+        .unwrap();
+    let deadline = Some(NOW + 2 + 300_000 + fleet_application::lab::PRE_BOOT_ALLOWANCE_MILLIS);
+    assert_eq!(record.readiness_deadline_at, deadline);
+    // What the store holds, with no update ever having succeeded.
+    let stored = provisions.records.lock().unwrap();
+    assert_eq!(stored.len(), 1);
+    assert_eq!(stored[0].readiness_deadline_at, deadline);
+}
+
+/// #433: a provision key joined to its principal with a bare ':' let two
+/// different (principal, key) pairs spell one scope and replay each other's
+/// provision.
+#[tokio::test]
+async fn provision_keys_of_colliding_principal_and_key_pairs_stay_distinct() {
+    let templates = Arc::new(FakeTemplates::default());
+    let leases = Arc::new(FakeLeases::default());
+    let provisions = Arc::new(FakeProvisions::with_leases(leases.leases.clone()));
+    let lab = Lab::new(
+        templates,
+        provisions.clone(),
+        leases,
+        FakePins::with_promoted("rcp-1@abc"),
+        Arc::new(FakeProjects::default()),
+        Arc::new(FakeAudit::default()),
+    );
+    let template = lab
+        .create_template(
+            &AllowAll,
+            &principal(),
+            NewLabTemplate {
+                content: content("ubuntu-lab", "rcp-1@abc"),
+            },
+            NOW,
+        )
+        .await
+        .unwrap();
+    let version = lab
+        .publish_template(&AllowAll, &principal(), &template.id, NOW + 1)
+        .await
+        .unwrap();
+    let start = |who: &'static str, key: &'static str| {
+        let lab = &lab;
+        let version_id = version.id.clone();
+        async move {
+            lab.start_provision(
+                &AllowAll,
+                &ActingPrincipal { id: who.to_owned() },
+                &version_id,
+                None,
+                Some(key),
+                NOW + 2,
+            )
+            .await
+            .unwrap()
+        }
+    };
+    let first = start("tailscale:a", "b:c").await;
+    let other = start("tailscale:a:b", "c").await;
+    assert_ne!(first.id, other.id);
+    assert_eq!(start("tailscale:a", "b:c").await.id, first.id);
+    assert_eq!(provisions.records.lock().unwrap().len(), 2);
 }
 
 #[tokio::test]
@@ -638,6 +991,12 @@ async fn provisioning_starts_with_a_record_in_provisioning_state() {
         .unwrap();
     assert_eq!(record.state, fleet_core::GuestState::Provisioning);
     assert_eq!(record.template_version_id, version.id);
+    // The readiness deadline is recorded before any step (#302): the
+    // template's 300 s plus the pre-boot allowance.
+    assert_eq!(
+        record.readiness_deadline_at,
+        Some(NOW + 2 + 300_000 + fleet_application::lab::PRE_BOOT_ALLOWANCE_MILLIS)
+    );
 
     // The record is readable and listed.
     let fetched = lab
@@ -802,6 +1161,7 @@ async fn lease_extension_authorizes_audits_and_advances_only_a_live_ready_lease(
         provisions,
         leases.clone(),
         FakePins::with_promoted("rcp-1@abc"),
+        Arc::new(FakeProjects::default()),
         audit.clone(),
     );
     let template = lab
@@ -1022,6 +1382,7 @@ async fn the_sweeper_claims_expired_leases_into_releasing() {
                 provisions,
                 leases.clone(),
                 FakePins::with_promoted("rcp-1@abc"),
+                Arc::new(FakeProjects::default()),
                 audit.clone(),
             ),
             templates,
@@ -1095,6 +1456,7 @@ async fn sweep_reports_each_committed_claim_before_a_later_failure() {
         Arc::new(FakeProvisions::with_leases(leases.leases.clone())),
         leases.clone(),
         FakePins::with_promoted("rcp-1@abc"),
+        Arc::new(FakeProjects::default()),
         audit,
     );
     let template = lab
@@ -1155,4 +1517,864 @@ async fn sweep_reports_each_committed_claim_before_a_later_failure() {
         .unwrap();
     assert_eq!(first.state, LeaseState::Releasing);
     assert_eq!(second.state, LeaseState::Ready);
+}
+
+#[tokio::test]
+async fn lease_creation_records_an_existent_explicit_project() {
+    let leases = Arc::new(FakeLeases::default());
+    let audit = Arc::new(FakeAudit::default());
+    let lab = Lab::new(
+        Arc::new(FakeTemplates::default()),
+        Arc::new(FakeProvisions::with_leases(leases.leases.clone())),
+        leases.clone(),
+        FakePins::with_promoted("rcp-1@abc"),
+        FakeProjects::with(sample_project("proj-1")),
+        audit.clone(),
+    );
+    let template = lab
+        .create_template(
+            &AllowAll,
+            &principal(),
+            NewLabTemplate {
+                content: content("ubuntu-lab", "rcp-1@abc"),
+            },
+            NOW,
+        )
+        .await
+        .unwrap();
+    let version = lab
+        .publish_template(&AllowAll, &principal(), &template.id, NOW + 1)
+        .await
+        .unwrap();
+    let lease = lab
+        .create_lease(
+            &AllowAll,
+            &principal(),
+            fleet_application::lab::NewLease {
+                template_version_id: version.id.clone(),
+                purpose: "the demo".to_owned(),
+                project_id: Some("proj-1".to_owned()),
+                cleanup: fleet_core::CleanupStrategy::Destroy,
+                ttl_seconds: 3_600,
+            },
+            NOW + 2,
+        )
+        .await
+        .unwrap();
+    assert_eq!(lease.project_id, Some("proj-1".to_owned()));
+    // The create event itself carries the linkage: both entries must sit
+    // on the same `lab_lease_creating` intent.
+    let intents = audit.intents.lock().unwrap();
+    assert!(
+        intents.iter().any(|intent| {
+            let entries: Vec<(&str, &str)> = intent.metadata.entries().collect();
+            entries
+                .iter()
+                .any(|(k, v)| k == &"event" && v == &"lab_lease_creating")
+                && entries
+                    .iter()
+                    .any(|(k, v)| k == &"projectId" && v == &"proj-1")
+        }),
+        "{intents:?}"
+    );
+}
+
+#[tokio::test]
+async fn lease_creation_inherits_the_template_versions_bootstrap_project() {
+    let leases = Arc::new(FakeLeases::default());
+    let lab = Lab::new(
+        Arc::new(FakeTemplates::default()),
+        Arc::new(FakeProvisions::with_leases(leases.leases.clone())),
+        leases.clone(),
+        FakePins::with_promoted("rcp-1@abc"),
+        FakeProjects::with(sample_project("proj-1")),
+        Arc::new(FakeAudit::default()),
+    );
+    let template = lab
+        .create_template(
+            &AllowAll,
+            &principal(),
+            NewLabTemplate {
+                content: LabTemplateContent {
+                    bootstrap_project_id: Some("proj-1".to_owned()),
+                    ..content("ubuntu-lab", "rcp-1@abc")
+                },
+            },
+            NOW,
+        )
+        .await
+        .unwrap();
+    let version = lab
+        .publish_template(&AllowAll, &principal(), &template.id, NOW + 1)
+        .await
+        .unwrap();
+    let lease = lab
+        .create_lease(
+            &AllowAll,
+            &principal(),
+            fleet_application::lab::NewLease {
+                template_version_id: version.id.clone(),
+                purpose: "the demo".to_owned(),
+                project_id: None,
+                cleanup: fleet_core::CleanupStrategy::Destroy,
+                ttl_seconds: 3_600,
+            },
+            NOW + 2,
+        )
+        .await
+        .unwrap();
+    assert_eq!(lease.project_id, Some("proj-1".to_owned()));
+}
+
+#[tokio::test]
+async fn lease_creation_refuses_an_unknown_project() {
+    let leases = Arc::new(FakeLeases::default());
+    let lab = Lab::new(
+        Arc::new(FakeTemplates::default()),
+        Arc::new(FakeProvisions::with_leases(leases.leases.clone())),
+        leases.clone(),
+        FakePins::with_promoted("rcp-1@abc"),
+        Arc::new(FakeProjects::default()),
+        Arc::new(FakeAudit::default()),
+    );
+    let template = lab
+        .create_template(
+            &AllowAll,
+            &principal(),
+            NewLabTemplate {
+                content: content("ubuntu-lab", "rcp-1@abc"),
+            },
+            NOW,
+        )
+        .await
+        .unwrap();
+    let version = lab
+        .publish_template(&AllowAll, &principal(), &template.id, NOW + 1)
+        .await
+        .unwrap();
+    let error = lab
+        .create_lease(
+            &AllowAll,
+            &principal(),
+            fleet_application::lab::NewLease {
+                template_version_id: version.id.clone(),
+                purpose: "the demo".to_owned(),
+                project_id: Some("ghost".to_owned()),
+                cleanup: fleet_core::CleanupStrategy::Destroy,
+                ttl_seconds: 3_600,
+            },
+            NOW + 2,
+        )
+        .await
+        .unwrap_err();
+    match error {
+        LabUseCaseError::Invalid { detail } => {
+            assert!(detail.contains("ghost"), "{detail}");
+        }
+        other => panic!("{other:?}"),
+    }
+    assert!(
+        leases.leases.lock().unwrap().is_empty(),
+        "the lease was created for an unknown project"
+    );
+}
+
+#[tokio::test]
+async fn lease_listing_narrows_by_project() {
+    let leases = Arc::new(FakeLeases::default());
+    let lab = Lab::new(
+        Arc::new(FakeTemplates::default()),
+        Arc::new(FakeProvisions::with_leases(leases.leases.clone())),
+        leases.clone(),
+        FakePins::with_promoted("rcp-1@abc"),
+        FakeProjects::with(sample_project("proj-1")),
+        Arc::new(FakeAudit::default()),
+    );
+    let template = lab
+        .create_template(
+            &AllowAll,
+            &principal(),
+            NewLabTemplate {
+                content: content("ubuntu-lab", "rcp-1@abc"),
+            },
+            NOW,
+        )
+        .await
+        .unwrap();
+    let version = lab
+        .publish_template(&AllowAll, &principal(), &template.id, NOW + 1)
+        .await
+        .unwrap();
+    for purpose in ["first", "second"] {
+        lab.create_lease(
+            &AllowAll,
+            &principal(),
+            fleet_application::lab::NewLease {
+                template_version_id: version.id.clone(),
+                purpose: purpose.to_owned(),
+                project_id: Some("proj-1".to_owned()),
+                cleanup: fleet_core::CleanupStrategy::Destroy,
+                ttl_seconds: 3_600,
+            },
+            NOW + 2,
+        )
+        .await
+        .unwrap();
+    }
+    lab.create_lease(
+        &AllowAll,
+        &principal(),
+        fleet_application::lab::NewLease {
+            template_version_id: version.id.clone(),
+            purpose: "unlinked".to_owned(),
+            project_id: None,
+            cleanup: fleet_core::CleanupStrategy::Destroy,
+            ttl_seconds: 3_600,
+        },
+        NOW + 3,
+    )
+    .await
+    .unwrap();
+    let linked = lab
+        .list_leases(&AllowAll, &principal(), Some("proj-1"))
+        .await
+        .unwrap();
+    assert_eq!(linked.len(), 2);
+    let everything = lab
+        .list_leases(&AllowAll, &principal(), None)
+        .await
+        .unwrap();
+    assert_eq!(everything.len(), 3);
+    // The default port search applies the same filter in the application.
+    let filter = fleet_application::lab::LeaseFilter {
+        purpose_prefix: Some("unl".to_owned()),
+        states: vec![fleet_core::LeaseState::Requested],
+        ..Default::default()
+    };
+    let found = lab
+        .search_leases(&AllowAll, &principal(), filter.clone(), None)
+        .await
+        .unwrap();
+    assert_eq!(found.len(), 1);
+    assert_eq!(found[0].purpose, "unlinked");
+    assert!(
+        lab.search_leases(&AllowAll, &principal(), filter, Some("someone-else"))
+            .await
+            .unwrap()
+            .is_empty()
+    );
+}
+
+#[tokio::test]
+async fn lease_creation_refuses_a_stale_template_bootstrap_project() {
+    let leases = Arc::new(FakeLeases::default());
+    let lab = Lab::new(
+        Arc::new(FakeTemplates::default()),
+        Arc::new(FakeProvisions::with_leases(leases.leases.clone())),
+        leases.clone(),
+        FakePins::with_promoted("rcp-1@abc"),
+        Arc::new(FakeProjects::default()),
+        Arc::new(FakeAudit::default()),
+    );
+    let template = lab
+        .create_template(
+            &AllowAll,
+            &principal(),
+            NewLabTemplate {
+                content: LabTemplateContent {
+                    bootstrap_project_id: Some("deleted".to_owned()),
+                    ..content("ubuntu-lab", "rcp-1@abc")
+                },
+            },
+            NOW,
+        )
+        .await
+        .unwrap();
+    let version = lab
+        .publish_template(&AllowAll, &principal(), &template.id, NOW + 1)
+        .await
+        .unwrap();
+    let error = lab
+        .create_lease(
+            &AllowAll,
+            &principal(),
+            fleet_application::lab::NewLease {
+                template_version_id: version.id.clone(),
+                purpose: "the demo".to_owned(),
+                project_id: None,
+                cleanup: fleet_core::CleanupStrategy::Destroy,
+                ttl_seconds: 3_600,
+            },
+            NOW + 2,
+        )
+        .await
+        .unwrap_err();
+    match error {
+        LabUseCaseError::Invalid { detail } => {
+            assert!(detail.contains("deleted"), "{detail}");
+            assert!(detail.contains("explicit project id"), "{detail}");
+        }
+        other => panic!("{other:?}"),
+    }
+    assert!(
+        leases.leases.lock().unwrap().is_empty(),
+        "the lease was created for a stale bootstrap project"
+    );
+}
+
+#[tokio::test]
+#[allow(clippy::too_many_lines)]
+async fn exec_runs_only_on_a_ready_unexpired_lease_with_a_lab_machine() {
+    let templates = Arc::new(FakeTemplates::default());
+    let audit = Arc::new(FakeAudit::default());
+    let leases = Arc::new(FakeLeases::default());
+    let provisions = Arc::new(FakeProvisions::with_leases(leases.leases.clone()));
+    let lab = Lab::new(
+        templates,
+        provisions.clone(),
+        leases.clone(),
+        FakePins::with_promoted("rcp-1@abc"),
+        Arc::new(FakeProjects::default()),
+        audit.clone(),
+    );
+    let template = lab
+        .create_template(
+            &AllowAll,
+            &principal(),
+            NewLabTemplate {
+                content: content("ubuntu-lab", "rcp-1@abc"),
+            },
+            NOW,
+        )
+        .await
+        .unwrap();
+    let version = lab
+        .publish_template(&AllowAll, &principal(), &template.id, NOW + 1)
+        .await
+        .unwrap();
+    let lease = lab
+        .create_lease(
+            &AllowAll,
+            &principal(),
+            fleet_application::lab::NewLease {
+                template_version_id: version.id.clone(),
+                purpose: "exec".to_owned(),
+                project_id: None,
+                cleanup: fleet_core::CleanupStrategy::Destroy,
+                ttl_seconds: 3_600,
+            },
+            NOW + 2,
+        )
+        .await
+        .unwrap();
+    let exec = |now: i64, script: &'static str, timeout: u64| {
+        let lab = &lab;
+        let id = lease.id.clone();
+        async move {
+            lab.exec_lease(
+                &AllowAll,
+                &principal(),
+                &id,
+                script,
+                timeout,
+                fleet_core::ExecSession::Service,
+                None,
+                now,
+            )
+            .await
+        }
+    };
+
+    // Not ready yet.
+    assert!(matches!(
+        exec(NOW + 3, "uname -a", 60).await.unwrap_err(),
+        LabUseCaseError::Invalid { .. }
+    ));
+
+    // Ready, but the guest has no Lab machine.
+    let mut record = provisions
+        .create(
+            &NewProvision {
+                template_version_id: version.id.clone(),
+                lease_id: Some(lease.id.clone()),
+                idempotency_key: None,
+                readiness_deadline_at: None,
+            },
+            NOW + 3,
+        )
+        .await
+        .unwrap();
+    {
+        let mut stored = leases.leases.lock().unwrap();
+        let entry = stored
+            .iter_mut()
+            .find(|entry| entry.id == lease.id)
+            .unwrap();
+        entry.state = fleet_core::LeaseState::Ready;
+        entry.provision_id = Some(record.id.clone());
+        entry.expires_at = Some(NOW + 1_000);
+    }
+    let error = exec(NOW + 4, "uname -a", 60).await.unwrap_err();
+    assert!(error.to_string().contains("Lab machine"), "{error}");
+
+    // Ready with a machine: the lab.exec operation, the command not audited.
+    record.machine_id = Some("machine-1".to_owned());
+    record.endpoint_id = Some("endpoint-1".to_owned());
+    provisions.update(&record).await.unwrap();
+    let new = exec(NOW + 5, "echo secret-ish-value", 120).await.unwrap();
+    assert_eq!(new.kind, "lab.exec");
+    let payload: serde_json::Value =
+        serde_json::from_str(new.payload_json.as_deref().unwrap()).unwrap();
+    assert_eq!(payload["leaseId"], lease.id.as_str());
+    assert_eq!(payload["timeoutSeconds"], 120);
+    // The guest OS comes from the lease's template version.
+    assert_eq!(payload["guestOs"], "linux");
+    let audited = format!("{:?}", audit.intents.lock().unwrap());
+    assert!(audited.contains("lab_exec_requested"));
+    assert!(!audited.contains("secret-ish-value"));
+    assert_eq!(payload["session"], "service");
+    assert!(payload["interactiveUser"].is_null());
+
+    // A Linux guest never provides an interactive session.
+    let interactive = |timeout: u64| {
+        let lab = &lab;
+        let id = lease.id.clone();
+        async move {
+            lab.exec_lease(
+                &AllowAll,
+                &principal(),
+                &id,
+                "notepad",
+                timeout,
+                fleet_core::ExecSession::Interactive,
+                None,
+                NOW + 5,
+            )
+            .await
+        }
+    };
+    let error = interactive(60).await.unwrap_err().to_string();
+    assert!(error.contains("unsupported"), "{error}");
+    // The synchronous interactive bound leaves room for the SSH session.
+    let error = interactive(900).await.unwrap_err().to_string();
+    assert!(error.contains("exec-detached"), "{error}");
+
+    // A retried request with the same key maps to the same operation key,
+    // scoped to the principal and the lease; another principal's key differs.
+    let keyed = |who: &'static str, now: i64| {
+        let lab = &lab;
+        let id = lease.id.clone();
+        async move {
+            lab.exec_lease(
+                &AllowAll,
+                &ActingPrincipal { id: who.to_owned() },
+                &id,
+                "true",
+                60,
+                fleet_core::ExecSession::Service,
+                Some("k1"),
+                now,
+            )
+            .await
+            .unwrap()
+            .idempotency_key
+        }
+    };
+    let first = keyed("anonymous-lan-admin", NOW + 5).await;
+    assert_eq!(
+        first.as_deref(),
+        Some(
+            fleet_application::idempotency::scoped_key(
+                "lab-exec",
+                "anonymous-lan-admin",
+                &[lease.id.as_str(), "k1"]
+            )
+            .as_str()
+        )
+    );
+    assert_eq!(keyed("anonymous-lan-admin", NOW + 6).await, first);
+    assert_ne!(keyed("someone-else", NOW + 6).await, first);
+
+    // #433: the old `{principal}:lab-exec:{lease}:{key}` join let ("a", a
+    // key spelling `b:lab-exec:{lease}:c`) and ("a:b", "c") share a scope.
+    let spoofed_key = format!("b:lab-exec:{}:c", lease.id);
+    let exec_key = |who: &'static str, key: String, now: i64| {
+        let lab = &lab;
+        let id = lease.id.clone();
+        async move {
+            lab.exec_lease(
+                &AllowAll,
+                &ActingPrincipal { id: who.to_owned() },
+                &id,
+                "true",
+                60,
+                fleet_core::ExecSession::Service,
+                Some(key.as_str()),
+                now,
+            )
+            .await
+            .unwrap()
+            .idempotency_key
+        }
+    };
+    assert_ne!(
+        exec_key("a", spoofed_key, NOW + 7).await,
+        exec_key("a:b", "c".to_owned(), NOW + 7).await
+    );
+
+    // The 64 KiB bound.
+    let oversized = "x".repeat(fleet_application::lab::MAX_LAB_EXEC_SCRIPT_BYTES + 1);
+    assert!(matches!(
+        lab.exec_lease(
+            &AllowAll,
+            &principal(),
+            &lease.id,
+            &oversized,
+            60,
+            fleet_core::ExecSession::Service,
+            None,
+            NOW + 5
+        )
+        .await
+        .unwrap_err(),
+        LabUseCaseError::Invalid { .. }
+    ));
+
+    // A ready lease without a TTL deadline is refused too.
+    {
+        let mut stored = leases.leases.lock().unwrap();
+        stored
+            .iter_mut()
+            .find(|entry| entry.id == lease.id)
+            .unwrap()
+            .expires_at = None;
+    }
+    assert!(matches!(
+        exec(NOW + 5, "true", 60).await.unwrap_err(),
+        LabUseCaseError::Invalid { .. }
+    ));
+    {
+        let mut stored = leases.leases.lock().unwrap();
+        stored
+            .iter_mut()
+            .find(|entry| entry.id == lease.id)
+            .unwrap()
+            .expires_at = Some(NOW + 1_000);
+    }
+
+    // Bounds, expiry, and authorization.
+    for (now, script, timeout) in [
+        (NOW + 5, "  ", 60),
+        (NOW + 5, "true", 0),
+        (NOW + 5, "true", 901),
+        (NOW + 1_000, "true", 60),
+    ] {
+        assert!(matches!(
+            exec(now, script, timeout).await.unwrap_err(),
+            LabUseCaseError::Invalid { .. }
+        ));
+    }
+    assert!(matches!(
+        lab.exec_lease(
+            &DenyAll,
+            &principal(),
+            &lease.id,
+            "true",
+            60,
+            fleet_core::ExecSession::Service,
+            None,
+            NOW + 5
+        )
+        .await
+        .unwrap_err(),
+        LabUseCaseError::Denied(_)
+    ));
+}
+
+#[tokio::test]
+#[allow(clippy::too_many_lines)]
+async fn cleanup_retry_rearms_only_a_cleanup_failed_lease_authorized_and_audited() {
+    use fleet_application::lab::MAX_CLEANUP_ATTEMPTS;
+
+    // Denies exactly lab.lease, so the use case is shown to require it.
+    #[derive(Debug, Default)]
+    struct LeaseDenied;
+    impl Authorizer for LeaseDenied {
+        fn decide(&self, request: AccessRequest<'_>) -> Decision {
+            if request.action == fleet_application::authz::Permission::LabLease {
+                return Decision::deny(ReasonId::PolicyAllow);
+            }
+            Decision::allow()
+        }
+    }
+
+    let leases = Arc::new(FakeLeases::default());
+    let audit = Arc::new(FakeAudit::default());
+    let lab = Lab::new(
+        Arc::new(FakeTemplates::default()),
+        Arc::new(FakeProvisions::with_leases(leases.leases.clone())),
+        leases.clone(),
+        FakePins::with_promoted("rcp-1@abc"),
+        Arc::new(FakeProjects::default()),
+        audit.clone(),
+    );
+    let mut lease = leases
+        .create(
+            &fleet_application::lab::NewLease {
+                template_version_id: "tv-1".to_owned(),
+                purpose: "the demo".to_owned(),
+                project_id: None,
+                cleanup: fleet_core::CleanupStrategy::Destroy,
+                ttl_seconds: 3_600,
+            },
+            "anonymous-lan-admin",
+            NOW,
+        )
+        .await
+        .unwrap();
+
+    // Only cleanup_failed can be re-armed; a releasing lease is refused
+    // unchanged, before any audit.
+    lease.state = LeaseState::Releasing;
+    lease.cleanup_attempts = 2;
+    lease.cleanup_next_at = Some(NOW + 60_000);
+    leases.update(&lease).await.unwrap();
+    let error = lab
+        .retry_cleanup(&AllowAll, &principal(), &lease.id)
+        .await
+        .unwrap_err();
+    assert!(matches!(error, LabUseCaseError::Invalid { .. }), "{error}");
+    assert!(error.to_string().contains("releasing"), "{error}");
+    assert!(audit.intents.lock().unwrap().is_empty());
+
+    lease.state = LeaseState::CleanupFailed;
+    lease.cleanup_attempts = MAX_CLEANUP_ATTEMPTS;
+    lease.cleanup_next_at = None;
+    leases.update(&lease).await.unwrap();
+
+    // The caller must hold lab.lease on it.
+    let error = lab
+        .retry_cleanup(&LeaseDenied, &principal(), &lease.id)
+        .await
+        .unwrap_err();
+    assert!(matches!(error, LabUseCaseError::Denied(_)), "{error}");
+    assert!(matches!(
+        lab.retry_cleanup(&AllowAll, &principal(), "no-such-lease")
+            .await
+            .unwrap_err(),
+        LabUseCaseError::NotFound { .. }
+    ));
+
+    let rearmed = lab
+        .retry_cleanup(&AllowAll, &principal(), &lease.id)
+        .await
+        .unwrap();
+    assert_eq!(rearmed.state, LeaseState::Releasing);
+    assert_eq!(rearmed.cleanup_next_at, None);
+    // The failed-attempt count is kept, so the next attempt's idempotency
+    // key is a fresh one, and its cleanup is due at once.
+    assert_eq!(rearmed.cleanup_attempts, MAX_CLEANUP_ATTEMPTS);
+    assert!(fleet_application::lab::cleanup_due(&rearmed, NOW));
+    assert_eq!(
+        fleet_application::lab::cleanup_operation(&rearmed, None)
+            .idempotency_key
+            .as_deref(),
+        Some(format!("lab-cleanup:{}:{MAX_CLEANUP_ATTEMPTS}", lease.id).as_str())
+    );
+    let stored = leases.get(&lease.id).await.unwrap();
+    assert_eq!(stored.state, LeaseState::Releasing);
+    assert_eq!(stored.cleanup_attempts, MAX_CLEANUP_ATTEMPTS);
+    let intents = audit.intents.lock().unwrap().clone();
+    assert_eq!(intents.len(), 2);
+    assert_eq!(intents[0].action, "lab.lease");
+    assert_eq!(intents[0].resource.as_deref(), Some(lease.id.as_str()));
+    let events = |intents: &[AuditIntent]| -> Vec<String> {
+        intents
+            .iter()
+            .filter_map(|intent| {
+                intent
+                    .metadata
+                    .entries()
+                    .find(|(key, _)| *key == "event")
+                    .map(|(_, value)| value.to_owned())
+            })
+            .collect()
+    };
+    assert_eq!(
+        events(&intents),
+        [
+            "lab_lease_cleanup_rearm_requested",
+            "lab_lease_cleanup_rearmed"
+        ]
+    );
+    assert!(
+        intents[1]
+            .metadata
+            .entries()
+            .any(|entry| entry == ("failedAttempts", "5"))
+    );
+
+    // A second re-arm finds a releasing lease and changes nothing.
+    assert!(matches!(
+        lab.retry_cleanup(&AllowAll, &principal(), &lease.id)
+            .await
+            .unwrap_err(),
+        LabUseCaseError::Invalid { .. }
+    ));
+
+    // A lease that changes between the read and the compare-and-set: the
+    // re-arm loses with a conflict, the newer state stands, and only the
+    // request is audited.
+    lease.state = LeaseState::CleanupFailed;
+    lease.cleanup_attempts = MAX_CLEANUP_ATTEMPTS;
+    leases.update(&lease).await.unwrap();
+    *leases.race_rearm.lock().unwrap() = true;
+    let error = lab
+        .retry_cleanup(&AllowAll, &principal(), &lease.id)
+        .await
+        .unwrap_err();
+    assert!(matches!(error, LabUseCaseError::Conflict { .. }), "{error}");
+    let stored = leases.get(&lease.id).await.unwrap();
+    assert_eq!(stored.state, LeaseState::Released);
+    assert_eq!(stored.cleanup_attempts, MAX_CLEANUP_ATTEMPTS);
+    let intents = audit.intents.lock().unwrap().clone();
+    assert_eq!(events(&intents[2..]), ["lab_lease_cleanup_rearm_requested"]);
+
+    // A refused completion record does not fail a committed re-arm: the
+    // caller still gets the lease back and queues the cleanup it owes.
+    lease.state = LeaseState::CleanupFailed;
+    leases.update(&lease).await.unwrap();
+    *audit.refuse_event.lock().unwrap() = Some("lab_lease_cleanup_rearmed".to_owned());
+    let rearmed = lab
+        .retry_cleanup(&AllowAll, &principal(), &lease.id)
+        .await
+        .unwrap();
+    assert_eq!(rearmed.state, LeaseState::Releasing);
+    assert_eq!(
+        leases.get(&lease.id).await.unwrap().state,
+        LeaseState::Releasing
+    );
+}
+
+#[tokio::test]
+#[allow(clippy::too_many_lines)]
+async fn interactive_exec_needs_a_windows_template_that_declares_the_user() {
+    use fleet_core::{ExecSession, GuestOs};
+    let templates = Arc::new(FakeTemplates::default());
+    let audit = Arc::new(FakeAudit::default());
+    let leases = Arc::new(FakeLeases::default());
+    let provisions = Arc::new(FakeProvisions::with_leases(leases.leases.clone()));
+    let lab = Lab::new(
+        templates,
+        provisions.clone(),
+        leases.clone(),
+        FakePins::with_promoted("rcp-1@abc"),
+        Arc::new(FakeProjects::default()),
+        audit.clone(),
+    );
+    let ready_lease = async |user: Option<&str>| {
+        let mut body = content("win-lab", "rcp-1@abc");
+        body.guest_os = GuestOs::Windows;
+        body.interactive_user = user.map(str::to_owned);
+        body.name = format!("win-lab-{}", user.unwrap_or("none"));
+        let template = lab
+            .create_template(
+                &AllowAll,
+                &principal(),
+                NewLabTemplate { content: body },
+                NOW,
+            )
+            .await
+            .unwrap();
+        let version = lab
+            .publish_template(&AllowAll, &principal(), &template.id, NOW + 1)
+            .await
+            .unwrap();
+        let lease = lab
+            .create_lease(
+                &AllowAll,
+                &principal(),
+                fleet_application::lab::NewLease {
+                    template_version_id: version.id.clone(),
+                    purpose: "interactive".to_owned(),
+                    project_id: None,
+                    cleanup: fleet_core::CleanupStrategy::Destroy,
+                    ttl_seconds: 3_600,
+                },
+                NOW + 2,
+            )
+            .await
+            .unwrap();
+        let mut record = provisions
+            .create(
+                &NewProvision {
+                    template_version_id: version.id.clone(),
+                    lease_id: Some(lease.id.clone()),
+                    idempotency_key: None,
+                    readiness_deadline_at: None,
+                },
+                NOW + 3,
+            )
+            .await
+            .unwrap();
+        record.machine_id = Some("machine-1".to_owned());
+        record.endpoint_id = Some("endpoint-1".to_owned());
+        provisions.update(&record).await.unwrap();
+        {
+            let mut stored = leases.leases.lock().unwrap();
+            let entry = stored
+                .iter_mut()
+                .find(|entry| entry.id == lease.id)
+                .unwrap();
+            entry.state = fleet_core::LeaseState::Ready;
+            entry.provision_id = Some(record.id.clone());
+            entry.expires_at = Some(NOW + 1_000_000);
+        }
+        lease.id
+    };
+    let with_user = ready_lease(Some("qa")).await;
+    let without_user = ready_lease(None).await;
+    let run = |id: &str, session: ExecSession| {
+        let lab = &lab;
+        let id = id.to_owned();
+        async move {
+            lab.exec_lease(
+                &AllowAll,
+                &principal(),
+                &id,
+                "notepad",
+                60,
+                session,
+                None,
+                NOW + 5,
+            )
+            .await
+        }
+    };
+    let new = run(&with_user, ExecSession::Interactive).await.unwrap();
+    let payload: serde_json::Value =
+        serde_json::from_str(new.payload_json.as_deref().unwrap()).unwrap();
+    assert_eq!(payload["session"], "interactive");
+    assert_eq!(payload["interactiveUser"], "qa");
+    assert_eq!(payload["guestOs"], "windows");
+    // Only the user's name is in the payload.
+    assert!(
+        !new.payload_json
+            .as_deref()
+            .unwrap()
+            .to_lowercase()
+            .contains("password")
+    );
+    let audited = format!("{:?}", audit.intents.lock().unwrap());
+    assert!(audited.contains("interactive"), "{audited}");
+    // The service session still works on the same lease and carries no user.
+    let service = run(&with_user, ExecSession::Service).await.unwrap();
+    let payload: serde_json::Value =
+        serde_json::from_str(service.payload_json.as_deref().unwrap()).unwrap();
+    assert_eq!(payload["session"], "service");
+    // A template without an interactive user has no desktop to run in.
+    let error = run(&without_user, ExecSession::Interactive)
+        .await
+        .unwrap_err();
+    assert!(error.to_string().contains("no interactive user"), "{error}");
 }

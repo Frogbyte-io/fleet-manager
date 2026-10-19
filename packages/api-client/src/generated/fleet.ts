@@ -3,6 +3,136 @@
  * Do not edit: run `pnpm --filter @frogbyte-io/fleet-api-client generate`.
  */
 /**
+ * One Coolify account's observation state.
+ */
+export interface AccountCoverageDto {
+  /** The account. */
+  accountId: string;
+  /** Its label. */
+  label: string;
+  /** Whether a discovery was ever recorded. */
+  observed: boolean;
+  /**
+     * When the snapshot was recorded (epoch millis).
+     * @nullable
+     */
+  recordedAt?: number | null;
+  /** The resource classes that are stale. */
+  staleClasses: string[];
+  /**
+     * The resource classes cut to fit the snapshot bound; services of
+     * these classes may be missing.
+     */
+  truncatedClasses: string[];
+}
+
+/**
+ * One DNS zone.
+ */
+export interface DnsZoneDto {
+  /** The provider's zone id. */
+  id: string;
+  /** The zone's apex name. */
+  name: string;
+  /** The provider's status for the zone. */
+  status: string;
+}
+
+/**
+ * The zones one Cloudflare account's token can see.
+ */
+export interface AccountZonesDto {
+  /** The account's id. */
+  accountId: string;
+  /** The account's label. */
+  accountLabel: string;
+  /**
+     * The failure class when the zones could not be read (`auth`,
+     * `permission`, `rate_limited`, `unavailable`, ...).
+     * @nullable
+     */
+  failure?: string | null;
+  /**
+     * What went wrong, when it did.
+     * @nullable
+     */
+  failureDetail?: string | null;
+  /** The zones. */
+  zones: DnsZoneDto[];
+}
+
+/**
+ * The structured, secret-free parameters.
+ */
+export type ActionRequestDtoParameters = { [key: string]: unknown };
+
+/**
+ * An action request.
+ */
+export interface ActionRequestDto {
+  /** The provider action's id. */
+  actionId: string;
+  /** When it was made (epoch milliseconds). */
+  createdAt: number;
+  /**
+     * When it was decided (epoch milliseconds).
+     * @nullable
+     */
+  decidedAt?: number | null;
+  /**
+     * Who approved or denied it: a principal, `policy:auto`, or
+     * `policy:deny`.
+     * @nullable
+     */
+  decidedBy?: string | null;
+  /**
+     * A denier's note.
+     * @nullable
+     */
+  decisionNote?: string | null;
+  /** When an undecided request expires (epoch milliseconds). */
+  expiresAt: number;
+  /**
+     * Why it failed.
+     * @nullable
+     */
+  failure?: string | null;
+  /** The request's identity. */
+  id: string;
+  /**
+     * The durable operation that executes it, once created. Poll it at
+     * `/operations/{id}`.
+     * @nullable
+     */
+  operationId?: string | null;
+  /** Where the request came from (`api`). */
+  origin: string;
+  /** The structured, secret-free parameters. */
+  parameters: ActionRequestDtoParameters;
+  /** Why the requester wants it. */
+  reason: string;
+  /** The principal that asked. */
+  requester: string;
+  /**
+     * The effective risk class when the request was made: `auto` (ran
+     * without a decision), `approve` (waits for a person), or `deny`
+     * (refused by policy).
+     */
+  riskClass: string;
+  /**
+     * `pending`, `approved`, `denied`, `expired`, `executing`,
+     * `succeeded`, or `failed`.
+     */
+  state: string;
+  /** What the action acts on. */
+  target: string;
+  /** Whether the state will never change. */
+  terminal: boolean;
+  /** The last change (epoch milliseconds). */
+  updatedAt: number;
+}
+
+/**
  * One existing machine whose endpoint matches a draft's host and port.
  * Candidates warn; they never merge or block.
  */
@@ -141,6 +271,47 @@ export interface AddedMachineDto {
   duplicates: DuplicateCandidateDto[];
   /** The registered machine, redacted per the caller's permissions. */
   machine: MachineDto;
+}
+
+/**
+ * A machine reference.
+ */
+export interface ServiceMachineRefDto {
+  /** The machine's identity. */
+  id: string;
+  /** The machine's name. */
+  name: string;
+}
+
+/**
+ * A Coolify server.
+ */
+export interface ServiceServerDto {
+  /** The address Coolify connects to. */
+  address: string;
+  /** The server's name. */
+  name: string;
+  /** The server's uuid. */
+  uuid: string;
+}
+
+/**
+ * A Coolify server that matched more than one machine.
+ */
+export interface AmbiguousServerDto {
+  /** The account. */
+  accountId: string;
+  /** `explicit_tag` or `address`. */
+  basis: string;
+  /** The machines that fit and that the caller may read; none is chosen. */
+  candidates: ServiceMachineRefDto[];
+  /**
+     * How many further machines fit that the caller may not read.
+     * @minimum 0
+     */
+  hiddenCandidates: number;
+  /** The server. */
+  server: ServiceServerDto;
 }
 
 /**
@@ -288,6 +459,11 @@ export interface ApplyPlanRequest {
 }
 
 /**
+ * An artifact's raw bytes, as the download route streams them.
+ */
+export type ArtifactBytes = Blob;
+
+/**
  * One guest network interface.
  */
 export interface ProviderInterfaceDto {
@@ -431,12 +607,38 @@ export interface AuditEventDto {
 }
 
 /**
+ * One build address that is out of allocation (#402).
+ */
+export interface BuildAddressDto {
+  /** The IPv4 address. */
+  address: string;
+  /**
+     * The operation that holds the address, or held it when it was
+     * quarantined.
+     */
+  operationId: string;
+  /** When the address was taken or quarantined, Unix milliseconds. */
+  since: number;
+  /**
+     * `held` by a running build, or `quarantined` after a build that did
+     * not end verifiably.
+     */
+  status: string;
+  /**
+     * When a quarantine ends on its own, Unix milliseconds; absent while
+     * held.
+     * @nullable
+     */
+  until?: number | null;
+}
+
+/**
  * One secret-backed build variable.
  */
 export interface SecretVarDto {
   /** The Packer variable name. */
   name: string;
-  /** The secret reference id. */
+  /** The name of the secret record, which must be `images/<name>`. */
   reference: string;
 }
 
@@ -444,6 +646,11 @@ export interface SecretVarDto {
  * The build request: which version to build and the deadline.
  */
 export interface BuildImageRequest {
+  /**
+     * Target account override; otherwise resolved from the recipe endpoint.
+     * @nullable
+     */
+  accountId?: string | null;
   /**
      * The secret-backed build variables, as name/reference pairs. The
      * values never enter argv, logs, or audit metadata.
@@ -631,6 +838,131 @@ export interface CheckoutFactDto {
 }
 
 /**
+ * The result of clearing a quarantine.
+ */
+export interface ClearedBuildAddressDto {
+  /** The address that can be allocated again. */
+  address: string;
+}
+
+/**
+ * One DNS record.
+ */
+export interface DnsRecordDto {
+  /** The value, normalized per type. */
+  content: string;
+  /**
+     * The provider's record id.
+     * @nullable
+     */
+  id?: string | null;
+  /** The fully qualified name. */
+  name: string;
+  /**
+     * The MX preference.
+     * @minimum 0
+     * @nullable
+     */
+  priority?: number | null;
+  /** Whether traffic is proxied through the provider. */
+  proxied: boolean;
+  /**
+     * The TTL in seconds; 1 is automatic.
+     * @minimum 0
+     */
+  ttl: number;
+  /** The record type. */
+  type: string;
+}
+
+/**
+ * The records last observed at a name through one Cloudflare account.
+ */
+export interface CloudflareDnsObservationDto {
+  /** The account that answered. */
+  accountId: string;
+  /** The name the records are at. */
+  name: string;
+  /** When they were read (epoch milliseconds). */
+  observedAt: number;
+  /** The records. */
+  records: DnsRecordDto[];
+  /**
+     * The `domain/<key>` Registry entry the records attached to, when the
+     * Registry had one when they were read.
+     * @nullable
+     */
+  registryEntry?: string | null;
+  /** The zone's provider id. */
+  zoneId: string;
+  /** The zone's apex name. */
+  zoneName: string;
+}
+
+/**
+ * The stored observations of one name.
+ */
+export interface CloudflareDnsObservationsDto {
+  /** The name asked about. */
+  name: string;
+  /** One entry per account and zone that was read, newest first. */
+  observations: CloudflareDnsObservationDto[];
+}
+
+/**
+ * The records at one name.
+ */
+export interface CloudflareDnsRecordsDto {
+  /** The account that answered. */
+  accountId: string;
+  /** Its label. */
+  accountLabel: string;
+  /** The name asked about. */
+  name: string;
+  /** When the records were read (epoch milliseconds). */
+  observedAt: number;
+  /** The records. */
+  records: DnsRecordDto[];
+  /**
+     * The `domain/<key>` Registry entry the observation attached to, when
+     * the Registry has one.
+     * @nullable
+     */
+  registryEntry?: string | null;
+  /** The zone the name belongs to. */
+  zone: DnsZoneDto;
+}
+
+/**
+ * Guest paths to copy from a ready lease.
+ */
+export interface CollectArtifactsRequest {
+  /**
+     * 1 to 16 distinct absolute guest paths of regular files, each at most
+     * 1024 bytes, without `.`, `..`, or empty components or control
+     * characters. Each file must fit the controller's artifact size cap.
+     */
+  paths: string[];
+}
+
+/**
+ * A lease's last failed artifact collection.
+ */
+export interface CollectionFailureDto {
+  /** A bounded detail naming the paths and why each failed. */
+  detail: string;
+  /** When it failed (epoch milliseconds). */
+  failedAt: number;
+  /** The `lab.collect` operation that failed. */
+  operationId: string;
+  /**
+     * A stable reason id, such as `collection_partial`, `collection_failed`,
+     * or `lease_not_ready`.
+     */
+  reason: string;
+}
+
+/**
  * Sets the desired-source remote.
  */
 export interface ConfigureSourceRequest {
@@ -673,6 +1005,339 @@ export interface ConfirmHostKeyRequest {
 export interface ConfirmProxmoxFingerprintRequest {
   /** The SHA-256 fingerprint as observed (colons optional). */
   fingerprint: string;
+}
+
+/**
+ * A deployed application.
+ */
+export interface CoolifyApplicationDto {
+  /**
+     * The build pack.
+     * @nullable
+     */
+  buildPack?: string | null;
+  /**
+     * When Coolify created it.
+     * @nullable
+     */
+  createdAt?: string | null;
+  /** The description. */
+  description: string;
+  /**
+     * The image reference of an image application.
+     * @nullable
+     */
+  dockerImage?: string | null;
+  /**
+     * The numeric environment id.
+     * @nullable
+     */
+  environmentId?: number | null;
+  /** The public hostnames and URLs. */
+  fqdns: string[];
+  /**
+     * The source branch.
+     * @nullable
+     */
+  gitBranch?: string | null;
+  /**
+     * The source repository, credentials removed.
+     * @nullable
+     */
+  gitRepository?: string | null;
+  /** The name. */
+  name: string;
+  /** Coolify's status, such as `running:healthy`. */
+  status: string;
+  /**
+     * When Coolify last changed it.
+     * @nullable
+     */
+  updatedAt?: string | null;
+  /** Coolify's identity. */
+  uuid: string;
+}
+
+/**
+ * A classified, credential-free failure of one resource class.
+ */
+export interface CoolifyFailureDto {
+  /** A short explanation; never a token, URL, or response body. */
+  detail: string;
+  /**
+     * `unauthorized`, `insufficient_permission`, `not_found`,
+     * `unreachable`, `timeout`, `rate_limited`, or `invalid_response`.
+     */
+  kind: string;
+}
+
+/**
+ * The observation state of one resource class.
+ */
+export interface CoolifyClassDto {
+  /** When the latest attempt ran (epoch millis). */
+  attemptedAt: number;
+  /**
+     * `servers`, `projects`, `applications`, `services`, `databases`, or
+     * `deployments`.
+     */
+  class: string;
+  failure?: null | CoolifyFailureDto;
+  /**
+     * How many items the snapshot holds for the class.
+     * @minimum 0
+     */
+  itemCount: number;
+  /**
+     * When the items were last listed successfully; absent when never.
+     * @nullable
+     */
+  observedAt?: number | null;
+  /** Why the latest attempt was only partial. */
+  partial: CoolifyFailureDto[];
+  /**
+     * Whether the items are stale: the latest attempt failed, the class was
+     * never listed, or the last success is old.
+     */
+  stale: boolean;
+  /** Whether the stored items were cut to fit the snapshot size bound. */
+  truncated: boolean;
+}
+
+/**
+ * A managed database. No credentials or connection URLs.
+ */
+export interface CoolifyDatabaseDto {
+  /** The description. */
+  description: string;
+  /**
+     * The engine, such as `postgresql`.
+     * @nullable
+     */
+  engine?: string | null;
+  /**
+     * The numeric environment id.
+     * @nullable
+     */
+  environmentId?: number | null;
+  /**
+     * The image reference.
+     * @nullable
+     */
+  image?: string | null;
+  /**
+     * Whether the database is exposed on a public port.
+     * @nullable
+     */
+  isPublic?: boolean | null;
+  /** The name. */
+  name: string;
+  /**
+     * The public port.
+     * @nullable
+     */
+  publicPort?: number | null;
+  /** Coolify's status. */
+  status: string;
+  /** Coolify's identity. */
+  uuid: string;
+}
+
+/**
+ * One deployment of an application. No logs.
+ */
+export interface CoolifyDeploymentDto {
+  /**
+     * The application's name.
+     * @nullable
+     */
+  applicationName?: string | null;
+  /**
+     * The application's identity, when known.
+     * @nullable
+     */
+  applicationUuid?: string | null;
+  /**
+     * The commit.
+     * @nullable
+     */
+  commit?: string | null;
+  /**
+     * The first line of the commit message.
+     * @nullable
+     */
+  commitMessage?: string | null;
+  /**
+     * When it was queued.
+     * @nullable
+     */
+  createdAt?: string | null;
+  /** Coolify's identity. */
+  deploymentUuid: string;
+  /**
+     * Whether the API started it.
+     * @nullable
+     */
+  isApi?: boolean | null;
+  /**
+     * Whether a webhook started it.
+     * @nullable
+     */
+  isWebhook?: boolean | null;
+  /**
+     * The pull request number for preview deployments.
+     * @nullable
+     */
+  pullRequestId?: number | null;
+  /**
+     * The server's name.
+     * @nullable
+     */
+  serverName?: string | null;
+  /** `queued`, `in_progress`, `finished`, `failed`, or `cancelled`. */
+  status: string;
+  /**
+     * When it last changed.
+     * @nullable
+     */
+  updatedAt?: string | null;
+}
+
+/**
+ * An environment of a project.
+ */
+export interface CoolifyEnvironmentDto {
+  /** The description. */
+  description: string;
+  /** Coolify's numeric environment id. */
+  id: number;
+  /** The name. */
+  name: string;
+}
+
+/**
+ * A project with its environments.
+ */
+export interface CoolifyProjectDto {
+  /** The description. */
+  description: string;
+  /** Whether the environments could not be refreshed by the latest run. */
+  detailsStale: boolean;
+  /** The environments; carried from the previous run when `detailsStale`. */
+  environments: CoolifyEnvironmentDto[];
+  /** The name. */
+  name: string;
+  /** Coolify's identity. */
+  uuid: string;
+}
+
+/**
+ * A Coolify server.
+ */
+export interface CoolifyServerDto {
+  /** The address Coolify connects to. */
+  address: string;
+  /** The description. */
+  description: string;
+  /** The name. */
+  name: string;
+  /**
+     * The proxy kind, when set.
+     * @nullable
+     */
+  proxyType?: string | null;
+  /**
+     * Whether Coolify considers it reachable.
+     * @nullable
+     */
+  reachable?: boolean | null;
+  /**
+     * Whether Coolify considers it usable.
+     * @nullable
+     */
+  usable?: boolean | null;
+  /** Coolify's identity. */
+  uuid: string;
+}
+
+/**
+ * A one-click or Compose service.
+ */
+export interface CoolifyServiceDto {
+  /**
+     * When Coolify created it.
+     * @nullable
+     */
+  createdAt?: string | null;
+  /** The description. */
+  description: string;
+  /** Whether the hostnames could not be refreshed by the latest run. */
+  detailsStale: boolean;
+  /**
+     * The numeric environment id.
+     * @nullable
+     */
+  environmentId?: number | null;
+  /**
+     * The public hostnames of its applications; carried from the previous
+     * run when `detailsStale`.
+     */
+  fqdns: string[];
+  /** The name. */
+  name: string;
+  /**
+     * The one-click service type.
+     * @nullable
+     */
+  serviceType?: string | null;
+  /**
+     * Coolify's status, when the list reports one.
+     * @nullable
+     */
+  status?: string | null;
+  /**
+     * When Coolify last changed it.
+     * @nullable
+     */
+  updatedAt?: string | null;
+  /** Coolify's identity. */
+  uuid: string;
+}
+
+/**
+ * The stamped, stale-aware Coolify snapshot of one account.
+ */
+export interface CoolifyObservationDto {
+  /** The account the snapshot belongs to. */
+  accountId: string;
+  /** Applications. */
+  applications: CoolifyApplicationDto[];
+  /** The per-class state: stamps, staleness, and failures. */
+  classes: CoolifyClassDto[];
+  /** Databases. */
+  databases: CoolifyDatabaseDto[];
+  /** Recent deployments, newest first. */
+  deployments: CoolifyDeploymentDto[];
+  /** The time staleness was evaluated against (epoch millis). */
+  evaluatedAt: number;
+  /** Projects with their environments. */
+  projects: CoolifyProjectDto[];
+  /** When the snapshot was last written (epoch millis). */
+  recordedAt: number;
+  /** Servers. */
+  servers: CoolifyServerDto[];
+  /** Services. */
+  services: CoolifyServiceDto[];
+  /**
+     * The Coolify version last seen.
+     * @nullable
+     */
+  version?: string | null;
+  /**
+     * Warnings from the latest run, such as a token that can read
+     * sensitive values (use a read-only token).
+     */
+  warnings: string[];
 }
 
 /**
@@ -734,6 +1399,107 @@ export interface CorrelatedDeviceDto {
 }
 
 /**
+ * Structured parameters the action defines (an object of at most 8
+ * KiB). They must be secret-free: Fleet holds provider credentials and
+ * refuses a request whose parameters look like one.
+ */
+export type CreateActionRequestParameters = { [key: string]: unknown };
+
+/**
+ * What to ask for.
+ */
+export interface CreateActionRequest {
+  /** The provider action's id, for example `coolify.application.redeploy`. */
+  actionId: string;
+  /**
+     * A key (1 to 128 printable ASCII characters) making a retry return the
+     * request already made. It is scoped to the caller; reusing it for a
+     * different request answers 409.
+     * @nullable
+     */
+  idempotencyKey?: string | null;
+  /**
+     * Structured parameters the action defines (an object of at most 8
+     * KiB). They must be secret-free: Fleet holds provider credentials and
+     * refuses a request whose parameters look like one.
+     */
+  parameters?: CreateActionRequestParameters;
+  /** Why, for the approver (at most 1000 characters). */
+  reason: string;
+  /**
+     * What the action acts on, in the provider's terms (at most 256
+     * characters).
+     */
+  target: string;
+}
+
+/**
+ * Which change.
+ */
+export type DnsChangeKind = typeof DnsChangeKind[keyof typeof DnsChangeKind];
+
+
+export const DnsChangeKind = {
+  upsert: 'upsert',
+  delete: 'delete',
+} as const;
+
+/**
+ * A record change to request.
+ */
+export interface CreateDnsChangeRequest {
+  /**
+     * The Cloudflare account (id or label), when several hold the zone.
+     * @nullable
+     */
+  account?: string | null;
+  /**
+     * Add another value beside the records already at the name (A, AAAA,
+     * TXT, MX). Without `replaces` or `add`, an upsert of a multi-value
+     * type is refused while the name already has records of that type.
+     */
+  add?: boolean;
+  /** The record value. For a delete, the value of the record to remove. */
+  content: string;
+  /**
+     * A key making a retry return the request already made.
+     * @nullable
+     */
+  idempotencyKey?: string | null;
+  /** The fully qualified record name. */
+  name: string;
+  /** `upsert` or `delete`. */
+  operation: DnsChangeKind;
+  /**
+     * The MX preference. Upsert only.
+     * @minimum 0
+     * @nullable
+     */
+  priority?: number | null;
+  /**
+     * Proxy through Cloudflare (A, AAAA, CNAME). Upsert only.
+     * @nullable
+     */
+  proxied?: boolean | null;
+  /** Why, for the approver (at most 1000 characters). */
+  reason: string;
+  /**
+     * The existing value an upsert replaces. A CNAME replaces its single
+     * value without it.
+     * @nullable
+     */
+  replaces?: string | null;
+  /**
+     * The TTL in seconds: 1 (automatic) or 60 to 86400. Upsert only.
+     * @minimum 0
+     * @nullable
+     */
+  ttl?: number | null;
+  /** The record type: A, AAAA, CNAME, TXT, or MX. */
+  type: string;
+}
+
+/**
  * The create-enrollment-token request.
  */
 export interface CreateEnrollmentTokenRequest {
@@ -743,6 +1509,65 @@ export interface CreateEnrollmentTokenRequest {
      * @nullable
      */
   ttlMillis?: number | null;
+}
+
+/**
+ * The provider kinds an account may belong to.
+ */
+export type ExternalProviderKindDto = typeof ExternalProviderKindDto[keyof typeof ExternalProviderKindDto];
+
+
+export const ExternalProviderKindDto = {
+  coolify: 'coolify',
+  cloudflare: 'cloudflare',
+} as const;
+
+/**
+ * The create-account request. The token is write-only.
+ */
+export interface CreateExternalAccountRequest {
+  /**
+     * The Cloudflare account id, for account-owned tokens.
+     * @nullable
+     */
+  accountId?: string | null;
+  /**
+     * The API base URL; Cloudflare defaults to its public API, Coolify
+     * needs the instance URL.
+     * @nullable
+     */
+  baseUrl?: string | null;
+  /** The provider kind. */
+  kind: ExternalProviderKindDto;
+  /** The operator-facing label, unique within the kind. */
+  label: string;
+  /**
+     * Free-form notes.
+     * @nullable
+     */
+  notes?: string | null;
+  /** The API token (write-only). */
+  token: string;
+}
+
+/**
+ * A pool creation request.
+ */
+export interface CreateLabPoolRequest {
+  /** The Proxmox account the members are reached through. */
+  accountId: string;
+  /**
+     * The snapshot every member carries and is reverted to (a PVE
+     * snapshot name, at most 40 characters).
+     */
+  baselineSnapshot: string;
+  /**
+     * The declared number of members, 1 to 16.
+     * @minimum 0
+     */
+  size: number;
+  /** A published template version whose cleanup strategy is `revert`. */
+  templateVersionId: string;
 }
 
 /**
@@ -868,6 +1693,46 @@ export interface CreateProxmoxAccountRequest {
 }
 
 /**
+ * A credential's metadata. The token and its hash are never part of it.
+ */
+export interface CredentialDto {
+  /** When it expires (epoch millis). */
+  expiresAt: number;
+  /** The credential's identity. */
+  id: string;
+  /** When it was issued (epoch millis). */
+  issuedAt: number;
+  /** The administrator that issued it. */
+  issuedBy: string;
+  /** An operator's free-text label. */
+  label: string;
+  /** The owner label: the ownership identity of the leases it creates. */
+  owner: string;
+  /**
+     * When it was revoked (epoch millis), when it was.
+     * @nullable
+     */
+  revokedAt?: number | null;
+  /** `active`, `expired`, or `revoked`. */
+  status: string;
+  /** Allowed Lab template ids. */
+  templates: string[];
+  /** Allowed Lab template version ids. */
+  versions: string[];
+}
+
+/**
+ * An optional note with a denial.
+ */
+export interface DenyActionRequest {
+  /**
+     * Why it was denied (at most 1000 characters).
+     * @nullable
+     */
+  note?: string | null;
+}
+
+/**
  * One recorded desired revision.
  */
 export interface DesiredHistoryEntryDto {
@@ -942,6 +1807,166 @@ export interface DesiredStatusDto {
 }
 
 /**
+ * The public operation resource. The application type is the transport
+ * truth; this type is the documented shape, kept one `From` away so the two
+ * cannot drift silently.
+ */
+export interface OperationDto {
+  /** Whether cancellation has been requested but not yet observed. */
+  cancelRequested: boolean;
+  /**
+     * The correlation identity joining this operation to the caller's flow.
+     * @nullable
+     */
+  correlationId?: string | null;
+  /** Creation time, in epoch milliseconds. */
+  createdAt: number;
+  /**
+     * The deadline, in epoch milliseconds, when one was set.
+     * @nullable
+     */
+  deadlineAt?: number | null;
+  /**
+     * The bounded public error, present when the operation failed.
+     * @nullable
+     */
+  errorJson?: string | null;
+  /** The operation's identity. */
+  id: string;
+  /**
+     * The caller's idempotency key, when one was supplied.
+     * @nullable
+     */
+  idempotencyKey?: string | null;
+  /** What kind of work this is. */
+  kind: string;
+  /**
+     * Progress numerator, when reported.
+     * @nullable
+     */
+  progressCurrent?: number | null;
+  /**
+     * Bounded progress message, when reported.
+     * @nullable
+     */
+  progressMessage?: string | null;
+  /**
+     * Progress denominator, when reported.
+     * @nullable
+     */
+  progressTotal?: number | null;
+  /**
+     * The bounded public result, present when the operation succeeded.
+     * @nullable
+     */
+  resultJson?: string | null;
+  /**
+     * The current state: `pending`, `running`, `cancelling`, `succeeded`,
+     * `failed`, `cancelled`, `timed_out`, or `blocked_manual_approval`.
+     */
+  state: string;
+  /** Last update, in epoch milliseconds. */
+  updatedAt: number;
+}
+
+/**
+ * A started detached command.
+ */
+export interface DetachedExecStartedDto {
+  /** The handle to poll: the id of the start operation. */
+  handle: string;
+  /** The lease. */
+  leaseId: string;
+  /**
+     * The `lab.exec_detach` operation that starts the command. It ends
+     * when the guest has started the command, not when the command ends.
+     */
+  operation: OperationDto;
+  /**
+     * The bound the guest enforces, in seconds.
+     * @minimum 0
+     */
+  timeoutSeconds: number;
+}
+
+/**
+ * The state of a detached command.
+ */
+export interface DetachedExecStatusDto {
+  /**
+     * The exit code, once `exited`. `124` means the command's time bound
+     * ended it.
+     * @nullable
+     */
+  exitCode?: number | null;
+  /**
+     * When the command finished (the guest's clock, epoch seconds).
+     * @nullable
+     */
+  finishedAt?: number | null;
+  /** The handle. */
+  handle: string;
+  /** The lease. */
+  leaseId: string;
+  /**
+     * The lease's state, when `lease_ended`.
+     * @nullable
+     */
+  leaseState?: string | null;
+  /**
+     * A stable reason for `starting` (`start_unconfirmed`: a start whose
+     * outcome is unknown, check status again), `lost` (`guest_rebooted`,
+     * `process_gone`, `never_started`, `guest_has_no_record`), `failed_to_start`
+     * (`start_failed`; see the operation), `lease_ended`, and
+     * `unreachable` (`guest_unreachable`, `no_lab_machine`).
+     * @nullable
+     */
+  reason?: string | null;
+  /**
+     * When the command started (the guest's clock, epoch seconds).
+     * @nullable
+     */
+  startedAt?: number | null;
+  /**
+     * `starting`, `running`, `exited`, `lost`, `failed_to_start`,
+     * `lease_ended`, or `unreachable`.
+     */
+  state: string;
+  /** The last of stderr, scrubbed and bounded likewise. */
+  stderr: string;
+  /**
+     * The size of stderr in the guest, in bytes.
+     * @minimum 0
+     */
+  stderrBytes: number;
+  /**
+     * The last of stdout, scrubbed of credentials and bounded like `lab
+     * exec` output.
+     */
+  stdout: string;
+  /**
+     * The size of stdout in the guest, in bytes.
+     * @minimum 0
+     */
+  stdoutBytes: number;
+  /**
+     * Whether the answer will never change: `exited`, `lost`,
+     * `failed_to_start`, and `lease_ended`. `unreachable` and `starting`
+     * are not terminal; poll again.
+     */
+  terminal: boolean;
+  /**
+     * The bound the guest enforces, in seconds.
+     * @minimum 0
+     */
+  timeoutSeconds: number;
+  /** Whether output was dropped from the front of stderr. */
+  truncatedStderr: boolean;
+  /** Whether output was dropped from the front of stdout. */
+  truncatedStdout: boolean;
+}
+
+/**
  * One discovered checkout, as the discovery operation reported it.
  */
 export interface DiscoveredCheckoutDto {
@@ -975,6 +2000,264 @@ export interface DiscoveredCheckoutDto {
 }
 
 /**
+ * Records of each type at one DNS name.
+ */
+export interface DnsRecordsDto {
+  /** A values. */
+  a: string[];
+  /** AAAA values. */
+  aaaa: string[];
+  /** CNAME values. */
+  cname: string[];
+  /** NS values (meaningful at the apex). */
+  ns: string[];
+}
+
+/**
+ * The status of the DNS half of an observation.
+ */
+export type DnsStatusDto = typeof DnsStatusDto[keyof typeof DnsStatusDto];
+
+
+export const DnsStatusDto = {
+  ok: 'ok',
+  not_found: 'not_found',
+  error: 'error',
+} as const;
+
+/**
+ * The DNS half of a domain observation.
+ */
+export interface DnsObservationDto {
+  /** Records at the apex. */
+  apex: DnsRecordsDto;
+  /**
+     * Why, for `not_found` and `error`.
+     * @nullable
+     */
+  detail?: string | null;
+  /** How the lookup ended. */
+  status: DnsStatusDto;
+  /** Records at `www.<apex>`. */
+  www: DnsRecordsDto;
+}
+
+/**
+ * The zones of every Cloudflare account.
+ */
+export interface DnsZonesDto {
+  /** One entry per account. */
+  accounts: AccountZonesDto[];
+}
+
+/**
+ * The status of the RDAP half of an observation.
+ */
+export type RdapStatusDto = typeof RdapStatusDto[keyof typeof RdapStatusDto];
+
+
+export const RdapStatusDto = {
+  ok: 'ok',
+  unavailable: 'unavailable',
+  not_found: 'not_found',
+  error: 'error',
+} as const;
+
+/**
+ * The RDAP half of a domain observation.
+ */
+export interface RdapObservationDto {
+  /**
+     * Why, for `unavailable`, `not_found`, and `error`.
+     * @nullable
+     */
+  detail?: string | null;
+  /**
+     * The expiry as a calendar date (`YYYY-MM-DD`). Some ccTLD registries
+     * do not publish one.
+     * @nullable
+     */
+  expires?: string | null;
+  /** The nameservers the registry lists. */
+  nameservers: string[];
+  /**
+     * The registrar's name as the registry reports it.
+     * @nullable
+     */
+  registrar?: string | null;
+  /**
+     * The RDAP server's base URL, when one was resolved.
+     * @nullable
+     */
+  server?: string | null;
+  /** How the lookup ended. */
+  status: RdapStatusDto;
+  /** The EPP status values. */
+  statuses: string[];
+}
+
+/**
+ * One public lookup result for a domain entry. Recorded in the
+ * controller's database; never written to Fleet Git.
+ */
+export interface DomainObservationDto {
+  /** The public DNS data. */
+  dns: DnsObservationDto;
+  /**
+     * Consecutive attempts with a failed half.
+     * @minimum 0
+     */
+  failures: number;
+  /**
+     * The latest attempt's failure, when a half failed.
+     * @nullable
+     */
+  lastError?: string | null;
+  /** When the latest lookup attempt finished (epoch milliseconds). */
+  observedAt: number;
+  /** The public registration data. */
+  rdap: RdapObservationDto;
+  /**
+     * When the data of a half that now fails to refresh was last good
+     * (epoch milliseconds); set only while old data is being kept.
+     * @nullable
+     */
+  staleSince?: number | null;
+}
+
+/**
+ * How a field's recorded value compares with the observation.
+ */
+export type FieldStateDto = typeof FieldStateDto[keyof typeof FieldStateDto];
+
+
+export const FieldStateDto = {
+  in_sync: 'in_sync',
+  changed: 'changed',
+  unknown: 'unknown',
+} as const;
+
+/**
+ * The difference for one entry field.
+ */
+export interface FieldDiffDto {
+  /** `registrar`, `expires`, `nameservers`, or `dnsHost`. */
+  field: string;
+  /** What the lookups saw. */
+  observed?: null | string | string[];
+  /** What the entry records. */
+  recorded?: null | string | string[];
+  /** The comparison. */
+  state: FieldStateDto;
+}
+
+/**
+ * One suggested field value.
+ */
+export interface SuggestedFieldDto {
+  /** The entry field. */
+  field: string;
+  /** The suggested value, in the field's type (a string, or a list of strings for `nameservers`). */
+  value: string | string[];
+}
+
+/**
+ * The derived warning rules.
+ */
+export type WarningCodeDto = typeof WarningCodeDto[keyof typeof WarningCodeDto];
+
+
+export const WarningCodeDto = {
+  registrar_mismatch: 'registrar_mismatch',
+  nameservers_mismatch: 'nameservers_mismatch',
+  dns_host_mismatch: 'dns_host_mismatch',
+  expiry_changed: 'expiry_changed',
+  expiring: 'expiring',
+  auto_renew_off_expiring: 'auto_renew_off_expiring',
+  stale_observation: 'stale_observation',
+  rdap_not_found: 'rdap_not_found',
+  lookup_failing: 'lookup_failing',
+} as const;
+
+/**
+ * How serious a warning is.
+ */
+export type SeverityDto = typeof SeverityDto[keyof typeof SeverityDto];
+
+
+export const SeverityDto = {
+  info: 'info',
+  warn: 'warn',
+  err: 'err',
+} as const;
+
+/**
+ * One derived warning.
+ */
+export interface DomainWarningDto {
+  /** Which rule fired. */
+  code: WarningCodeDto;
+  /** A sentence for people. */
+  message: string;
+  /** How serious it is. */
+  severity: SeverityDto;
+}
+
+/**
+ * A domain entry's latest observation compared with the entry.
+ */
+export interface DomainObservationViewDto {
+  /** Per-field comparison, in a stable order. */
+  diffs: FieldDiffDto[];
+  /** The entry's key (`domain/<key>`). */
+  key: string;
+  observation?: null | DomainObservationDto;
+  /**
+     * The field changes that would bring the entry in line with the
+     * observation. A person or agent applies them with
+     * `fleetctl registry set` and publishes through Git; Fleet never
+     * writes them.
+     */
+  suggestion: SuggestedFieldDto[];
+  /**
+     * Derived warnings, most serious first. These feed the Overview's
+     * needs-attention queue.
+     */
+  warnings: DomainWarningDto[];
+}
+
+/**
+ * Where a list response sits in its result set.
+ *
+ * Pagination is cursor-based, never offset-based: an offset silently skips or
+ * repeats rows when the underlying set changes between requests. The cursor is
+ * opaque, and a client that parses one is relying on an implementation detail
+ * that is free to change.
+ */
+export interface PageInfo {
+  /**
+     * The number of items this page was limited to.
+     * @minimum 0
+     */
+  limit: number;
+  /**
+     * Cursor for the next page, or `null` on the last page.
+     * @nullable
+     */
+  nextCursor?: string | null;
+}
+
+/**
+ * A page of domain observation views.
+ */
+export interface DomainObservationPage {
+  /** The views, ordered by key. */
+  items: DomainObservationViewDto[];
+  /** Where this page sits in the result set. */
+  page: PageInfo;
+}
+
+/**
  * The proposed endpoint of a draft. The user arrives redacted unless the
  * caller may read sensitive endpoint detail.
  */
@@ -988,6 +2271,23 @@ export interface DraftEndpointDto {
   port: number;
   /** The remote login user, `***` when redacted. */
   user: string;
+}
+
+/**
+ * A drain request.
+ */
+export interface DrainLabPoolRequest {
+  /**
+     * Drains every member; required instead of `vmids`, so a drain of the
+     * whole pool is never implied by an empty body.
+     */
+  all?: boolean;
+  /**
+     * The VMIDs to drain. Name them, or set `all` instead.
+     * @nullable
+     * @items.minimum 0
+     */
+  vmids?: number[] | null;
 }
 
 /**
@@ -1067,6 +2367,55 @@ export interface EnrollmentTokenListDto {
 }
 
 /**
+ * A command to start detached on a ready lease's guest.
+ */
+export interface ExecDetachedRequest {
+  /**
+     * The shell script to run (at most 64 KiB). It is never audited and
+     * the detached-exec record keeps only its SHA-256 and size. Like `lab
+     * exec`, the queued operation's payload holds it, and the guest keeps it
+     * in `cmd.sh`.
+     */
+  script: string;
+  /**
+     * `service` (the default) or `interactive`: the template's interactive
+     * test user's desktop session (Windows guests only).
+     * @nullable
+     */
+  session?: string | null;
+  /**
+     * The bound in seconds, enforced in the guest. It defaults to, and can
+     * never exceed, what is left of the lease's TTL: a detached command
+     * cannot outlive its lease or extend it.
+     * @minimum 0
+     * @nullable
+     */
+  timeoutSeconds?: number | null;
+}
+
+/**
+ * A command to run on a ready lease's guest.
+ */
+export interface ExecLeaseRequest {
+  /** The shell script to run (at most 64 KiB). It is never audited. */
+  script: string;
+  /**
+     * `service` (the default) runs in the SSH login's session;
+     * `interactive` runs in the template's interactive test user's
+     * desktop session (Windows guests whose template declares one).
+     * @nullable
+     */
+  session?: string | null;
+  /**
+     * The deadline, in seconds (1–900; default 60; at most 810 with
+     * `session` = `interactive`).
+     * @minimum 0
+     * @nullable
+     */
+  timeoutSeconds?: number | null;
+}
+
+/**
  * The requested ready-TTL extension.
  */
 export interface ExtendLeaseRequest {
@@ -1078,11 +2427,90 @@ export interface ExtendLeaseRequest {
 }
 
 /**
+ * The classified outcome of a probe.
+ */
+export type ProbeStatusDto = typeof ProbeStatusDto[keyof typeof ProbeStatusDto];
+
+
+export const ProbeStatusDto = {
+  ok: 'ok',
+  unreachable: 'unreachable',
+  unauthorized: 'unauthorized',
+  insufficient_permission: 'insufficient_permission',
+} as const;
+
+/**
+ * The latest probe of an account.
+ */
+export interface ExternalProbeDto {
+  /** When the probe ran (epoch millis). */
+  checkedAt: number;
+  /** A short, redacted explanation. */
+  detail: string;
+  /** Permissions the token was seen to hold. */
+  granted: string[];
+  /** Permissions Fleet needs that the token was seen to lack. */
+  missing: string[];
+  /** The classification. */
+  status: ProbeStatusDto;
+  /**
+     * Permissions the probe did not verify: it never calls a route that
+     * could change state, so their state is unknown.
+     */
+  unverified: string[];
+}
+
+/**
+ * One external provider account. The token is never here.
+ */
+export interface ExternalAccountDto {
+  /**
+     * The provider-side account id (Cloudflare account-owned tokens).
+     * @nullable
+     */
+  accountId?: string | null;
+  /** The provider's API base URL. */
+  baseUrl: string;
+  /** When the account was created (epoch millis). */
+  createdAt: number;
+  /** The account's identity. */
+  id: string;
+  /** The provider kind. */
+  kind: ExternalProviderKindDto;
+  /** The operator-facing label, unique within the kind. */
+  label: string;
+  lastProbe?: null | ExternalProbeDto;
+  /** Free-form operator notes. */
+  notes: string;
+  /**
+     * A policy the stored record breaks: `https_required` for an http base
+     * URL that is not a loopback address. Such an account is never probed
+     * or discovered until its base URL is edited to https.
+     * @nullable
+     */
+  policyViolation?: string | null;
+  /** When the account last changed (epoch millis). */
+  updatedAt: number;
+}
+
+/**
  * Fetches one commit of the configured source as a candidate.
  */
 export interface FetchDesiredRequest {
   /** The full 40-character lowercase hexadecimal commit SHA. */
   commitSha: string;
+}
+
+/**
+ * A fill request.
+ */
+export interface FillLabPoolRequest {
+  /**
+     * The VMIDs of existing QEMU guests that carry the baseline snapshot.
+     * Empty re-queues the verification of members still filling.
+     * @items.minimum 0
+     */
+  vmids: number[];
 }
 
 /**
@@ -1112,6 +2540,90 @@ export type FrogenvAuthDto = {
 };
 
 /**
+ * A concrete output template identity.
+ */
+export interface ImageBuildTemplateDto {
+  /** Template name. */
+  name: string;
+  /** Template node. */
+  node: string;
+  /**
+     * Template VMID.
+     * @minimum 0
+     */
+  vmid: number;
+}
+
+/**
+ * Safe build provenance and outcome; credentials and work paths are excluded.
+ */
+export interface ImageBuildDto {
+  /**
+     * Resolved target account; absent when target binding failed.
+     * @nullable
+     */
+  accountId?: string | null;
+  /** Frozen provisioning asset digests. */
+  assetDigests: string[];
+  /** Frozen recipe digest. */
+  contentDigest: string;
+  /**
+     * End time in epoch milliseconds.
+     * @nullable
+     */
+  endedAt?: number | null;
+  /** Build identity. */
+  id: string;
+  /** Frozen target node. */
+  node: string;
+  /** Durable operation identity. */
+  operationId: string;
+  /** Running, succeeded, failed or cancelled. */
+  outcome: string;
+  /**
+     * Probed Packer version, when available.
+     * @nullable
+     */
+  packerVersion?: string | null;
+  /**
+     * Probed Proxmox plugin version, when available.
+     * @nullable
+     */
+  proxmoxPluginVersion?: string | null;
+  /**
+     * Safe terminal reason code.
+     * @nullable
+     */
+  reason?: string | null;
+  /** Recipe identity. */
+  recipeId: string;
+  /** Start time in epoch milliseconds. */
+  startedAt: number;
+  /** Frozen target storage. */
+  storagePool: string;
+  template?: null | ImageBuildTemplateDto;
+  /** Immutable version identity. */
+  versionId: string;
+}
+
+/**
+ * One image build secret record: its name only.
+ */
+export interface ImageSecretDto {
+  /**
+     * The record name (`images/<name>`): what a build's secret variable
+     * references.
+     */
+  reference: string;
+  /**
+     * Whether the write replaced an existing record's value. Absent when
+     * listing.
+     * @nullable
+     */
+  replaced?: boolean | null;
+}
+
+/**
  * The import request: the SSH login user and port for the draft.
  */
 export interface ImportTailnetDeviceRequest {
@@ -1126,9 +2638,188 @@ export interface ImportTailnetDeviceRequest {
 }
 
 /**
+ * The state of one input of the read model.
+ */
+export interface InputStateDto {
+  /**
+     * A fixed, caller-safe sentence when the input was unavailable; never
+     * a backend error.
+     * @nullable
+     */
+  detail?: string | null;
+  /**
+     * `available`, `not_configured`, `denied`, or `unavailable`. A denied
+     * or unavailable input is left out of the answer.
+     */
+  state: string;
+}
+
+/**
+ * What to issue.
+ */
+export interface IssueCredentialRequest {
+  /** A free-text label. */
+  label?: string;
+  /** The owner label (`a-z`, `0-9`, `.`, `_`, `-`; at most 63). */
+  owner: string;
+  /** Allowed Lab template ids. */
+  templates?: string[];
+  /**
+     * The lifetime in seconds (60 to 86400).
+     * @minimum 0
+     */
+  ttlSeconds: number;
+  /** Allowed Lab template version ids. */
+  versions?: string[];
+}
+
+/**
+ * A freshly issued credential: its metadata and the token, shown once.
+ */
+export type IssuedCredentialDto = CredentialDto & {
+  /**
+     * The bearer token. It is returned only by this response and cannot be
+     * read again; present it as `Authorization: Bearer <token>` (or set
+     * `FLEET_TOKEN` for `fleetctl`).
+     */
+  token: string;
+};
+
+/**
+ * One stored Lab artifact's metadata.
+ */
+export interface LabArtifactDto {
+  /** When it was stored (epoch milliseconds). */
+  createdAt: number;
+  /** The artifact's identity. */
+  id: string;
+  /** `exec-log` or `file`. */
+  kind: string;
+  /** The lease it came from. */
+  leaseId: string;
+  /** Where the bytes live, relative to the controller's artifact store. */
+  location: string;
+  /** `exec-<operation>.log` for an exec log; the guest path for a file. */
+  name: string;
+  /**
+     * The `lab.exec` or `lab.collect` operation that produced it.
+     * @nullable
+     */
+  operationId?: string | null;
+  /** The lease's owner. */
+  owner: string;
+  /**
+     * The project that lease served, when it recorded one.
+     * @nullable
+     */
+  projectId?: string | null;
+  /** When the retention sweep deletes it (epoch milliseconds). */
+  retainUntil: number;
+  /** The lowercase hex sha256 of the bytes. */
+  sha256: string;
+  /**
+     * The size in bytes.
+     * @minimum 0
+     */
+  sizeBytes: number;
+}
+
+/**
+ * A virtual audio device (Proxmox `audio0`).
+ */
+export interface LabAudioDto {
+  /** The device model: `ich9-intel-hda`, `intel-hda`, or `AC97`. */
+  device: string;
+  /** The host backend: `none` (no host audio). */
+  driver: string;
+}
+
+/**
+ * What a drain did.
+ */
+export interface LabPoolDrainDto {
+  /**
+     * The VMIDs that leave once their lease's cleanup or their fill ends.
+     * @items.minimum 0
+     */
+  deferred: number[];
+  /**
+     * The VMIDs that left the pool. The guests themselves stay.
+     * @items.minimum 0
+     */
+  removed: number[];
+}
+
+/**
+ * One pool member.
+ */
+export interface LabPoolMemberDto {
+  /**
+     * Why it is quarantined, when it is.
+     * @nullable
+     */
+  detail?: string | null;
+  /** Whether it leaves the pool once its lease's cleanup or its fill ends. */
+  draining: boolean;
+  /** The member's identity; a refill after a drain gets a new one. */
+  id: string;
+  /**
+     * The lease it is bound to, when any. A quarantined member can still
+     * be bound: its lease's cleanup still owes the revert.
+     * @nullable
+     */
+  leaseId?: string | null;
+  /**
+     * The guest's name when its fill verified it.
+     * @nullable
+     */
+  name?: string | null;
+  /**
+     * The node the guest was last seen on, once verified.
+     * @nullable
+     */
+  node?: string | null;
+  /** `filling`, `available`, `leased`, or `quarantined`. */
+  state: string;
+  /** When it last changed (epoch millis). */
+  updatedAt: number;
+  /**
+     * The guest's VMID.
+     * @minimum 0
+     */
+  vmid: number;
+}
+
+/**
+ * One pool and its members.
+ */
+export interface LabPoolDto {
+  /** The Proxmox account the members are reached through. */
+  accountId: string;
+  /** The snapshot every member is reverted to. */
+  baselineSnapshot: string;
+  /** When the pool was created (epoch millis). */
+  createdAt: number;
+  /** Who created the pool. */
+  createdBy: string;
+  /** The pool's identity. */
+  id: string;
+  /** The members, by VMID. */
+  members: LabPoolMemberDto[];
+  /**
+     * The declared number of members.
+     * @minimum 0
+     */
+  size: number;
+  /** The published template version leases take members for. */
+  templateVersionId: string;
+}
+
+/**
  * The frozen template content.
  */
 export interface LabTemplateContentDto {
+  audio?: null | LabAudioDto;
   /**
      * The bootstrap profile reference, when pinned.
      * @nullable
@@ -1148,8 +2839,16 @@ export interface LabTemplateContentDto {
      * @minimum 0
      */
   diskGib: number;
+  /** The guest's operating system: `linux` or `windows`. */
+  guestOs: string;
   /** The pinned image version id. */
   imageVersionId: string;
+  /**
+     * The local account whose desktop session `--session interactive`
+     * runs in (a name only, never a password); Windows guests only.
+     * @nullable
+     */
+  interactiveUser?: string | null;
   /**
      * The memory in MiB.
      * @minimum 0
@@ -1170,6 +2869,20 @@ export interface LabTemplateContentDto {
   /** The readiness probe. */
   readinessProbe: string;
   /**
+     * Public OpenSSH SHA256 fingerprint for pinned trust.
+     * @nullable
+     */
+  sshFingerprint?: string | null;
+  /**
+     * The guest SSH listener port.
+     * @minimum 0
+     */
+  sshPort: number;
+  /** Host-key trust: tofu or pinned. */
+  sshTrustMode: string;
+  /** The SSH account preconfigured in the image. */
+  sshUser: string;
+  /**
      * The default TTL in seconds.
      * @minimum 0
      */
@@ -1180,6 +2893,7 @@ export interface LabTemplateContentDto {
  * One template draft.
  */
 export interface LabTemplateDto {
+  audio?: null | LabAudioDto;
   /**
      * The bootstrap profile reference, when pinned.
      * @nullable
@@ -1201,10 +2915,18 @@ export interface LabTemplateDto {
      * @minimum 0
      */
   diskGib: number;
+  /** The guest's operating system: `linux` or `windows`. */
+  guestOs: string;
   /** The draft's identity. */
   id: string;
   /** The pinned image version id. */
   imageVersionId: string;
+  /**
+     * The local account whose desktop session `--session interactive`
+     * runs in (a name only, never a password); Windows guests only.
+     * @nullable
+     */
+  interactiveUser?: string | null;
   /**
      * The memory in MiB.
      * @minimum 0
@@ -1229,6 +2951,20 @@ export interface LabTemplateDto {
   readinessDeadlineSeconds: number;
   /** The readiness probe. */
   readinessProbe: string;
+  /**
+     * Public OpenSSH SHA256 fingerprint for pinned trust.
+     * @nullable
+     */
+  sshFingerprint?: string | null;
+  /**
+     * The guest SSH listener port.
+     * @minimum 0
+     */
+  sshPort: number;
+  /** Host-key trust: tofu or pinned. */
+  sshTrustMode: string;
+  /** The SSH account preconfigured in the image. */
+  sshUser: string;
   /**
      * The default TTL in seconds, beginning at ready.
      * @minimum 0
@@ -1264,6 +3000,17 @@ export interface LabTemplateVersionDto {
 export interface LeaseDto {
   /** The cleanup strategy. */
   cleanup: string;
+  /**
+     * Failed cleanup attempts so far (FM-713).
+     * @minimum 0
+     */
+  cleanupAttempts: number;
+  /**
+     * When the next cleanup attempt is due (epoch millis), while a
+     * releasing lease backs off after a failed attempt.
+     * @nullable
+     */
+  cleanupNextAt?: number | null;
   /** When the lease was created. */
   createdAt: number;
   /**
@@ -1299,6 +3046,79 @@ export interface LeaseDto {
      */
   ttlSeconds: number;
 }
+
+/**
+ * A lease's capacity reservation: what it holds on a node.
+ */
+export interface LeaseReservationDto {
+  /** The Proxmox account the guest is cloned through. */
+  accountId: string;
+  /**
+     * Reserved vCPU cores.
+     * @minimum 0
+     */
+  cores: number;
+  /**
+     * Reserved disk, in bytes.
+     * @minimum 0
+     */
+  diskBytes: number;
+  /**
+     * Reserved memory, in bytes.
+     * @minimum 0
+     */
+  memoryBytes: number;
+  /** The PVE node the capacity is reserved on. */
+  node: string;
+  /** The reservation record's state: `held` until it is released. */
+  state: string;
+  /** The storage pool the disk is allocated on. */
+  storagePool: string;
+}
+
+/**
+ * One lease with its guest's connection details (FM-720).
+ */
+export type LeaseDetailDto = LeaseDto & ({
+  /**
+     * The guest's IPv4 address, once its agent reported one.
+     * @nullable
+     */
+  address?: string | null;
+  collectionFailure?: null | CollectionFailureDto;
+  /**
+     * That machine's SSH endpoint.
+     * @nullable
+     */
+  endpointId?: string | null;
+  /**
+     * The saga step that failed, when provisioning failed.
+     * @nullable
+     */
+  failedStep?: string | null;
+  /**
+     * The Lab-owned Fleet machine the guest was registered as.
+     * @nullable
+     */
+  machineId?: string | null;
+  /**
+     * The PVE node the guest runs on.
+     * @nullable
+     */
+  node?: string | null;
+  /**
+     * The guest's provision state, once provisioning started.
+     * @nullable
+     */
+  provisionState?: string | null;
+  reservation?: null | LeaseReservationDto;
+  /**
+     * The guest's VMID.
+     * @minimum 0
+     * @nullable
+     */
+  vmid?: number | null;
+});
 
 /**
  * The guest identity the operator explicitly confirms.
@@ -1632,87 +3452,87 @@ export interface OperationAccepted {
 }
 
 /**
- * The public operation resource. The application type is the transport
- * truth; this type is the documented shape, kept one `From` away so the two
- * cannot drift silently.
+ * The structured, secret-free parameters.
  */
-export interface OperationDto {
-  /** Whether cancellation has been requested but not yet observed. */
-  cancelRequested: boolean;
-  /**
-     * The correlation identity joining this operation to the caller's flow.
-     * @nullable
-     */
-  correlationId?: string | null;
-  /** Creation time, in epoch milliseconds. */
-  createdAt: number;
-  /**
-     * The deadline, in epoch milliseconds, when one was set.
-     * @nullable
-     */
-  deadlineAt?: number | null;
-  /**
-     * The bounded public error, present when the operation failed.
-     * @nullable
-     */
-  errorJson?: string | null;
-  /** The operation's identity. */
-  id: string;
-  /**
-     * The caller's idempotency key, when one was supplied.
-     * @nullable
-     */
-  idempotencyKey?: string | null;
-  /** What kind of work this is. */
-  kind: string;
-  /**
-     * Progress numerator, when reported.
-     * @nullable
-     */
-  progressCurrent?: number | null;
-  /**
-     * Bounded progress message, when reported.
-     * @nullable
-     */
-  progressMessage?: string | null;
-  /**
-     * Progress denominator, when reported.
-     * @nullable
-     */
-  progressTotal?: number | null;
-  /**
-     * The bounded public result, present when the operation succeeded.
-     * @nullable
-     */
-  resultJson?: string | null;
-  /**
-     * The current state: `pending`, `running`, `cancelling`, `succeeded`,
-     * `failed`, `cancelled`, `timed_out`, or `blocked_manual_approval`.
-     */
-  state: string;
-  /** Last update, in epoch milliseconds. */
-  updatedAt: number;
-}
+export type PageActionRequestDtoItemsItemParameters = { [key: string]: unknown };
 
 /**
- * Where a list response sits in its result set.
- *
- * Pagination is cursor-based, never offset-based: an offset silently skips or
- * repeats rows when the underlying set changes between requests. The cursor is
- * opaque, and a client that parses one is relying on an implementation detail
- * that is free to change.
+ * An action request.
  */
-export interface PageInfo {
+export type PageActionRequestDtoItemsItem = {
+  /** The provider action's id. */
+  actionId: string;
+  /** When it was made (epoch milliseconds). */
+  createdAt: number;
   /**
-     * The number of items this page was limited to.
-     * @minimum 0
-     */
-  limit: number;
-  /**
-     * Cursor for the next page, or `null` on the last page.
+     * When it was decided (epoch milliseconds).
      * @nullable
      */
-  nextCursor?: string | null;
+  decidedAt?: number | null;
+  /**
+     * Who approved or denied it: a principal, `policy:auto`, or
+     * `policy:deny`.
+     * @nullable
+     */
+  decidedBy?: string | null;
+  /**
+     * A denier's note.
+     * @nullable
+     */
+  decisionNote?: string | null;
+  /** When an undecided request expires (epoch milliseconds). */
+  expiresAt: number;
+  /**
+     * Why it failed.
+     * @nullable
+     */
+  failure?: string | null;
+  /** The request's identity. */
+  id: string;
+  /**
+     * The durable operation that executes it, once created. Poll it at
+     * `/operations/{id}`.
+     * @nullable
+     */
+  operationId?: string | null;
+  /** Where the request came from (`api`). */
+  origin: string;
+  /** The structured, secret-free parameters. */
+  parameters: PageActionRequestDtoItemsItemParameters;
+  /** Why the requester wants it. */
+  reason: string;
+  /** The principal that asked. */
+  requester: string;
+  /**
+     * The effective risk class when the request was made: `auto` (ran
+     * without a decision), `approve` (waits for a person), or `deny`
+     * (refused by policy).
+     */
+  riskClass: string;
+  /**
+     * `pending`, `approved`, `denied`, `expired`, `executing`,
+     * `succeeded`, or `failed`.
+     */
+  state: string;
+  /** What the action acts on. */
+  target: string;
+  /** Whether the state will never change. */
+  terminal: boolean;
+  /** The last change (epoch milliseconds). */
+  updatedAt: number;
+};
+
+/**
+ * A page of resources.
+ *
+ * The concrete schema for a list endpoint appears when that endpoint does;
+ * [`PageInfo`] is the part of the shape that is fixed for every one of them.
+ */
+export interface PageActionRequestDto {
+  /** The items on this page, in the endpoint's documented order. */
+  items: PageActionRequestDtoItemsItem[];
+  /** Where this page sits in the result set. */
+  page: PageInfo;
 }
 
 /**
@@ -1824,6 +3644,45 @@ export type PageAuditEventDtoItemsItem = {
 export interface PageAuditEventDto {
   /** The items on this page, in the endpoint's documented order. */
   items: PageAuditEventDtoItemsItem[];
+  /** Where this page sits in the result set. */
+  page: PageInfo;
+}
+
+/**
+ * One build address that is out of allocation (#402).
+ */
+export type PageBuildAddressDtoItemsItem = {
+  /** The IPv4 address. */
+  address: string;
+  /**
+     * The operation that holds the address, or held it when it was
+     * quarantined.
+     */
+  operationId: string;
+  /** When the address was taken or quarantined, Unix milliseconds. */
+  since: number;
+  /**
+     * `held` by a running build, or `quarantined` after a build that did
+     * not end verifiably.
+     */
+  status: string;
+  /**
+     * When a quarantine ends on its own, Unix milliseconds; absent while
+     * held.
+     * @nullable
+     */
+  until?: number | null;
+};
+
+/**
+ * A page of resources.
+ *
+ * The concrete schema for a list endpoint appears when that endpoint does;
+ * [`PageInfo`] is the part of the shape that is fixed for every one of them.
+ */
+export interface PageBuildAddressDto {
+  /** The items on this page, in the endpoint's documented order. */
+  items: PageBuildAddressDtoItemsItem[];
   /** Where this page sits in the result set. */
   page: PageInfo;
 }
@@ -1949,6 +3808,48 @@ export interface PageCorrelatedDeviceDto {
 }
 
 /**
+ * A credential's metadata. The token and its hash are never part of it.
+ */
+export type PageCredentialDtoItemsItem = {
+  /** When it expires (epoch millis). */
+  expiresAt: number;
+  /** The credential's identity. */
+  id: string;
+  /** When it was issued (epoch millis). */
+  issuedAt: number;
+  /** The administrator that issued it. */
+  issuedBy: string;
+  /** An operator's free-text label. */
+  label: string;
+  /** The owner label: the ownership identity of the leases it creates. */
+  owner: string;
+  /**
+     * When it was revoked (epoch millis), when it was.
+     * @nullable
+     */
+  revokedAt?: number | null;
+  /** `active`, `expired`, or `revoked`. */
+  status: string;
+  /** Allowed Lab template ids. */
+  templates: string[];
+  /** Allowed Lab template version ids. */
+  versions: string[];
+};
+
+/**
+ * A page of resources.
+ *
+ * The concrete schema for a list endpoint appears when that endpoint does;
+ * [`PageInfo`] is the part of the shape that is fixed for every one of them.
+ */
+export interface PageCredentialDto {
+  /** The items on this page, in the endpoint's documented order. */
+  items: PageCredentialDtoItemsItem[];
+  /** Where this page sits in the result set. */
+  page: PageInfo;
+}
+
+/**
  * One recorded desired revision.
  */
 export type PageDesiredHistoryEntryDtoItemsItem = {
@@ -2001,9 +3902,241 @@ export interface PageDesiredResourceDto {
 }
 
 /**
+ * One external provider account. The token is never here.
+ */
+export type PageExternalAccountDtoItemsItem = {
+  /**
+     * The provider-side account id (Cloudflare account-owned tokens).
+     * @nullable
+     */
+  accountId?: string | null;
+  /** The provider's API base URL. */
+  baseUrl: string;
+  /** When the account was created (epoch millis). */
+  createdAt: number;
+  /** The account's identity. */
+  id: string;
+  /** The provider kind. */
+  kind: ExternalProviderKindDto;
+  /** The operator-facing label, unique within the kind. */
+  label: string;
+  lastProbe?: null | ExternalProbeDto;
+  /** Free-form operator notes. */
+  notes: string;
+  /**
+     * A policy the stored record breaks: `https_required` for an http base
+     * URL that is not a loopback address. Such an account is never probed
+     * or discovered until its base URL is edited to https.
+     * @nullable
+     */
+  policyViolation?: string | null;
+  /** When the account last changed (epoch millis). */
+  updatedAt: number;
+};
+
+/**
+ * A page of resources.
+ *
+ * The concrete schema for a list endpoint appears when that endpoint does;
+ * [`PageInfo`] is the part of the shape that is fixed for every one of them.
+ */
+export interface PageExternalAccountDto {
+  /** The items on this page, in the endpoint's documented order. */
+  items: PageExternalAccountDtoItemsItem[];
+  /** Where this page sits in the result set. */
+  page: PageInfo;
+}
+
+/**
+ * Safe build provenance and outcome; credentials and work paths are excluded.
+ */
+export type PageImageBuildDtoItemsItem = {
+  /**
+     * Resolved target account; absent when target binding failed.
+     * @nullable
+     */
+  accountId?: string | null;
+  /** Frozen provisioning asset digests. */
+  assetDigests: string[];
+  /** Frozen recipe digest. */
+  contentDigest: string;
+  /**
+     * End time in epoch milliseconds.
+     * @nullable
+     */
+  endedAt?: number | null;
+  /** Build identity. */
+  id: string;
+  /** Frozen target node. */
+  node: string;
+  /** Durable operation identity. */
+  operationId: string;
+  /** Running, succeeded, failed or cancelled. */
+  outcome: string;
+  /**
+     * Probed Packer version, when available.
+     * @nullable
+     */
+  packerVersion?: string | null;
+  /**
+     * Probed Proxmox plugin version, when available.
+     * @nullable
+     */
+  proxmoxPluginVersion?: string | null;
+  /**
+     * Safe terminal reason code.
+     * @nullable
+     */
+  reason?: string | null;
+  /** Recipe identity. */
+  recipeId: string;
+  /** Start time in epoch milliseconds. */
+  startedAt: number;
+  /** Frozen target storage. */
+  storagePool: string;
+  template?: null | ImageBuildTemplateDto;
+  /** Immutable version identity. */
+  versionId: string;
+};
+
+/**
+ * A page of resources.
+ *
+ * The concrete schema for a list endpoint appears when that endpoint does;
+ * [`PageInfo`] is the part of the shape that is fixed for every one of them.
+ */
+export interface PageImageBuildDto {
+  /** The items on this page, in the endpoint's documented order. */
+  items: PageImageBuildDtoItemsItem[];
+  /** Where this page sits in the result set. */
+  page: PageInfo;
+}
+
+/**
+ * One image build secret record: its name only.
+ */
+export type PageImageSecretDtoItemsItem = {
+  /**
+     * The record name (`images/<name>`): what a build's secret variable
+     * references.
+     */
+  reference: string;
+  /**
+     * Whether the write replaced an existing record's value. Absent when
+     * listing.
+     * @nullable
+     */
+  replaced?: boolean | null;
+};
+
+/**
+ * A page of resources.
+ *
+ * The concrete schema for a list endpoint appears when that endpoint does;
+ * [`PageInfo`] is the part of the shape that is fixed for every one of them.
+ */
+export interface PageImageSecretDto {
+  /** The items on this page, in the endpoint's documented order. */
+  items: PageImageSecretDtoItemsItem[];
+  /** Where this page sits in the result set. */
+  page: PageInfo;
+}
+
+/**
+ * One stored Lab artifact's metadata.
+ */
+export type PageLabArtifactDtoItemsItem = {
+  /** When it was stored (epoch milliseconds). */
+  createdAt: number;
+  /** The artifact's identity. */
+  id: string;
+  /** `exec-log` or `file`. */
+  kind: string;
+  /** The lease it came from. */
+  leaseId: string;
+  /** Where the bytes live, relative to the controller's artifact store. */
+  location: string;
+  /** `exec-<operation>.log` for an exec log; the guest path for a file. */
+  name: string;
+  /**
+     * The `lab.exec` or `lab.collect` operation that produced it.
+     * @nullable
+     */
+  operationId?: string | null;
+  /** The lease's owner. */
+  owner: string;
+  /**
+     * The project that lease served, when it recorded one.
+     * @nullable
+     */
+  projectId?: string | null;
+  /** When the retention sweep deletes it (epoch milliseconds). */
+  retainUntil: number;
+  /** The lowercase hex sha256 of the bytes. */
+  sha256: string;
+  /**
+     * The size in bytes.
+     * @minimum 0
+     */
+  sizeBytes: number;
+};
+
+/**
+ * A page of resources.
+ *
+ * The concrete schema for a list endpoint appears when that endpoint does;
+ * [`PageInfo`] is the part of the shape that is fixed for every one of them.
+ */
+export interface PageLabArtifactDto {
+  /** The items on this page, in the endpoint's documented order. */
+  items: PageLabArtifactDtoItemsItem[];
+  /** Where this page sits in the result set. */
+  page: PageInfo;
+}
+
+/**
+ * One pool and its members.
+ */
+export type PageLabPoolDtoItemsItem = {
+  /** The Proxmox account the members are reached through. */
+  accountId: string;
+  /** The snapshot every member is reverted to. */
+  baselineSnapshot: string;
+  /** When the pool was created (epoch millis). */
+  createdAt: number;
+  /** Who created the pool. */
+  createdBy: string;
+  /** The pool's identity. */
+  id: string;
+  /** The members, by VMID. */
+  members: LabPoolMemberDto[];
+  /**
+     * The declared number of members.
+     * @minimum 0
+     */
+  size: number;
+  /** The published template version leases take members for. */
+  templateVersionId: string;
+};
+
+/**
+ * A page of resources.
+ *
+ * The concrete schema for a list endpoint appears when that endpoint does;
+ * [`PageInfo`] is the part of the shape that is fixed for every one of them.
+ */
+export interface PageLabPoolDto {
+  /** The items on this page, in the endpoint's documented order. */
+  items: PageLabPoolDtoItemsItem[];
+  /** Where this page sits in the result set. */
+  page: PageInfo;
+}
+
+/**
  * One template draft.
  */
 export type PageLabTemplateDtoItemsItem = {
+  audio?: null | LabAudioDto;
   /**
      * The bootstrap profile reference, when pinned.
      * @nullable
@@ -2025,10 +4158,18 @@ export type PageLabTemplateDtoItemsItem = {
      * @minimum 0
      */
   diskGib: number;
+  /** The guest's operating system: `linux` or `windows`. */
+  guestOs: string;
   /** The draft's identity. */
   id: string;
   /** The pinned image version id. */
   imageVersionId: string;
+  /**
+     * The local account whose desktop session `--session interactive`
+     * runs in (a name only, never a password); Windows guests only.
+     * @nullable
+     */
+  interactiveUser?: string | null;
   /**
      * The memory in MiB.
      * @minimum 0
@@ -2053,6 +4194,20 @@ export type PageLabTemplateDtoItemsItem = {
   readinessDeadlineSeconds: number;
   /** The readiness probe. */
   readinessProbe: string;
+  /**
+     * Public OpenSSH SHA256 fingerprint for pinned trust.
+     * @nullable
+     */
+  sshFingerprint?: string | null;
+  /**
+     * The guest SSH listener port.
+     * @minimum 0
+     */
+  sshPort: number;
+  /** Host-key trust: tofu or pinned. */
+  sshTrustMode: string;
+  /** The SSH account preconfigured in the image. */
+  sshUser: string;
   /**
      * The default TTL in seconds, beginning at ready.
      * @minimum 0
@@ -2081,6 +4236,17 @@ export interface PageLabTemplateDto {
 export type PageLeaseDtoItemsItem = {
   /** The cleanup strategy. */
   cleanup: string;
+  /**
+     * Failed cleanup attempts so far (FM-713).
+     * @minimum 0
+     */
+  cleanupAttempts: number;
+  /**
+     * When the next cleanup attempt is due (epoch millis), while a
+     * releasing lease backs off after a failed attempt.
+     * @nullable
+     */
+  cleanupNextAt?: number | null;
   /** When the lease was created. */
   createdAt: number;
   /**
@@ -2349,6 +4515,19 @@ export interface PageOperationDto {
 }
 
 /**
+ * How a project's remote is fetched.
+ */
+export interface RemoteFetchDto {
+  /** `https`, `http`, `ssh`, or `scp`. */
+  scheme: string;
+  /**
+     * The ssh login user (`git` in `git@host:path`); null for http(s).
+     * @nullable
+     */
+  user?: string | null;
+}
+
+/**
  * A project as the detail view displays it.
  */
 export type PageProjectDtoItemsItem = {
@@ -2358,6 +4537,11 @@ export type PageProjectDtoItemsItem = {
   createdAt: number;
   /** Operator notes. */
   description: string;
+  /**
+     * How the remote is fetched: the scheme and, for ssh, the login user.
+     * Never a credential.
+     */
+  fetch: RemoteFetchDto;
   /** The project's identity. */
   id: string;
   /** The display name. */
@@ -2393,12 +4577,25 @@ export type PageProvisionRecordDtoItemsItem = {
   /** When the record was created. */
   createdAt: number;
   /**
+     * What became of the guest: `not_allocated`, `present`, `destroyed`
+     * (cleanup removed it), `kept` (released with keep), or
+     * `returned_to_pool` or `quarantined_in_pool` (a pool member, not an
+     * orphan). The node and VMID stay as history after it is
+     * gone, so `state` alone does not say the guest still exists.
+     */
+  guest: string;
+  /**
      * The guest's IPv4 address, once reported.
      * @nullable
      */
   guestIpv4?: string | null;
   /** The record's identity. */
   id: string;
+  /**
+     * The linked lease's state, when a lease links back to the record.
+     * @nullable
+     */
+  leaseState?: string | null;
   /**
      * The PVE node the guest landed on, once cloned.
      * @nullable
@@ -2521,10 +4718,29 @@ export interface PageRecipeDto {
 
 /**
  * The structured view: exactly the supported Proxmox field subset.
+ *
+ * The `firstDisk*`, `networkBridge`, and `bootIso*` fields follow the
+ * Packer Proxmox plugin's schema (#278). The older fields keep their
+ * published `/api/v1` meaning: they read top-level builder keys, most of
+ * which the plugin does not accept, and are deprecated in favour of the
+ * new ones (the compatibility policy in this crate's README).
  */
 export interface StructuredRecipeDto {
   /**
-     * The network bridge.
+     * The boot ISO (`boot_iso.iso_file`, or the deprecated top-level key).
+     * @nullable
+     */
+  bootIsoFile?: string | null;
+  /**
+     * The boot ISO's storage pool (`boot_iso.iso_storage_pool`, or the
+     * deprecated top-level key).
+     * @nullable
+     */
+  bootIsoStoragePool?: string | null;
+  /**
+     * Deprecated: the top-level `bridge`, which the plugin refuses. Use
+     * `networkBridge`.
+     * @deprecated
      * @nullable
      */
   bridge?: string | null;
@@ -2534,7 +4750,8 @@ export interface StructuredRecipeDto {
      */
   cloneVm?: string | null;
   /**
-     * The cloud-init user.
+     * Deprecated: the top-level `ciuser`; the plugin has no such key.
+     * @deprecated
      * @nullable
      */
   cloudInitUser?: string | null;
@@ -2545,17 +4762,32 @@ export interface StructuredRecipeDto {
      */
   cores?: number | null;
   /**
-     * The disk size.
+     * Deprecated: the top-level `disk_size`, which the plugin refuses. Use
+     * `firstDiskSize`.
+     * @deprecated
      * @nullable
      */
   diskSize?: string | null;
   /**
-     * The ISO file path, for the iso source.
+     * The first disk's size (`disks[0].disk_size`).
+     * @nullable
+     */
+  firstDiskSize?: string | null;
+  /**
+     * The first disk's storage pool (`disks[0].storage_pool`). Absent when
+     * the builder declares no disk: a clone then keeps its source's storage.
+     * @nullable
+     */
+  firstDiskStoragePool?: string | null;
+  /**
+     * Deprecated: the top-level `iso_file`. Use `bootIsoFile`.
+     * @deprecated
      * @nullable
      */
   isoFile?: string | null;
   /**
-     * The ISO's storage pool, for the iso source.
+     * Deprecated: the top-level `iso_storage_pool`. Use `bootIsoStoragePool`.
+     * @deprecated
      * @nullable
      */
   isoStoragePool?: string | null;
@@ -2565,16 +4797,26 @@ export interface StructuredRecipeDto {
      * @nullable
      */
   memory?: number | null;
+  /**
+     * The first network adapter's bridge (`network_adapters[0].bridge`).
+     * @nullable
+     */
+  networkBridge?: string | null;
   /** The PVE node the recipe builds on. */
   node: string;
   /** What the recipe builds from: `iso` or `clone`. */
   source: string;
   /**
-     * The cloud-init SSH keys.
+     * Deprecated: the top-level `sshkeys`; the plugin has no such key.
+     * @deprecated
      * @nullable
      */
   sshKeys?: string | null;
-  /** The PVE storage pool the build writes to. */
+  /**
+     * Deprecated: the builder's top-level `vm_storage_pool`/`storage_pool`,
+     * which the plugin refuses. Use `firstDiskStoragePool`.
+     * @deprecated
+     */
   storagePool: string;
 }
 
@@ -2582,6 +4824,12 @@ export interface StructuredRecipeDto {
  * One published recipe version.
  */
 export type PageRecipeVersionDtoItemsItem = {
+  /**
+     * Whether the version was published with the audited opt-in that lets
+     * it build with `insecure_skip_tls_verify` (#284). False for every
+     * version published before the opt-in existed.
+     */
+  allowInsecureTls: boolean;
   /** The frozen content. */
   content: string;
   /** The frozen content digest. */
@@ -2599,6 +4847,14 @@ export type PageRecipeVersionDtoItemsItem = {
      * @nullable
      */
   promotedAt?: number | null;
+  /**
+     * The build record the version's latest promotion pinned. Lab clones
+     * that build's template; a later rebuild of the version does not change
+     * it. Kept after a demotion. Null for a version never promoted, or
+     * promoted before pins were recorded and not since.
+     * @nullable
+     */
+  promotedBuildId?: string | null;
   /**
      * Who promoted the version, when any.
      * @nullable
@@ -2712,6 +4968,11 @@ export interface ProjectDto {
   createdAt: number;
   /** Operator notes. */
   description: string;
+  /**
+     * How the remote is fetched: the scheme and, for ssh, the login user.
+     * Never a credential.
+     */
+  fetch: RemoteFetchDto;
   /** The project's identity. */
   id: string;
   /** The display name. */
@@ -2734,12 +4995,25 @@ export interface ProvisionRecordDto {
   /** When the record was created. */
   createdAt: number;
   /**
+     * What became of the guest: `not_allocated`, `present`, `destroyed`
+     * (cleanup removed it), `kept` (released with keep), or
+     * `returned_to_pool` or `quarantined_in_pool` (a pool member, not an
+     * orphan). The node and VMID stay as history after it is
+     * gone, so `state` alone does not say the guest still exists.
+     */
+  guest: string;
+  /**
      * The guest's IPv4 address, once reported.
      * @nullable
      */
   guestIpv4?: string | null;
   /** The record's identity. */
   id: string;
+  /**
+     * The linked lease's state, when a lease links back to the record.
+     * @nullable
+     */
+  leaseState?: string | null;
   /**
      * The PVE node the guest landed on, once cloned.
      * @nullable
@@ -3152,6 +5426,21 @@ export interface ProxmoxTaskPage {
 }
 
 /**
+ * The optional publish request (#284). An absent or empty body publishes
+ * with every option off, as before the body existed.
+ */
+export interface PublishRecipeRequest {
+  /**
+     * Lets the version build with `insecure_skip_tls_verify`. Without it,
+     * a build of a recipe that skips TLS verification is refused, and
+     * every other build pins the account's confirmed certificate for
+     * Packer. Refused for a recipe that does not skip verification. The
+     * opt-in is audited and part of the version digest.
+     */
+  allowInsecureTls?: boolean;
+}
+
+/**
  * How the workflow's endpoint authenticates.
  */
 export type ReadyAuthDto = {
@@ -3232,6 +5521,12 @@ export interface RecipeDto {
  * One published recipe version.
  */
 export interface RecipeVersionDto {
+  /**
+     * Whether the version was published with the audited opt-in that lets
+     * it build with `insecure_skip_tls_verify` (#284). False for every
+     * version published before the opt-in existed.
+     */
+  allowInsecureTls: boolean;
   /** The frozen content. */
   content: string;
   /** The frozen content digest. */
@@ -3249,6 +5544,14 @@ export interface RecipeVersionDto {
      * @nullable
      */
   promotedAt?: number | null;
+  /**
+     * The build record the version's latest promotion pinned. Lab clones
+     * that build's template; a later rebuild of the version does not change
+     * it. Kept after a demotion. Null for a version never promoted, or
+     * promoted before pins were recorded and not since.
+     * @nullable
+     */
+  promotedBuildId?: string | null;
   /**
      * Who promoted the version, when any.
      * @nullable
@@ -3277,11 +5580,364 @@ export interface RecordCheckoutsRequest {
 }
 
 /**
+ * What a relation points at.
+ */
+export interface RegistryTargetDto {
+  /** `registry`, `machine`, `project`, `coolify`, or `proxmoxGuest`. */
+  class: string;
+  /**
+     * The reference within the class: `<type>/<key>` for `registry`, a
+     * name for `machine` and `project`, the recorded reference otherwise.
+     */
+  reference: string;
+}
+
+/**
+ * One relation of an entry.
+ */
+export interface RegistryRelationDto {
+  /** What it points at. */
+  target: RegistryTargetDto;
+  /** The relation type, for example `used-by`. */
+  type: string;
+}
+
+/**
+ * One Registry entry.
+ */
+export interface RegistryEntryDto {
+  /** The field values, as declared by the type. */
+  fields: unknown;
+  /** The stable resource identity. */
+  id: string;
+  /** The natural key, unique per type: the entry is `<type>/<key>`. */
+  key: string;
+  /** Links to dashboards and documents. */
+  links: unknown;
+  /** The resource's slug name. */
+  name: string;
+  /**
+     * Free-form notes.
+     * @nullable
+     */
+  notes?: string | null;
+  /** The entry's outgoing relations. */
+  relations: RegistryRelationDto[];
+  /**
+     * The entry's repository-relative file path in the revision, when the
+     * snapshot recorded it. Null for a revision fetched before paths were
+     * recorded.
+     * @nullable
+     */
+  sourcePath?: string | null;
+  /** The tags. */
+  tags: string[];
+  /** The entry's type. */
+  type: string;
+}
+
+/**
+ * One Registry entry.
+ */
+export type RegistryOneRegistryEntryDtoData = {
+  /** The field values, as declared by the type. */
+  fields: unknown;
+  /** The stable resource identity. */
+  id: string;
+  /** The natural key, unique per type: the entry is `<type>/<key>`. */
+  key: string;
+  /** Links to dashboards and documents. */
+  links: unknown;
+  /** The resource's slug name. */
+  name: string;
+  /**
+     * Free-form notes.
+     * @nullable
+     */
+  notes?: string | null;
+  /** The entry's outgoing relations. */
+  relations: RegistryRelationDto[];
+  /**
+     * The entry's repository-relative file path in the revision, when the
+     * snapshot recorded it. Null for a revision fetched before paths were
+     * recorded.
+     * @nullable
+     */
+  sourcePath?: string | null;
+  /** The tags. */
+  tags: string[];
+  /** The entry's type. */
+  type: string;
+};
+
+/**
+ * The desired revision a Registry answer was read at.
+ */
+export interface RegistryRevisionDto {
+  /** The Fleet Git commit SHA the data came from. */
+  commitSha: string;
+  /** The content digest of the revision. */
+  contentDigest: string;
+}
+
+/**
+ * One Registry resource and the revision it was read at.
+ */
+export interface RegistryOneRegistryEntryDto {
+  /** One Registry entry. */
+  data: RegistryOneRegistryEntryDtoData;
+  /** The active revision. */
+  revision: RegistryRevisionDto;
+}
+
+/**
+ * One Registry entry.
+ */
+export type RegistryPageRegistryEntryDtoItemsItem = {
+  /** The field values, as declared by the type. */
+  fields: unknown;
+  /** The stable resource identity. */
+  id: string;
+  /** The natural key, unique per type: the entry is `<type>/<key>`. */
+  key: string;
+  /** Links to dashboards and documents. */
+  links: unknown;
+  /** The resource's slug name. */
+  name: string;
+  /**
+     * Free-form notes.
+     * @nullable
+     */
+  notes?: string | null;
+  /** The entry's outgoing relations. */
+  relations: RegistryRelationDto[];
+  /**
+     * The entry's repository-relative file path in the revision, when the
+     * snapshot recorded it. Null for a revision fetched before paths were
+     * recorded.
+     * @nullable
+     */
+  sourcePath?: string | null;
+  /** The tags. */
+  tags: string[];
+  /** The entry's type. */
+  type: string;
+};
+
+/**
+ * A page of Registry data and the revision it was read at.
+ */
+export interface RegistryPageRegistryEntryDto {
+  /** The items, in the endpoint's documented order. */
+  items: RegistryPageRegistryEntryDtoItemsItem[];
+  /** Where this page sits in the result set. */
+  page: PageInfo;
+  revision?: null | RegistryRevisionDto;
+}
+
+/**
+ * An entry that points at the queried target.
+ */
+export type RegistryPageRegistryReferenceDtoItemsItem = {
+  /** The pointing entry's key. */
+  entryKey: string;
+  /** The pointing entry's slug name. */
+  entryName: string;
+  /** The pointing entry's type. */
+  entryType: string;
+  /** The relation type the entry declares. */
+  relation: string;
+  /**
+     * The pointing entry's repository path, when recorded.
+     * @nullable
+     */
+  sourcePath?: string | null;
+};
+
+/**
+ * A page of Registry data and the revision it was read at.
+ */
+export interface RegistryPageRegistryReferenceDto {
+  /** The items, in the endpoint's documented order. */
+  items: RegistryPageRegistryReferenceDtoItemsItem[];
+  /** Where this page sits in the result set. */
+  page: PageInfo;
+  revision?: null | RegistryRevisionDto;
+}
+
+/**
+ * An entry that points at the queried target.
+ */
+export interface RegistryReferenceDto {
+  /** The pointing entry's key. */
+  entryKey: string;
+  /** The pointing entry's slug name. */
+  entryName: string;
+  /** The pointing entry's type. */
+  entryType: string;
+  /** The relation type the entry declares. */
+  relation: string;
+  /**
+     * The pointing entry's repository path, when recorded.
+     * @nullable
+     */
+  sourcePath?: string | null;
+}
+
+/**
+ * The Registry controller settings. Fleet does not enforce the change
+ * mode (the repository host's branch protection does); `fleetctl` and the
+ * `fleet` skill follow it.
+ */
+export interface RegistrySettingsDto {
+  /**
+     * Whether a fetched, valid revision that changes only Registry
+     * resources activates without a manual step.
+     */
+  autoActivate: boolean;
+  /**
+     * Whether auto-activation is held because a rollback happened. A
+     * manual activation releases the hold. Read-only.
+     */
+  autoActivateHold: boolean;
+  /**
+     * How Registry edits should reach the default branch: `direct` or
+     * `pull-request`.
+     */
+  changeMode: string;
+}
+
+/**
+ * One Registry type.
+ */
+export interface RegistryTypeDto {
+  /** The human-facing name. */
+  displayName: string;
+  /** How many entries of this type the revision holds. */
+  entryCount: number;
+  /** The field holding an entry's natural key. */
+  keyField: string;
+  /** The type's name, as entries reference it. */
+  name: string;
+  /**
+     * `builtin` (shipped with Fleet) or `repository` (a `RegistryType`
+     * resource in Fleet Git).
+     */
+  origin: string;
+  /** The relation names entries of this type may declare. */
+  relations: string[];
+  /**
+     * The resource identity, for repository types.
+     * @nullable
+     */
+  resourceId?: string | null;
+  /**
+     * The defining document's repository path, for repository types, when
+     * the snapshot recorded it.
+     * @nullable
+     */
+  sourcePath?: string | null;
+  /** The type's spec: declared fields and their value types. */
+  spec: unknown;
+}
+
+/**
+ * The type list: all types of the active revision.
+ */
+export interface RegistryTypeList {
+  /** The types, ordered by name. */
+  items: RegistryTypeDto[];
+  revision?: null | RegistryRevisionDto;
+}
+
+/**
  * The release request.
  */
 export interface ReleaseLeaseRequest {
   /** Whether to keep the VM out of automatic cleanup (elevated). */
   keep?: boolean;
+}
+
+/**
+ * The structured, secret-free parameters.
+ */
+export type ResourceActionRequestDtoDataParameters = { [key: string]: unknown };
+
+/**
+ * An action request.
+ */
+export type ResourceActionRequestDtoData = {
+  /** The provider action's id. */
+  actionId: string;
+  /** When it was made (epoch milliseconds). */
+  createdAt: number;
+  /**
+     * When it was decided (epoch milliseconds).
+     * @nullable
+     */
+  decidedAt?: number | null;
+  /**
+     * Who approved or denied it: a principal, `policy:auto`, or
+     * `policy:deny`.
+     * @nullable
+     */
+  decidedBy?: string | null;
+  /**
+     * A denier's note.
+     * @nullable
+     */
+  decisionNote?: string | null;
+  /** When an undecided request expires (epoch milliseconds). */
+  expiresAt: number;
+  /**
+     * Why it failed.
+     * @nullable
+     */
+  failure?: string | null;
+  /** The request's identity. */
+  id: string;
+  /**
+     * The durable operation that executes it, once created. Poll it at
+     * `/operations/{id}`.
+     * @nullable
+     */
+  operationId?: string | null;
+  /** Where the request came from (`api`). */
+  origin: string;
+  /** The structured, secret-free parameters. */
+  parameters: ResourceActionRequestDtoDataParameters;
+  /** Why the requester wants it. */
+  reason: string;
+  /** The principal that asked. */
+  requester: string;
+  /**
+     * The effective risk class when the request was made: `auto` (ran
+     * without a decision), `approve` (waits for a person), or `deny`
+     * (refused by policy).
+     */
+  riskClass: string;
+  /**
+     * `pending`, `approved`, `denied`, `expired`, `executing`,
+     * `succeeded`, or `failed`.
+     */
+  state: string;
+  /** What the action acts on. */
+  target: string;
+  /** Whether the state will never change. */
+  terminal: boolean;
+  /** The last change (epoch milliseconds). */
+  updatedAt: number;
+};
+
+/**
+ * A single resource.
+ *
+ * The payload is nested under `data` so that later top-level fields are an
+ * additive change rather than a breaking one.
+ */
+export interface ResourceActionRequestDto {
+  /** An action request. */
+  data: ResourceActionRequestDtoData;
 }
 
 /**
@@ -3406,6 +6062,168 @@ export interface ResourceCatalogVersionDto {
 }
 
 /**
+ * The result of clearing a quarantine.
+ */
+export type ResourceClearedBuildAddressDtoData = {
+  /** The address that can be allocated again. */
+  address: string;
+};
+
+/**
+ * A single resource.
+ *
+ * The payload is nested under `data` so that later top-level fields are an
+ * additive change rather than a breaking one.
+ */
+export interface ResourceClearedBuildAddressDto {
+  /** The result of clearing a quarantine. */
+  data: ResourceClearedBuildAddressDtoData;
+}
+
+/**
+ * The stored observations of one name.
+ */
+export type ResourceCloudflareDnsObservationsDtoData = {
+  /** The name asked about. */
+  name: string;
+  /** One entry per account and zone that was read, newest first. */
+  observations: CloudflareDnsObservationDto[];
+};
+
+/**
+ * A single resource.
+ *
+ * The payload is nested under `data` so that later top-level fields are an
+ * additive change rather than a breaking one.
+ */
+export interface ResourceCloudflareDnsObservationsDto {
+  /** The stored observations of one name. */
+  data: ResourceCloudflareDnsObservationsDtoData;
+}
+
+/**
+ * The records at one name.
+ */
+export type ResourceCloudflareDnsRecordsDtoData = {
+  /** The account that answered. */
+  accountId: string;
+  /** Its label. */
+  accountLabel: string;
+  /** The name asked about. */
+  name: string;
+  /** When the records were read (epoch milliseconds). */
+  observedAt: number;
+  /** The records. */
+  records: DnsRecordDto[];
+  /**
+     * The `domain/<key>` Registry entry the observation attached to, when
+     * the Registry has one.
+     * @nullable
+     */
+  registryEntry?: string | null;
+  /** The zone the name belongs to. */
+  zone: DnsZoneDto;
+};
+
+/**
+ * A single resource.
+ *
+ * The payload is nested under `data` so that later top-level fields are an
+ * additive change rather than a breaking one.
+ */
+export interface ResourceCloudflareDnsRecordsDto {
+  /** The records at one name. */
+  data: ResourceCloudflareDnsRecordsDtoData;
+}
+
+/**
+ * The stamped, stale-aware Coolify snapshot of one account.
+ */
+export type ResourceCoolifyObservationDtoData = {
+  /** The account the snapshot belongs to. */
+  accountId: string;
+  /** Applications. */
+  applications: CoolifyApplicationDto[];
+  /** The per-class state: stamps, staleness, and failures. */
+  classes: CoolifyClassDto[];
+  /** Databases. */
+  databases: CoolifyDatabaseDto[];
+  /** Recent deployments, newest first. */
+  deployments: CoolifyDeploymentDto[];
+  /** The time staleness was evaluated against (epoch millis). */
+  evaluatedAt: number;
+  /** Projects with their environments. */
+  projects: CoolifyProjectDto[];
+  /** When the snapshot was last written (epoch millis). */
+  recordedAt: number;
+  /** Servers. */
+  servers: CoolifyServerDto[];
+  /** Services. */
+  services: CoolifyServiceDto[];
+  /**
+     * The Coolify version last seen.
+     * @nullable
+     */
+  version?: string | null;
+  /**
+     * Warnings from the latest run, such as a token that can read
+     * sensitive values (use a read-only token).
+     */
+  warnings: string[];
+};
+
+/**
+ * A single resource.
+ *
+ * The payload is nested under `data` so that later top-level fields are an
+ * additive change rather than a breaking one.
+ */
+export interface ResourceCoolifyObservationDto {
+  /** The stamped, stale-aware Coolify snapshot of one account. */
+  data: ResourceCoolifyObservationDtoData;
+}
+
+/**
+ * A credential's metadata. The token and its hash are never part of it.
+ */
+export type ResourceCredentialDtoData = {
+  /** When it expires (epoch millis). */
+  expiresAt: number;
+  /** The credential's identity. */
+  id: string;
+  /** When it was issued (epoch millis). */
+  issuedAt: number;
+  /** The administrator that issued it. */
+  issuedBy: string;
+  /** An operator's free-text label. */
+  label: string;
+  /** The owner label: the ownership identity of the leases it creates. */
+  owner: string;
+  /**
+     * When it was revoked (epoch millis), when it was.
+     * @nullable
+     */
+  revokedAt?: number | null;
+  /** `active`, `expired`, or `revoked`. */
+  status: string;
+  /** Allowed Lab template ids. */
+  templates: string[];
+  /** Allowed Lab template version ids. */
+  versions: string[];
+};
+
+/**
+ * A single resource.
+ *
+ * The payload is nested under `data` so that later top-level fields are an
+ * additive change rather than a breaking one.
+ */
+export interface ResourceCredentialDto {
+  /** A credential's metadata. The token and its hash are never part of it. */
+  data: ResourceCredentialDtoData;
+}
+
+/**
  * The configured desired-source remote.
  */
 export type ResourceDesiredSourceDtoData = {
@@ -3452,6 +6270,144 @@ export interface ResourceDesiredStatusDto {
 }
 
 /**
+ * A started detached command.
+ */
+export type ResourceDetachedExecStartedDtoData = {
+  /** The handle to poll: the id of the start operation. */
+  handle: string;
+  /** The lease. */
+  leaseId: string;
+  /**
+     * The `lab.exec_detach` operation that starts the command. It ends
+     * when the guest has started the command, not when the command ends.
+     */
+  operation: OperationDto;
+  /**
+     * The bound the guest enforces, in seconds.
+     * @minimum 0
+     */
+  timeoutSeconds: number;
+};
+
+/**
+ * A single resource.
+ *
+ * The payload is nested under `data` so that later top-level fields are an
+ * additive change rather than a breaking one.
+ */
+export interface ResourceDetachedExecStartedDto {
+  /** A started detached command. */
+  data: ResourceDetachedExecStartedDtoData;
+}
+
+/**
+ * The state of a detached command.
+ */
+export type ResourceDetachedExecStatusDtoData = {
+  /**
+     * The exit code, once `exited`. `124` means the command's time bound
+     * ended it.
+     * @nullable
+     */
+  exitCode?: number | null;
+  /**
+     * When the command finished (the guest's clock, epoch seconds).
+     * @nullable
+     */
+  finishedAt?: number | null;
+  /** The handle. */
+  handle: string;
+  /** The lease. */
+  leaseId: string;
+  /**
+     * The lease's state, when `lease_ended`.
+     * @nullable
+     */
+  leaseState?: string | null;
+  /**
+     * A stable reason for `starting` (`start_unconfirmed`: a start whose
+     * outcome is unknown, check status again), `lost` (`guest_rebooted`,
+     * `process_gone`, `never_started`, `guest_has_no_record`), `failed_to_start`
+     * (`start_failed`; see the operation), `lease_ended`, and
+     * `unreachable` (`guest_unreachable`, `no_lab_machine`).
+     * @nullable
+     */
+  reason?: string | null;
+  /**
+     * When the command started (the guest's clock, epoch seconds).
+     * @nullable
+     */
+  startedAt?: number | null;
+  /**
+     * `starting`, `running`, `exited`, `lost`, `failed_to_start`,
+     * `lease_ended`, or `unreachable`.
+     */
+  state: string;
+  /** The last of stderr, scrubbed and bounded likewise. */
+  stderr: string;
+  /**
+     * The size of stderr in the guest, in bytes.
+     * @minimum 0
+     */
+  stderrBytes: number;
+  /**
+     * The last of stdout, scrubbed of credentials and bounded like `lab
+     * exec` output.
+     */
+  stdout: string;
+  /**
+     * The size of stdout in the guest, in bytes.
+     * @minimum 0
+     */
+  stdoutBytes: number;
+  /**
+     * Whether the answer will never change: `exited`, `lost`,
+     * `failed_to_start`, and `lease_ended`. `unreachable` and `starting`
+     * are not terminal; poll again.
+     */
+  terminal: boolean;
+  /**
+     * The bound the guest enforces, in seconds.
+     * @minimum 0
+     */
+  timeoutSeconds: number;
+  /** Whether output was dropped from the front of stderr. */
+  truncatedStderr: boolean;
+  /** Whether output was dropped from the front of stdout. */
+  truncatedStdout: boolean;
+};
+
+/**
+ * A single resource.
+ *
+ * The payload is nested under `data` so that later top-level fields are an
+ * additive change rather than a breaking one.
+ */
+export interface ResourceDetachedExecStatusDto {
+  /** The state of a detached command. */
+  data: ResourceDetachedExecStatusDtoData;
+}
+
+/**
+ * The zones of every Cloudflare account.
+ */
+export type ResourceDnsZonesDtoData = {
+  /** One entry per account. */
+  accounts: AccountZonesDto[];
+};
+
+/**
+ * A single resource.
+ *
+ * The payload is nested under `data` so that later top-level fields are an
+ * additive change rather than a breaking one.
+ */
+export interface ResourceDnsZonesDto {
+  /** The zones of every Cloudflare account. */
+  data: ResourceDnsZonesDtoData;
+}
+
+/**
  * The create-enrollment-token response. The token value is shown exactly
  * once; only its hash is stored.
  */
@@ -3481,9 +6437,281 @@ export interface ResourceEnrollmentTokenCreatedDto {
 }
 
 /**
+ * One external provider account. The token is never here.
+ */
+export type ResourceExternalAccountDtoData = {
+  /**
+     * The provider-side account id (Cloudflare account-owned tokens).
+     * @nullable
+     */
+  accountId?: string | null;
+  /** The provider's API base URL. */
+  baseUrl: string;
+  /** When the account was created (epoch millis). */
+  createdAt: number;
+  /** The account's identity. */
+  id: string;
+  /** The provider kind. */
+  kind: ExternalProviderKindDto;
+  /** The operator-facing label, unique within the kind. */
+  label: string;
+  lastProbe?: null | ExternalProbeDto;
+  /** Free-form operator notes. */
+  notes: string;
+  /**
+     * A policy the stored record breaks: `https_required` for an http base
+     * URL that is not a loopback address. Such an account is never probed
+     * or discovered until its base URL is edited to https.
+     * @nullable
+     */
+  policyViolation?: string | null;
+  /** When the account last changed (epoch millis). */
+  updatedAt: number;
+};
+
+/**
+ * A single resource.
+ *
+ * The payload is nested under `data` so that later top-level fields are an
+ * additive change rather than a breaking one.
+ */
+export interface ResourceExternalAccountDto {
+  /** One external provider account. The token is never here. */
+  data: ResourceExternalAccountDtoData;
+}
+
+/**
+ * Safe build provenance and outcome; credentials and work paths are excluded.
+ */
+export type ResourceImageBuildDtoData = {
+  /**
+     * Resolved target account; absent when target binding failed.
+     * @nullable
+     */
+  accountId?: string | null;
+  /** Frozen provisioning asset digests. */
+  assetDigests: string[];
+  /** Frozen recipe digest. */
+  contentDigest: string;
+  /**
+     * End time in epoch milliseconds.
+     * @nullable
+     */
+  endedAt?: number | null;
+  /** Build identity. */
+  id: string;
+  /** Frozen target node. */
+  node: string;
+  /** Durable operation identity. */
+  operationId: string;
+  /** Running, succeeded, failed or cancelled. */
+  outcome: string;
+  /**
+     * Probed Packer version, when available.
+     * @nullable
+     */
+  packerVersion?: string | null;
+  /**
+     * Probed Proxmox plugin version, when available.
+     * @nullable
+     */
+  proxmoxPluginVersion?: string | null;
+  /**
+     * Safe terminal reason code.
+     * @nullable
+     */
+  reason?: string | null;
+  /** Recipe identity. */
+  recipeId: string;
+  /** Start time in epoch milliseconds. */
+  startedAt: number;
+  /** Frozen target storage. */
+  storagePool: string;
+  template?: null | ImageBuildTemplateDto;
+  /** Immutable version identity. */
+  versionId: string;
+};
+
+/**
+ * A single resource.
+ *
+ * The payload is nested under `data` so that later top-level fields are an
+ * additive change rather than a breaking one.
+ */
+export interface ResourceImageBuildDto {
+  /** Safe build provenance and outcome; credentials and work paths are excluded. */
+  data: ResourceImageBuildDtoData;
+}
+
+/**
+ * One image build secret record: its name only.
+ */
+export type ResourceImageSecretDtoData = {
+  /**
+     * The record name (`images/<name>`): what a build's secret variable
+     * references.
+     */
+  reference: string;
+  /**
+     * Whether the write replaced an existing record's value. Absent when
+     * listing.
+     * @nullable
+     */
+  replaced?: boolean | null;
+};
+
+/**
+ * A single resource.
+ *
+ * The payload is nested under `data` so that later top-level fields are an
+ * additive change rather than a breaking one.
+ */
+export interface ResourceImageSecretDto {
+  /** One image build secret record: its name only. */
+  data: ResourceImageSecretDtoData;
+}
+
+/**
+ * A freshly issued credential: its metadata and the token, shown once.
+ */
+export type ResourceIssuedCredentialDtoData = CredentialDto & {
+  /**
+     * The bearer token. It is returned only by this response and cannot be
+     * read again; present it as `Authorization: Bearer <token>` (or set
+     * `FLEET_TOKEN` for `fleetctl`).
+     */
+  token: string;
+};
+
+/**
+ * A single resource.
+ *
+ * The payload is nested under `data` so that later top-level fields are an
+ * additive change rather than a breaking one.
+ */
+export interface ResourceIssuedCredentialDto {
+  /** A freshly issued credential: its metadata and the token, shown once. */
+  data: ResourceIssuedCredentialDtoData;
+}
+
+/**
+ * One stored Lab artifact's metadata.
+ */
+export type ResourceLabArtifactDtoData = {
+  /** When it was stored (epoch milliseconds). */
+  createdAt: number;
+  /** The artifact's identity. */
+  id: string;
+  /** `exec-log` or `file`. */
+  kind: string;
+  /** The lease it came from. */
+  leaseId: string;
+  /** Where the bytes live, relative to the controller's artifact store. */
+  location: string;
+  /** `exec-<operation>.log` for an exec log; the guest path for a file. */
+  name: string;
+  /**
+     * The `lab.exec` or `lab.collect` operation that produced it.
+     * @nullable
+     */
+  operationId?: string | null;
+  /** The lease's owner. */
+  owner: string;
+  /**
+     * The project that lease served, when it recorded one.
+     * @nullable
+     */
+  projectId?: string | null;
+  /** When the retention sweep deletes it (epoch milliseconds). */
+  retainUntil: number;
+  /** The lowercase hex sha256 of the bytes. */
+  sha256: string;
+  /**
+     * The size in bytes.
+     * @minimum 0
+     */
+  sizeBytes: number;
+};
+
+/**
+ * A single resource.
+ *
+ * The payload is nested under `data` so that later top-level fields are an
+ * additive change rather than a breaking one.
+ */
+export interface ResourceLabArtifactDto {
+  /** One stored Lab artifact's metadata. */
+  data: ResourceLabArtifactDtoData;
+}
+
+/**
+ * What a drain did.
+ */
+export type ResourceLabPoolDrainDtoData = {
+  /**
+     * The VMIDs that leave once their lease's cleanup or their fill ends.
+     * @items.minimum 0
+     */
+  deferred: number[];
+  /**
+     * The VMIDs that left the pool. The guests themselves stay.
+     * @items.minimum 0
+     */
+  removed: number[];
+};
+
+/**
+ * A single resource.
+ *
+ * The payload is nested under `data` so that later top-level fields are an
+ * additive change rather than a breaking one.
+ */
+export interface ResourceLabPoolDrainDto {
+  /** What a drain did. */
+  data: ResourceLabPoolDrainDtoData;
+}
+
+/**
+ * One pool and its members.
+ */
+export type ResourceLabPoolDtoData = {
+  /** The Proxmox account the members are reached through. */
+  accountId: string;
+  /** The snapshot every member is reverted to. */
+  baselineSnapshot: string;
+  /** When the pool was created (epoch millis). */
+  createdAt: number;
+  /** Who created the pool. */
+  createdBy: string;
+  /** The pool's identity. */
+  id: string;
+  /** The members, by VMID. */
+  members: LabPoolMemberDto[];
+  /**
+     * The declared number of members.
+     * @minimum 0
+     */
+  size: number;
+  /** The published template version leases take members for. */
+  templateVersionId: string;
+};
+
+/**
+ * A single resource.
+ *
+ * The payload is nested under `data` so that later top-level fields are an
+ * additive change rather than a breaking one.
+ */
+export interface ResourceLabPoolDto {
+  /** One pool and its members. */
+  data: ResourceLabPoolDtoData;
+}
+
+/**
  * One template draft.
  */
 export type ResourceLabTemplateDtoData = {
+  audio?: null | LabAudioDto;
   /**
      * The bootstrap profile reference, when pinned.
      * @nullable
@@ -3505,10 +6733,18 @@ export type ResourceLabTemplateDtoData = {
      * @minimum 0
      */
   diskGib: number;
+  /** The guest's operating system: `linux` or `windows`. */
+  guestOs: string;
   /** The draft's identity. */
   id: string;
   /** The pinned image version id. */
   imageVersionId: string;
+  /**
+     * The local account whose desktop session `--session interactive`
+     * runs in (a name only, never a password); Windows guests only.
+     * @nullable
+     */
+  interactiveUser?: string | null;
   /**
      * The memory in MiB.
      * @minimum 0
@@ -3533,6 +6769,20 @@ export type ResourceLabTemplateDtoData = {
   readinessDeadlineSeconds: number;
   /** The readiness probe. */
   readinessProbe: string;
+  /**
+     * Public OpenSSH SHA256 fingerprint for pinned trust.
+     * @nullable
+     */
+  sshFingerprint?: string | null;
+  /**
+     * The guest SSH listener port.
+     * @minimum 0
+     */
+  sshPort: number;
+  /** Host-key trust: tofu or pinned. */
+  sshTrustMode: string;
+  /** The SSH account preconfigured in the image. */
+  sshUser: string;
   /**
      * The default TTL in seconds, beginning at ready.
      * @minimum 0
@@ -3585,11 +6835,77 @@ export interface ResourceLabTemplateVersionDto {
 }
 
 /**
+ * One lease with its guest's connection details (FM-720).
+ */
+export type ResourceLeaseDetailDtoData = LeaseDto & ({
+  /**
+     * The guest's IPv4 address, once its agent reported one.
+     * @nullable
+     */
+  address?: string | null;
+  collectionFailure?: null | CollectionFailureDto;
+  /**
+     * That machine's SSH endpoint.
+     * @nullable
+     */
+  endpointId?: string | null;
+  /**
+     * The saga step that failed, when provisioning failed.
+     * @nullable
+     */
+  failedStep?: string | null;
+  /**
+     * The Lab-owned Fleet machine the guest was registered as.
+     * @nullable
+     */
+  machineId?: string | null;
+  /**
+     * The PVE node the guest runs on.
+     * @nullable
+     */
+  node?: string | null;
+  /**
+     * The guest's provision state, once provisioning started.
+     * @nullable
+     */
+  provisionState?: string | null;
+  reservation?: null | LeaseReservationDto;
+  /**
+     * The guest's VMID.
+     * @minimum 0
+     * @nullable
+     */
+  vmid?: number | null;
+});
+
+/**
+ * A single resource.
+ *
+ * The payload is nested under `data` so that later top-level fields are an
+ * additive change rather than a breaking one.
+ */
+export interface ResourceLeaseDetailDto {
+  /** One lease with its guest's connection details (FM-720). */
+  data: ResourceLeaseDetailDtoData;
+}
+
+/**
  * One lease.
  */
 export type ResourceLeaseDtoData = {
   /** The cleanup strategy. */
   cleanup: string;
+  /**
+     * Failed cleanup attempts so far (FM-713).
+     * @minimum 0
+     */
+  cleanupAttempts: number;
+  /**
+     * When the next cleanup attempt is due (epoch millis), while a
+     * releasing lease backs off after a failed attempt.
+     * @nullable
+     */
+  cleanupNextAt?: number | null;
   /** When the lease was created. */
   createdAt: number;
   /**
@@ -4026,6 +7342,11 @@ export type ResourceProjectDtoData = {
   createdAt: number;
   /** Operator notes. */
   description: string;
+  /**
+     * How the remote is fetched: the scheme and, for ssh, the login user.
+     * Never a credential.
+     */
+  fetch: RemoteFetchDto;
   /** The project's identity. */
   id: string;
   /** The display name. */
@@ -4059,12 +7380,25 @@ export type ResourceProvisionRecordDtoData = {
   /** When the record was created. */
   createdAt: number;
   /**
+     * What became of the guest: `not_allocated`, `present`, `destroyed`
+     * (cleanup removed it), `kept` (released with keep), or
+     * `returned_to_pool` or `quarantined_in_pool` (a pool member, not an
+     * orphan). The node and VMID stay as history after it is
+     * gone, so `state` alone does not say the guest still exists.
+     */
+  guest: string;
+  /**
      * The guest's IPv4 address, once reported.
      * @nullable
      */
   guestIpv4?: string | null;
   /** The record's identity. */
   id: string;
+  /**
+     * The linked lease's state, when a lease links back to the record.
+     * @nullable
+     */
+  leaseState?: string | null;
   /**
      * The PVE node the guest landed on, once cloned.
      * @nullable
@@ -4361,6 +7695,12 @@ export interface ResourceRecipeDto {
  * One published recipe version.
  */
 export type ResourceRecipeVersionDtoData = {
+  /**
+     * Whether the version was published with the audited opt-in that lets
+     * it build with `insecure_skip_tls_verify` (#284). False for every
+     * version published before the opt-in existed.
+     */
+  allowInsecureTls: boolean;
   /** The frozen content. */
   content: string;
   /** The frozen content digest. */
@@ -4378,6 +7718,14 @@ export type ResourceRecipeVersionDtoData = {
      * @nullable
      */
   promotedAt?: number | null;
+  /**
+     * The build record the version's latest promotion pinned. Lab clones
+     * that build's template; a later rebuild of the version does not change
+     * it. Kept after a demotion. Null for a version never promoted, or
+     * promoted before pins were recorded and not since.
+     * @nullable
+     */
+  promotedBuildId?: string | null;
   /**
      * Who promoted the version, when any.
      * @nullable
@@ -4403,6 +7751,473 @@ export type ResourceRecipeVersionDtoData = {
 export interface ResourceRecipeVersionDto {
   /** One published recipe version. */
   data: ResourceRecipeVersionDtoData;
+}
+
+/**
+ * The Registry controller settings. Fleet does not enforce the change
+ * mode (the repository host's branch protection does); `fleetctl` and the
+ * `fleet` skill follow it.
+ */
+export type ResourceRegistrySettingsDtoData = {
+  /**
+     * Whether a fetched, valid revision that changes only Registry
+     * resources activates without a manual step.
+     */
+  autoActivate: boolean;
+  /**
+     * Whether auto-activation is held because a rollback happened. A
+     * manual activation releases the hold. Read-only.
+     */
+  autoActivateHold: boolean;
+  /**
+     * How Registry edits should reach the default branch: `direct` or
+     * `pull-request`.
+     */
+  changeMode: string;
+};
+
+/**
+ * A single resource.
+ *
+ * The payload is nested under `data` so that later top-level fields are an
+ * additive change rather than a breaking one.
+ */
+export interface ResourceRegistrySettingsDto {
+  /**
+     * The Registry controller settings. Fleet does not enforce the change
+     * mode (the repository host's branch protection does); `fleetctl` and the
+     * `fleet` skill follow it.
+     */
+  data: ResourceRegistrySettingsDtoData;
+}
+
+/**
+ * What the answer was built from.
+ */
+export interface ServicesCoverageDto {
+  /** Per-account detail. */
+  accounts: AccountCoverageDto[];
+  /** Docker container observations (not stored until M5 lands). */
+  containers: InputStateDto;
+  /** Coolify observations. */
+  coolify: InputStateDto;
+  /** Fleet machines. */
+  machines: InputStateDto;
+  /** The Registry. */
+  registry: InputStateDto;
+}
+
+/**
+ * A container of a service.
+ */
+export interface ServiceContainerDto {
+  /** The container id. */
+  id: string;
+  /** The image. */
+  image: string;
+  /** The machine it runs on. */
+  machineId: string;
+  /** The container name. */
+  name: string;
+  /** `running`, `degraded`, `stopped`, or `unknown`. */
+  state: string;
+  /** The human status text. */
+  status: string;
+}
+
+/**
+ * The Coolify identity of a service.
+ */
+export interface ServiceCoolifyDto {
+  /** The account the resource was discovered through. */
+  accountId: string;
+  /** The account's label. */
+  accountLabel: string;
+  /**
+     * The image, build pack, service type, or engine.
+     * @nullable
+     */
+  detail?: string | null;
+  /**
+     * The environment name.
+     * @nullable
+     */
+  environmentName?: string | null;
+  /**
+     * The project name.
+     * @nullable
+     */
+  projectName?: string | null;
+  /**
+     * The project uuid, when resolved.
+     * @nullable
+     */
+  projectUuid?: string | null;
+  /**
+     * Coolify's raw status string.
+     * @nullable
+     */
+  status?: string | null;
+  /** The resource uuid. */
+  uuid: string;
+}
+
+/**
+ * The latest known deployment of an application.
+ */
+export interface ServiceDeployDto {
+  /**
+     * When it last changed, as Coolify reports it.
+     * @nullable
+     */
+  at?: string | null;
+  /**
+     * The commit.
+     * @nullable
+     */
+  commit?: string | null;
+  /** The deployment uuid. */
+  deploymentUuid: string;
+  /** Whether the deployments observation is stale. */
+  stale: boolean;
+  /** Coolify's deployment status. */
+  status: string;
+}
+
+/**
+ * Where a service sits on Fleet machines.
+ */
+export interface ServicePlacementDto {
+  /**
+     * The evidence: `explicit_tag`, `address`, or `container`.
+     * @nullable
+     */
+  basis?: string | null;
+  /**
+     * The candidate machines the caller may read, when ambiguous; none is
+     * chosen.
+     */
+  candidates: ServiceMachineRefDto[];
+  /**
+     * How many further candidates the caller may not read.
+     * @minimum 0
+     */
+  hiddenCandidates: number;
+  machine?: null | ServiceMachineRefDto;
+  /** `matched`, `ambiguous`, `unmatched`, or `unknown`. */
+  state: string;
+}
+
+/**
+ * A Registry entry related to a service.
+ */
+export interface ServiceRegistryLinkDto {
+  /**
+     * The service hostname a domain match went through.
+     * @nullable
+     */
+  host?: string | null;
+  /** The entry's key. */
+  key: string;
+  /**
+     * `hosted_on` (an explicit relation) or `domain_match` (a domain entry
+     * whose fqdn equals or is a parent of a service hostname).
+     */
+  link: string;
+  /** The entry's type. */
+  type: string;
+}
+
+/**
+ * One running service.
+ */
+export interface RunningServiceDto {
+  /** The containers observed for it. */
+  containers: ServiceContainerDto[];
+  coolify?: null | ServiceCoolifyDto;
+  /**
+     * A link into the Coolify UI (the project page).
+     * @nullable
+     */
+  deepLink?: string | null;
+  /** The public hostnames, as Coolify reports them. */
+  fqdns: string[];
+  /** The stable id: `coolify:<account>:<uuid>` or `docker:<machine>:<name>`. */
+  id: string;
+  /** `application`, `service`, `database`, or `container`. */
+  kind: string;
+  lastDeploy?: null | ServiceDeployDto;
+  /** The display name. */
+  name: string;
+  /** The Fleet machine placement. */
+  placement: ServicePlacementDto;
+  /** The related Registry entries. */
+  registry: ServiceRegistryLinkDto[];
+  server?: null | ServiceServerDto;
+  /**
+     * How the server was derived: `deployment`, `container`,
+     * `sole_server`, or `unknown`.
+     */
+  serverBasis: string;
+  /** Where it was observed: `coolify`, `docker`, or both. */
+  sources: string[];
+  /** Whether any input behind this service is stale. */
+  stale: boolean;
+  /**
+     * Why: `coolify_<class>_stale`, `fqdns_stale`, `machine_offline`,
+     * `machine_stale`, `containers_stale`.
+     */
+  staleReasons: string[];
+  /** `running`, `degraded`, `stopped`, or `unknown`. */
+  state: string;
+}
+
+/**
+ * One service and what its answer was built from.
+ */
+export type ResourceServiceDetailDtoData = {
+  /** What the answer was built from. */
+  coverage: ServicesCoverageDto;
+  /** The service. */
+  service: RunningServiceDto;
+};
+
+/**
+ * A single resource.
+ *
+ * The payload is nested under `data` so that later top-level fields are an
+ * additive change rather than a breaking one.
+ */
+export interface ResourceServiceDetailDto {
+  /** One service and what its answer was built from. */
+  data: ResourceServiceDetailDtoData;
+}
+
+/**
+ * A deployment log tail: bounded, redacted, never stored.
+ */
+export type ResourceServiceLogsDtoData = {
+  /** Coolify's deployment status. */
+  deploymentStatus: string;
+  /** The deployment the lines belong to. */
+  deploymentUuid: string;
+  /** The log lines, oldest first, after redaction. */
+  lines: string[];
+  /** Whether redaction changed any line. */
+  redacted: boolean;
+  /** Whether earlier lines were cut to fit the bounds. */
+  truncated: boolean;
+};
+
+/**
+ * A single resource.
+ *
+ * The payload is nested under `data` so that later top-level fields are an
+ * additive change rather than a breaking one.
+ */
+export interface ResourceServiceLogsDto {
+  /** A deployment log tail: bounded, redacted, never stored. */
+  data: ResourceServiceLogsDtoData;
+}
+
+/**
+ * One environment variable of a service: its name and flags. There is no
+ * value field: Coolify hides values from Fleet's token and Fleet never
+ * asks for them.
+ */
+export interface ServiceEnvVarDto {
+  /** Available while building (applications). */
+  isBuildtime: boolean;
+  /** A literal value: nothing is escaped or expanded. */
+  isLiteral: boolean;
+  /** A multiline value. */
+  isMultiline: boolean;
+  /** Whether it belongs to preview deployments. */
+  isPreview: boolean;
+  /** Available at runtime (applications). */
+  isRuntime: boolean;
+  /** Whether the value refers to a shared variable. */
+  isShared: boolean;
+  /** Coolify hides the value after saving. */
+  isShownOnce: boolean;
+  /** The variable's name. */
+  key: string;
+}
+
+/**
+ * An application's health check (the HTTP kind).
+ */
+export interface ServiceHealthDto {
+  /** `http`, or `cmd` for a command check Fleet shows but does not edit. */
+  checkType: string;
+  /** Whether Coolify runs the check. */
+  enabled: boolean;
+  /**
+     * The host header, when set.
+     * @nullable
+     */
+  host?: string | null;
+  /**
+     * Seconds between checks.
+     * @minimum 0
+     */
+  interval: number;
+  /** The HTTP method. */
+  method: string;
+  /** The request path. */
+  path: string;
+  /**
+     * The port, when not the application's own.
+     * @minimum 0
+     * @nullable
+     */
+  port?: number | null;
+  /**
+     * Text the response must contain, when set.
+     * @nullable
+     */
+  responseText?: string | null;
+  /**
+     * Failures before the application is unhealthy.
+     * @minimum 0
+     */
+  retries: number;
+  /**
+     * The status code that counts as healthy.
+     * @minimum 0
+     */
+  returnCode: number;
+  /** `http` or `https`. */
+  scheme: string;
+  /**
+     * Seconds before the first check.
+     * @minimum 0
+     */
+  startPeriod: number;
+  /**
+     * Seconds a check may take.
+     * @minimum 0
+     */
+  timeout: number;
+}
+
+/**
+ * A Coolify resource's settings as Fleet can show and change them.
+ */
+export type ResourceServiceSettingsDtoData = {
+  /**
+     * The domains, when Fleet can change them for this resource.
+     * @nullable
+     */
+  domains?: string[] | null;
+  /**
+     * The variables (keys and flags only), when the kind has them.
+     * @nullable
+     */
+  env?: ServiceEnvVarDto[] | null;
+  health?: null | ServiceHealthDto;
+  /** The resource's name. */
+  name: string;
+  /** What Fleet cannot show or change here, and why. */
+  notes: string[];
+  /** `application`, `service`, or `database`. */
+  resourceKind: string;
+  /** The running-service id. */
+  serviceId: string;
+};
+
+/**
+ * A single resource.
+ *
+ * The payload is nested under `data` so that later top-level fields are an
+ * additive change rather than a breaking one.
+ */
+export interface ResourceServiceSettingsDto {
+  /** A Coolify resource's settings as Fleet can show and change them. */
+  data: ResourceServiceSettingsDtoData;
+}
+
+/**
+ * A default variable of a template: a non-secret literal.
+ */
+export interface SiteTemplateEnvDto {
+  /** The variable's name. */
+  key: string;
+  /** The default value. */
+  value: string;
+}
+
+/**
+ * What a template creates.
+ */
+export interface SiteTemplateSourceDto {
+  /**
+     * The build pack (`git` templates).
+     * @nullable
+     */
+  buildPack?: string | null;
+  /**
+     * `service` (a Coolify one-click service) or `git` (a public Git
+     * repository built by Coolify).
+     */
+  kind: string;
+  /**
+     * The port the application listens on (`git` templates).
+     * @minimum 0
+     * @nullable
+     */
+  portsExposes?: number | null;
+  /**
+     * The one-click service type (`service` templates).
+     * @nullable
+     */
+  serviceType?: string | null;
+}
+
+/**
+ * One site template.
+ */
+export interface SiteTemplateDto {
+  /** Default environment values written after creation. */
+  defaultEnv: SiteTemplateEnvDto[];
+  /** What the template makes. */
+  description: string;
+  /** The SHA-256 that pins the definition; a request carries it. */
+  digest: string;
+  /** Variables to set after the deploy, by name only. */
+  followUpEnvKeys: string[];
+  /** The stable id. */
+  id: string;
+  /** A short display name. */
+  name: string;
+  /** Whether a deploy needs a public repository and a branch. */
+  needsRepository: boolean;
+  /** What it creates. */
+  source: SiteTemplateSourceDto;
+  /**
+     * The definition's version.
+     * @minimum 0
+     */
+  version: number;
+}
+
+/**
+ * The site templates.
+ */
+export type ResourceSiteTemplatesDtoData = {
+  /** The built-in templates. */
+  templates: SiteTemplateDto[];
+};
+
+/**
+ * A single resource.
+ *
+ * The payload is nested under `data` so that later top-level fields are an
+ * additive change rather than a breaking one.
+ */
+export interface ResourceSiteTemplatesDto {
+  /** The site templates. */
+  data: ResourceSiteTemplatesDtoData;
 }
 
 /**
@@ -4520,9 +8335,12 @@ export interface SaveCatalogRequest {
 }
 
 /**
- * The create/update request.
+ * The create/update request. An update replaces the whole draft: an
+ * optional field that is omitted (for example `interactiveUser`, `audio`,
+ * `guestOs`) is cleared or reset to its default, not kept.
  */
 export interface SaveLabTemplateRequest {
+  audio?: null | LabAudioDto;
   /**
      * The bootstrap profile reference, when pinned.
      * @nullable
@@ -4542,8 +8360,16 @@ export interface SaveLabTemplateRequest {
      * @minimum 0
      */
   diskGib: number;
+  /** The guest's operating system: `linux` (the default) or `windows`. */
+  guestOs?: string;
   /** The pinned image version id. */
   imageVersionId: string;
+  /**
+     * The local account whose desktop session `--session interactive`
+     * runs in: a name only, never a password. Windows guests only.
+     * @nullable
+     */
+  interactiveUser?: string | null;
   /**
      * The memory in MiB.
      * @minimum 0
@@ -4563,6 +8389,20 @@ export interface SaveLabTemplateRequest {
   readinessDeadlineSeconds: number;
   /** The readiness probe. */
   readinessProbe: string;
+  /**
+     * Public OpenSSH SHA256 fingerprint for pinned trust.
+     * @nullable
+     */
+  sshFingerprint?: string | null;
+  /**
+     * The guest SSH listener port.
+     * @minimum 0
+     */
+  sshPort?: number;
+  /** Host-key trust: tofu or pinned. */
+  sshTrustMode?: string;
+  /** The SSH account preconfigured in the image. */
+  sshUser?: string;
   /**
      * The default TTL in seconds.
      * @minimum 0
@@ -4586,6 +8426,312 @@ export interface SaveRecipeRequest {
   source: string;
   /** The PVE storage pool the build writes to. */
   storagePool: string;
+}
+
+/**
+ * What to say when filing a lifecycle action on a service.
+ */
+export interface ServiceActionBody {
+  /**
+     * A key making a retry return the request already made (scoped to the
+     * caller).
+     * @nullable
+     */
+  idempotencyKey?: string | null;
+  /** Why, for the approver (at most 1000 characters). */
+  reason?: string;
+}
+
+/**
+ * One service and what its answer was built from.
+ */
+export interface ServiceDetailDto {
+  /** What the answer was built from. */
+  coverage: ServicesCoverageDto;
+  /** The service. */
+  service: RunningServiceDto;
+}
+
+/**
+ * The fields every settings request shares.
+ */
+export interface ServiceSettingsMeta {
+  /**
+     * A key making a retry return the request already made (scoped to the
+     * caller).
+     * @nullable
+     */
+  idempotencyKey?: string | null;
+  /** Why, for the approver (at most 1000 characters). */
+  reason?: string;
+  /**
+     * Redeploy an application (restart a service) once the change is
+     * applied, as part of the same approved operation.
+     */
+  redeploy?: boolean;
+}
+
+/**
+ * A request to replace an application's domains.
+ */
+export type ServiceDomainsBody = ServiceSettingsMeta & {
+  /**
+     * The complete new list of URLs (`https://shop.example.com`); an empty
+     * list clears the domains.
+     */
+  domains: string[];
+};
+
+/**
+ * One variable change.
+ */
+export interface ServiceEnvChangeBody {
+  /**
+     * Build-time availability (applications; unset keeps the current one).
+     * @nullable
+     */
+  isBuildtime?: boolean | null;
+  /**
+     * A literal value (unset keeps the current one).
+     * @nullable
+     */
+  isLiteral?: boolean | null;
+  /**
+     * A multiline value (unset keeps the current one).
+     * @nullable
+     */
+  isMultiline?: boolean | null;
+  /** Whether the change is to the preview-deployment variable. */
+  isPreview?: boolean;
+  /**
+     * Runtime availability (applications; unset keeps the current one).
+     * @nullable
+     */
+  isRuntime?: boolean | null;
+  /**
+     * Hide the value after saving (unset keeps the current one).
+     * @nullable
+     */
+  isShownOnce?: boolean | null;
+  /** The variable's name. */
+  key: string;
+  /** `set` or `unset`. */
+  op: string;
+  /**
+     * The new value (`set` only). It is write-only: it is moved into the
+     * encrypted secret store, never stored in the request, never audited,
+     * and never returned.
+     * @nullable
+     */
+  value?: string | null;
+}
+
+/**
+ * A request to set or unset environment variables.
+ */
+export type ServiceEnvBody = ServiceSettingsMeta & {
+  /** The variables to change (one to eight). */
+  changes: ServiceEnvChangeBody[];
+};
+
+/**
+ * A request to change an application's health check. Only the fields named
+ * change.
+ */
+export type ServiceHealthBody = ServiceSettingsMeta & ({
+  /** Fields to clear: `port`, `host`, `responseText`. */
+  clear?: string[];
+  /**
+     * Turn the check on or off.
+     * @nullable
+     */
+  enabled?: boolean | null;
+  /**
+     * The host header.
+     * @nullable
+     */
+  host?: string | null;
+  /**
+     * Seconds between checks (1 to 3600).
+     * @minimum 0
+     * @nullable
+     */
+  interval?: number | null;
+  /**
+     * `GET`, `HEAD`, `POST`, or `OPTIONS`.
+     * @nullable
+     */
+  method?: string | null;
+  /**
+     * The request path, starting with `/`.
+     * @nullable
+     */
+  path?: string | null;
+  /**
+     * The port (1 to 65535).
+     * @minimum 0
+     * @nullable
+     */
+  port?: number | null;
+  /**
+     * Text the response must contain.
+     * @nullable
+     */
+  responseText?: string | null;
+  /**
+     * Failures before unhealthy (1 to 100).
+     * @minimum 0
+     * @nullable
+     */
+  retries?: number | null;
+  /**
+     * The healthy status code (100 to 599).
+     * @minimum 0
+     * @nullable
+     */
+  returnCode?: number | null;
+  /**
+     * `http` or `https`.
+     * @nullable
+     */
+  scheme?: string | null;
+  /**
+     * Seconds before the first check (0 to 3600).
+     * @minimum 0
+     * @nullable
+     */
+  startPeriod?: number | null;
+  /**
+     * Seconds a check may take (1 to 3600).
+     * @minimum 0
+     * @nullable
+     */
+  timeout?: number | null;
+});
+
+/**
+ * A deployment log tail: bounded, redacted, never stored.
+ */
+export interface ServiceLogsDto {
+  /** Coolify's deployment status. */
+  deploymentStatus: string;
+  /** The deployment the lines belong to. */
+  deploymentUuid: string;
+  /** The log lines, oldest first, after redaction. */
+  lines: string[];
+  /** Whether redaction changed any line. */
+  redacted: boolean;
+  /** Whether earlier lines were cut to fit the bounds. */
+  truncated: boolean;
+}
+
+/**
+ * A Coolify resource's settings as Fleet can show and change them.
+ */
+export interface ServiceSettingsDto {
+  /**
+     * The domains, when Fleet can change them for this resource.
+     * @nullable
+     */
+  domains?: string[] | null;
+  /**
+     * The variables (keys and flags only), when the kind has them.
+     * @nullable
+     */
+  env?: ServiceEnvVarDto[] | null;
+  health?: null | ServiceHealthDto;
+  /** The resource's name. */
+  name: string;
+  /** What Fleet cannot show or change here, and why. */
+  notes: string[];
+  /** `application`, `service`, or `database`. */
+  resourceKind: string;
+  /** The running-service id. */
+  serviceId: string;
+}
+
+/**
+ * A page of running services.
+ */
+export interface ServicesPage {
+  /** Coolify servers that matched more than one machine. */
+  ambiguousServers: AmbiguousServerDto[];
+  /** What the answer was built from. */
+  coverage: ServicesCoverageDto;
+  /** The read time (epoch millis). */
+  evaluatedAt: number;
+  /** The services, ordered by id. */
+  items: RunningServiceDto[];
+  /** Where this page sits in the result set. */
+  page: PageInfo;
+}
+
+/**
+ * The set-secret request. The value is write-only: it is never echoed,
+ * logged, audited, or readable afterwards.
+ */
+export interface SetImageSecretRequest {
+  /**
+     * The record name, without the `images/` prefix (`images/<name>` is
+     * accepted too). Letters, digits, `.`, `_`, `-`.
+     */
+  name: string;
+  /** The secret value (write-only). */
+  value: string;
+}
+
+/**
+ * The body of a deploy request.
+ */
+export interface SiteDeployBody {
+  /** The Fleet Coolify account id. */
+  accountId: string;
+  /**
+     * The branch (templates that deploy a repository).
+     * @nullable
+     */
+  branch?: string | null;
+  /**
+     * The destination uuid, when the server has several.
+     * @nullable
+     */
+  destinationUuid?: string | null;
+  /** The site's domain: a host name or an `https://` URL. */
+  domain: string;
+  /** The environment name within the project. */
+  environmentName: string;
+  /**
+     * A key making a retry return the request already made (scoped to the
+     * caller).
+     * @nullable
+     */
+  idempotencyKey?: string | null;
+  /**
+     * The resource name; derived from the domain when absent.
+     * @nullable
+     */
+  name?: string | null;
+  /** The target project's Coolify uuid, or its exact name when unambiguous. */
+  projectUuid: string;
+  /** Why, for the approver (at most 1000 characters). */
+  reason?: string;
+  /**
+     * The public repository URL (templates that deploy a repository).
+     * @nullable
+     */
+  repository?: string | null;
+  /** The target server's Coolify uuid, or its exact name when unambiguous. */
+  serverUuid: string;
+  /** The template id. */
+  templateId: string;
+}
+
+/**
+ * The site templates.
+ */
+export interface SiteTemplatesDto {
+  /** The built-in templates. */
+  templates: SiteTemplateDto[];
 }
 
 /**
@@ -4697,11 +8843,18 @@ export interface StartFrogenvOperationRequest {
 }
 
 /**
- * The configured Proxmox account used to provision a lease.
+ * How to provision a lease: through an explicit Proxmox account, or through
+ * the one placement selects.
  */
 export interface StartLeaseProvisionRequest {
-  /** The identity of the explicitly configured Proxmox account. */
-  accountId: string;
+  /**
+     * The identity of the explicitly configured Proxmox account. When
+     * omitted, placement selects the one trusted account whose cluster
+     * holds the pinned image's template; none or several fail the
+     * provision operation with an explanation.
+     * @nullable
+     */
+  accountId?: string | null;
 }
 
 /**
@@ -4969,6 +9122,37 @@ export interface TailnetStatusDto {
 }
 
 /**
+ * The update-account request. Absent fields are left alone.
+ */
+export interface UpdateExternalAccountRequest {
+  /**
+     * A new Cloudflare account id; an empty string clears it.
+     * @nullable
+     */
+  accountId?: string | null;
+  /**
+     * A new base URL.
+     * @nullable
+     */
+  baseUrl?: string | null;
+  /**
+     * A new label.
+     * @nullable
+     */
+  label?: string | null;
+  /**
+     * New notes.
+     * @nullable
+     */
+  notes?: string | null;
+  /**
+     * A replacement API token (write-only).
+     * @nullable
+     */
+  token?: string | null;
+}
+
+/**
  * The update-project request.
  */
 export interface UpdateProjectRequest {
@@ -4979,6 +9163,22 @@ export interface UpdateProjectRequest {
   description?: string | null;
   /** The display name. */
   name: string;
+}
+
+/**
+ * A partial change to the Registry settings; omitted fields stay.
+ */
+export interface UpdateRegistrySettingsRequest {
+  /**
+     * Turns Registry-only auto-activation on or off.
+     * @nullable
+     */
+  autoActivate?: boolean | null;
+  /**
+     * `direct` or `pull-request`.
+     * @nullable
+     */
+  changeMode?: string | null;
 }
 
 export type ListAuditEventsParams = {
@@ -5050,6 +9250,75 @@ cursor?: string | null;
 limit?: number | null;
 };
 
+export type ListDnsObservationsParams = {
+/**
+ * The fully qualified name.
+ */
+name: string;
+};
+
+export type ListDnsRecordsParams = {
+/**
+ * The fully qualified name.
+ */
+name: string;
+/**
+ * Only records of this type.
+ */
+type?: string;
+/**
+ * The Cloudflare account (id or label), when several hold the zone.
+ */
+account?: string;
+};
+
+export type ListDnsZonesParams = {
+/**
+ * Only this Cloudflare account (id or label).
+ */
+account?: string;
+};
+
+export type ListExternalAccountsParams = {
+/**
+ * Restrict to one provider kind.
+ */
+kind?: ExternalProviderKindDto;
+/**
+ * The maximum number of accounts to return.
+ * @minimum 0
+ */
+limit?: number;
+/**
+ * The opaque cursor: the last account id of the previous page.
+ */
+cursor?: string;
+};
+
+export type ListImageBuildsParams = {
+/**
+ * Maximum records per page (default 50, maximum 200).
+ * @minimum 0
+ * @nullable
+ */
+limit?: number | null;
+/**
+ * Last build identity returned by the preceding page.
+ * @nullable
+ */
+cursor?: string | null;
+/**
+ * Filter by recipe identity.
+ * @nullable
+ */
+recipeId?: string | null;
+/**
+ * Filter by immutable version identity.
+ * @nullable
+ */
+versionId?: string | null;
+};
+
 export type ListImageRecipesParams = {
 /**
  * The maximum number of recipes to return.
@@ -5060,6 +9329,60 @@ limit?: number;
  * The opaque cursor: the last recipe id of the previous page.
  */
 cursor?: string;
+};
+
+export type ListLabArtifactsParams = {
+/**
+ * Only artifacts from this lease.
+ */
+leaseId?: string;
+/**
+ * Only artifacts from leases serving this project.
+ */
+projectId?: string;
+/**
+ * The `nextCursor` of the previous page.
+ */
+cursor?: string;
+/**
+ * The page size (1–200; default 50).
+ * @minimum 0
+ */
+limit?: number;
+};
+
+export type ListLabLeasesParams = {
+/**
+ * Only leases serving this project.
+ */
+projectId?: string;
+/**
+ * Only leases whose purpose is exactly this.
+ */
+purpose?: string;
+/**
+ * Only leases whose purpose starts with this (case-sensitive).
+ */
+purposePrefix?: string;
+/**
+ * Only leases in these states: comma-separated (`state=ready,provisioning`) or repeated (`state=ready&state=provisioning`); an unknown state is a 400.
+ */
+state?: string;
+/**
+ * Only leases owned by this principal.
+ */
+owner?: string;
+};
+
+export type PutLabFileParams = {
+/**
+ * The absolute guest path of the file to create.
+ */
+path: string;
+/**
+ * Replace an existing regular file at the path (default false).
+ */
+overwrite?: boolean;
 };
 
 export type ListMachinesParams = {
@@ -5173,6 +9496,166 @@ limit?: number;
  * The opaque cursor: the last task's UPID from the previous page.
  */
 cursor?: string;
+};
+
+export type ListRegistryEntriesParams = {
+/**
+ * Only entries of this type.
+ * @nullable
+ */
+type?: string | null;
+/**
+ * Only entries carrying this tag (exact match).
+ * @nullable
+ */
+tag?: string | null;
+/**
+ * Only entries whose key, name, field values, tags, or notes contain
+ * this text (case-insensitive substring).
+ * @nullable
+ */
+q?: string | null;
+/**
+ * Only entries with a relation to this target, as `<class>:<reference>`
+ * (for example `machine:build-1` or `registry:service/aptabase`).
+ * @nullable
+ */
+target?: string | null;
+/**
+ * With `target`, only relations of this type.
+ * @nullable
+ */
+relation?: string | null;
+/**
+ * Opaque cursor returned as the previous page's `nextCursor`.
+ * @nullable
+ */
+cursor?: string | null;
+/**
+ * Requested page size, clamped to the API maximum.
+ * @minimum 0
+ * @nullable
+ */
+limit?: number | null;
+};
+
+export type ListRegistryEntryReferencesParams = {
+/**
+ * Only relations of this type.
+ * @nullable
+ */
+relation?: string | null;
+/**
+ * Opaque cursor returned as the previous page's `nextCursor`.
+ * @nullable
+ */
+cursor?: string | null;
+/**
+ * Requested page size, clamped to the API maximum.
+ * @minimum 0
+ * @nullable
+ */
+limit?: number | null;
+};
+
+export type ListDomainObservationsParams = {
+/**
+ * Only domains with at least one warning.
+ * @nullable
+ */
+attention?: boolean | null;
+/**
+ * Opaque cursor returned as the previous page's `nextCursor`.
+ * @nullable
+ */
+cursor?: string | null;
+/**
+ * Requested page size, clamped to the API maximum.
+ * @minimum 0
+ * @nullable
+ */
+limit?: number | null;
+};
+
+export type ListRegistryReferencesParams = {
+/**
+ * The target, as `<class>:<reference>`: `registry:<type>/<key>`,
+ * `machine:<name>`, `project:<name>`, `coolify:<reference>`, or
+ * `proxmoxGuest:<reference>`.
+ */
+target: string;
+/**
+ * Only relations of this type.
+ * @nullable
+ */
+relation?: string | null;
+/**
+ * Opaque cursor returned as the previous page's `nextCursor`.
+ * @nullable
+ */
+cursor?: string | null;
+/**
+ * Requested page size, clamped to the API maximum.
+ * @minimum 0
+ * @nullable
+ */
+limit?: number | null;
+};
+
+export type ListActionRequestsParams = {
+/**
+ * Only requests in this state: pending, approved, denied, expired, executing, succeeded, or failed.
+ */
+state?: string;
+/**
+ * The maximum number of requests to return (default 50, at most 200).
+ * @minimum 0
+ */
+limit?: number;
+};
+
+export type ListRunningServicesParams = {
+/**
+ * Only services observed by this source: `coolify` or `docker`.
+ * @nullable
+ */
+source?: string | null;
+/**
+ * Only services placed on this machine id.
+ * @nullable
+ */
+machine?: string | null;
+/**
+ * Only services whose name or hostname contains this text
+ * (case-insensitive).
+ * @nullable
+ */
+q?: string | null;
+/**
+ * Opaque cursor returned as the previous page's `nextCursor`.
+ * @nullable
+ */
+cursor?: string | null;
+/**
+ * Requested page size, clamped to the API maximum.
+ * @minimum 0
+ * @nullable
+ */
+limit?: number | null;
+};
+
+export type GetServiceLogsParams = {
+/**
+ * A deployment uuid; the newest deployment when absent.
+ * @nullable
+ */
+deployment?: string | null;
+/**
+ * How many trailing lines to return (default 200, at most 1000).
+ * @minimum 0
+ * @nullable
+ */
+lines?: number | null;
 };
 
 export type ListSkillCatalogParams = {
@@ -5298,6 +9781,197 @@ export const listAuditEvents = async (params?: ListAuditEventsParams, options?: 
 
   const data: listAuditEventsResponse['data'] = body ? JSON.parse(body) : {}
   return { data, status: res.status, headers: res.headers } as listAuditEventsResponse
+}
+
+
+
+export type listCredentialsResponse200 = {
+  data: PageCredentialDto
+  status: 200
+}
+
+export type listCredentialsResponse403 = {
+  data: ApiError
+  status: 403
+}
+
+export type listCredentialsResponse500 = {
+  data: ApiError
+  status: 500
+}
+
+export type listCredentialsResponseSuccess = (listCredentialsResponse200) & {
+  headers: Headers;
+};
+export type listCredentialsResponseError = (listCredentialsResponse403 | listCredentialsResponse500) & {
+  headers: Headers;
+};
+
+export type listCredentialsResponse = (listCredentialsResponseSuccess | listCredentialsResponseError)
+
+export const getListCredentialsUrl = () => {
+
+
+
+
+  return `/api/v1/credentials`
+}
+
+/**
+ * # Errors
+ *
+ * Returns the public error envelope on refusal or backend failure.
+ * @summary Lists the delegated credentials' metadata, newest first.
+ */
+export const listCredentials = async ( options?: RequestInit): Promise<listCredentialsResponse> => {
+
+  const res = await fetch(getListCredentialsUrl(),
+  {
+    ...options,
+    method: 'GET'
+
+
+  }
+)
+
+
+  const body = [204, 205, 304].includes(res.status) ? null : await res.text();
+
+  const data: listCredentialsResponse['data'] = body ? JSON.parse(body) : {}
+  return { data, status: res.status, headers: res.headers } as listCredentialsResponse
+}
+
+
+
+export type issueCredentialResponse201 = {
+  data: ResourceIssuedCredentialDto
+  status: 201
+}
+
+export type issueCredentialResponse400 = {
+  data: ApiError
+  status: 400
+}
+
+export type issueCredentialResponse403 = {
+  data: ApiError
+  status: 403
+}
+
+export type issueCredentialResponse500 = {
+  data: ApiError
+  status: 500
+}
+
+export type issueCredentialResponseSuccess = (issueCredentialResponse201) & {
+  headers: Headers;
+};
+export type issueCredentialResponseError = (issueCredentialResponse400 | issueCredentialResponse403 | issueCredentialResponse500) & {
+  headers: Headers;
+};
+
+export type issueCredentialResponse = (issueCredentialResponseSuccess | issueCredentialResponseError)
+
+export const getIssueCredentialUrl = () => {
+
+
+
+
+  return `/api/v1/credentials`
+}
+
+/**
+ * # Errors
+ *
+ * Returns the public error envelope on refusal or a malformed request.
+ * @summary Issues a delegated credential. The response carries the token exactly
+once.
+ */
+export const issueCredential = async (issueCredentialRequest: IssueCredentialRequest, options?: RequestInit): Promise<issueCredentialResponse> => {
+
+    const getHeaders = (h?: NonNullable<RequestInit['headers']>): Record<string, string | readonly string[]> => {
+    if (!h) return {};
+    if (h instanceof Headers) return Object.fromEntries(h.entries());
+    if (Array.isArray(h)) return Object.fromEntries(h);
+    return h;
+  };
+const res = await fetch(getIssueCredentialUrl(),
+  {
+    ...options,
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...getHeaders(options?.headers) },
+    body: JSON.stringify(issueCredentialRequest)
+  }
+)
+
+
+  const body = [204, 205, 304].includes(res.status) ? null : await res.text();
+
+  const data: issueCredentialResponse['data'] = body ? JSON.parse(body) : {}
+  return { data, status: res.status, headers: res.headers } as issueCredentialResponse
+}
+
+
+
+export type revokeCredentialResponse200 = {
+  data: ResourceCredentialDto
+  status: 200
+}
+
+export type revokeCredentialResponse403 = {
+  data: ApiError
+  status: 403
+}
+
+export type revokeCredentialResponse404 = {
+  data: ApiError
+  status: 404
+}
+
+export type revokeCredentialResponse500 = {
+  data: ApiError
+  status: 500
+}
+
+export type revokeCredentialResponseSuccess = (revokeCredentialResponse200) & {
+  headers: Headers;
+};
+export type revokeCredentialResponseError = (revokeCredentialResponse403 | revokeCredentialResponse404 | revokeCredentialResponse500) & {
+  headers: Headers;
+};
+
+export type revokeCredentialResponse = (revokeCredentialResponseSuccess | revokeCredentialResponseError)
+
+export const getRevokeCredentialUrl = (credentialId: string,) => {
+
+
+
+
+  return `/api/v1/credentials/${credentialId}/revoke`
+}
+
+/**
+ * # Errors
+ *
+ * Returns the public error envelope on refusal or an unknown credential.
+ * @summary Revokes a credential. Its next request is refused.
+ */
+export const revokeCredential = async (credentialId: string, options?: RequestInit): Promise<revokeCredentialResponse> => {
+
+  const res = await fetch(getRevokeCredentialUrl(credentialId),
+  {
+    ...options,
+    method: 'POST'
+
+
+  }
+)
+
+
+  const body = [204, 205, 304].includes(res.status) ? null : await res.text();
+
+  const data: revokeCredentialResponse['data'] = body ? JSON.parse(body) : {}
+  return { data, status: res.status, headers: res.headers } as revokeCredentialResponse
 }
 
 
@@ -5478,7 +10152,10 @@ export const getFetchDesiredRevisionUrl = () => {
  *
  * Returns an API error when no remote is configured, or on authentication,
  * authorization, validation, or storage failure.
- * @summary Fetches a commit of the configured source as a candidate.
+ * @summary Fetches a commit of the configured source as a candidate. This is the
+fetch-now endpoint a webhook or CI step calls after a push: post the
+pushed commit's full SHA. A valid Registry-only candidate then
+activates on its own when `registry.autoActivate` is on.
  */
 export const fetchDesiredRevision = async (fetchDesiredRequest: FetchDesiredRequest, options?: RequestInit): Promise<fetchDesiredRevisionResponse> => {
 
@@ -5771,6 +10448,143 @@ const res = await fetch(getRollbackDesiredRevisionUrl(),
 
 
 
+export type getRegistrySettingsResponse200 = {
+  data: ResourceRegistrySettingsDto
+  status: 200
+}
+
+export type getRegistrySettingsResponse403 = {
+  data: ApiError
+  status: 403
+}
+
+export type getRegistrySettingsResponse500 = {
+  data: ApiError
+  status: 500
+}
+
+export type getRegistrySettingsResponse503 = {
+  data: ApiError
+  status: 503
+}
+
+export type getRegistrySettingsResponseSuccess = (getRegistrySettingsResponse200) & {
+  headers: Headers;
+};
+export type getRegistrySettingsResponseError = (getRegistrySettingsResponse403 | getRegistrySettingsResponse500 | getRegistrySettingsResponse503) & {
+  headers: Headers;
+};
+
+export type getRegistrySettingsResponse = (getRegistrySettingsResponseSuccess | getRegistrySettingsResponseError)
+
+export const getGetRegistrySettingsUrl = () => {
+
+
+
+
+  return `/api/v1/desired/settings`
+}
+
+/**
+ * # Errors
+ *
+ * Returns an API error when authentication, authorization, or storage fails.
+ * @summary Reads the Registry settings (auto-activation and change mode).
+ */
+export const getRegistrySettings = async ( options?: RequestInit): Promise<getRegistrySettingsResponse> => {
+
+  const res = await fetch(getGetRegistrySettingsUrl(),
+  {
+    ...options,
+    method: 'GET'
+
+
+  }
+)
+
+
+  const body = [204, 205, 304].includes(res.status) ? null : await res.text();
+
+  const data: getRegistrySettingsResponse['data'] = body ? JSON.parse(body) : {}
+  return { data, status: res.status, headers: res.headers } as getRegistrySettingsResponse
+}
+
+
+
+export type updateRegistrySettingsResponse200 = {
+  data: ResourceRegistrySettingsDto
+  status: 200
+}
+
+export type updateRegistrySettingsResponse400 = {
+  data: ApiError
+  status: 400
+}
+
+export type updateRegistrySettingsResponse403 = {
+  data: ApiError
+  status: 403
+}
+
+export type updateRegistrySettingsResponse500 = {
+  data: ApiError
+  status: 500
+}
+
+export type updateRegistrySettingsResponse503 = {
+  data: ApiError
+  status: 503
+}
+
+export type updateRegistrySettingsResponseSuccess = (updateRegistrySettingsResponse200) & {
+  headers: Headers;
+};
+export type updateRegistrySettingsResponseError = (updateRegistrySettingsResponse400 | updateRegistrySettingsResponse403 | updateRegistrySettingsResponse500 | updateRegistrySettingsResponse503) & {
+  headers: Headers;
+};
+
+export type updateRegistrySettingsResponse = (updateRegistrySettingsResponseSuccess | updateRegistrySettingsResponseError)
+
+export const getUpdateRegistrySettingsUrl = () => {
+
+
+
+
+  return `/api/v1/desired/settings`
+}
+
+/**
+ * # Errors
+ *
+ * Returns an API error when authentication, authorization, validation, or storage fails.
+ * @summary Changes the Registry settings. Authorized like activation and audited.
+ */
+export const updateRegistrySettings = async (updateRegistrySettingsRequest: UpdateRegistrySettingsRequest, options?: RequestInit): Promise<updateRegistrySettingsResponse> => {
+
+    const getHeaders = (h?: NonNullable<RequestInit['headers']>): Record<string, string | readonly string[]> => {
+    if (!h) return {};
+    if (h instanceof Headers) return Object.fromEntries(h.entries());
+    if (Array.isArray(h)) return Object.fromEntries(h);
+    return h;
+  };
+const res = await fetch(getUpdateRegistrySettingsUrl(),
+  {
+    ...options,
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json', ...getHeaders(options?.headers) },
+    body: JSON.stringify(updateRegistrySettingsRequest)
+  }
+)
+
+
+  const body = [204, 205, 304].includes(res.status) ? null : await res.text();
+
+  const data: updateRegistrySettingsResponse['data'] = body ? JSON.parse(body) : {}
+  return { data, status: res.status, headers: res.headers } as updateRegistrySettingsResponse
+}
+
+
+
 export type getDesiredSourceResponse200 = {
   data: ResourceDesiredSourceDto
   status: 200
@@ -5984,6 +10798,1044 @@ const res = await fetch(getStoreDesiredSourceCredentialUrl(),
 
 
 
+export type createDnsChangeResponse201 = {
+  data: ResourceActionRequestDto
+  status: 201
+}
+
+export type createDnsChangeResponse400 = {
+  data: ApiError
+  status: 400
+}
+
+export type createDnsChangeResponse403 = {
+  data: ApiError
+  status: 403
+}
+
+export type createDnsChangeResponse404 = {
+  data: ApiError
+  status: 404
+}
+
+export type createDnsChangeResponse409 = {
+  data: ApiError
+  status: 409
+}
+
+export type createDnsChangeResponse502 = {
+  data: ApiError
+  status: 502
+}
+
+export type createDnsChangeResponse503 = {
+  data: ApiError
+  status: 503
+}
+
+export type createDnsChangeResponseSuccess = (createDnsChangeResponse201) & {
+  headers: Headers;
+};
+export type createDnsChangeResponseError = (createDnsChangeResponse400 | createDnsChangeResponse403 | createDnsChangeResponse404 | createDnsChangeResponse409 | createDnsChangeResponse502 | createDnsChangeResponse503) & {
+  headers: Headers;
+};
+
+export type createDnsChangeResponse = (createDnsChangeResponseSuccess | createDnsChangeResponseError)
+
+export const getCreateDnsChangeUrl = () => {
+
+
+
+
+  return `/api/v1/dns/changes`
+}
+
+/**
+ * # Errors
+ *
+ * Returns the public error envelope on refusal, invalid values, an unknown
+ * zone, a change that would do nothing, a credential-like TXT value, or a
+ * provider failure.
+ * @summary Requests a record change. The controller reads the zone, computes the
+preview (current record against proposed), and files an action request
+(`dns.record.upsert` or `dns.record.delete`) whose parameters carry that
+preview. The default risk class is `approve`: a person approves it in the
+console or with `fleetctl requests approve`. When the request executes,
+the zone is read again; a zone that changed since the preview fails the
+operation instead of being overwritten.
+ */
+export const createDnsChange = async (createDnsChangeRequest: CreateDnsChangeRequest, options?: RequestInit): Promise<createDnsChangeResponse> => {
+
+    const getHeaders = (h?: NonNullable<RequestInit['headers']>): Record<string, string | readonly string[]> => {
+    if (!h) return {};
+    if (h instanceof Headers) return Object.fromEntries(h.entries());
+    if (Array.isArray(h)) return Object.fromEntries(h);
+    return h;
+  };
+const res = await fetch(getCreateDnsChangeUrl(),
+  {
+    ...options,
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...getHeaders(options?.headers) },
+    body: JSON.stringify(createDnsChangeRequest)
+  }
+)
+
+
+  const body = [204, 205, 304].includes(res.status) ? null : await res.text();
+
+  const data: createDnsChangeResponse['data'] = body ? JSON.parse(body) : {}
+  return { data, status: res.status, headers: res.headers } as createDnsChangeResponse
+}
+
+
+
+export type listDnsObservationsResponse200 = {
+  data: ResourceCloudflareDnsObservationsDto
+  status: 200
+}
+
+export type listDnsObservationsResponse400 = {
+  data: ApiError
+  status: 400
+}
+
+export type listDnsObservationsResponse403 = {
+  data: ApiError
+  status: 403
+}
+
+export type listDnsObservationsResponse503 = {
+  data: ApiError
+  status: 503
+}
+
+export type listDnsObservationsResponseSuccess = (listDnsObservationsResponse200) & {
+  headers: Headers;
+};
+export type listDnsObservationsResponseError = (listDnsObservationsResponse400 | listDnsObservationsResponse403 | listDnsObservationsResponse503) & {
+  headers: Headers;
+};
+
+export type listDnsObservationsResponse = (listDnsObservationsResponseSuccess | listDnsObservationsResponseError)
+
+export const getListDnsObservationsUrl = (params: ListDnsObservationsParams,) => {
+  const normalizedParams = new URLSearchParams();
+
+  Object.entries(params || {}).forEach(([key, value]) => {
+
+    if (value !== undefined) {
+      normalizedParams.append(key, value === null ? 'null' : String(value))
+    }
+  });
+
+  const stringifiedParams = normalizedParams.toString();
+
+  return stringifiedParams.length > 0 ? `/api/v1/dns/observations?${stringifiedParams}` : `/api/v1/dns/observations`
+}
+
+/**
+ * # Errors
+ *
+ * Returns the public error envelope on refusal or a missing or malformed
+ * name.
+ * @summary Reads the records last observed at a name through Cloudflare, without
+calling Cloudflare. These are the zone's own records as Fleet last read
+them (what a change would act on); the public resolver observations of
+the domain enricher are kept apart under `/registry`.
+ */
+export const listDnsObservations = async (params: ListDnsObservationsParams, options?: RequestInit): Promise<listDnsObservationsResponse> => {
+
+  const res = await fetch(getListDnsObservationsUrl(params),
+  {
+    ...options,
+    method: 'GET'
+
+
+  }
+)
+
+
+  const body = [204, 205, 304].includes(res.status) ? null : await res.text();
+
+  const data: listDnsObservationsResponse['data'] = body ? JSON.parse(body) : {}
+  return { data, status: res.status, headers: res.headers } as listDnsObservationsResponse
+}
+
+
+
+export type listDnsRecordsResponse200 = {
+  data: ResourceCloudflareDnsRecordsDto
+  status: 200
+}
+
+export type listDnsRecordsResponse400 = {
+  data: ApiError
+  status: 400
+}
+
+export type listDnsRecordsResponse403 = {
+  data: ApiError
+  status: 403
+}
+
+export type listDnsRecordsResponse404 = {
+  data: ApiError
+  status: 404
+}
+
+export type listDnsRecordsResponse409 = {
+  data: ApiError
+  status: 409
+}
+
+export type listDnsRecordsResponse502 = {
+  data: ApiError
+  status: 502
+}
+
+export type listDnsRecordsResponse503 = {
+  data: ApiError
+  status: 503
+}
+
+export type listDnsRecordsResponseSuccess = (listDnsRecordsResponse200) & {
+  headers: Headers;
+};
+export type listDnsRecordsResponseError = (listDnsRecordsResponse400 | listDnsRecordsResponse403 | listDnsRecordsResponse404 | listDnsRecordsResponse409 | listDnsRecordsResponse502 | listDnsRecordsResponse503) & {
+  headers: Headers;
+};
+
+export type listDnsRecordsResponse = (listDnsRecordsResponseSuccess | listDnsRecordsResponseError)
+
+export const getListDnsRecordsUrl = (params: ListDnsRecordsParams,) => {
+  const normalizedParams = new URLSearchParams();
+
+  Object.entries(params || {}).forEach(([key, value]) => {
+
+    if (value !== undefined) {
+      normalizedParams.append(key, value === null ? 'null' : String(value))
+    }
+  });
+
+  const stringifiedParams = normalizedParams.toString();
+
+  return stringifiedParams.length > 0 ? `/api/v1/dns/records?${stringifiedParams}` : `/api/v1/dns/records`
+}
+
+/**
+ * # Errors
+ *
+ * Returns the public error envelope on refusal, a missing name, an unknown
+ * zone, or a provider failure.
+ * @summary Reads the records at a fully qualified name through the Cloudflare
+account whose zone contains it, and records them as an observation beside
+the matching `domain` Registry entry.
+ */
+export const listDnsRecords = async (params: ListDnsRecordsParams, options?: RequestInit): Promise<listDnsRecordsResponse> => {
+
+  const res = await fetch(getListDnsRecordsUrl(params),
+  {
+    ...options,
+    method: 'GET'
+
+
+  }
+)
+
+
+  const body = [204, 205, 304].includes(res.status) ? null : await res.text();
+
+  const data: listDnsRecordsResponse['data'] = body ? JSON.parse(body) : {}
+  return { data, status: res.status, headers: res.headers } as listDnsRecordsResponse
+}
+
+
+
+export type listDnsZonesResponse200 = {
+  data: ResourceDnsZonesDto
+  status: 200
+}
+
+export type listDnsZonesResponse403 = {
+  data: ApiError
+  status: 403
+}
+
+export type listDnsZonesResponse404 = {
+  data: ApiError
+  status: 404
+}
+
+export type listDnsZonesResponse503 = {
+  data: ApiError
+  status: 503
+}
+
+export type listDnsZonesResponseSuccess = (listDnsZonesResponse200) & {
+  headers: Headers;
+};
+export type listDnsZonesResponseError = (listDnsZonesResponse403 | listDnsZonesResponse404 | listDnsZonesResponse503) & {
+  headers: Headers;
+};
+
+export type listDnsZonesResponse = (listDnsZonesResponseSuccess | listDnsZonesResponseError)
+
+export const getListDnsZonesUrl = (params?: ListDnsZonesParams,) => {
+  const normalizedParams = new URLSearchParams();
+
+  Object.entries(params || {}).forEach(([key, value]) => {
+
+    if (value !== undefined) {
+      normalizedParams.append(key, value === null ? 'null' : String(value))
+    }
+  });
+
+  const stringifiedParams = normalizedParams.toString();
+
+  return stringifiedParams.length > 0 ? `/api/v1/dns/zones?${stringifiedParams}` : `/api/v1/dns/zones`
+}
+
+/**
+ * # Errors
+ *
+ * Returns the public error envelope on refusal or when no Cloudflare
+ * account exists.
+ * @summary Lists the zones each Cloudflare account's token can see. One account's
+failure is reported on that account, not as a failure of the rest.
+ */
+export const listDnsZones = async (params?: ListDnsZonesParams, options?: RequestInit): Promise<listDnsZonesResponse> => {
+
+  const res = await fetch(getListDnsZonesUrl(params),
+  {
+    ...options,
+    method: 'GET'
+
+
+  }
+)
+
+
+  const body = [204, 205, 304].includes(res.status) ? null : await res.text();
+
+  const data: listDnsZonesResponse['data'] = body ? JSON.parse(body) : {}
+  return { data, status: res.status, headers: res.headers } as listDnsZonesResponse
+}
+
+
+
+export type listExternalAccountsResponse200 = {
+  data: PageExternalAccountDto
+  status: 200
+}
+
+export type listExternalAccountsResponse403 = {
+  data: ApiError
+  status: 403
+}
+
+export type listExternalAccountsResponseSuccess = (listExternalAccountsResponse200) & {
+  headers: Headers;
+};
+export type listExternalAccountsResponseError = (listExternalAccountsResponse403) & {
+  headers: Headers;
+};
+
+export type listExternalAccountsResponse = (listExternalAccountsResponseSuccess | listExternalAccountsResponseError)
+
+export const getListExternalAccountsUrl = (params?: ListExternalAccountsParams,) => {
+  const normalizedParams = new URLSearchParams();
+
+  Object.entries(params || {}).forEach(([key, value]) => {
+
+    if (value !== undefined) {
+      normalizedParams.append(key, value === null ? 'null' : String(value))
+    }
+  });
+
+  const stringifiedParams = normalizedParams.toString();
+
+  return stringifiedParams.length > 0 ? `/api/v1/external-accounts?${stringifiedParams}` : `/api/v1/external-accounts`
+}
+
+/**
+ * # Errors
+ *
+ * Returns the public error envelope on refusal or backend failure.
+ * @summary Lists external provider accounts.
+ */
+export const listExternalAccounts = async (params?: ListExternalAccountsParams, options?: RequestInit): Promise<listExternalAccountsResponse> => {
+
+  const res = await fetch(getListExternalAccountsUrl(params),
+  {
+    ...options,
+    method: 'GET'
+
+
+  }
+)
+
+
+  const body = [204, 205, 304].includes(res.status) ? null : await res.text();
+
+  const data: listExternalAccountsResponse['data'] = body ? JSON.parse(body) : {}
+  return { data, status: res.status, headers: res.headers } as listExternalAccountsResponse
+}
+
+
+
+export type createExternalAccountResponse201 = {
+  data: ResourceExternalAccountDto
+  status: 201
+}
+
+export type createExternalAccountResponse400 = {
+  data: ApiError
+  status: 400
+}
+
+export type createExternalAccountResponse403 = {
+  data: ApiError
+  status: 403
+}
+
+export type createExternalAccountResponse409 = {
+  data: ApiError
+  status: 409
+}
+
+export type createExternalAccountResponseSuccess = (createExternalAccountResponse201) & {
+  headers: Headers;
+};
+export type createExternalAccountResponseError = (createExternalAccountResponse400 | createExternalAccountResponse403 | createExternalAccountResponse409) & {
+  headers: Headers;
+};
+
+export type createExternalAccountResponse = (createExternalAccountResponseSuccess | createExternalAccountResponseError)
+
+export const getCreateExternalAccountUrl = () => {
+
+
+
+
+  return `/api/v1/external-accounts`
+}
+
+/**
+ * # Errors
+ *
+ * Returns the public error envelope on refusal, conflict, or backend
+ * failure.
+ * @summary Registers an account and stores its token.
+ */
+export const createExternalAccount = async (createExternalAccountRequest: CreateExternalAccountRequest, options?: RequestInit): Promise<createExternalAccountResponse> => {
+
+    const getHeaders = (h?: NonNullable<RequestInit['headers']>): Record<string, string | readonly string[]> => {
+    if (!h) return {};
+    if (h instanceof Headers) return Object.fromEntries(h.entries());
+    if (Array.isArray(h)) return Object.fromEntries(h);
+    return h;
+  };
+const res = await fetch(getCreateExternalAccountUrl(),
+  {
+    ...options,
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...getHeaders(options?.headers) },
+    body: JSON.stringify(createExternalAccountRequest)
+  }
+)
+
+
+  const body = [204, 205, 304].includes(res.status) ? null : await res.text();
+
+  const data: createExternalAccountResponse['data'] = body ? JSON.parse(body) : {}
+  return { data, status: res.status, headers: res.headers } as createExternalAccountResponse
+}
+
+
+
+export type getExternalAccountResponse200 = {
+  data: ResourceExternalAccountDto
+  status: 200
+}
+
+export type getExternalAccountResponse403 = {
+  data: ApiError
+  status: 403
+}
+
+export type getExternalAccountResponse404 = {
+  data: ApiError
+  status: 404
+}
+
+export type getExternalAccountResponseSuccess = (getExternalAccountResponse200) & {
+  headers: Headers;
+};
+export type getExternalAccountResponseError = (getExternalAccountResponse403 | getExternalAccountResponse404) & {
+  headers: Headers;
+};
+
+export type getExternalAccountResponse = (getExternalAccountResponseSuccess | getExternalAccountResponseError)
+
+export const getGetExternalAccountUrl = (accountId: string,) => {
+
+
+
+
+  return `/api/v1/external-accounts/${accountId}`
+}
+
+/**
+ * # Errors
+ *
+ * Returns the public error envelope on refusal or an unknown account.
+ * @summary Reads one external provider account.
+ */
+export const getExternalAccount = async (accountId: string, options?: RequestInit): Promise<getExternalAccountResponse> => {
+
+  const res = await fetch(getGetExternalAccountUrl(accountId),
+  {
+    ...options,
+    method: 'GET'
+
+
+  }
+)
+
+
+  const body = [204, 205, 304].includes(res.status) ? null : await res.text();
+
+  const data: getExternalAccountResponse['data'] = body ? JSON.parse(body) : {}
+  return { data, status: res.status, headers: res.headers } as getExternalAccountResponse
+}
+
+
+
+export type deleteExternalAccountResponse204 = {
+  data: void
+  status: 204
+}
+
+export type deleteExternalAccountResponse403 = {
+  data: ApiError
+  status: 403
+}
+
+export type deleteExternalAccountResponse404 = {
+  data: ApiError
+  status: 404
+}
+
+export type deleteExternalAccountResponseSuccess = (deleteExternalAccountResponse204) & {
+  headers: Headers;
+};
+export type deleteExternalAccountResponseError = (deleteExternalAccountResponse403 | deleteExternalAccountResponse404) & {
+  headers: Headers;
+};
+
+export type deleteExternalAccountResponse = (deleteExternalAccountResponseSuccess | deleteExternalAccountResponseError)
+
+export const getDeleteExternalAccountUrl = (accountId: string,) => {
+
+
+
+
+  return `/api/v1/external-accounts/${accountId}`
+}
+
+/**
+ * # Errors
+ *
+ * Returns the public error envelope on refusal, an unknown account, or a
+ * backend failure.
+ * @summary Removes an account and its token.
+ */
+export const deleteExternalAccount = async (accountId: string, options?: RequestInit): Promise<deleteExternalAccountResponse> => {
+
+  const res = await fetch(getDeleteExternalAccountUrl(accountId),
+  {
+    ...options,
+    method: 'DELETE'
+
+
+  }
+)
+
+
+  const body = [204, 205, 304].includes(res.status) ? null : await res.text();
+
+  const data: deleteExternalAccountResponse['data'] = body ? JSON.parse(body) : undefined
+  return { data, status: res.status, headers: res.headers } as deleteExternalAccountResponse
+}
+
+
+
+export type updateExternalAccountResponse200 = {
+  data: ResourceExternalAccountDto
+  status: 200
+}
+
+export type updateExternalAccountResponse400 = {
+  data: ApiError
+  status: 400
+}
+
+export type updateExternalAccountResponse403 = {
+  data: ApiError
+  status: 403
+}
+
+export type updateExternalAccountResponse404 = {
+  data: ApiError
+  status: 404
+}
+
+export type updateExternalAccountResponse409 = {
+  data: ApiError
+  status: 409
+}
+
+export type updateExternalAccountResponseSuccess = (updateExternalAccountResponse200) & {
+  headers: Headers;
+};
+export type updateExternalAccountResponseError = (updateExternalAccountResponse400 | updateExternalAccountResponse403 | updateExternalAccountResponse404 | updateExternalAccountResponse409) & {
+  headers: Headers;
+};
+
+export type updateExternalAccountResponse = (updateExternalAccountResponseSuccess | updateExternalAccountResponseError)
+
+export const getUpdateExternalAccountUrl = (accountId: string,) => {
+
+
+
+
+  return `/api/v1/external-accounts/${accountId}`
+}
+
+/**
+ * # Errors
+ *
+ * Returns the public error envelope on refusal, an unknown account, a
+ * conflict, or a malformed request.
+ * @summary Updates an account; a supplied token replaces the stored one.
+ */
+export const updateExternalAccount = async (accountId: string,
+    updateExternalAccountRequest: UpdateExternalAccountRequest, options?: RequestInit): Promise<updateExternalAccountResponse> => {
+
+    const getHeaders = (h?: NonNullable<RequestInit['headers']>): Record<string, string | readonly string[]> => {
+    if (!h) return {};
+    if (h instanceof Headers) return Object.fromEntries(h.entries());
+    if (Array.isArray(h)) return Object.fromEntries(h);
+    return h;
+  };
+const res = await fetch(getUpdateExternalAccountUrl(accountId),
+  {
+    ...options,
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json', ...getHeaders(options?.headers) },
+    body: JSON.stringify(updateExternalAccountRequest)
+  }
+)
+
+
+  const body = [204, 205, 304].includes(res.status) ? null : await res.text();
+
+  const data: updateExternalAccountResponse['data'] = body ? JSON.parse(body) : {}
+  return { data, status: res.status, headers: res.headers } as updateExternalAccountResponse
+}
+
+
+
+export type discoverCoolifyAccountResponse200 = {
+  data: ResourceCoolifyObservationDto
+  status: 200
+}
+
+export type discoverCoolifyAccountResponse400 = {
+  data: ApiError
+  status: 400
+}
+
+export type discoverCoolifyAccountResponse403 = {
+  data: ApiError
+  status: 403
+}
+
+export type discoverCoolifyAccountResponse404 = {
+  data: ApiError
+  status: 404
+}
+
+export type discoverCoolifyAccountResponse409 = {
+  data: ApiError
+  status: 409
+}
+
+export type discoverCoolifyAccountResponseSuccess = (discoverCoolifyAccountResponse200) & {
+  headers: Headers;
+};
+export type discoverCoolifyAccountResponseError = (discoverCoolifyAccountResponse400 | discoverCoolifyAccountResponse403 | discoverCoolifyAccountResponse404 | discoverCoolifyAccountResponse409) & {
+  headers: Headers;
+};
+
+export type discoverCoolifyAccountResponse = (discoverCoolifyAccountResponseSuccess | discoverCoolifyAccountResponseError)
+
+export const getDiscoverCoolifyAccountUrl = (accountId: string,) => {
+
+
+
+
+  return `/api/v1/external-accounts/${accountId}/coolify/discover`
+}
+
+/**
+ * # Errors
+ *
+ * Returns the public error envelope on refusal, an unknown or non-Coolify
+ * account, or a missing stored token.
+ * @summary Runs a read-only discovery of a Coolify account and records the
+snapshot. An unreachable or refusing Coolify is a successful run whose
+per-class state says so; the previous items stay, marked stale.
+ */
+export const discoverCoolifyAccount = async (accountId: string, options?: RequestInit): Promise<discoverCoolifyAccountResponse> => {
+
+  const res = await fetch(getDiscoverCoolifyAccountUrl(accountId),
+  {
+    ...options,
+    method: 'POST'
+
+
+  }
+)
+
+
+  const body = [204, 205, 304].includes(res.status) ? null : await res.text();
+
+  const data: discoverCoolifyAccountResponse['data'] = body ? JSON.parse(body) : {}
+  return { data, status: res.status, headers: res.headers } as discoverCoolifyAccountResponse
+}
+
+
+
+export type getCoolifyObservationsResponse200 = {
+  data: ResourceCoolifyObservationDto
+  status: 200
+}
+
+export type getCoolifyObservationsResponse400 = {
+  data: ApiError
+  status: 400
+}
+
+export type getCoolifyObservationsResponse403 = {
+  data: ApiError
+  status: 403
+}
+
+export type getCoolifyObservationsResponse404 = {
+  data: ApiError
+  status: 404
+}
+
+export type getCoolifyObservationsResponseSuccess = (getCoolifyObservationsResponse200) & {
+  headers: Headers;
+};
+export type getCoolifyObservationsResponseError = (getCoolifyObservationsResponse400 | getCoolifyObservationsResponse403 | getCoolifyObservationsResponse404) & {
+  headers: Headers;
+};
+
+export type getCoolifyObservationsResponse = (getCoolifyObservationsResponseSuccess | getCoolifyObservationsResponseError)
+
+export const getGetCoolifyObservationsUrl = (accountId: string,) => {
+
+
+
+
+  return `/api/v1/external-accounts/${accountId}/coolify/observations`
+}
+
+/**
+ * # Errors
+ *
+ * Returns the public error envelope on refusal, an unknown or non-Coolify
+ * account, or when no discovery has run yet.
+ * @summary Reads the cached Coolify snapshot of an account, with per-class stamps
+and staleness evaluated now.
+ */
+export const getCoolifyObservations = async (accountId: string, options?: RequestInit): Promise<getCoolifyObservationsResponse> => {
+
+  const res = await fetch(getGetCoolifyObservationsUrl(accountId),
+  {
+    ...options,
+    method: 'GET'
+
+
+  }
+)
+
+
+  const body = [204, 205, 304].includes(res.status) ? null : await res.text();
+
+  const data: getCoolifyObservationsResponse['data'] = body ? JSON.parse(body) : {}
+  return { data, status: res.status, headers: res.headers } as getCoolifyObservationsResponse
+}
+
+
+
+export type probeExternalAccountResponse200 = {
+  data: ResourceExternalAccountDto
+  status: 200
+}
+
+export type probeExternalAccountResponse403 = {
+  data: ApiError
+  status: 403
+}
+
+export type probeExternalAccountResponse404 = {
+  data: ApiError
+  status: 404
+}
+
+export type probeExternalAccountResponse409 = {
+  data: ApiError
+  status: 409
+}
+
+export type probeExternalAccountResponseSuccess = (probeExternalAccountResponse200) & {
+  headers: Headers;
+};
+export type probeExternalAccountResponseError = (probeExternalAccountResponse403 | probeExternalAccountResponse404 | probeExternalAccountResponse409) & {
+  headers: Headers;
+};
+
+export type probeExternalAccountResponse = (probeExternalAccountResponseSuccess | probeExternalAccountResponseError)
+
+export const getProbeExternalAccountUrl = (accountId: string,) => {
+
+
+
+
+  return `/api/v1/external-accounts/${accountId}/probe`
+}
+
+/**
+ * # Errors
+ *
+ * Returns the public error envelope on refusal, an unknown account, or a
+ * missing stored token.
+ * @summary Probes an account with its stored token and records the classified
+result. An unreachable or refusing service is a successful probe whose
+status says so.
+ */
+export const probeExternalAccount = async (accountId: string, options?: RequestInit): Promise<probeExternalAccountResponse> => {
+
+  const res = await fetch(getProbeExternalAccountUrl(accountId),
+  {
+    ...options,
+    method: 'POST'
+
+
+  }
+)
+
+
+  const body = [204, 205, 304].includes(res.status) ? null : await res.text();
+
+  const data: probeExternalAccountResponse['data'] = body ? JSON.parse(body) : {}
+  return { data, status: res.status, headers: res.headers } as probeExternalAccountResponse
+}
+
+
+
+export type listImageBuildAddressesResponse200 = {
+  data: PageBuildAddressDto
+  status: 200
+}
+
+export type listImageBuildAddressesResponse403 = {
+  data: ApiError
+  status: 403
+}
+
+export type listImageBuildAddressesResponseSuccess = (listImageBuildAddressesResponse200) & {
+  headers: Headers;
+};
+export type listImageBuildAddressesResponseError = (listImageBuildAddressesResponse403) & {
+  headers: Headers;
+};
+
+export type listImageBuildAddressesResponse = (listImageBuildAddressesResponseSuccess | listImageBuildAddressesResponseError)
+
+export const getListImageBuildAddressesUrl = () => {
+
+
+
+
+  return `/api/v1/images/build-addresses`
+}
+
+/**
+ * # Errors
+ *
+ * Returns the public error envelope on refusal or backend failure.
+ * @summary Lists the build addresses that are held or quarantined.
+ */
+export const listImageBuildAddresses = async ( options?: RequestInit): Promise<listImageBuildAddressesResponse> => {
+
+  const res = await fetch(getListImageBuildAddressesUrl(),
+  {
+    ...options,
+    method: 'GET'
+
+
+  }
+)
+
+
+  const body = [204, 205, 304].includes(res.status) ? null : await res.text();
+
+  const data: listImageBuildAddressesResponse['data'] = body ? JSON.parse(body) : {}
+  return { data, status: res.status, headers: res.headers } as listImageBuildAddressesResponse
+}
+
+
+
+export type clearImageBuildAddressResponse200 = {
+  data: ResourceClearedBuildAddressDto
+  status: 200
+}
+
+export type clearImageBuildAddressResponse400 = {
+  data: ApiError
+  status: 400
+}
+
+export type clearImageBuildAddressResponse403 = {
+  data: ApiError
+  status: 403
+}
+
+export type clearImageBuildAddressResponse404 = {
+  data: ApiError
+  status: 404
+}
+
+export type clearImageBuildAddressResponse409 = {
+  data: ApiError
+  status: 409
+}
+
+export type clearImageBuildAddressResponseSuccess = (clearImageBuildAddressResponse200) & {
+  headers: Headers;
+};
+export type clearImageBuildAddressResponseError = (clearImageBuildAddressResponse400 | clearImageBuildAddressResponse403 | clearImageBuildAddressResponse404 | clearImageBuildAddressResponse409) & {
+  headers: Headers;
+};
+
+export type clearImageBuildAddressResponse = (clearImageBuildAddressResponseSuccess | clearImageBuildAddressResponseError)
+
+export const getClearImageBuildAddressUrl = (address: string,) => {
+
+
+
+
+  return `/api/v1/images/build-addresses/${address}/clear`
+}
+
+/**
+ * # Errors
+ *
+ * Returns the public error envelope on refusal, a malformed address, an
+ * address that is not quarantined, or an address a running build holds.
+ * @summary Ends the quarantine of one build address early. Remove the stranded VM
+first; Fleet does not probe for it.
+ */
+export const clearImageBuildAddress = async (address: string, options?: RequestInit): Promise<clearImageBuildAddressResponse> => {
+
+  const res = await fetch(getClearImageBuildAddressUrl(address),
+  {
+    ...options,
+    method: 'POST'
+
+
+  }
+)
+
+
+  const body = [204, 205, 304].includes(res.status) ? null : await res.text();
+
+  const data: clearImageBuildAddressResponse['data'] = body ? JSON.parse(body) : {}
+  return { data, status: res.status, headers: res.headers } as clearImageBuildAddressResponse
+}
+
+
+
+export type listImageBuildsResponse200 = {
+  data: PageImageBuildDto
+  status: 200
+}
+
+export type listImageBuildsResponse400 = {
+  data: ApiError
+  status: 400
+}
+
+export type listImageBuildsResponse403 = {
+  data: ApiError
+  status: 403
+}
+
+export type listImageBuildsResponseSuccess = (listImageBuildsResponse200) & {
+  headers: Headers;
+};
+export type listImageBuildsResponseError = (listImageBuildsResponse400 | listImageBuildsResponse403) & {
+  headers: Headers;
+};
+
+export type listImageBuildsResponse = (listImageBuildsResponseSuccess | listImageBuildsResponseError)
+
+export const getListImageBuildsUrl = (params?: ListImageBuildsParams,) => {
+  const normalizedParams = new URLSearchParams();
+
+  Object.entries(params || {}).forEach(([key, value]) => {
+
+    if (value !== undefined) {
+      normalizedParams.append(key, value === null ? 'null' : String(value))
+    }
+  });
+
+  const stringifiedParams = normalizedParams.toString();
+
+  return stringifiedParams.length > 0 ? `/api/v1/images/builds?${stringifiedParams}` : `/api/v1/images/builds`
+}
+
+/**
+ * # Errors
+ * Returns the standard error envelope on denial or backend failure.
+ * @summary Lists recorded image builds under images.read.
+ */
+export const listImageBuilds = async (params?: ListImageBuildsParams, options?: RequestInit): Promise<listImageBuildsResponse> => {
+
+  const res = await fetch(getListImageBuildsUrl(params),
+  {
+    ...options,
+    method: 'GET'
+
+
+  }
+)
+
+
+  const body = [204, 205, 304].includes(res.status) ? null : await res.text();
+
+  const data: listImageBuildsResponse['data'] = body ? JSON.parse(body) : {}
+  return { data, status: res.status, headers: res.headers } as listImageBuildsResponse
+}
+
+
+
 export type startImageBuildResponse202 = {
   data: ResourceOperationDto
   status: 202
@@ -6051,6 +11903,63 @@ const res = await fetch(getStartImageBuildUrl(),
 
   const data: startImageBuildResponse['data'] = body ? JSON.parse(body) : {}
   return { data, status: res.status, headers: res.headers } as startImageBuildResponse
+}
+
+
+
+export type getImageBuildResponse200 = {
+  data: ResourceImageBuildDto
+  status: 200
+}
+
+export type getImageBuildResponse403 = {
+  data: ApiError
+  status: 403
+}
+
+export type getImageBuildResponse404 = {
+  data: ApiError
+  status: 404
+}
+
+export type getImageBuildResponseSuccess = (getImageBuildResponse200) & {
+  headers: Headers;
+};
+export type getImageBuildResponseError = (getImageBuildResponse403 | getImageBuildResponse404) & {
+  headers: Headers;
+};
+
+export type getImageBuildResponse = (getImageBuildResponseSuccess | getImageBuildResponseError)
+
+export const getGetImageBuildUrl = (buildId: string,) => {
+
+
+
+
+  return `/api/v1/images/builds/${buildId}`
+}
+
+/**
+ * # Errors
+ * Returns the standard error envelope on denial, missing record or backend failure.
+ * @summary Reads one recorded image build under images.read.
+ */
+export const getImageBuild = async (buildId: string, options?: RequestInit): Promise<getImageBuildResponse> => {
+
+  const res = await fetch(getGetImageBuildUrl(buildId),
+  {
+    ...options,
+    method: 'GET'
+
+
+  }
+)
+
+
+  const body = [204, 205, 304].includes(res.status) ? null : await res.text();
+
+  const data: getImageBuildResponse['data'] = body ? JSON.parse(body) : {}
+  return { data, status: res.status, headers: res.headers } as getImageBuildResponse
 }
 
 
@@ -6367,6 +12276,11 @@ export type publishImageRecipeResponse201 = {
   status: 201
 }
 
+export type publishImageRecipeResponse400 = {
+  data: ApiError
+  status: 400
+}
+
 export type publishImageRecipeResponse404 = {
   data: ApiError
   status: 404
@@ -6375,7 +12289,7 @@ export type publishImageRecipeResponse404 = {
 export type publishImageRecipeResponseSuccess = (publishImageRecipeResponse201) & {
   headers: Headers;
 };
-export type publishImageRecipeResponseError = (publishImageRecipeResponse404) & {
+export type publishImageRecipeResponseError = (publishImageRecipeResponse400 | publishImageRecipeResponse404) & {
   headers: Headers;
 };
 
@@ -6392,18 +12306,26 @@ export const getPublishImageRecipeUrl = (recipeId: string,) => {
 /**
  * # Errors
  *
- * Returns the public error envelope on refusal or an unknown recipe.
+ * Returns the public error envelope on refusal, a malformed body, or an
+ * unknown recipe.
  * @summary Publishes a draft: freezes an immutable version identified by its
 content digest. Idempotent by construction.
  */
-export const publishImageRecipe = async (recipeId: string, options?: RequestInit): Promise<publishImageRecipeResponse> => {
+export const publishImageRecipe = async (recipeId: string,
+    nullPublishRecipeRequest?: null | PublishRecipeRequest, options?: RequestInit): Promise<publishImageRecipeResponse> => {
 
-  const res = await fetch(getPublishImageRecipeUrl(recipeId),
+    const getHeaders = (h?: NonNullable<RequestInit['headers']>): Record<string, string | readonly string[]> => {
+    if (!h) return {};
+    if (h instanceof Headers) return Object.fromEntries(h.entries());
+    if (Array.isArray(h)) return Object.fromEntries(h);
+    return h;
+  };
+const res = await fetch(getPublishImageRecipeUrl(recipeId),
   {
     ...options,
-    method: 'POST'
-
-
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...getHeaders(options?.headers) },
+    body: JSON.stringify(nullPublishRecipeRequest)
   }
 )
 
@@ -6465,6 +12387,190 @@ export const listImageRecipeVersions = async (recipeId: string, options?: Reques
 
   const data: listImageRecipeVersionsResponse['data'] = body ? JSON.parse(body) : {}
   return { data, status: res.status, headers: res.headers } as listImageRecipeVersionsResponse
+}
+
+
+
+export type listImageSecretsResponse200 = {
+  data: PageImageSecretDto
+  status: 200
+}
+
+export type listImageSecretsResponse403 = {
+  data: ApiError
+  status: 403
+}
+
+export type listImageSecretsResponseSuccess = (listImageSecretsResponse200) & {
+  headers: Headers;
+};
+export type listImageSecretsResponseError = (listImageSecretsResponse403) & {
+  headers: Headers;
+};
+
+export type listImageSecretsResponse = (listImageSecretsResponseSuccess | listImageSecretsResponseError)
+
+export const getListImageSecretsUrl = () => {
+
+
+
+
+  return `/api/v1/images/secrets`
+}
+
+/**
+ * # Errors
+ *
+ * Returns the public error envelope on refusal or backend failure.
+ * @summary Lists the names of the `images/<name>` build secrets. Values are never
+returned.
+ */
+export const listImageSecrets = async ( options?: RequestInit): Promise<listImageSecretsResponse> => {
+
+  const res = await fetch(getListImageSecretsUrl(),
+  {
+    ...options,
+    method: 'GET'
+
+
+  }
+)
+
+
+  const body = [204, 205, 304].includes(res.status) ? null : await res.text();
+
+  const data: listImageSecretsResponse['data'] = body ? JSON.parse(body) : {}
+  return { data, status: res.status, headers: res.headers } as listImageSecretsResponse
+}
+
+
+
+export type setImageSecretResponse200 = {
+  data: ResourceImageSecretDto
+  status: 200
+}
+
+export type setImageSecretResponse400 = {
+  data: ApiError
+  status: 400
+}
+
+export type setImageSecretResponse403 = {
+  data: ApiError
+  status: 403
+}
+
+export type setImageSecretResponseSuccess = (setImageSecretResponse200) & {
+  headers: Headers;
+};
+export type setImageSecretResponseError = (setImageSecretResponse400 | setImageSecretResponse403) & {
+  headers: Headers;
+};
+
+export type setImageSecretResponse = (setImageSecretResponseSuccess | setImageSecretResponseError)
+
+export const getSetImageSecretUrl = () => {
+
+
+
+
+  return `/api/v1/images/secrets`
+}
+
+/**
+ * # Errors
+ *
+ * Returns the public error envelope on refusal, a malformed name or
+ * value, or backend failure.
+ * @summary Creates or replaces one `images/<name>` build secret. The value is
+write-only; the answer carries the record name only.
+ */
+export const setImageSecret = async (setImageSecretRequest: SetImageSecretRequest, options?: RequestInit): Promise<setImageSecretResponse> => {
+
+    const getHeaders = (h?: NonNullable<RequestInit['headers']>): Record<string, string | readonly string[]> => {
+    if (!h) return {};
+    if (h instanceof Headers) return Object.fromEntries(h.entries());
+    if (Array.isArray(h)) return Object.fromEntries(h);
+    return h;
+  };
+const res = await fetch(getSetImageSecretUrl(),
+  {
+    ...options,
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...getHeaders(options?.headers) },
+    body: JSON.stringify(setImageSecretRequest)
+  }
+)
+
+
+  const body = [204, 205, 304].includes(res.status) ? null : await res.text();
+
+  const data: setImageSecretResponse['data'] = body ? JSON.parse(body) : {}
+  return { data, status: res.status, headers: res.headers } as setImageSecretResponse
+}
+
+
+
+export type deleteImageSecretResponse200 = {
+  data: ResourceImageSecretDto
+  status: 200
+}
+
+export type deleteImageSecretResponse400 = {
+  data: ApiError
+  status: 400
+}
+
+export type deleteImageSecretResponse403 = {
+  data: ApiError
+  status: 403
+}
+
+export type deleteImageSecretResponse404 = {
+  data: ApiError
+  status: 404
+}
+
+export type deleteImageSecretResponseSuccess = (deleteImageSecretResponse200) & {
+  headers: Headers;
+};
+export type deleteImageSecretResponseError = (deleteImageSecretResponse400 | deleteImageSecretResponse403 | deleteImageSecretResponse404) & {
+  headers: Headers;
+};
+
+export type deleteImageSecretResponse = (deleteImageSecretResponseSuccess | deleteImageSecretResponseError)
+
+export const getDeleteImageSecretUrl = (name: string,) => {
+
+
+
+
+  return `/api/v1/images/secrets/${name}`
+}
+
+/**
+ * # Errors
+ *
+ * Returns the public error envelope on refusal, a malformed name, or an
+ * unknown secret.
+ * @summary Deletes one `images/<name>` build secret.
+ */
+export const deleteImageSecret = async (name: string, options?: RequestInit): Promise<deleteImageSecretResponse> => {
+
+  const res = await fetch(getDeleteImageSecretUrl(name),
+  {
+    ...options,
+    method: 'DELETE'
+
+
+  }
+)
+
+
+  const body = [204, 205, 304].includes(res.status) ? null : await res.text();
+
+  const data: deleteImageSecretResponse['data'] = body ? JSON.parse(body) : {}
+  return { data, status: res.status, headers: res.headers } as deleteImageSecretResponse
 }
 
 
@@ -6570,8 +12676,8 @@ export const getPromoteImageVersionUrl = (versionId: string,) => {
  * Returns the public error envelope on refusal, an unknown version, or a
  * gate refusal.
  * @summary Promotes one version as the recipe's built image. The gate verifies
-the version's build operation completed successfully with a recorded
-artifact, queried from the operation record — never assumed.
+the latest immutable build record has matching inputs and a successful
+output template.
  */
 export const promoteImageVersion = async (versionId: string, options?: RequestInit): Promise<promoteImageVersionResponse> => {
 
@@ -6593,9 +12699,300 @@ export const promoteImageVersion = async (versionId: string, options?: RequestIn
 
 
 
+export type listLabArtifactsResponse200 = {
+  data: PageLabArtifactDto
+  status: 200
+}
+
+export type listLabArtifactsResponse400 = {
+  data: ApiError
+  status: 400
+}
+
+export type listLabArtifactsResponse403 = {
+  data: ApiError
+  status: 403
+}
+
+export type listLabArtifactsResponse500 = {
+  data: ApiError
+  status: 500
+}
+
+export type listLabArtifactsResponse503 = {
+  data: ApiError
+  status: 503
+}
+
+export type listLabArtifactsResponseSuccess = (listLabArtifactsResponse200) & {
+  headers: Headers;
+};
+export type listLabArtifactsResponseError = (listLabArtifactsResponse400 | listLabArtifactsResponse403 | listLabArtifactsResponse500 | listLabArtifactsResponse503) & {
+  headers: Headers;
+};
+
+export type listLabArtifactsResponse = (listLabArtifactsResponseSuccess | listLabArtifactsResponseError)
+
+export const getListLabArtifactsUrl = (params?: ListLabArtifactsParams,) => {
+  const normalizedParams = new URLSearchParams();
+
+  Object.entries(params || {}).forEach(([key, value]) => {
+
+    if (value !== undefined) {
+      normalizedParams.append(key, value === null ? 'null' : String(value))
+    }
+  });
+
+  const stringifiedParams = normalizedParams.toString();
+
+  return stringifiedParams.length > 0 ? `/api/v1/lab/artifacts?${stringifiedParams}` : `/api/v1/lab/artifacts`
+}
+
+/**
+ * # Errors
+ *
+ * Returns the public error envelope on refusal or backend failure.
+ * @summary Lists the stored Lab artifacts, newest first, one page at a time.
+ */
+export const listLabArtifacts = async (params?: ListLabArtifactsParams, options?: RequestInit): Promise<listLabArtifactsResponse> => {
+
+  const res = await fetch(getListLabArtifactsUrl(params),
+  {
+    ...options,
+    method: 'GET'
+
+
+  }
+)
+
+
+  const body = [204, 205, 304].includes(res.status) ? null : await res.text();
+
+  const data: listLabArtifactsResponse['data'] = body ? JSON.parse(body) : {}
+  return { data, status: res.status, headers: res.headers } as listLabArtifactsResponse
+}
+
+
+
+export type getLabArtifactResponse200 = {
+  data: ResourceLabArtifactDto
+  status: 200
+}
+
+export type getLabArtifactResponse403 = {
+  data: ApiError
+  status: 403
+}
+
+export type getLabArtifactResponse404 = {
+  data: ApiError
+  status: 404
+}
+
+export type getLabArtifactResponse500 = {
+  data: ApiError
+  status: 500
+}
+
+export type getLabArtifactResponse503 = {
+  data: ApiError
+  status: 503
+}
+
+export type getLabArtifactResponseSuccess = (getLabArtifactResponse200) & {
+  headers: Headers;
+};
+export type getLabArtifactResponseError = (getLabArtifactResponse403 | getLabArtifactResponse404 | getLabArtifactResponse500 | getLabArtifactResponse503) & {
+  headers: Headers;
+};
+
+export type getLabArtifactResponse = (getLabArtifactResponseSuccess | getLabArtifactResponseError)
+
+export const getGetLabArtifactUrl = (artifactId: string,) => {
+
+
+
+
+  return `/api/v1/lab/artifacts/${artifactId}`
+}
+
+/**
+ * # Errors
+ *
+ * Returns the public error envelope on refusal or an unknown artifact.
+ * @summary Reads one Lab artifact's metadata.
+ */
+export const getLabArtifact = async (artifactId: string, options?: RequestInit): Promise<getLabArtifactResponse> => {
+
+  const res = await fetch(getGetLabArtifactUrl(artifactId),
+  {
+    ...options,
+    method: 'GET'
+
+
+  }
+)
+
+
+  const body = [204, 205, 304].includes(res.status) ? null : await res.text();
+
+  const data: getLabArtifactResponse['data'] = body ? JSON.parse(body) : {}
+  return { data, status: res.status, headers: res.headers } as getLabArtifactResponse
+}
+
+
+
+export type downloadLabArtifactResponse200 = {
+  data: Blob
+  status: 200
+}
+
+export type downloadLabArtifactResponse403 = {
+  data: ApiError
+  status: 403
+}
+
+export type downloadLabArtifactResponse404 = {
+  data: ApiError
+  status: 404
+}
+
+export type downloadLabArtifactResponse409 = {
+  data: ApiError
+  status: 409
+}
+
+export type downloadLabArtifactResponse500 = {
+  data: ApiError
+  status: 500
+}
+
+export type downloadLabArtifactResponse503 = {
+  data: ApiError
+  status: 503
+}
+
+export type downloadLabArtifactResponseSuccess = (downloadLabArtifactResponse200) & {
+  headers: Headers;
+};
+export type downloadLabArtifactResponseError = (downloadLabArtifactResponse403 | downloadLabArtifactResponse404 | downloadLabArtifactResponse409 | downloadLabArtifactResponse500 | downloadLabArtifactResponse503) & {
+  headers: Headers;
+};
+
+export type downloadLabArtifactResponse = (downloadLabArtifactResponseSuccess | downloadLabArtifactResponseError)
+
+export const getDownloadLabArtifactUrl = (artifactId: string,) => {
+
+
+
+
+  return `/api/v1/lab/artifacts/${artifactId}/content`
+}
+
+/**
+ * # Errors
+ *
+ * Returns the public error envelope on refusal, an unknown artifact, or
+ * bytes that are missing or corrupt.
+ * @summary Streams one Lab artifact's bytes. The controller re-hashes them first
+and refuses (409) bytes that no longer match the recorded size and
+sha256; the response carries the digest as `Repr-Digest`
+(`sha-256=:<base64>:`) and `ETag` (`"sha256:<hex>"`) so the client can
+verify what it received.
+ */
+export const downloadLabArtifact = async (artifactId: string, options?: RequestInit): Promise<downloadLabArtifactResponse> => {
+
+  const res = await fetch(getDownloadLabArtifactUrl(artifactId),
+  {
+    ...options,
+    method: 'GET'
+
+
+  }
+)
+
+
+  const body = [204, 205, 304].includes(res.status) ? null : await res.blob();
+  const data: downloadLabArtifactResponse['data'] = body as downloadLabArtifactResponse['data']
+  return { data, status: res.status, headers: res.headers } as downloadLabArtifactResponse
+}
+
+
+
+export type getDetachedExecResponse200 = {
+  data: ResourceDetachedExecStatusDto
+  status: 200
+}
+
+export type getDetachedExecResponse403 = {
+  data: ApiError
+  status: 403
+}
+
+export type getDetachedExecResponse404 = {
+  data: ApiError
+  status: 404
+}
+
+export type getDetachedExecResponse500 = {
+  data: ApiError
+  status: 500
+}
+
+export type getDetachedExecResponseSuccess = (getDetachedExecResponse200) & {
+  headers: Headers;
+};
+export type getDetachedExecResponseError = (getDetachedExecResponse403 | getDetachedExecResponse404 | getDetachedExecResponse500) & {
+  headers: Headers;
+};
+
+export type getDetachedExecResponse = (getDetachedExecResponseSuccess | getDetachedExecResponseError)
+
+export const getGetDetachedExecUrl = (handle: string,) => {
+
+
+
+
+  return `/api/v1/lab/detached-execs/${handle}`
+}
+
+/**
+ * # Errors
+ *
+ * Returns the public error envelope on refusal or an unknown handle.
+ * @summary Reads a detached command's state, exit code, and bounded output tails.
+A read of the guest, not an operation. A handle whose lease has been
+released or has expired answers `lease_ended`, a terminal state, rather
+than an error. A handle of another owner reads as not found.
+ */
+export const getDetachedExec = async (handle: string, options?: RequestInit): Promise<getDetachedExecResponse> => {
+
+  const res = await fetch(getGetDetachedExecUrl(handle),
+  {
+    ...options,
+    method: 'GET'
+
+
+  }
+)
+
+
+  const body = [204, 205, 304].includes(res.status) ? null : await res.text();
+
+  const data: getDetachedExecResponse['data'] = body ? JSON.parse(body) : {}
+  return { data, status: res.status, headers: res.headers } as getDetachedExecResponse
+}
+
+
+
 export type listLabLeasesResponse200 = {
   data: PageLeaseDto
   status: 200
+}
+
+export type listLabLeasesResponse400 = {
+  data: ApiError
+  status: 400
 }
 
 export type listLabLeasesResponse403 = {
@@ -6611,29 +13008,36 @@ export type listLabLeasesResponse500 = {
 export type listLabLeasesResponseSuccess = (listLabLeasesResponse200) & {
   headers: Headers;
 };
-export type listLabLeasesResponseError = (listLabLeasesResponse403 | listLabLeasesResponse500) & {
+export type listLabLeasesResponseError = (listLabLeasesResponse400 | listLabLeasesResponse403 | listLabLeasesResponse500) & {
   headers: Headers;
 };
 
 export type listLabLeasesResponse = (listLabLeasesResponseSuccess | listLabLeasesResponseError)
 
-export const getListLabLeasesUrl = () => {
+export const getListLabLeasesUrl = (params?: ListLabLeasesParams,) => {
+  const normalizedParams = new URLSearchParams();
 
+  Object.entries(params || {}).forEach(([key, value]) => {
 
+    if (value !== undefined) {
+      normalizedParams.append(key, value === null ? 'null' : String(value))
+    }
+  });
 
+  const stringifiedParams = normalizedParams.toString();
 
-  return `/api/v1/lab/leases`
+  return stringifiedParams.length > 0 ? `/api/v1/lab/leases?${stringifiedParams}` : `/api/v1/lab/leases`
 }
 
 /**
  * # Errors
  *
  * Returns the public error envelope on refusal or backend failure.
- * @summary Lists the leases.
+ * @summary Lists the leases, narrowed by project, purpose, state, and owner.
  */
-export const listLabLeases = async ( options?: RequestInit): Promise<listLabLeasesResponse> => {
+export const listLabLeases = async (params?: ListLabLeasesParams, options?: RequestInit): Promise<listLabLeasesResponse> => {
 
-  const res = await fetch(getListLabLeasesUrl(),
+  const res = await fetch(getListLabLeasesUrl(params),
   {
     ...options,
     method: 'GET'
@@ -6650,6 +13054,11 @@ export const listLabLeases = async ( options?: RequestInit): Promise<listLabLeas
 }
 
 
+
+export type createLabLeaseResponse200 = {
+  data: ResourceLeaseDto
+  status: 200
+}
 
 export type createLabLeaseResponse201 = {
   data: ResourceLeaseDto
@@ -6671,15 +13080,20 @@ export type createLabLeaseResponse404 = {
   status: 404
 }
 
+export type createLabLeaseResponse409 = {
+  data: ApiError
+  status: 409
+}
+
 export type createLabLeaseResponse500 = {
   data: ApiError
   status: 500
 }
 
-export type createLabLeaseResponseSuccess = (createLabLeaseResponse201) & {
+export type createLabLeaseResponseSuccess = (createLabLeaseResponse200 | createLabLeaseResponse201) & {
   headers: Headers;
 };
-export type createLabLeaseResponseError = (createLabLeaseResponse400 | createLabLeaseResponse403 | createLabLeaseResponse404 | createLabLeaseResponse500) & {
+export type createLabLeaseResponseError = (createLabLeaseResponse400 | createLabLeaseResponse403 | createLabLeaseResponse404 | createLabLeaseResponse409 | createLabLeaseResponse500) & {
   headers: Headers;
 };
 
@@ -6785,6 +13199,389 @@ export const sweepLabLeases = async ( options?: RequestInit): Promise<sweepLabLe
 
 
 
+export type getLabLeaseResponse200 = {
+  data: ResourceLeaseDetailDto
+  status: 200
+}
+
+export type getLabLeaseResponse403 = {
+  data: ApiError
+  status: 403
+}
+
+export type getLabLeaseResponse404 = {
+  data: ApiError
+  status: 404
+}
+
+export type getLabLeaseResponse500 = {
+  data: ApiError
+  status: 500
+}
+
+export type getLabLeaseResponseSuccess = (getLabLeaseResponse200) & {
+  headers: Headers;
+};
+export type getLabLeaseResponseError = (getLabLeaseResponse403 | getLabLeaseResponse404 | getLabLeaseResponse500) & {
+  headers: Headers;
+};
+
+export type getLabLeaseResponse = (getLabLeaseResponseSuccess | getLabLeaseResponseError)
+
+export const getGetLabLeaseUrl = (leaseId: string,) => {
+
+
+
+
+  return `/api/v1/lab/leases/${leaseId}`
+}
+
+/**
+ * # Errors
+ *
+ * Returns the public error envelope on refusal or an unknown lease.
+ * @summary Reads one lease with its guest's connection details.
+ */
+export const getLabLease = async (leaseId: string, options?: RequestInit): Promise<getLabLeaseResponse> => {
+
+  const res = await fetch(getGetLabLeaseUrl(leaseId),
+  {
+    ...options,
+    method: 'GET'
+
+
+  }
+)
+
+
+  const body = [204, 205, 304].includes(res.status) ? null : await res.text();
+
+  const data: getLabLeaseResponse['data'] = body ? JSON.parse(body) : {}
+  return { data, status: res.status, headers: res.headers } as getLabLeaseResponse
+}
+
+
+
+export type collectLabArtifactsResponse202 = {
+  data: ResourceOperationDto
+  status: 202
+}
+
+export type collectLabArtifactsResponse400 = {
+  data: ApiError
+  status: 400
+}
+
+export type collectLabArtifactsResponse403 = {
+  data: ApiError
+  status: 403
+}
+
+export type collectLabArtifactsResponse404 = {
+  data: ApiError
+  status: 404
+}
+
+export type collectLabArtifactsResponse500 = {
+  data: ApiError
+  status: 500
+}
+
+export type collectLabArtifactsResponse503 = {
+  data: ApiError
+  status: 503
+}
+
+export type collectLabArtifactsResponseSuccess = (collectLabArtifactsResponse202) & {
+  headers: Headers;
+};
+export type collectLabArtifactsResponseError = (collectLabArtifactsResponse400 | collectLabArtifactsResponse403 | collectLabArtifactsResponse404 | collectLabArtifactsResponse500 | collectLabArtifactsResponse503) & {
+  headers: Headers;
+};
+
+export type collectLabArtifactsResponse = (collectLabArtifactsResponseSuccess | collectLabArtifactsResponseError)
+
+export const getCollectLabArtifactsUrl = (leaseId: string,) => {
+
+
+
+
+  return `/api/v1/lab/leases/${leaseId}/artifacts/collect`
+}
+
+/**
+ * # Errors
+ *
+ * Returns the public error envelope on refusal, an unknown lease, a lease
+ * that is not ready, or invalid paths.
+ * @summary Copies declared guest files from a ready lease into the artifact store
+as a `lab.collect` operation. A path that cannot be copied fails the
+operation and is recorded on the lease (`collectionFailure`); the paths
+that were copied stay stored. Collection never changes the lease or its
+cleanup.
+ */
+export const collectLabArtifacts = async (leaseId: string,
+    collectArtifactsRequest: CollectArtifactsRequest, options?: RequestInit): Promise<collectLabArtifactsResponse> => {
+
+    const getHeaders = (h?: NonNullable<RequestInit['headers']>): Record<string, string | readonly string[]> => {
+    if (!h) return {};
+    if (h instanceof Headers) return Object.fromEntries(h.entries());
+    if (Array.isArray(h)) return Object.fromEntries(h);
+    return h;
+  };
+const res = await fetch(getCollectLabArtifactsUrl(leaseId),
+  {
+    ...options,
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...getHeaders(options?.headers) },
+    body: JSON.stringify(collectArtifactsRequest)
+  }
+)
+
+
+  const body = [204, 205, 304].includes(res.status) ? null : await res.text();
+
+  const data: collectLabArtifactsResponse['data'] = body ? JSON.parse(body) : {}
+  return { data, status: res.status, headers: res.headers } as collectLabArtifactsResponse
+}
+
+
+
+export type retryLabLeaseCleanupResponse202 = {
+  data: ResourceOperationDto
+  status: 202
+}
+
+export type retryLabLeaseCleanupResponse400 = {
+  data: ApiError
+  status: 400
+}
+
+export type retryLabLeaseCleanupResponse403 = {
+  data: ApiError
+  status: 403
+}
+
+export type retryLabLeaseCleanupResponse404 = {
+  data: ApiError
+  status: 404
+}
+
+export type retryLabLeaseCleanupResponse409 = {
+  data: ApiError
+  status: 409
+}
+
+export type retryLabLeaseCleanupResponse500 = {
+  data: ApiError
+  status: 500
+}
+
+export type retryLabLeaseCleanupResponseSuccess = (retryLabLeaseCleanupResponse202) & {
+  headers: Headers;
+};
+export type retryLabLeaseCleanupResponseError = (retryLabLeaseCleanupResponse400 | retryLabLeaseCleanupResponse403 | retryLabLeaseCleanupResponse404 | retryLabLeaseCleanupResponse409 | retryLabLeaseCleanupResponse500) & {
+  headers: Headers;
+};
+
+export type retryLabLeaseCleanupResponse = (retryLabLeaseCleanupResponseSuccess | retryLabLeaseCleanupResponseError)
+
+export const getRetryLabLeaseCleanupUrl = (leaseId: string,) => {
+
+
+
+
+  return `/api/v1/lab/leases/${leaseId}/cleanup/retry`
+}
+
+/**
+ * # Errors
+ *
+ * Returns the public error envelope on refusal, an unknown lease, a lease
+ * that is not `cleanup_failed`, or a concurrent re-arm.
+ * @summary Re-arms the cleanup of a `cleanup_failed` lease once its cause is fixed
+(#292) and queues the next `lab.cleanup` attempt.
+ */
+export const retryLabLeaseCleanup = async (leaseId: string, options?: RequestInit): Promise<retryLabLeaseCleanupResponse> => {
+
+  const res = await fetch(getRetryLabLeaseCleanupUrl(leaseId),
+  {
+    ...options,
+    method: 'POST'
+
+
+  }
+)
+
+
+  const body = [204, 205, 304].includes(res.status) ? null : await res.text();
+
+  const data: retryLabLeaseCleanupResponse['data'] = body ? JSON.parse(body) : {}
+  return { data, status: res.status, headers: res.headers } as retryLabLeaseCleanupResponse
+}
+
+
+
+export type execLabLeaseResponse202 = {
+  data: ResourceOperationDto
+  status: 202
+}
+
+export type execLabLeaseResponse400 = {
+  data: ApiError
+  status: 400
+}
+
+export type execLabLeaseResponse403 = {
+  data: ApiError
+  status: 403
+}
+
+export type execLabLeaseResponse404 = {
+  data: ApiError
+  status: 404
+}
+
+export type execLabLeaseResponse500 = {
+  data: ApiError
+  status: 500
+}
+
+export type execLabLeaseResponseSuccess = (execLabLeaseResponse202) & {
+  headers: Headers;
+};
+export type execLabLeaseResponseError = (execLabLeaseResponse400 | execLabLeaseResponse403 | execLabLeaseResponse404 | execLabLeaseResponse500) & {
+  headers: Headers;
+};
+
+export type execLabLeaseResponse = (execLabLeaseResponseSuccess | execLabLeaseResponseError)
+
+export const getExecLabLeaseUrl = (leaseId: string,) => {
+
+
+
+
+  return `/api/v1/lab/leases/${leaseId}/exec`
+}
+
+/**
+ * # Errors
+ *
+ * Returns the public error envelope on refusal, an unknown lease, a lease
+ * that is not ready, or an invalid command.
+ * @summary Runs a command on a ready lease's guest as a `lab.exec` operation. The
+result carries the exit code and stdout and stderr, each scrubbed of
+credentials (URL userinfo and `user:password@`) and bounded, as machine
+exec does. A truncated flag is true when output was dropped, whether by
+the transport or by the result bound.
+ */
+export const execLabLease = async (leaseId: string,
+    execLeaseRequest: ExecLeaseRequest, options?: RequestInit): Promise<execLabLeaseResponse> => {
+
+    const getHeaders = (h?: NonNullable<RequestInit['headers']>): Record<string, string | readonly string[]> => {
+    if (!h) return {};
+    if (h instanceof Headers) return Object.fromEntries(h.entries());
+    if (Array.isArray(h)) return Object.fromEntries(h);
+    return h;
+  };
+const res = await fetch(getExecLabLeaseUrl(leaseId),
+  {
+    ...options,
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...getHeaders(options?.headers) },
+    body: JSON.stringify(execLeaseRequest)
+  }
+)
+
+
+  const body = [204, 205, 304].includes(res.status) ? null : await res.text();
+
+  const data: execLabLeaseResponse['data'] = body ? JSON.parse(body) : {}
+  return { data, status: res.status, headers: res.headers } as execLabLeaseResponse
+}
+
+
+
+export type execDetachedLabLeaseResponse202 = {
+  data: ResourceDetachedExecStartedDto
+  status: 202
+}
+
+export type execDetachedLabLeaseResponse400 = {
+  data: ApiError
+  status: 400
+}
+
+export type execDetachedLabLeaseResponse403 = {
+  data: ApiError
+  status: 403
+}
+
+export type execDetachedLabLeaseResponse404 = {
+  data: ApiError
+  status: 404
+}
+
+export type execDetachedLabLeaseResponse500 = {
+  data: ApiError
+  status: 500
+}
+
+export type execDetachedLabLeaseResponseSuccess = (execDetachedLabLeaseResponse202) & {
+  headers: Headers;
+};
+export type execDetachedLabLeaseResponseError = (execDetachedLabLeaseResponse400 | execDetachedLabLeaseResponse403 | execDetachedLabLeaseResponse404 | execDetachedLabLeaseResponse500) & {
+  headers: Headers;
+};
+
+export type execDetachedLabLeaseResponse = (execDetachedLabLeaseResponseSuccess | execDetachedLabLeaseResponseError)
+
+export const getExecDetachedLabLeaseUrl = (leaseId: string,) => {
+
+
+
+
+  return `/api/v1/lab/leases/${leaseId}/exec-detached`
+}
+
+/**
+ * # Errors
+ *
+ * Returns the public error envelope on refusal, an unknown lease, a lease
+ * that is not ready or about to expire, or an invalid command.
+ * @summary Starts a command on a ready lease's guest and returns at once with a
+handle. The command runs in the guest, outside the SSH session, until it
+exits, hits its bound, or the lease ends. Poll
+`GET /lab/detached-execs/{handle}`. A retry with the same
+`Idempotency-Key` returns the same handle and starts nothing twice.
+ */
+export const execDetachedLabLease = async (leaseId: string,
+    execDetachedRequest: ExecDetachedRequest, options?: RequestInit): Promise<execDetachedLabLeaseResponse> => {
+
+    const getHeaders = (h?: NonNullable<RequestInit['headers']>): Record<string, string | readonly string[]> => {
+    if (!h) return {};
+    if (h instanceof Headers) return Object.fromEntries(h.entries());
+    if (Array.isArray(h)) return Object.fromEntries(h);
+    return h;
+  };
+const res = await fetch(getExecDetachedLabLeaseUrl(leaseId),
+  {
+    ...options,
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...getHeaders(options?.headers) },
+    body: JSON.stringify(execDetachedRequest)
+  }
+)
+
+
+  const body = [204, 205, 304].includes(res.status) ? null : await res.text();
+
+  const data: execDetachedLabLeaseResponse['data'] = body ? JSON.parse(body) : {}
+  return { data, status: res.status, headers: res.headers } as execDetachedLabLeaseResponse
+}
+
+
+
 export type extendLabLeaseResponse200 = {
   data: ResourceLeaseDto
   status: 200
@@ -6862,6 +13659,110 @@ const res = await fetch(getExtendLabLeaseUrl(leaseId),
 
   const data: extendLabLeaseResponse['data'] = body ? JSON.parse(body) : {}
   return { data, status: res.status, headers: res.headers } as extendLabLeaseResponse
+}
+
+
+
+export type putLabFileResponse202 = {
+  data: ResourceOperationDto
+  status: 202
+}
+
+export type putLabFileResponse400 = {
+  data: ApiError
+  status: 400
+}
+
+export type putLabFileResponse403 = {
+  data: ApiError
+  status: 403
+}
+
+export type putLabFileResponse404 = {
+  data: ApiError
+  status: 404
+}
+
+export type putLabFileResponse408 = {
+  data: ApiError
+  status: 408
+}
+
+export type putLabFileResponse413 = {
+  data: ApiError
+  status: 413
+}
+
+export type putLabFileResponse500 = {
+  data: ApiError
+  status: 500
+}
+
+export type putLabFileResponse503 = {
+  data: ApiError
+  status: 503
+}
+
+export type putLabFileResponseSuccess = (putLabFileResponse202) & {
+  headers: Headers;
+};
+export type putLabFileResponseError = (putLabFileResponse400 | putLabFileResponse403 | putLabFileResponse404 | putLabFileResponse408 | putLabFileResponse413 | putLabFileResponse500 | putLabFileResponse503) & {
+  headers: Headers;
+};
+
+export type putLabFileResponse = (putLabFileResponseSuccess | putLabFileResponseError)
+
+export const getPutLabFileUrl = (leaseId: string,
+    params: PutLabFileParams,) => {
+  const normalizedParams = new URLSearchParams();
+
+  Object.entries(params || {}).forEach(([key, value]) => {
+
+    if (value !== undefined) {
+      normalizedParams.append(key, value === null ? 'null' : String(value))
+    }
+  });
+
+  const stringifiedParams = normalizedParams.toString();
+
+  return stringifiedParams.length > 0 ? `/api/v1/lab/leases/${leaseId}/files?${stringifiedParams}` : `/api/v1/lab/leases/${leaseId}/files`
+}
+
+/**
+ * # Errors
+ *
+ * Returns the public error envelope on refusal, an unknown lease, a lease
+ * that is not ready, an invalid path, or an upload over the cap.
+ * @summary Copies one file into a ready lease as a `lab.put` operation. The body is
+the file's bytes (`application/octet-stream`). The operation's result
+records the guest path, size, and SHA-256; the controller verifies the
+SHA-256 inside the guest and moves the file into place only after it
+matches, so a failed put leaves nothing at the path.
+ */
+export const putLabFile = async (leaseId: string,
+    putLabFileBody: Blob,
+    params: PutLabFileParams, options?: RequestInit): Promise<putLabFileResponse> => {
+
+    const getHeaders = (h?: NonNullable<RequestInit['headers']>): Record<string, string | readonly string[]> => {
+    if (!h) return {};
+    if (h instanceof Headers) return Object.fromEntries(h.entries());
+    if (Array.isArray(h)) return Object.fromEntries(h);
+    return h;
+  };
+const res = await fetch(getPutLabFileUrl(leaseId,params),
+  {
+    ...options,
+    method: 'POST',
+    headers: { 'Content-Type': 'application/octet-stream', ...getHeaders(options?.headers) },
+    body: putLabFileBody
+  }
+)
+
+
+  const body = [204, 205, 304].includes(res.status) ? null : await res.text();
+
+  const data: putLabFileResponse['data'] = body ? JSON.parse(body) : {}
+  return { data, status: res.status, headers: res.headers } as putLabFileResponse
 }
 
 
@@ -7018,6 +13919,417 @@ const res = await fetch(getReleaseLabLeaseUrl(leaseId),
 
   const data: releaseLabLeaseResponse['data'] = body ? JSON.parse(body) : {}
   return { data, status: res.status, headers: res.headers } as releaseLabLeaseResponse
+}
+
+
+
+export type listLabPoolsResponse200 = {
+  data: PageLabPoolDto
+  status: 200
+}
+
+export type listLabPoolsResponse403 = {
+  data: ApiError
+  status: 403
+}
+
+export type listLabPoolsResponse500 = {
+  data: ApiError
+  status: 500
+}
+
+export type listLabPoolsResponseSuccess = (listLabPoolsResponse200) & {
+  headers: Headers;
+};
+export type listLabPoolsResponseError = (listLabPoolsResponse403 | listLabPoolsResponse500) & {
+  headers: Headers;
+};
+
+export type listLabPoolsResponse = (listLabPoolsResponseSuccess | listLabPoolsResponseError)
+
+export const getListLabPoolsUrl = () => {
+
+
+
+
+  return `/api/v1/lab/pools`
+}
+
+/**
+ * # Errors
+ *
+ * Returns the public error envelope on refusal or backend failure.
+ * @summary Lists the pools and their members.
+ */
+export const listLabPools = async ( options?: RequestInit): Promise<listLabPoolsResponse> => {
+
+  const res = await fetch(getListLabPoolsUrl(),
+  {
+    ...options,
+    method: 'GET'
+
+
+  }
+)
+
+
+  const body = [204, 205, 304].includes(res.status) ? null : await res.text();
+
+  const data: listLabPoolsResponse['data'] = body ? JSON.parse(body) : {}
+  return { data, status: res.status, headers: res.headers } as listLabPoolsResponse
+}
+
+
+
+export type createLabPoolResponse201 = {
+  data: ResourceLabPoolDto
+  status: 201
+}
+
+export type createLabPoolResponse400 = {
+  data: ApiError
+  status: 400
+}
+
+export type createLabPoolResponse403 = {
+  data: ApiError
+  status: 403
+}
+
+export type createLabPoolResponse404 = {
+  data: ApiError
+  status: 404
+}
+
+export type createLabPoolResponse409 = {
+  data: ApiError
+  status: 409
+}
+
+export type createLabPoolResponseSuccess = (createLabPoolResponse201) & {
+  headers: Headers;
+};
+export type createLabPoolResponseError = (createLabPoolResponse400 | createLabPoolResponse403 | createLabPoolResponse404 | createLabPoolResponse409) & {
+  headers: Headers;
+};
+
+export type createLabPoolResponse = (createLabPoolResponseSuccess | createLabPoolResponseError)
+
+export const getCreateLabPoolUrl = () => {
+
+
+
+
+  return `/api/v1/lab/pools`
+}
+
+/**
+ * # Errors
+ *
+ * Returns the public error envelope on refusal, malformed input, an
+ * unknown version or account, or a version that already has a pool.
+ * @summary Creates a pool for a published template version whose cleanup strategy
+is `revert`. Leases from that version then take a pool member instead of
+a clone.
+ */
+export const createLabPool = async (createLabPoolRequest: CreateLabPoolRequest, options?: RequestInit): Promise<createLabPoolResponse> => {
+
+    const getHeaders = (h?: NonNullable<RequestInit['headers']>): Record<string, string | readonly string[]> => {
+    if (!h) return {};
+    if (h instanceof Headers) return Object.fromEntries(h.entries());
+    if (Array.isArray(h)) return Object.fromEntries(h);
+    return h;
+  };
+const res = await fetch(getCreateLabPoolUrl(),
+  {
+    ...options,
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...getHeaders(options?.headers) },
+    body: JSON.stringify(createLabPoolRequest)
+  }
+)
+
+
+  const body = [204, 205, 304].includes(res.status) ? null : await res.text();
+
+  const data: createLabPoolResponse['data'] = body ? JSON.parse(body) : {}
+  return { data, status: res.status, headers: res.headers } as createLabPoolResponse
+}
+
+
+
+export type getLabPoolResponse200 = {
+  data: ResourceLabPoolDto
+  status: 200
+}
+
+export type getLabPoolResponse403 = {
+  data: ApiError
+  status: 403
+}
+
+export type getLabPoolResponse404 = {
+  data: ApiError
+  status: 404
+}
+
+export type getLabPoolResponseSuccess = (getLabPoolResponse200) & {
+  headers: Headers;
+};
+export type getLabPoolResponseError = (getLabPoolResponse403 | getLabPoolResponse404) & {
+  headers: Headers;
+};
+
+export type getLabPoolResponse = (getLabPoolResponseSuccess | getLabPoolResponseError)
+
+export const getGetLabPoolUrl = (poolId: string,) => {
+
+
+
+
+  return `/api/v1/lab/pools/${poolId}`
+}
+
+/**
+ * # Errors
+ *
+ * Returns the public error envelope on refusal or an unknown pool.
+ * @summary Reads one pool and its members.
+ */
+export const getLabPool = async (poolId: string, options?: RequestInit): Promise<getLabPoolResponse> => {
+
+  const res = await fetch(getGetLabPoolUrl(poolId),
+  {
+    ...options,
+    method: 'GET'
+
+
+  }
+)
+
+
+  const body = [204, 205, 304].includes(res.status) ? null : await res.text();
+
+  const data: getLabPoolResponse['data'] = body ? JSON.parse(body) : {}
+  return { data, status: res.status, headers: res.headers } as getLabPoolResponse
+}
+
+
+
+export type deleteLabPoolResponse204 = {
+  data: void
+  status: 204
+}
+
+export type deleteLabPoolResponse403 = {
+  data: ApiError
+  status: 403
+}
+
+export type deleteLabPoolResponse404 = {
+  data: ApiError
+  status: 404
+}
+
+export type deleteLabPoolResponse409 = {
+  data: ApiError
+  status: 409
+}
+
+export type deleteLabPoolResponseSuccess = (deleteLabPoolResponse204) & {
+  headers: Headers;
+};
+export type deleteLabPoolResponseError = (deleteLabPoolResponse403 | deleteLabPoolResponse404 | deleteLabPoolResponse409) & {
+  headers: Headers;
+};
+
+export type deleteLabPoolResponse = (deleteLabPoolResponseSuccess | deleteLabPoolResponseError)
+
+export const getDeleteLabPoolUrl = (poolId: string,) => {
+
+
+
+
+  return `/api/v1/lab/pools/${poolId}`
+}
+
+/**
+ * # Errors
+ *
+ * Returns the public error envelope on refusal, an unknown pool, or a pool
+ * that still holds members.
+ * @summary Deletes an empty pool (drain it first). Leases from its template version
+then clone again.
+ */
+export const deleteLabPool = async (poolId: string, options?: RequestInit): Promise<deleteLabPoolResponse> => {
+
+  const res = await fetch(getDeleteLabPoolUrl(poolId),
+  {
+    ...options,
+    method: 'DELETE'
+
+
+  }
+)
+
+
+  const body = [204, 205, 304].includes(res.status) ? null : await res.text();
+
+  const data: deleteLabPoolResponse['data'] = body ? JSON.parse(body) : undefined
+  return { data, status: res.status, headers: res.headers } as deleteLabPoolResponse
+}
+
+
+
+export type drainLabPoolResponse200 = {
+  data: ResourceLabPoolDrainDto
+  status: 200
+}
+
+export type drainLabPoolResponse400 = {
+  data: ApiError
+  status: 400
+}
+
+export type drainLabPoolResponse403 = {
+  data: ApiError
+  status: 403
+}
+
+export type drainLabPoolResponse404 = {
+  data: ApiError
+  status: 404
+}
+
+export type drainLabPoolResponseSuccess = (drainLabPoolResponse200) & {
+  headers: Headers;
+};
+export type drainLabPoolResponseError = (drainLabPoolResponse400 | drainLabPoolResponse403 | drainLabPoolResponse404) & {
+  headers: Headers;
+};
+
+export type drainLabPoolResponse = (drainLabPoolResponseSuccess | drainLabPoolResponseError)
+
+export const getDrainLabPoolUrl = (poolId: string,) => {
+
+
+
+
+  return `/api/v1/lab/pools/${poolId}/drain`
+}
+
+/**
+ * # Errors
+ *
+ * Returns the public error envelope on refusal or an unknown pool or VMID.
+ * @summary Drains the named members from a pool, or every member with `all`.
+Unbound members leave at once; a member bound to a lease, or still
+filling, leaves once that finishes instead of returning to the pool.
+Fleet never destroys a pool guest: drained guests stay where they are.
+ */
+export const drainLabPool = async (poolId: string,
+    drainLabPoolRequest: DrainLabPoolRequest, options?: RequestInit): Promise<drainLabPoolResponse> => {
+
+    const getHeaders = (h?: NonNullable<RequestInit['headers']>): Record<string, string | readonly string[]> => {
+    if (!h) return {};
+    if (h instanceof Headers) return Object.fromEntries(h.entries());
+    if (Array.isArray(h)) return Object.fromEntries(h);
+    return h;
+  };
+const res = await fetch(getDrainLabPoolUrl(poolId),
+  {
+    ...options,
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...getHeaders(options?.headers) },
+    body: JSON.stringify(drainLabPoolRequest)
+  }
+)
+
+
+  const body = [204, 205, 304].includes(res.status) ? null : await res.text();
+
+  const data: drainLabPoolResponse['data'] = body ? JSON.parse(body) : {}
+  return { data, status: res.status, headers: res.headers } as drainLabPoolResponse
+}
+
+
+
+export type fillLabPoolResponse202 = {
+  data: ResourceOperationDto
+  status: 202
+}
+
+export type fillLabPoolResponse400 = {
+  data: ApiError
+  status: 400
+}
+
+export type fillLabPoolResponse403 = {
+  data: ApiError
+  status: 403
+}
+
+export type fillLabPoolResponse404 = {
+  data: ApiError
+  status: 404
+}
+
+export type fillLabPoolResponse409 = {
+  data: ApiError
+  status: 409
+}
+
+export type fillLabPoolResponseSuccess = (fillLabPoolResponse202) & {
+  headers: Headers;
+};
+export type fillLabPoolResponseError = (fillLabPoolResponse400 | fillLabPoolResponse403 | fillLabPoolResponse404 | fillLabPoolResponse409) & {
+  headers: Headers;
+};
+
+export type fillLabPoolResponse = (fillLabPoolResponseSuccess | fillLabPoolResponseError)
+
+export const getFillLabPoolUrl = (poolId: string,) => {
+
+
+
+
+  return `/api/v1/lab/pools/${poolId}/fill`
+}
+
+/**
+ * # Errors
+ *
+ * Returns the public error envelope on refusal, invalid VMIDs, an unknown
+ * pool, a full pool, or a guest that already is a pool member.
+ * @summary Registers existing QEMU guests as pool members and queues the
+`lab.pool.fill` operation that checks each one, reverts it to the
+baseline snapshot through the reviewed revert, and verifies it. A
+member becomes `available` only once verified; otherwise it is
+`quarantined` with the reason.
+ */
+export const fillLabPool = async (poolId: string,
+    fillLabPoolRequest: FillLabPoolRequest, options?: RequestInit): Promise<fillLabPoolResponse> => {
+
+    const getHeaders = (h?: NonNullable<RequestInit['headers']>): Record<string, string | readonly string[]> => {
+    if (!h) return {};
+    if (h instanceof Headers) return Object.fromEntries(h.entries());
+    if (Array.isArray(h)) return Object.fromEntries(h);
+    return h;
+  };
+const res = await fetch(getFillLabPoolUrl(poolId),
+  {
+    ...options,
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...getHeaders(options?.headers) },
+    body: JSON.stringify(fillLabPoolRequest)
+  }
+)
+
+
+  const body = [204, 205, 304].includes(res.status) ? null : await res.text();
+
+  const data: fillLabPoolResponse['data'] = body ? JSON.parse(body) : {}
+  return { data, status: res.status, headers: res.headers } as fillLabPoolResponse
 }
 
 
@@ -10576,10 +17888,15 @@ export type startReviewedProxmoxOperationResponse403 = {
   status: 403
 }
 
+export type startReviewedProxmoxOperationResponse409 = {
+  data: ApiError
+  status: 409
+}
+
 export type startReviewedProxmoxOperationResponseSuccess = (startReviewedProxmoxOperationResponse202) & {
   headers: Headers;
 };
-export type startReviewedProxmoxOperationResponseError = (startReviewedProxmoxOperationResponse400 | startReviewedProxmoxOperationResponse403) & {
+export type startReviewedProxmoxOperationResponseError = (startReviewedProxmoxOperationResponse400 | startReviewedProxmoxOperationResponse403 | startReviewedProxmoxOperationResponse409) & {
   headers: Headers;
 };
 
@@ -10860,6 +18177,1796 @@ export const listProxmoxTasks = async (accountId: string,
 
   const data: listProxmoxTasksResponse['data'] = body ? JSON.parse(body) : {}
   return { data, status: res.status, headers: res.headers } as listProxmoxTasksResponse
+}
+
+
+
+export type listRegistryEntriesResponse200 = {
+  data: RegistryPageRegistryEntryDto
+  status: 200
+}
+
+export type listRegistryEntriesResponse400 = {
+  data: ApiError
+  status: 400
+}
+
+export type listRegistryEntriesResponse403 = {
+  data: ApiError
+  status: 403
+}
+
+export type listRegistryEntriesResponse500 = {
+  data: ApiError
+  status: 500
+}
+
+export type listRegistryEntriesResponse503 = {
+  data: ApiError
+  status: 503
+}
+
+export type listRegistryEntriesResponseSuccess = (listRegistryEntriesResponse200) & {
+  headers: Headers;
+};
+export type listRegistryEntriesResponseError = (listRegistryEntriesResponse400 | listRegistryEntriesResponse403 | listRegistryEntriesResponse500 | listRegistryEntriesResponse503) & {
+  headers: Headers;
+};
+
+export type listRegistryEntriesResponse = (listRegistryEntriesResponseSuccess | listRegistryEntriesResponseError)
+
+export const getListRegistryEntriesUrl = (params?: ListRegistryEntriesParams,) => {
+  const normalizedParams = new URLSearchParams();
+
+  Object.entries(params || {}).forEach(([key, value]) => {
+
+    if (value !== undefined) {
+      normalizedParams.append(key, value === null ? 'null' : String(value))
+    }
+  });
+
+  const stringifiedParams = normalizedParams.toString();
+
+  return stringifiedParams.length > 0 ? `/api/v1/registry/entries?${stringifiedParams}` : `/api/v1/registry/entries`
+}
+
+/**
+ * # Errors
+ *
+ * Returns an API error when a filter is malformed, or authentication,
+ * authorization, or storage fails.
+ * @summary Lists Registry entries, filtered by type, tag, text, and relation
+target, ordered by type then key.
+ */
+export const listRegistryEntries = async (params?: ListRegistryEntriesParams, options?: RequestInit): Promise<listRegistryEntriesResponse> => {
+
+  const res = await fetch(getListRegistryEntriesUrl(params),
+  {
+    ...options,
+    method: 'GET'
+
+
+  }
+)
+
+
+  const body = [204, 205, 304].includes(res.status) ? null : await res.text();
+
+  const data: listRegistryEntriesResponse['data'] = body ? JSON.parse(body) : {}
+  return { data, status: res.status, headers: res.headers } as listRegistryEntriesResponse
+}
+
+
+
+export type getRegistryEntryResponse200 = {
+  data: RegistryOneRegistryEntryDto
+  status: 200
+}
+
+export type getRegistryEntryResponse403 = {
+  data: ApiError
+  status: 403
+}
+
+export type getRegistryEntryResponse404 = {
+  data: ApiError
+  status: 404
+}
+
+export type getRegistryEntryResponse500 = {
+  data: ApiError
+  status: 500
+}
+
+export type getRegistryEntryResponse503 = {
+  data: ApiError
+  status: 503
+}
+
+export type getRegistryEntryResponseSuccess = (getRegistryEntryResponse200) & {
+  headers: Headers;
+};
+export type getRegistryEntryResponseError = (getRegistryEntryResponse403 | getRegistryEntryResponse404 | getRegistryEntryResponse500 | getRegistryEntryResponse503) & {
+  headers: Headers;
+};
+
+export type getRegistryEntryResponse = (getRegistryEntryResponseSuccess | getRegistryEntryResponseError)
+
+export const getGetRegistryEntryUrl = (type: string,
+    key: string,) => {
+
+
+
+
+  return `/api/v1/registry/entries/${type}/${key}`
+}
+
+/**
+ * # Errors
+ *
+ * Returns an API error when the entry does not exist, or authentication,
+ * authorization, or storage fails.
+ * @summary Reads one Registry entry by its `<type>/<key>` address.
+ */
+export const getRegistryEntry = async (type: string,
+    key: string, options?: RequestInit): Promise<getRegistryEntryResponse> => {
+
+  const res = await fetch(getGetRegistryEntryUrl(type,key),
+  {
+    ...options,
+    method: 'GET'
+
+
+  }
+)
+
+
+  const body = [204, 205, 304].includes(res.status) ? null : await res.text();
+
+  const data: getRegistryEntryResponse['data'] = body ? JSON.parse(body) : {}
+  return { data, status: res.status, headers: res.headers } as getRegistryEntryResponse
+}
+
+
+
+export type getDomainObservationResponse200 = {
+  data: DomainObservationViewDto
+  status: 200
+}
+
+export type getDomainObservationResponse400 = {
+  data: ApiError
+  status: 400
+}
+
+export type getDomainObservationResponse403 = {
+  data: ApiError
+  status: 403
+}
+
+export type getDomainObservationResponse404 = {
+  data: ApiError
+  status: 404
+}
+
+export type getDomainObservationResponse500 = {
+  data: ApiError
+  status: 500
+}
+
+export type getDomainObservationResponse503 = {
+  data: ApiError
+  status: 503
+}
+
+export type getDomainObservationResponseSuccess = (getDomainObservationResponse200) & {
+  headers: Headers;
+};
+export type getDomainObservationResponseError = (getDomainObservationResponse400 | getDomainObservationResponse403 | getDomainObservationResponse404 | getDomainObservationResponse500 | getDomainObservationResponse503) & {
+  headers: Headers;
+};
+
+export type getDomainObservationResponse = (getDomainObservationResponseSuccess | getDomainObservationResponseError)
+
+export const getGetDomainObservationUrl = (type: string,
+    key: string,) => {
+
+
+
+
+  return `/api/v1/registry/entries/${type}/${key}/observations`
+}
+
+/**
+ * # Errors
+ *
+ * Returns an API error when the entry does not exist or is not a domain,
+ * or authentication, authorization, or storage fails.
+ * @summary Reads one domain entry's latest observation and its comparison with the
+entry.
+ */
+export const getDomainObservation = async (type: string,
+    key: string, options?: RequestInit): Promise<getDomainObservationResponse> => {
+
+  const res = await fetch(getGetDomainObservationUrl(type,key),
+  {
+    ...options,
+    method: 'GET'
+
+
+  }
+)
+
+
+  const body = [204, 205, 304].includes(res.status) ? null : await res.text();
+
+  const data: getDomainObservationResponse['data'] = body ? JSON.parse(body) : {}
+  return { data, status: res.status, headers: res.headers } as getDomainObservationResponse
+}
+
+
+
+export type refreshDomainObservationResponse200 = {
+  data: DomainObservationViewDto
+  status: 200
+}
+
+export type refreshDomainObservationResponse400 = {
+  data: ApiError
+  status: 400
+}
+
+export type refreshDomainObservationResponse403 = {
+  data: ApiError
+  status: 403
+}
+
+export type refreshDomainObservationResponse404 = {
+  data: ApiError
+  status: 404
+}
+
+export type refreshDomainObservationResponse429 = {
+  data: ApiError
+  status: 429
+}
+
+export type refreshDomainObservationResponse500 = {
+  data: ApiError
+  status: 500
+}
+
+export type refreshDomainObservationResponse503 = {
+  data: ApiError
+  status: 503
+}
+
+export type refreshDomainObservationResponseSuccess = (refreshDomainObservationResponse200) & {
+  headers: Headers;
+};
+export type refreshDomainObservationResponseError = (refreshDomainObservationResponse400 | refreshDomainObservationResponse403 | refreshDomainObservationResponse404 | refreshDomainObservationResponse429 | refreshDomainObservationResponse500 | refreshDomainObservationResponse503) & {
+  headers: Headers;
+};
+
+export type refreshDomainObservationResponse = (refreshDomainObservationResponseSuccess | refreshDomainObservationResponseError)
+
+export const getRefreshDomainObservationUrl = (type: string,
+    key: string,) => {
+
+
+
+
+  return `/api/v1/registry/entries/${type}/${key}/observations/refresh`
+}
+
+/**
+ * # Errors
+ *
+ * Returns an API error when the entry does not exist or is not a domain,
+ * the caller may not observe, the RDAP server's rate-limit slot is not
+ * available soon (429), or storage fails. A lookup that fails is recorded
+ * in the returned observation, not reported as an error.
+ * @summary Looks the domain up now (RDAP and DNS) and records the observation. A
+mutation of observations, never of Fleet Git: authorized as
+`registry.observe` and audited.
+ */
+export const refreshDomainObservation = async (type: string,
+    key: string, options?: RequestInit): Promise<refreshDomainObservationResponse> => {
+
+  const res = await fetch(getRefreshDomainObservationUrl(type,key),
+  {
+    ...options,
+    method: 'POST'
+
+
+  }
+)
+
+
+  const body = [204, 205, 304].includes(res.status) ? null : await res.text();
+
+  const data: refreshDomainObservationResponse['data'] = body ? JSON.parse(body) : {}
+  return { data, status: res.status, headers: res.headers } as refreshDomainObservationResponse
+}
+
+
+
+export type listRegistryEntryReferencesResponse200 = {
+  data: RegistryPageRegistryReferenceDto
+  status: 200
+}
+
+export type listRegistryEntryReferencesResponse400 = {
+  data: ApiError
+  status: 400
+}
+
+export type listRegistryEntryReferencesResponse403 = {
+  data: ApiError
+  status: 403
+}
+
+export type listRegistryEntryReferencesResponse500 = {
+  data: ApiError
+  status: 500
+}
+
+export type listRegistryEntryReferencesResponse503 = {
+  data: ApiError
+  status: 503
+}
+
+export type listRegistryEntryReferencesResponseSuccess = (listRegistryEntryReferencesResponse200) & {
+  headers: Headers;
+};
+export type listRegistryEntryReferencesResponseError = (listRegistryEntryReferencesResponse400 | listRegistryEntryReferencesResponse403 | listRegistryEntryReferencesResponse500 | listRegistryEntryReferencesResponse503) & {
+  headers: Headers;
+};
+
+export type listRegistryEntryReferencesResponse = (listRegistryEntryReferencesResponseSuccess | listRegistryEntryReferencesResponseError)
+
+export const getListRegistryEntryReferencesUrl = (type: string,
+    key: string,
+    params?: ListRegistryEntryReferencesParams,) => {
+  const normalizedParams = new URLSearchParams();
+
+  Object.entries(params || {}).forEach(([key, value]) => {
+
+    if (value !== undefined) {
+      normalizedParams.append(key, value === null ? 'null' : String(value))
+    }
+  });
+
+  const stringifiedParams = normalizedParams.toString();
+
+  return stringifiedParams.length > 0 ? `/api/v1/registry/entries/${type}/${key}/referenced-by?${stringifiedParams}` : `/api/v1/registry/entries/${type}/${key}/referenced-by`
+}
+
+/**
+ * # Errors
+ *
+ * Returns an API error when the cursor is malformed, or authentication,
+ * authorization, or storage fails.
+ * @summary Lists the entries that point at one entry ("what uses
+`service/aptabase`?"), ordered by type, key, then relation.
+ */
+export const listRegistryEntryReferences = async (type: string,
+    key: string,
+    params?: ListRegistryEntryReferencesParams, options?: RequestInit): Promise<listRegistryEntryReferencesResponse> => {
+
+  const res = await fetch(getListRegistryEntryReferencesUrl(type,key,params),
+  {
+    ...options,
+    method: 'GET'
+
+
+  }
+)
+
+
+  const body = [204, 205, 304].includes(res.status) ? null : await res.text();
+
+  const data: listRegistryEntryReferencesResponse['data'] = body ? JSON.parse(body) : {}
+  return { data, status: res.status, headers: res.headers } as listRegistryEntryReferencesResponse
+}
+
+
+
+export type listDomainObservationsResponse200 = {
+  data: DomainObservationPage
+  status: 200
+}
+
+export type listDomainObservationsResponse400 = {
+  data: ApiError
+  status: 400
+}
+
+export type listDomainObservationsResponse403 = {
+  data: ApiError
+  status: 403
+}
+
+export type listDomainObservationsResponse500 = {
+  data: ApiError
+  status: 500
+}
+
+export type listDomainObservationsResponse503 = {
+  data: ApiError
+  status: 503
+}
+
+export type listDomainObservationsResponseSuccess = (listDomainObservationsResponse200) & {
+  headers: Headers;
+};
+export type listDomainObservationsResponseError = (listDomainObservationsResponse400 | listDomainObservationsResponse403 | listDomainObservationsResponse500 | listDomainObservationsResponse503) & {
+  headers: Headers;
+};
+
+export type listDomainObservationsResponse = (listDomainObservationsResponseSuccess | listDomainObservationsResponseError)
+
+export const getListDomainObservationsUrl = (params?: ListDomainObservationsParams,) => {
+  const normalizedParams = new URLSearchParams();
+
+  Object.entries(params || {}).forEach(([key, value]) => {
+
+    if (value !== undefined) {
+      normalizedParams.append(key, value === null ? 'null' : String(value))
+    }
+  });
+
+  const stringifiedParams = normalizedParams.toString();
+
+  return stringifiedParams.length > 0 ? `/api/v1/registry/observations?${stringifiedParams}` : `/api/v1/registry/observations`
+}
+
+/**
+ * # Errors
+ *
+ * Returns an API error when the cursor is malformed, or authentication,
+ * authorization, or storage fails.
+ * @summary Lists the observations of domain entries, compared with the entries,
+ordered by key. With `attention=true`, only domains with a warning:
+the feed of the Overview's needs-attention queue.
+ */
+export const listDomainObservations = async (params?: ListDomainObservationsParams, options?: RequestInit): Promise<listDomainObservationsResponse> => {
+
+  const res = await fetch(getListDomainObservationsUrl(params),
+  {
+    ...options,
+    method: 'GET'
+
+
+  }
+)
+
+
+  const body = [204, 205, 304].includes(res.status) ? null : await res.text();
+
+  const data: listDomainObservationsResponse['data'] = body ? JSON.parse(body) : {}
+  return { data, status: res.status, headers: res.headers } as listDomainObservationsResponse
+}
+
+
+
+export type listRegistryReferencesResponse200 = {
+  data: RegistryPageRegistryReferenceDto
+  status: 200
+}
+
+export type listRegistryReferencesResponse400 = {
+  data: ApiError
+  status: 400
+}
+
+export type listRegistryReferencesResponse403 = {
+  data: ApiError
+  status: 403
+}
+
+export type listRegistryReferencesResponse500 = {
+  data: ApiError
+  status: 500
+}
+
+export type listRegistryReferencesResponse503 = {
+  data: ApiError
+  status: 503
+}
+
+export type listRegistryReferencesResponseSuccess = (listRegistryReferencesResponse200) & {
+  headers: Headers;
+};
+export type listRegistryReferencesResponseError = (listRegistryReferencesResponse400 | listRegistryReferencesResponse403 | listRegistryReferencesResponse500 | listRegistryReferencesResponse503) & {
+  headers: Headers;
+};
+
+export type listRegistryReferencesResponse = (listRegistryReferencesResponseSuccess | listRegistryReferencesResponseError)
+
+export const getListRegistryReferencesUrl = (params: ListRegistryReferencesParams,) => {
+  const normalizedParams = new URLSearchParams();
+
+  Object.entries(params || {}).forEach(([key, value]) => {
+
+    if (value !== undefined) {
+      normalizedParams.append(key, value === null ? 'null' : String(value))
+    }
+  });
+
+  const stringifiedParams = normalizedParams.toString();
+
+  return stringifiedParams.length > 0 ? `/api/v1/registry/references?${stringifiedParams}` : `/api/v1/registry/references`
+}
+
+/**
+ * # Errors
+ *
+ * Returns an API error when the target or cursor is malformed, or
+ * authentication, authorization, or storage fails.
+ * @summary Lists the entries that point at a target: a Registry entry, a machine,
+a project, a Coolify resource, or a Proxmox guest ("what points at
+machine X?"), ordered by type, key, then relation.
+ */
+export const listRegistryReferences = async (params: ListRegistryReferencesParams, options?: RequestInit): Promise<listRegistryReferencesResponse> => {
+
+  const res = await fetch(getListRegistryReferencesUrl(params),
+  {
+    ...options,
+    method: 'GET'
+
+
+  }
+)
+
+
+  const body = [204, 205, 304].includes(res.status) ? null : await res.text();
+
+  const data: listRegistryReferencesResponse['data'] = body ? JSON.parse(body) : {}
+  return { data, status: res.status, headers: res.headers } as listRegistryReferencesResponse
+}
+
+
+
+export type listRegistryTypesResponse200 = {
+  data: RegistryTypeList
+  status: 200
+}
+
+export type listRegistryTypesResponse403 = {
+  data: ApiError
+  status: 403
+}
+
+export type listRegistryTypesResponse500 = {
+  data: ApiError
+  status: 500
+}
+
+export type listRegistryTypesResponse503 = {
+  data: ApiError
+  status: 503
+}
+
+export type listRegistryTypesResponseSuccess = (listRegistryTypesResponse200) & {
+  headers: Headers;
+};
+export type listRegistryTypesResponseError = (listRegistryTypesResponse403 | listRegistryTypesResponse500 | listRegistryTypesResponse503) & {
+  headers: Headers;
+};
+
+export type listRegistryTypesResponse = (listRegistryTypesResponseSuccess | listRegistryTypesResponseError)
+
+export const getListRegistryTypesUrl = () => {
+
+
+
+
+  return `/api/v1/registry/types`
+}
+
+/**
+ * # Errors
+ *
+ * Returns an API error when authentication, authorization, or storage fails.
+ * @summary Lists the Registry types of the active revision.
+ */
+export const listRegistryTypes = async ( options?: RequestInit): Promise<listRegistryTypesResponse> => {
+
+  const res = await fetch(getListRegistryTypesUrl(),
+  {
+    ...options,
+    method: 'GET'
+
+
+  }
+)
+
+
+  const body = [204, 205, 304].includes(res.status) ? null : await res.text();
+
+  const data: listRegistryTypesResponse['data'] = body ? JSON.parse(body) : {}
+  return { data, status: res.status, headers: res.headers } as listRegistryTypesResponse
+}
+
+
+
+export type listActionRequestsResponse200 = {
+  data: PageActionRequestDto
+  status: 200
+}
+
+export type listActionRequestsResponse400 = {
+  data: ApiError
+  status: 400
+}
+
+export type listActionRequestsResponse403 = {
+  data: ApiError
+  status: 403
+}
+
+export type listActionRequestsResponse500 = {
+  data: ApiError
+  status: 500
+}
+
+export type listActionRequestsResponse503 = {
+  data: ApiError
+  status: 503
+}
+
+export type listActionRequestsResponseSuccess = (listActionRequestsResponse200) & {
+  headers: Headers;
+};
+export type listActionRequestsResponseError = (listActionRequestsResponse400 | listActionRequestsResponse403 | listActionRequestsResponse500 | listActionRequestsResponse503) & {
+  headers: Headers;
+};
+
+export type listActionRequestsResponse = (listActionRequestsResponseSuccess | listActionRequestsResponseError)
+
+export const getListActionRequestsUrl = (params?: ListActionRequestsParams,) => {
+  const normalizedParams = new URLSearchParams();
+
+  Object.entries(params || {}).forEach(([key, value]) => {
+
+    if (value !== undefined) {
+      normalizedParams.append(key, value === null ? 'null' : String(value))
+    }
+  });
+
+  const stringifiedParams = normalizedParams.toString();
+
+  return stringifiedParams.length > 0 ? `/api/v1/requests?${stringifiedParams}` : `/api/v1/requests`
+}
+
+/**
+ * # Errors
+ *
+ * Returns the public error envelope on refusal or a malformed filter.
+ * @summary Lists action requests, newest first, optionally only those in one state
+(for the approver's inbox: `state=pending`). Expiry and the outcome of an
+executing request's operation are applied as they are read.
+ */
+export const listActionRequests = async (params?: ListActionRequestsParams, options?: RequestInit): Promise<listActionRequestsResponse> => {
+
+  const res = await fetch(getListActionRequestsUrl(params),
+  {
+    ...options,
+    method: 'GET'
+
+
+  }
+)
+
+
+  const body = [204, 205, 304].includes(res.status) ? null : await res.text();
+
+  const data: listActionRequestsResponse['data'] = body ? JSON.parse(body) : {}
+  return { data, status: res.status, headers: res.headers } as listActionRequestsResponse
+}
+
+
+
+export type createActionRequestResponse201 = {
+  data: ResourceActionRequestDto
+  status: 201
+}
+
+export type createActionRequestResponse400 = {
+  data: ApiError
+  status: 400
+}
+
+export type createActionRequestResponse403 = {
+  data: ApiError
+  status: 403
+}
+
+export type createActionRequestResponse409 = {
+  data: ApiError
+  status: 409
+}
+
+export type createActionRequestResponse500 = {
+  data: ApiError
+  status: 500
+}
+
+export type createActionRequestResponse503 = {
+  data: ApiError
+  status: 503
+}
+
+export type createActionRequestResponseSuccess = (createActionRequestResponse201) & {
+  headers: Headers;
+};
+export type createActionRequestResponseError = (createActionRequestResponse400 | createActionRequestResponse403 | createActionRequestResponse409 | createActionRequestResponse500 | createActionRequestResponse503) & {
+  headers: Headers;
+};
+
+export type createActionRequestResponse = (createActionRequestResponseSuccess | createActionRequestResponseError)
+
+export const getCreateActionRequestUrl = () => {
+
+
+
+
+  return `/api/v1/requests`
+}
+
+/**
+ * # Errors
+ *
+ * Returns the public error envelope on refusal, an unknown action, or
+ * invalid or credential-like input.
+ * @summary Asks Fleet to run a provider action. The action's risk class decides
+what happens next: `auto` starts the operation at once (the response is
+`executing` with its `operationId`), `approve` records the request as
+`pending` until a person approves or denies it before `expiresAt`, and
+`deny` records it as `denied`. The response always states which.
+ */
+export const createActionRequest = async (createActionRequestBody: CreateActionRequest, options?: RequestInit): Promise<createActionRequestResponse> => {
+
+    const getHeaders = (h?: NonNullable<RequestInit['headers']>): Record<string, string | readonly string[]> => {
+    if (!h) return {};
+    if (h instanceof Headers) return Object.fromEntries(h.entries());
+    if (Array.isArray(h)) return Object.fromEntries(h);
+    return h;
+  };
+const res = await fetch(getCreateActionRequestUrl(),
+  {
+    ...options,
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...getHeaders(options?.headers) },
+    body: JSON.stringify(createActionRequestBody)
+  }
+)
+
+
+  const body = [204, 205, 304].includes(res.status) ? null : await res.text();
+
+  const data: createActionRequestResponse['data'] = body ? JSON.parse(body) : {}
+  return { data, status: res.status, headers: res.headers } as createActionRequestResponse
+}
+
+
+
+export type getActionRequestResponse200 = {
+  data: ResourceActionRequestDto
+  status: 200
+}
+
+export type getActionRequestResponse403 = {
+  data: ApiError
+  status: 403
+}
+
+export type getActionRequestResponse404 = {
+  data: ApiError
+  status: 404
+}
+
+export type getActionRequestResponse500 = {
+  data: ApiError
+  status: 500
+}
+
+export type getActionRequestResponse503 = {
+  data: ApiError
+  status: 503
+}
+
+export type getActionRequestResponseSuccess = (getActionRequestResponse200) & {
+  headers: Headers;
+};
+export type getActionRequestResponseError = (getActionRequestResponse403 | getActionRequestResponse404 | getActionRequestResponse500 | getActionRequestResponse503) & {
+  headers: Headers;
+};
+
+export type getActionRequestResponse = (getActionRequestResponseSuccess | getActionRequestResponseError)
+
+export const getGetActionRequestUrl = (requestId: string,) => {
+
+
+
+
+  return `/api/v1/requests/${requestId}`
+}
+
+/**
+ * # Errors
+ *
+ * Returns the public error envelope on refusal or an unknown id.
+ * @summary Reads one action request.
+ */
+export const getActionRequest = async (requestId: string, options?: RequestInit): Promise<getActionRequestResponse> => {
+
+  const res = await fetch(getGetActionRequestUrl(requestId),
+  {
+    ...options,
+    method: 'GET'
+
+
+  }
+)
+
+
+  const body = [204, 205, 304].includes(res.status) ? null : await res.text();
+
+  const data: getActionRequestResponse['data'] = body ? JSON.parse(body) : {}
+  return { data, status: res.status, headers: res.headers } as getActionRequestResponse
+}
+
+
+
+export type approveActionRequestResponse200 = {
+  data: ResourceActionRequestDto
+  status: 200
+}
+
+export type approveActionRequestResponse403 = {
+  data: ApiError
+  status: 403
+}
+
+export type approveActionRequestResponse404 = {
+  data: ApiError
+  status: 404
+}
+
+export type approveActionRequestResponse409 = {
+  data: ApiError
+  status: 409
+}
+
+export type approveActionRequestResponse500 = {
+  data: ApiError
+  status: 500
+}
+
+export type approveActionRequestResponse503 = {
+  data: ApiError
+  status: 503
+}
+
+export type approveActionRequestResponseSuccess = (approveActionRequestResponse200) & {
+  headers: Headers;
+};
+export type approveActionRequestResponseError = (approveActionRequestResponse403 | approveActionRequestResponse404 | approveActionRequestResponse409 | approveActionRequestResponse500 | approveActionRequestResponse503) & {
+  headers: Headers;
+};
+
+export type approveActionRequestResponse = (approveActionRequestResponseSuccess | approveActionRequestResponseError)
+
+export const getApproveActionRequestUrl = (requestId: string,) => {
+
+
+
+
+  return `/api/v1/requests/${requestId}/approve`
+}
+
+/**
+ * # Errors
+ *
+ * Returns the public error envelope on refusal, an unknown id, or a request
+ * that is no longer pending.
+ * @summary Approves a pending request and starts its operation. The approver is
+recorded, and their authorization is checked again when the operation is
+created. Of concurrent approvals exactly one succeeds; the rest get 409.
+An approval whose operation cannot be created answers 200 with the
+request `failed` and the reason.
+ */
+export const approveActionRequest = async (requestId: string, options?: RequestInit): Promise<approveActionRequestResponse> => {
+
+  const res = await fetch(getApproveActionRequestUrl(requestId),
+  {
+    ...options,
+    method: 'POST'
+
+
+  }
+)
+
+
+  const body = [204, 205, 304].includes(res.status) ? null : await res.text();
+
+  const data: approveActionRequestResponse['data'] = body ? JSON.parse(body) : {}
+  return { data, status: res.status, headers: res.headers } as approveActionRequestResponse
+}
+
+
+
+export type denyActionRequestResponse200 = {
+  data: ResourceActionRequestDto
+  status: 200
+}
+
+export type denyActionRequestResponse400 = {
+  data: ApiError
+  status: 400
+}
+
+export type denyActionRequestResponse403 = {
+  data: ApiError
+  status: 403
+}
+
+export type denyActionRequestResponse404 = {
+  data: ApiError
+  status: 404
+}
+
+export type denyActionRequestResponse409 = {
+  data: ApiError
+  status: 409
+}
+
+export type denyActionRequestResponse500 = {
+  data: ApiError
+  status: 500
+}
+
+export type denyActionRequestResponse503 = {
+  data: ApiError
+  status: 503
+}
+
+export type denyActionRequestResponseSuccess = (denyActionRequestResponse200) & {
+  headers: Headers;
+};
+export type denyActionRequestResponseError = (denyActionRequestResponse400 | denyActionRequestResponse403 | denyActionRequestResponse404 | denyActionRequestResponse409 | denyActionRequestResponse500 | denyActionRequestResponse503) & {
+  headers: Headers;
+};
+
+export type denyActionRequestResponse = (denyActionRequestResponseSuccess | denyActionRequestResponseError)
+
+export const getDenyActionRequestUrl = (requestId: string,) => {
+
+
+
+
+  return `/api/v1/requests/${requestId}/deny`
+}
+
+/**
+ * # Errors
+ *
+ * Returns the public error envelope on refusal, an unknown id, or a request
+ * that is no longer pending.
+ * @summary Denies a pending request, with an optional note.
+ */
+export const denyActionRequest = async (requestId: string,
+    nullDenyActionRequest?: null | DenyActionRequest, options?: RequestInit): Promise<denyActionRequestResponse> => {
+
+    const getHeaders = (h?: NonNullable<RequestInit['headers']>): Record<string, string | readonly string[]> => {
+    if (!h) return {};
+    if (h instanceof Headers) return Object.fromEntries(h.entries());
+    if (Array.isArray(h)) return Object.fromEntries(h);
+    return h;
+  };
+const res = await fetch(getDenyActionRequestUrl(requestId),
+  {
+    ...options,
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...getHeaders(options?.headers) },
+    body: JSON.stringify(nullDenyActionRequest)
+  }
+)
+
+
+  const body = [204, 205, 304].includes(res.status) ? null : await res.text();
+
+  const data: denyActionRequestResponse['data'] = body ? JSON.parse(body) : {}
+  return { data, status: res.status, headers: res.headers } as denyActionRequestResponse
+}
+
+
+
+export type listRunningServicesResponse200 = {
+  data: ServicesPage
+  status: 200
+}
+
+export type listRunningServicesResponse400 = {
+  data: ApiError
+  status: 400
+}
+
+export type listRunningServicesResponse403 = {
+  data: ApiError
+  status: 403
+}
+
+export type listRunningServicesResponse503 = {
+  data: ApiError
+  status: 503
+}
+
+export type listRunningServicesResponseSuccess = (listRunningServicesResponse200) & {
+  headers: Headers;
+};
+export type listRunningServicesResponseError = (listRunningServicesResponse400 | listRunningServicesResponse403 | listRunningServicesResponse503) & {
+  headers: Headers;
+};
+
+export type listRunningServicesResponse = (listRunningServicesResponseSuccess | listRunningServicesResponseError)
+
+export const getListRunningServicesUrl = (params?: ListRunningServicesParams,) => {
+  const normalizedParams = new URLSearchParams();
+
+  Object.entries(params || {}).forEach(([key, value]) => {
+
+    if (value !== undefined) {
+      normalizedParams.append(key, value === null ? 'null' : String(value))
+    }
+  });
+
+  const stringifiedParams = normalizedParams.toString();
+
+  return stringifiedParams.length > 0 ? `/api/v1/services?${stringifiedParams}` : `/api/v1/services`
+}
+
+/**
+ * # Errors
+ *
+ * Returns the public error envelope on a malformed filter, or when the
+ * caller may read none of the inputs.
+ * @summary Lists running services: Coolify resources joined with Docker
+containers on Fleet machines and with Registry entries, ordered by id.
+Inputs the caller may not read are left out and reported in `coverage`.
+ */
+export const listRunningServices = async (params?: ListRunningServicesParams, options?: RequestInit): Promise<listRunningServicesResponse> => {
+
+  const res = await fetch(getListRunningServicesUrl(params),
+  {
+    ...options,
+    method: 'GET'
+
+
+  }
+)
+
+
+  const body = [204, 205, 304].includes(res.status) ? null : await res.text();
+
+  const data: listRunningServicesResponse['data'] = body ? JSON.parse(body) : {}
+  return { data, status: res.status, headers: res.headers } as listRunningServicesResponse
+}
+
+
+
+export type getRunningServiceResponse200 = {
+  data: ResourceServiceDetailDto
+  status: 200
+}
+
+export type getRunningServiceResponse403 = {
+  data: ApiError
+  status: 403
+}
+
+export type getRunningServiceResponse404 = {
+  data: ApiError
+  status: 404
+}
+
+export type getRunningServiceResponse503 = {
+  data: ApiError
+  status: 503
+}
+
+export type getRunningServiceResponseSuccess = (getRunningServiceResponse200) & {
+  headers: Headers;
+};
+export type getRunningServiceResponseError = (getRunningServiceResponse403 | getRunningServiceResponse404 | getRunningServiceResponse503) & {
+  headers: Headers;
+};
+
+export type getRunningServiceResponse = (getRunningServiceResponseSuccess | getRunningServiceResponseError)
+
+export const getGetRunningServiceUrl = (serviceId: string,) => {
+
+
+
+
+  return `/api/v1/services/${serviceId}`
+}
+
+/**
+ * # Errors
+ *
+ * Returns the public error envelope on refusal or when no such service is
+ * in the caller's view.
+ * @summary Reads one running service by id.
+ */
+export const getRunningService = async (serviceId: string, options?: RequestInit): Promise<getRunningServiceResponse> => {
+
+  const res = await fetch(getGetRunningServiceUrl(serviceId),
+  {
+    ...options,
+    method: 'GET'
+
+
+  }
+)
+
+
+  const body = [204, 205, 304].includes(res.status) ? null : await res.text();
+
+  const data: getRunningServiceResponse['data'] = body ? JSON.parse(body) : {}
+  return { data, status: res.status, headers: res.headers } as getRunningServiceResponse
+}
+
+
+
+export type requestServiceActionResponse201 = {
+  data: ResourceActionRequestDto
+  status: 201
+}
+
+export type requestServiceActionResponse400 = {
+  data: ApiError
+  status: 400
+}
+
+export type requestServiceActionResponse403 = {
+  data: ApiError
+  status: 403
+}
+
+export type requestServiceActionResponse404 = {
+  data: ApiError
+  status: 404
+}
+
+export type requestServiceActionResponse409 = {
+  data: ApiError
+  status: 409
+}
+
+export type requestServiceActionResponse503 = {
+  data: ApiError
+  status: 503
+}
+
+export type requestServiceActionResponseSuccess = (requestServiceActionResponse201) & {
+  headers: Headers;
+};
+export type requestServiceActionResponseError = (requestServiceActionResponse400 | requestServiceActionResponse403 | requestServiceActionResponse404 | requestServiceActionResponse409 | requestServiceActionResponse503) & {
+  headers: Headers;
+};
+
+export type requestServiceActionResponse = (requestServiceActionResponseSuccess | requestServiceActionResponseError)
+
+export const getRequestServiceActionUrl = (serviceId: string,
+    verb: string,) => {
+
+
+
+
+  return `/api/v1/services/${serviceId}/actions/${verb}`
+}
+
+/**
+ * # Errors
+ *
+ * Returns the public error envelope on refusal, an unknown service or verb,
+ * or a broker refusal.
+ * @summary Files a lifecycle action (`start`, `stop`, `restart`, or `redeploy`) on a
+Coolify service as a brokered action request. `restart`, `redeploy`, and
+`start` run at once; `stop` waits for a person to approve it. The
+resource must be in the account's latest Coolify observation. The answer
+is the action request; follow it at `/requests/{id}` and its operation at
+`/operations/{id}`, whose result records the status observed after the
+call.
+ */
+export const requestServiceAction = async (serviceId: string,
+    verb: string,
+    serviceActionBody: ServiceActionBody, options?: RequestInit): Promise<requestServiceActionResponse> => {
+
+    const getHeaders = (h?: NonNullable<RequestInit['headers']>): Record<string, string | readonly string[]> => {
+    if (!h) return {};
+    if (h instanceof Headers) return Object.fromEntries(h.entries());
+    if (Array.isArray(h)) return Object.fromEntries(h);
+    return h;
+  };
+const res = await fetch(getRequestServiceActionUrl(serviceId,verb),
+  {
+    ...options,
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...getHeaders(options?.headers) },
+    body: JSON.stringify(serviceActionBody)
+  }
+)
+
+
+  const body = [204, 205, 304].includes(res.status) ? null : await res.text();
+
+  const data: requestServiceActionResponse['data'] = body ? JSON.parse(body) : {}
+  return { data, status: res.status, headers: res.headers } as requestServiceActionResponse
+}
+
+
+
+export type getServiceLogsResponse200 = {
+  data: ResourceServiceLogsDto
+  status: 200
+}
+
+export type getServiceLogsResponse400 = {
+  data: ApiError
+  status: 400
+}
+
+export type getServiceLogsResponse403 = {
+  data: ApiError
+  status: 403
+}
+
+export type getServiceLogsResponse404 = {
+  data: ApiError
+  status: 404
+}
+
+export type getServiceLogsResponse503 = {
+  data: ApiError
+  status: 503
+}
+
+export type getServiceLogsResponseSuccess = (getServiceLogsResponse200) & {
+  headers: Headers;
+};
+export type getServiceLogsResponseError = (getServiceLogsResponse400 | getServiceLogsResponse403 | getServiceLogsResponse404 | getServiceLogsResponse503) & {
+  headers: Headers;
+};
+
+export type getServiceLogsResponse = (getServiceLogsResponseSuccess | getServiceLogsResponseError)
+
+export const getGetServiceLogsUrl = (serviceId: string,
+    params?: GetServiceLogsParams,) => {
+  const normalizedParams = new URLSearchParams();
+
+  Object.entries(params || {}).forEach(([key, value]) => {
+
+    if (value !== undefined) {
+      normalizedParams.append(key, value === null ? 'null' : String(value))
+    }
+  });
+
+  const stringifiedParams = normalizedParams.toString();
+
+  return stringifiedParams.length > 0 ? `/api/v1/services/${serviceId}/logs?${stringifiedParams}` : `/api/v1/services/${serviceId}/logs`
+}
+
+/**
+ * # Errors
+ *
+ * Returns the public error envelope on refusal, a service that is not a
+ * known application, or a provider failure.
+ * @summary Tails the log of a Coolify application's deployment, bounded in lines
+and bytes and redacted before it is returned; it is never stored.
+Coolify returns deployment logs only to a token with the `read:sensitive`
+ability, so an account whose token lacks it answers 403 with
+`provider_permission`. Needs `external_account.config` on the account.
+ */
+export const getServiceLogs = async (serviceId: string,
+    params?: GetServiceLogsParams, options?: RequestInit): Promise<getServiceLogsResponse> => {
+
+  const res = await fetch(getGetServiceLogsUrl(serviceId,params),
+  {
+    ...options,
+    method: 'GET'
+
+
+  }
+)
+
+
+  const body = [204, 205, 304].includes(res.status) ? null : await res.text();
+
+  const data: getServiceLogsResponse['data'] = body ? JSON.parse(body) : {}
+  return { data, status: res.status, headers: res.headers } as getServiceLogsResponse
+}
+
+
+
+export type getServiceSettingsResponse200 = {
+  data: ResourceServiceSettingsDto
+  status: 200
+}
+
+export type getServiceSettingsResponse400 = {
+  data: ApiError
+  status: 400
+}
+
+export type getServiceSettingsResponse403 = {
+  data: ApiError
+  status: 403
+}
+
+export type getServiceSettingsResponse404 = {
+  data: ApiError
+  status: 404
+}
+
+export type getServiceSettingsResponse422 = {
+  data: ApiError
+  status: 422
+}
+
+export type getServiceSettingsResponse503 = {
+  data: ApiError
+  status: 503
+}
+
+export type getServiceSettingsResponseSuccess = (getServiceSettingsResponse200) & {
+  headers: Headers;
+};
+export type getServiceSettingsResponseError = (getServiceSettingsResponse400 | getServiceSettingsResponse403 | getServiceSettingsResponse404 | getServiceSettingsResponse422 | getServiceSettingsResponse503) & {
+  headers: Headers;
+};
+
+export type getServiceSettingsResponse = (getServiceSettingsResponseSuccess | getServiceSettingsResponseError)
+
+export const getGetServiceSettingsUrl = (serviceId: string,) => {
+
+
+
+
+  return `/api/v1/services/${serviceId}/settings`
+}
+
+/**
+ * # Errors
+ *
+ * Returns the public error envelope on refusal, an unknown service, an
+ * unsupported Coolify version, or a provider failure.
+ * @summary Reads a Coolify resource's settings: environment variable names and
+flags (never values), an application's domains, and its health check.
+Needs `external_account.read`.
+ */
+export const getServiceSettings = async (serviceId: string, options?: RequestInit): Promise<getServiceSettingsResponse> => {
+
+  const res = await fetch(getGetServiceSettingsUrl(serviceId),
+  {
+    ...options,
+    method: 'GET'
+
+
+  }
+)
+
+
+  const body = [204, 205, 304].includes(res.status) ? null : await res.text();
+
+  const data: getServiceSettingsResponse['data'] = body ? JSON.parse(body) : {}
+  return { data, status: res.status, headers: res.headers } as getServiceSettingsResponse
+}
+
+
+
+export type requestServiceDomainsChangeResponse201 = {
+  data: ResourceActionRequestDto
+  status: 201
+}
+
+export type requestServiceDomainsChangeResponse400 = {
+  data: ApiError
+  status: 400
+}
+
+export type requestServiceDomainsChangeResponse403 = {
+  data: ApiError
+  status: 403
+}
+
+export type requestServiceDomainsChangeResponse404 = {
+  data: ApiError
+  status: 404
+}
+
+export type requestServiceDomainsChangeResponse409 = {
+  data: ApiError
+  status: 409
+}
+
+export type requestServiceDomainsChangeResponse503 = {
+  data: ApiError
+  status: 503
+}
+
+export type requestServiceDomainsChangeResponseSuccess = (requestServiceDomainsChangeResponse201) & {
+  headers: Headers;
+};
+export type requestServiceDomainsChangeResponseError = (requestServiceDomainsChangeResponse400 | requestServiceDomainsChangeResponse403 | requestServiceDomainsChangeResponse404 | requestServiceDomainsChangeResponse409 | requestServiceDomainsChangeResponse503) & {
+  headers: Headers;
+};
+
+export type requestServiceDomainsChangeResponse = (requestServiceDomainsChangeResponseSuccess | requestServiceDomainsChangeResponseError)
+
+export const getRequestServiceDomainsChangeUrl = (serviceId: string,) => {
+
+
+
+
+  return `/api/v1/services/${serviceId}/settings/domains`
+}
+
+/**
+ * # Errors
+ *
+ * Returns the public error envelope on refusal, invalid domains, an
+ * unknown or non-application resource, a Compose application, a change
+ * that would do nothing, or a broker refusal.
+ * @summary Files a request to replace a Coolify application's domains, with a
+preview of the difference (`before`, `after`, and the changed fields).
+An `approve`-class action request; stale at execution when the domains
+changed in the meantime.
+ */
+export const requestServiceDomainsChange = async (serviceId: string,
+    serviceDomainsBody: ServiceDomainsBody, options?: RequestInit): Promise<requestServiceDomainsChangeResponse> => {
+
+    const getHeaders = (h?: NonNullable<RequestInit['headers']>): Record<string, string | readonly string[]> => {
+    if (!h) return {};
+    if (h instanceof Headers) return Object.fromEntries(h.entries());
+    if (Array.isArray(h)) return Object.fromEntries(h);
+    return h;
+  };
+const res = await fetch(getRequestServiceDomainsChangeUrl(serviceId),
+  {
+    ...options,
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...getHeaders(options?.headers) },
+    body: JSON.stringify(serviceDomainsBody)
+  }
+)
+
+
+  const body = [204, 205, 304].includes(res.status) ? null : await res.text();
+
+  const data: requestServiceDomainsChangeResponse['data'] = body ? JSON.parse(body) : {}
+  return { data, status: res.status, headers: res.headers } as requestServiceDomainsChangeResponse
+}
+
+
+
+export type requestServiceEnvChangeResponse201 = {
+  data: ResourceActionRequestDto
+  status: 201
+}
+
+export type requestServiceEnvChangeResponse400 = {
+  data: ApiError
+  status: 400
+}
+
+export type requestServiceEnvChangeResponse403 = {
+  data: ApiError
+  status: 403
+}
+
+export type requestServiceEnvChangeResponse404 = {
+  data: ApiError
+  status: 404
+}
+
+export type requestServiceEnvChangeResponse409 = {
+  data: ApiError
+  status: 409
+}
+
+export type requestServiceEnvChangeResponse503 = {
+  data: ApiError
+  status: 503
+}
+
+export type requestServiceEnvChangeResponseSuccess = (requestServiceEnvChangeResponse201) & {
+  headers: Headers;
+};
+export type requestServiceEnvChangeResponseError = (requestServiceEnvChangeResponse400 | requestServiceEnvChangeResponse403 | requestServiceEnvChangeResponse404 | requestServiceEnvChangeResponse409 | requestServiceEnvChangeResponse503) & {
+  headers: Headers;
+};
+
+export type requestServiceEnvChangeResponse = (requestServiceEnvChangeResponseSuccess | requestServiceEnvChangeResponseError)
+
+export const getRequestServiceEnvChangeUrl = (serviceId: string,) => {
+
+
+
+
+  return `/api/v1/services/${serviceId}/settings/env`
+}
+
+/**
+ * # Errors
+ *
+ * Returns the public error envelope on refusal, invalid input, an unknown
+ * resource, or a broker refusal.
+ * @summary Files a request to set or unset environment variables of a Coolify
+application or service. The values are write-only: each is moved into
+the encrypted secret store and the request records only key names
+and flags, so the approver sees names and never a
+value. The held values are deleted after execution, denial, or expiry.
+The change is an `approve`-class action request; the answer is that
+request. A secret-shaped value never appears in any response.
+ */
+export const requestServiceEnvChange = async (serviceId: string,
+    serviceEnvBody: ServiceEnvBody, options?: RequestInit): Promise<requestServiceEnvChangeResponse> => {
+
+    const getHeaders = (h?: NonNullable<RequestInit['headers']>): Record<string, string | readonly string[]> => {
+    if (!h) return {};
+    if (h instanceof Headers) return Object.fromEntries(h.entries());
+    if (Array.isArray(h)) return Object.fromEntries(h);
+    return h;
+  };
+const res = await fetch(getRequestServiceEnvChangeUrl(serviceId),
+  {
+    ...options,
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...getHeaders(options?.headers) },
+    body: JSON.stringify(serviceEnvBody)
+  }
+)
+
+
+  const body = [204, 205, 304].includes(res.status) ? null : await res.text();
+
+  const data: requestServiceEnvChangeResponse['data'] = body ? JSON.parse(body) : {}
+  return { data, status: res.status, headers: res.headers } as requestServiceEnvChangeResponse
+}
+
+
+
+export type requestServiceHealthChangeResponse201 = {
+  data: ResourceActionRequestDto
+  status: 201
+}
+
+export type requestServiceHealthChangeResponse400 = {
+  data: ApiError
+  status: 400
+}
+
+export type requestServiceHealthChangeResponse403 = {
+  data: ApiError
+  status: 403
+}
+
+export type requestServiceHealthChangeResponse404 = {
+  data: ApiError
+  status: 404
+}
+
+export type requestServiceHealthChangeResponse409 = {
+  data: ApiError
+  status: 409
+}
+
+export type requestServiceHealthChangeResponse503 = {
+  data: ApiError
+  status: 503
+}
+
+export type requestServiceHealthChangeResponseSuccess = (requestServiceHealthChangeResponse201) & {
+  headers: Headers;
+};
+export type requestServiceHealthChangeResponseError = (requestServiceHealthChangeResponse400 | requestServiceHealthChangeResponse403 | requestServiceHealthChangeResponse404 | requestServiceHealthChangeResponse409 | requestServiceHealthChangeResponse503) & {
+  headers: Headers;
+};
+
+export type requestServiceHealthChangeResponse = (requestServiceHealthChangeResponseSuccess | requestServiceHealthChangeResponseError)
+
+export const getRequestServiceHealthChangeUrl = (serviceId: string,) => {
+
+
+
+
+  return `/api/v1/services/${serviceId}/settings/health`
+}
+
+/**
+ * # Errors
+ *
+ * Returns the public error envelope on refusal, invalid fields, an unknown
+ * or non-application resource, a change that would do nothing, or a broker
+ * refusal.
+ * @summary Files a request to change a Coolify application's health check, with a
+preview of the difference. Only the named fields change. An
+`approve`-class action request.
+ */
+export const requestServiceHealthChange = async (serviceId: string,
+    serviceHealthBody: ServiceHealthBody, options?: RequestInit): Promise<requestServiceHealthChangeResponse> => {
+
+    const getHeaders = (h?: NonNullable<RequestInit['headers']>): Record<string, string | readonly string[]> => {
+    if (!h) return {};
+    if (h instanceof Headers) return Object.fromEntries(h.entries());
+    if (Array.isArray(h)) return Object.fromEntries(h);
+    return h;
+  };
+const res = await fetch(getRequestServiceHealthChangeUrl(serviceId),
+  {
+    ...options,
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...getHeaders(options?.headers) },
+    body: JSON.stringify(serviceHealthBody)
+  }
+)
+
+
+  const body = [204, 205, 304].includes(res.status) ? null : await res.text();
+
+  const data: requestServiceHealthChangeResponse['data'] = body ? JSON.parse(body) : {}
+  return { data, status: res.status, headers: res.headers } as requestServiceHealthChangeResponse
+}
+
+
+
+export type requestSiteDeploymentResponse201 = {
+  data: ResourceActionRequestDto
+  status: 201
+}
+
+export type requestSiteDeploymentResponse400 = {
+  data: ApiError
+  status: 400
+}
+
+export type requestSiteDeploymentResponse403 = {
+  data: ApiError
+  status: 403
+}
+
+export type requestSiteDeploymentResponse404 = {
+  data: ApiError
+  status: 404
+}
+
+export type requestSiteDeploymentResponse409 = {
+  data: ApiError
+  status: 409
+}
+
+export type requestSiteDeploymentResponse503 = {
+  data: ApiError
+  status: 503
+}
+
+export type requestSiteDeploymentResponseSuccess = (requestSiteDeploymentResponse201) & {
+  headers: Headers;
+};
+export type requestSiteDeploymentResponseError = (requestSiteDeploymentResponse400 | requestSiteDeploymentResponse403 | requestSiteDeploymentResponse404 | requestSiteDeploymentResponse409 | requestSiteDeploymentResponse503) & {
+  headers: Headers;
+};
+
+export type requestSiteDeploymentResponse = (requestSiteDeploymentResponseSuccess | requestSiteDeploymentResponseError)
+
+export const getRequestSiteDeploymentUrl = () => {
+
+
+
+
+  return `/api/v1/site-deployments`
+}
+
+/**
+ * # Errors
+ *
+ * Returns the public error envelope on refusal, an unknown template,
+ * account, or target, a domain already in use, or a broker refusal.
+ * @summary Files a request to deploy a new site from a template: it creates the
+Coolify resource, sets the domain, and starts the first deployment. The
+server, project, and environment must be in the account's latest Coolify
+observation and the domain must not already be routed there. The request
+is `approve` class (it waits for a person unless policy says otherwise);
+the answer is the action request. Follow it at `/requests/{id}` and its
+operation at `/operations/{id}`: the result names the created uuid and
+every step, and a deployment that stopped after creating the resource is a
+failed operation whose result still carries them.
+ */
+export const requestSiteDeployment = async (siteDeployBody: SiteDeployBody, options?: RequestInit): Promise<requestSiteDeploymentResponse> => {
+
+    const getHeaders = (h?: NonNullable<RequestInit['headers']>): Record<string, string | readonly string[]> => {
+    if (!h) return {};
+    if (h instanceof Headers) return Object.fromEntries(h.entries());
+    if (Array.isArray(h)) return Object.fromEntries(h);
+    return h;
+  };
+const res = await fetch(getRequestSiteDeploymentUrl(),
+  {
+    ...options,
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...getHeaders(options?.headers) },
+    body: JSON.stringify(siteDeployBody)
+  }
+)
+
+
+  const body = [204, 205, 304].includes(res.status) ? null : await res.text();
+
+  const data: requestSiteDeploymentResponse['data'] = body ? JSON.parse(body) : {}
+  return { data, status: res.status, headers: res.headers } as requestSiteDeploymentResponse
+}
+
+
+
+export type listSiteTemplatesResponse200 = {
+  data: ResourceSiteTemplatesDto
+  status: 200
+}
+
+export type listSiteTemplatesResponse403 = {
+  data: ApiError
+  status: 403
+}
+
+export type listSiteTemplatesResponse503 = {
+  data: ApiError
+  status: 503
+}
+
+export type listSiteTemplatesResponseSuccess = (listSiteTemplatesResponse200) & {
+  headers: Headers;
+};
+export type listSiteTemplatesResponseError = (listSiteTemplatesResponse403 | listSiteTemplatesResponse503) & {
+  headers: Headers;
+};
+
+export type listSiteTemplatesResponse = (listSiteTemplatesResponseSuccess | listSiteTemplatesResponseError)
+
+export const getListSiteTemplatesUrl = () => {
+
+
+
+
+  return `/api/v1/site-templates`
+}
+
+/**
+ * # Errors
+ *
+ * Returns the public error envelope on refusal or when the surface is not
+ * wired.
+ * @summary Lists the built-in site templates. Needs `external_account.read`.
+ */
+export const listSiteTemplates = async ( options?: RequestInit): Promise<listSiteTemplatesResponse> => {
+
+  const res = await fetch(getListSiteTemplatesUrl(),
+  {
+    ...options,
+    method: 'GET'
+
+
+  }
+)
+
+
+  const body = [204, 205, 304].includes(res.status) ? null : await res.text();
+
+  const data: listSiteTemplatesResponse['data'] = body ? JSON.parse(body) : {}
+  return { data, status: res.status, headers: res.headers } as listSiteTemplatesResponse
 }
 
 
@@ -11345,6 +20452,11 @@ export type getSystemInfoResponse200 = {
   status: 200
 }
 
+export type getSystemInfoResponse403 = {
+  data: ApiError
+  status: 403
+}
+
 export type getSystemInfoResponse500 = {
   data: ApiError
   status: 500
@@ -11353,7 +20465,7 @@ export type getSystemInfoResponse500 = {
 export type getSystemInfoResponseSuccess = (getSystemInfoResponse200) & {
   headers: Headers;
 };
-export type getSystemInfoResponseError = (getSystemInfoResponse500) & {
+export type getSystemInfoResponseError = (getSystemInfoResponse403 | getSystemInfoResponse500) & {
   headers: Headers;
 };
 

@@ -10,6 +10,8 @@ const fetchDesiredRevision = vi.fn()
 const activateDesiredRevision = vi.fn()
 const rollbackDesiredRevision = vi.fn()
 const getOperation = vi.fn()
+const getRegistrySettings = vi.fn()
+const updateRegistrySettings = vi.fn()
 
 vi.mock('@frogbyte-io/fleet-api-client', () => ({
   getDesiredSource: (...a: unknown[]) => getDesiredSource(...a),
@@ -20,6 +22,8 @@ vi.mock('@frogbyte-io/fleet-api-client', () => ({
   activateDesiredRevision: (...a: unknown[]) => activateDesiredRevision(...a),
   rollbackDesiredRevision: (...a: unknown[]) => rollbackDesiredRevision(...a),
   getOperation: (...a: unknown[]) => getOperation(...a),
+  getRegistrySettings: (...a: unknown[]) => getRegistrySettings(...a),
+  updateRegistrySettings: (...a: unknown[]) => updateRegistrySettings(...a),
   cancelOperation: vi.fn(),
 }))
 
@@ -57,8 +61,9 @@ let fetchResult: Record<string, unknown>
 enableAutoUnmount(afterEach)
 
 beforeEach(() => {
-  for (const mock of [getDesiredSource, getDesiredRevision, listDesiredHistory, configureDesiredSource, fetchDesiredRevision, activateDesiredRevision, rollbackDesiredRevision, getOperation])
+  for (const mock of [getDesiredSource, getDesiredRevision, listDesiredHistory, configureDesiredSource, fetchDesiredRevision, activateDesiredRevision, rollbackDesiredRevision, getOperation, getRegistrySettings, updateRegistrySettings])
     mock.mockReset()
+  getRegistrySettings.mockResolvedValue(ok({ data: { autoActivate: true, changeMode: 'pull-request' } }))
   getDesiredSource.mockResolvedValue(ok({ data: { remote: 'ssh://git@host/fleet.git' } }))
   getDesiredRevision.mockResolvedValue(ok({ data: { active: null } }))
   listDesiredHistory.mockResolvedValue(ok({ items: [] }))

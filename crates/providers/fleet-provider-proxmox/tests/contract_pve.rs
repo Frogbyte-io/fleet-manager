@@ -1527,3 +1527,45 @@ fn walk(value: &serde_json::Value, visit: &mut dyn FnMut(&str)) {
 async fn contract_fixtures_carry_only_synthetic_values() {
     for_each_major(fixtures_are_synthetic).await;
 }
+
+#[tokio::test]
+async fn target_network_probe_only_reads_the_selected_guest() {
+    for major in [PVE8, PVE9] {
+        let transport = Scripted::new();
+        let base = format!("/api2/json/nodes/{}/qemu/101/agent", major.n1);
+        transport.get(
+            format!("{base}/info"),
+            200,
+            fixture(major, "agent-info.json"),
+        );
+        transport.get(
+            format!("{base}/network-get-interfaces"),
+            200,
+            fixture(major, "agent-network.json"),
+        );
+        let agent = client(&transport)
+            .guest_agent_network(request(), major.n1, 101)
+            .await;
+        assert!(agent.online);
+        assert!(
+            agent
+                .interfaces
+                .iter()
+                .any(|interface| !interface.addresses.is_empty())
+        );
+        assert!(agent.os_name.is_none());
+        assert_eq!(transport.calls().len(), 2);
+        let offline = Scripted::new();
+        offline.get(
+            format!("{base}/info"),
+            500,
+            fixture(major, "agent-not-running.json"),
+        );
+        let agent = client(&offline)
+            .guest_agent_network(request(), major.n1, 101)
+            .await;
+        assert!(!agent.online);
+        assert!(agent.interfaces.is_empty());
+        assert_eq!(offline.calls().len(), 1);
+    }
+}

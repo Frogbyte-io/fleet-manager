@@ -592,17 +592,27 @@ pub async fn start_catalog_rollout(
             || {
                 use sha2::Digest as _;
                 let digest = sha2::Sha256::digest(payload.as_bytes());
-                format!(
-                    "{}:catalog-rollout-{}",
-                    p.id,
+                let derived = format!(
+                    "catalog-rollout-{}",
                     digest.iter().fold(String::with_capacity(64), |mut out, b| {
                         use std::fmt::Write as _;
                         let _ = write!(out, "{b:02x}");
                         out
                     })
+                );
+                fleet_application::idempotency::scoped_key(
+                    fleet_application::idempotency::CALLER_KEY,
+                    &p.id,
+                    &[&derived],
                 )
             },
-            |key| format!("{}:{key}", p.id),
+            |key| {
+                fleet_application::idempotency::scoped_key(
+                    fleet_application::idempotency::CALLER_KEY,
+                    &p.id,
+                    &[key],
+                )
+            },
         );
     let new_operation = fleet_application::operation::NewOperation {
         kind: "skills.catalog-rollout".to_owned(),

@@ -1,7 +1,10 @@
 import type { Component } from 'vue'
 import {
   Activity,
+  BookMarked,
   Boxes,
+  Container,
+  ClipboardCheck,
   FileText,
   FlaskConical,
   Folder,
@@ -37,6 +40,7 @@ export const NAV_GROUPS: NavGroup[] = [
     items: [
       { title: 'Fleet', to: '/fleet', icon: Server, available: true },
       { title: 'Proxmox', to: '/proxmox', icon: Shield, available: true },
+      { title: 'Services', to: '/services', icon: Container, available: true },
       { title: 'Tailnet', to: '/tailnet', icon: Network, available: false },
       { title: 'Containers', to: '/containers', icon: Boxes, available: false },
     ],
@@ -48,12 +52,14 @@ export const NAV_GROUPS: NavGroup[] = [
       { title: 'Skills', to: '/skills', icon: Layers, available: true },
       { title: 'Lab', to: '/lab', icon: FlaskConical, available: true },
       { title: 'Images', to: '/images', icon: Image, available: true },
+      { title: 'Registry', to: '/registry', icon: BookMarked, available: true },
     ],
   },
   {
     label: 'Control',
     items: [
       { title: 'Operations', to: '/operations', icon: Activity, available: true },
+      { title: 'Approvals', to: '/requests', icon: ClipboardCheck, available: true },
       { title: 'Audit log', to: '/audit', icon: FileText, available: true },
       { title: 'Settings', to: '/settings', icon: Settings, available: true },
     ],

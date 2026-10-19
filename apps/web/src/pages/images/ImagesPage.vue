@@ -9,6 +9,7 @@ import { Skeleton } from '@/components/ui/skeleton'
 import type { Tone } from '../fleet/inventory'
 import { isTerminal as leaseEnded, leaseTone } from '../lab/lab'
 import { errorMessage, isTerminal } from '../machine/api'
+import ImageSecrets from './components/ImageSecrets.vue'
 import RecipeEditor from './components/RecipeEditor.vue'
 import VersionPanel from './components/VersionPanel.vue'
 import { lineage, pinState, templateOfVersion, versionNumbers, type NodeKind, type Selection } from './images'
@@ -373,5 +374,7 @@ const staleCount = computed(() => templateList.value.filter(t => templatePin(t).
         page; the pipeline above highlights its lineage.
       </p>
     </div>
+
+    <ImageSecrets />
   </div>
 </template>

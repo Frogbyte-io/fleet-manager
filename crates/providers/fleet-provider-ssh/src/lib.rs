@@ -33,9 +33,16 @@ use std::path::PathBuf;
 use std::process::Command;
 use std::time::Duration;
 
+pub mod detached;
 pub mod discovery;
 pub mod exec;
+pub mod fetch;
 pub mod inventory;
+pub mod put;
+pub mod shell;
+
+#[cfg(test)]
+mod pwsh_support;
 
 pub use discovery::{
     DISCOVERY_DEADLINE, DISCOVERY_SOURCE, DiscoveredCheckout, MAX_CHECKOUTS, discover,
@@ -43,9 +50,12 @@ pub use discovery::{
 };
 pub use exec::{
     ExecutionLimiter, ExecutionResult, MAX_STREAM_BYTES, ScriptMetadata, decode_metadata,
-    encode_metadata, execute_script, remote_prologue,
+    encode_metadata, execute_script, execute_script_with, remote_prologue,
 };
+pub use fetch::{FetchOutcome, fetch_file};
 pub use inventory::{COLLECTION_DEADLINE, PROBE_SOURCE, collect, parse_probe_output, probe_script};
+pub use put::{PutOutcome, PutRequest, put_file};
+pub use shell::GuestShell;
 
 /// One host's key, as observed from the network.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -313,7 +323,7 @@ impl SshProvider {
         endpoint: &SshConnectionSpec,
         timeout: Duration,
     ) -> Result<(), SshProviderError> {
-        let config_path = self.write_config()?;
+        let config_path = self.write_config(&endpoint.auth)?;
         let mut command = Command::new("ssh");
         command
             .arg("-F")
@@ -321,9 +331,7 @@ impl SshProvider {
             .arg("-o")
             .arg(format!("ConnectTimeout={}", timeout.as_secs()))
             .arg("-p")
-            .arg(endpoint.port.to_string())
-            .arg("-o")
-            .arg("IdentitiesOnly=yes");
+            .arg(endpoint.port.to_string());
         match &endpoint.auth {
             SshAuth::Agent => {}
             SshAuth::IdentityFile { path } => {
@@ -345,29 +353,63 @@ impl SshProvider {
         })
     }
 
-    fn write_config(&self) -> Result<PathBuf, SshProviderError> {
-        let path = self.work_dir.join("config");
+    /// Writes the isolated config for one authentication method. Each method
+    /// has its own file, and each write is an atomic rename, so concurrent
+    /// operations never read a partial config.
+    ///
+    /// The identity policy is explicit:
+    ///
+    /// - [`SshAuth::IdentityFile`]: `IdentitiesOnly yes` (with `-i` on the
+    ///   command line), so the configured file is the only identity offered.
+    /// - [`SshAuth::Agent`]: `IdentitiesOnly no` is OpenSSH's own default: it
+    ///   offers every key the agent holds, then the controller user's default
+    ///   identity files (`~/.ssh/id_*`). A controller with no agent therefore
+    ///   still authenticates with its default key. Offering a key reveals only
+    ///   its public half; `MaxAuthTries` on the target bounds the attempts.
+    fn write_config(&self, auth: &SshAuth) -> Result<PathBuf, SshProviderError> {
+        static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let (name, identity) = match auth {
+            SshAuth::Agent => ("config-agent", AGENT_IDENTITY_POLICY),
+            SshAuth::IdentityFile { .. } => ("config-identity-file", IDENTITY_FILE_POLICY),
+        };
+        let path = self.work_dir.join(name);
         // The known-hosts path must be absolute: the ssh process runs with
         // the controller's working directory, not this crate's directory.
         let known_hosts = self.known_hosts_path().display().to_string();
-        std::fs::write(
-            &path,
-            format!(
-                "StrictHostKeyChecking yes\n\
-                 UserKnownHostsFile {known_hosts}\n\
-                 HashKnownHosts yes\n\
-                 BatchMode yes\n\
-                 LogLevel ERROR\n\
-                 PreferredAuthentications publickey\n\
-                 IdentitiesOnly yes\n"
-            ),
-        )
-        .map_err(|error| SshProviderError::Setup {
-            detail: format!("cannot write the isolated config: {error}"),
-        })?;
+        let contents = format!(
+            "StrictHostKeyChecking yes\n\
+             UserKnownHostsFile {known_hosts}\n\
+             HashKnownHosts yes\n\
+             BatchMode yes\n\
+             LogLevel ERROR\n\
+             PreferredAuthentications publickey\n\
+             {identity}"
+        );
+        // Write a private temporary file and rename it into place: a
+        // concurrent `ssh -F` sees the old or the new complete file, never
+        // an empty or truncated one (which would silently drop the host-key
+        // pinning and the identity policy).
+        let temporary = self.work_dir.join(format!(
+            "{name}.{}.{}.tmp",
+            std::process::id(),
+            NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        ));
+        std::fs::write(&temporary, contents)
+            .and_then(|()| std::fs::rename(&temporary, &path))
+            .map_err(|error| {
+                let _ = std::fs::remove_file(&temporary);
+                SshProviderError::Setup {
+                    detail: format!("cannot write the isolated config: {error}"),
+                }
+            })?;
         Ok(path)
     }
 }
+
+/// OpenSSH's default: agent keys first, then the default identity files.
+const AGENT_IDENTITY_POLICY: &str = "IdentitiesOnly no\n";
+/// Offers only the identity file passed with `-i`.
+const IDENTITY_FILE_POLICY: &str = "IdentitiesOnly yes\n";
 
 pub(crate) fn add_ssh_destination(command: &mut Command, endpoint: &SshConnectionSpec) {
     command
@@ -382,7 +424,8 @@ pub(crate) fn add_ssh_keyscan_host(command: &mut Command, host: &str) {
 /// How Fleet authenticates to an SSH endpoint.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum SshAuth {
-    /// The caller's running agent (`SSH_AUTH_SOCK`) supplies the key.
+    /// The caller's agent (`SSH_AUTH_SOCK`) supplies keys, then the user's
+    /// default `~/.ssh/id_*` files (OpenSSH's default).
     Agent,
     /// A specific identity file, referenced by path. The path is not secret;
     /// a passphrase would be, and Fleet does not do passphrase prompts.
@@ -403,6 +446,9 @@ pub struct SshConnectionSpec {
     pub user: String,
     /// The authentication method.
     pub auth: SshAuth,
+    /// The guest's operating system, which selects the guest shell. A
+    /// machine that is not a Lab guest is Linux.
+    pub guest_os: fleet_core::GuestOs,
 }
 
 /// Extracts `(key type, fingerprint)` from an `ssh-keygen -lf` summary line:
@@ -439,7 +485,8 @@ fn host_matches_line(line: &str, host: &str) -> bool {
     })
 }
 
-/// Picks the most informative bounded line from a tool's stderr. OpenSSH
+/// Picks the most informative line from a tool's stderr, scrubbed of
+/// credentials and control characters and bounded. OpenSSH
 /// puts banner noise (the `@@@@` warning block) before the actual reason, so
 /// a recognized failure reason wins; otherwise the last line does.
 pub(crate) fn redact_failure(text: &str) -> String {
@@ -458,21 +505,157 @@ pub(crate) fn redact_failure(text: &str) -> String {
         })
         .or_else(|| lines.last());
     let line = reason.copied().unwrap_or("no detail");
-    if line.len() > 200 {
-        format!("{}…", &line[..200])
-    } else {
-        (*line).to_owned()
+    // Bound the scanned input first (on a char boundary) so the scrub stays
+    // cheap, scrub credentials and control characters, then cut the result:
+    // cutting first could split a credential and keep half of it.
+    let scrubbed =
+        fleet_core::flatten_control_characters(&fleet_core::redact_credentials(scrub_window(line)));
+    let limit = scrubbed
+        .char_indices()
+        .nth(MAX_DETAIL_CHARS)
+        .map(|(index, _)| index);
+    match limit {
+        Some(index) => format!("{}…", &scrubbed[..index]),
+        None => scrubbed,
     }
+}
+
+/// Characters of a failure line kept in `connection_failed` details.
+const MAX_DETAIL_CHARS: usize = 200;
+/// Bytes of a failure line scanned for credentials.
+const SCRUB_WINDOW: usize = 4096;
+
+/// The prefix of `text` that is scrubbed. A cut window ends on a char
+/// boundary at whitespace, so no token (and no credential) is split by it.
+fn scrub_window(text: &str) -> &str {
+    if text.len() <= SCRUB_WINDOW {
+        return text;
+    }
+    let mut end = SCRUB_WINDOW;
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    &text[..text[..end].rfind(char::is_whitespace).unwrap_or(0)]
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{SshAuth, SshConnectionSpec, add_ssh_destination, add_ssh_keyscan_host};
+    use super::{
+        SshAuth, SshConnectionSpec, SshProvider, add_ssh_destination, add_ssh_keyscan_host,
+        redact_failure,
+    };
     use std::process::Command;
+
+    #[test]
+    fn failure_detail_redacts_credentials() {
+        let detail = redact_failure("fatal: cannot reach https://user:hunter2@host.invalid/x.git");
+        assert!(!detail.contains("hunter2"), "{detail}");
+        let scp = redact_failure("ssh: deploy:hunter2@host.invalid: Permission denied");
+        assert!(!scp.contains("hunter2"), "{scp}");
+    }
+
+    #[test]
+    fn failure_detail_cuts_on_a_char_boundary() {
+        // 3-byte characters: byte 200 falls inside one.
+        let detail = redact_failure(&"€".repeat(500));
+        assert_eq!(detail.chars().count(), 201, "{detail}");
+        assert!(detail.ends_with('…'));
+        // A multibyte cut inside the scan window must not panic either.
+        // 3-byte characters after an odd-length prefix put byte 4096 inside
+        // one, so the window's boundary step-back runs.
+        let long = format!("Permission denied! {}", "€€€ ".repeat(2_000));
+        assert!(redact_failure(&long).ends_with('…'));
+        // A credential cut off by the window is dropped, not kept in part.
+        let edge = format!("{} user:hunter2pw@host.invalid", "x ".repeat(2_040));
+        assert!(!redact_failure(&edge).contains("hunter2"));
+    }
+
+    #[test]
+    fn failure_detail_flattens_control_characters() {
+        let detail = redact_failure("Permission denied\u{1b}[31m\u{7}");
+        assert!(!detail.chars().any(char::is_control), "{detail:?}");
+    }
+
+    fn effective_options(config: &std::path::Path, extra: &[&str]) -> Vec<String> {
+        let output = Command::new("ssh")
+            .arg("-G")
+            .arg("-F")
+            .arg(config)
+            .args(extra)
+            .args(["--", "user@host.invalid"])
+            .output()
+            .expect("ssh -G runs");
+        String::from_utf8_lossy(&output.stdout)
+            .lines()
+            .map(str::to_owned)
+            .collect()
+    }
+
+    #[test]
+    fn agent_auth_offers_agent_keys_and_default_files() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let provider = SshProvider::new(dir.path().to_path_buf()).expect("provider");
+        let config = provider.write_config(&SshAuth::Agent).expect("config");
+        let text = std::fs::read_to_string(&config).expect("config text");
+        assert!(text.contains("IdentitiesOnly no\n"), "{text}");
+        assert!(!text.contains("IdentitiesOnly yes"), "{text}");
+        let options = effective_options(&config, &[]);
+        assert!(
+            options.contains(&"identitiesonly no".to_owned()),
+            "{options:?}"
+        );
+        let identities: Vec<_> = options
+            .iter()
+            .filter(|line| line.starts_with("identityfile "))
+            .collect();
+        assert!(
+            identities.contains(&&"identityfile ~/.ssh/id_ed25519".to_owned()),
+            "the default identity files stay in the offer: {identities:?}"
+        );
+        assert!(
+            !identities.contains(&&"identityfile none".to_owned()),
+            "{identities:?}"
+        );
+    }
+
+    #[test]
+    fn identity_file_auth_pins_its_file() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let key = dir.path().join("key");
+        std::fs::write(&key, "not a real key").expect("write key");
+        let provider = SshProvider::new(dir.path().to_path_buf()).expect("provider");
+        let auth = SshAuth::IdentityFile {
+            path: key.display().to_string(),
+        };
+        let config = provider.write_config(&auth).expect("config");
+        let options = effective_options(&config, &["-i", &key.display().to_string()]);
+        assert!(
+            options.contains(&"identitiesonly yes".to_owned()),
+            "{options:?}"
+        );
+        assert!(
+            options.contains(&format!("identityfile {}", key.display())),
+            "{options:?}"
+        );
+    }
+
+    #[test]
+    fn auth_methods_use_separate_config_files() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let provider = SshProvider::new(dir.path().to_path_buf()).expect("provider");
+        let agent = provider.write_config(&SshAuth::Agent).expect("agent");
+        let file = provider
+            .write_config(&SshAuth::IdentityFile {
+                path: "k".to_owned(),
+            })
+            .expect("file");
+        assert_ne!(agent, file);
+    }
 
     #[test]
     fn ssh_destination_is_after_the_option_terminator() {
         let endpoint = SshConnectionSpec {
+            guest_os: fleet_core::GuestOs::default(),
             host: "-Fmalicious".to_owned(),
             port: 22,
             user: "-oProxyCommand=malicious".to_owned(),

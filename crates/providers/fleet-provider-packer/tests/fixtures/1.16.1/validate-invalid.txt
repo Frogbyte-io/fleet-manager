@@ -1,0 +1,1 @@
+1791542400,,ui,error,Error: Incorrect attribute value type\n\n  on invalid.pkr.hcl line 30:\n  (source code not available)\n\nInappropriate value for attribute "clone_vm_id": a number is required.\n\nError: Incorrect attribute value type\n\n  on invalid.pkr.hcl line 33:\n  (source code not available)\n\nInappropriate value for attribute "cores": a number is required.\n\n

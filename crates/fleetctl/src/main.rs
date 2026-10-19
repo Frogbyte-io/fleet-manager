@@ -13,10 +13,10 @@ fn main() -> ExitCode {
     }
 
     match fleetctl::parse(&args) {
-        Ok(invocation) => match fleetctl::run(&invocation) {
-            Ok(text) => {
+        Ok(invocation) => match fleetctl::run_with_exit(&invocation) {
+            Ok((text, code)) => {
                 println!("{text}");
-                ExitCode::SUCCESS
+                ExitCode::from(code)
             }
             Err(error) => {
                 eprintln!("fleetctl: {error}");

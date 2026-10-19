@@ -4,6 +4,7 @@
 use fleet_application::lab::{
     AttachProvisionOutcome, LeasePort as _, NewLease, NewProvision, ProvisionPort as _,
 };
+use fleet_application::project::{NewProject, ProjectPort as _};
 use fleet_core::{CleanupStrategy, LeaseState, MAX_LAB_LEASE_LIFETIME_MILLIS};
 use fleet_storage_sqlite::{LeaseRepository, Store};
 
@@ -167,11 +168,30 @@ async fn provision_completion_marks_linked_lease_ready_and_starts_its_ttl() {
                 template_version_id: lease.template_version_id.clone(),
                 lease_id: Some(lease.id.clone()),
                 idempotency_key: Some("operator:lease-1".to_owned()),
+                readiness_deadline_at: Some(NOW + 600_000),
             },
             NOW,
         )
         .await
         .expect("the provision must be created");
+    // The deadline is part of the insert (#360).
+    assert_eq!(provision.readiness_deadline_at, Some(NOW + 600_000));
+    // A concurrent retry with the same key gets the winner's record, deadline
+    // included, and never a second record.
+    let replay = provisions
+        .create(
+            &NewProvision {
+                template_version_id: lease.template_version_id.clone(),
+                lease_id: Some(lease.id.clone()),
+                idempotency_key: Some("operator:lease-1".to_owned()),
+                readiness_deadline_at: Some(NOW + 999_000),
+            },
+            NOW + 1,
+        )
+        .await
+        .expect("the replay must answer the winner's record");
+    assert_eq!(replay.id, provision.id);
+    assert_eq!(replay.readiness_deadline_at, Some(NOW + 600_000));
     assert_eq!(
         leases
             .attach_provision(&lease.id, &provision.id)
@@ -237,6 +257,7 @@ async fn readiness_transaction_rolls_back_when_lease_expiry_exceeds_its_cap() {
                 template_version_id: lease.template_version_id.clone(),
                 lease_id: Some(lease.id.clone()),
                 idempotency_key: None,
+                readiness_deadline_at: None,
             },
             NOW,
         )
@@ -260,4 +281,237 @@ async fn readiness_transaction_rolls_back_when_lease_expiry_exceeds_its_cap() {
         provisions.get(&provision.id).await.unwrap().state,
         fleet_core::GuestState::Provisioning
     );
+}
+
+#[tokio::test]
+async fn leases_narrow_by_project_and_deleting_it_nulls_the_link() {
+    let (_dir, store, leases) = setup().await;
+    let projects = fleet_storage_sqlite::ProjectRepository::new(store.pool().clone());
+
+    // The migration applies (opening the store ran it) and the stored
+    // lease keeps the FK-constrained column.
+    let project = projects
+        .create(&NewProject {
+            fetch: fleet_core::RemoteFetch::default(),
+            remote: "https://github.com/example/linked.git".to_owned(),
+            idempotency_key: None,
+            name: "linked".to_owned(),
+            description: String::new(),
+        })
+        .await
+        .expect("the project must be registered");
+
+    let with_project = leases
+        .create(
+            &NewLease {
+                template_version_id: "template-1@digest".to_owned(),
+                purpose: "the linked lease".to_owned(),
+                project_id: Some(project.id.clone()),
+                cleanup: CleanupStrategy::Destroy,
+                ttl_seconds: 3_600,
+            },
+            "operator",
+            NOW,
+        )
+        .await
+        .expect("the lease must store the project");
+    assert_eq!(with_project.project_id, Some(project.id.clone()));
+    let without_project = ready_lease(&leases, NOW + 1_000).await;
+    assert_eq!(without_project.project_id, None);
+
+    // The project filter narrows the list.
+    let linked = leases
+        .list(Some(&project.id))
+        .await
+        .expect("the project-filtered list must succeed");
+    assert_eq!(linked.len(), 1);
+    assert_eq!(linked[0].id, with_project.id);
+    let everything = leases
+        .list(None)
+        .await
+        .expect("the unfiltered list must succeed");
+    assert_eq!(everything.len(), 2);
+
+    // Deleting the project nulls the lease's project reference instead of
+    // deleting the lease.
+    projects
+        .delete(&project.id)
+        .await
+        .expect("the project must be deleted");
+    let unlinked = leases
+        .get(&with_project.id)
+        .await
+        .expect("the lease must survive the project deletion");
+    assert_eq!(unlinked.project_id, None);
+}
+
+#[tokio::test]
+async fn the_project_link_migration_tolerates_linked_provisions_and_orphans() {
+    use sqlx::sqlite::{
+        SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions, SqliteSynchronous,
+    };
+
+    let dir = tempfile::tempdir().expect("a temp directory");
+    let path = dir.path().join("legacy.db");
+
+    // Install the pre-migration schema (everything up to 0035) and seed it
+    // exactly like a live controller would have had: a provision row linked
+    // to a lease (0025's plain lease_id FK, no ON DELETE action) and one
+    // lease pointing at a project that no longer exists (0022's project_id
+    // was unconstrained).
+    let options = SqliteConnectOptions::new()
+        .filename(&path)
+        .create_if_missing(true)
+        .journal_mode(SqliteJournalMode::Wal)
+        .synchronous(SqliteSynchronous::Normal)
+        .foreign_keys(true);
+    let pool = SqlitePoolOptions::new()
+        .connect_with(options)
+        .await
+        .expect("the legacy pool must connect");
+    fleet_storage_sqlite::MIGRATOR
+        .run_to(35, &pool)
+        .await
+        .expect("the legacy schema must install");
+    sqlx::query(
+        "INSERT INTO projects (id, remote, name, description, created_at, updated_at) \
+         VALUES ('alive', 'https://github.com/example/alive.git', 'alive', '', 1, 1)",
+    )
+    .execute(&pool)
+    .await
+    .expect("the surviving project must exist");
+    sqlx::query(
+        "INSERT INTO lab_leases \
+         (id, template_version_id, owner, purpose, project_id, state, cleanup, created_at, ttl_seconds) \
+         VALUES ('lease-live', 'tv-1', 'tester', 'live', 'alive', 'ready', 'destroy', 1, 3600)",
+    )
+    .execute(&pool)
+    .await
+    .expect("the linked lease must exist");
+    sqlx::query(
+        "INSERT INTO lab_leases \
+         (id, template_version_id, owner, purpose, project_id, state, cleanup, created_at, ttl_seconds) \
+         VALUES ('lease-orphan', 'tv-1', 'tester', 'orphan', 'ghost', 'ready', 'destroy', 1, 3600)",
+    )
+    .execute(&pool)
+    .await
+    .expect("the orphaned lease must exist");
+    sqlx::query(
+        "INSERT INTO lab_provisions \
+         (id, template_version_id, state, created_at, updated_at, lease_id) \
+         VALUES ('p-1', 'tv-1', 'ready', 1, 1, 'lease-live')",
+    )
+    .execute(&pool)
+    .await
+    .expect("the linked provision must exist");
+    pool.close().await;
+
+    // The rebuild must survive both the referenced-parent drop and the
+    // orphaned project id.
+    let store = Store::open(&path)
+        .await
+        .expect("the migration must apply cleanly");
+    let leases = LeaseRepository::new(store.pool().clone());
+    let live = leases.get("lease-live").await.expect("the lease survived");
+    assert_eq!(live.project_id, Some("alive".to_owned()));
+    let orphan = leases
+        .get("lease-orphan")
+        .await
+        .expect("the orphaned lease survived");
+    assert_eq!(orphan.project_id, None);
+    let provisions = fleet_storage_sqlite::LabRepository::new(store.pool().clone());
+    let provision = provisions
+        .get("p-1")
+        .await
+        .expect("the provision survived the parent-rename");
+    assert_eq!(provision.lease_id, Some("lease-live".to_owned()));
+    store.close().await;
+}
+
+#[tokio::test]
+async fn a_failed_cleanup_is_recorded_only_against_the_state_and_count_it_was_read_at() {
+    let (_dir, _store, leases) = setup().await;
+    let mut lease = ready_lease(&leases, NOW + 3_600_000).await;
+    lease.state = LeaseState::Releasing;
+    lease.cleanup_attempts = 2;
+    leases.update(&lease).await.unwrap();
+
+    // The failure the application computed from the read lease.
+    let mut failed = lease.clone();
+    fleet_application::lab::record_cleanup_failure(&mut failed, NOW);
+    assert_eq!(failed.cleanup_attempts, 3);
+
+    // A stale count (another sweep already counted this attempt) writes
+    // nothing.
+    assert!(!leases.record_failed_cleanup(1, &failed).await.unwrap());
+    assert_eq!(leases.get(&lease.id).await.unwrap().cleanup_attempts, 2);
+
+    // A lease that left `releasing` (an operator's keep switch released it,
+    // or a re-arm moved it) is never overwritten.
+    let mut released = leases.get(&lease.id).await.unwrap();
+    released.state = LeaseState::Released;
+    leases.update(&released).await.unwrap();
+    assert!(!leases.record_failed_cleanup(2, &failed).await.unwrap());
+    let stored = leases.get(&lease.id).await.unwrap();
+    assert_eq!(stored.state, LeaseState::Released);
+    assert_eq!(stored.cleanup_attempts, 2);
+
+    // Back to the observed state and count: the write lands, with the
+    // computed attempt count and backoff.
+    let mut releasing = stored;
+    releasing.state = LeaseState::Releasing;
+    leases.update(&releasing).await.unwrap();
+    assert!(leases.record_failed_cleanup(2, &failed).await.unwrap());
+    let stored = leases.get(&lease.id).await.unwrap();
+    assert_eq!(stored.state, LeaseState::Releasing);
+    assert_eq!(stored.cleanup_attempts, 3);
+    assert_eq!(stored.cleanup_next_at, failed.cleanup_next_at);
+    assert!(stored.cleanup_next_at.is_some());
+
+    // An attempt that ends the round leaves `cleanup_failed` with nothing
+    // scheduled.
+    let mut last = stored.clone();
+    last.cleanup_attempts = fleet_application::lab::MAX_CLEANUP_ATTEMPTS - 1;
+    leases.update(&last).await.unwrap();
+    let mut exhausted = last.clone();
+    fleet_application::lab::record_cleanup_failure(&mut exhausted, NOW);
+    assert_eq!(exhausted.state, LeaseState::CleanupFailed);
+    assert!(
+        leases
+            .record_failed_cleanup(last.cleanup_attempts, &exhausted)
+            .await
+            .unwrap()
+    );
+    let stored = leases.get(&lease.id).await.unwrap();
+    assert_eq!(stored.state, LeaseState::CleanupFailed);
+    assert_eq!(stored.cleanup_next_at, None);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn overlapping_sweeps_count_one_failed_attempt_once() {
+    let (_dir, _store, leases) = setup().await;
+    let leases = std::sync::Arc::new(leases);
+    let mut lease = ready_lease(&leases, NOW + 3_600_000).await;
+    lease.state = LeaseState::Releasing;
+    lease.cleanup_attempts = 0;
+    leases.update(&lease).await.unwrap();
+    let mut failed = lease.clone();
+    fleet_application::lab::record_cleanup_failure(&mut failed, NOW);
+
+    let barrier = std::sync::Arc::new(tokio::sync::Barrier::new(8));
+    let tasks: Vec<_> = (0..8)
+        .map(|_| {
+            let (leases, failed, barrier) = (leases.clone(), failed.clone(), barrier.clone());
+            tokio::spawn(async move {
+                barrier.wait().await;
+                leases.record_failed_cleanup(0, &failed).await.unwrap()
+            })
+        })
+        .collect();
+    let mut winners = 0;
+    for task in tasks {
+        winners += usize::from(task.await.unwrap());
+    }
+    assert_eq!(winners, 1);
+    assert_eq!(leases.get(&lease.id).await.unwrap().cleanup_attempts, 1);
 }

@@ -7,10 +7,11 @@ use sqlx::SqlitePool;
 use uuid::Uuid;
 
 use fleet_application::lab::{
-    CloneTargetReservation, LabTemplate, LabTemplateContent, LabTemplatePort, LabTemplateVersion,
-    Lease, LeasePort, NewLabTemplate, NewLease, NewProvision, ProvisionPort, ProvisionRecord,
+    CloneTargetReservation, KeyedLeaseCreate, LabTemplate, LabTemplateContent, LabTemplatePort,
+    LabTemplateVersion, Lease, LeaseFilter, LeasePort, NewLabTemplate, NewLease, NewProvision,
+    ProvisionPort, ProvisionRecord,
 };
-use fleet_core::{CleanupStrategy, GuestState, LeaseState, ReadinessProbe};
+use fleet_core::{CleanupStrategy, GuestOs, GuestState, LeaseState, ReadinessProbe};
 
 /// The Lab repository over a pool.
 #[derive(Debug)]
@@ -38,12 +39,26 @@ impl LabRepository {
             bootstrap_project_id: row.get("bootstrap_project_id"),
             readiness_probe: ReadinessProbe::from_id(&probe)?,
             readiness_command: row.get("readiness_command"),
+            ssh_user: row.get("ssh_user"),
+            ssh_port: u16::try_from(row.get::<i64, _>("ssh_port"))
+                .map_err(|_| "invalid Lab SSH port".to_owned())?,
+            ssh_trust_mode: row.get("ssh_trust_mode"),
+            ssh_fingerprint: row.get("ssh_fingerprint"),
             readiness_deadline_seconds: u32::try_from(
                 row.get::<i64, _>("readiness_deadline_seconds"),
             )
             .unwrap_or(1),
             ttl_seconds: u32::try_from(row.get::<i64, _>("ttl_seconds")).unwrap_or(1),
             cleanup: CleanupStrategy::from_id(&cleanup)?,
+            audio: match (
+                row.get::<Option<String>, _>("audio_device"),
+                row.get::<Option<String>, _>("audio_driver"),
+            ) {
+                (Some(device), Some(driver)) => Some(fleet_core::LabAudio { device, driver }),
+                _ => None,
+            },
+            guest_os: GuestOs::from_id(&row.get::<String, _>("guest_os"))?,
+            interactive_user: row.get("interactive_user"),
         })
     }
 
@@ -84,6 +99,12 @@ impl LabRepository {
                 .and_then(|value| u32::try_from(value).ok()),
             clone_upid: row.get("clone_upid"),
             guest_ipv4: row.get("guest_ipv4"),
+            machine_id: row.get("machine_id"),
+            endpoint_id: row.get("endpoint_id"),
+            ready_project_operation_id: row.get("ready_project_operation_id"),
+            readiness_deadline_at: row.get("readiness_deadline_at"),
+            failed_step: row.get("failed_step"),
+            account_id: optional_column(row, "account_id")?,
             ready_at: row.get("ready_at"),
             idempotency_key: row.get("idempotency_key"),
             created_at: row.get("created_at"),
@@ -97,8 +118,8 @@ impl LabTemplatePort for LabRepository {
         let id = Uuid::now_v7().to_string();
         let content = &template.content;
         let result = sqlx::query(
-            "INSERT INTO lab_templates (id, name, description, image_version_id, cores, memory_mib, disk_gib, bootstrap_project_id, readiness_probe, readiness_command, readiness_deadline_seconds, ttl_seconds, cleanup, published_from, created_at, updated_at) \
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, NULL, ?14, ?14)",
+            "INSERT INTO lab_templates (id, name, description, image_version_id, cores, memory_mib, disk_gib, bootstrap_project_id, readiness_probe, readiness_command, readiness_deadline_seconds, ttl_seconds, cleanup, published_from, created_at, updated_at, ssh_user, ssh_port, ssh_trust_mode, ssh_fingerprint, audio_device, audio_driver, guest_os, interactive_user) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, NULL, ?14, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22)",
         )
         .bind(&id)
         .bind(&content.name)
@@ -114,6 +135,12 @@ impl LabTemplatePort for LabRepository {
         .bind(i64::from(content.ttl_seconds))
         .bind(content.cleanup.id())
         .bind(now)
+        .bind(&content.ssh_user).bind(i64::from(content.ssh_port))
+        .bind(&content.ssh_trust_mode).bind(&content.ssh_fingerprint)
+        .bind(content.audio.as_ref().map(|audio| audio.device.as_str()))
+        .bind(content.audio.as_ref().map(|audio| audio.driver.as_str()))
+        .bind(content.guest_os.id())
+        .bind(&content.interactive_user)
         .execute(&self.pool)
         .await;
         match result {
@@ -152,7 +179,7 @@ impl LabTemplatePort for LabRepository {
         now: i64,
     ) -> Result<LabTemplate, String> {
         let updated = sqlx::query(
-            "UPDATE lab_templates SET name = ?2, description = ?3, image_version_id = ?4, cores = ?5, memory_mib = ?6, disk_gib = ?7, bootstrap_project_id = ?8, readiness_probe = ?9, readiness_command = ?10, readiness_deadline_seconds = ?11, ttl_seconds = ?12, cleanup = ?13, updated_at = ?14 WHERE id = ?1",
+            "UPDATE lab_templates SET name = ?2, description = ?3, image_version_id = ?4, cores = ?5, memory_mib = ?6, disk_gib = ?7, bootstrap_project_id = ?8, readiness_probe = ?9, readiness_command = ?10, readiness_deadline_seconds = ?11, ttl_seconds = ?12, cleanup = ?13, updated_at = ?14, ssh_user = ?15, ssh_port = ?16, ssh_trust_mode = ?17, ssh_fingerprint = ?18, audio_device = ?19, audio_driver = ?20, guest_os = ?21, interactive_user = ?22 WHERE id = ?1",
         )
         .bind(id)
         .bind(&content.name)
@@ -168,6 +195,12 @@ impl LabTemplatePort for LabRepository {
         .bind(i64::from(content.ttl_seconds))
         .bind(content.cleanup.id())
         .bind(now)
+        .bind(&content.ssh_user).bind(i64::from(content.ssh_port))
+        .bind(&content.ssh_trust_mode).bind(&content.ssh_fingerprint)
+        .bind(content.audio.as_ref().map(|audio| audio.device.as_str()))
+        .bind(content.audio.as_ref().map(|audio| audio.driver.as_str()))
+        .bind(content.guest_os.id())
+        .bind(&content.interactive_user)
         .execute(&self.pool)
         .await
         .map_err(|error| format!("update failed: {error}"))?;
@@ -254,14 +287,15 @@ impl ProvisionPort for LabRepository {
     async fn create(&self, new: &NewProvision, now: i64) -> Result<ProvisionRecord, String> {
         let id = Uuid::now_v7().to_string();
         let result = sqlx::query(
-            "INSERT INTO lab_provisions (id, template_version_id, state, idempotency_key, created_at, updated_at, lease_id) \
-             VALUES (?1, ?2, 'provisioning', ?3, ?4, ?4, ?5)",
+            "INSERT INTO lab_provisions (id, template_version_id, state, idempotency_key, created_at, updated_at, lease_id, readiness_deadline_at) \
+             VALUES (?1, ?2, 'provisioning', ?3, ?4, ?4, ?5, ?6)",
         )
         .bind(&id)
         .bind(&new.template_version_id)
         .bind(&new.idempotency_key)
         .bind(now)
         .bind(&new.lease_id)
+        .bind(new.readiness_deadline_at)
         .execute(&self.pool)
         .await;
         match result {
@@ -306,8 +340,8 @@ impl ProvisionPort for LabRepository {
     }
 
     async fn update(&self, record: &ProvisionRecord) -> Result<(), String> {
-        sqlx::query(
-            "UPDATE lab_provisions SET state = ?2, node = ?3, vmid = ?4, clone_upid = ?5, guest_ipv4 = ?6, ready_at = ?7, updated_at = ?8 WHERE id = ?1",
+        let updated = sqlx::query(
+            "UPDATE lab_provisions SET state = ?2, node = ?3, vmid = ?4, clone_upid = ?5, guest_ipv4 = ?6, ready_at = ?7, updated_at = ?8, machine_id = ?9, endpoint_id = ?10, ready_project_operation_id = ?11, readiness_deadline_at = ?12, failed_step = ?13, account_id = ?14 WHERE id = ?1 AND (state != 'never_ready' OR ?2 = 'never_ready')",
         )
         .bind(&record.id)
         .bind(record.state.id())
@@ -317,10 +351,44 @@ impl ProvisionPort for LabRepository {
         .bind(&record.guest_ipv4)
         .bind(record.ready_at)
         .bind(fleet_core::SystemClock::now_unix_millis())
+        .bind(&record.machine_id)
+        .bind(&record.endpoint_id)
+        .bind(&record.ready_project_operation_id)
+        .bind(record.readiness_deadline_at)
+        .bind(&record.failed_step)
+        .bind(&record.account_id)
         .execute(&self.pool)
         .await
         .map_err(|error| format!("update failed: {error}"))?;
+        // A record that ended `never_ready` stays ended: a saga still
+        // running on a stale copy must stop, not resurrect it (#303).
+        if updated.rows_affected() == 0
+            && <Self as ProvisionPort>::get(self, &record.id)
+                .await
+                .is_ok_and(|stored| stored.state == GuestState::NeverReady)
+        {
+            return Err(format!(
+                "provision {} is never_ready and cannot change",
+                record.id
+            ));
+        }
         Ok(())
+    }
+
+    async fn abandon(&self, id: &str) -> Result<Option<ProvisionRecord>, String> {
+        let result = sqlx::query(
+            "UPDATE lab_provisions SET state = 'never_ready', failed_step = COALESCE(failed_step, 'interrupted'), updated_at = ?2 \
+             WHERE id = ?1 AND state IN ('provisioning', 'provisioned', 'booting', 'bootstrapping')",
+        )
+        .bind(id)
+        .bind(fleet_core::SystemClock::now_unix_millis())
+        .execute(&self.pool)
+        .await
+        .map_err(|error| format!("abandon failed: {error}"))?;
+        if result.rows_affected() == 0 {
+            return Ok(None);
+        }
+        <Self as ProvisionPort>::get(self, id).await.map(Some)
     }
 
     async fn complete_ready(
@@ -345,7 +413,7 @@ impl ProvisionPort for LabRepository {
         if let (Some(lease_id), Some(expires_at)) = (record.lease_id.as_deref(), lease_expires_at) {
             let changed = sqlx::query(
                 "UPDATE lab_leases SET state = 'ready', ready_at = ?3, expires_at = ?4 \
-                 WHERE id = ?1 AND state = 'provisioning' AND provision_id = ?2 \
+                 WHERE id = ?1 AND state IN ('provisioning', 'booting', 'bootstrapping') AND provision_id = ?2 \
                  AND ready_at IS NULL AND expires_at IS NULL \
                  AND ?4 <= COALESCE(max_lifetime_at, created_at + ?5)",
             )
@@ -384,7 +452,7 @@ impl ProvisionPort for LabRepository {
         let updated = sqlx::query(
             "UPDATE lab_provisions SET state = 'ready', node = ?3, vmid = ?4, clone_upid = ?5, guest_ipv4 = ?6, ready_at = ?7, updated_at = ?8 \
              WHERE id = ?1 AND lease_id IS ?2 \
-             AND (state = 'provisioning' OR (state = 'ready' AND ready_at = ?7))",
+             AND (state IN ('provisioning', 'booting', 'bootstrapping') OR (state = 'ready' AND ready_at = ?7))",
         )
         .bind(&record.id)
         .bind(&record.lease_id)
@@ -407,6 +475,80 @@ impl ProvisionPort for LabRepository {
             .commit()
             .await
             .map_err(|error| format!("commit readiness transaction failed: {error}"))
+    }
+
+    async fn ensure_guest_machine(
+        &self,
+        record_id: &str,
+        reference: &str,
+    ) -> Result<ProvisionRecord, String> {
+        let mut tx = self
+            .pool
+            .begin_with("BEGIN IMMEDIATE")
+            .await
+            .map_err(|error| error.to_string())?;
+        let row = sqlx::query("SELECT * FROM lab_provisions WHERE id = ?1")
+            .bind(record_id)
+            .fetch_one(&mut *tx)
+            .await
+            .map_err(|error| error.to_string())?;
+        let record = Self::row_to_provision(&row)?;
+        if let (Some(machine), Some(endpoint)) = (&record.machine_id, &record.endpoint_id) {
+            let matches: bool = sqlx::query_scalar(
+                "SELECT EXISTS(SELECT 1 FROM machine_endpoints WHERE id = ?1 AND machine_id = ?2 AND kind = 'ssh' AND reference = ?3)"
+            ).bind(endpoint).bind(machine).bind(reference).fetch_one(&mut *tx).await.map_err(|error| error.to_string())?;
+            if !matches {
+                return Err("the recorded Lab SSH endpoint changed".to_owned());
+            }
+            return Ok(record);
+        }
+        if record.machine_id.is_some() || record.endpoint_id.is_some() {
+            return Err(
+                "the Lab machine association is incomplete; reconcile before continuing".to_owned(),
+            );
+        }
+        let machine = Uuid::now_v7().to_string();
+        let endpoint = Uuid::now_v7().to_string();
+        let now = fleet_core::SystemClock::now_unix_millis();
+        sqlx::query("INSERT INTO machines (id, name, description, created_at, updated_at) VALUES (?1, ?2, 'Temporary Lab-owned guest', ?3, ?3)")
+            .bind(&machine).bind(format!("fm-lab-{record_id}")).bind(now).execute(&mut *tx).await.map_err(|error| error.to_string())?;
+        sqlx::query("INSERT INTO machine_endpoints (id, machine_id, kind, reference, created_at) VALUES (?1, ?2, 'ssh', ?3, ?4)")
+            .bind(&endpoint).bind(&machine).bind(reference).bind(now).execute(&mut *tx).await.map_err(|error| error.to_string())?;
+        sqlx::query("INSERT OR IGNORE INTO tags (id, name) VALUES (?1, 'lab')")
+            .bind(Uuid::now_v7().to_string())
+            .execute(&mut *tx)
+            .await
+            .map_err(|error| error.to_string())?;
+        sqlx::query("INSERT INTO machine_tags (machine_id, tag_id) SELECT ?1, id FROM tags WHERE name = 'lab'")
+            .bind(&machine).execute(&mut *tx).await.map_err(|error| error.to_string())?;
+        for group in std::iter::once(format!("lab-provision:{record_id}"))
+            .chain(record.lease_id.as_ref().map(|id| format!("lab-lease:{id}")))
+        {
+            sqlx::query("INSERT INTO machine_groups (machine_id, group_name) VALUES (?1, ?2)")
+                .bind(&machine)
+                .bind(group)
+                .execute(&mut *tx)
+                .await
+                .map_err(|error| error.to_string())?;
+        }
+        sqlx::query("UPDATE lab_provisions SET machine_id = ?2, endpoint_id = ?3, updated_at = ?4 WHERE id = ?1")
+            .bind(record_id).bind(&machine).bind(&endpoint).bind(now).execute(&mut *tx).await.map_err(|error| error.to_string())?;
+        tx.commit().await.map_err(|error| error.to_string())?;
+        <Self as ProvisionPort>::get(self, record_id).await
+    }
+
+    async fn find_by_machine_id(
+        &self,
+        machine_id: &str,
+    ) -> Result<Option<ProvisionRecord>, String> {
+        sqlx::query("SELECT * FROM lab_provisions WHERE machine_id = ?1")
+            .bind(machine_id)
+            .fetch_optional(&self.pool)
+            .await
+            .map_err(|error| error.to_string())?
+            .as_ref()
+            .map(Self::row_to_provision)
+            .transpose()
     }
 
     async fn list(&self) -> Result<Vec<ProvisionRecord>, String> {
@@ -490,7 +632,7 @@ impl ProvisionPort for LabRepository {
     }
 }
 
-fn is_unique_violation(error: &sqlx::Error) -> bool {
+pub(crate) fn is_unique_violation(error: &sqlx::Error) -> bool {
     matches!(
         error
             .as_database_error()
@@ -538,6 +680,7 @@ impl LeaseRepository {
             ready_at: row.get("ready_at"),
             expires_at: row.get("expires_at"),
             cleanup_attempts: u32::try_from(row.get::<i64, _>("cleanup_attempts")).unwrap_or(0),
+            cleanup_next_at: optional_column(row, "cleanup_next_at")?,
         })
     }
 }
@@ -570,6 +713,104 @@ impl LeasePort for LeaseRepository {
         <Self as fleet_application::lab::LeasePort>::get(self, &id).await
     }
 
+    async fn create_keyed(
+        &self,
+        lease: &NewLease,
+        owner: &str,
+        now: i64,
+        key: &str,
+        fingerprint: &str,
+    ) -> Result<KeyedLeaseCreate, String> {
+        let id = Uuid::now_v7().to_string();
+        let max_lifetime_at = now
+            .checked_add(fleet_core::MAX_LAB_LEASE_LIFETIME_MILLIS)
+            .ok_or_else(|| {
+                "the lease creation time exceeds the maximum lifetime range".to_owned()
+            })?;
+        let result = sqlx::query(
+            "INSERT INTO lab_leases (id, template_version_id, owner, purpose, project_id, state, cleanup, created_at, max_lifetime_at, ttl_seconds, idempotency_key, idempotency_fingerprint) \
+             VALUES (?1, ?2, ?3, ?4, ?5, 'requested', ?6, ?7, ?8, ?9, ?10, ?11)",
+        )
+        .bind(&id)
+        .bind(&lease.template_version_id)
+        .bind(owner)
+        .bind(&lease.purpose)
+        .bind(&lease.project_id)
+        .bind(lease.cleanup.id())
+        .bind(now)
+        .bind(max_lifetime_at)
+        .bind(i64::from(lease.ttl_seconds))
+        .bind(key)
+        .bind(fingerprint)
+        .execute(&self.pool)
+        .await;
+        match result {
+            Ok(_) => <Self as LeasePort>::get(self, &id)
+                .await
+                .map(KeyedLeaseCreate::Created),
+            Err(error) if is_unique_violation(&error) => {
+                // A concurrent create with the same key won: its lease is
+                // the idempotent answer.
+                <Self as LeasePort>::find_by_idempotency_key(self, key)
+                    .await?
+                    .map(|(lease, fingerprint)| KeyedLeaseCreate::Replay { lease, fingerprint })
+                    .ok_or_else(|| format!("create failed: {error}"))
+            }
+            Err(error) => Err(format!("create failed: {error}")),
+        }
+    }
+
+    async fn find_by_idempotency_key(&self, key: &str) -> Result<Option<(Lease, String)>, String> {
+        let row = sqlx::query("SELECT * FROM lab_leases WHERE idempotency_key = ?1")
+            .bind(key)
+            .fetch_optional(&self.pool)
+            .await
+            .map_err(|error| format!("find failed: {error}"))?;
+        row.map(|row| {
+            let fingerprint: Option<String> = row.get("idempotency_fingerprint");
+            Self::row_to_lease(&row).map(|lease| (lease, fingerprint.unwrap_or_default()))
+        })
+        .transpose()
+    }
+
+    async fn search(&self, filter: &LeaseFilter) -> Result<Vec<Lease>, String> {
+        let mut query =
+            sqlx::QueryBuilder::<sqlx::Sqlite>::new("SELECT * FROM lab_leases WHERE 1 = 1");
+        if let Some(project_id) = &filter.project_id {
+            query.push(" AND project_id = ").push_bind(project_id);
+        }
+        if let Some(purpose) = &filter.purpose {
+            query.push(" AND purpose = ").push_bind(purpose);
+        }
+        if let Some(prefix) = &filter.purpose_prefix {
+            // Case-sensitive and wildcard-free, unlike LIKE.
+            let chars = i64::try_from(prefix.chars().count()).unwrap_or(i64::MAX);
+            query
+                .push(" AND substr(purpose, 1, ")
+                .push_bind(chars)
+                .push(") = ")
+                .push_bind(prefix);
+        }
+        if !filter.states.is_empty() {
+            query.push(" AND state IN (");
+            let mut separated = query.separated(", ");
+            for state in &filter.states {
+                separated.push_bind(state.id());
+            }
+            query.push(")");
+        }
+        if let Some(owner) = &filter.owner {
+            query.push(" AND owner = ").push_bind(owner);
+        }
+        query.push(" ORDER BY created_at DESC, id DESC");
+        let rows = query
+            .build()
+            .fetch_all(&self.pool)
+            .await
+            .map_err(|error| format!("search failed: {error}"))?;
+        rows.iter().map(Self::row_to_lease).collect()
+    }
+
     async fn get(&self, id: &str) -> Result<Lease, String> {
         sqlx::query("SELECT * FROM lab_leases WHERE id = ?1")
             .bind(id)
@@ -583,7 +824,7 @@ impl LeasePort for LeaseRepository {
 
     async fn update(&self, lease: &Lease) -> Result<(), String> {
         let updated = sqlx::query(
-            "UPDATE lab_leases SET state = ?2, provision_id = ?3, ready_at = ?4, expires_at = ?5, cleanup_attempts = ?6 WHERE id = ?1",
+            "UPDATE lab_leases SET state = ?2, provision_id = ?3, ready_at = ?4, expires_at = ?5, cleanup_attempts = ?6, cleanup = ?7, cleanup_next_at = ?8 WHERE id = ?1",
         )
         .bind(&lease.id)
         .bind(lease.state.id())
@@ -591,6 +832,10 @@ impl LeasePort for LeaseRepository {
         .bind(lease.ready_at)
         .bind(lease.expires_at)
         .bind(i64::from(lease.cleanup_attempts))
+        // The cleanup decision is part of the lease's mutable state: a
+        // `keep` release must persist, or the cleanup would destroy the VM.
+        .bind(lease.cleanup.id())
+        .bind(lease.cleanup_next_at)
         .execute(&self.pool)
         .await
         .map_err(|error| format!("update failed: {error}"))?;
@@ -600,11 +845,21 @@ impl LeasePort for LeaseRepository {
         Ok(())
     }
 
-    async fn list(&self) -> Result<Vec<Lease>, String> {
-        let rows = sqlx::query("SELECT * FROM lab_leases ORDER BY created_at DESC, id DESC")
+    async fn list(&self, project_id: Option<&str>) -> Result<Vec<Lease>, String> {
+        let rows = match project_id {
+            Some(project_id) => sqlx::query(
+                "SELECT * FROM lab_leases WHERE project_id = ?1 \
+                     ORDER BY created_at DESC, id DESC",
+            )
+            .bind(project_id)
             .fetch_all(&self.pool)
             .await
-            .map_err(|error| format!("list failed: {error}"))?;
+            .map_err(|error| format!("list failed: {error}"))?,
+            None => sqlx::query("SELECT * FROM lab_leases ORDER BY created_at DESC, id DESC")
+                .fetch_all(&self.pool)
+                .await
+                .map_err(|error| format!("list failed: {error}"))?,
+        };
         rows.iter().map(Self::row_to_lease).collect()
     }
 
@@ -667,8 +922,10 @@ impl LeasePort for LeaseRepository {
             .map_err(|error| format!("read linked provision failed: {error}"))?;
         Ok(
             if current.is_some_and(|row| {
-                row.get::<String, _>("state") == "provisioning"
-                    && row.get::<Option<String>, _>("provision_id").as_deref() == Some(provision_id)
+                matches!(
+                    row.get::<String, _>("state").as_str(),
+                    "provisioning" | "booting" | "bootstrapping"
+                ) && row.get::<Option<String>, _>("provision_id").as_deref() == Some(provision_id)
             }) {
                 fleet_application::lab::AttachProvisionOutcome::AlreadyAttached
             } else {
@@ -698,5 +955,92 @@ impl LeasePort for LeaseRepository {
         .await
         .map_err(|error| format!("claim failed: {error}"))?;
         Ok(claimed.rows_affected() == 1)
+    }
+
+    async fn transition(
+        &self,
+        id: &str,
+        observed: LeaseState,
+        provision_id: Option<&str>,
+        to: LeaseState,
+    ) -> Result<bool, String> {
+        // Compare state and provision link so a stale sweeper snapshot
+        // cannot overwrite a lease that became ready or was released.
+        let moved = sqlx::query(
+            "UPDATE lab_leases SET state = ?4 WHERE id = ?1 AND state = ?2 AND provision_id IS ?3",
+        )
+        .bind(id)
+        .bind(observed.id())
+        .bind(provision_id)
+        .bind(to.id())
+        .execute(&self.pool)
+        .await
+        .map_err(|error| format!("transition failed: {error}"))?;
+        Ok(moved.rows_affected() == 1)
+    }
+
+    async fn rearm_cleanup(
+        &self,
+        id: &str,
+        observed_attempts: u32,
+        attempts: u32,
+    ) -> Result<bool, String> {
+        let rearmed = sqlx::query(
+            "UPDATE lab_leases SET state = 'releasing', cleanup_attempts = ?3, \
+             cleanup_next_at = NULL \
+             WHERE id = ?1 AND state = 'cleanup_failed' AND cleanup_attempts = ?2",
+        )
+        .bind(id)
+        .bind(i64::from(observed_attempts))
+        .bind(i64::from(attempts))
+        .execute(&self.pool)
+        .await
+        .map_err(|error| format!("re-arm failed: {error}"))?;
+        Ok(rearmed.rows_affected() == 1)
+    }
+
+    async fn record_failed_cleanup(
+        &self,
+        observed_attempts: u32,
+        failed: &Lease,
+    ) -> Result<bool, String> {
+        let recorded = sqlx::query(
+            "UPDATE lab_leases SET state = ?3, cleanup_attempts = ?4, cleanup_next_at = ?5 \
+             WHERE id = ?1 AND state = 'releasing' AND cleanup_attempts = ?2",
+        )
+        .bind(&failed.id)
+        .bind(i64::from(observed_attempts))
+        .bind(failed.state.id())
+        .bind(i64::from(failed.cleanup_attempts))
+        .bind(failed.cleanup_next_at)
+        .execute(&self.pool)
+        .await
+        .map_err(|error| format!("recording the failed cleanup failed: {error}"))?;
+        Ok(recorded.rows_affected() == 1)
+    }
+}
+
+/// A nullable column added by a later migration: absent (a database not yet
+/// migrated, as some storage tests build) reads as `None`, while a decode
+/// failure is reported rather than hidden.
+fn optional_column<T>(row: &sqlx::sqlite::SqliteRow, column: &str) -> Result<Option<T>, String>
+where
+    for<'r> T: sqlx::Decode<'r, sqlx::Sqlite> + sqlx::Type<sqlx::Sqlite>,
+{
+    match row.try_get::<Option<T>, _>(column) {
+        Ok(value) => Ok(value),
+        Err(sqlx::Error::ColumnNotFound(_)) => Ok(None),
+        Err(error) => Err(format!("the {column} column is unreadable: {error}")),
+    }
+}
+
+#[async_trait]
+impl fleet_application::operation::LeaseOwnerLookup for LeaseRepository {
+    async fn owner_of(&self, lease_id: &str) -> Result<Option<String>, String> {
+        sqlx::query_scalar::<_, String>("SELECT owner FROM lab_leases WHERE id = ?1")
+            .bind(lease_id)
+            .fetch_optional(&self.pool)
+            .await
+            .map_err(|error| format!("lease owner lookup failed: {error}"))
     }
 }
