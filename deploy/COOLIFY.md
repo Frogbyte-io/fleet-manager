@@ -67,6 +67,20 @@ Compose project name. Never share it between two controller instances.
    `FLEET_BUILD_CONTEXT` unset so the context remains relative to `deploy/`.
    The key's contents must never be entered as
    a Coolify environment value, build argument, or inline Compose content.
+
+   Optional M10 settings (all may stay unset):
+
+   | Variable | Effect |
+   |---|---|
+   | `FLEET_DESIRED_FETCH_INTERVAL_SECONDS` | Periodic fetch of the Fleet Git source; `0` (default) is off, otherwise at least `30`. Needed for pushed Registry edits to appear without a manual fetch. |
+   | `FLEET_REGISTRY_ENRICH_INTERVAL_SECONDS` | Domain RDAP/DNS sweep; default daily, `0` off, otherwise at least `900`. |
+   | `FLEET_REGISTRY_EXPIRY_WINDOW_DAYS` | Domain expiry warning window; default `30`. |
+   | `FLEET_ACTION_REQUEST_TTL_SECONDS` | How long an action request waits for approval; default `86400`. |
+   | `FLEET_ACTION_POLICY` | Risk-class overrides, `action.id=auto\|approve\|deny,...`; default none. |
+
+   SSH Fleet Git remotes verify host keys against `/var/lib/fleet/.ssh/known_hosts`
+   on the data volume (the controller user's home). Pin the Git host's keys there
+   before configuring an `ssh://` or `git@` remote.
 5. Use one replica and stop/recreate deployments. Disable overlapping rolling
    deployments and automatic previews: two controllers must never open the
    same SQLite volume. An isolated preview needs its own volume, master key,
