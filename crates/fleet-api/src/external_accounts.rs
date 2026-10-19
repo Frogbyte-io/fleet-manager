@@ -410,10 +410,17 @@ pub async fn create_external_account(
     principal: Option<Extension<crate::ActingPrincipal>>,
     Extension(correlation_id): Extension<CorrelationId>,
     accounts: Option<Extension<Arc<ExternalAccounts>>>,
-    Json(request): Json<CreateExternalAccountRequest>,
+    body: Result<Json<CreateExternalAccountRequest>, axum::extract::rejection::JsonRejection>,
 ) -> Result<(StatusCode, Json<Resource<ExternalAccountDto>>), ApiErrorResponse> {
     let accounts = accounts_or_error(accounts, correlation_id)?;
     let principal = crate::operations::principal_or_error(principal, correlation_id)?;
+    // The rejection is never echoed: its text can quote the token.
+    let Json(request) = body.map_err(|_| {
+        crate::machines::invalid_request(
+            "the request body is not valid JSON for this request",
+            correlation_id,
+        )
+    })?;
     let account = accounts
         .create(
             state.authorizer.as_ref(),
@@ -459,10 +466,17 @@ pub async fn update_external_account(
     Extension(correlation_id): Extension<CorrelationId>,
     accounts: Option<Extension<Arc<ExternalAccounts>>>,
     Path(account_id): Path<String>,
-    Json(request): Json<UpdateExternalAccountRequest>,
+    body: Result<Json<UpdateExternalAccountRequest>, axum::extract::rejection::JsonRejection>,
 ) -> Result<Json<Resource<ExternalAccountDto>>, ApiErrorResponse> {
     let accounts = accounts_or_error(accounts, correlation_id)?;
     let principal = crate::operations::principal_or_error(principal, correlation_id)?;
+    // The rejection is never echoed: its text can quote the token.
+    let Json(request) = body.map_err(|_| {
+        crate::machines::invalid_request(
+            "the request body is not valid JSON for this request",
+            correlation_id,
+        )
+    })?;
     let account = accounts
         .update(
             state.authorizer.as_ref(),
