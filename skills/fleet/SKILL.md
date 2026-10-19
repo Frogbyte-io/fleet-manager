@@ -1,6 +1,6 @@
 ---
 name: fleet
-description: Operate this Fleet Manager controller with fleetctl --output json - check controller health, find machines, prepare projects on a machine, run disposable Lab environments, follow operations, and read skill deployments, and look up or record the Registry (domains, services, vendors, accounts, hosting). Use whenever a task involves the fleet's machines, Lab leases, controller state, or where something is hosted or who provides it.
+description: Operate this Fleet Manager controller with fleetctl --output json - check controller health, find machines, prepare projects on a machine, run disposable Lab environments, follow operations, and read skill deployments, request brokered Coolify and DNS changes, and look up or record the Registry (domains, services, vendors, accounts, hosting). Use whenever a task involves the fleet's machines, Lab leases, controller state, or where something is hosted or who provides it.
 ---
 
 # Fleet
@@ -265,6 +265,76 @@ fleetctl --output json registry publish -m "Record example.com registrar"
 codes, or keys in any field, note, or tag. Use `loginAt` to say where a login
 lives, for example `1Password (Webhuset vault)`, never the credential itself.
 Record only what you verified or were told; leave unknown fields out.
+
+## Brokered actions
+
+Changes at Coolify (running services) and Cloudflare (DNS) are not made with
+provider keys. You file a request; the controller holds the keys, authorizes
+it, audits it, and runs it once its risk class allows. Low-risk requests run
+at once; `approve`-class requests (stop, env, domains, DNS, deploys) wait for a
+person.
+
+**Never ask for, read, or handle a provider key** (Coolify or Cloudflare
+token). Never put one in an argument, file, or Registry field. Environment
+variable values are the only secrets you touch, and only values the user
+supplied, through `--stdin` or `--file`, never as arguments.
+
+```bash
+fleetctl --output json services list --source coolify
+fleetctl --output json services settings <service-id>
+fleetctl --output json services logs <service-id> --lines 100
+fleetctl --output json services restart <service-id> --reason "pick up new config" --wait-approval=5m
+fleetctl --output json services stop <service-id> --reason "client asked to pause" --wait-approval
+fleetctl --output json services start <service-id> --wait-approval
+fleetctl --output json services redeploy <service-id> --wait-approval=10m
+fleetctl --output json services env list <service-id>
+fleetctl --output json services env set <service-id> --stdin --redeploy --wait-approval=5m
+fleetctl --output json services env unset <service-id> OLD_FLAG --wait-approval
+fleetctl --output json services domains set <service-id> https://www.example.com --wait-approval=5m
+fleetctl --output json services health set <service-id> --enabled --path /healthz --wait-approval
+fleetctl --output json services templates
+fleetctl --output json services deploy --template <template-id> --account <account-id> --server <server> --project <project> --environment production --domain www.example.com --dns --dns-target 203.0.113.10 --wait-approval=10m
+fleetctl --output json dns zones
+fleetctl --output json dns records www.example.com
+fleetctl --output json dns observations www.example.com
+fleetctl --output json dns set www.example.com --type A --content 203.0.113.10 --replaces 203.0.113.9 --reason "move to new host" --wait-approval=5m
+fleetctl --output json dns delete old.example.com --type CNAME --content target.example.net --wait-approval
+fleetctl --output json requests list --state pending
+fleetctl --output json requests get <request-id> --wait=2m
+```
+
+- Use `services` for lifecycle, `services env|domains|health` for Coolify
+  settings, `services deploy` to create a site from a built-in template
+  (`--dns` also files the Cloudflare request), and `dns` for records. Read
+  first (`settings`, `env list`, `dns records`): the request shows a preview of
+  the change, and env commands show names and flags, never values.
+- Always give `--reason`. Without a wait, the command files the request and
+  returns its id; add `--wait-approval[=<duration>]` (1s to 1h, default 5m) to
+  stay for the answer. Waiting is bounded: do not wrap it in a loop.
+- With a wait the answer is `{outcome, request, result}`. Exit 0 is `executed`,
+  2 is `still_pending`, 1 is anything else.
+- `env set --stdin` reads `KEY=VALUE` lines (or one value with `--key <name>`)
+  that the user gave you. If you do not have the value, ask the user; do not
+  invent or look one up.
+
+Outcomes:
+
+| `outcome` | What to do |
+| --- | --- |
+| `executed` | Report what changed. Verify with a read (`services get`, `dns records`), then record new facts (below). |
+| `denied` | A person said no. Report it with the request id and any note. **Never retry or re-file the request**, or file a variant to get around it; ask the user. |
+| `expired` | No one answered in time and it did not run. Tell the user; file again only if they ask. |
+| `still_pending` | Not decided yet. Report the request id and stop. Do not poll in a loop; the user can approve it and you can check once with `requests get <request-id>` when asked. |
+| `failed` | The provider rejected or failed it. Report the error as printed; do not retry blindly. |
+
+Do not `requests approve` your own request. Approving is a person's decision;
+do it only when the user explicitly tells you to.
+
+After a successful change, record what is now true in the Registry (see
+Registry above): `services deploy` prints the `registry set` patch to apply,
+`registry suggest domain/<fqdn>` prints one from the latest DNS observation,
+and `registry set` / `registry relate` record the service, its domain, and the
+link between them.
 
 ## Operations
 
