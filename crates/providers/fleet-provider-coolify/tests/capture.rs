@@ -11,12 +11,13 @@
 //! ```text
 //! FLEET_COOLIFY_BASE_URL=https://coolify.example.com \
 //! FLEET_COOLIFY_TOKEN=... \
-//! FLEET_COOLIFY_CAPTURE_DIR=crates/providers/fleet-provider-coolify/tests/fixtures/recorded \
+//! FLEET_COOLIFY_CAPTURE_DIR=tests/fixtures/recorded-v<version> \
 //!   cargo test -p fleet-provider-coolify --test capture -- --ignored --nocapture
 //! ```
 //!
-//! Put the version the instance reports in the directory name, then point
-//! the contract tests at it.
+//! The path is relative to this crate (cargo runs tests there). Put the
+//! version the instance reports in the name; every directory under
+//! `tests/fixtures/` is then a contract-test fixture set.
 
 #[tokio::test]
 #[ignore = "needs a live Coolify instance and a read token"]
