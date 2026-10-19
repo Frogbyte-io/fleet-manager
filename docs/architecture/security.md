@@ -52,7 +52,7 @@ The `fleet-auth` authorizer decides a credential principal from a deny-by-defaul
 
 The credential narrows a caller that presents it; it is not a perimeter. Anonymous callers of the trusted-LAN listener stay administrators until the rest of M8 (sessions, bootstrap, refusing anonymous administration) lands.
 
-## Brokered provider actions (proposed, ADR 0016)
+## Brokered provider actions (ADR 0016)
 
 API-token providers (Coolify and Cloudflare in M10) are provider accounts whose tokens are encrypted secret records. No API, CLI output, log, audit event, operation payload, or result returns a token, and agents never receive one. An agent asks for a change by creating an `ActionRequest`: a typed provider action with structured, validated parameters. Each action type has a risk class, `auto`, `approve`, or `deny`, configurable per type. An approved request runs as a durable operation through the same authorization and audit path as any other mutation. Requests, decisions, and approvers are audited; parameters are validated, not interpreted as text.
 

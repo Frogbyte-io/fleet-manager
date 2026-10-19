@@ -1,8 +1,8 @@
 # ADR 0016: A descriptive Registry in Fleet Git and brokered provider actions
 
-Status: Proposed
+Status: Accepted
 
-Proposed: 2026-10-16 (FM-1000). Proposed for maintainer review. It narrows two "Explicitly outside" lines of the master plan and adds a class of desired resources that are never applied; it does not reverse ADR 0004, 0005, or 0013.
+Proposed: 2026-10-16 (FM-1000). Accepted: 2026-10-19 by maintainer review. It narrows two "Explicitly outside" lines of the master plan and adds a class of desired resources that are never applied; it does not reverse ADR 0004, 0005, or 0013.
 
 ## Context
 

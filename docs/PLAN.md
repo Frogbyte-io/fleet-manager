@@ -353,7 +353,7 @@ M9 depends only on landed M1–M4, M6, and M7 contracts and may run in parallel 
 
 ### M10 — Registry, running services, and brokered provider actions
 
-Status: planned (2026-10-12). Detailed plan and issue breakdown: [planning/m10-registry-services.md](planning/m10-registry-services.md). Boundaries: [ADR 0016](adr/0016-descriptive-registry-and-action-broker.md).
+Status: complete on `dev` (2026-10-19); ADR 0016 accepted. Detailed plan and issue breakdown: [planning/m10-registry-services.md](planning/m10-registry-services.md). Boundaries: [ADR 0016](adr/0016-descriptive-registry-and-action-broker.md).
 
 Outcome: one place to answer "what do we have, where is it, what does it cost, and how does it connect", for humans and agents, and a way for agents to request provider changes without holding provider keys.
 
