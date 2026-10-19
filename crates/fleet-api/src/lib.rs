@@ -505,6 +505,11 @@ pub fn api(state: Arc<operations::ApiState>) -> (Router, utoipa::openapi::OpenAp
                 .routes(routes!(images::list_image_build_addresses))
                 .routes(routes!(images::clear_image_build_address))
                 .routes(routes!(
+                    images::list_image_secrets,
+                    images::set_image_secret
+                ))
+                .routes(routes!(images::delete_image_secret))
+                .routes(routes!(
                     credentials::list_credentials,
                     credentials::issue_credential
                 ))

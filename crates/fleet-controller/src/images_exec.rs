@@ -3109,6 +3109,106 @@ mod tests {
         );
     }
 
+    /// #520: a record written through the operator surface is the record a
+    /// build resolves; the value reaches the var file and no audit row.
+    #[tokio::test]
+    async fn a_build_resolves_a_secret_created_through_the_image_secret_surface() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let mut replies = probes();
+        replies.extend([
+            reply("", Some(0), false),
+            reply("1,proxmox-clone,artifact,0,id,120", Some(0), false),
+        ]);
+        let (dir, store, repository, operations, mut operation, transport) =
+            setup(CONTENT, serde_json::json!({}), replies, false).await;
+        let key = dir.path().join("master.key");
+        std::fs::write(
+            &key,
+            "1 0a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20212223242526272829\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&key, std::fs::Permissions::from_mode(0o600)).unwrap();
+        let secrets =
+            Arc::new(fleet_secrets::SecretStore::open(store.pool().clone(), &key).unwrap());
+        // A record outside the namespace is invisible to the surface.
+        secrets
+            .create("proxmox/account-1", "other-integration-token".into())
+            .await
+            .unwrap();
+        let images = Images::new(
+            repository.clone(),
+            Arc::new(AuditSink::new(store.pool().clone())),
+        )
+        .with_secrets(Arc::new(
+            crate::image_secrets::SecretBackedImageSecrets::new(secrets.clone()),
+        ));
+        let principal = ActingPrincipal {
+            id: "anonymous-lan-admin".to_owned(),
+        };
+        let written = images
+            .set_secret(
+                &Allow,
+                &principal,
+                "build-token",
+                &fleet_core::SensitiveString::new("fixture-secret-token"),
+            )
+            .await
+            .unwrap();
+        assert_eq!(written.reference, "images/build-token");
+        assert!(!written.replaced);
+        assert_eq!(
+            images.list_secrets(&Allow, &principal).await.unwrap(),
+            vec!["images/build-token".to_owned()]
+        );
+        // Another integration's record cannot be reached by name.
+        assert!(
+            images
+                .delete_secret(&Allow, &principal, "../proxmox/account-1")
+                .await
+                .is_err()
+        );
+        assert_eq!(secrets.list().await.unwrap().len(), 2);
+        let mut payload: serde_json::Value =
+            serde_json::from_str(operation.payload_json.as_deref().unwrap()).unwrap();
+        payload["secretVars"] =
+            serde_json::json!([{"name": "token", "reference": written.reference}]);
+        operation.payload_json = Some(payload.to_string());
+        let executor = ImagesExecutor::new(
+            repository.clone(),
+            transport.clone(),
+            Some(secrets.clone()),
+            dir.path().join("work"),
+        );
+        assert!(
+            operations
+                .execute_claimed(&executor, operation.clone())
+                .await
+        );
+        let record = repository.get_build(&operation.id).await.unwrap();
+        assert_eq!(record.outcome, "succeeded", "{:?}", record.reason);
+        assert!(transport.saw_var_file.lock().unwrap().is_some());
+        images
+            .delete_secret(&Allow, &principal, "images/build-token")
+            .await
+            .unwrap();
+        assert!(
+            images
+                .list_secrets(&Allow, &principal)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        let audit: Vec<String> = sqlx::query_scalar("SELECT metadata_json FROM audit_events")
+            .fetch_all(store.pool())
+            .await
+            .unwrap();
+        let audit = audit.join("\n");
+        assert!(audit.contains("image_secret_set"), "{audit}");
+        assert!(audit.contains("image_secret_deleted"), "{audit}");
+        assert!(!audit.contains("fixture-secret-token"));
+        assert!(!audit.contains("other-integration-token"));
+    }
+
     #[tokio::test]
     async fn secret_variables_and_var_file_paths_never_enter_build_or_audit_records() {
         let mut replies = probes();

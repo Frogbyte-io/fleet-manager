@@ -2691,6 +2691,49 @@ fn parsing_walks_the_promotion_forms() {
 }
 
 #[test]
+fn image_secret_commands_take_names_only_never_values() {
+    let parse = |words: &[&str]| {
+        let args: Vec<String> = words.iter().map(ToString::to_string).collect();
+        fleetctl::parse(&args).map(|parsed| parsed.command)
+    };
+    assert!(matches!(
+        parse(&["images", "secret", "list"]).unwrap(),
+        fleetctl::Command::ImagesSecretList
+    ));
+    assert!(matches!(
+        parse(&["images", "secret", "set", "iso-pass"]).unwrap(),
+        fleetctl::Command::ImagesSecretSet { name } if name == "iso-pass"
+    ));
+    // The optional namespace prefix is folded into the short name.
+    assert!(matches!(
+        parse(&["images", "secret", "rm", "images/iso-pass"]).unwrap(),
+        fleetctl::Command::ImagesSecretRemove { name } if name == "iso-pass"
+    ));
+    // A value is never an argument: a second positional is refused, so a
+    // secret cannot reach argv or shell history.
+    assert!(parse(&["images", "secret", "set", "iso-pass", "hunter2"]).is_err());
+    assert!(parse(&["images", "secret", "set"]).is_err());
+    // The name is a path segment, so free text is refused.
+    for bad in ["../x", "a/b", "proxmox/acct", ".hidden", "a b", ""] {
+        assert!(parse(&["images", "secret", "set", bad]).is_err(), "{bad}");
+        assert!(parse(&["images", "secret", "rm", bad]).is_err(), "{bad}");
+    }
+}
+
+#[test]
+fn a_secret_from_stdin_loses_exactly_one_trailing_newline() {
+    let strip = |text: &str| fleetctl::finish_secret_for_test(text).unwrap();
+    assert_eq!(strip("hunter2\n"), "hunter2");
+    assert_eq!(strip("hunter2\r\n"), "hunter2");
+    assert_eq!(strip("hunter2"), "hunter2");
+    // A PEM's own final newline survives when a second one was added.
+    assert_eq!(strip("-----END KEY-----\n\n"), "-----END KEY-----\n");
+    assert_eq!(strip(" pad \n"), " pad ");
+    assert!(fleetctl::finish_secret_for_test("\n").is_err());
+    assert!(fleetctl::finish_secret_for_test("").is_err());
+}
+
+#[test]
 fn parsing_walks_the_build_address_forms() {
     let parse = |words: &[&str]| {
         let args: Vec<String> = words.iter().map(ToString::to_string).collect();

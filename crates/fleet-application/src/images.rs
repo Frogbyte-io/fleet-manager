@@ -307,6 +307,47 @@ pub fn check_secret_reference(reference: &str) -> Result<(), String> {
     }
 }
 
+/// The longest secret value accepted (64 KiB: a private key fits).
+pub const MAX_SECRET_VALUE_LEN: usize = 64 * 1024;
+
+/// Normalizes a caller's secret name to the record reference. The short
+/// name (`foo`) and the full reference (`images/foo`) are both accepted.
+fn secret_reference(name: &str) -> Result<String, RecipeUseCaseError> {
+    let reference = if name.starts_with(SECRET_NAMESPACE) {
+        name.to_owned()
+    } else {
+        format!("{SECRET_NAMESPACE}{name}")
+    };
+    check_secret_reference(&reference).map_err(|detail| RecipeUseCaseError::Invalid { detail })?;
+    Ok(reference)
+}
+
+/// The outcome of writing an image secret.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ImageSecretWrite {
+    /// The record name (`images/<name>`), the value to put in a build's
+    /// secret variable.
+    pub reference: String,
+    /// Whether an existing record's value was replaced.
+    pub replaced: bool,
+}
+
+/// The `images/<name>` secret records, over the encrypted secret store.
+/// Values go in and are never returned; names are the whole read surface.
+#[async_trait]
+pub trait ImageSecretPort: fmt::Debug + Send + Sync {
+    /// The names (`images/<name>`) of the live records in the namespace.
+    async fn list(&self) -> Result<Vec<String>, String>;
+    /// Creates or replaces the record; true when one was replaced.
+    async fn set(
+        &self,
+        reference: &str,
+        value: &fleet_core::SensitiveString,
+    ) -> Result<bool, String>;
+    /// Deletes the record; false when there was none.
+    async fn delete(&self, reference: &str) -> Result<bool, String>;
+}
+
 /// The image-recipe use cases.
 #[derive(Debug)]
 pub struct Images {
@@ -314,6 +355,7 @@ pub struct Images {
     audit: Arc<dyn AuditPort>,
     build_addresses: Option<Arc<dyn BuildAddressPort>>,
     build_address_pool_configured: bool,
+    secrets: Option<Arc<dyn ImageSecretPort>>,
 }
 
 impl Images {
@@ -325,6 +367,196 @@ impl Images {
             audit,
             build_addresses: None,
             build_address_pool_configured: false,
+            secrets: None,
+        }
+    }
+
+    /// Gives the service the store for `images/<name>` build secrets
+    /// (#520). Without one, the secret use cases refuse with a clear
+    /// reason.
+    #[must_use]
+    pub fn with_secrets(mut self, port: Arc<dyn ImageSecretPort>) -> Self {
+        self.secrets = Some(port);
+        self
+    }
+
+    fn secret_port(&self) -> Result<&Arc<dyn ImageSecretPort>, RecipeUseCaseError> {
+        self.secrets
+            .as_ref()
+            .ok_or_else(|| RecipeUseCaseError::Invalid {
+                detail:
+                    "the controller runs without a secret store; image build secrets cannot be managed"
+                        .to_owned(),
+            })
+    }
+
+    /// Lists the names of the `images/<name>` secret records. Values are
+    /// never readable.
+    ///
+    /// # Errors
+    ///
+    /// Fails on denial or a backend failure.
+    pub async fn list_secrets(
+        &self,
+        authorizer: &dyn Authorizer,
+        principal: &ActingPrincipal,
+    ) -> Result<Vec<String>, RecipeUseCaseError> {
+        authorize(
+            authorizer,
+            AccessRequest {
+                principal_id: &principal.id,
+                action: Permission::ImagesRead,
+                resource: None,
+            },
+        )
+        .map_err(RecipeUseCaseError::Denied)?;
+        let Some(port) = &self.secrets else {
+            return Ok(Vec::new());
+        };
+        let mut names = port
+            .list()
+            .await
+            .map_err(|detail| RecipeUseCaseError::Backend {
+                context: "image secrets",
+                detail,
+            })?;
+        names.sort();
+        Ok(names)
+    }
+
+    /// Creates or replaces the `images/<name>` secret record. The value is
+    /// write-only: it reaches the store and nothing else. The audit trail
+    /// carries the name and the outcome, never the value.
+    ///
+    /// # Errors
+    ///
+    /// Fails on denial, a malformed name or value, or a backend failure.
+    pub async fn set_secret(
+        &self,
+        authorizer: &dyn Authorizer,
+        principal: &ActingPrincipal,
+        name: &str,
+        value: &fleet_core::SensitiveString,
+    ) -> Result<ImageSecretWrite, RecipeUseCaseError> {
+        // Authorization comes first: a denied caller learns nothing about
+        // which names are well formed.
+        authorize(
+            authorizer,
+            AccessRequest {
+                principal_id: &principal.id,
+                action: Permission::ImagesConfig,
+                resource: None,
+            },
+        )
+        .map_err(RecipeUseCaseError::Denied)?;
+        let reference = secret_reference(name)?;
+        let text = value.expose();
+        if text.trim().is_empty() || text.len() > MAX_SECRET_VALUE_LEN {
+            return Err(RecipeUseCaseError::Invalid {
+                detail: format!(
+                    "the secret value must be non-empty and at most {MAX_SECRET_VALUE_LEN} bytes"
+                ),
+            });
+        }
+        let port = self.secret_port()?;
+        self.audit_event(
+            principal,
+            Permission::ImagesConfig,
+            Some(&reference),
+            "image_secret_setting",
+            &[("name", reference.as_str())],
+        )
+        .await?;
+        let outcome = port.set(&reference, value).await;
+        let (event, replaced_fact) = match &outcome {
+            Ok(true) => ("image_secret_set", Some("true")),
+            Ok(false) => ("image_secret_set", Some("false")),
+            Err(_) => ("image_secret_set_failed", None),
+        };
+        let mut facts = vec![("name", reference.as_str())];
+        if let Some(replaced) = replaced_fact {
+            facts.push(("replaced", replaced));
+        }
+        let audited = self
+            .audit_event(
+                principal,
+                Permission::ImagesConfig,
+                Some(&reference),
+                event,
+                &facts,
+            )
+            .await;
+        let replaced = outcome.map_err(|detail| RecipeUseCaseError::Backend {
+            context: "image secrets",
+            detail,
+        })?;
+        audited?;
+        Ok(ImageSecretWrite {
+            reference,
+            replaced,
+        })
+    }
+
+    /// Deletes the `images/<name>` secret record. A build that still
+    /// references it fails at its next run with a clear message.
+    ///
+    /// # Errors
+    ///
+    /// Fails on denial, a malformed name, an unknown record, or a backend
+    /// failure.
+    pub async fn delete_secret(
+        &self,
+        authorizer: &dyn Authorizer,
+        principal: &ActingPrincipal,
+        name: &str,
+    ) -> Result<String, RecipeUseCaseError> {
+        // Authorization comes first: a denied caller learns nothing about
+        // which names are well formed.
+        authorize(
+            authorizer,
+            AccessRequest {
+                principal_id: &principal.id,
+                action: Permission::ImagesConfig,
+                resource: None,
+            },
+        )
+        .map_err(RecipeUseCaseError::Denied)?;
+        let reference = secret_reference(name)?;
+        let port = self.secret_port()?;
+        self.audit_event(
+            principal,
+            Permission::ImagesConfig,
+            Some(&reference),
+            "image_secret_deleting",
+            &[("name", reference.as_str())],
+        )
+        .await?;
+        let outcome = port.delete(&reference).await;
+        let event = match &outcome {
+            Ok(true) => "image_secret_deleted",
+            Ok(false) => "image_secret_delete_refused",
+            Err(_) => "image_secret_delete_failed",
+        };
+        let audited = self
+            .audit_event(
+                principal,
+                Permission::ImagesConfig,
+                Some(&reference),
+                event,
+                &[("name", reference.as_str())],
+            )
+            .await;
+        let existed = outcome.map_err(|detail| RecipeUseCaseError::Backend {
+            context: "image secrets",
+            detail,
+        })?;
+        audited?;
+        if existed {
+            Ok(reference)
+        } else {
+            Err(RecipeUseCaseError::NotFound {
+                what: format!("image secret {reference}"),
+            })
         }
     }
 
