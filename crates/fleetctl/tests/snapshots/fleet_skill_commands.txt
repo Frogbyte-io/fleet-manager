@@ -78,6 +78,48 @@ fleetctl --output json registry validate
   -> local Fleet Git checkout: Validate { repo: None }
 fleetctl --output json registry publish -m "Record example.com registrar"
   -> local Fleet Git checkout: Publish { message: "Record example.com registrar", change_mode: None, base: None, branch: None, repo: None }
+fleetctl --output json services list --source coolify
+  -> GET /api/v1/services?source=coolify
+fleetctl --output json services settings <service-id>
+  -> GET /api/v1/services/service-id-example/settings
+fleetctl --output json services logs <service-id> --lines 100
+  -> GET /api/v1/services/service-id-example/logs?lines=100
+fleetctl --output json services restart <service-id> --reason "pick up new config" --wait-approval=5m
+  -> POST /api/v1/services/service-id-example/actions/restart body {"reason":"pick up new config"}
+fleetctl --output json services stop <service-id> --reason "client asked to pause" --wait-approval
+  -> POST /api/v1/services/service-id-example/actions/stop body {"reason":"client asked to pause"}
+fleetctl --output json services start <service-id> --wait-approval
+  -> POST /api/v1/services/service-id-example/actions/start body {"reason":""}
+fleetctl --output json services redeploy <service-id> --wait-approval=10m
+  -> POST /api/v1/services/service-id-example/actions/redeploy body {"reason":""}
+fleetctl --output json services env list <service-id>
+  -> GET /api/v1/services/service-id-example/settings
+fleetctl --output json services env set <service-id> --stdin --redeploy --wait-approval=5m
+  -> POST /api/v1/services/{id}/settings/env (values read from stdin, never an argument)
+fleetctl --output json services env unset <service-id> OLD_FLAG --wait-approval
+  -> POST /api/v1/services/service-id-example/settings/env body {"changes":[{"isPreview":false,"key":"OLD_FLAG","op":"unset"}],"reason":"change environment variables of service-id-example"}
+fleetctl --output json services domains set <service-id> https://www.example.com --wait-approval=5m
+  -> POST /api/v1/services/service-id-example/settings/domains body {"domains":["https://www.example.com"],"reason":"change domains of service-id-example"}
+fleetctl --output json services health set <service-id> --enabled --path /healthz --wait-approval
+  -> POST /api/v1/services/service-id-example/settings/health body {"enabled":true,"path":"/healthz","reason":"change health check of service-id-example"}
+fleetctl --output json services templates
+  -> GET /api/v1/site-templates
+fleetctl --output json services deploy --template <template-id> --account <account-id> --server <server> --project <project> --environment production --domain www.example.com --dns --dns-target 203.0.113.10 --wait-approval=10m
+  -> POST /api/v1/site-deployments body {"accountId":"account-id-example","domain":"www.example.com","environmentName":"production","projectUuid":"project-example","reason":"","serverUuid":"server-example","templateId":"template-id-example"}
+fleetctl --output json dns zones
+  -> GET /api/v1/dns/zones
+fleetctl --output json dns records www.example.com
+  -> GET /api/v1/dns/records?name=www.example.com
+fleetctl --output json dns observations www.example.com
+  -> GET /api/v1/dns/observations?name=www.example.com
+fleetctl --output json dns set www.example.com --type A --content 203.0.113.10 --replaces 203.0.113.9 --reason "move to new host" --wait-approval=5m
+  -> POST /api/v1/dns/changes body {"content":"203.0.113.10","name":"www.example.com","operation":"upsert","reason":"move to new host","replaces":"203.0.113.9","type":"A"}
+fleetctl --output json dns delete old.example.com --type CNAME --content target.example.net --wait-approval
+  -> POST /api/v1/dns/changes body {"content":"target.example.net","name":"old.example.com","operation":"delete","reason":"requested with fleetctl dns","type":"CNAME"}
+fleetctl --output json requests list --state pending
+  -> GET /api/v1/requests?state=pending
+fleetctl --output json requests get <request-id> --wait=2m
+  -> GET /api/v1/requests/request-id-example
 fleetctl --output json operations list --limit 20
   -> GET /api/v1/operations?limit=20
 fleetctl --output json operations get <operation-id>
