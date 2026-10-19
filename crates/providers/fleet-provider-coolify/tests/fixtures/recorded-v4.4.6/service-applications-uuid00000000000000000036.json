@@ -1,0 +1,32 @@
+[
+  {
+    "created_at": "2026-10-11T20:10:04.000000Z",
+    "deleted_at": null,
+    "exclude_from_status": false,
+    "exposes": null,
+    "fqdn": null,
+    "human_name": null,
+    "image": "[scrubbed]:2026.10.0",
+    "is_force_https_enabled": true,
+    "is_gzip_enabled": true,
+    "is_include_timestamps": false,
+    "is_log_drain_enabled": false,
+    "is_migrated": false,
+    "is_stripprefix_enabled": true,
+    "last_online_at": "[scrubbed]",
+    "last_restart_at": null,
+    "last_restart_type": null,
+    "max_restart_count": 0,
+    "name": "name-33",
+    "noindex_domains": null,
+    "ports": "",
+    "redirect": "[scrubbed]",
+    "required_fqdn": false,
+    "restart_count": 0,
+    "restart_limit_reached": false,
+    "service_id": 4,
+    "status": "running:unknown",
+    "updated_at": "2026-10-19T19:49:54.000000Z",
+    "uuid": "uuid00000000000000000034"
+  }
+]

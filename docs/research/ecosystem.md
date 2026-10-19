@@ -104,7 +104,7 @@ Findings (API: `/api/v1`, schemas verified against v4.4.6. Route availability by
 - The OpenAPI schemas for databases (`list-databases`) and resources are documented as "very complex, will be implemented later", so the database shape is taken from `DatabasesController` and translated tolerantly (the engine falls back to the image name).
 - `GET /enable` and `GET /deploy` reach mutating handlers before v4.2.0, so Fleet never requests them (or any route that is not in the list above).
 
-Decision: discovery (FM-1030, `fleet-provider-coolify`) is GET-only over a closed route set with a `read` token, never follows redirects, bounds time and size, and translates through a field allow-list so nothing Coolify may hide behind `read:sensitive` is stored even if the token holds that ability. Contract fixtures in the repository are synthetic, written from the v4.4.6 schemas; recording scrubbed fixtures from a real instance is an operator step (the ignored `capture` test), pending at the time of writing. Mutations (deploy, restart) are brokered separately and are out of scope here.
+Decision: discovery (FM-1030, `fleet-provider-coolify`) is GET-only over a closed route set with a `read` token, never follows redirects, bounds time and size, and translates through a field allow-list so nothing Coolify may hide behind `read:sensitive` is stored even if the token holds that ability. Contract fixtures include a synthetic set written from the v4.4.6 schemas and a scrubbed set recorded from a real Coolify 4.4.6 instance (`tests/fixtures/recorded-v4.4.6/`, 2026-10-19, read-only token) with the ignored `capture` test. Mutations (deploy, restart) are brokered separately and are out of scope here.
 
 ### GitHub
 
