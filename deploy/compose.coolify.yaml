@@ -39,6 +39,17 @@ services:
       FLEET_IMAGE_BUILD_ADDRESS_POOL_GATEWAY: ${FLEET_IMAGE_BUILD_ADDRESS_POOL_GATEWAY:-}
       FLEET_IMAGE_BUILD_ADDRESS_POOL_DNS: ${FLEET_IMAGE_BUILD_ADDRESS_POOL_DNS:-}
       FLEET_IMAGE_BUILD_ADDRESS_POOL_REFUSE_ISO: ${FLEET_IMAGE_BUILD_ADDRESS_POOL_REFUSE_ISO:-}
+      # Periodic fetch of the Fleet Git source (FM-1014); 0 is off, otherwise
+      # at least 30 seconds. Registry-only revisions auto-activate.
+      FLEET_DESIRED_FETCH_INTERVAL_SECONDS: ${FLEET_DESIRED_FETCH_INTERVAL_SECONDS:-0}
+      # Domain RDAP/DNS enrichment (FM-1020); empty keeps the controller's
+      # defaults (daily sweep, 30-day expiry window). 0 turns the sweep off.
+      FLEET_REGISTRY_ENRICH_INTERVAL_SECONDS: ${FLEET_REGISTRY_ENRICH_INTERVAL_SECONDS:-}
+      FLEET_REGISTRY_EXPIRY_WINDOW_DAYS: ${FLEET_REGISTRY_EXPIRY_WINDOW_DAYS:-}
+      # Action broker (FM-1040): request expiry and per-action risk-class
+      # overrides (`action.id=auto|approve|deny,...`); empty keeps defaults.
+      FLEET_ACTION_REQUEST_TTL_SECONDS: ${FLEET_ACTION_REQUEST_TTL_SECONDS:-}
+      FLEET_ACTION_POLICY: ${FLEET_ACTION_POLICY:-}
     volumes:
       - fleet-data:/var/lib/fleet
     secrets:
