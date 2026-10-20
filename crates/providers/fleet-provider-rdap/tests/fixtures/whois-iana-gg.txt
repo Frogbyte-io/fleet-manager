@@ -1,0 +1,14 @@
+% IANA WHOIS server
+% This query returned 1 object
+
+domain:       GG
+
+organisation: Example Registry Operator
+
+contact:      administrative
+name:         REDACTED
+
+whois:        whois.gg
+
+status:       ACTIVE
+source:       IANA

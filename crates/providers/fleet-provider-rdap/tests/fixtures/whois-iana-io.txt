@@ -1,0 +1,25 @@
+% IANA WHOIS server
+% for more information on IANA, visit http://www.iana.org
+% This query returned 1 object
+
+domain:       IO
+
+organisation: Example Registry Operator Limited
+address:      Example Street
+
+contact:      administrative
+name:         REDACTED
+
+contact:      technical
+name:         REDACTED
+
+nserver:      a.nic.io 192.0.2.1
+
+whois:        whois.nic.io
+
+status:       ACTIVE
+remarks:      Registration information: http://www.nic.io/
+
+created:      1997-09-16
+changed:      2023-06-14
+source:       IANA

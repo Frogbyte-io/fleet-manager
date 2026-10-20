@@ -38,7 +38,8 @@ use crate::registry::{
 pub use limiter::RateLimiter;
 pub use model::{
     Assessment, DnsObservation, DnsRecords, DnsStatus, DomainObservation, FieldDiff, FieldState,
-    RdapObservation, RdapStatus, Severity, SuggestedField, Warning, WarningCode,
+    RdapObservation, RdapStatus, RegistrationSource, Severity, SuggestedField, Warning,
+    WarningCode,
 };
 
 /// The registry type the enricher observes.
@@ -62,6 +63,8 @@ pub const DEFAULT_WINDOW_DAYS: u32 = 30;
 pub const MAX_WINDOW_DAYS: u32 = 365;
 /// The default gap between two queries to one RDAP server.
 pub const DEFAULT_RDAP_GAP: Duration = Duration::from_secs(2);
+/// The limiter key of the WHOIS referral server (`whois.iana.org`).
+const IANA_WHOIS_KEY: &str = "whois://whois.iana.org";
 /// The longest an on-demand lookup waits for its rate-limit slot before it
 /// is refused instead.
 const MAX_SLOT_WAIT: Duration = Duration::from_secs(30);
@@ -173,6 +176,53 @@ pub trait RdapPort: std::fmt::Debug + Send + Sync {
     /// [`RdapFailure::NotFound`] when the domain is unregistered, else
     /// [`RdapFailure::Failed`].
     async fn lookup(&self, server: &str, fqdn: &str) -> Result<RdapAnswer, RdapFailure>;
+}
+
+/// What a registry WHOIS server said about a domain: the registrar and the
+/// expiry, nothing else.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct WhoisAnswer {
+    /// The registrar's name.
+    pub registrar: Option<String>,
+    /// The expiry, as the server wrote it.
+    pub expires: Option<String>,
+}
+
+/// Why a WHOIS query produced no answer.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum WhoisFailure {
+    /// The registry reports the domain is not registered.
+    NotFound,
+    /// The answer is in a format Fleet cannot read; reported as
+    /// `unavailable`, not as a failure.
+    Unreadable,
+    /// Any other failure, as a short credential-free category.
+    Failed(String),
+}
+
+/// The WHOIS fallback port, for TLDs with no RDAP service. The adapter owns
+/// the IANA referral and port 43.
+#[async_trait]
+pub trait WhoisPort: std::fmt::Debug + Send + Sync {
+    /// Whether [`WhoisPort::server_for`] answers without a network query
+    /// (a cached referral or a remembered failure). When it does not, the
+    /// enricher takes a rate-limit slot for the referral server first.
+    fn referral_is_cached(&self, fqdn: &str) -> bool;
+
+    /// The registry WHOIS host for the domain's TLD, or `None` when the
+    /// TLD has no public WHOIS server.
+    ///
+    /// # Errors
+    ///
+    /// Fails (with a short category) when the referral is unavailable.
+    async fn server_for(&self, fqdn: &str) -> Result<Option<String>, String>;
+
+    /// Queries one server.
+    ///
+    /// # Errors
+    ///
+    /// See [`WhoisFailure`].
+    async fn lookup(&self, server: &str, fqdn: &str) -> Result<WhoisAnswer, WhoisFailure>;
 }
 
 /// The DNS record types the enricher reads.
@@ -379,6 +429,7 @@ pub fn shared_limiter(gap: Duration) -> SharedLimiter {
 pub struct DomainEnricher {
     directory: Arc<dyn DomainDirectory>,
     rdap: Arc<dyn RdapPort>,
+    whois: Option<Arc<dyn WhoisPort>>,
     dns: Arc<dyn DnsPort>,
     store: Arc<dyn ObservationStore>,
     audit: Arc<dyn AuditPort>,
@@ -409,6 +460,7 @@ impl DomainEnricher {
         Self {
             directory,
             rdap,
+            whois: None,
             dns,
             store,
             audit,
@@ -423,6 +475,14 @@ impl DomainEnricher {
     #[must_use]
     pub fn with_limiter(mut self, limiter: SharedLimiter) -> Self {
         self.limiter = limiter;
+        self
+    }
+
+    /// Enables the WHOIS fallback for TLDs the RDAP bootstrap does not
+    /// cover. Its servers share the per-server rate limiter.
+    #[must_use]
+    pub fn with_whois(mut self, whois: Arc<dyn WhoisPort>) -> Self {
+        self.whois = Some(whois);
         self
     }
 
@@ -771,35 +831,16 @@ impl DomainEnricher {
     ) -> Result<RdapObservation, ProjectUseCaseError> {
         let server = match self.rdap.server_for(fqdn).await {
             Ok(Some(server)) => server,
-            Ok(None) => {
-                let tld = fqdn.rsplit('.').next().unwrap_or_default();
-                return Ok(RdapObservation::empty(
-                    RdapStatus::Unavailable,
-                    format!("no RDAP service is registered for .{tld}"),
-                ));
-            }
+            Ok(None) => return self.observe_whois(fqdn, refuse_long_waits).await,
             Err(detail) => {
                 return Ok(RdapObservation::empty(RdapStatus::Error, bounded(&detail)));
             }
         };
-        let max_wait = refuse_long_waits.then_some(MAX_SLOT_WAIT);
-        let wait = self
-            .limiter
-            .lock()
-            .await
-            .try_reserve(&server, Instant::now(), max_wait)
-            .map_err(|_| ProjectUseCaseError::Backend {
-                context: "registry_observe_rate_limited",
-                detail: format!(
-                    "the RDAP server {server} is being queried at its rate limit; retry shortly"
-                ),
-            })?;
-        if !wait.is_zero() {
-            tokio::time::sleep(wait).await;
-        }
+        self.wait_for_slot(&server, refuse_long_waits).await?;
         Ok(match self.rdap.lookup(&server, fqdn).await {
             Ok(answer) => RdapObservation {
                 status: RdapStatus::Ok,
+                source: RegistrationSource::Rdap,
                 server: Some(server),
                 registrar: answer.registrar,
                 expires: answer.expires.as_deref().and_then(diff::date_part),
@@ -818,6 +859,108 @@ impl DomainEnricher {
                 server: Some(server),
                 ..RdapObservation::empty(RdapStatus::Error, bounded(&detail))
             },
+        })
+    }
+
+    /// Waits for the server's rate-limit slot; an on-demand lookup that
+    /// would wait too long is refused instead.
+    async fn wait_for_slot(
+        &self,
+        server: &str,
+        refuse_long_waits: bool,
+    ) -> Result<(), ProjectUseCaseError> {
+        let max_wait = refuse_long_waits.then_some(MAX_SLOT_WAIT);
+        let wait = self
+            .limiter
+            .lock()
+            .await
+            .try_reserve(server, Instant::now(), max_wait)
+            .map_err(|_| ProjectUseCaseError::Backend {
+                context: "registry_observe_rate_limited",
+                detail: format!(
+                    "the registry server {server} is being queried at its rate limit; retry shortly"
+                ),
+            })?;
+        if !wait.is_zero() {
+            tokio::time::sleep(wait).await;
+        }
+        Ok(())
+    }
+
+    /// The registration half for a TLD with no RDAP service: the WHOIS
+    /// fallback when it is enabled and the TLD has a WHOIS server, else
+    /// `unavailable`. WHOIS has no standard format, so an answer Fleet
+    /// cannot read is also `unavailable`; it is data the registry did not
+    /// give in a usable form, not a failing lookup.
+    async fn observe_whois(
+        &self,
+        fqdn: &str,
+        refuse_long_waits: bool,
+    ) -> Result<RdapObservation, ProjectUseCaseError> {
+        let tld = fqdn.rsplit('.').next().unwrap_or_default();
+        let no_service = || {
+            RdapObservation::empty(
+                RdapStatus::Unavailable,
+                format!("no RDAP service is registered for .{tld}"),
+            )
+        };
+        let Some(whois) = &self.whois else {
+            return Ok(no_service());
+        };
+        let from_whois = |observation: RdapObservation, server: &str| RdapObservation {
+            source: RegistrationSource::Whois,
+            server: Some(server.to_owned()),
+            ..observation
+        };
+        if !whois.referral_is_cached(fqdn) {
+            // The IANA referral server is shared infrastructure too.
+            self.wait_for_slot(IANA_WHOIS_KEY, refuse_long_waits)
+                .await?;
+        }
+        let server = match whois.server_for(fqdn).await {
+            Ok(Some(server)) => server,
+            Ok(None) => {
+                return Ok(RdapObservation::empty(
+                    RdapStatus::Unavailable,
+                    format!("no RDAP or WHOIS service is registered for .{tld}"),
+                ));
+            }
+            Err(detail) => {
+                return Ok(RdapObservation::empty(RdapStatus::Error, bounded(&detail)));
+            }
+        };
+        // The key cannot collide with an RDAP base URL.
+        self.wait_for_slot(&format!("whois://{server}"), refuse_long_waits)
+            .await?;
+        Ok(match whois.lookup(&server, fqdn).await {
+            Ok(answer) => from_whois(
+                RdapObservation {
+                    status: RdapStatus::Ok,
+                    registrar: answer.registrar,
+                    expires: answer.expires.as_deref().and_then(diff::date_part),
+                    detail: None,
+                    ..RdapObservation::empty(RdapStatus::Ok, "")
+                },
+                &server,
+            ),
+            Err(WhoisFailure::NotFound) => from_whois(
+                RdapObservation::empty(
+                    RdapStatus::NotFound,
+                    "the registry reports the domain is not registered",
+                ),
+                &server,
+            ),
+            Err(WhoisFailure::Unreadable) => from_whois(
+                RdapObservation::empty(
+                    RdapStatus::Unavailable,
+                    format!("the WHOIS answer for .{tld} is in a format Fleet cannot read"),
+                ),
+                &server,
+            ),
+            Err(WhoisFailure::Failed(detail)) => from_whois(
+                RdapObservation::empty(RdapStatus::Error, bounded(&detail)),
+                &server,
+            ),
         })
     }
 

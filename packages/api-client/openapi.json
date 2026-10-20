@@ -20557,6 +20557,7 @@
         "description": "The RDAP half of a domain observation.",
         "required": [
           "status",
+          "source",
           "statuses",
           "nameservers"
         ],
@@ -20594,7 +20595,11 @@
               "string",
               "null"
             ],
-            "description": "The RDAP server's base URL, when one was resolved."
+            "description": "The server that answered: the RDAP base URL or the WHOIS host,\nwhen one was resolved."
+          },
+          "source": {
+            "$ref": "#/components/schemas/RegistrationSourceDto",
+            "description": "Which protocol answered: `rdap`, or `whois` for a TLD with no RDAP\nservice."
           },
           "status": {
             "$ref": "#/components/schemas/RdapStatusDto",
@@ -20910,6 +20915,14 @@
             "description": "The machine the checkouts were observed on."
           }
         }
+      },
+      "RegistrationSourceDto": {
+        "type": "string",
+        "description": "Which protocol answered the registration lookup.",
+        "enum": [
+          "rdap",
+          "whois"
+        ]
       },
       "RegistryEntryDto": {
         "type": "object",

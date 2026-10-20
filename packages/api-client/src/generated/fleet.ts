@@ -2051,6 +2051,17 @@ export interface DnsZonesDto {
 }
 
 /**
+ * Which protocol answered the registration lookup.
+ */
+export type RegistrationSourceDto = typeof RegistrationSourceDto[keyof typeof RegistrationSourceDto];
+
+
+export const RegistrationSourceDto = {
+  rdap: 'rdap',
+  whois: 'whois',
+} as const;
+
+/**
  * The status of the RDAP half of an observation.
  */
 export type RdapStatusDto = typeof RdapStatusDto[keyof typeof RdapStatusDto];
@@ -2086,10 +2097,16 @@ export interface RdapObservationDto {
      */
   registrar?: string | null;
   /**
-     * The RDAP server's base URL, when one was resolved.
+     * The server that answered: the RDAP base URL or the WHOIS host,
+     * when one was resolved.
      * @nullable
      */
   server?: string | null;
+  /**
+     * Which protocol answered: `rdap`, or `whois` for a TLD with no RDAP
+     * service.
+     */
+  source: RegistrationSourceDto;
   /** How the lookup ended. */
   status: RdapStatusDto;
   /** The EPP status values. */

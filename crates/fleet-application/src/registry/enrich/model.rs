@@ -17,11 +17,34 @@ pub enum RdapStatus {
     Error,
 }
 
-/// The RDAP half of an observation.
+/// Where the registration data came from.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RegistrationSource {
+    /// An RDAP server (the default; older observations carry no source).
+    #[default]
+    Rdap,
+    /// The TLD's registry WHOIS server, for a TLD with no RDAP service.
+    Whois,
+}
+
+impl RegistrationSource {
+    // serde's `skip_serializing_if` passes a reference.
+    #[allow(clippy::trivially_copy_pass_by_ref)]
+    fn is_rdap(&self) -> bool {
+        *self == Self::Rdap
+    }
+}
+
+/// The registration half of an observation (RDAP, or WHOIS when the TLD
+/// has no RDAP service).
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct RdapObservation {
     /// How the lookup ended.
     pub status: RdapStatus,
+    /// Which protocol answered.
+    #[serde(default, skip_serializing_if = "RegistrationSource::is_rdap")]
+    pub source: RegistrationSource,
     /// The RDAP server's base URL, when one was resolved.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub server: Option<String>,
@@ -50,6 +73,7 @@ impl RdapObservation {
     pub fn empty(status: RdapStatus, detail: impl Into<String>) -> Self {
         Self {
             status,
+            source: RegistrationSource::Rdap,
             server: None,
             registrar: None,
             expires: None,

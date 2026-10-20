@@ -1,0 +1,7 @@
+Domain Name: example.io
+Registry Domain ID: D0000000-IO
+Registrar WHOIS Server: whois.example-registrar.test
+Registry Expiry Date: 2027-05-01T09:08:07Z
+Registrar: Example Registrar, Inc.
+Registrant Organization: REDACTED
+Name Server: ns1.example.net

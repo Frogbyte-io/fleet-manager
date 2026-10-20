@@ -1,6 +1,6 @@
 use fleet_application::registry::enrich::{
     DnsObservation, DnsRecords, DnsStatus, DomainObservation, ObservationStore, RdapObservation,
-    RdapStatus,
+    RdapStatus, RegistrationSource,
 };
 use fleet_storage_sqlite::{ObservationRepository, Store};
 
@@ -12,6 +12,7 @@ fn observation(at: i64, registrar: &str) -> DomainObservation {
         failures: 0,
         rdap: RdapObservation {
             status: RdapStatus::Ok,
+            source: RegistrationSource::Rdap,
             server: Some("https://rdap.example/".to_owned()),
             registrar: Some(registrar.to_owned()),
             expires: Some("2027-08-13".to_owned()),
