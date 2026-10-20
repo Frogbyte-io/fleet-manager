@@ -34,7 +34,13 @@
 //! The network sits behind [`RdapTransport`] so tests replay recorded
 //! fixtures. The bootstrap file is cached with a TTL and a stale copy is
 //! served when a refresh fails.
+//!
+//! For a TLD with no RDAP service, the [`whois`] module is the fallback:
+//! the registry's WHOIS server (RFC 3912, port 43), found through
+//! `whois.iana.org`, read for the registrar name and expiry date only.
 #![warn(missing_docs)]
+
+pub mod whois;
 
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};

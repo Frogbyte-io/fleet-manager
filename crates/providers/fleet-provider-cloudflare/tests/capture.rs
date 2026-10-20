@@ -9,7 +9,7 @@
 //!
 //! ```text
 //! FLEET_CLOUDFLARE_TOKEN=... \
-//! FLEET_CLOUDFLARE_CAPTURE_DIR=crates/providers/fleet-provider-cloudflare/tests/fixtures/recorded \
+//! FLEET_CLOUDFLARE_CAPTURE_DIR=tests/fixtures/recorded \
 //!   cargo test -p fleet-provider-cloudflare --test capture -- --ignored --nocapture
 //! ```
 

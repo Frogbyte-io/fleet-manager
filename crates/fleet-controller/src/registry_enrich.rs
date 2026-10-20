@@ -13,9 +13,11 @@ use std::time::Duration;
 use fleet_application::registry::RegistryReadModel;
 use fleet_application::registry::enrich::{
     DnsFailure, DnsKind, DnsPort, DomainEnricher, EnrichSettings, INTERVAL_VAR, ObservationStore,
-    RdapAnswer, RdapFailure, RdapPort, SharedLimiter, WINDOW_VAR, shared_limiter,
+    RdapAnswer, RdapFailure, RdapPort, SharedLimiter, WINDOW_VAR, WhoisAnswer, WhoisFailure,
+    WhoisPort, shared_limiter,
 };
 use fleet_provider_dns::{DnsError, Kind, SystemResolver};
+use fleet_provider_rdap::whois::{TcpWhoisTransport, WhoisClient, WhoisError};
 use fleet_provider_rdap::{RdapClient, RdapError, ReqwestRdapTransport};
 use sqlx::SqlitePool;
 
@@ -66,6 +68,38 @@ impl RdapPort for RdapAdapter {
     }
 }
 
+/// The WHOIS fallback behind the application port.
+#[derive(Debug)]
+pub struct WhoisAdapter {
+    client: WhoisClient,
+}
+
+#[async_trait::async_trait]
+impl WhoisPort for WhoisAdapter {
+    fn referral_is_cached(&self, fqdn: &str) -> bool {
+        self.client.referral_is_cached(fqdn)
+    }
+
+    async fn server_for(&self, fqdn: &str) -> Result<Option<String>, String> {
+        self.client
+            .server_for(fqdn)
+            .await
+            .map_err(|error| error.to_string())
+    }
+
+    async fn lookup(&self, server: &str, fqdn: &str) -> Result<WhoisAnswer, WhoisFailure> {
+        match self.client.query(server, fqdn).await {
+            Ok(record) => Ok(WhoisAnswer {
+                registrar: record.registrar,
+                expires: record.expires,
+            }),
+            Err(WhoisError::NotFound) => Err(WhoisFailure::NotFound),
+            Err(WhoisError::Unreadable) => Err(WhoisFailure::Unreadable),
+            Err(error) => Err(WhoisFailure::Failed(error.to_string())),
+        }
+    }
+}
+
 /// The DNS provider behind the application port. A resolver that could not
 /// start answers every query with that fixed failure, so the sweep records
 /// an honest `error` instead of the controller refusing to start.
@@ -99,6 +133,7 @@ impl DnsPort for DnsAdapter {
 
 struct Shared {
     rdap: Arc<RdapAdapter>,
+    whois: Arc<WhoisAdapter>,
     dns: Arc<DnsAdapter>,
     limiter: SharedLimiter,
 }
@@ -112,6 +147,9 @@ fn shared(settings: &EnrichSettings) -> Option<&'static Shared> {
             Some(Shared {
                 rdap: Arc::new(RdapAdapter {
                     client: RdapClient::new(Arc::new(transport)),
+                }),
+                whois: Arc::new(WhoisAdapter {
+                    client: WhoisClient::new(Arc::new(TcpWhoisTransport)),
                 }),
                 dns: Arc::new(DnsAdapter {
                     resolver: SystemResolver::new().map_err(|error| error.to_string()),
@@ -143,6 +181,7 @@ pub fn compose_domain_enricher(
             Arc::new(fleet_storage_sqlite::AuditSink::new(pool.clone())),
             settings,
         )
+        .with_whois(shared.whois.clone())
         .with_limiter(shared.limiter.clone()),
     ))
 }

@@ -19,7 +19,7 @@ use axum::{
 use fleet_application::project::ProjectUseCaseError;
 use fleet_application::registry::enrich::{
     DOMAIN_TYPE, DnsRecords, DnsStatus, DomainEnricher, DomainObservation, DomainView, FieldState,
-    RdapStatus, Severity, WarningCode,
+    RdapStatus, RegistrationSource, Severity, WarningCode,
 };
 use fleet_application::registry::{
     Answered, EntryCursor, ReferenceCursor, RegistryEntryFilter, RegistryEntryRecord,
@@ -685,6 +685,16 @@ fn enricher(
         })
 }
 
+/// Which protocol answered the registration lookup.
+#[derive(Clone, Copy, Debug, Serialize, ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum RegistrationSourceDto {
+    /// An RDAP server.
+    Rdap,
+    /// The TLD's registry WHOIS server, for a TLD with no RDAP service.
+    Whois,
+}
+
 /// The status of the RDAP half of an observation.
 #[derive(Clone, Copy, Debug, Serialize, ToSchema)]
 #[serde(rename_all = "snake_case")]
@@ -705,7 +715,11 @@ pub enum RdapStatusDto {
 pub struct RdapObservationDto {
     /// How the lookup ended.
     pub status: RdapStatusDto,
-    /// The RDAP server's base URL, when one was resolved.
+    /// Which protocol answered: `rdap`, or `whois` for a TLD with no RDAP
+    /// service.
+    pub source: RegistrationSourceDto,
+    /// The server that answered: the RDAP base URL or the WHOIS host,
+    /// when one was resolved.
     pub server: Option<String>,
     /// The registrar's name as the registry reports it.
     pub registrar: Option<String>,
@@ -960,6 +974,10 @@ fn observation_dto(observation: DomainObservation) -> DomainObservationDto {
                 RdapStatus::Unavailable => RdapStatusDto::Unavailable,
                 RdapStatus::NotFound => RdapStatusDto::NotFound,
                 RdapStatus::Error => RdapStatusDto::Error,
+            },
+            source: match observation.rdap.source {
+                RegistrationSource::Rdap => RegistrationSourceDto::Rdap,
+                RegistrationSource::Whois => RegistrationSourceDto::Whois,
             },
             server: observation.rdap.server,
             registrar: observation.rdap.registrar,

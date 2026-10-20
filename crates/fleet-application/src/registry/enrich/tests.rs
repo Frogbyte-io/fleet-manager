@@ -25,6 +25,7 @@ fn observation(registrar: Option<&str>, expires: Option<&str>, ns: &[&str]) -> D
         failures: 0,
         rdap: RdapObservation {
             status: RdapStatus::Ok,
+            source: RegistrationSource::Rdap,
             server: Some("https://rdap.example/".to_owned()),
             registrar: registrar.map(str::to_owned),
             expires: expires.map(str::to_owned),
@@ -1208,4 +1209,274 @@ fn rig_with_one_domain() -> Rig {
         DnsStub::default(),
         Duration::ZERO,
     )
+}
+
+type WhoisStubAnswer = (Option<String>, Result<WhoisAnswer, WhoisFailure>);
+
+#[derive(Debug, Default)]
+struct WhoisStub {
+    /// fqdn -> (server, answer); a server of `None` means no WHOIS.
+    answers: Mutex<HashMap<String, WhoisStubAnswer>>,
+    queries: Mutex<Vec<(std::time::Instant, String)>>,
+    /// Whether the IANA referral needs a network query (and a slot).
+    uncached_referrals: bool,
+}
+
+impl WhoisStub {
+    fn uncached(mut self) -> Self {
+        self.uncached_referrals = true;
+        self
+    }
+
+    fn with(
+        self,
+        fqdn: &str,
+        server: Option<&str>,
+        answer: Result<WhoisAnswer, WhoisFailure>,
+    ) -> Self {
+        self.answers
+            .lock()
+            .unwrap()
+            .insert(fqdn.to_owned(), (server.map(str::to_owned), answer));
+        self
+    }
+}
+
+#[async_trait]
+impl WhoisPort for WhoisStub {
+    fn referral_is_cached(&self, _fqdn: &str) -> bool {
+        !self.uncached_referrals
+    }
+
+    async fn server_for(&self, fqdn: &str) -> Result<Option<String>, String> {
+        Ok(self
+            .answers
+            .lock()
+            .unwrap()
+            .get(fqdn)
+            .and_then(|(server, _)| server.clone()))
+    }
+
+    async fn lookup(&self, server: &str, fqdn: &str) -> Result<WhoisAnswer, WhoisFailure> {
+        self.queries
+            .lock()
+            .unwrap()
+            .push((std::time::Instant::now(), server.to_owned()));
+        self.answers.lock().unwrap().get(fqdn).unwrap().1.clone()
+    }
+}
+
+fn io_answer() -> WhoisAnswer {
+    WhoisAnswer {
+        registrar: Some("Example Registrar, Inc.".to_owned()),
+        expires: Some("2027-05-01T09:08:07Z".to_owned()),
+    }
+}
+
+fn whois_rig(domains: &[&str], whois: WhoisStub, gap: Duration) -> (Rig, Arc<WhoisStub>) {
+    let entries = domains
+        .iter()
+        .map(|d| entry(d, json!({"fqdn": d, "registrar": "Example Registrar"})))
+        .collect();
+    let rdap = Arc::new(RdapStub::default());
+    let store = Arc::new(Store::default());
+    let audit = Arc::new(Audit::default());
+    let whois = Arc::new(whois);
+    let enricher = DomainEnricher::new(
+        Arc::new(Directory { entries }),
+        rdap.clone(),
+        Arc::new(DnsStub::default()),
+        store.clone(),
+        audit.clone(),
+        EnrichSettings {
+            rdap_gap: gap,
+            ..EnrichSettings::default()
+        },
+    )
+    .with_whois(whois.clone())
+    .with_clock(Arc::new(|| NOW));
+    let rig = Rig {
+        enricher,
+        rdap,
+        store,
+        audit,
+    };
+    (rig, whois)
+}
+
+async fn observe_one(rig: &Rig, fqdn: &str) -> DomainObservation {
+    rig.enricher
+        .refresh(&Allow, "alice", None, fqdn)
+        .await
+        .unwrap()
+        .observation
+        .unwrap()
+}
+
+#[tokio::test]
+async fn a_tld_without_rdap_falls_back_to_whois_and_reports_its_source() {
+    let whois = WhoisStub::default().with("example.io", Some("whois.nic.io"), Ok(io_answer()));
+    let (rig, _) = whois_rig(&["example.io"], whois, Duration::ZERO);
+    let observed = observe_one(&rig, "example.io").await;
+    assert_eq!(observed.rdap.status, RdapStatus::Ok);
+    assert_eq!(observed.rdap.source, RegistrationSource::Whois);
+    assert_eq!(observed.rdap.server.as_deref(), Some("whois.nic.io"));
+    assert_eq!(
+        observed.rdap.registrar.as_deref(),
+        Some("Example Registrar, Inc.")
+    );
+    assert_eq!(observed.rdap.expires.as_deref(), Some("2027-05-01"));
+    assert!(rig.rdap.queries.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn whois_data_goes_through_the_same_diff_and_warnings() {
+    let whois = WhoisStub::default().with(
+        "example.io",
+        Some("whois.nic.io"),
+        Ok(WhoisAnswer {
+            registrar: Some("Other Registrar".to_owned()),
+            expires: Some("2026-10-20".to_owned()),
+        }),
+    );
+    let (rig, _) = whois_rig(&["example.io"], whois, Duration::ZERO);
+    let view = rig
+        .enricher
+        .refresh(&Allow, "alice", None, "example.io")
+        .await
+        .unwrap();
+    let found = codes(&view.assessment);
+    assert!(found.contains(&WarningCode::RegistrarMismatch), "{found:?}");
+    assert!(found.contains(&WarningCode::Expiring), "{found:?}");
+}
+
+#[tokio::test]
+async fn a_whois_answer_without_an_expiry_still_reports_the_registrar() {
+    let whois = WhoisStub::default().with(
+        "example.gg",
+        Some("whois.gg"),
+        Ok(WhoisAnswer {
+            registrar: Some("Example Registrar Ltd".to_owned()),
+            expires: None,
+        }),
+    );
+    let (rig, _) = whois_rig(&["example.gg"], whois, Duration::ZERO);
+    let observed = observe_one(&rig, "example.gg").await;
+    assert_eq!(observed.rdap.status, RdapStatus::Ok);
+    assert_eq!(observed.rdap.expires, None);
+}
+
+#[tokio::test]
+async fn a_tld_with_neither_rdap_nor_whois_is_unavailable() {
+    let whois = WhoisStub::default().with("example.zz", None, Ok(io_answer()));
+    let (rig, whois) = whois_rig(&["example.zz"], whois, Duration::ZERO);
+    let observed = observe_one(&rig, "example.zz").await;
+    assert_eq!(observed.rdap.status, RdapStatus::Unavailable);
+    assert!(observed.rdap.detail.unwrap().contains(".zz"));
+    assert!(whois.queries.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn an_unreadable_whois_answer_is_unavailable_and_a_transport_failure_is_an_error() {
+    let whois = WhoisStub::default()
+        .with(
+            "odd.io",
+            Some("whois.nic.io"),
+            Err(WhoisFailure::Unreadable),
+        )
+        .with(
+            "down.io",
+            Some("whois.nic.io"),
+            Err(WhoisFailure::Failed(
+                "the WHOIS server could not be reached".to_owned(),
+            )),
+        )
+        .with("gone.io", Some("whois.nic.io"), Err(WhoisFailure::NotFound));
+    let (rig, _) = whois_rig(&["odd.io", "down.io", "gone.io"], whois, Duration::ZERO);
+    assert_eq!(
+        observe_one(&rig, "odd.io").await.rdap.status,
+        RdapStatus::Unavailable
+    );
+    assert_eq!(
+        observe_one(&rig, "down.io").await.rdap.status,
+        RdapStatus::Error
+    );
+    assert_eq!(
+        observe_one(&rig, "gone.io").await.rdap.status,
+        RdapStatus::NotFound
+    );
+}
+
+#[tokio::test]
+async fn whois_queries_to_one_server_are_spaced_and_on_demand_waits_are_refused() {
+    let whois = WhoisStub::default()
+        .with("a.io", Some("whois.nic.io"), Ok(io_answer()))
+        .with("b.io", Some("whois.nic.io"), Ok(io_answer()));
+    let (rig, whois) = whois_rig(&["a.io", "b.io"], whois, Duration::from_millis(120));
+    let report = rig.enricher.sweep(&Allow, "system", None).await.unwrap();
+    assert_eq!(report.observed, 2);
+    {
+        let queries = whois.queries.lock().unwrap();
+        assert_eq!(queries.len(), 2);
+        let gap = queries[1].0.duration_since(queries[0].0);
+        assert!(gap >= Duration::from_millis(100), "gap was {gap:?}");
+    }
+
+    let whois = WhoisStub::default()
+        .with("a.io", Some("whois.nic.io"), Ok(io_answer()))
+        .with("b.io", Some("whois.nic.io"), Ok(io_answer()));
+    let (rig, whois) = whois_rig(&["a.io", "b.io"], whois, Duration::from_secs(40));
+    observe_one(&rig, "a.io").await;
+    let error = rig
+        .enricher
+        .refresh(&Allow, "a", None, "b.io")
+        .await
+        .unwrap_err();
+    assert!(matches!(
+        error,
+        ProjectUseCaseError::Backend {
+            context: "registry_observe_rate_limited",
+            ..
+        }
+    ));
+    assert_eq!(whois.queries.lock().unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn an_uncached_iana_referral_takes_a_slot_on_the_shared_limiter() {
+    let whois = WhoisStub::default()
+        .uncached()
+        .with("a.io", Some("whois.nic.io"), Ok(io_answer()))
+        .with("b.gg", Some("whois.gg"), Ok(io_answer()));
+    let (rig, whois) = whois_rig(&["a.io", "b.gg"], whois, Duration::from_secs(40));
+    observe_one(&rig, "a.io").await;
+    // A different registry, but the same IANA slot, which is 40 s away.
+    let error = rig
+        .enricher
+        .refresh(&Allow, "a", None, "b.gg")
+        .await
+        .unwrap_err();
+    assert!(matches!(
+        error,
+        ProjectUseCaseError::Backend {
+            context: "registry_observe_rate_limited",
+            ..
+        }
+    ));
+    assert_eq!(whois.queries.lock().unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn a_throttled_whois_server_is_an_error_with_an_honest_detail() {
+    let whois = WhoisStub::default().with(
+        "a.io",
+        Some("whois.nic.io"),
+        Err(WhoisFailure::Failed(
+            "the WHOIS server is rate limiting queries; try again later".to_owned(),
+        )),
+    );
+    let (rig, _) = whois_rig(&["a.io"], whois, Duration::ZERO);
+    let observed = observe_one(&rig, "a.io").await;
+    assert_eq!(observed.rdap.status, RdapStatus::Error);
+    assert!(observed.rdap.detail.unwrap().contains("rate limiting"));
 }

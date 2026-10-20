@@ -1,0 +1,9 @@
+% IANA WHOIS server
+% This query returned 1 object
+
+domain:       ZZ
+
+organisation: Example
+
+status:       ACTIVE
+source:       IANA
