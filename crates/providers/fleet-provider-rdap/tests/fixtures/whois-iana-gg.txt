@@ -1,0 +1,11 @@
+% IANA WHOIS server
+% This query returned 1 object
+
+refer:        whois.gg
+
+domain:       GG
+
+whois:        whois.gg
+
+status:       ACTIVE
+source:       IANA

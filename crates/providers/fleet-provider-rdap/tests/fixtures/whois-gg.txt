@@ -1,0 +1,19 @@
+Domain:
+    example.gg
+
+Domain Status:
+    Active
+
+Registrant:
+    REDACTED
+
+Registrar:
+    Example Registrar Ltd (https://registrar.example.test)
+
+Relevant dates:
+    Registered on 01 May 2020
+    Registry fee due on 01 May 2027
+
+Name servers:
+    ns1.example.net
+    ns2.example.net

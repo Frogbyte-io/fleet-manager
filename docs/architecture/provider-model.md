@@ -147,7 +147,7 @@ API-token providers outside Proxmox share one account registry (FM-1001; `crates
 
 ## Public lookups: RDAP and DNS (FM-1020)
 
-`fleet-provider-rdap` and `fleet-provider-dns` are credential-free providers for the Registry domain enricher (see [desired-state.md](desired-state.md)). RDAP uses the IANA bootstrap registry and HTTPS only, with bounded bodies and redirects; DNS uses hickory-resolver (MIT OR Apache-2.0) over the system resolver. Failures are fixed, credential-free categories. Provider types are translated in the controller adapters (`registry_enrich.rs`), not leaked into the application.
+`fleet-provider-rdap` and `fleet-provider-dns` are credential-free providers for the Registry domain enricher (see [desired-state.md](desired-state.md)); `fleet-provider-rdap` also holds the WHOIS fallback (`whois` module, TCP port 43, IANA referral, bounded) for TLDs with no RDAP service. RDAP uses the IANA bootstrap registry and HTTPS only, with bounded bodies and redirects; DNS uses hickory-resolver (MIT OR Apache-2.0) over the system resolver. Failures are fixed, credential-free categories. Provider types are translated in the controller adapters (`registry_enrich.rs`), not leaked into the application.
 
 ## Cloudflare DNS (FM-1042)
 

@@ -1,0 +1,18 @@
+% IANA WHOIS server
+% for more information on IANA, visit http://www.iana.org
+% This query returned 1 object
+
+refer:        whois.nic.io
+
+domain:       IO
+
+organisation: Internet Computer Bureau Limited
+
+whois:        whois.nic.io
+
+status:       ACTIVE
+remarks:      Registration information: http://www.nic.io/
+
+created:      1997-09-16
+changed:      2023-06-14
+source:       IANA
