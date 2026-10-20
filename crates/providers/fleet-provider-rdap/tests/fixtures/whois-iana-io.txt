@@ -2,11 +2,18 @@
 % for more information on IANA, visit http://www.iana.org
 % This query returned 1 object
 
-refer:        whois.nic.io
-
 domain:       IO
 
-organisation: Internet Computer Bureau Limited
+organisation: Example Registry Operator Limited
+address:      Example Street
+
+contact:      administrative
+name:         REDACTED
+
+contact:      technical
+name:         REDACTED
+
+nserver:      a.nic.io 192.0.2.1
 
 whois:        whois.nic.io
 

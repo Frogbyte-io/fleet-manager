@@ -76,6 +76,10 @@ pub struct WhoisAdapter {
 
 #[async_trait::async_trait]
 impl WhoisPort for WhoisAdapter {
+    fn referral_is_cached(&self, fqdn: &str) -> bool {
+        self.client.referral_is_cached(fqdn)
+    }
+
     async fn server_for(&self, fqdn: &str) -> Result<Option<String>, String> {
         self.client
             .server_for(fqdn)

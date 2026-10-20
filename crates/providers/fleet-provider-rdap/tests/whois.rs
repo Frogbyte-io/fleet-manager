@@ -20,6 +20,8 @@ const IO: &[u8] = include_bytes!("fixtures/whois-io.txt");
 const GG: &[u8] = include_bytes!("fixtures/whois-gg.txt");
 const IO_NOT_FOUND: &[u8] = include_bytes!("fixtures/whois-io-notfound.txt");
 const RATE_LIMITED: &[u8] = include_bytes!("fixtures/whois-ratelimited.txt");
+const IO_CRLF: &[u8] = include_bytes!("fixtures/whois-io-crlf.txt");
+const IANA_GARBLED: &[u8] = include_bytes!("fixtures/whois-iana-garbled.txt");
 
 type Key = (String, String);
 
@@ -98,7 +100,19 @@ fn only_the_registrar_and_expiry_are_read() {
 #[test]
 fn not_found_and_unreadable_answers_are_distinguished() {
     assert_eq!(parse_answer(IO_NOT_FOUND), Err(WhoisError::NotFound));
-    assert_eq!(parse_answer(RATE_LIMITED), Err(WhoisError::Unreadable));
+    assert_eq!(parse_answer(RATE_LIMITED), Err(WhoisError::Throttled));
+    assert_eq!(
+        parse_answer(b"something odd\n"),
+        Err(WhoisError::Unreadable)
+    );
+    assert_eq!(
+        parse_answer(b"Domain not found. Please try again later.\r\n"),
+        Err(WhoisError::NotFound)
+    );
+    assert_eq!(
+        parse_answer(b"Quota exceeded\n"),
+        Err(WhoisError::Throttled)
+    );
     assert_eq!(parse_answer(b""), Err(WhoisError::Unreadable));
 }
 
@@ -169,4 +183,39 @@ async fn bad_names_and_servers_are_never_sent() {
         Err(WhoisError::InvalidName(_))
     ));
     assert!(replay.requests.lock().unwrap().is_empty());
+}
+
+#[test]
+fn crlf_answers_parse_like_lf_ones() {
+    assert_eq!(parse_answer(IO_CRLF).unwrap(), parse_answer(IO).unwrap());
+}
+
+#[test]
+fn ip_literals_and_single_labels_are_not_referral_hosts() {
+    assert_eq!(parse_referral(b"whois: 192.0.2.1\n"), None);
+    assert_eq!(parse_referral(b"whois: localhost\n"), None);
+    assert_eq!(parse_referral(b"whois: 2001:db8::1\n"), None);
+    assert_eq!(parse_referral(b"refer: whois.nic.io\n"), None);
+}
+
+#[tokio::test]
+async fn a_non_iana_answer_is_not_cached_as_no_whois_server() {
+    let replay = Arc::new(Replay::default());
+    replay.answer("whois.iana.org", "io", IANA_GARBLED);
+    let client = WhoisClient::new(replay.clone());
+    assert_eq!(client.server_for("a.io").await, Err(WhoisError::Unreadable));
+    // Remembered briefly as a failure, never as a "none" referral.
+    assert!(client.referral_is_cached("a.io"));
+    assert_eq!(client.server_for("b.io").await, Err(WhoisError::Unreadable));
+    assert_eq!(replay.count("whois.iana.org"), 1);
+}
+
+#[tokio::test]
+async fn referral_cache_state_is_visible_to_callers_that_rate_limit_iana() {
+    let replay = Arc::new(Replay::default());
+    replay.answer("whois.iana.org", "io", IANA_IO);
+    let client = WhoisClient::new(replay.clone());
+    assert!(!client.referral_is_cached("a.io"));
+    client.server_for("a.io").await.unwrap();
+    assert!(client.referral_is_cached("a.io"));
 }

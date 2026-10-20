@@ -1218,9 +1218,16 @@ struct WhoisStub {
     /// fqdn -> (server, answer); a server of `None` means no WHOIS.
     answers: Mutex<HashMap<String, WhoisStubAnswer>>,
     queries: Mutex<Vec<(std::time::Instant, String)>>,
+    /// Whether the IANA referral needs a network query (and a slot).
+    uncached_referrals: bool,
 }
 
 impl WhoisStub {
+    fn uncached(mut self) -> Self {
+        self.uncached_referrals = true;
+        self
+    }
+
     fn with(
         self,
         fqdn: &str,
@@ -1237,6 +1244,10 @@ impl WhoisStub {
 
 #[async_trait]
 impl WhoisPort for WhoisStub {
+    fn referral_is_cached(&self, _fqdn: &str) -> bool {
+        !self.uncached_referrals
+    }
+
     async fn server_for(&self, fqdn: &str) -> Result<Option<String>, String> {
         Ok(self
             .answers
@@ -1429,4 +1440,43 @@ async fn whois_queries_to_one_server_are_spaced_and_on_demand_waits_are_refused(
         }
     ));
     assert_eq!(whois.queries.lock().unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn an_uncached_iana_referral_takes_a_slot_on_the_shared_limiter() {
+    let whois = WhoisStub::default()
+        .uncached()
+        .with("a.io", Some("whois.nic.io"), Ok(io_answer()))
+        .with("b.gg", Some("whois.gg"), Ok(io_answer()));
+    let (rig, whois) = whois_rig(&["a.io", "b.gg"], whois, Duration::from_secs(40));
+    observe_one(&rig, "a.io").await;
+    // A different registry, but the same IANA slot, which is 40 s away.
+    let error = rig
+        .enricher
+        .refresh(&Allow, "a", None, "b.gg")
+        .await
+        .unwrap_err();
+    assert!(matches!(
+        error,
+        ProjectUseCaseError::Backend {
+            context: "registry_observe_rate_limited",
+            ..
+        }
+    ));
+    assert_eq!(whois.queries.lock().unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn a_throttled_whois_server_is_an_error_with_an_honest_detail() {
+    let whois = WhoisStub::default().with(
+        "a.io",
+        Some("whois.nic.io"),
+        Err(WhoisFailure::Failed(
+            "the WHOIS server is rate limiting queries; try again later".to_owned(),
+        )),
+    );
+    let (rig, _) = whois_rig(&["a.io"], whois, Duration::ZERO);
+    let observed = observe_one(&rig, "a.io").await;
+    assert_eq!(observed.rdap.status, RdapStatus::Error);
+    assert!(observed.rdap.detail.unwrap().contains("rate limiting"));
 }

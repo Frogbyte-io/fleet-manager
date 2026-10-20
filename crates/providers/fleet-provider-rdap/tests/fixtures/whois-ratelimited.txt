@@ -1,1 +1,1 @@
-Request rate limit exceeded. Try again later.
+Rate limit exceeded. Try again later.

@@ -6,9 +6,11 @@
 //! * RFC 3912: a WHOIS query is the name and CRLF sent over TCP port 43;
 //!   the server answers with free text and closes the connection.
 //! * IANA's WHOIS server (`whois.iana.org`) answers a TLD query with that
-//!   TLD's registry in a `whois:` line (its `refer:` line is the same
-//!   host). A TLD with no such line has no public WHOIS server, which is a
-//!   normal answer, not an error.
+//!   TLD's registry in a `whois:` line, after the contact blocks (there is
+//!   no `refer:` line in these answers). An IANA answer (`% This query
+//!   returned N object`) with no such line means the TLD has no public
+//!   WHOIS server, which is a normal answer, not an error. Anything that
+//!   does not look like an IANA answer is not trusted as "none".
 //!
 //! There is no standard text format. Two small per-format readers cover
 //! what registries answer today: `Key: value` lines (`.io`), and a key line
@@ -33,6 +35,13 @@ pub const IANA_WHOIS_SERVER: &str = "whois.iana.org";
 pub const WHOIS_PORT: u16 = 43;
 /// How long a TLD's referral is trusted.
 pub const REFERRAL_TTL: Duration = Duration::from_hours(24);
+/// How long "this TLD has no WHOIS server" is trusted.
+pub const NO_REFERRAL_TTL: Duration = Duration::from_hours(1);
+/// How long a failed referral lookup is remembered, so a sweep does not
+/// repeat a doomed query for every domain.
+pub const REFERRAL_FAILURE_MEMORY: Duration = Duration::from_secs(30);
+/// The marker every genuine IANA WHOIS answer carries.
+const IANA_MARKER: &str = "% this query returned";
 /// How long one whole query (connect, send, read) may take.
 pub const WHOIS_TIMEOUT: Duration = Duration::from_secs(15);
 /// The most response bytes read from one answer.
@@ -92,6 +101,9 @@ pub enum WhoisError {
     /// The answer is in a format no reader understands, or names neither
     /// a registrar nor an expiry date.
     Unreadable,
+    /// The server is throttling or refusing queries (a rate-limit or quota
+    /// message), so nothing is known about the domain.
+    Throttled,
     /// The name is not one this provider will send.
     InvalidName(String),
 }
@@ -101,6 +113,10 @@ impl std::fmt::Display for WhoisError {
         match self {
             Self::NotFound => write!(f, "the registry reports no such domain"),
             Self::Unreadable => write!(f, "the WHOIS answer is in a format Fleet cannot read"),
+            Self::Throttled => write!(
+                f,
+                "the WHOIS server is rate limiting queries; try again later"
+            ),
             Self::Transport(detail) | Self::InvalidName(detail) => write!(f, "{detail}"),
         }
     }
@@ -166,17 +182,22 @@ pub fn parse_answer(bytes: &[u8]) -> Result<WhoisRecord, WhoisError> {
     if record.registrar.is_some() || record.expires.is_some() {
         return Ok(record);
     }
-    let not_found = lines.iter().any(|line| {
-        let line = line.trim().to_ascii_lowercase();
-        ["not found", "no match", "no entries found", "no data found"]
-            .iter()
-            .any(|marker| line.starts_with(marker))
-    });
-    Err(if not_found {
-        WhoisError::NotFound
-    } else {
-        WhoisError::Unreadable
-    })
+    let has = |markers: &[&str]| {
+        lines.iter().any(|line| {
+            let line = line.trim().to_ascii_lowercase();
+            markers.iter().any(|marker| line.contains(marker))
+        })
+    };
+    // Not found wins: "domain not found, try again" is still not found.
+    Err(
+        if has(&["not found", "no match", "no entries found", "no data found"]) {
+            WhoisError::NotFound
+        } else if has(&["rate limit", "too many", "quota", "try again"]) {
+            WhoisError::Throttled
+        } else {
+            WhoisError::Unreadable
+        },
+    )
 }
 
 /// A registrar name without a trailing parenthesized URL (`.gg` appends
@@ -210,8 +231,8 @@ fn valid_date(value: &str) -> Option<String> {
     (shaped && value.len() <= 40).then(|| value.to_owned())
 }
 
-/// The WHOIS server named by an IANA answer for a TLD: the `whois:` line
-/// (or `refer:`), when it holds a plain hostname.
+/// The WHOIS server named by an IANA answer for a TLD: the `whois:` line,
+/// when it holds a plain hostname.
 #[must_use]
 pub fn parse_referral(bytes: &[u8]) -> Option<String> {
     let text = String::from_utf8_lossy(bytes);
@@ -219,14 +240,23 @@ pub fn parse_referral(bytes: &[u8]) -> Option<String> {
         let (key, value) = line.split_once(':')?;
         let key = key.trim().to_ascii_lowercase();
         let host = value.trim().to_ascii_lowercase();
-        ((key == "whois" || key == "refer") && is_hostname(&host)).then_some(host)
+        (key == "whois" && is_hostname(&host)).then_some(host)
     })
 }
 
+/// A plain DNS hostname: at least two labels, letters-digits-hyphens, and
+/// a last label that is not all digits (so IP literals are refused). The
+/// name still comes from IANA's answer, which is trusted to name a
+/// registry; this check only keeps a garbled or hostile answer from making
+/// Fleet connect to an address or a non-name.
 fn is_hostname(host: &str) -> bool {
     !host.is_empty()
         && host.len() <= 253
         && host.contains('.')
+        && host
+            .rsplit('.')
+            .next()
+            .is_some_and(|last| !last.bytes().all(|b| b.is_ascii_digit()))
         && host.split('.').all(|label| {
             !label.is_empty()
                 && label.len() <= 63
@@ -246,6 +276,7 @@ pub struct WhoisClient {
     iana_server: String,
     ttl: Duration,
     referrals: Mutex<HashMap<String, (Instant, Option<String>)>>,
+    failures: Mutex<HashMap<String, (Instant, WhoisError)>>,
 }
 
 impl WhoisClient {
@@ -257,6 +288,7 @@ impl WhoisClient {
             iana_server: IANA_WHOIS_SERVER.to_owned(),
             ttl: REFERRAL_TTL,
             referrals: Mutex::new(HashMap::new()),
+            failures: Mutex::new(HashMap::new()),
         }
     }
 
@@ -267,32 +299,89 @@ impl WhoisClient {
         self
     }
 
+    /// Whether [`WhoisClient::server_for`] would answer without touching
+    /// the network (a cached referral, or a remembered failure). Callers
+    /// that rate limit IANA use this to reserve a slot only when needed.
+    #[must_use]
+    pub fn referral_is_cached(&self, domain: &str) -> bool {
+        let Ok(name) = ldh_name(domain) else {
+            return true;
+        };
+        let tld = name.rsplit('.').next().unwrap_or_default();
+        self.cached(tld).is_some()
+    }
+
+    fn cached(&self, tld: &str) -> Option<Result<Option<String>, WhoisError>> {
+        if let Ok(cache) = self.referrals.lock()
+            && let Some((at, server)) = cache.get(tld)
+        {
+            let ttl = if server.is_some() {
+                self.ttl
+            } else {
+                self.ttl.min(NO_REFERRAL_TTL)
+            };
+            if at.elapsed() < ttl {
+                return Some(Ok(server.clone()));
+            }
+        }
+        if let Ok(failures) = self.failures.lock()
+            && let Some((at, error)) = failures.get(tld)
+            && at.elapsed() < REFERRAL_FAILURE_MEMORY.min(self.ttl)
+        {
+            return Some(Err(error.clone()));
+        }
+        None
+    }
+
     /// The registry's WHOIS server for the domain's TLD, or `None` when
-    /// the TLD has none. Answers (including "none") are cached; failures
-    /// are not.
+    /// IANA says the TLD has none. Referrals are cached (24 hours; "none"
+    /// for one hour, and only when the answer is positively an IANA
+    /// answer); failures are remembered briefly.
     ///
     /// # Errors
     ///
-    /// Fails on an invalid name or when IANA cannot be queried.
+    /// Fails on an invalid name, when IANA cannot be queried, or when its
+    /// answer is not recognizably an IANA answer.
     pub async fn server_for(&self, domain: &str) -> Result<Option<String>, WhoisError> {
         let name = ldh_name(domain).map_err(|error| WhoisError::InvalidName(error.to_string()))?;
         let tld = name.rsplit('.').next().unwrap_or_default().to_owned();
-        if let Ok(cache) = self.referrals.lock()
-            && let Some((at, server)) = cache.get(&tld)
-            && at.elapsed() < self.ttl
-        {
-            return Ok(server.clone());
+        if let Some(cached) = self.cached(&tld) {
+            return cached;
         }
+        let outcome = self.fetch_referral(&tld).await;
+        match &outcome {
+            Ok(server) => {
+                if let Ok(mut cache) = self.referrals.lock() {
+                    cache.insert(tld, (Instant::now(), server.clone()));
+                }
+            }
+            Err(error) => {
+                if let Ok(mut failures) = self.failures.lock() {
+                    failures.insert(tld, (Instant::now(), error.clone()));
+                }
+            }
+        }
+        outcome
+    }
+
+    async fn fetch_referral(&self, tld: &str) -> Result<Option<String>, WhoisError> {
         let answer = self
             .transport
-            .query(&self.iana_server, &tld)
+            .query(&self.iana_server, tld)
             .await
             .map_err(WhoisError::Transport)?;
-        let server = parse_referral(&answer);
-        if let Ok(mut cache) = self.referrals.lock() {
-            cache.insert(tld, (Instant::now(), server.clone()));
+        if let Some(server) = parse_referral(&answer) {
+            return Ok(Some(server));
         }
-        Ok(server)
+        if String::from_utf8_lossy(&answer)
+            .to_ascii_lowercase()
+            .contains(IANA_MARKER)
+        {
+            Ok(None)
+        } else {
+            // A throttle notice or an error page is not "no WHOIS server".
+            Err(WhoisError::Unreadable)
+        }
     }
 
     /// Queries `server` for `domain`.

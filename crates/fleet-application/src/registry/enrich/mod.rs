@@ -63,6 +63,8 @@ pub const DEFAULT_WINDOW_DAYS: u32 = 30;
 pub const MAX_WINDOW_DAYS: u32 = 365;
 /// The default gap between two queries to one RDAP server.
 pub const DEFAULT_RDAP_GAP: Duration = Duration::from_secs(2);
+/// The limiter key of the WHOIS referral server (`whois.iana.org`).
+const IANA_WHOIS_KEY: &str = "whois://whois.iana.org";
 /// The longest an on-demand lookup waits for its rate-limit slot before it
 /// is refused instead.
 const MAX_SLOT_WAIT: Duration = Duration::from_secs(30);
@@ -202,6 +204,11 @@ pub enum WhoisFailure {
 /// the IANA referral and port 43.
 #[async_trait]
 pub trait WhoisPort: std::fmt::Debug + Send + Sync {
+    /// Whether [`WhoisPort::server_for`] answers without a network query
+    /// (a cached referral or a remembered failure). When it does not, the
+    /// enricher takes a rate-limit slot for the referral server first.
+    fn referral_is_cached(&self, fqdn: &str) -> bool;
+
     /// The registry WHOIS host for the domain's TLD, or `None` when the
     /// TLD has no public WHOIS server.
     ///
@@ -905,6 +912,11 @@ impl DomainEnricher {
             server: Some(server.to_owned()),
             ..observation
         };
+        if !whois.referral_is_cached(fqdn) {
+            // The IANA referral server is shared infrastructure too.
+            self.wait_for_slot(IANA_WHOIS_KEY, refuse_long_waits)
+                .await?;
+        }
         let server = match whois.server_for(fqdn).await {
             Ok(Some(server)) => server,
             Ok(None) => {

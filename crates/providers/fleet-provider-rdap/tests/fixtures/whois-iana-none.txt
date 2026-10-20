@@ -3,5 +3,7 @@
 
 domain:       ZZ
 
+organisation: Example
+
 status:       ACTIVE
 source:       IANA
