@@ -91,9 +91,11 @@ impl World {
             std::fs::set_permissions(&key_file, std::fs::Permissions::from_mode(0o600)).unwrap();
         }
         let secrets = Arc::new(fleet_secrets::SecretStore::open(pool.clone(), &key_file).unwrap());
-        let keys = Arc::new(SecretBackedMachineKeys::new(secrets.clone()));
-        let resolver =
-            Arc::new(SshAuthResolver::new(keys.clone()).protecting(vec![dir.path().to_path_buf()]));
+        let keys = Arc::new(
+            SecretBackedMachineKeys::new(secrets.clone())
+                .protecting(vec![dir.path().join("ssh"), key_file.clone()]),
+        );
+        let resolver = Arc::new(SshAuthResolver::new(keys.clone()));
 
         let machines: Arc<dyn fleet_application::machine::MachinePort> =
             Arc::new(MachineRepository::new(pool.clone()));
@@ -931,36 +933,57 @@ async fn an_explicit_auth_needs_machine_update_but_the_default_needs_only_exec()
 }
 
 #[tokio::test]
-async fn an_identity_file_inside_the_controllers_data_is_refused_at_execution() {
+async fn an_identity_file_in_the_controllers_key_area_is_refused_but_its_home_ssh_is_not() {
     let world = World::new().await;
-    // The SSH work directory holds other sessions' key files.
-    let inside = world.dir.path().join("ssh").join("known_hosts");
-    let auth = EndpointAuth::IdentityFile {
-        path: inside.display().to_string(),
+    let refuse = |path: std::path::PathBuf| {
+        let world = &world;
+        async move {
+            let auth = EndpointAuth::IdentityFile {
+                path: path.display().to_string(),
+            };
+            let at_request = world
+                .access
+                .request_exec(
+                    &fleet_auth::LanAllowAllAuthorizer,
+                    &lan(),
+                    &request(world, Some(&auth)),
+                )
+                .await
+                .map(|_| ());
+            let as_default = world
+                .access
+                .set_default_auth(
+                    &fleet_auth::LanAllowAllAuthorizer,
+                    &lan(),
+                    &world.machine_id,
+                    &world.endpoint_id,
+                    Some(&auth),
+                )
+                .await;
+            (at_request, as_default)
+        }
     };
-    let new = world
-        .access
-        .request_exec(
-            &fleet_auth::LanAllowAllAuthorizer,
-            &lan(),
-            &request(&world, Some(&auth)),
-        )
-        .await
-        .unwrap();
-    let queued = world
-        .operations
-        .create_machine_access(
-            &fleet_auth::LanAllowAllAuthorizer,
-            &lan().id,
-            &world.machine_id,
-            &new,
-        )
-        .await
-        .unwrap();
-    let done = world.run(&queued).await;
-    assert_eq!(done.state, "failed");
-    let text = format!("{:?}", done.error_json);
-    assert!(text.contains("inside the controller"), "{text}");
+    // The provider's work directory and the master key are refused, both
+    // when a request names them and when a default is set.
+    for protected in [
+        world.dir.path().join("ssh").join("keys").join("key-1-0"),
+        world.dir.path().join("ssh").join("known_hosts"),
+        world.dir.path().join("master.key"),
+    ] {
+        let (at_request, as_default) = refuse(protected.clone()).await;
+        assert!(
+            matches!(at_request, Err(LabUseCaseError::Invalid { .. })),
+            "{protected:?}: {at_request:?}"
+        );
+        assert!(
+            matches!(as_default, Err(LabUseCaseError::Invalid { .. })),
+            "{protected:?}: {as_default:?}"
+        );
+    }
+    // The controller user's own ~/.ssh under the data directory stays usable.
+    let (at_request, as_default) = refuse(world.dir.path().join(".ssh").join("id_ed25519")).await;
+    assert!(at_request.is_ok(), "{at_request:?}");
+    assert!(as_default.is_ok(), "{as_default:?}");
 }
 
 #[tokio::test]
@@ -1235,4 +1258,57 @@ async fn reading_an_endpoints_default_needs_machine_read_on_that_machine() {
         )
         .await;
     assert!(matches!(refused, Err(LabUseCaseError::Denied(_))));
+}
+
+#[tokio::test]
+async fn the_hidden_operations_do_not_shorten_a_page() {
+    let world = World::new().await;
+    world.use_stored_key_by_default().await;
+    for _ in 0..4 {
+        world
+            .operations
+            .create(
+                &fleet_auth::LanAllowAllAuthorizer,
+                &lan().id,
+                &fleet_application::operation::NewOperation {
+                    kind: "noop".to_owned(),
+                    idempotency_key: None,
+                    deadline_at: None,
+                    correlation_id: None,
+                    payload_json: None,
+                    review_token: None,
+                },
+            )
+            .await
+            .unwrap();
+    }
+    // Newer machine operations the reader may not see.
+    for _ in 0..4 {
+        let new = world
+            .access
+            .request_exec(
+                &fleet_auth::LanAllowAllAuthorizer,
+                &lan(),
+                &request(&world, None),
+            )
+            .await
+            .unwrap();
+        world
+            .operations
+            .create_machine_access(
+                &fleet_auth::LanAllowAllAuthorizer,
+                &lan().id,
+                &world.machine_id,
+                &new,
+            )
+            .await
+            .unwrap();
+    }
+    let page = world
+        .operations
+        .list(&Deny(Permission::MachineExec), &lan().id, 3)
+        .await
+        .unwrap();
+    assert_eq!(page.len(), 3, "a full page of visible operations");
+    assert!(page.iter().all(|operation| operation.kind == "noop"));
 }

@@ -149,6 +149,46 @@ impl SshProvider {
         Ok(())
     }
 
+    /// Refuses an identity file inside this provider's own key directory:
+    /// it holds other sessions' stored keys. Every SSH-driven kind passes
+    /// through here before `ssh` starts.
+    pub(crate) fn check_identity_file(&self, path: &str) -> Result<(), SshProviderError> {
+        let given = Path::new(path);
+        let keys = self.key_dir();
+        let keys = std::fs::canonicalize(&keys).unwrap_or(keys);
+        let resolved = std::fs::canonicalize(given).unwrap_or_else(|_| given.to_path_buf());
+        if resolved.starts_with(&keys)
+            || given.starts_with(&keys)
+            || given
+                .components()
+                .any(|c| c == std::path::Component::ParentDir)
+        {
+            return Err(SshProviderError::Setup {
+                detail: "the identity file is inside the SSH provider's own key directory"
+                    .to_owned(),
+            });
+        }
+        Ok(())
+    }
+
+    /// Removes key files older than any session (bounded: one directory read).
+    fn sweep_stale_keys(&self) {
+        let Ok(entries) = std::fs::read_dir(self.key_dir()) else {
+            return;
+        };
+        for entry in entries.flatten().take(1024) {
+            let stale = entry
+                .metadata()
+                .and_then(|meta| meta.modified())
+                .ok()
+                .and_then(|modified| modified.elapsed().ok())
+                .is_some_and(|age| age >= STALE_KEY_AGE);
+            if stale {
+                let _ = std::fs::remove_file(entry.path());
+            }
+        }
+    }
+
     /// Writes `key` to a fresh 0600 file for one session.
     pub(crate) fn materialize_key(&self, key: &PrivateKey) -> Result<KeyFile, SshProviderError> {
         static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
@@ -156,6 +196,7 @@ impl SshProvider {
         std::fs::create_dir_all(&dir).map_err(|error| SshProviderError::Setup {
             detail: format!("cannot create {}: {error}", dir.display()),
         })?;
+        self.sweep_stale_keys();
         let path = dir.join(format!(
             "key-{}-{}",
             std::process::id(),
@@ -325,6 +366,58 @@ mod tests {
             .expect("written");
         let _second = SshProvider::new(dir.path().to_path_buf()).expect("provider");
         assert!(mine.path().exists(), "a live session's key was swept");
+    }
+
+    #[test]
+    fn an_identity_file_in_the_provider_key_directory_is_refused_before_ssh_starts() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let provider = SshProvider::new(dir.path().to_path_buf()).expect("provider");
+        let inside = provider.key_dir().join("key-9-9");
+        assert!(
+            provider
+                .check_identity_file(&inside.display().to_string())
+                .is_err()
+        );
+        let spec = crate::SshConnectionSpec {
+            host: "127.0.0.1".to_owned(),
+            port: 1,
+            user: "nobody".to_owned(),
+            auth: crate::SshAuth::IdentityFile {
+                path: inside.display().to_string(),
+            },
+            guest_os: fleet_core::GuestOs::Linux,
+        };
+        assert!(
+            provider
+                .test_connect(&spec, std::time::Duration::from_secs(1))
+                .is_err()
+        );
+        // The user's own key elsewhere, and the sibling known_hosts area, pass.
+        let home_key = dir.path().join(".ssh").join("id_ed25519");
+        assert!(
+            provider
+                .check_identity_file(&home_key.display().to_string())
+                .is_ok()
+        );
+    }
+
+    #[test]
+    fn a_session_start_removes_stale_key_files() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let provider = SshProvider::new(dir.path().to_path_buf()).expect("provider");
+        let stale = provider.key_dir().join("key-1-1");
+        std::fs::write(&stale, "old").expect("seed");
+        let old = std::time::SystemTime::now() - std::time::Duration::from_hours(8);
+        std::fs::File::options()
+            .write(true)
+            .open(&stale)
+            .expect("open")
+            .set_modified(old)
+            .expect("mtime");
+        let _fresh = provider
+            .materialize_key(&PrivateKey::parse(KEY).expect("parses"))
+            .expect("written");
+        assert!(!stale.exists(), "a stale key survived a new session");
     }
 
     #[test]

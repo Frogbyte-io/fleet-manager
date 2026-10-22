@@ -394,6 +394,7 @@ pub(crate) fn spawn_session(
         .arg(endpoint.port.to_string());
     match &endpoint.auth {
         crate::SshAuth::IdentityFile { path } => {
+            provider.check_identity_file(path)?;
             command.arg("-i").arg(path);
         }
         crate::SshAuth::StoredKey { .. } => {
