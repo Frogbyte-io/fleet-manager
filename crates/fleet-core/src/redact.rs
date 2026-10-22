@@ -2013,23 +2013,21 @@ fn literal_escape_len(rest: &[u8]) -> Option<usize> {
 }
 
 /// The length of the terminal escape sequence that starts at `at`, if one
-/// does. With `bare_keep`, `ESC [` and a letter that is directly followed by
-/// a word (`\e[password=x`) is the introducer alone: the letter is text.
-fn escape_len(bytes: &[u8], at: usize, literal: bool, bare_keep: bool) -> Option<usize> {
+/// does.
+fn escape_len(bytes: &[u8], at: usize, literal: bool) -> Option<usize> {
     let rest = &bytes[at..];
     match rest[0] {
-        0x1b => Some(1 + escape_body_len(bytes, at + 1, false, bare_keep)?),
+        0x1b => Some(1 + escape_body_len(bytes, at + 1, false)?),
         b'\\' if literal => {
             // `\u001b`, `\x1b` or `\033` followed by `[` or `]`: an escape
             // written out in JSON or a debug dump.
             let literal = literal_escape_len(rest)?;
-            matches!(rest.get(literal), Some(b'[' | b']')).then(|| {
-                escape_body_len(bytes, at + literal, true, bare_keep).map(|len| literal + len)
-            })?
+            matches!(rest.get(literal), Some(b'[' | b']'))
+                .then(|| escape_body_len(bytes, at + literal, true).map(|len| literal + len))?
         }
         // C1 controls: CSI, DCS, SOS, OSC, PM, APC.
         0xc2 => match rest.get(1)? {
-            0x9b => Some(2 + csi_len(bytes, at + 2, bare_keep)),
+            0x9b => Some(2 + csi_len(bytes, at + 2)),
             0x90 | 0x98 | 0x9d | 0x9e | 0x9f => Some(2 + string_len(bytes, at + 2, false)),
             _ => None,
         },
@@ -2037,27 +2035,10 @@ fn escape_len(bytes: &[u8], at: usize, literal: bool, bare_keep: bool) -> Option
     }
 }
 
-/// Whether the sequence of `len` bytes at `at` is a bare `ESC [ letter` whose
-/// letter is followed by a word: a CSI with a one-letter final, or an
-/// introducer and the start of a word. Both readings are scrubbed.
-fn is_bare_letter_csi(bytes: &[u8], at: usize, len: usize) -> bool {
-    let rest = &bytes[at..at + len];
-    let intro = match rest[0] {
-        0x1b => 1,
-        b'\\' => literal_escape_len(rest).unwrap_or(0),
-        _ => 0,
-    };
-    intro > 0
-        && len == intro + 2
-        && rest[intro] == b'['
-        && rest[intro + 1].is_ascii_alphabetic()
-        && bytes.get(at + len).is_some_and(u8::is_ascii_alphanumeric)
-}
-
 /// The length of what follows an `ESC` at `at`.
-fn escape_body_len(bytes: &[u8], at: usize, literal: bool, bare_keep: bool) -> Option<usize> {
+fn escape_body_len(bytes: &[u8], at: usize, literal: bool) -> Option<usize> {
     Some(match bytes.get(at)? {
-        b'[' => 1 + csi_len(bytes, at + 1, bare_keep),
+        b'[' => 1 + csi_len(bytes, at + 1),
         b']' | b'P' | b'X' | b'^' | b'_' => 1 + string_len(bytes, at + 1, literal),
         b' '..=b'/' => {
             // Intermediates and a final byte (character-set selection).
@@ -2075,8 +2056,36 @@ fn escape_body_len(bytes: &[u8], at: usize, literal: bool, bare_keep: bool) -> O
     })
 }
 
-/// Parameter, intermediate and final bytes of a CSI sequence from `at`.
-fn csi_len(bytes: &[u8], at: usize, bare_keep: bool) -> usize {
+/// The longest word that is looked at after a bare `ESC [ letter`.
+const BARE_CSI_WORD_MAX: usize = 64;
+
+/// Whether the letter at `at`, right after `ESC [` with no parameters, starts
+/// a secret name that the CSI reading would cut in two: `\e[password=x` is
+/// `ESC [` and `password` (a lone `p` is no useful final), while
+/// `\e[Kpassword=x` is the erase-line final `K` and `password`. The letter is
+/// text only when the word with it names a secret and the word without it
+/// does not.
+fn letter_starts_secret_name(bytes: &[u8], at: usize) -> bool {
+    let run = bytes[at..]
+        .iter()
+        .take(BARE_CSI_WORD_MAX + 1)
+        .take_while(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-' | b'.'))
+        .count();
+    if !(2..=BARE_CSI_WORD_MAX).contains(&run) || !bytes[at].is_ascii_alphabetic() {
+        return false;
+    }
+    let (Ok(with), Ok(without)) = (
+        std::str::from_utf8(&bytes[at..at + run]),
+        std::str::from_utf8(&bytes[at + 1..at + run]),
+    ) else {
+        return false;
+    };
+    names_a_secret(with) && !names_a_secret(without)
+}
+
+/// Parameter, intermediate and final bytes of a CSI sequence from `at`. A bare
+/// introducer whose letter starts a secret name has no final.
+fn csi_len(bytes: &[u8], at: usize) -> usize {
     let mut len = 0;
     while matches!(bytes.get(at + len), Some(b'0'..=b'?')) {
         len += 1;
@@ -2084,11 +2093,7 @@ fn csi_len(bytes: &[u8], at: usize, bare_keep: bool) -> usize {
     while matches!(bytes.get(at + len), Some(b' '..=b'/')) {
         len += 1;
     }
-    if bare_keep
-        && len == 0
-        && bytes.get(at).is_some_and(u8::is_ascii_alphabetic)
-        && bytes.get(at + 1).is_some_and(u8::is_ascii_alphanumeric)
-    {
+    if len == 0 && letter_starts_secret_name(bytes, at) {
         return 0;
     }
     len + usize::from(matches!(bytes.get(at + len), Some(b'@'..=b'~')))
@@ -2138,8 +2143,6 @@ struct Norm {
     whitespace: bool,
     /// Strip the written-out escape forms too.
     literal: bool,
-    /// Read `ESC [ letter word` as the introducer and a word.
-    bare_keep: bool,
 }
 
 impl Norm {
@@ -2148,7 +2151,6 @@ impl Norm {
         soft: Soft::Space,
         whitespace: true,
         literal: true,
-        bare_keep: false,
     };
 }
 
@@ -2160,8 +2162,6 @@ struct Cleaned {
     origins: Vec<usize>,
     /// A control character whose treatment is a choice (see [`Soft`]).
     soft_seen: bool,
-    /// A bare `ESC [ letter word` (see [`is_bare_letter_csi`]).
-    ambiguous: bool,
 }
 
 /// Escape sequences stripped, vertical whitespace and soft controls handled,
@@ -2179,12 +2179,10 @@ fn clean(text: &str, norm: Norm, track: bool) -> Cleaned {
         text: String::with_capacity(text.len()),
         origins: Vec::new(),
         soft_seen: false,
-        ambiguous: false,
     };
     let mut at = 0;
     while at < bytes.len() {
-        if let Some(len) = escape_len(bytes, at, norm.literal, norm.bare_keep) {
-            result.ambiguous |= !norm.bare_keep && is_bare_letter_csi(bytes, at, len);
+        if let Some(len) = escape_len(bytes, at, norm.literal) {
             at += len;
             rejoin(&mut result, bytes, &mut at, norm);
             continue;
@@ -2255,7 +2253,7 @@ fn joined_escape(output: &[u8], bytes: &[u8], at: usize, norm: Norm) -> Option<(
             continue;
         }
         let from_rest = literal - back;
-        if let Some(body) = escape_body_len(bytes, at + from_rest, true, norm.bare_keep) {
+        if let Some(body) = escape_body_len(bytes, at + from_rest, true) {
             return Some((back, from_rest + body));
         }
     }
@@ -2287,91 +2285,79 @@ fn has_noise(text: &str) -> bool {
 /// Whether `text` has a terminal escape sequence, written out ones included.
 fn has_escape(text: &str) -> bool {
     let bytes = text.as_bytes();
-    (0..bytes.len()).any(|at| escape_len(bytes, at, true, false).is_some())
+    (0..bytes.len()).any(|at| escape_len(bytes, at, true).is_some())
 }
 
 /// Runs `pass` to a fixed point over the cleaned text. A soft control
-/// character or a bare `ESC [ letter word` has more than one reading, and a
-/// credential must be masked under every one of them: each reading is scrubbed
-/// on its own, the spans it masked are mapped back to the input and masked in
-/// the other readings before they run, and the result that masks most (then
-/// the shortest, which has a split value joined back) is kept.
+/// character has two readings (a space, or nothing), and a credential must be
+/// masked under both: each reading is scrubbed on its own, the spans it masked
+/// are mapped back to the input and masked there before the reading that masks
+/// most (then the shortest, which has a split value joined back) is scrubbed
+/// again, so the result masks the union.
 fn scrub_normalized(text: &str, whitespace: bool, pass: impl Fn(&str) -> String + Copy) -> String {
     let tabs = whitespace && text.contains('\t');
     if !(has_noise(text) || has_escape(text) || tabs) {
         return settle(text, pass);
     }
-    let base = Norm {
+    let spaced = Norm {
         whitespace,
         ..Norm::STORED
     };
-    let first = clean(text, base, true);
-    let spaced = settle(&first.text, pass);
-    if !first.soft_seen && !first.ambiguous {
-        return spaced;
+    let first = clean(text, spaced, false);
+    if !first.soft_seen {
+        return settle(&first.text, pass);
     }
-    let mut readings = vec![base];
-    if first.soft_seen {
-        readings.push(Norm {
-            soft: Soft::Delete,
-            ..base
-        });
-    }
-    if first.ambiguous {
-        let keeping: Vec<Norm> = readings
-            .iter()
-            .map(|reading| Norm {
-                bare_keep: true,
-                ..*reading
-            })
-            .collect();
-        readings.extend(keeping);
-    }
+    let deleted = Norm {
+        soft: Soft::Delete,
+        ..spaced
+    };
     // Each reading on its own: its result and what it masked, in the input.
-    let spans_of = |cleaned: &Cleaned, scrubbed: &str| masked_ranges(text, cleaned, scrubbed);
-    let mut own = vec![(spans_of(&first, &spaced), spaced)];
-    for reading in &readings[1..] {
-        let cleaned = clean(text, *reading, true);
-        let scrubbed = settle(&cleaned.text, pass);
-        own.push((spans_of(&cleaned, &scrubbed), scrubbed));
-    }
-    // The reading that masks most on its own (then the shortest, which has a
-    // split value joined back) sets the layout of the result.
+    let own: Vec<(String, Option<Vec<ByteRange>>)> = [spaced, deleted]
+        .iter()
+        .map(|reading| {
+            let cleaned = clean(text, *reading, true);
+            let scrubbed = settle(&cleaned.text, pass);
+            let spans = masked_ranges(text, &cleaned, &scrubbed);
+            (scrubbed, spans)
+        })
+        .collect();
     let masks = |text: &str| text.matches(MASK).count();
-    let mut best = 0;
-    for (index, (_, scrubbed)) in own.iter().enumerate().skip(1) {
-        let (_, kept) = &own[best];
-        if (masks(scrubbed), kept.len()) > (masks(kept), scrubbed.len()) {
-            best = index;
-        }
-    }
-    // What the other readings masked is masked in the input before it is
-    // read the best way (with what that reading masked itself, which the
-    // others' masks could otherwise split).
-    let borrowed = own
+    let best = usize::from((masks(&own[1].0), own[0].0.len()) > (masks(&own[0].0), own[1].0.len()));
+    let ranges: Vec<ByteRange> = own
         .iter()
-        .enumerate()
-        .any(|(index, (spans, _))| index != best && spans.as_ref().is_some_and(|s| !s.is_empty()));
-    if !borrowed {
-        return own.swap_remove(best).1;
-    }
-    let ranges: Vec<(usize, usize)> = own
-        .iter()
-        .filter_map(|(spans, _)| spans.as_deref())
+        .filter_map(|(_, spans)| spans.as_deref())
         .flatten()
         .copied()
         .collect();
+    let other_masked = own[1 - best]
+        .1
+        .as_ref()
+        .is_some_and(|spans| !spans.is_empty());
+    if !other_masked {
+        return own
+            .into_iter()
+            .nth(best)
+            .map(|(text, _)| text)
+            .unwrap_or_default();
+    }
+    // What the other reading masked is masked in the input before it is read
+    // the best way (together with what that reading masked itself, which the
+    // other's masks could otherwise split).
+    let reading = [spaced, deleted][best];
     settle(
-        &clean(&mask_ranges(text, ranges), readings[best], false).text,
+        &clean(&mask_ranges(text, ranges), reading, false).text,
         pass,
     )
 }
+
+/// A byte range of a text: start and end.
+type ByteRange = (usize, usize);
 
 /// The byte ranges of `input` that `scrubbed` masked, when `scrubbed` is
 /// `cleaned.text` with spans replaced by [`MASK`] and each can be told where
 /// it ends. `None` when it cannot be aligned (the caller loses nothing but
 /// the union for that reading).
-fn masked_ranges(input: &str, cleaned: &Cleaned, scrubbed: &str) -> Option<Vec<(usize, usize)>> {
+fn masked_ranges(input: &str, cleaned: &Cleaned, scrubbed: &str) -> Option<Vec<ByteRange>> {
     const SYNC: usize = 24;
     let before = cleaned.text.as_bytes();
     let after = scrubbed.as_bytes();
@@ -2413,7 +2399,7 @@ fn masked_ranges(input: &str, cleaned: &Cleaned, scrubbed: &str) -> Option<Vec<(
 
 /// `text` with each range replaced by [`MASK`]; overlapping or touching
 /// ranges are one mask.
-fn mask_ranges(text: &str, mut ranges: Vec<(usize, usize)>) -> String {
+fn mask_ranges(text: &str, mut ranges: Vec<ByteRange>) -> String {
     ranges.sort_unstable();
     let mut result = String::with_capacity(text.len());
     let mut cursor = 0;
@@ -3313,16 +3299,10 @@ mod tests {
     #[test]
     fn secret_pair_scrub_is_linear_on_pathological_input() {
         let text = "=a".repeat(100_000) + &"token=".repeat(50_000);
-        let _ = redact_credentials(&text);
+        assert_scales_linearly("=a token=", &text);
         // One very long line of bare keys must not be quadratic.
-        let started = std::time::Instant::now();
         let long = "x password: ab ".repeat(70_000);
-        let _ = redact_credentials(&long);
-        assert!(
-            started.elapsed() < std::time::Duration::from_secs(2),
-            "{:?}",
-            started.elapsed()
-        );
+        assert_scales_linearly("x password: ab ", &long);
         for unit in [
             "--password ",
             "Bearer\n",
@@ -3573,6 +3553,45 @@ mod tests {
         assert_eq!(value["creds"]["pass"], "***");
     }
 
+    /// The shortest of `runs` timings of the scrub of `text`.
+    fn fastest_scrub(text: &str, runs: usize) -> std::time::Duration {
+        (0..runs)
+            .map(|_| {
+                let started = std::time::Instant::now();
+                let _ = redact_credentials(text);
+                started.elapsed()
+            })
+            .min()
+            .expect("at least one run")
+    }
+
+    /// The scrub is linear: four times the input takes about four times as
+    /// long, where a quadratic rule takes sixteen. A ratio rather than a
+    /// wall-clock limit, and the fastest of several runs, so a loaded host
+    /// (which slows both sizes) does not fail the test.
+    fn assert_scales_linearly(what: &str, text: &str) {
+        let cut = |len: usize| {
+            let mut end = len.min(text.len());
+            while !text.is_char_boundary(end) {
+                end -= 1;
+            }
+            &text[..end]
+        };
+        let big = cut(text.len() / 2 + 1);
+        let small = cut(big.len() / 4);
+        let small_time = fastest_scrub(small, 3);
+        let big_time = fastest_scrub(big, 2);
+        // Under a millisecond or so of the small run nothing can be read from
+        // the ratio, and the allowance absorbs timer and scheduler noise (a quadratic rule takes minutes at this size, far past it).
+        let allowed = small_time * 10 + std::time::Duration::from_secs(1);
+        assert!(
+            big_time < allowed,
+            "{what:?}: {} bytes took {big_time:?}, {} bytes {small_time:?}",
+            big.len(),
+            small.len()
+        );
+    }
+
     /// Every new rule on 1 MB of its own trigger: a quadratic rule takes
     /// minutes here.
     #[test]
@@ -3729,12 +3748,6 @@ mod tests {
                 format!("token{}{}=x", open.repeat(half), "[0m".repeat(half)),
             ));
         }
-        // Both a soft control and an ambiguous `ESC [`: four readings, so a
-        // quarter of the size keeps the same budget.
-        texts.push((
-            "soft control and ambiguous ESC [".into(),
-            "\u{1b}[pa a\0b ".repeat(1_048_576 / 4 / 9),
-        ));
         texts.push(("distinct BEGIN labels".into(), distinct(false)));
         texts.push(("distinct BEGIN/END labels".into(), distinct(true)));
         texts.push((
@@ -3746,13 +3759,7 @@ mod tests {
             distinct(false).replace("BEGIN", "END"),
         ));
         for (unit, text) in texts {
-            let started = std::time::Instant::now();
-            let _ = redact_credentials(&text);
-            assert!(
-                started.elapsed() < std::time::Duration::from_secs(3),
-                "{unit:?}: {:?}",
-                started.elapsed()
-            );
+            assert_scales_linearly(&unit, &text);
         }
     }
 
