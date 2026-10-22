@@ -209,13 +209,16 @@ describe('operation results', () => {
 
   it('reads exec output from a success, a nonzero exit, a deadline kill, and a connection failure', () => {
     expect(execOutput({ resultJson: '{"exitCode":0,"stdout":"ok\\n","stderr":"","truncatedStdout":false,"truncatedStderr":false}' }))
-      .toEqual({ exitCode: 0, stdout: 'ok\n', stderr: '', truncatedStdout: false, truncatedStderr: false, reason: null, detail: null })
+      .toEqual({ exitCode: 0, stdout: 'ok\n', stderr: '', truncatedStdout: false, truncatedStderr: false, reason: null, detail: null, refusalCode: null })
     expect(execOutput({ errorJson: '{"exitCode":2,"stdout":"","stderr":"boom","truncatedStdout":true,"truncatedStderr":false}' }))
       .toMatchObject({ exitCode: 2, stderr: 'boom', truncatedStdout: true })
     expect(execOutput({ errorJson: '{"reason":"deadline_killed","detail":"killed","partialOutput":{"stdout":"half","stderr":"","truncatedStdout":false,"truncatedStderr":true}}' }))
       .toMatchObject({ exitCode: null, stdout: 'half', truncatedStderr: true, reason: 'deadline_killed', detail: 'killed' })
     expect(execOutput({ errorJson: '{"reason":"connection_failed","detail":"refused"}' }))
       .toMatchObject({ exitCode: null, stdout: '', stderr: '', reason: 'connection_failed' })
+    // A guest-side refusal is not an exit code: the reason and its code show instead.
+    expect(execOutput({ errorJson: '{"reason":"guest_refused","refusalCode":77,"detail":"fleet: no active session"}' }))
+      .toMatchObject({ exitCode: null, reason: 'guest_refused', refusalCode: 77, detail: 'fleet: no active session' })
     expect(execOutput({})).toBeNull()
   })
 
