@@ -67,13 +67,18 @@ pub(super) fn render(value: &Value) -> String {
         )),
         Some(observation) => {
             let rdap = &observation["rdap"];
+            // The registration half is RDAP, or WHOIS for a TLD with no RDAP.
+            let source = match rdap["source"].as_str() {
+                Some("whois") => "WHOIS",
+                _ => "RDAP",
+            };
             lines.push(format!(
-                "domain/{key}: RDAP {}, DNS {}",
+                "domain/{key}: {source} {}, DNS {}",
                 rdap["status"].as_str().unwrap_or("?"),
                 observation["dns"]["status"].as_str().unwrap_or("?"),
             ));
             if let Some(detail) = rdap["detail"].as_str() {
-                lines.push(format!("  RDAP: {detail}"));
+                lines.push(format!("  {source}: {detail}"));
             }
         }
     }
@@ -148,6 +153,21 @@ mod tests {
             "fleetctl registry set domain/example.com --field registrar='Namecheap, Inc.' --field expires=2027-08-13 --field nameservers=a.ns.net,b.ns.net"
         ), "{text}");
         assert!(text.contains("[warn]"));
+    }
+
+    #[test]
+    fn labels_the_lookup_source() {
+        let view = |source: &str| {
+            json!({"key": "a.io", "observation": {"rdap": {"status": "ok", "source": source, "detail": "d"}, "dns": {"status": "ok"}},
+                "warnings": [], "diffs": [], "suggestion": []})
+        };
+        let whois = render(&view("whois"));
+        assert!(whois.contains("domain/a.io: WHOIS ok, DNS ok"), "{whois}");
+        assert!(whois.contains("  WHOIS: d"), "{whois}");
+        assert!(render(&view("rdap")).contains("domain/a.io: RDAP ok, DNS ok"));
+        // An observation view without a source (older controller) reads as RDAP.
+        assert!(render(&json!({"key": "a.io", "observation": {"rdap": {"status": "ok"}, "dns": {"status": "ok"}},
+            "warnings": [], "diffs": [], "suggestion": []})).contains("RDAP ok"));
     }
 
     #[test]
