@@ -102,6 +102,8 @@ describe('ScreenTab', () => {
     await flushPromises()
     const stub = wrapper.get('[data-testid="console-stub"]')
     expect(stub.attributes()).toMatchObject({ 'data-account': 'acc1', 'data-node': 'pve-a', 'data-vmid': '101', 'data-status': 'running', 'data-blocked': '' })
+    // The trusted-LAN caveat is shown beside the console.
+    expect(wrapper.get('[data-testid="screen-lan-note"]').text()).toContain('every caller is the same principal')
   })
 
   it('withholds the console when the privilege report says VM.Console is missing', async () => {

@@ -84,6 +84,8 @@ pub enum ConsoleCloseReason {
     Shutdown,
     /// The relay failed.
     Error,
+    /// The browser sent a stream the relay could not follow.
+    Protocol,
 }
 
 impl ConsoleCloseReason {
@@ -97,6 +99,7 @@ impl ConsoleCloseReason {
             Self::MaxDuration => "max_duration",
             Self::Shutdown => "shutdown",
             Self::Error => "error",
+            Self::Protocol => "protocol",
         }
     }
 }
@@ -484,16 +487,73 @@ impl ProxmoxAccounts {
         now: i64,
     ) -> Result<AttachedConsole, ProxmoxUseCaseError> {
         let state = self.console_state()?;
-        let pending = state.ledger().pending.remove(&hash_token(token));
+        // The token is spent and the slot is held in one critical section:
+        // from here until the console ends (or this attach fails), the
+        // session counts against the caps, so a create racing an attach
+        // cannot slip past them while the PVE proxy is being opened.
+        let pending = {
+            let mut ledger = state.ledger();
+            let pending = ledger.pending.remove(&hash_token(token));
+            if let Some(pending) = pending.as_ref().filter(|pending| pending.expires_at > now) {
+                ledger.active.insert(
+                    pending.session_id.clone(),
+                    Active {
+                        principal: principal.id.clone(),
+                        account_id: pending.account_id.clone(),
+                        node: pending.node.clone(),
+                        vmid: pending.vmid,
+                        started_at: now,
+                    },
+                );
+            }
+            pending
+        };
         let Some(pending) = pending.filter(|pending| pending.expires_at > now) else {
             return Err(ProxmoxUseCaseError::NotFound {
                 what: "console session (unknown, already used, or expired)".to_owned(),
             });
         };
+        match self
+            .attach_reserved(state, authorizer, principal, &pending, now)
+            .await
+        {
+            Ok(channel) => Ok(AttachedConsole {
+                session_id: pending.session_id,
+                channel,
+                limits: state.limits,
+                shutdown: state.shutdown.subscribe(),
+            }),
+            Err(error) => {
+                state.ledger().active.remove(&pending.session_id);
+                Err(error)
+            }
+        }
+    }
+
+    /// The attach steps that run while the slot is held; the caller releases
+    /// the slot on any error.
+    async fn attach_reserved(
+        &self,
+        state: &ConsoleState,
+        authorizer: &dyn Authorizer,
+        principal: &ActingPrincipal,
+        pending: &Pending,
+        now: i64,
+    ) -> Result<Box<dyn ConsoleChannel>, ProxmoxUseCaseError> {
         Self::authorize_console(authorizer, principal, &pending.account_id)?;
+        if *state.shutdown.borrow() {
+            // No new screen opens once the controller is shutting down; the
+            // refusal is audited as an end so the trail shows the attempt.
+            let _ = self
+                .console_end(&pending.session_id, ConsoleCloseReason::Shutdown, now)
+                .await;
+            return Err(ProxmoxUseCaseError::Conflict {
+                detail: "the controller is shutting down; try again once it is back".to_owned(),
+            });
+        }
         let account = self.trusted_account(&pending.account_id).await?;
         let secret = SensitiveString::new(self.require_secret(&account).await?);
-        let channel = state
+        let mut channel = state
             .port
             .open(&account, &secret, &pending.node, pending.vmid)
             .await
@@ -503,15 +563,13 @@ impl ProxmoxAccounts {
                 }
                 other => ProxmoxUseCaseError::Source(other),
             })?;
-        let mut channel = channel;
         let vmid = pending.vmid.to_string();
-        let creator_differs = pending.principal.id != principal.id;
         let mut facts = vec![
             ("session", pending.session_id.as_str()),
             ("node", pending.node.as_str()),
             ("vmid", vmid.as_str()),
         ];
-        if creator_differs {
+        if pending.principal.id != principal.id {
             facts.push(("createdBy", pending.principal.id.as_str()));
         }
         if let Err(error) = self
@@ -526,22 +584,11 @@ impl ProxmoxAccounts {
             channel.close().await;
             return Err(error);
         }
-        state.ledger().active.insert(
-            pending.session_id.clone(),
-            Active {
-                principal: principal.id.clone(),
-                account_id: account.id.clone(),
-                node: pending.node.clone(),
-                vmid: pending.vmid,
-                started_at: now,
-            },
-        );
-        Ok(AttachedConsole {
-            session_id: pending.session_id,
-            channel,
-            limits: state.limits,
-            shutdown: state.shutdown.subscribe(),
-        })
+        // The duration counts from the moment the screen opened.
+        if let Some(active) = state.ledger().active.get_mut(&pending.session_id) {
+            active.started_at = now;
+        }
+        Ok(channel)
     }
 
     /// Records the end of an attached console: duration and close reason,
@@ -643,7 +690,7 @@ impl ProxmoxAccounts {
 fn console_forbidden(vmid: u32) -> ProxmoxSourceError {
     ProxmoxSourceError::Forbidden {
         detail: format!(
-            "the account's API token lacks VM.Console on /vms/{vmid}; grant it (for example the PVEVMConsole role) and retry"
+            "the account's API token lacks VM.Console on /vms/{vmid}; grant it (the FleetConsole role from the token guide, or PVEVMUser) and retry"
         ),
     }
 }

@@ -45,7 +45,7 @@ const BASE: Record<ConsoleEndKind, Omit<ConsoleEnd, 'kind'>> = {
   },
   'no-permission': {
     title: 'No permission',
-    detail: 'The account\'s Proxmox API token lacks VM.Console on this guest. Grant it (the PVEVMConsole role) and connect again.',
+    detail: 'The account\'s Proxmox API token lacks VM.Console on this guest. Grant it (the FleetConsole role from the token guide, or PVEVMUser) and connect again.',
     tone: 'err',
     retry: false,
   },
@@ -115,6 +115,7 @@ export function describeClose(code: number, reason: string): ConsoleEnd {
     case 4403: return endOf('no-permission', 'You may not open guest screens: your principal lacks proxmox.console.')
     case 4404: return endOf('expired')
     case 4409: return endOf('limit', reason)
+    case 4400: return endOf('unavailable', reason || 'The browser sent something the console relay could not follow.')
     case 4408: return endOf('idle')
     case 4410: return endOf('max-duration')
     case 1001: return endOf('shutdown')

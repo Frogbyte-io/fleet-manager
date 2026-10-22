@@ -16,6 +16,9 @@ describe('describeClose', () => {
     expect(describeClose(4404, '').kind).toBe('expired')
     expect(describeClose(4409, 'too many console sessions are open').detail).toContain('too many console sessions')
     expect(describeClose(4408, '').kind).toBe('idle')
+    expect(describeClose(4400, 'the console could not follow the browser').kind).toBe('unavailable')
+    expect(describeClose(4403, '').detail).toContain('proxmox.console')
+    expect(describeClose(4502, 'lacks VM.Console on /vms/1').detail).toContain('VM.Console')
     expect(describeClose(4410, '').kind).toBe('max-duration')
     expect(describeClose(1001, '').kind).toBe('shutdown')
     for (const code of [4401, 4403, 4404, 4409, 4408, 4410, 1001, 4502, 4503, 1000, 1006, 1011]) {

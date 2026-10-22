@@ -46,7 +46,7 @@ the authentication run back to back.
 ### Which privileges
 
 `VM.Console` on `/vms/{vmid}`, checked at `vncproxy`; nothing else. The
-built-in roles `PVEVMConsole` and `PVEVMUser` carry it, `PVEAuditor` does not.
+built-in role `PVEVMUser` (and the `FleetConsole` role in the token guide) carries it, `PVEAuditor` does not.
 It is a distinct privilege from `VM.PowerMgmt` and the agent privileges, so it
 is a new Fleet tier (`console`, role `FleetConsole`) in the privilege table
 rather than a new row in an existing tier.

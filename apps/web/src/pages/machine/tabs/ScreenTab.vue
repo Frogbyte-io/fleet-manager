@@ -76,6 +76,12 @@ const blocked = computed(() => privileges.error.value ? null : tierBlockReason(p
           </option>
         </select>
       </label>
+      <p
+        class="text-[11px] text-fc-faint"
+        data-testid="screen-lan-note"
+      >
+        On a trusted-LAN controller every caller is the same principal: any client that can reach it may open consoles, and the session limit is shared.
+      </p>
       <ProxmoxConsole
         :key="guest.key"
         :account-id="guest.accountId"

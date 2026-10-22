@@ -24,10 +24,10 @@ use crate::{
     ProxmoxClient, PveApiError, PveHttpMethod, PveHttpRequest, PveTransportError, urlencode,
 };
 
-/// The largest WebSocket message the channel accepts. A full-screen raw
-/// framebuffer update at 4K is under 40 MiB; real traffic is far smaller
-/// because noVNC negotiates compressed encodings.
-pub const MAX_MESSAGE_BYTES: usize = 32 * 1024 * 1024;
+/// The largest WebSocket message the channel accepts. Real traffic is far
+/// smaller: noVNC negotiates compressed encodings, and a viewer asks for
+/// incremental updates.
+pub const MAX_MESSAGE_BYTES: usize = 8 * 1024 * 1024;
 
 /// How long the RFB version and authentication exchange may take.
 pub const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);

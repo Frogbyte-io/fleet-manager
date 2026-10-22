@@ -47,6 +47,14 @@ const MAX_BROWSER_MESSAGE_BYTES: usize = 1024 * 1024;
 /// How long the browser has to complete the RFB version exchange.
 const BROWSER_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
 
+/// How long one send may take before the peer is treated as gone.
+const SEND_TIMEOUT: Duration = Duration::from_secs(15);
+
+/// How often the relay pings the browser, and how long a browser may stay
+/// completely silent (no message, no pong) before it is treated as gone.
+const PING_INTERVAL: Duration = Duration::from_secs(20);
+const PEER_SILENCE_LIMIT: Duration = Duration::from_secs(75);
+
 /// WebSocket close codes the relay uses (private-use range).
 mod close {
     pub const UNAUTHENTICATED: u16 = 4401;
@@ -56,6 +64,7 @@ mod close {
     pub const UPSTREAM: u16 = 4502;
     pub const UNAVAILABLE: u16 = 4503;
     pub const IDLE: u16 = 4408;
+    pub const PROTOCOL: u16 = 4400;
     pub const MAX_DURATION: u16 = 4410;
     pub const SHUTDOWN: u16 = 1001;
     pub const NORMAL: u16 = 1000;
@@ -147,20 +156,20 @@ fn offered_token(headers: &HeaderMap) -> Option<String> {
         })
 }
 
-/// Whether a browser-supplied `Origin` names the host it connected to. A
-/// missing Origin is a non-browser client and is left to the token.
-fn same_origin(headers: &HeaderMap) -> bool {
+/// Whether a browser-supplied `Origin` names the host it connected to, by the
+/// same rule as the mutation guard. A missing Origin is a non-browser client
+/// and is left to the token.
+fn origin_allowed(headers: &HeaderMap) -> bool {
     let Some(origin) = headers
         .get(header::ORIGIN)
         .and_then(|value| value.to_str().ok())
     else {
         return true;
     };
-    let origin_authority = origin.split_once("://").map_or(origin, |(_, rest)| rest);
-    headers
+    let host = headers
         .get(header::HOST)
-        .and_then(|value| value.to_str().ok())
-        .is_some_and(|host| host.eq_ignore_ascii_case(origin_authority))
+        .and_then(|value| value.to_str().ok());
+    crate::browser::same_origin(origin, host)
 }
 
 async fn socket_handler(
@@ -169,7 +178,7 @@ async fn socket_handler(
     headers: HeaderMap,
     ws: WebSocketUpgrade,
 ) -> Response {
-    if !same_origin(&headers) {
+    if !origin_allowed(&headers) {
         return (
             StatusCode::FORBIDDEN,
             "cross-origin console sockets are refused\n",
@@ -200,6 +209,17 @@ async fn refuse(mut socket: WebSocket, code: u16, reason: &str) {
             reason: reason.into(),
         })))
         .await;
+    // Let the close handshake finish before the socket drops: closing a TCP
+    // connection with unread browser bytes in it resets the connection and can
+    // discard the close frame the browser has not read yet. Bounded.
+    let _ = tokio::time::timeout(Duration::from_secs(2), async {
+        while let Some(Ok(message)) = socket.recv().await {
+            if matches!(message, Message::Close(_)) {
+                break;
+            }
+        }
+    })
+    .await;
 }
 
 async fn serve(
@@ -268,34 +288,68 @@ async fn browser_read(
     Some(std::mem::replace(buffer, rest))
 }
 
+/// Sends one message to the browser, bounded: a peer that stopped reading
+/// (a half-open connection) cannot stall the relay and its timers.
+async fn send_to_browser(socket: &mut WebSocket, message: Message) -> bool {
+    matches!(
+        tokio::time::timeout(SEND_TIMEOUT, socket.send(message)).await,
+        Ok(Ok(()))
+    )
+}
+
+/// Sends one message toward the guest, bounded like [`send_to_browser`].
+async fn send_to_guest(channel: &mut dyn ConsoleChannel, bytes: Vec<u8>) -> bool {
+    matches!(
+        tokio::time::timeout(SEND_TIMEOUT, channel.send(bytes)).await,
+        Ok(Ok(()))
+    )
+}
+
+/// Why the browser-side RFB exchange did not complete.
+enum HandshakeEnd {
+    /// The browser went away or stalled.
+    Gone,
+    /// The browser speaks something the relay does not: it gets a reason.
+    Refused(&'static str),
+}
+
 /// The RFB 3.8 exchange toward the browser: PVE's VNC authentication is
-/// already done, so the browser is offered security type *None*. Returns the
-/// bytes the browser sent past the exchange.
-async fn browser_handshake(socket: &mut WebSocket) -> Option<Vec<u8>> {
+/// already done, so the browser is offered security type *None*. A client
+/// that does not answer with 3.8 is refused cleanly (the relay offers exactly
+/// the one version it has tested). Returns the bytes the browser sent past
+/// the exchange.
+async fn browser_handshake(socket: &mut WebSocket) -> Result<Vec<u8>, HandshakeEnd> {
     let mut buffer = Vec::new();
-    socket
-        .send(Message::Binary(b"RFB 003.008\n".to_vec().into()))
+    if !send_to_browser(socket, Message::Binary(b"RFB 003.008\n".to_vec().into())).await {
+        return Err(HandshakeEnd::Gone);
+    }
+    let version = browser_read(socket, &mut buffer, 12)
         .await
-        .ok()?;
-    let version = browser_read(socket, &mut buffer, 12).await?;
-    if !version.starts_with(b"RFB 003.") {
-        return None;
+        .ok_or(HandshakeEnd::Gone)?;
+    if version != b"RFB 003.008\n" {
+        return Err(HandshakeEnd::Refused(
+            "the console speaks RFB 3.8 only; this client answered another version",
+        ));
     }
     // One security type: None (1).
-    socket
-        .send(Message::Binary(vec![1_u8, 1].into()))
-        .await
-        .ok()?;
-    let chosen = browser_read(socket, &mut buffer, 1).await?;
-    if chosen != [1] {
-        return None;
+    if !send_to_browser(socket, Message::Binary(vec![1_u8, 1].into())).await {
+        return Err(HandshakeEnd::Gone);
     }
-    socket
-        .send(Message::Binary(vec![0_u8, 0, 0, 0].into()))
+    let chosen = browser_read(socket, &mut buffer, 1)
         .await
-        .ok()?;
-    Some(buffer)
+        .ok_or(HandshakeEnd::Gone)?;
+    if chosen != [1] {
+        return Err(HandshakeEnd::Refused(
+            "the client chose an RFB security type the console does not offer",
+        ));
+    }
+    if !send_to_browser(socket, Message::Binary(vec![0_u8, 0, 0, 0].into())).await {
+        return Err(HandshakeEnd::Gone);
+    }
+    Ok(buffer)
 }
+
+type Ended = (ConsoleCloseReason, u16, &'static str);
 
 async fn relay(mut socket: WebSocket, proxmox: Arc<ProxmoxAccounts>, attached: AttachedConsole) {
     let AttachedConsole {
@@ -309,22 +363,38 @@ async fn relay(mut socket: WebSocket, proxmox: Arc<ProxmoxAccounts>, attached: A
     let max_deadline = started + limits.max_duration;
     let mut idle_deadline = started + limits.idle;
     let mut activity = ClientActivity::default();
+    let mut last_heard = started;
+    let mut ping = tokio::time::interval_at(started + PING_INTERVAL, PING_INTERVAL);
 
-    let (reason, code, text) = 'run: {
+    let (reason, code, text): Ended = 'run: {
+        // A shutdown that began before this relay subscribed is not a
+        // change the receiver will report: check the state itself.
+        if *shutdown.borrow() {
+            break 'run (
+                ConsoleCloseReason::Shutdown,
+                close::SHUTDOWN,
+                "the controller is shutting down",
+            );
+        }
         let leftover =
             match tokio::time::timeout(BROWSER_HANDSHAKE_TIMEOUT, browser_handshake(&mut socket))
                 .await
             {
-                Ok(Some(leftover)) => leftover,
-                Ok(None) | Err(_) => {
+                Ok(Ok(leftover)) => leftover,
+                Ok(Err(HandshakeEnd::Refused(text))) => {
+                    break 'run (ConsoleCloseReason::Protocol, close::PROTOCOL, text);
+                }
+                Ok(Err(HandshakeEnd::Gone)) | Err(_) => {
                     break 'run (ConsoleCloseReason::Client, close::NORMAL, "handshake ended");
                 }
             };
         if !leftover.is_empty() {
-            if activity.observe(&leftover) {
-                idle_deadline = tokio::time::Instant::now() + limits.idle;
+            match activity.observe(&leftover) {
+                Ok(true) => idle_deadline = tokio::time::Instant::now() + limits.idle,
+                Ok(false) => {}
+                Err(_) => break 'run (ConsoleCloseReason::Protocol, close::PROTOCOL, UNFOLLOWABLE),
             }
-            if channel.send(leftover).await.is_err() {
+            if !send_to_guest(&mut *channel, leftover).await {
                 break 'run (
                     ConsoleCloseReason::Error,
                     close::UPSTREAM,
@@ -336,27 +406,42 @@ async fn relay(mut socket: WebSocket, proxmox: Arc<ProxmoxAccounts>, attached: A
             tokio::select! {
                 from_guest = channel.recv() => match from_guest {
                     Ok(Some(bytes)) => {
-                        if socket.send(Message::Binary(bytes.into())).await.is_err() {
+                        if !send_to_browser(&mut socket, Message::Binary(bytes.into())).await {
                             break 'run (ConsoleCloseReason::Client, close::NORMAL, "the browser went away");
                         }
                     }
                     Ok(None) => break 'run (ConsoleCloseReason::Guest, close::NORMAL, "the guest closed its screen"),
                     Err(_) => break 'run (ConsoleCloseReason::Error, close::UPSTREAM, "the screen connection failed"),
                 },
-                from_browser = socket.recv() => match from_browser {
-                    Some(Ok(Message::Binary(bytes))) => {
-                        if activity.observe(&bytes) {
-                            idle_deadline = tokio::time::Instant::now() + limits.idle;
+                from_browser = socket.recv() => {
+                    last_heard = tokio::time::Instant::now();
+                    match from_browser {
+                        Some(Ok(Message::Binary(bytes))) => {
+                            match activity.observe(&bytes) {
+                                Ok(true) => idle_deadline = tokio::time::Instant::now() + limits.idle,
+                                Ok(false) => {}
+                                Err(_) => break 'run (ConsoleCloseReason::Protocol, close::PROTOCOL, UNFOLLOWABLE),
+                            }
+                            if !send_to_guest(&mut *channel, bytes.to_vec()).await {
+                                break 'run (ConsoleCloseReason::Error, close::UPSTREAM, "the screen connection failed");
+                            }
                         }
-                        if channel.send(bytes.to_vec()).await.is_err() {
-                            break 'run (ConsoleCloseReason::Error, close::UPSTREAM, "the screen connection failed");
+                        Some(Ok(Message::Close(_)) | Err(_)) | None => {
+                            break 'run (ConsoleCloseReason::Client, close::NORMAL, "closed");
                         }
+                        // Pongs (and the library's own ping replies) prove the
+                        // peer is alive; text frames are not RFB.
+                        Some(Ok(_)) => {}
                     }
-                    Some(Ok(Message::Close(_)) | Err(_)) | None => {
-                        break 'run (ConsoleCloseReason::Client, close::NORMAL, "closed");
+                }
+                _ = ping.tick() => {
+                    if last_heard.elapsed() > PEER_SILENCE_LIMIT {
+                        break 'run (ConsoleCloseReason::Client, close::NORMAL, "the browser stopped answering");
                     }
-                    Some(Ok(_)) => {}
-                },
+                    if !send_to_browser(&mut socket, Message::Ping(Vec::new().into())).await {
+                        break 'run (ConsoleCloseReason::Client, close::NORMAL, "the browser went away");
+                    }
+                }
                 () = tokio::time::sleep_until(idle_deadline) => {
                     break 'run (ConsoleCloseReason::Idle, close::IDLE, "the console was idle");
                 }
@@ -373,7 +458,7 @@ async fn relay(mut socket: WebSocket, proxmox: Arc<ProxmoxAccounts>, attached: A
     };
 
     channel.close().await;
-    refuse(socket, code, text).await;
+    let _ = tokio::time::timeout(SEND_TIMEOUT, refuse(socket, code, text)).await;
     if let Err(error) = proxmox
         .console_end(
             &session_id,
@@ -386,70 +471,141 @@ async fn relay(mut socket: WebSocket, proxmox: Arc<ProxmoxAccounts>, attached: A
     }
 }
 
+/// The close text when the browser's stream could not be followed.
+const UNFOLLOWABLE: &str = "the console could not follow the browser's RFB stream and closed";
+
+/// The browser's RFB stream could not be followed.
+#[derive(Debug, PartialEq, Eq)]
+struct Unfollowable;
+
+/// The largest single client message the relay follows. Clipboard text is the
+/// only variable-length message that can be large.
+const MAX_CLIENT_MESSAGE_BYTES: usize = 2 * 1024 * 1024;
+
+/// `ClientCutText` extended-clipboard action bits (RFB extension, as noVNC
+/// 1.7.0 sends them): `Caps` marks a capability announcement, `Provide`
+/// carries the clipboard contents.
+const CLIPBOARD_ACTION_CAPS: u32 = 1 << 24;
+const CLIPBOARD_ACTION_PROVIDE: u32 = 1 << 28;
+
 /// Finds the input events in the browser's RFB client-to-server stream so
 /// the idle bound counts a person at the keyboard, not a viewer's automatic
-/// update requests. A stream it cannot follow counts as activity: the bound
-/// fails open rather than closing a working console.
+/// messages (update requests, encodings, the extended-clipboard announcement
+/// noVNC sends on connect). It follows every client message noVNC 1.7.0 and
+/// the QEMU extensions send; a stream it cannot follow is an error the relay
+/// answers by closing (reason `protocol`), never by disabling the bound.
 #[derive(Default)]
 struct ClientActivity {
     buffer: Vec<u8>,
-    lost: bool,
+    /// Whether the one-byte `ClientInit` that follows the security result
+    /// (before any typed message) has been consumed.
+    client_init_done: bool,
 }
 
 impl ClientActivity {
-    /// Feeds bytes; true when they contain a key, pointer, or clipboard
+    /// Feeds bytes; true when they complete a key, pointer, or pasted-text
     /// message.
-    fn observe(&mut self, bytes: &[u8]) -> bool {
-        if self.lost {
-            return true;
-        }
+    fn observe(&mut self, bytes: &[u8]) -> Result<bool, Unfollowable> {
         self.buffer.extend_from_slice(bytes);
         let mut input = false;
         let mut offset = 0;
+        if !self.client_init_done && !self.buffer.is_empty() {
+            // ClientInit: the shared-session flag, one byte, not a typed
+            // message.
+            self.client_init_done = true;
+            offset = 1;
+        }
         loop {
             let rest = &self.buffer[offset..];
             let Some(&kind) = rest.first() else { break };
-            let length = match kind {
-                // SetPixelFormat.
-                0 => Some(20),
-                // SetEncodings: 4 + 4 * count.
-                2 => rest
-                    .get(2..4)
-                    .map(|count| 4 + 4 * usize::from(u16::from_be_bytes([count[0], count[1]]))),
-                // FramebufferUpdateRequest.
-                3 => Some(10),
-                // KeyEvent, PointerEvent.
-                4 => Some(8),
-                5 => Some(6),
-                // ClientCutText: 8 + length.
-                6 => rest.get(4..8).map(|len| {
-                    8 + usize::try_from(u32::from_be_bytes([len[0], len[1], len[2], len[3]]))
-                        .unwrap_or(usize::MAX)
-                }),
-                // QEMU extended key event (255, 0): 12 bytes.
-                255 => rest.get(1).and_then(|sub| (*sub == 0).then_some(12)),
-                _ => {
-                    self.lost = true;
-                    self.buffer.clear();
-                    return true;
-                }
+            let Some((length, is_input)) = Self::classify(kind, rest)? else {
+                break;
             };
-            let Some(length) = length else { break };
-            if length > MAX_BROWSER_MESSAGE_BYTES * 2 {
-                self.lost = true;
-                self.buffer.clear();
-                return true;
+            if length > MAX_CLIENT_MESSAGE_BYTES {
+                return Err(Unfollowable);
             }
             if rest.len() < length {
                 break;
             }
-            if matches!(kind, 4..=6 | 255) {
-                input = true;
-            }
+            // Extended clipboard: only "provide" carries user text.
+            let is_input = match (kind, is_input) {
+                (6, _) => Self::clipboard_is_input(&rest[..length]),
+                (_, flag) => flag,
+            };
+            input |= is_input;
             offset += length;
         }
         self.buffer.drain(..offset);
-        input
+        if self.buffer.len() > MAX_CLIENT_MESSAGE_BYTES {
+            return Err(Unfollowable);
+        }
+        Ok(input)
+    }
+
+    /// The total length of the message starting at `rest[0]` and whether it
+    /// is input; `None` when more bytes are needed to know.
+    fn classify(kind: u8, rest: &[u8]) -> Result<Option<(usize, bool)>, Unfollowable> {
+        let be16 = |at: usize| {
+            rest.get(at..at + 2)
+                .map(|b| usize::from(u16::from_be_bytes([b[0], b[1]])))
+        };
+        let length = match kind {
+            // SetPixelFormat.
+            0 => Some((20, false)),
+            // SetEncodings: 4 + 4 * count.
+            2 => be16(2).map(|count| (4 + 4 * count, false)),
+            // FramebufferUpdateRequest.
+            3 => Some((10, false)),
+            // KeyEvent.
+            4 => Some((8, true)),
+            // PointerEvent: 6 bytes, 7 with noVNC's extended-button marker
+            // (bit 7 of the mask byte).
+            5 => rest
+                .get(1)
+                .map(|mask| (if mask & 0x80 == 0 { 6 } else { 7 }, true)),
+            // ClientCutText: 8 + |length|; a negative length is the
+            // extended-clipboard form.
+            6 => rest.get(4..8).map(|len| {
+                let signed = i32::from_be_bytes([len[0], len[1], len[2], len[3]]);
+                (
+                    8usize.saturating_add(
+                        usize::try_from(signed.unsigned_abs()).unwrap_or(usize::MAX),
+                    ),
+                    true,
+                )
+            }),
+            // EnableContinuousUpdates.
+            150 => Some((10, false)),
+            // ClientFence: 9 + payload length.
+            248 => rest.get(8).map(|n| (9 + usize::from(*n), false)),
+            // xvp.
+            250 => Some((4, false)),
+            // SetDesktopSize: 8 + 16 * screens.
+            251 => rest.get(6).map(|n| (8 + 16 * usize::from(*n), false)),
+            // QEMU extended key event (255, 0): 12 bytes.
+            255 => match rest.get(1) {
+                Some(0) => Some((12, true)),
+                Some(_) => return Err(Unfollowable),
+                None => None,
+            },
+            _ => return Err(Unfollowable),
+        };
+        Ok(length)
+    }
+
+    /// Whether one complete `ClientCutText` is user text: a plain one is; an
+    /// extended one only when it provides contents (not a caps announcement,
+    /// notify, request, or peek, which noVNC sends by itself).
+    fn clipboard_is_input(message: &[u8]) -> bool {
+        let negative = message.get(4).is_some_and(|b| b & 0x80 != 0);
+        if !negative {
+            return true;
+        }
+        let Some(flags) = message.get(8..12) else {
+            return false;
+        };
+        let flags = u32::from_be_bytes([flags[0], flags[1], flags[2], flags[3]]);
+        flags & CLIPBOARD_ACTION_PROVIDE != 0 && flags & CLIPBOARD_ACTION_CAPS == 0
     }
 }
 
@@ -457,41 +613,150 @@ impl ClientActivity {
 mod tests {
     use super::*;
 
-    #[test]
-    fn update_requests_are_not_input_but_keys_and_pointers_are() {
+    /// The client messages noVNC 1.7.0 builds, captured from its own code.
+    fn novnc() -> std::collections::BTreeMap<String, Vec<u8>> {
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(
+            "../tests/fixtures/novnc-1.7.0-client-messages.json"
+        ))
+        .unwrap();
+        fixture["messages"]
+            .as_object()
+            .unwrap()
+            .iter()
+            .map(|(name, bytes)| {
+                (
+                    name.clone(),
+                    bytes
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .map(|byte| u8::try_from(byte.as_u64().unwrap()).unwrap())
+                        .collect(),
+                )
+            })
+            .collect()
+    }
+
+    /// A tracker past the one-byte `ClientInit`, as the relay has after the
+    /// browser's first byte.
+    fn after_client_init() -> ClientActivity {
         let mut activity = ClientActivity::default();
-        // FramebufferUpdateRequest.
-        assert!(!activity.observe(&[3, 1, 0, 0, 0, 0, 3, 0x20, 2, 0x58]));
-        // KeyEvent down for 'a'.
-        assert!(activity.observe(&[4, 1, 0, 0, 0, 0, 0, 0x61]));
-        // PointerEvent.
-        assert!(activity.observe(&[5, 0, 0, 10, 0, 20]));
+        assert_eq!(activity.observe(&[1]), Ok(false));
+        activity
     }
 
     #[test]
-    fn messages_split_across_frames_are_followed() {
+    fn the_client_init_byte_is_not_a_message_and_not_input() {
         let mut activity = ClientActivity::default();
-        assert!(!activity.observe(&[4, 1, 0]));
-        assert!(activity.observe(&[0, 0, 0, 0, 0x61]));
-        // SetEncodings with two encodings arrives in three frames.
-        assert!(!activity.observe(&[2, 0]));
-        assert!(!activity.observe(&[0, 2, 0, 0, 0, 0]));
-        assert!(!activity.observe(&[0, 0, 0, 1]));
+        assert_eq!(activity.observe(&[1]), Ok(false));
+        assert_eq!(activity.observe(&novnc()["keyEvent"]), Ok(true));
+        // ClientInit and a message in one frame.
+        let mut activity = ClientActivity::default();
+        let mut frame = vec![0_u8];
+        frame.extend_from_slice(&novnc()["fbUpdateRequest"]);
+        assert_eq!(activity.observe(&frame), Ok(false));
+        assert!(activity.buffer.is_empty());
     }
 
     #[test]
-    fn an_unfollowable_stream_counts_as_activity() {
-        let mut activity = ClientActivity::default();
-        assert!(activity.observe(&[99, 1, 2, 3]));
-        assert!(activity.observe(&[3, 1, 0, 0, 0, 0, 3, 0x20, 2, 0x58]));
+    fn every_message_novnc_sends_is_followed_and_only_input_counts() {
+        let messages = novnc();
+        let input = [
+            "keyEvent",
+            "qemuKey",
+            "pointer",
+            "extPointer",
+            "cutText",
+            "extClipProvide",
+        ];
+        let automatic = [
+            "pixelFormat",
+            "clientEncodings",
+            "fbUpdateRequest",
+            "extClipCaps",
+            "extClipNotify",
+            "extClipRequest",
+            "fence",
+            "continuous",
+            "xvp",
+            "setDesktopSize",
+        ];
+        for name in input {
+            let mut activity = after_client_init();
+            assert_eq!(activity.observe(&messages[name]), Ok(true), "{name}");
+            assert!(activity.buffer.is_empty(), "{name} was consumed whole");
+        }
+        for name in automatic {
+            let mut activity = after_client_init();
+            assert_eq!(activity.observe(&messages[name]), Ok(false), "{name}");
+            assert!(activity.buffer.is_empty(), "{name} was consumed whole");
+        }
     }
 
     #[test]
-    fn clipboard_text_is_input() {
+    fn a_real_connection_sequence_is_followed_byte_by_byte() {
+        // The order noVNC sends on connect, then a keystroke, delivered one
+        // byte per WebSocket message: the idle bound still sees exactly one
+        // input.
+        let messages = novnc();
+        let mut stream = vec![1_u8];
+        for name in [
+            "pixelFormat",
+            "clientEncodings",
+            "extClipCaps",
+            "fbUpdateRequest",
+            "fence",
+            "keyEvent",
+        ] {
+            stream.extend_from_slice(&messages[name]);
+        }
         let mut activity = ClientActivity::default();
+        let mut inputs = 0;
+        for byte in stream {
+            if activity.observe(&[byte]).unwrap() {
+                inputs += 1;
+            }
+        }
+        assert_eq!(inputs, 1);
+        assert!(activity.buffer.is_empty());
+    }
+
+    #[test]
+    fn an_extended_clipboard_announcement_is_not_a_person_typing() {
+        // Sent by noVNC on its own right after connecting; counting it would
+        // keep every console from ever idling.
+        let messages = novnc();
+        let mut activity = after_client_init();
+        assert_eq!(activity.observe(&messages["extClipCaps"]), Ok(false));
+        // The negative length (extended form) is read as |length|, not as a
+        // 4 GiB payload.
+        assert_eq!(&messages["extClipCaps"][4..8], &[255, 255, 255, 248]);
+    }
+
+    #[test]
+    fn an_unfollowable_stream_is_an_error_never_a_disabled_bound() {
+        assert_eq!(
+            after_client_init().observe(&[99, 1, 2, 3]),
+            Err(Unfollowable)
+        );
+        // QEMU audio and other sub-messages noVNC never sends.
+        assert_eq!(
+            after_client_init().observe(&[255, 7, 0, 0]),
+            Err(Unfollowable)
+        );
+        // A cut-text length claiming more than the relay follows.
+        assert_eq!(
+            after_client_init().observe(&[6, 0, 0, 0, 0x7f, 0xff, 0xff, 0xff]),
+            Err(Unfollowable)
+        );
+    }
+
+    #[test]
+    fn plain_clipboard_text_is_input() {
+        let mut activity = after_client_init();
         let mut message = vec![6, 0, 0, 0, 0, 0, 0, 2];
         message.extend_from_slice(b"hi");
-        assert!(activity.observe(&message));
+        assert_eq!(activity.observe(&message), Ok(true));
     }
 
     #[test]
@@ -509,13 +774,13 @@ mod tests {
     fn cross_origin_upgrades_are_refused() {
         let mut headers = HeaderMap::new();
         headers.insert(header::HOST, "fleet.example.test:8443".parse().unwrap());
-        assert!(same_origin(&headers));
+        assert!(origin_allowed(&headers));
         headers.insert(
             header::ORIGIN,
             "https://fleet.example.test:8443".parse().unwrap(),
         );
-        assert!(same_origin(&headers));
+        assert!(origin_allowed(&headers));
         headers.insert(header::ORIGIN, "https://evil.example.test".parse().unwrap());
-        assert!(!same_origin(&headers));
+        assert!(!origin_allowed(&headers));
     }
 }

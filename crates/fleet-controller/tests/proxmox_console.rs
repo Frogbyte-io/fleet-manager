@@ -63,6 +63,8 @@ struct ConsoleTransport {
     received: Arc<Mutex<Vec<Vec<u8>>>>,
     /// Every API path and the pinned fingerprint it used.
     calls: Mutex<Vec<(String, Option<String>)>>,
+    /// When set, `connect_websocket` waits for a permit: a slow PVE.
+    gate: Mutex<Option<Arc<tokio::sync::Semaphore>>>,
 }
 
 impl ConsoleTransport {
@@ -72,6 +74,7 @@ impl ConsoleTransport {
             screen,
             received: Arc::new(Mutex::new(Vec::new())),
             calls: Mutex::new(Vec::new()),
+            gate: Mutex::new(None),
         })
     }
 }
@@ -194,6 +197,10 @@ impl PveTransport for ConsoleTransport {
         &self,
         request: PveHttpRequest,
     ) -> Result<Box<dyn PveSocket>, PveTransportError> {
+        let gate = self.gate.lock().unwrap().clone();
+        if let Some(gate) = gate {
+            gate.acquire().await.unwrap().forget();
+        }
         assert_eq!(request.pinned_fingerprint.as_deref(), Some(FP));
         assert!(
             request.path.contains("/vncwebsocket?port=5900&vncticket="),
@@ -243,6 +250,25 @@ async fn harness(
     screen: Screen,
     limits: Option<ConsoleLimits>,
 ) -> Harness {
+    let transport = ConsoleTransport::new(permissions, screen);
+    harness_over(transport.clone(), transport, limits).await
+}
+
+/// A harness over the real pinned transport, for the live variant.
+async fn harness_with(transport: Arc<dyn PveTransport>, limits: Option<ConsoleLimits>) -> Harness {
+    harness_over(
+        transport,
+        ConsoleTransport::new(PERMISSIONS_FULL, Screen::Open),
+        limits,
+    )
+    .await
+}
+
+async fn harness_over(
+    transport: Arc<dyn PveTransport>,
+    fake: Arc<ConsoleTransport>,
+    limits: Option<ConsoleLimits>,
+) -> Harness {
     let dist = tempfile::tempdir().unwrap();
     std::fs::write(dist.path().join("index.html"), "<html>fleet</html>").unwrap();
     let store_dir = tempfile::tempdir().unwrap();
@@ -262,11 +288,10 @@ async fn harness(
         std::fs::set_permissions(&key_path, std::fs::Permissions::from_mode(0o600)).unwrap();
     }
     let secrets = Arc::new(SecretStore::open(store.pool().clone(), &key_path).unwrap());
-    let transport = ConsoleTransport::new(permissions, screen);
     let mut accounts = compose_proxmox(
         store.pool().clone(),
         secrets,
-        transport.clone(),
+        transport,
         Arc::new(fleet_storage_sqlite::AuditSink::new(store.pool().clone())),
     );
     if let Some(limits) = limits {
@@ -310,7 +335,7 @@ async fn harness(
         _key_dir: key_dir,
         address,
         proxmox,
-        transport,
+        transport: fake,
         shutdown: Some(shutdown_tx),
     }
 }
@@ -447,6 +472,12 @@ async fn browser_handshake(browser: &mut Browser) {
         .await
         .unwrap();
     expect_binary(browser, &[0, 0, 0, 0]).await;
+    // ClientInit (shared session): the first thing a viewer sends after the
+    // security result, before any typed message.
+    browser
+        .send(Message::Binary(vec![1_u8].into()))
+        .await
+        .unwrap();
 }
 
 async fn expect_close(browser: &mut Browser) -> (u16, String) {
@@ -460,7 +491,7 @@ async fn expect_close(browser: &mut Browser) -> (u16, String) {
             }
             Some(Ok(Message::Close(None))) | None => return (1005, String::new()),
             Some(Ok(_)) => {}
-            Some(Err(_)) => return (1006, String::new()),
+            Some(Err(error)) => return (1006, format!("{error}")),
         }
     }
 }
@@ -538,15 +569,15 @@ async fn a_session_attaches_once_relays_the_screen_and_audits_start_and_end() {
         .await
         .unwrap();
     for _ in 0..50 {
-        if !harness.transport.received.lock().unwrap().is_empty() {
+        if harness.transport.received.lock().unwrap().len() >= 2 {
             break;
         }
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
     assert_eq!(
         harness.transport.received.lock().unwrap().clone(),
-        vec![vec![4_u8, 1, 0, 0, 0, 0, 0, 0x61]],
-        "the guest receives exactly the browser's key event"
+        vec![vec![1_u8], vec![4_u8, 1, 0, 0, 0, 0, 0, 0x61]],
+        "the guest receives ClientInit and then exactly the browser's key event"
     );
     browser.close(None).await.unwrap();
 
@@ -695,7 +726,8 @@ async fn controller_shutdown_closes_every_console() {
     browser_handshake(&mut browser).await;
     expect_binary(&mut browser, b"SERVERINIT").await;
     harness.proxmox.console_shutdown();
-    assert_eq!(expect_close(&mut browser).await.0, 1001);
+    let closed = expect_close(&mut browser).await;
+    assert_eq!(closed.0, 1001, "{closed:?}");
     let events = console_events(&harness).await;
     let ended = events
         .iter()
@@ -915,4 +947,344 @@ async fn the_privilege_report_has_a_console_tier() {
             assert_eq!(console["missing"][0]["path"], "/vms/{vmid}");
         }
     }
+}
+
+/// The client messages noVNC 1.7.0 builds, captured from its own code.
+fn novnc(name: &str) -> Vec<u8> {
+    let fixture: Value =
+        serde_json::from_str(include_str!("fixtures/novnc-1.7.0-client-messages.json")).unwrap();
+    fixture["messages"][name]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|byte| u8::try_from(byte.as_u64().unwrap()).unwrap())
+        .collect()
+}
+
+#[tokio::test]
+async fn novnc_connect_traffic_does_not_keep_a_console_alive_but_typing_does() {
+    let harness = harness(
+        PERMISSIONS_FULL,
+        Screen::Open,
+        Some(ConsoleLimits {
+            idle: Duration::from_millis(1500),
+            max_duration: Duration::from_secs(60),
+        }),
+    )
+    .await;
+    let account = trusted_account(&harness).await;
+    let (_, created) = create_session(&harness, &account).await;
+    let token = created["data"]["token"].as_str().unwrap().to_owned();
+    let mut browser = connect_browser(&harness, &token).await;
+    browser_handshake(&mut browser).await;
+    expect_binary(&mut browser, b"SERVERINIT").await;
+    // Typing every 500 ms keeps it open well past the 1.5 s idle bound.
+    for _ in 0..5 {
+        browser
+            .send(Message::Binary(novnc("keyEvent").into()))
+            .await
+            .unwrap();
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
+    // noVNC's own automatic traffic (encodings, clipboard announcement, update
+    // requests, fences) is not input: the console idles out.
+    for name in ["clientEncodings", "extClipCaps", "fbUpdateRequest", "fence"] {
+        browser
+            .send(Message::Binary(novnc(name).into()))
+            .await
+            .unwrap();
+    }
+    assert_eq!(expect_close(&mut browser).await.0, 4408);
+}
+
+#[tokio::test]
+async fn a_stream_the_relay_cannot_follow_closes_with_reason_protocol() {
+    let harness = harness(PERMISSIONS_FULL, Screen::Open, None).await;
+    let account = trusted_account(&harness).await;
+    let (_, created) = create_session(&harness, &account).await;
+    let token = created["data"]["token"].as_str().unwrap().to_owned();
+    let mut browser = connect_browser(&harness, &token).await;
+    browser_handshake(&mut browser).await;
+    expect_binary(&mut browser, b"SERVERINIT").await;
+    browser
+        .send(Message::Binary(vec![99_u8, 1, 2, 3].into()))
+        .await
+        .unwrap();
+    assert_eq!(expect_close(&mut browser).await.0, 4400);
+    let events = console_events(&harness).await;
+    let ended = events
+        .iter()
+        .find(|event| event["metadata"]["event"] == "proxmox_console_session_ended")
+        .unwrap();
+    assert_eq!(ended["metadata"]["reason"], "protocol");
+}
+
+#[tokio::test]
+async fn a_client_that_is_not_rfb_3_8_is_refused_cleanly() {
+    let harness = harness(PERMISSIONS_FULL, Screen::Open, None).await;
+    let account = trusted_account(&harness).await;
+    let (_, created) = create_session(&harness, &account).await;
+    let token = created["data"]["token"].as_str().unwrap().to_owned();
+    let mut browser = connect_browser(&harness, &token).await;
+    expect_binary(&mut browser, b"RFB 003.008\n").await;
+    browser
+        .send(Message::Binary(b"RFB 003.003\n".to_vec().into()))
+        .await
+        .unwrap();
+    let (code, reason) = expect_close(&mut browser).await;
+    assert_eq!(code, 4400);
+    assert!(reason.contains("RFB 3.8"), "{reason}");
+}
+
+fn principal(id: &str) -> ActingPrincipal {
+    ActingPrincipal { id: id.to_owned() }
+}
+
+#[tokio::test]
+async fn concurrent_creates_cannot_exceed_the_per_principal_cap() {
+    let harness = harness(PERMISSIONS_FULL, Screen::Open, None).await;
+    let account = trusted_account(&harness).await;
+    let me = principal("racer");
+    let attempts = (0..12).map(|_| {
+        harness.proxmox.console_create(
+            harness_authorizer(),
+            &me,
+            &account,
+            "pve-a",
+            101,
+            fleet_core::SystemClock::now_unix_millis(),
+        )
+    });
+    let results = futures_util::future::join_all(attempts).await;
+    let created = results.iter().filter(|result| result.is_ok()).count();
+    assert_eq!(created, 4, "exactly the cap, never more");
+    assert!(
+        results
+            .iter()
+            .filter_map(|r| r.as_ref().err())
+            .all(|error| matches!(
+                error,
+                fleet_application::proxmox::ProxmoxUseCaseError::Conflict { .. }
+            ))
+    );
+}
+
+#[tokio::test]
+async fn an_attaching_session_still_counts_against_the_cap() {
+    let harness = harness(PERMISSIONS_FULL, Screen::Open, None).await;
+    let account = trusted_account(&harness).await;
+    let me = principal("racer");
+    let now = || fleet_core::SystemClock::now_unix_millis();
+    let mut tokens = Vec::new();
+    for _ in 0..4 {
+        let session = harness
+            .proxmox
+            .console_create(harness_authorizer(), &me, &account, "pve-a", 101, now())
+            .await
+            .unwrap();
+        tokens.push(session.token.expose().to_owned());
+    }
+    // PVE is slow to open the proxy for the first attach.
+    let gate = Arc::new(tokio::sync::Semaphore::new(0));
+    *harness.transport.gate.lock().unwrap() = Some(Arc::clone(&gate));
+    let proxmox = Arc::clone(&harness.proxmox);
+    let first = tokens[0].clone();
+    let attaching = tokio::spawn(async move {
+        proxmox
+            .console_attach(harness_authorizer(), &principal("racer"), &first, now())
+            .await
+    });
+    // The attach holds its slot as soon as it has taken the token.
+    for _ in 0..200 {
+        if harness.proxmox.console_active_count() == 1 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert_eq!(harness.proxmox.console_active_count(), 1);
+    // Three tokens wait and one session is attaching: still four, so a fifth
+    // create is refused even though no console is open yet.
+    let fifth = harness
+        .proxmox
+        .console_create(harness_authorizer(), &me, &account, "pve-a", 101, now())
+        .await
+        .map(|_| ())
+        .unwrap_err();
+    assert!(
+        matches!(
+            fifth,
+            fleet_application::proxmox::ProxmoxUseCaseError::Conflict { .. }
+        ),
+        "{fifth}"
+    );
+    gate.add_permits(1);
+    let attached = attaching.await.unwrap().expect("the attach completes");
+    // Releasing the session frees its slot for a new one.
+    harness
+        .proxmox
+        .console_end(
+            &attached.session_id,
+            fleet_application::proxmox::console::ConsoleCloseReason::Client,
+            now(),
+        )
+        .await
+        .unwrap();
+    harness
+        .proxmox
+        .console_create(harness_authorizer(), &me, &account, "pve-a", 101, now())
+        .await
+        .expect("a slot is free again");
+}
+
+#[tokio::test]
+async fn a_failed_attach_releases_its_slot_and_none_open_after_shutdown() {
+    let harness = harness(PERMISSIONS_FULL, Screen::Forbidden, None).await;
+    let account = trusted_account(&harness).await;
+    let me = principal("racer");
+    let now = || fleet_core::SystemClock::now_unix_millis();
+    let mut tokens = Vec::new();
+    for _ in 0..4 {
+        let session = harness
+            .proxmox
+            .console_create(harness_authorizer(), &me, &account, "pve-a", 101, now())
+            .await
+            .unwrap();
+        tokens.push(session.token.expose().to_owned());
+    }
+    // PVE refuses the proxy: the attach fails and the slot comes back.
+    let failed = harness
+        .proxmox
+        .console_attach(harness_authorizer(), &me, &tokens[0], now())
+        .await
+        .map(|_| ())
+        .unwrap_err();
+    assert!(
+        matches!(
+            failed,
+            fleet_application::proxmox::ProxmoxUseCaseError::Source(_)
+        ),
+        "{failed}"
+    );
+    assert_eq!(harness.proxmox.console_active_count(), 0);
+    assert_eq!(harness.proxmox.console_session_count(), 3);
+    harness
+        .proxmox
+        .console_create(harness_authorizer(), &me, &account, "pve-a", 101, now())
+        .await
+        .expect("the failed attach freed a slot");
+
+    // Once shutdown has begun no console opens; the refusal is audited as an end.
+    harness.proxmox.console_shutdown();
+    let refused = harness
+        .proxmox
+        .console_attach(harness_authorizer(), &me, &tokens[1], now())
+        .await
+        .map(|_| ())
+        .unwrap_err();
+    assert!(
+        matches!(
+            refused,
+            fleet_application::proxmox::ProxmoxUseCaseError::Conflict { .. }
+        ),
+        "{refused}"
+    );
+    let events = console_events(&harness).await;
+    let ended = events
+        .iter()
+        .find(|event| event["metadata"]["event"] == "proxmox_console_session_ended")
+        .expect("an audited end for the refused attach");
+    assert_eq!(ended["metadata"]["reason"], "shutdown");
+    assert_eq!(harness.proxmox.console_active_count(), 0);
+}
+
+/// Live: the idle bound against a real PVE guest's screen, with noVNC's real
+/// messages. Needs `FLEET_PVE_LIVE=1`, `PROXMOX_*`, `PROXMOX_VNC_NODE` and
+/// `PROXMOX_VNC_VMID` naming a running scratch guest.
+#[tokio::test]
+async fn live_idle_bound_follows_novnc_traffic_on_a_real_guest() {
+    if std::env::var("FLEET_PVE_LIVE").ok().as_deref() != Some("1") {
+        return;
+    }
+    let (Ok(node), Ok(vmid)) = (
+        std::env::var("PROXMOX_VNC_NODE"),
+        std::env::var("PROXMOX_VNC_VMID"),
+    ) else {
+        return;
+    };
+    let vmid: u64 = vmid.parse().unwrap();
+    let env = |name: &str| std::env::var(name).unwrap_or_else(|_| panic!("{name} is required"));
+    let live = harness_with(
+        Arc::new(fleet_provider_proxmox::ReqwestPveTransport::new()),
+        Some(ConsoleLimits {
+            idle: Duration::from_secs(4),
+            max_duration: Duration::from_secs(120),
+        }),
+    )
+    .await;
+    let (status, body) = raw(
+        live.address,
+        "POST",
+        "/api/v1/proxmox/accounts",
+        Some(json!({
+            "name": "live", "host": env("PROXMOX_HOST"), "port": 8006,
+            "tokenId": env("PROXMOX_TOKEN_ID"), "tokenSecret": env("PROXMOX_API_KEY")
+        })),
+    )
+    .await;
+    assert_eq!(status, 201, "{body}");
+    let id = body["data"]["id"].as_str().unwrap().to_owned();
+    raw(
+        live.address,
+        "POST",
+        &format!("/api/v1/proxmox/accounts/{id}/observe"),
+        Some(json!({})),
+    )
+    .await;
+    let (status, body) = raw(
+        live.address,
+        "POST",
+        &format!("/api/v1/proxmox/accounts/{id}/confirm"),
+        Some(json!({"fingerprint": env("PROXMOX_FINGERPRINT")})),
+    )
+    .await;
+    assert_eq!(status, 200, "{body}");
+    let open = || async {
+        let (status, created) = raw(
+            live.address,
+            "POST",
+            &format!("/api/v1/proxmox/accounts/{id}/console-sessions"),
+            Some(json!({"node": node, "vmid": vmid})),
+        )
+        .await;
+        assert_eq!(status, 201, "{created}");
+        let mut browser = connect_browser(&live, created["data"]["token"].as_str().unwrap()).await;
+        browser_handshake(&mut browser).await;
+        // The real ServerInit follows ClientInit.
+        let first = next_message(&mut browser).await;
+        assert!(matches!(first, Message::Binary(_)), "{first:?}");
+        browser
+    };
+    // noVNC's automatic traffic only (the messages a QEMU VNC server accepts
+    // without negotiating extensions): the real guest console idles out.
+    let mut browser = open().await;
+    let started = std::time::Instant::now();
+    for name in ["clientEncodings", "fbUpdateRequest", "fbUpdateRequest"] {
+        browser
+            .send(Message::Binary(novnc(name).into()))
+            .await
+            .unwrap();
+    }
+    assert_eq!(expect_close(&mut browser).await.0, 4408);
+    assert!(started.elapsed() < Duration::from_secs(9));
+    // Typing every second keeps a second console open well past the bound.
+    let mut browser = open().await;
+    for _ in 0..8 {
+        browser
+            .send(Message::Binary(novnc("keyEvent").into()))
+            .await
+            .unwrap();
+        tokio::time::sleep(Duration::from_secs(1)).await;
+    }
+    browser.close(None).await.unwrap();
+    eprintln!("live idle: idled out on automatic traffic; kept alive by typing");
 }
