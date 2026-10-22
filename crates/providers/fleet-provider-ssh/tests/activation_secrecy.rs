@@ -55,7 +55,10 @@ fn check(root: &std::path::Path) {
     let args = std::fs::read_to_string(log.join("args")).unwrap();
     let env = std::fs::read_to_string(log.join("env")).unwrap();
     let stdin = std::fs::read_to_string(log.join("stdin")).unwrap();
-    assert!(!args.contains(PRODUCT_KEY), "the key is on the command line");
+    assert!(
+        !args.contains(PRODUCT_KEY),
+        "the key is on the command line"
+    );
     assert!(!env.contains(PRODUCT_KEY), "the key is in the environment");
     // The Windows layer sends the script as one base64 line on stdin.
     use base64::Engine as _;

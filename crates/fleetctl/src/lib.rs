@@ -1379,8 +1379,7 @@ pub fn parse(args: &[String]) -> Result<Invocation, CliError> {
         },
         [
             "machines",
-            verb
-            @ ("exec" | "put" | "collect" | "files" | "file-get" | "endpoint-auth" | "ssh-key"
+            verb @ ("exec" | "put" | "collect" | "files" | "file-get" | "endpoint-auth" | "ssh-key"
             | "create" | "product-key"),
             rest @ ..,
         ] => machine_access::parse(verb, rest, &mut output)?,

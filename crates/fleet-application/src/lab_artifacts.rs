@@ -636,7 +636,7 @@ pub struct LabArtifacts {
     /// Serializes blob commits with blob removals: content addressing lets
     /// two artifacts share one blob, so a removal must not race a commit
     /// that is about to reference the same bytes.
-    blob_lock: tokio::sync::Mutex<()>,
+    blob_lock: Arc<tokio::sync::Mutex<()>>,
 }
 
 impl LabArtifacts {
@@ -659,7 +659,7 @@ impl LabArtifacts {
             templates,
             audit,
             policy,
-            blob_lock: tokio::sync::Mutex::new(()),
+            blob_lock: Arc::new(tokio::sync::Mutex::new(())),
         }
     }
 
@@ -667,6 +667,13 @@ impl LabArtifacts {
     #[must_use]
     pub fn policy(&self) -> ArtifactPolicy {
         self.policy
+    }
+
+    /// The lock serializing blob commits and deletes, shared with machine
+    /// files that use the same content-addressed store.
+    #[must_use]
+    pub fn blob_lock(&self) -> Arc<tokio::sync::Mutex<()>> {
+        self.blob_lock.clone()
     }
 
     /// Lists up to `limit` artifacts, newest first, narrowed by lease

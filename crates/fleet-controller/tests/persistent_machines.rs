@@ -29,17 +29,17 @@ use fleet_application::proxmox::{
 };
 use fleet_application::worker::OperationExecutor;
 use fleet_controller::machine_access::{SecretBackedMachineKeys, SshAuthResolver};
-use fleet_controller::proxmox_exec::ProxmoxDestructiveExecutor;
 use fleet_controller::persistent_machines::{
     GuestConfigExecutor, MachineCreateExecutor, MachineCreateParts, SecretBackedProductKeys,
 };
+use fleet_controller::proxmox_exec::ProxmoxDestructiveExecutor;
 use fleet_provider_proxmox::{
     PveHttpMethod, PveHttpRequest, PveHttpResponse, PveTransport, PveTransportError,
 };
 use fleet_provider_ssh::{ExecutionLimiter, PrivateKey, SshAuth, SshConnectionSpec, SshProvider};
 use fleet_storage_sqlite::{
-    AuditSink, EndpointAuthRepository, GuestLinkRepository, MachineRepository,
-    OperationRepository, PersistentGuestRepository, ProxmoxAccountRepository, Store,
+    AuditSink, EndpointAuthRepository, GuestLinkRepository, MachineRepository, OperationRepository,
+    PersistentGuestRepository, ProxmoxAccountRepository, Store,
 };
 use serde_json::{Value, json};
 
@@ -229,7 +229,15 @@ impl FakePve {
                 }
                 state.digest += 1;
                 let guest = state.guests.get_mut(&vmid.parse::<u32>().unwrap()).unwrap();
-                for key in ["tags", "description", "onboot", "protection", "cores", "memory", "net0"] {
+                for key in [
+                    "tags",
+                    "description",
+                    "onboot",
+                    "protection",
+                    "cores",
+                    "memory",
+                    "net0",
+                ] {
                     if let Some(value) = body.get(key) {
                         guest.config.insert(key.to_owned(), value.clone());
                     }
@@ -245,14 +253,22 @@ impl FakePve {
                     state.fail_starts -= 1;
                     return (500, json!({ "data": null }));
                 }
-                state.guests.get_mut(&vmid.parse::<u32>().unwrap()).unwrap().running = true;
+                state
+                    .guests
+                    .get_mut(&vmid.parse::<u32>().unwrap())
+                    .unwrap()
+                    .running = true;
                 ok(json!(format!(
                     "UPID:{node}:0000BBBB:00000002:65000001:qmstart:{vmid}:root@pam:"
                 )))
             }
             ("POST", ["nodes", node, "qemu", vmid, "status", "stop"]) => {
                 state.calls.push(format!("stop {vmid}"));
-                state.guests.get_mut(&vmid.parse::<u32>().unwrap()).unwrap().running = false;
+                state
+                    .guests
+                    .get_mut(&vmid.parse::<u32>().unwrap())
+                    .unwrap()
+                    .running = false;
                 ok(json!(format!(
                     "UPID:{node}:0000CCCC:00000003:65000002:qmstop:{vmid}:root@pam:"
                 )))
@@ -413,12 +429,11 @@ impl World {
         // the guest's authorized_keys holds at the start.
         let bootstrap_text =
             std::fs::read_to_string(sshd.keys_dir.path().join("user_ed25519")).unwrap();
-        let bootstrap_pub =
-            std::fs::read_to_string(sshd.keys_dir.path().join("user_ed25519.pub"))
-                .unwrap()
-                .trim()
-                .to_owned();
-        let bootstrap_ref = keys.create(&bootstrap_text).await.unwrap();
+        let bootstrap_pub = std::fs::read_to_string(sshd.keys_dir.path().join("user_ed25519.pub"))
+            .unwrap()
+            .trim()
+            .to_owned();
+        let bootstrap_ref = keys.create(&bootstrap_text, None).await.unwrap();
 
         let machines: Arc<dyn MachinePort> = Arc::new(MachineRepository::new(pool.clone()));
         let audit = Arc::new(AuditSink::new(pool.clone()));
@@ -542,7 +557,8 @@ impl World {
     }
 
     async fn create(&self, spec: &Value) -> Operation {
-        self.run(self.executor.as_ref(), "machine.create", spec).await
+        self.run(self.executor.as_ref(), "machine.create", spec)
+            .await
     }
 
     fn authorized_keys(&self) -> Vec<String> {
@@ -680,11 +696,21 @@ async fn a_persistent_vm_is_created_registered_and_rekeyed_in_order() {
     };
     assert_ne!(credential, world.bootstrap_ref);
     assert_eq!(result["credentialRef"], credential.as_str());
-    let new_key = world.keys.resolve(&credential).await.unwrap().unwrap();
+    let new_key = world
+        .keys
+        .resolve(&credential, &machine_id)
+        .await
+        .unwrap()
+        .unwrap();
     assert!(world.can_log_in(SshAuth::StoredKey {
         key: PrivateKey::parse(&new_key).unwrap()
     }));
-    let bootstrap_text = world.keys.resolve(&world.bootstrap_ref).await.unwrap().unwrap();
+    let bootstrap_text = world
+        .keys
+        .resolve(&world.bootstrap_ref, &machine_id)
+        .await
+        .unwrap()
+        .unwrap();
     assert!(
         !world.can_log_in(SshAuth::StoredKey {
             key: PrivateKey::parse(&bootstrap_text).unwrap()
@@ -737,7 +763,7 @@ async fn a_failed_install_leaves_the_image_key_working_and_nothing_removed() {
     assert_eq!(world.authorized_keys(), vec![world.bootstrap_pub.clone()]);
     let bootstrap_text = world
         .keys
-        .resolve(&world.bootstrap_ref)
+        .resolve(&world.bootstrap_ref, "")
         .await
         .unwrap()
         .unwrap();
@@ -873,7 +899,10 @@ async fn the_guest_config_action_is_an_allow_list_that_refuses_templates_and_lab
         )
         .await;
     assert_eq!(lifted.state, "succeeded", "{:?}", error_of(&lifted));
-    assert_eq!(world.pve.guest(vmid as u32).unwrap().config["protection"], 0);
+    assert_eq!(
+        world.pve.guest(vmid as u32).unwrap().config["protection"],
+        0
+    );
     assert_eq!(result_of(&lifted)["applied"], json!(["protection"]));
 
     // A key outside the allow-list is refused with no write.
@@ -943,7 +972,13 @@ async fn destroying_a_persistent_vm_is_a_separate_confirmed_act_that_lifts_prote
     assert_eq!(protected.state, "failed");
     assert!(world.pve.guest(vmid as u32).is_some());
     let markers = PersistentGuestRepository::new(world.pool.clone());
-    assert!(markers.get(&world.account_id, vmid as u32).await.unwrap().is_some());
+    assert!(
+        markers
+            .get(&world.account_id, vmid as u32)
+            .await
+            .unwrap()
+            .is_some()
+    );
 
     // Lift protection (a reviewed config action), then the confirmed destroy.
     let lifted = world
@@ -970,7 +1005,13 @@ async fn destroying_a_persistent_vm_is_a_separate_confirmed_act_that_lifts_prote
     assert_eq!(destroyed.state, "succeeded", "{:?}", error_of(&destroyed));
     assert!(world.pve.guest(vmid as u32).is_none());
     // The marker goes with the guest, so the VMID and name are free again.
-    assert!(markers.get(&world.account_id, vmid as u32).await.unwrap().is_none());
+    assert!(
+        markers
+            .get(&world.account_id, vmid as u32)
+            .await
+            .unwrap()
+            .is_none()
+    );
     let _ = &world.accounts;
 }
 
@@ -1025,7 +1066,12 @@ async fn lab_never_selects_a_persistent_guest_whatever_its_name() {
         client.clone(),
     )
     .with_persistent(markers.clone());
-    let vmids: Vec<u32> = inventory.lab_guests().await.iter().map(|g| g.vmid).collect();
+    let vmids: Vec<u32> = inventory
+        .lab_guests()
+        .await
+        .iter()
+        .map(|g| g.vmid)
+        .collect();
     assert_eq!(vmids, vec![7200]);
 
     // A pool never takes it, and the refusal says why.

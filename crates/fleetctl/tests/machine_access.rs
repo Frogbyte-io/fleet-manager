@@ -114,7 +114,7 @@ impl OperationExecutor for StubSsh {
     }
 }
 
-/// The machine's files.
+/// The machine's files. The stand-in honours any auth: no connection is made.
 #[derive(Debug, Default)]
 struct Guest {
     files: Mutex<HashMap<String, Vec<u8>>>,
@@ -143,6 +143,42 @@ impl GuestFiles for Guest {
                 .map_err(|error| error.to_string()),
         };
         (outcome, sink)
+    }
+
+    async fn fetch_with_auth(
+        &self,
+        machine_id: &str,
+        endpoint_id: &str,
+        _auth: Option<&fleet_application::machine_access::EndpointAuth>,
+        guest_os: fleet_core::GuestOs,
+        path: &str,
+        max_bytes: u64,
+        deadline: Duration,
+        sink: StagingFile,
+    ) -> (Result<FetchOutcome, String>, StagingFile) {
+        self.fetch(
+            machine_id,
+            endpoint_id,
+            guest_os,
+            path,
+            max_bytes,
+            deadline,
+            sink,
+        )
+        .await
+    }
+
+    async fn put_with_auth(
+        &self,
+        machine_id: &str,
+        endpoint_id: &str,
+        _auth: Option<&fleet_application::machine_access::EndpointAuth>,
+        request: fleet_controller::lab_artifacts_store::GuestPut,
+        deadline: Duration,
+        source: std::fs::File,
+    ) -> Result<fleet_provider_ssh::PutOutcome, String> {
+        self.put(machine_id, endpoint_id, request, deadline, source)
+            .await
     }
 
     async fn put(

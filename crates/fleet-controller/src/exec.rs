@@ -520,20 +520,33 @@ impl ScriptExecutor {
         &self,
         payload: &SshExecPayload,
     ) -> Result<(SshConnectionSpec, String, String), String> {
-        let auth = match &payload.auth {
-            SshExecAuth::Agent => SshAuth::Agent,
-            SshExecAuth::IdentityFile { path } => SshAuth::IdentityFile { path: path.clone() },
-            SshExecAuth::Secret { credential } => {
-                let resolver = self
-                    .resolver
-                    .as_ref()
-                    .ok_or("stored-key authentication is not configured on this controller")?;
-                resolver
-                    .resolve(&fleet_application::machine_access::EndpointAuth::Secret {
-                        credential: credential.clone(),
-                    })
-                    .await?
+        let wire = match &payload.auth {
+            SshExecAuth::Agent => fleet_application::machine_access::EndpointAuth::Agent,
+            SshExecAuth::IdentityFile { path } => {
+                fleet_application::machine_access::EndpointAuth::IdentityFile { path: path.clone() }
             }
+            SshExecAuth::Secret { credential } => {
+                fleet_application::machine_access::EndpointAuth::Secret {
+                    credential: credential.clone(),
+                }
+            }
+        };
+        // With a resolver every auth kind goes through it, so an identity
+        // file under the controller's own data is refused and a stored key
+        // resolves only for a machine it is bound to.
+        let auth = match &self.resolver {
+            Some(resolver) => resolver.resolve(&wire, &payload.machine_id).await?,
+            None => match wire {
+                fleet_application::machine_access::EndpointAuth::Agent => SshAuth::Agent,
+                fleet_application::machine_access::EndpointAuth::IdentityFile { path } => {
+                    SshAuth::IdentityFile { path }
+                }
+                fleet_application::machine_access::EndpointAuth::Secret { .. } => {
+                    return Err(
+                        "stored-key authentication is not configured on this controller".to_owned(),
+                    );
+                }
+            },
         };
         let (mut spec, verified, host) = resolve_ssh_endpoint(
             self.machines.as_ref(),

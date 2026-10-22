@@ -236,6 +236,45 @@ fn machine_scoped_kind_permission_inner(kind: &str, payload: Option<&str>) -> Op
     }
 }
 
+/// The permission that reads a machine access operation (ADR 0017): its
+/// payload names the command or the files, and its result holds the output.
+fn machine_access_kind_permission(kind: &str) -> Option<Permission> {
+    match kind {
+        "machine.exec" => Some(Permission::MachineExec),
+        "machine.put" => Some(Permission::MachinePut),
+        "machine.collect" => Some(Permission::MachineCollect),
+        _ => None,
+    }
+}
+
+/// Whether the principal may see this operation: any kind but the machine
+/// access kinds, which need that kind's permission on the payload's machine.
+fn machine_operation_readable(
+    authorizer: &dyn Authorizer,
+    principal_id: &str,
+    operation: &Operation,
+) -> bool {
+    let Some(permission) = machine_access_kind_permission(&operation.kind) else {
+        return true;
+    };
+    let machine = operation
+        .payload_json
+        .as_deref()
+        .and_then(|payload| serde_json::from_str::<serde_json::Value>(payload).ok())
+        .and_then(|payload| payload["machineId"].as_str().map(str::to_owned));
+    machine.is_some_and(|machine| {
+        authorize(
+            authorizer,
+            AccessRequest {
+                principal_id,
+                action: permission,
+                resource: Some(&machine),
+            },
+        )
+        .is_ok()
+    })
+}
+
 /// The payload bound for provider inputs.
 pub const MAX_PAYLOAD_JSON: usize = 128 * 1024;
 
@@ -1457,6 +1496,23 @@ impl Operations {
         }
         let rollout_payload = catalog_rollout_payload(new)?;
 
+        // A stored-key auth (ADR 0017) is resolved by the executor with the
+        // controller's key store, so only the machine routes, which authorize
+        // the caller against the machine and audit the request, may queue it.
+        // Without this, anyone who can queue `ssh.exec` could name a stored
+        // key reference and run commands as that key.
+        if route != CreateRoute::Dedicated
+            && new
+                .payload_json
+                .as_deref()
+                .and_then(|payload| serde_json::from_str::<serde_json::Value>(payload).ok())
+                .is_some_and(|payload| payload["auth"]["type"] == "secret")
+        {
+            return Err(OperationUseCaseError::Invalid {
+                detail: "a stored-key auth is accepted only through the machine routes".to_owned(),
+            });
+        }
+
         // The checkout and skills kinds act on a machine through SSH, so
         // their creation carries the machine-scoped authorization the
         // dedicated endpoints enforce: a caller with operation.create but
@@ -1803,6 +1859,11 @@ impl Operations {
         )
         .map_err(OperationUseCaseError::Denied)?;
         let operation = self.port.get(id).await.map_err(map_port_failure("get"))?;
+        if !machine_operation_readable(authorizer, principal_id, &operation) {
+            return Err(OperationUseCaseError::NotFound {
+                what: format!("operation {id}"),
+            });
+        }
         if crate::authz::is_delegated_principal(principal_id) {
             self.require_own_lab_operation(principal_id, &operation)
                 .await?;
@@ -1874,10 +1935,15 @@ impl Operations {
             },
         )
         .map_err(OperationUseCaseError::Denied)?;
-        self.port
+        let operations = self
+            .port
             .list(limit)
             .await
-            .map_err(map_port_failure("list"))
+            .map_err(map_port_failure("list"))?;
+        Ok(operations
+            .into_iter()
+            .filter(|operation| machine_operation_readable(authorizer, principal_id, operation))
+            .collect())
     }
 
     /// Requests cancellation of an operation.

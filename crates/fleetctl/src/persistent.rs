@@ -77,10 +77,9 @@ pub(crate) fn parse_create(rest: &[&str], output: &mut Output) -> Result<CreateA
             "--account" => args.account = Some(value("account")?),
             "--image-version" => args.image_version = Some(value("image-version")?),
             "--name" => args.name = Some(value("name")?),
-            "--vmid" => args.fields.push((
-                "vmid".to_owned(),
-                json!(number("vmid", &value("vmid")?)?),
-            )),
+            "--vmid" => args
+                .fields
+                .push(("vmid".to_owned(), json!(number("vmid", &value("vmid")?)?))),
             "--node" => args.fields.push(("node".to_owned(), json!(value("node")?))),
             "--storage" => args
                 .fields
@@ -189,7 +188,8 @@ pub(crate) fn parse_create(rest: &[&str], output: &mut Output) -> Result<CreateA
                         message: "--admin-password must be none, store or discard".to_owned(),
                     });
                 }
-                args.windows.insert("adminPassword".to_owned(), json!(policy));
+                args.windows
+                    .insert("adminPassword".to_owned(), json!(policy));
             }
             "--activate-key" => {
                 args.windows.insert(
@@ -246,7 +246,10 @@ impl CreateArgs {
             spec.insert("tags".to_owned(), json!(self.tags));
         }
         if !self.bootstrap.is_empty() {
-            spec.insert("bootstrap".to_owned(), Value::Object(self.bootstrap.clone()));
+            spec.insert(
+                "bootstrap".to_owned(),
+                Value::Object(self.bootstrap.clone()),
+            );
         }
         if let Some(fingerprint) = &self.pinned {
             spec.insert(
@@ -382,7 +385,10 @@ mod tests {
             parse(&all).unwrap().spec()
         };
         assert!(with(&[])["credential"].is_null());
-        assert_eq!(with(&["--credential", "generate"])["credential"]["type"], "generate");
+        assert_eq!(
+            with(&["--credential", "generate"])["credential"]["type"],
+            "generate"
+        );
         assert_eq!(
             with(&["--credential", "ref-1"])["credential"],
             json!({"type": "reference", "credential": "ref-1"})
@@ -391,6 +397,17 @@ mod tests {
             with(&["--public-key", "ssh-ed25519 AAAA c"])["credential"]["type"],
             "publicKey"
         );
-        assert!(parse(&["--account", "a", "--image-version", "v", "--name", "n", "--bogus"]).is_err());
+        assert!(
+            parse(&[
+                "--account",
+                "a",
+                "--image-version",
+                "v",
+                "--name",
+                "n",
+                "--bogus"
+            ])
+            .is_err()
+        );
     }
 }

@@ -1278,13 +1278,11 @@ fn validate_destructive_params(action: &str, params: &serde_json::Value) -> Resu
                 return Ok(());
             }
             if !params.is_object()
-                || params
-                    .as_object()
-                    .is_some_and(|params| {
-                        params
-                            .keys()
-                            .any(|key| !matches!(key.as_str(), "purge" | "confirmPersistent"))
-                    })
+                || params.as_object().is_some_and(|params| {
+                    params
+                        .keys()
+                        .any(|key| !matches!(key.as_str(), "purge" | "confirmPersistent"))
+                })
             {
                 return Err(
                     "destroy parameters must be an object containing only purge and confirmPersistent"

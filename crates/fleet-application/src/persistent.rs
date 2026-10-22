@@ -864,7 +864,9 @@ impl PersistentMachines {
                 .keys
                 .as_ref()
                 .ok_or_else(|| backend("no SSH key store is wired".to_owned()))?;
-            if !keys.exists(credential).await.map_err(backend)? {
+            // The machine does not exist yet, so only a key not bound to a
+            // machine can be named here (an empty machine id matches none).
+            if !keys.exists(credential, "").await.map_err(backend)? {
                 return Err(invalid(
                     "the SSH credential reference names no usable key".to_owned(),
                 ));

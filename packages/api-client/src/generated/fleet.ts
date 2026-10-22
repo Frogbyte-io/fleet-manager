@@ -9448,6 +9448,13 @@ export interface StoreProductKeyRequest {
  */
 export interface StoreSshKeyRequest {
   /**
+     * Binds the key to one machine: it then resolves for that machine only.
+     * Absent, the key is unbound and usable on any machine by a caller who
+     * may change that machine's credentials.
+     * @nullable
+     */
+  machineId?: string | null;
+  /**
      * An unencrypted PEM or OpenSSH private key. It is stored in the
      * encrypted secret store and never returned or recorded.
      */

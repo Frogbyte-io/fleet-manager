@@ -52,24 +52,23 @@ impl SecretBackedMachineKeys {
         Self { secrets }
     }
 
-    /// Whether `reference` names a live record inside a usable namespace.
-    async fn in_namespace(&self, reference: &str) -> Result<bool, String> {
+    /// Whether `reference` names a live record inside a namespace usable on
+    /// `machine_id`: a `machines/ssh/<machine>/...` record only on its own
+    /// machine, an unbound `machines/ssh/...` or `git/...` record anywhere.
+    async fn in_namespace(&self, reference: &str, machine_id: &str) -> Result<bool, String> {
         Ok(self
             .secrets
             .list()
             .await
             .map_err(|error| format!("the secret store is unreadable: {error}"))?
             .iter()
-            .any(|record| {
-                record.id == reference
-                    && (record.name.starts_with(KEY_PREFIX) || record.name.starts_with(GIT_PREFIX))
-            }))
+            .any(|record| record.id == reference && usable_on(&record.name, machine_id)))
     }
 
     /// The stored text of a record inside a usable namespace, when it is
     /// live. `None` means missing, revoked, or outside the namespaces.
-    async fn text(&self, reference: &str) -> Result<Option<String>, String> {
-        if !self.in_namespace(reference).await? {
+    async fn text(&self, reference: &str, machine_id: &str) -> Result<Option<String>, String> {
+        if !self.in_namespace(reference, machine_id).await? {
             return Ok(None);
         }
         match self.secrets.resolve(reference).await {
@@ -85,11 +84,16 @@ impl SecretBackedMachineKeys {
 
 #[async_trait]
 impl MachineKeyPort for SecretBackedMachineKeys {
-    async fn create(&self, private_key: &str) -> Result<String, String> {
+    async fn create(&self, private_key: &str, machine_id: Option<&str>) -> Result<String, String> {
         // Refuse anything that is not a usable key before it is stored, so
         // the store never holds a value an endpoint could not use.
         PrivateKey::parse(private_key)?;
-        let name = format!("{KEY_PREFIX}{}", uuid::Uuid::now_v7());
+        // A key stored for a machine carries the machine in its name, so
+        // it resolves for that machine only.
+        let name = match machine_id {
+            Some(machine) => format!("{KEY_PREFIX}{machine}/{}", uuid::Uuid::now_v7()),
+            None => format!("{KEY_PREFIX}{}", uuid::Uuid::now_v7()),
+        };
         self.secrets
             .create(
                 &name,
@@ -100,18 +104,18 @@ impl MachineKeyPort for SecretBackedMachineKeys {
             .map_err(|error| format!("the key could not be stored: {error}"))
     }
 
-    async fn exists(&self, reference: &str) -> Result<bool, String> {
+    async fn exists(&self, reference: &str, machine_id: &str) -> Result<bool, String> {
         // A live record that is not a usable key (an HTTPS token in the
         // repository-credential namespace) does not count: it could never
         // authenticate a session.
         Ok(self
-            .text(reference)
+            .text(reference, machine_id)
             .await?
             .is_some_and(|text| PrivateKey::parse(&text).is_ok()))
     }
 
-    async fn resolve(&self, reference: &str) -> Result<Option<String>, String> {
-        self.text(reference).await
+    async fn resolve(&self, reference: &str, machine_id: &str) -> Result<Option<String>, String> {
+        self.text(reference, machine_id).await
     }
 }
 
@@ -120,13 +124,47 @@ impl MachineKeyPort for SecretBackedMachineKeys {
 #[derive(Debug)]
 pub struct SshAuthResolver {
     keys: Arc<dyn MachineKeyPort>,
+    protected: Vec<std::path::PathBuf>,
 }
 
 impl SshAuthResolver {
     /// Composes the resolver over a key store.
     #[must_use]
     pub fn new(keys: Arc<dyn MachineKeyPort>) -> Self {
-        Self { keys }
+        Self {
+            keys,
+            protected: Vec::new(),
+        }
+    }
+
+    /// Refuses identity files under these paths (the controller's data
+    /// directory and master key): the SSH work directory holds other
+    /// sessions' key files, and an identity-file auth could otherwise name
+    /// one.
+    #[must_use]
+    pub fn protecting(mut self, paths: Vec<std::path::PathBuf>) -> Self {
+        self.protected = paths;
+        self
+    }
+
+    fn check_identity_path(&self, path: &str) -> Result<(), String> {
+        let given = std::path::Path::new(path);
+        // The canonical path when it exists (a symlink cannot hide a
+        // protected file); otherwise the path as written.
+        let resolved = std::fs::canonicalize(given).unwrap_or_else(|_| given.to_path_buf());
+        let protected = self.protected.iter().any(|root| {
+            let root = std::fs::canonicalize(root).unwrap_or_else(|_| root.clone());
+            resolved.starts_with(&root) || given.starts_with(&root)
+        });
+        if protected
+            || given
+                .components()
+                .any(|c| c == std::path::Component::ParentDir)
+        {
+            Err("the identity file is inside the controller's own data; it is refused".to_owned())
+        } else {
+            Ok(())
+        }
     }
 
     /// The provider auth for `auth`.
@@ -135,14 +173,17 @@ impl SshAuthResolver {
     ///
     /// Fails, without echoing key text, when a stored key was revoked, is
     /// unreadable, or is not a usable unencrypted private key.
-    pub async fn resolve(&self, auth: &EndpointAuth) -> Result<SshAuth, String> {
+    pub async fn resolve(&self, auth: &EndpointAuth, machine_id: &str) -> Result<SshAuth, String> {
         match auth {
             EndpointAuth::Agent => Ok(SshAuth::Agent),
-            EndpointAuth::IdentityFile { path } => Ok(SshAuth::IdentityFile { path: path.clone() }),
+            EndpointAuth::IdentityFile { path } => {
+                self.check_identity_path(path)?;
+                Ok(SshAuth::IdentityFile { path: path.clone() })
+            }
             EndpointAuth::Secret { credential } => {
                 let text = self
                     .keys
-                    .resolve(credential)
+                    .resolve(credential, machine_id)
                     .await?
                     .ok_or("the endpoint's stored SSH key no longer exists (revoked)")?;
                 let key = PrivateKey::parse(&text)?;
@@ -150,6 +191,18 @@ impl SshAuthResolver {
             }
         }
     }
+}
+
+/// Whether a secret record named `name` may authenticate a session on
+/// `machine_id` (see [`SecretBackedMachineKeys`]).
+fn usable_on(name: &str, machine_id: &str) -> bool {
+    if let Some(rest) = name.strip_prefix(KEY_PREFIX) {
+        return match rest.split_once('/') {
+            Some((owner, _)) => owner == machine_id,
+            None => true,
+        };
+    }
+    name.starts_with(GIT_PREFIX)
 }
 
 /// What a machine operation's payload names: where and how to connect.

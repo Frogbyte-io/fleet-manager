@@ -1384,7 +1384,10 @@ impl Run<'_> {
     async fn bootstrap_auth(&self, step: &'static str) -> Step<SshAuth> {
         self.exec
             .resolver
-            .resolve(&self.spec.bootstrap.auth)
+            .resolve(
+                &self.spec.bootstrap.auth,
+                self.machine_id.as_deref().unwrap_or_default(),
+            )
             .await
             .map_err(|detail| failure(step, "bootstrap_auth", detail))
     }
@@ -1439,7 +1442,7 @@ impl Run<'_> {
             && let Some(text) = self
                 .exec
                 .keys
-                .resolve(&credential)
+                .resolve(&credential, &machine_id)
                 .await
                 .map_err(|detail| failure(step, "credential_failed", detail))?
         {
@@ -1465,7 +1468,7 @@ impl Run<'_> {
                 let text = self
                     .exec
                     .keys
-                    .resolve(&credential)
+                    .resolve(&credential, &machine_id)
                     .await
                     .map_err(|detail| failure(step, "credential_failed", detail))?
                     .ok_or_else(|| {
@@ -1481,9 +1484,13 @@ impl Run<'_> {
         }
     }
 
-    /// Stores the generated private key as `machines/ssh/<id>`.
-    async fn store_key(&self, _machine_id: &str, key: &PrivateKey) -> Result<String, String> {
-        self.exec.keys.create(key.expose_for_store()).await
+    /// Stores the generated private key as `machines/ssh/<machine>/<id>`:
+    /// bound to the new machine, so it resolves on that machine only.
+    async fn store_key(&self, machine_id: &str, key: &PrivateKey) -> Result<String, String> {
+        self.exec
+            .keys
+            .create(key.expose_for_store(), Some(machine_id))
+            .await
     }
 
     async fn public_of(&self, text: &str) -> Step<String> {
@@ -1537,7 +1544,7 @@ impl Run<'_> {
         let stored = self
             .exec
             .resolver
-            .resolve(&auth)
+            .resolve(&auth, &machine_id)
             .await
             .map_err(|detail| failure(step, "verify_failed", detail))?;
         self.ssh(
@@ -1629,9 +1636,12 @@ impl Run<'_> {
                 let auth = self
                     .exec
                     .resolver
-                    .resolve(&EndpointAuth::Secret {
-                        credential: reference.clone(),
-                    })
+                    .resolve(
+                        &EndpointAuth::Secret {
+                            credential: reference.clone(),
+                        },
+                        self.machine_id.as_deref().unwrap_or_default(),
+                    )
                     .await
                     .map_err(|detail| failure(step, "credential_failed", detail))?;
                 Ok((user, auth))
