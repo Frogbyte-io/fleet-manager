@@ -5161,6 +5161,248 @@
         }
       }
     },
+    "/api/v1/machine-files/{fileId}": {
+      "get": {
+        "tags": [
+          "machines"
+        ],
+        "summary": "Reads one collected file's metadata.",
+        "description": "# Errors\n\nReturns the public error envelope on refusal or an unknown file.",
+        "operationId": "getMachineFile",
+        "parameters": [
+          {
+            "name": "fileId",
+            "in": "path",
+            "description": "The collected file's identity.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The file's metadata.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Resource_MachineFileDto"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The caller may not collect files from this machine.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "The file does not exist.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "A backend port failed.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Machine access is not wired, or the controller has no artifact store.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/machine-files/{fileId}/content": {
+      "get": {
+        "tags": [
+          "machines"
+        ],
+        "summary": "Streams one collected file's bytes. The controller re-hashes them first\nand refuses (409) bytes that no longer match the recorded size and\nsha256; the response carries the digest as `Repr-Digest` and `ETag`.",
+        "description": "# Errors\n\nReturns the public error envelope on refusal, an unknown file, or bytes\nthat are missing or corrupt.",
+        "operationId": "downloadMachineFile",
+        "parameters": [
+          {
+            "name": "fileId",
+            "in": "path",
+            "description": "The collected file's identity.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The file's verified bytes.",
+            "headers": {
+              "ETag": {
+                "schema": {
+                  "type": "string"
+                },
+                "description": "The bytes' sha256, as `\"sha256:<hex>\"`."
+              },
+              "Repr-Digest": {
+                "schema": {
+                  "type": "string"
+                },
+                "description": "The bytes' sha256, as `sha-256=:<base64>:` (RFC 9530)."
+              }
+            },
+            "content": {
+              "application/octet-stream": {
+                "schema": {
+                  "$ref": "#/components/schemas/ArtifactBytes"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The caller may not collect files from this machine.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "The file does not exist.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The stored bytes are missing or no longer match their digest.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "A backend port failed.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Machine access is not wired, or the controller has no artifact store.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/machine-ssh-keys": {
+      "post": {
+        "tags": [
+          "machines"
+        ],
+        "summary": "Stores an SSH private key for stored-key authentication and returns its\nreference. The key is never returned, logged, or recorded in an audit\nevent.",
+        "description": "# Errors\n\nReturns the public error envelope on refusal, a value that is not a\nusable unencrypted private key, or when no secret store is configured.",
+        "operationId": "storeMachineSshKey",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/StoreSshKeyRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "description": "The key is stored; the reference is the only thing returned.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Resource_StoredSshKeyDto"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The value is not a usable unencrypted private key, or no secret store is configured.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The caller may not write secrets.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "A backend port failed.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Machine access is not wired.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/machines": {
       "get": {
         "tags": [
@@ -5823,6 +6065,111 @@
         }
       }
     },
+    "/api/v1/machines/{machineId}/collect": {
+      "post": {
+        "tags": [
+          "machines"
+        ],
+        "summary": "Copies declared files off a machine into the controller's artifact store\nas a `machine.collect` operation. A path that cannot be copied fails the\noperation (the files that were copied stay stored); the result lists the\nstored files.",
+        "description": "# Errors\n\nReturns the public error envelope on refusal, an unknown machine or\nendpoint, no usable auth, or invalid paths.",
+        "operationId": "collectMachineFiles",
+        "parameters": [
+          {
+            "name": "machineId",
+            "in": "path",
+            "description": "The machine's identity.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "Idempotency-Key",
+            "in": "header",
+            "description": "A caller-chosen key: a retry with the same key returns the operation already queued.",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/MachineCollectRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "202": {
+            "description": "The copy is queued as a `machine.collect` operation; its result lists the stored files.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Resource_OperationDto"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The paths or target are invalid, the host key was never confirmed, or the endpoint has no auth.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The caller may not collect files from this machine.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "The machine or endpoint does not exist.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "A backend port failed.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Machine access is not wired, or the controller has no artifact store.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/machines/{machineId}/drift": {
       "get": {
         "tags": [
@@ -5875,6 +6222,681 @@
           },
           "503": {
             "description": "The planning surface is not wired.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/machines/{machineId}/endpoints/{endpointId}/auth": {
+      "get": {
+        "tags": [
+          "machines"
+        ],
+        "summary": "Reads an SSH endpoint's default auth.",
+        "description": "# Errors\n\nReturns the public error envelope on refusal, an unknown machine, or an\nendpoint that is not one of the machine's SSH endpoints.",
+        "operationId": "getMachineEndpointAuth",
+        "parameters": [
+          {
+            "name": "machineId",
+            "in": "path",
+            "description": "The machine's identity.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "endpointId",
+            "in": "path",
+            "description": "The SSH endpoint's identity.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The endpoint's default auth.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Resource_EndpointAuthStateDto"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The endpoint is not an SSH endpoint.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The caller may not read machines.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "The machine or endpoint does not exist.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "A backend port failed.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Machine access is not wired.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "put": {
+        "tags": [
+          "machines"
+        ],
+        "summary": "Records an SSH endpoint's default auth, so callers need not repeat it. A\n`secret` reference must name a stored SSH key.",
+        "description": "# Errors\n\nReturns the public error envelope on refusal, an unknown machine or\nendpoint, a malformed reference, or a secret that does not exist.",
+        "operationId": "setMachineEndpointAuth",
+        "parameters": [
+          {
+            "name": "machineId",
+            "in": "path",
+            "description": "The machine's identity.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "endpointId",
+            "in": "path",
+            "description": "The SSH endpoint's identity.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SetEndpointAuthRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "The recorded default auth.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Resource_EndpointAuthStateDto"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The endpoint is not an SSH endpoint, the reference is malformed, or the secret does not name a stored SSH key.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The caller may not update machines.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "The machine or endpoint does not exist.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "A backend port failed.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Machine access is not wired.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "tags": [
+          "machines"
+        ],
+        "summary": "Clears an SSH endpoint's default auth.",
+        "description": "# Errors\n\nReturns the public error envelope on refusal or an unknown machine or\nendpoint.",
+        "operationId": "clearMachineEndpointAuth",
+        "parameters": [
+          {
+            "name": "machineId",
+            "in": "path",
+            "description": "The machine's identity.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "endpointId",
+            "in": "path",
+            "description": "The SSH endpoint's identity.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The endpoint now has no default auth.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Resource_EndpointAuthStateDto"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The endpoint is not an SSH endpoint.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The caller may not update machines.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "The machine or endpoint does not exist.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "A backend port failed.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Machine access is not wired.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/machines/{machineId}/exec": {
+      "post": {
+        "tags": [
+          "machines"
+        ],
+        "summary": "Runs a bounded command on a machine over its SSH endpoint, with the\nendpoint's stored credential, as a `machine.exec` operation. The result\ncarries the exit code, scrubbed and bounded stdout and stderr, and\ntruncation flags. The audit event records the command's SHA-256, never\nthe command.",
+        "description": "# Errors\n\nReturns the public error envelope on refusal, an unknown machine or\nendpoint, an endpoint whose host key was never confirmed, no usable auth,\nor an invalid command.",
+        "operationId": "execMachine",
+        "parameters": [
+          {
+            "name": "machineId",
+            "in": "path",
+            "description": "The machine's identity.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "Idempotency-Key",
+            "in": "header",
+            "description": "A caller-chosen key: a retry with the same key and command returns the operation already queued.",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/MachineExecRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "202": {
+            "description": "The command is queued as a `machine.exec` operation; its result records the exit code and output.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Resource_OperationDto"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The command, timeout or target is invalid, the host key was never confirmed, or the endpoint has no auth.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The caller may not run commands on this machine.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "The machine or endpoint does not exist.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "A backend port failed.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Machine access is not wired.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/machines/{machineId}/files": {
+      "get": {
+        "tags": [
+          "machines"
+        ],
+        "summary": "Lists the files collected from a machine, newest first.",
+        "description": "# Errors\n\nReturns the public error envelope on refusal or backend failure.",
+        "operationId": "listMachineFiles",
+        "parameters": [
+          {
+            "name": "machineId",
+            "in": "path",
+            "description": "The machine's identity.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "description": "The page size (1-200; default 50).",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int32",
+              "minimum": 0
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The collected files, newest first.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Page_MachineFileDto"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The query parameters are malformed.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The caller may not collect files from this machine.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "A backend port failed.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Machine access is not wired, or the controller has no artifact store.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "machines"
+        ],
+        "summary": "Copies one file onto a machine as a `machine.put` operation. The body is\nthe raw file. It is streamed into controller staging (the cap is enforced\nwhile streaming) and sent over the endpoint's stored credential; the\ncontroller verifies the SHA-256 inside the guest and moves the file into\nplace only after it matches, so a failed put leaves nothing at the path.",
+        "description": "# Errors\n\nReturns the public error envelope on refusal, an unknown machine or\nendpoint, no usable auth, an invalid path, or an upload over the cap.",
+        "operationId": "putMachineFile",
+        "parameters": [
+          {
+            "name": "machineId",
+            "in": "path",
+            "description": "The machine's identity.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "path",
+            "in": "query",
+            "description": "The absolute guest path of the file to create.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "overwrite",
+            "in": "query",
+            "description": "Replace an existing regular file at the path (default false).",
+            "required": false,
+            "schema": {
+              "type": "boolean"
+            }
+          },
+          {
+            "name": "endpointId",
+            "in": "query",
+            "description": "The SSH endpoint; absent means the machine's only SSH endpoint.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "guestOs",
+            "in": "query",
+            "description": "`linux` (default) or `windows`.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "authType",
+            "in": "query",
+            "description": "An explicit auth kind: `agent`, `identityFile` or `secret`.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "credential",
+            "in": "query",
+            "description": "The secret reference, for `authType=secret`.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "identityPath",
+            "in": "query",
+            "description": "The identity file path, for `authType=identityFile`.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "X-Content-SHA256",
+            "in": "header",
+            "description": "The file's lowercase hex SHA-256; the upload is refused when what arrives hashes differently.",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          {
+            "name": "Idempotency-Key",
+            "in": "header",
+            "description": "A caller-chosen key bound to the target and the file's digest.",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          }
+        ],
+        "requestBody": {
+          "description": "The file's raw bytes.",
+          "content": {
+            "application/octet-stream": {
+              "schema": {
+                "type": "array",
+                "items": {
+                  "type": "integer",
+                  "format": "int32",
+                  "minimum": 0
+                }
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "202": {
+            "description": "The copy is queued as a `machine.put` operation; its result records the guest path, size and SHA-256.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Resource_OperationDto"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The path or target is invalid, the host key was never confirmed, the endpoint has no auth, or the declared SHA-256 does not match the body.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The caller may not put files onto this machine.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "The machine or endpoint does not exist.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "408": {
+            "description": "The upload body stalled for a minute.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "The file exceeds the controller's upload cap.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "A backend port failed.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The controller has no upload staging area, or too many uploads are in flight (code `busy`).",
             "content": {
               "application/json": {
                 "schema": {
@@ -14638,6 +15660,83 @@
           }
         }
       },
+      "EndpointAuthDto": {
+        "oneOf": [
+          {
+            "type": "object",
+            "description": "The controller's SSH agent and default key files.",
+            "required": [
+              "type"
+            ],
+            "properties": {
+              "type": {
+                "type": "string",
+                "enum": [
+                  "agent"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "An identity file on the controller, by path.",
+            "required": [
+              "path",
+              "type"
+            ],
+            "properties": {
+              "path": {
+                "type": "string",
+                "description": "The identity file's path."
+              },
+              "type": {
+                "type": "string",
+                "enum": [
+                  "identityFile"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "A private key Fleet holds as an encrypted secret, by reference.",
+            "required": [
+              "credential",
+              "type"
+            ],
+            "properties": {
+              "credential": {
+                "type": "string",
+                "description": "The reference returned when the key was stored."
+              },
+              "type": {
+                "type": "string",
+                "enum": [
+                  "secret"
+                ]
+              }
+            }
+          }
+        ],
+        "description": "How an SSH endpoint authenticates. A stored key is named by reference and\nis never returned."
+      },
+      "EndpointAuthStateDto": {
+        "type": "object",
+        "description": "An endpoint's recorded default auth.",
+        "properties": {
+          "auth": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/EndpointAuthDto",
+                "description": "The default auth, or `null` when none is recorded."
+              }
+            ]
+          }
+        }
+      },
       "EndpointDto": {
         "type": "object",
         "description": "One connection endpoint of a machine. The reference arrives redacted\nfrom the use case unless the caller may read sensitive endpoint detail.",
@@ -16284,6 +17383,47 @@
           }
         }
       },
+      "MachineCollectRequest": {
+        "type": "object",
+        "description": "The body of `POST /machines/{machineId}/collect`.",
+        "required": [
+          "paths"
+        ],
+        "properties": {
+          "auth": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/EndpointAuthDto",
+                "description": "An explicit auth, overriding the endpoint's default."
+              }
+            ]
+          },
+          "endpointId": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The SSH endpoint; absent means the machine's only SSH endpoint."
+          },
+          "guestOs": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The guest's OS, `linux` (default) or `windows`."
+          },
+          "paths": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "1 to 16 distinct absolute guest paths of regular files, each at most\n1024 bytes, without `.`, `..` or empty components or control\ncharacters (a Windows guest takes drive-absolute paths). Each file\nmust fit the controller's artifact size cap."
+          }
+        }
+      },
       "MachineDriftDto": {
         "type": "object",
         "description": "One machine's drift against the active desired revision.",
@@ -16442,6 +17582,122 @@
             "type": "integer",
             "format": "int64",
             "description": "Last mutation (epoch milliseconds)."
+          }
+        }
+      },
+      "MachineExecRequest": {
+        "type": "object",
+        "description": "The body of `POST /machines/{machineId}/exec`.",
+        "properties": {
+          "auth": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/EndpointAuthDto",
+                "description": "An explicit auth, overriding the endpoint's default."
+              }
+            ]
+          },
+          "command": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "type": "string"
+            },
+            "description": "A program and its arguments, passed to the guest as data (no shell\nparses them). Exactly one of `command` and `script` is required."
+          },
+          "endpointId": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The SSH endpoint; absent means the machine's only SSH endpoint."
+          },
+          "guestOs": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The guest's OS, `linux` (default) or `windows`."
+          },
+          "script": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Script text for the guest's shell (bash, or PowerShell on Windows),\nsent untouched."
+          },
+          "timeoutSeconds": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "The deadline in seconds (1-900; default 60).",
+            "minimum": 0
+          }
+        }
+      },
+      "MachineFileDto": {
+        "type": "object",
+        "description": "One file collected from a machine.",
+        "required": [
+          "id",
+          "machineId",
+          "owner",
+          "path",
+          "sizeBytes",
+          "sha256",
+          "createdAt",
+          "retainUntil"
+        ],
+        "properties": {
+          "createdAt": {
+            "type": "integer",
+            "format": "int64",
+            "description": "When it was stored (epoch milliseconds)."
+          },
+          "id": {
+            "type": "string",
+            "description": "The file record's identity."
+          },
+          "machineId": {
+            "type": "string",
+            "description": "The machine it came from."
+          },
+          "operationId": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The `machine.collect` operation that produced it."
+          },
+          "owner": {
+            "type": "string",
+            "description": "The principal that asked for the collection."
+          },
+          "path": {
+            "type": "string",
+            "description": "The guest path it was collected from."
+          },
+          "retainUntil": {
+            "type": "integer",
+            "format": "int64",
+            "description": "When the retention pass deletes it (epoch milliseconds)."
+          },
+          "sha256": {
+            "type": "string",
+            "description": "The lowercase hex sha256 of the bytes."
+          },
+          "sizeBytes": {
+            "type": "integer",
+            "format": "int64",
+            "description": "The size in bytes.",
+            "minimum": 0
           }
         }
       },
@@ -18807,6 +20063,83 @@
                   "type": "integer",
                   "format": "int64",
                   "description": "Last mutation (epoch milliseconds)."
+                }
+              }
+            },
+            "description": "The items on this page, in the endpoint's documented order."
+          },
+          "page": {
+            "$ref": "#/components/schemas/PageInfo",
+            "description": "Where this page sits in the result set."
+          }
+        }
+      },
+      "Page_MachineFileDto": {
+        "type": "object",
+        "description": "A page of resources.\n\nThe concrete schema for a list endpoint appears when that endpoint does;\n[`PageInfo`] is the part of the shape that is fixed for every one of them.",
+        "required": [
+          "items",
+          "page"
+        ],
+        "properties": {
+          "items": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "description": "One file collected from a machine.",
+              "required": [
+                "id",
+                "machineId",
+                "owner",
+                "path",
+                "sizeBytes",
+                "sha256",
+                "createdAt",
+                "retainUntil"
+              ],
+              "properties": {
+                "createdAt": {
+                  "type": "integer",
+                  "format": "int64",
+                  "description": "When it was stored (epoch milliseconds)."
+                },
+                "id": {
+                  "type": "string",
+                  "description": "The file record's identity."
+                },
+                "machineId": {
+                  "type": "string",
+                  "description": "The machine it came from."
+                },
+                "operationId": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "description": "The `machine.collect` operation that produced it."
+                },
+                "owner": {
+                  "type": "string",
+                  "description": "The principal that asked for the collection."
+                },
+                "path": {
+                  "type": "string",
+                  "description": "The guest path it was collected from."
+                },
+                "retainUntil": {
+                  "type": "integer",
+                  "format": "int64",
+                  "description": "When the retention pass deletes it (epoch milliseconds)."
+                },
+                "sha256": {
+                  "type": "string",
+                  "description": "The lowercase hex sha256 of the bytes."
+                },
+                "sizeBytes": {
+                  "type": "integer",
+                  "format": "int64",
+                  "description": "The size in bytes.",
+                  "minimum": 0
                 }
               }
             },
@@ -22291,6 +23624,32 @@
           }
         }
       },
+      "Resource_EndpointAuthStateDto": {
+        "type": "object",
+        "description": "A single resource.\n\nThe payload is nested under `data` so that later top-level fields are an\nadditive change rather than a breaking one.",
+        "required": [
+          "data"
+        ],
+        "properties": {
+          "data": {
+            "type": "object",
+            "description": "An endpoint's recorded default auth.",
+            "properties": {
+              "auth": {
+                "oneOf": [
+                  {
+                    "type": "null"
+                  },
+                  {
+                    "$ref": "#/components/schemas/EndpointAuthDto",
+                    "description": "The default auth, or `null` when none is recorded."
+                  }
+                ]
+              }
+            }
+          }
+        }
+      },
       "Resource_EnrollmentTokenCreatedDto": {
         "type": "object",
         "description": "A single resource.\n\nThe payload is nested under `data` so that later top-level fields are an\nadditive change rather than a breaking one.",
@@ -23359,6 +24718,74 @@
                 "type": "integer",
                 "format": "int64",
                 "description": "Last mutation (epoch milliseconds)."
+              }
+            }
+          }
+        }
+      },
+      "Resource_MachineFileDto": {
+        "type": "object",
+        "description": "A single resource.\n\nThe payload is nested under `data` so that later top-level fields are an\nadditive change rather than a breaking one.",
+        "required": [
+          "data"
+        ],
+        "properties": {
+          "data": {
+            "type": "object",
+            "description": "One file collected from a machine.",
+            "required": [
+              "id",
+              "machineId",
+              "owner",
+              "path",
+              "sizeBytes",
+              "sha256",
+              "createdAt",
+              "retainUntil"
+            ],
+            "properties": {
+              "createdAt": {
+                "type": "integer",
+                "format": "int64",
+                "description": "When it was stored (epoch milliseconds)."
+              },
+              "id": {
+                "type": "string",
+                "description": "The file record's identity."
+              },
+              "machineId": {
+                "type": "string",
+                "description": "The machine it came from."
+              },
+              "operationId": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "description": "The `machine.collect` operation that produced it."
+              },
+              "owner": {
+                "type": "string",
+                "description": "The principal that asked for the collection."
+              },
+              "path": {
+                "type": "string",
+                "description": "The guest path it was collected from."
+              },
+              "retainUntil": {
+                "type": "integer",
+                "format": "int64",
+                "description": "When the retention pass deletes it (epoch milliseconds)."
+              },
+              "sha256": {
+                "type": "string",
+                "description": "The lowercase hex sha256 of the bytes."
+              },
+              "sizeBytes": {
+                "type": "integer",
+                "format": "int64",
+                "description": "The size in bytes.",
+                "minimum": 0
               }
             }
           }
@@ -24787,6 +26214,28 @@
           }
         }
       },
+      "Resource_StoredSshKeyDto": {
+        "type": "object",
+        "description": "A single resource.\n\nThe payload is nested under `data` so that later top-level fields are an\nadditive change rather than a breaking one.",
+        "required": [
+          "data"
+        ],
+        "properties": {
+          "data": {
+            "type": "object",
+            "description": "The reference of a stored SSH key.",
+            "required": [
+              "credentialRef"
+            ],
+            "properties": {
+              "credentialRef": {
+                "type": "string",
+                "description": "The reference to use as `credential` in a `secret` endpoint auth."
+              }
+            }
+          }
+        }
+      },
       "Resource_TailnetStatusDto": {
         "type": "object",
         "description": "A single resource.\n\nThe payload is nested under `data` so that later top-level fields are an\nadditive change rather than a breaking one.",
@@ -26031,6 +27480,19 @@
           }
         }
       },
+      "SetEndpointAuthRequest": {
+        "type": "object",
+        "description": "The body of `PUT /machines/{machineId}/endpoints/{endpointId}/auth`.",
+        "required": [
+          "auth"
+        ],
+        "properties": {
+          "auth": {
+            "$ref": "#/components/schemas/EndpointAuthDto",
+            "description": "The default auth to record."
+          }
+        }
+      },
       "SetImageSecretRequest": {
         "type": "object",
         "description": "The set-secret request. The value is write-only: it is never echoed,\nlogged, audited, or readable afterwards.",
@@ -26876,6 +28338,19 @@
         },
         "additionalProperties": false
       },
+      "StoreSshKeyRequest": {
+        "type": "object",
+        "description": "The body of `POST /machine-ssh-keys`.",
+        "required": [
+          "privateKey"
+        ],
+        "properties": {
+          "privateKey": {
+            "type": "string",
+            "description": "An unencrypted PEM or OpenSSH private key. It is stored in the\nencrypted secret store and never returned or recorded."
+          }
+        }
+      },
       "StoredCredentialDto": {
         "type": "object",
         "description": "The reference of a stored Git credential.",
@@ -26886,6 +28361,19 @@
           "credentialRef": {
             "type": "string",
             "description": "The opaque reference to pass as `credentialRef`."
+          }
+        }
+      },
+      "StoredSshKeyDto": {
+        "type": "object",
+        "description": "The reference of a stored SSH key.",
+        "required": [
+          "credentialRef"
+        ],
+        "properties": {
+          "credentialRef": {
+            "type": "string",
+            "description": "The reference to use as `credential` in a `secret` endpoint auth."
           }
         }
       },

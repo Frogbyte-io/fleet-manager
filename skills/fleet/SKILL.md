@@ -54,6 +54,54 @@ fleetctl --output json machines get <machine-id>
 machine `id` (not its name) in every other command. A machine's `endpoints`
 list the SSH endpoint ids that SSH-driven commands take as `--endpoint`.
 
+### Working on a machine
+
+```bash
+fleetctl --output json machines exec <machine-id> -- uname -a
+fleetctl --output json machines exec <machine-id> --timeout 300 -- cargo test --workspace
+fleetctl --output json machines exec <machine-id> --script -- "cd /srv/app && ./deploy.sh | tail -n 20"
+fleetctl --output json machines exec <machine-id> --os windows --script -- "Get-Service sshd"
+fleetctl --output json machines put <machine-id> ./build/app.tar.gz /opt/app/app.tar.gz --overwrite
+fleetctl --output json machines collect <machine-id> /var/log/app/error.log /etc/app/config.yaml
+fleetctl --output json machines files <machine-id>
+fleetctl --output json machines file-get <file-id> --out ./error.log
+```
+
+The controller holds the machine's SSH key and runs every command; you never
+see the key and you never need an SSH client. An endpoint's default credential
+is recorded by whoever set up the machine, so you pass no `--auth`. If a
+command answers "the endpoint has no default auth", ask the user to set one
+(`machines endpoint-auth set`) rather than guessing a credential. `--endpoint`
+is only needed when the machine has more than one SSH endpoint.
+
+- `exec` waits and answers `{state, exitCode, stdout, stderr, truncatedStdout,
+  truncatedStderr}`. **The CLI exits with the command's own exit code**, so
+  branch on it. `255` can also be `ssh` itself failing (a refused login, an
+  unreachable host); read `stderr` and `reason`. A `reason` of `deadline_killed`
+  means the deadline (default 60 s, at most 900 s) passed: the command may
+  still have run, so check before repeating it. Output is cut at 1 MiB per
+  stream, with the matching `truncated*` flag set; send long output to a file
+  and `collect` it. Anything credential-shaped in the output is redacted.
+- Words after `--` are passed to the program as data, with no shell: pipes,
+  `&&` and `$VAR` do nothing. For shell syntax use `--script` with exactly one
+  word, the script text (bash; PowerShell on Windows, with `--os windows`).
+  Empty arguments cannot be passed; use `--script` for those.
+- `--os` is `linux` (default) or `windows`. A Windows machine takes
+  drive-absolute paths (`C:\Users\...`) for `put` and `collect`.
+- `put` sends one local file to an absolute path; it fails rather than replace
+  an existing file unless you pass `--overwrite`, and it verifies the SHA-256
+  inside the machine so a failed put leaves nothing behind. `collect` copies up
+  to 16 files (each within the controller's artifact cap) into the controller;
+  `file-get` downloads one and verifies it. Collected files are kept for seven
+  days. A failed `collect` still keeps the files it did copy and lists the
+  `failures` by path.
+- Never type a secret into a command, because the operation records it. Put it
+  in a file with `put`, or ask the user to set it up another way. `exec` is
+  audited by the command's digest, not its text.
+- Do not use `exec` to read the controller's own secrets or to remove your
+  access. There is no interactive terminal and no privilege elevation here;
+  if `sudo` needs a password, tell the user.
+
 ## Projects
 
 ```bash

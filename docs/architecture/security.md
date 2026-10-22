@@ -52,6 +52,12 @@ The `fleet-auth` authorizer decides a credential principal from a deny-by-defaul
 
 The credential narrows a caller that presents it; it is not a perimeter. Anonymous callers of the trusted-LAN listener stay administrators until the rest of M8 (sessions, bootstrap, refusing anonymous administration) lands.
 
+## Brokered machine access (proposed, ADR 0017)
+
+An agent works on a machine through the controller, which holds the machine's SSH key and runs every session. A stored key is an encrypted secret record in the `machines/ssh/` namespace (or an existing repository SSH credential in the `git/` namespace); an SSH endpoint records a kind and an opaque reference as its default auth, never a key. The controller resolves the key at the moment a session starts and hands it to `ssh` through a mode-0600 file in a mode-0700 directory that is removed after success, failure, deadline kill and cancellation (and emptied at start). No API response, CLI output, operation payload or result, log, or audit event contains the key, and a stored key's `Debug` is redacted.
+
+`machine.exec`, `machine.put` and `machine.collect` are durable operations created only through their dedicated routes, behind `machines.exec`, `machines.put` and `machines.collect` on the machine. The audit event for an exec records the machine, endpoint, auth kind, timeout and the SHA-256 of the command, never the command; put and collect record paths, sizes and digests, never content. They reuse the verified-endpoint trust gate, the `ssh.exec` bounds and output scrubber, and the Lab upload and artifact stores, so revocation (deleting the secret, clearing the endpoint's default, or revoking the principal) takes effect on the next command. There is no implicit fall back to the controller's own agent keys. An interactive terminal, bulk fan-out, privilege-elevation policy and certificate-based access (ADR 0017 option b) are out of scope.
+
 ## Brokered provider actions (ADR 0016)
 
 API-token providers (Coolify and Cloudflare in M10) are provider accounts whose tokens are encrypted secret records. No API, CLI output, log, audit event, operation payload, or result returns a token, and agents never receive one. An agent asks for a change by creating an `ActionRequest`: a typed provider action with structured, validated parameters. Each action type has a risk class, `auto`, `approve`, or `deny`, configurable per type. An approved request runs as a durable operation through the same authorization and audit path as any other mutation. Requests, decisions, and approvers are audited; parameters are validated, not interpreted as text.
@@ -82,7 +88,7 @@ Authorization is centralized in the application layer and answers principal/acti
 
 Initial permission vocabulary includes:
 
-- `machines.read`, `machines.enroll`, `machines.exec`, `machines.apply`, `machines.admin`
+- `machines.read`, `machines.enroll`, `machines.exec`, `machines.put`, `machines.collect`, `machines.apply`, `machines.admin` (`machines.exec`, `machines.put` and `machines.collect` are the brokered machine access actions of ADR 0017, scoped to the machine and never delegated to Lab credentials)
 - `projects.read`, `projects.clone`, `projects.modify`
 - `skills.read`, `skills.deploy`, `skills.modify`
 - `containers.read`, `containers.logs`, `containers.exec`, `containers.lifecycle`

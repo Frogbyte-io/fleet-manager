@@ -2339,6 +2339,29 @@ export interface DriftCountsDto {
 }
 
 /**
+ * How an SSH endpoint authenticates. A stored key is named by reference and
+ * is never returned.
+ */
+export type EndpointAuthDto = {
+  type: 'agent';
+} | {
+  /** The identity file's path. */
+  path: string;
+  type: 'identityFile';
+} | {
+  /** The reference returned when the key was stored. */
+  credential: string;
+  type: 'secret';
+};
+
+/**
+ * An endpoint's recorded default auth.
+ */
+export interface EndpointAuthStateDto {
+  auth?: null | EndpointAuthDto;
+}
+
+/**
  * The create-enrollment-token response. The token value is shown exactly
  * once; only its hash is stored.
  */
@@ -3153,6 +3176,30 @@ export interface LinkGuestRequest {
 }
 
 /**
+ * The body of `POST /machines/{machineId}/collect`.
+ */
+export interface MachineCollectRequest {
+  auth?: null | EndpointAuthDto;
+  /**
+     * The SSH endpoint; absent means the machine's only SSH endpoint.
+     * @nullable
+     */
+  endpointId?: string | null;
+  /**
+     * The guest's OS, `linux` (default) or `windows`.
+     * @nullable
+     */
+  guestOs?: string | null;
+  /**
+     * 1 to 16 distinct absolute guest paths of regular files, each at most
+     * 1024 bytes, without `.`, `..` or empty components or control
+     * characters (a Windows guest takes drive-absolute paths). Each file
+     * must fit the controller's artifact size cap.
+     */
+  paths: string[];
+}
+
+/**
  * The desired revision a plan was computed against.
  */
 export interface PlanRevisionDto {
@@ -3188,6 +3235,71 @@ export interface MachineDriftDto {
      * or `unavailable` (drift could not be computed for this machine).
      */
   status: string;
+}
+
+/**
+ * The body of `POST /machines/{machineId}/exec`.
+ */
+export interface MachineExecRequest {
+  auth?: null | EndpointAuthDto;
+  /**
+     * A program and its arguments, passed to the guest as data (no shell
+     * parses them). Exactly one of `command` and `script` is required.
+     * @nullable
+     */
+  command?: string[] | null;
+  /**
+     * The SSH endpoint; absent means the machine's only SSH endpoint.
+     * @nullable
+     */
+  endpointId?: string | null;
+  /**
+     * The guest's OS, `linux` (default) or `windows`.
+     * @nullable
+     */
+  guestOs?: string | null;
+  /**
+     * Script text for the guest's shell (bash, or PowerShell on Windows),
+     * sent untouched.
+     * @nullable
+     */
+  script?: string | null;
+  /**
+     * The deadline in seconds (1-900; default 60).
+     * @minimum 0
+     * @nullable
+     */
+  timeoutSeconds?: number | null;
+}
+
+/**
+ * One file collected from a machine.
+ */
+export interface MachineFileDto {
+  /** When it was stored (epoch milliseconds). */
+  createdAt: number;
+  /** The file record's identity. */
+  id: string;
+  /** The machine it came from. */
+  machineId: string;
+  /**
+     * The `machine.collect` operation that produced it.
+     * @nullable
+     */
+  operationId?: string | null;
+  /** The principal that asked for the collection. */
+  owner: string;
+  /** The guest path it was collected from. */
+  path: string;
+  /** When the retention pass deletes it (epoch milliseconds). */
+  retainUntil: number;
+  /** The lowercase hex sha256 of the bytes. */
+  sha256: string;
+  /**
+     * The size in bytes.
+     * @minimum 0
+     */
+  sizeBytes: number;
 }
 
 /**
@@ -4405,6 +4517,49 @@ export type PageMachineDtoItemsItem = {
 export interface PageMachineDto {
   /** The items on this page, in the endpoint's documented order. */
   items: PageMachineDtoItemsItem[];
+  /** Where this page sits in the result set. */
+  page: PageInfo;
+}
+
+/**
+ * One file collected from a machine.
+ */
+export type PageMachineFileDtoItemsItem = {
+  /** When it was stored (epoch milliseconds). */
+  createdAt: number;
+  /** The file record's identity. */
+  id: string;
+  /** The machine it came from. */
+  machineId: string;
+  /**
+     * The `machine.collect` operation that produced it.
+     * @nullable
+     */
+  operationId?: string | null;
+  /** The principal that asked for the collection. */
+  owner: string;
+  /** The guest path it was collected from. */
+  path: string;
+  /** When the retention pass deletes it (epoch milliseconds). */
+  retainUntil: number;
+  /** The lowercase hex sha256 of the bytes. */
+  sha256: string;
+  /**
+     * The size in bytes.
+     * @minimum 0
+     */
+  sizeBytes: number;
+};
+
+/**
+ * A page of resources.
+ *
+ * The concrete schema for a list endpoint appears when that endpoint does;
+ * [`PageInfo`] is the part of the shape that is fixed for every one of them.
+ */
+export interface PageMachineFileDto {
+  /** The items on this page, in the endpoint's documented order. */
+  items: PageMachineFileDtoItemsItem[];
   /** Where this page sits in the result set. */
   page: PageInfo;
 }
@@ -6425,6 +6580,24 @@ export interface ResourceDnsZonesDto {
 }
 
 /**
+ * An endpoint's recorded default auth.
+ */
+export type ResourceEndpointAuthStateDtoData = {
+  auth?: null | EndpointAuthDto;
+};
+
+/**
+ * A single resource.
+ *
+ * The payload is nested under `data` so that later top-level fields are an
+ * additive change rather than a breaking one.
+ */
+export interface ResourceEndpointAuthStateDto {
+  /** An endpoint's recorded default auth. */
+  data: ResourceEndpointAuthStateDtoData;
+}
+
+/**
  * The create-enrollment-token response. The token value is shown exactly
  * once; only its hash is stored.
  */
@@ -7060,6 +7233,47 @@ export type ResourceMachineDtoData = {
 export interface ResourceMachineDto {
   /** A machine, as the list and detail endpoints display it. */
   data: ResourceMachineDtoData;
+}
+
+/**
+ * One file collected from a machine.
+ */
+export type ResourceMachineFileDtoData = {
+  /** When it was stored (epoch milliseconds). */
+  createdAt: number;
+  /** The file record's identity. */
+  id: string;
+  /** The machine it came from. */
+  machineId: string;
+  /**
+     * The `machine.collect` operation that produced it.
+     * @nullable
+     */
+  operationId?: string | null;
+  /** The principal that asked for the collection. */
+  owner: string;
+  /** The guest path it was collected from. */
+  path: string;
+  /** When the retention pass deletes it (epoch milliseconds). */
+  retainUntil: number;
+  /** The lowercase hex sha256 of the bytes. */
+  sha256: string;
+  /**
+     * The size in bytes.
+     * @minimum 0
+     */
+  sizeBytes: number;
+};
+
+/**
+ * A single resource.
+ *
+ * The payload is nested under `data` so that later top-level fields are an
+ * additive change rather than a breaking one.
+ */
+export interface ResourceMachineFileDto {
+  /** One file collected from a machine. */
+  data: ResourceMachineFileDtoData;
 }
 
 /**
@@ -8291,6 +8505,25 @@ export interface ResourceStoredCredentialDto {
 }
 
 /**
+ * The reference of a stored SSH key.
+ */
+export type ResourceStoredSshKeyDtoData = {
+  /** The reference to use as `credential` in a `secret` endpoint auth. */
+  credentialRef: string;
+};
+
+/**
+ * A single resource.
+ *
+ * The payload is nested under `data` so that later top-level fields are an
+ * additive change rather than a breaking one.
+ */
+export interface ResourceStoredSshKeyDto {
+  /** The reference of a stored SSH key. */
+  data: ResourceStoredSshKeyDtoData;
+}
+
+/**
  * The integration's status: configured or not, the client id, and the
  * fixed read-only scope.
  */
@@ -8681,6 +8914,14 @@ export interface ServicesPage {
   items: RunningServiceDto[];
   /** Where this page sits in the result set. */
   page: PageInfo;
+}
+
+/**
+ * The body of `PUT /machines/{machineId}/endpoints/{endpointId}/auth`.
+ */
+export interface SetEndpointAuthRequest {
+  /** The default auth to record. */
+  auth: EndpointAuthDto;
 }
 
 /**
@@ -9093,10 +9334,29 @@ export interface StoreCredentialRequest {
 }
 
 /**
+ * The body of `POST /machine-ssh-keys`.
+ */
+export interface StoreSshKeyRequest {
+  /**
+     * An unencrypted PEM or OpenSSH private key. It is stored in the
+     * encrypted secret store and never returned or recorded.
+     */
+  privateKey: string;
+}
+
+/**
  * The reference of a stored Git credential.
  */
 export interface StoredCredentialDto {
   /** The opaque reference to pass as `credentialRef`. */
+  credentialRef: string;
+}
+
+/**
+ * The reference of a stored SSH key.
+ */
+export interface StoredSshKeyDto {
+  /** The reference to use as `credential` in a `secret` endpoint auth. */
   credentialRef: string;
 }
 
@@ -9436,6 +9696,45 @@ export type ListOnboardingDraftsParams = {
  * @minimum 0
  */
 limit?: number;
+};
+
+export type ListMachineFilesParams = {
+/**
+ * The page size (1-200; default 50).
+ * @minimum 0
+ */
+limit?: number;
+};
+
+export type PutMachineFileParams = {
+/**
+ * The absolute guest path of the file to create.
+ */
+path: string;
+/**
+ * Replace an existing regular file at the path (default false).
+ */
+overwrite?: boolean;
+/**
+ * The SSH endpoint; absent means the machine's only SSH endpoint.
+ */
+endpointId?: string;
+/**
+ * `linux` (default) or `windows`.
+ */
+guestOs?: string;
+/**
+ * An explicit auth kind: `agent`, `identityFile` or `secret`.
+ */
+authType?: string;
+/**
+ * The secret reference, for `authType=secret`.
+ */
+credential?: string;
+/**
+ * The identity file path, for `authType=identityFile`.
+ */
+identityPath?: string;
 };
 
 export type ListOperationsParams = {
@@ -14863,6 +15162,226 @@ export const startLabProvision = async (versionId: string, options?: RequestInit
 
 
 
+export type getMachineFileResponse200 = {
+  data: ResourceMachineFileDto
+  status: 200
+}
+
+export type getMachineFileResponse403 = {
+  data: ApiError
+  status: 403
+}
+
+export type getMachineFileResponse404 = {
+  data: ApiError
+  status: 404
+}
+
+export type getMachineFileResponse500 = {
+  data: ApiError
+  status: 500
+}
+
+export type getMachineFileResponse503 = {
+  data: ApiError
+  status: 503
+}
+
+export type getMachineFileResponseSuccess = (getMachineFileResponse200) & {
+  headers: Headers;
+};
+export type getMachineFileResponseError = (getMachineFileResponse403 | getMachineFileResponse404 | getMachineFileResponse500 | getMachineFileResponse503) & {
+  headers: Headers;
+};
+
+export type getMachineFileResponse = (getMachineFileResponseSuccess | getMachineFileResponseError)
+
+export const getGetMachineFileUrl = (fileId: string,) => {
+
+
+
+
+  return `/api/v1/machine-files/${fileId}`
+}
+
+/**
+ * # Errors
+ *
+ * Returns the public error envelope on refusal or an unknown file.
+ * @summary Reads one collected file's metadata.
+ */
+export const getMachineFile = async (fileId: string, options?: RequestInit): Promise<getMachineFileResponse> => {
+
+  const res = await fetch(getGetMachineFileUrl(fileId),
+  {
+    ...options,
+    method: 'GET'
+
+
+  }
+)
+
+
+  const body = [204, 205, 304].includes(res.status) ? null : await res.text();
+
+  const data: getMachineFileResponse['data'] = body ? JSON.parse(body) : {}
+  return { data, status: res.status, headers: res.headers } as getMachineFileResponse
+}
+
+
+
+export type downloadMachineFileResponse200 = {
+  data: Blob
+  status: 200
+}
+
+export type downloadMachineFileResponse403 = {
+  data: ApiError
+  status: 403
+}
+
+export type downloadMachineFileResponse404 = {
+  data: ApiError
+  status: 404
+}
+
+export type downloadMachineFileResponse409 = {
+  data: ApiError
+  status: 409
+}
+
+export type downloadMachineFileResponse500 = {
+  data: ApiError
+  status: 500
+}
+
+export type downloadMachineFileResponse503 = {
+  data: ApiError
+  status: 503
+}
+
+export type downloadMachineFileResponseSuccess = (downloadMachineFileResponse200) & {
+  headers: Headers;
+};
+export type downloadMachineFileResponseError = (downloadMachineFileResponse403 | downloadMachineFileResponse404 | downloadMachineFileResponse409 | downloadMachineFileResponse500 | downloadMachineFileResponse503) & {
+  headers: Headers;
+};
+
+export type downloadMachineFileResponse = (downloadMachineFileResponseSuccess | downloadMachineFileResponseError)
+
+export const getDownloadMachineFileUrl = (fileId: string,) => {
+
+
+
+
+  return `/api/v1/machine-files/${fileId}/content`
+}
+
+/**
+ * # Errors
+ *
+ * Returns the public error envelope on refusal, an unknown file, or bytes
+ * that are missing or corrupt.
+ * @summary Streams one collected file's bytes. The controller re-hashes them first
+and refuses (409) bytes that no longer match the recorded size and
+sha256; the response carries the digest as `Repr-Digest` and `ETag`.
+ */
+export const downloadMachineFile = async (fileId: string, options?: RequestInit): Promise<downloadMachineFileResponse> => {
+
+  const res = await fetch(getDownloadMachineFileUrl(fileId),
+  {
+    ...options,
+    method: 'GET'
+
+
+  }
+)
+
+
+  const body = [204, 205, 304].includes(res.status) ? null : await res.blob();
+  const data: downloadMachineFileResponse['data'] = body as downloadMachineFileResponse['data']
+  return { data, status: res.status, headers: res.headers } as downloadMachineFileResponse
+}
+
+
+
+export type storeMachineSshKeyResponse201 = {
+  data: ResourceStoredSshKeyDto
+  status: 201
+}
+
+export type storeMachineSshKeyResponse400 = {
+  data: ApiError
+  status: 400
+}
+
+export type storeMachineSshKeyResponse403 = {
+  data: ApiError
+  status: 403
+}
+
+export type storeMachineSshKeyResponse500 = {
+  data: ApiError
+  status: 500
+}
+
+export type storeMachineSshKeyResponse503 = {
+  data: ApiError
+  status: 503
+}
+
+export type storeMachineSshKeyResponseSuccess = (storeMachineSshKeyResponse201) & {
+  headers: Headers;
+};
+export type storeMachineSshKeyResponseError = (storeMachineSshKeyResponse400 | storeMachineSshKeyResponse403 | storeMachineSshKeyResponse500 | storeMachineSshKeyResponse503) & {
+  headers: Headers;
+};
+
+export type storeMachineSshKeyResponse = (storeMachineSshKeyResponseSuccess | storeMachineSshKeyResponseError)
+
+export const getStoreMachineSshKeyUrl = () => {
+
+
+
+
+  return `/api/v1/machine-ssh-keys`
+}
+
+/**
+ * # Errors
+ *
+ * Returns the public error envelope on refusal, a value that is not a
+ * usable unencrypted private key, or when no secret store is configured.
+ * @summary Stores an SSH private key for stored-key authentication and returns its
+reference. The key is never returned, logged, or recorded in an audit
+event.
+ */
+export const storeMachineSshKey = async (storeSshKeyRequest: StoreSshKeyRequest, options?: RequestInit): Promise<storeMachineSshKeyResponse> => {
+
+    const getHeaders = (h?: NonNullable<RequestInit['headers']>): Record<string, string | readonly string[]> => {
+    if (!h) return {};
+    if (h instanceof Headers) return Object.fromEntries(h.entries());
+    if (Array.isArray(h)) return Object.fromEntries(h);
+    return h;
+  };
+const res = await fetch(getStoreMachineSshKeyUrl(),
+  {
+    ...options,
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...getHeaders(options?.headers) },
+    body: JSON.stringify(storeSshKeyRequest)
+  }
+)
+
+
+  const body = [204, 205, 304].includes(res.status) ? null : await res.text();
+
+  const data: storeMachineSshKeyResponse['data'] = body ? JSON.parse(body) : {}
+  return { data, status: res.status, headers: res.headers } as storeMachineSshKeyResponse
+}
+
+
+
 export type listMachinesResponse200 = {
   data: PageMachineDto
   status: 200
@@ -15557,6 +16076,90 @@ const res = await fetch(getStartApplyWorkflowUrl(machineId),
 
 
 
+export type collectMachineFilesResponse202 = {
+  data: ResourceOperationDto
+  status: 202
+}
+
+export type collectMachineFilesResponse400 = {
+  data: ApiError
+  status: 400
+}
+
+export type collectMachineFilesResponse403 = {
+  data: ApiError
+  status: 403
+}
+
+export type collectMachineFilesResponse404 = {
+  data: ApiError
+  status: 404
+}
+
+export type collectMachineFilesResponse500 = {
+  data: ApiError
+  status: 500
+}
+
+export type collectMachineFilesResponse503 = {
+  data: ApiError
+  status: 503
+}
+
+export type collectMachineFilesResponseSuccess = (collectMachineFilesResponse202) & {
+  headers: Headers;
+};
+export type collectMachineFilesResponseError = (collectMachineFilesResponse400 | collectMachineFilesResponse403 | collectMachineFilesResponse404 | collectMachineFilesResponse500 | collectMachineFilesResponse503) & {
+  headers: Headers;
+};
+
+export type collectMachineFilesResponse = (collectMachineFilesResponseSuccess | collectMachineFilesResponseError)
+
+export const getCollectMachineFilesUrl = (machineId: string,) => {
+
+
+
+
+  return `/api/v1/machines/${machineId}/collect`
+}
+
+/**
+ * # Errors
+ *
+ * Returns the public error envelope on refusal, an unknown machine or
+ * endpoint, no usable auth, or invalid paths.
+ * @summary Copies declared files off a machine into the controller's artifact store
+as a `machine.collect` operation. A path that cannot be copied fails the
+operation (the files that were copied stay stored); the result lists the
+stored files.
+ */
+export const collectMachineFiles = async (machineId: string,
+    machineCollectRequest: MachineCollectRequest, options?: RequestInit): Promise<collectMachineFilesResponse> => {
+
+    const getHeaders = (h?: NonNullable<RequestInit['headers']>): Record<string, string | readonly string[]> => {
+    if (!h) return {};
+    if (h instanceof Headers) return Object.fromEntries(h.entries());
+    if (Array.isArray(h)) return Object.fromEntries(h);
+    return h;
+  };
+const res = await fetch(getCollectMachineFilesUrl(machineId),
+  {
+    ...options,
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...getHeaders(options?.headers) },
+    body: JSON.stringify(machineCollectRequest)
+  }
+)
+
+
+  const body = [204, 205, 304].includes(res.status) ? null : await res.text();
+
+  const data: collectMachineFilesResponse['data'] = body ? JSON.parse(body) : {}
+  return { data, status: res.status, headers: res.headers } as collectMachineFilesResponse
+}
+
+
+
 export type getMachineDriftResponse200 = {
   data: ResourceMachineDriftDto
   status: 200
@@ -15617,6 +16220,509 @@ export const getMachineDrift = async (machineId: string, options?: RequestInit):
 
   const data: getMachineDriftResponse['data'] = body ? JSON.parse(body) : {}
   return { data, status: res.status, headers: res.headers } as getMachineDriftResponse
+}
+
+
+
+export type getMachineEndpointAuthResponse200 = {
+  data: ResourceEndpointAuthStateDto
+  status: 200
+}
+
+export type getMachineEndpointAuthResponse400 = {
+  data: ApiError
+  status: 400
+}
+
+export type getMachineEndpointAuthResponse403 = {
+  data: ApiError
+  status: 403
+}
+
+export type getMachineEndpointAuthResponse404 = {
+  data: ApiError
+  status: 404
+}
+
+export type getMachineEndpointAuthResponse500 = {
+  data: ApiError
+  status: 500
+}
+
+export type getMachineEndpointAuthResponse503 = {
+  data: ApiError
+  status: 503
+}
+
+export type getMachineEndpointAuthResponseSuccess = (getMachineEndpointAuthResponse200) & {
+  headers: Headers;
+};
+export type getMachineEndpointAuthResponseError = (getMachineEndpointAuthResponse400 | getMachineEndpointAuthResponse403 | getMachineEndpointAuthResponse404 | getMachineEndpointAuthResponse500 | getMachineEndpointAuthResponse503) & {
+  headers: Headers;
+};
+
+export type getMachineEndpointAuthResponse = (getMachineEndpointAuthResponseSuccess | getMachineEndpointAuthResponseError)
+
+export const getGetMachineEndpointAuthUrl = (machineId: string,
+    endpointId: string,) => {
+
+
+
+
+  return `/api/v1/machines/${machineId}/endpoints/${endpointId}/auth`
+}
+
+/**
+ * # Errors
+ *
+ * Returns the public error envelope on refusal, an unknown machine, or an
+ * endpoint that is not one of the machine's SSH endpoints.
+ * @summary Reads an SSH endpoint's default auth.
+ */
+export const getMachineEndpointAuth = async (machineId: string,
+    endpointId: string, options?: RequestInit): Promise<getMachineEndpointAuthResponse> => {
+
+  const res = await fetch(getGetMachineEndpointAuthUrl(machineId,endpointId),
+  {
+    ...options,
+    method: 'GET'
+
+
+  }
+)
+
+
+  const body = [204, 205, 304].includes(res.status) ? null : await res.text();
+
+  const data: getMachineEndpointAuthResponse['data'] = body ? JSON.parse(body) : {}
+  return { data, status: res.status, headers: res.headers } as getMachineEndpointAuthResponse
+}
+
+
+
+export type setMachineEndpointAuthResponse200 = {
+  data: ResourceEndpointAuthStateDto
+  status: 200
+}
+
+export type setMachineEndpointAuthResponse400 = {
+  data: ApiError
+  status: 400
+}
+
+export type setMachineEndpointAuthResponse403 = {
+  data: ApiError
+  status: 403
+}
+
+export type setMachineEndpointAuthResponse404 = {
+  data: ApiError
+  status: 404
+}
+
+export type setMachineEndpointAuthResponse500 = {
+  data: ApiError
+  status: 500
+}
+
+export type setMachineEndpointAuthResponse503 = {
+  data: ApiError
+  status: 503
+}
+
+export type setMachineEndpointAuthResponseSuccess = (setMachineEndpointAuthResponse200) & {
+  headers: Headers;
+};
+export type setMachineEndpointAuthResponseError = (setMachineEndpointAuthResponse400 | setMachineEndpointAuthResponse403 | setMachineEndpointAuthResponse404 | setMachineEndpointAuthResponse500 | setMachineEndpointAuthResponse503) & {
+  headers: Headers;
+};
+
+export type setMachineEndpointAuthResponse = (setMachineEndpointAuthResponseSuccess | setMachineEndpointAuthResponseError)
+
+export const getSetMachineEndpointAuthUrl = (machineId: string,
+    endpointId: string,) => {
+
+
+
+
+  return `/api/v1/machines/${machineId}/endpoints/${endpointId}/auth`
+}
+
+/**
+ * # Errors
+ *
+ * Returns the public error envelope on refusal, an unknown machine or
+ * endpoint, a malformed reference, or a secret that does not exist.
+ * @summary Records an SSH endpoint's default auth, so callers need not repeat it. A
+`secret` reference must name a stored SSH key.
+ */
+export const setMachineEndpointAuth = async (machineId: string,
+    endpointId: string,
+    setEndpointAuthRequest: SetEndpointAuthRequest, options?: RequestInit): Promise<setMachineEndpointAuthResponse> => {
+
+    const getHeaders = (h?: NonNullable<RequestInit['headers']>): Record<string, string | readonly string[]> => {
+    if (!h) return {};
+    if (h instanceof Headers) return Object.fromEntries(h.entries());
+    if (Array.isArray(h)) return Object.fromEntries(h);
+    return h;
+  };
+const res = await fetch(getSetMachineEndpointAuthUrl(machineId,endpointId),
+  {
+    ...options,
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json', ...getHeaders(options?.headers) },
+    body: JSON.stringify(setEndpointAuthRequest)
+  }
+)
+
+
+  const body = [204, 205, 304].includes(res.status) ? null : await res.text();
+
+  const data: setMachineEndpointAuthResponse['data'] = body ? JSON.parse(body) : {}
+  return { data, status: res.status, headers: res.headers } as setMachineEndpointAuthResponse
+}
+
+
+
+export type clearMachineEndpointAuthResponse200 = {
+  data: ResourceEndpointAuthStateDto
+  status: 200
+}
+
+export type clearMachineEndpointAuthResponse400 = {
+  data: ApiError
+  status: 400
+}
+
+export type clearMachineEndpointAuthResponse403 = {
+  data: ApiError
+  status: 403
+}
+
+export type clearMachineEndpointAuthResponse404 = {
+  data: ApiError
+  status: 404
+}
+
+export type clearMachineEndpointAuthResponse500 = {
+  data: ApiError
+  status: 500
+}
+
+export type clearMachineEndpointAuthResponse503 = {
+  data: ApiError
+  status: 503
+}
+
+export type clearMachineEndpointAuthResponseSuccess = (clearMachineEndpointAuthResponse200) & {
+  headers: Headers;
+};
+export type clearMachineEndpointAuthResponseError = (clearMachineEndpointAuthResponse400 | clearMachineEndpointAuthResponse403 | clearMachineEndpointAuthResponse404 | clearMachineEndpointAuthResponse500 | clearMachineEndpointAuthResponse503) & {
+  headers: Headers;
+};
+
+export type clearMachineEndpointAuthResponse = (clearMachineEndpointAuthResponseSuccess | clearMachineEndpointAuthResponseError)
+
+export const getClearMachineEndpointAuthUrl = (machineId: string,
+    endpointId: string,) => {
+
+
+
+
+  return `/api/v1/machines/${machineId}/endpoints/${endpointId}/auth`
+}
+
+/**
+ * # Errors
+ *
+ * Returns the public error envelope on refusal or an unknown machine or
+ * endpoint.
+ * @summary Clears an SSH endpoint's default auth.
+ */
+export const clearMachineEndpointAuth = async (machineId: string,
+    endpointId: string, options?: RequestInit): Promise<clearMachineEndpointAuthResponse> => {
+
+  const res = await fetch(getClearMachineEndpointAuthUrl(machineId,endpointId),
+  {
+    ...options,
+    method: 'DELETE'
+
+
+  }
+)
+
+
+  const body = [204, 205, 304].includes(res.status) ? null : await res.text();
+
+  const data: clearMachineEndpointAuthResponse['data'] = body ? JSON.parse(body) : {}
+  return { data, status: res.status, headers: res.headers } as clearMachineEndpointAuthResponse
+}
+
+
+
+export type execMachineResponse202 = {
+  data: ResourceOperationDto
+  status: 202
+}
+
+export type execMachineResponse400 = {
+  data: ApiError
+  status: 400
+}
+
+export type execMachineResponse403 = {
+  data: ApiError
+  status: 403
+}
+
+export type execMachineResponse404 = {
+  data: ApiError
+  status: 404
+}
+
+export type execMachineResponse500 = {
+  data: ApiError
+  status: 500
+}
+
+export type execMachineResponse503 = {
+  data: ApiError
+  status: 503
+}
+
+export type execMachineResponseSuccess = (execMachineResponse202) & {
+  headers: Headers;
+};
+export type execMachineResponseError = (execMachineResponse400 | execMachineResponse403 | execMachineResponse404 | execMachineResponse500 | execMachineResponse503) & {
+  headers: Headers;
+};
+
+export type execMachineResponse = (execMachineResponseSuccess | execMachineResponseError)
+
+export const getExecMachineUrl = (machineId: string,) => {
+
+
+
+
+  return `/api/v1/machines/${machineId}/exec`
+}
+
+/**
+ * # Errors
+ *
+ * Returns the public error envelope on refusal, an unknown machine or
+ * endpoint, an endpoint whose host key was never confirmed, no usable auth,
+ * or an invalid command.
+ * @summary Runs a bounded command on a machine over its SSH endpoint, with the
+endpoint's stored credential, as a `machine.exec` operation. The result
+carries the exit code, scrubbed and bounded stdout and stderr, and
+truncation flags. The audit event records the command's SHA-256, never
+the command.
+ */
+export const execMachine = async (machineId: string,
+    machineExecRequest: MachineExecRequest, options?: RequestInit): Promise<execMachineResponse> => {
+
+    const getHeaders = (h?: NonNullable<RequestInit['headers']>): Record<string, string | readonly string[]> => {
+    if (!h) return {};
+    if (h instanceof Headers) return Object.fromEntries(h.entries());
+    if (Array.isArray(h)) return Object.fromEntries(h);
+    return h;
+  };
+const res = await fetch(getExecMachineUrl(machineId),
+  {
+    ...options,
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...getHeaders(options?.headers) },
+    body: JSON.stringify(machineExecRequest)
+  }
+)
+
+
+  const body = [204, 205, 304].includes(res.status) ? null : await res.text();
+
+  const data: execMachineResponse['data'] = body ? JSON.parse(body) : {}
+  return { data, status: res.status, headers: res.headers } as execMachineResponse
+}
+
+
+
+export type listMachineFilesResponse200 = {
+  data: PageMachineFileDto
+  status: 200
+}
+
+export type listMachineFilesResponse400 = {
+  data: ApiError
+  status: 400
+}
+
+export type listMachineFilesResponse403 = {
+  data: ApiError
+  status: 403
+}
+
+export type listMachineFilesResponse500 = {
+  data: ApiError
+  status: 500
+}
+
+export type listMachineFilesResponse503 = {
+  data: ApiError
+  status: 503
+}
+
+export type listMachineFilesResponseSuccess = (listMachineFilesResponse200) & {
+  headers: Headers;
+};
+export type listMachineFilesResponseError = (listMachineFilesResponse400 | listMachineFilesResponse403 | listMachineFilesResponse500 | listMachineFilesResponse503) & {
+  headers: Headers;
+};
+
+export type listMachineFilesResponse = (listMachineFilesResponseSuccess | listMachineFilesResponseError)
+
+export const getListMachineFilesUrl = (machineId: string,
+    params?: ListMachineFilesParams,) => {
+  const normalizedParams = new URLSearchParams();
+
+  Object.entries(params || {}).forEach(([key, value]) => {
+
+    if (value !== undefined) {
+      normalizedParams.append(key, value === null ? 'null' : String(value))
+    }
+  });
+
+  const stringifiedParams = normalizedParams.toString();
+
+  return stringifiedParams.length > 0 ? `/api/v1/machines/${machineId}/files?${stringifiedParams}` : `/api/v1/machines/${machineId}/files`
+}
+
+/**
+ * # Errors
+ *
+ * Returns the public error envelope on refusal or backend failure.
+ * @summary Lists the files collected from a machine, newest first.
+ */
+export const listMachineFiles = async (machineId: string,
+    params?: ListMachineFilesParams, options?: RequestInit): Promise<listMachineFilesResponse> => {
+
+  const res = await fetch(getListMachineFilesUrl(machineId,params),
+  {
+    ...options,
+    method: 'GET'
+
+
+  }
+)
+
+
+  const body = [204, 205, 304].includes(res.status) ? null : await res.text();
+
+  const data: listMachineFilesResponse['data'] = body ? JSON.parse(body) : {}
+  return { data, status: res.status, headers: res.headers } as listMachineFilesResponse
+}
+
+
+
+export type putMachineFileResponse202 = {
+  data: ResourceOperationDto
+  status: 202
+}
+
+export type putMachineFileResponse400 = {
+  data: ApiError
+  status: 400
+}
+
+export type putMachineFileResponse403 = {
+  data: ApiError
+  status: 403
+}
+
+export type putMachineFileResponse404 = {
+  data: ApiError
+  status: 404
+}
+
+export type putMachineFileResponse408 = {
+  data: ApiError
+  status: 408
+}
+
+export type putMachineFileResponse413 = {
+  data: ApiError
+  status: 413
+}
+
+export type putMachineFileResponse500 = {
+  data: ApiError
+  status: 500
+}
+
+export type putMachineFileResponse503 = {
+  data: ApiError
+  status: 503
+}
+
+export type putMachineFileResponseSuccess = (putMachineFileResponse202) & {
+  headers: Headers;
+};
+export type putMachineFileResponseError = (putMachineFileResponse400 | putMachineFileResponse403 | putMachineFileResponse404 | putMachineFileResponse408 | putMachineFileResponse413 | putMachineFileResponse500 | putMachineFileResponse503) & {
+  headers: Headers;
+};
+
+export type putMachineFileResponse = (putMachineFileResponseSuccess | putMachineFileResponseError)
+
+export const getPutMachineFileUrl = (machineId: string,
+    params: PutMachineFileParams,) => {
+  const normalizedParams = new URLSearchParams();
+
+  Object.entries(params || {}).forEach(([key, value]) => {
+
+    if (value !== undefined) {
+      normalizedParams.append(key, value === null ? 'null' : String(value))
+    }
+  });
+
+  const stringifiedParams = normalizedParams.toString();
+
+  return stringifiedParams.length > 0 ? `/api/v1/machines/${machineId}/files?${stringifiedParams}` : `/api/v1/machines/${machineId}/files`
+}
+
+/**
+ * # Errors
+ *
+ * Returns the public error envelope on refusal, an unknown machine or
+ * endpoint, no usable auth, an invalid path, or an upload over the cap.
+ * @summary Copies one file onto a machine as a `machine.put` operation. The body is
+the raw file. It is streamed into controller staging (the cap is enforced
+while streaming) and sent over the endpoint's stored credential; the
+controller verifies the SHA-256 inside the guest and moves the file into
+place only after it matches, so a failed put leaves nothing at the path.
+ */
+export const putMachineFile = async (machineId: string,
+    putMachineFileBody: Blob,
+    params: PutMachineFileParams, options?: RequestInit): Promise<putMachineFileResponse> => {
+
+    const getHeaders = (h?: NonNullable<RequestInit['headers']>): Record<string, string | readonly string[]> => {
+    if (!h) return {};
+    if (h instanceof Headers) return Object.fromEntries(h.entries());
+    if (Array.isArray(h)) return Object.fromEntries(h);
+    return h;
+  };
+const res = await fetch(getPutMachineFileUrl(machineId,params),
+  {
+    ...options,
+    method: 'POST',
+    headers: { 'Content-Type': 'application/octet-stream', ...getHeaders(options?.headers) },
+    body: putMachineFileBody
+  }
+)
+
+
+  const body = [204, 205, 304].includes(res.status) ? null : await res.text();
+
+  const data: putMachineFileResponse['data'] = body ? JSON.parse(body) : {}
+  return { data, status: res.status, headers: res.headers } as putMachineFileResponse
 }
 
 

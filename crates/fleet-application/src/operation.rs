@@ -66,7 +66,7 @@ pub const BROKER_IDEMPOTENCY_PREFIX: &str = "action-request:";
 /// machine-scoped shape plus the plan and its approval identities
 /// (FM-402); the source kinds carry the remote/commit payloads and are
 /// catalog-level (FM-403).
-pub const CREATABLE_KINDS: [&str; 70] = [
+pub const CREATABLE_KINDS: [&str; 73] = [
     "noop",
     // Brokered Coolify lifecycle kind (FM-1033): created only through the
     // action broker.
@@ -137,6 +137,11 @@ pub const CREATABLE_KINDS: [&str; 70] = [
     "lab.exec_detach",
     "lab.collect",
     "lab.put",
+    // Brokered machine access kinds (#493, ADR 0017): created only through
+    // their dedicated machine routes.
+    "machine.exec",
+    "machine.put",
+    "machine.collect",
     "lab.pool.fill",
     // Brokered DNS kinds (FM-1042): created only through the action broker.
     "dns.record.upsert",
@@ -1115,6 +1120,54 @@ impl Operations {
         .await
     }
 
+    /// Queues a `machine.exec`, `machine.put` or `machine.collect` that
+    /// `MachineAccess` validated (#493), by a caller allowed to use that
+    /// kind's permission on the machine named in the payload.
+    ///
+    /// # Errors
+    ///
+    /// Fails on an unknown kind, a payload that names another machine,
+    /// denial, or a backend failure.
+    pub async fn create_machine_access(
+        &self,
+        authorizer: &dyn Authorizer,
+        principal_id: &str,
+        machine_id: &str,
+        new: &NewOperation,
+    ) -> Result<Operation, OperationUseCaseError> {
+        let permission = match new.kind.as_str() {
+            "machine.exec" => Permission::MachineExec,
+            "machine.put" => Permission::MachinePut,
+            "machine.collect" => Permission::MachineCollect,
+            other => {
+                return Err(OperationUseCaseError::Invalid {
+                    detail: format!("{other} is not a machine access kind"),
+                });
+            }
+        };
+        let linked = new
+            .payload_json
+            .as_deref()
+            .and_then(|payload| serde_json::from_str::<serde_json::Value>(payload).ok())
+            .and_then(|payload| payload["machineId"].as_str().map(str::to_owned));
+        if linked.as_deref() != Some(machine_id) {
+            return Err(OperationUseCaseError::Invalid {
+                detail: format!("the {} payload must match its machine", new.kind),
+            });
+        }
+        authorize(
+            authorizer,
+            AccessRequest {
+                principal_id,
+                action: permission,
+                resource: Some(machine_id),
+            },
+        )
+        .map_err(OperationUseCaseError::Denied)?;
+        self.create_inner(authorizer, principal_id, new, CreateRoute::Dedicated)
+            .await
+    }
+
     /// Queues the `lab.cleanup` operation for one releasing lease (the
     /// release and sweep routes), by a caller allowed to lease Lab guests.
     ///
@@ -1493,6 +1546,17 @@ impl Operations {
             if route != CreateRoute::Dedicated {
                 return Err(OperationUseCaseError::Invalid {
                     detail: "lab.put runs through the lease files route".to_owned(),
+                });
+            }
+        } else if matches!(
+            new.kind.as_str(),
+            "machine.exec" | "machine.put" | "machine.collect"
+        ) {
+            // Authorized by `create_machine_access` against its machine, and
+            // audited with the command digest by the machine access use case.
+            if route != CreateRoute::Dedicated {
+                return Err(OperationUseCaseError::Invalid {
+                    detail: format!("{} runs through its machine route", new.kind),
                 });
             }
         } else if new.kind == crate::lab_pool::FILL_KIND {

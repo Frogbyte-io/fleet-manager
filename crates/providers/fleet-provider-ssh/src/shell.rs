@@ -358,7 +358,7 @@ pub(crate) fn spawn_script_session(
     metadata: &ScriptMetadata,
     script: &str,
     deadline: Duration,
-) -> Result<std::process::Child, SshProviderError> {
+) -> Result<crate::key::SshChild, SshProviderError> {
     spawn_session(provider, endpoint, metadata, script, deadline, false)
 }
 
@@ -372,10 +372,15 @@ pub(crate) fn spawn_session(
     script: &str,
     deadline: Duration,
     watched: bool,
-) -> Result<std::process::Child, SshProviderError> {
+) -> Result<crate::key::SshChild, SshProviderError> {
     let shell = GuestShell::for_os(endpoint.guest_os)?;
     validate_metadata(metadata)?;
     let config_path = provider.write_config(&endpoint.auth)?;
+    // The guard travels with the child: dropping the session removes the file.
+    let key_file = match &endpoint.auth {
+        crate::SshAuth::StoredKey { key } => Some(provider.materialize_key(key)?),
+        _ => None,
+    };
 
     let (command_line, input) = shell.session_parts(watched, metadata, script, deadline);
     let mut command = std::process::Command::new("ssh");
@@ -387,8 +392,16 @@ pub(crate) fn spawn_session(
         .arg("-T")
         .arg("-p")
         .arg(endpoint.port.to_string());
-    if let crate::SshAuth::IdentityFile { path } = &endpoint.auth {
-        command.arg("-i").arg(path);
+    match &endpoint.auth {
+        crate::SshAuth::IdentityFile { path } => {
+            command.arg("-i").arg(path);
+        }
+        crate::SshAuth::StoredKey { .. } => {
+            if let Some(file) = &key_file {
+                command.arg("-i").arg(file.path());
+            }
+        }
+        crate::SshAuth::Agent => {}
     }
     crate::add_ssh_destination(&mut command, endpoint);
     command
@@ -396,10 +409,11 @@ pub(crate) fn spawn_session(
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped());
-    let mut child = command.spawn().map_err(|error| SshProviderError::Tool {
+    let child = command.spawn().map_err(|error| SshProviderError::Tool {
         tool: "ssh",
         detail: format!("cannot start: {error}"),
     })?;
+    let mut child = crate::key::SshChild::new(child, key_file);
     let stdin = child.stdin.as_mut().ok_or_else(|| SshProviderError::Tool {
         tool: "ssh",
         detail: "the ssh process has no stdin".to_owned(),

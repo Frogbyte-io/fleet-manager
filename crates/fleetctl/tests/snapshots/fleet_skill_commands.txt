@@ -10,6 +10,22 @@ fleetctl --output json machines list --tag <tag>
   -> GET /api/v1/machines?tag=gpu
 fleetctl --output json machines get <machine-id>
   -> GET /api/v1/machines/machine-id-example
+fleetctl --output json machines exec <machine-id> -- uname -a
+  -> POST /api/v1/machines/machine-id-example/exec body {"command":["uname","-a"]}
+fleetctl --output json machines exec <machine-id> --timeout 300 -- cargo test --workspace
+  -> POST /api/v1/machines/machine-id-example/exec body {"command":["cargo","test","--workspace"],"timeoutSeconds":300}
+fleetctl --output json machines exec <machine-id> --script -- "cd /srv/app && ./deploy.sh | tail -n 20"
+  -> POST /api/v1/machines/machine-id-example/exec body {"script":"cd /srv/app && ./deploy.sh | tail -n 20"}
+fleetctl --output json machines exec <machine-id> --os windows --script -- "Get-Service sshd"
+  -> POST /api/v1/machines/machine-id-example/exec body {"guestOs":"windows","script":"Get-Service sshd"}
+fleetctl --output json machines put <machine-id> ./build/app.tar.gz /opt/app/app.tar.gz --overwrite
+  -> POST /api/v1/machines/machine-id-example/files?path=/opt/app/app.tar.gz&overwrite=true
+fleetctl --output json machines collect <machine-id> /var/log/app/error.log /etc/app/config.yaml
+  -> POST /api/v1/machines/machine-id-example/collect body {"paths":["/var/log/app/error.log","/etc/app/config.yaml"]}
+fleetctl --output json machines files <machine-id>
+  -> GET /api/v1/machines/machine-id-example/files
+fleetctl --output json machines file-get <file-id> --out ./error.log
+  -> GET /api/v1/machine-files/file-id-example
 fleetctl --output json projects list
   -> GET /api/v1/projects
 fleetctl --output json projects get <project-id>

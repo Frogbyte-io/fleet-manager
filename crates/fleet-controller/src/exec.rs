@@ -68,7 +68,7 @@ fn watchdog_by_default() -> bool {
 }
 
 /// How the endpoint authenticates.
-#[derive(Debug, serde::Deserialize)]
+#[derive(Clone, Debug, serde::Deserialize)]
 #[serde(rename_all = "camelCase", tag = "type")]
 enum SshExecAuth {
     /// The controller's agent supplies the key.
@@ -77,6 +77,12 @@ enum SshExecAuth {
     IdentityFile {
         /// The identity file's path.
         path: String,
+    },
+    /// A private key Fleet holds as a secret, by reference (ADR 0017). The
+    /// executor resolves it just in time; the payload never carries a key.
+    Secret {
+        /// The secret-record reference.
+        credential: String,
     },
 }
 
@@ -115,6 +121,8 @@ pub struct ScriptExecutor {
     machines: Arc<dyn MachinePort>,
     provider: SshProvider,
     limiter: Arc<ExecutionLimiter>,
+    /// Resolves stored-key auth just in time (ADR 0017).
+    resolver: Option<Arc<crate::machine_access::SshAuthResolver>>,
     /// Retained for the provider's isolated directory lifetime.
     #[allow(dead_code)]
     work_dir: PathBuf,
@@ -155,8 +163,16 @@ impl ScriptExecutor {
             machines,
             provider,
             limiter,
+            resolver: None,
             work_dir,
         }
+    }
+
+    /// Lets `ssh.exec` authenticate with a stored key (ADR 0017).
+    #[must_use]
+    pub fn with_resolver(mut self, resolver: Arc<crate::machine_access::SshAuthResolver>) -> Self {
+        self.resolver = Some(resolver);
+        self
     }
 }
 
@@ -302,12 +318,7 @@ impl ScriptExecutor {
             working_directory: String::new(),
             environment: Vec::new(),
             arguments: Vec::new(),
-            auth: match &payload.auth {
-                SshExecAuth::Agent => SshExecAuth::Agent,
-                SshExecAuth::IdentityFile { path } => {
-                    SshExecAuth::IdentityFile { path: path.clone() }
-                }
-            },
+            auth: payload.auth.clone(),
             timeout_seconds: payload.timeout_seconds,
             guest_os: payload.guest_os,
             guest_watchdog: true,
@@ -470,6 +481,17 @@ impl ScriptExecutor {
         let auth = match &payload.auth {
             SshExecAuth::Agent => SshAuth::Agent,
             SshExecAuth::IdentityFile { path } => SshAuth::IdentityFile { path: path.clone() },
+            SshExecAuth::Secret { credential } => {
+                let resolver = self
+                    .resolver
+                    .as_ref()
+                    .ok_or("stored-key authentication is not configured on this controller")?;
+                resolver
+                    .resolve(&fleet_application::machine_access::EndpointAuth::Secret {
+                        credential: credential.clone(),
+                    })
+                    .await?
+            }
         };
         let (mut spec, verified, host) = resolve_ssh_endpoint(
             self.machines.as_ref(),
