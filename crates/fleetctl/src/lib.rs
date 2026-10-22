@@ -3832,7 +3832,9 @@ pub fn run(invocation: &Invocation) -> Result<String, CliError> {
 }
 
 /// [`run`], with the process exit code the result implies: `lab exec
-/// --wait` mirrors the remote command's exit code, and `lab create --wait`
+/// --wait` mirrors the remote command's exit code (a guest-side refusal, such
+/// as an interactive session that is not logged on, has no command exit code
+/// and exits 1; its `refusalCode` is in the JSON, #490), and `lab create --wait`
 /// and `lab destroy --wait` fail when the lease did not reach the state
 /// they waited for, as does `lab cleanup-retry --wait` when its attempt did
 /// not release the lease, and `lab collect --wait` fails unless every path
@@ -4961,6 +4963,25 @@ mod event_output_tests {
         ] {
             assert!(parsed(&args).is_err(), "{args:?}");
         }
+    }
+
+    /// A guest refusal (#490) is a failed operation with no command exit
+    /// code, so `lab exec --wait` exits 1 for it, not with the refusal code
+    /// (before #490 a refusal of 77 exited 77, like a command that exits 77).
+    #[test]
+    fn a_guest_refusal_is_exit_one_for_lab_exec_wait_not_its_code() {
+        let args: Vec<String> = ["lab", "exec", "lease-1", "--wait", "--", "x"]
+            .map(str::to_owned)
+            .into();
+        let exec = parse(&args).unwrap();
+        let refused = serde_json::json!({
+            "reason": "guest_refused", "refusalCode": 77, "detail": "no session"
+        });
+        assert_eq!(lab_exit_code(&exec.command, &refused), 1);
+        assert_eq!(
+            lab_exit_code(&exec.command, &serde_json::json!({"exitCode": 77})),
+            77
+        );
     }
 
     #[test]
