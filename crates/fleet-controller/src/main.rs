@@ -290,9 +290,13 @@ fn run_serve(mut config: fleet_config::ControllerConfig) -> ExitCode {
             )
         });
         let ssh_auth_resolver = machine_keys.as_ref().map(|keys| {
-            std::sync::Arc::new(fleet_controller::machine_access::SshAuthResolver::new(
-                keys.clone(),
-            ))
+            std::sync::Arc::new(
+                fleet_controller::machine_access::SshAuthResolver::new(keys.clone()).protecting(
+                    std::iter::once(config.data_dir.clone())
+                        .chain(config.master_key_file.clone())
+                        .collect(),
+                ),
+            )
         });
         let machine_access = {
             let mut access = fleet_application::machine_access::MachineAccess::new(
@@ -321,6 +325,11 @@ fn run_serve(mut config: fleet_config::ControllerConfig) -> ExitCode {
                         max_bytes: config.lab_artifact_max_bytes,
                     },
                 );
+            }
+            // One lock serializes blob commits and deletes for the Lab
+            // artifacts and the machine files that share the blob store.
+            if let Some(artifacts) = &lab_artifacts {
+                access = access.with_blob_lock(artifacts.blob_lock());
             }
             std::sync::Arc::new(access)
         };

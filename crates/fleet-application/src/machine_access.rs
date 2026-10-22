@@ -58,7 +58,11 @@ const MAX_REFERENCE_BYTES: usize = 1024;
 pub const POSIX_ARGV_SCRIPT: &str = "exec \"$@\"\n";
 /// The PowerShell script that runs the caller's argv from `$args` (ADR
 /// 0015's shell layer supplies the arguments), mapping the native exit code
-/// the way the layer already does.
+/// the way the layer already does. Windows PowerShell 5.1 builds a native
+/// command's line from the argument array itself and does not escape
+/// embedded double quotes, so an argument containing `"` may reach the
+/// program split or merged differently than given; use `--script` (and the
+/// program's own quoting) for such arguments.
 pub const POWERSHELL_ARGV_SCRIPT: &str = "$fleetCmd=$args[0];$fleetRest=@();if($args.Count -gt 1){$fleetRest=@($args[1..($args.Count-1)])};& $fleetCmd @fleetRest\n";
 
 /// How an SSH endpoint authenticates. The wire shape is the `auth` object
@@ -159,14 +163,14 @@ pub trait MachineKeyPort: fmt::Debug + Send + Sync {
     ///
     /// Fails with a secret-free detail when the value is not a usable key or
     /// the store errors.
-    async fn create(&self, private_key: &str) -> Result<String, String>;
+    async fn create(&self, private_key: &str, machine_id: Option<&str>) -> Result<String, String>;
 
     /// Whether the reference names a live, usable key.
     ///
     /// # Errors
     ///
     /// Fails with a secret-free detail when the store errors.
-    async fn exists(&self, reference: &str) -> Result<bool, String>;
+    async fn exists(&self, reference: &str, machine_id: &str) -> Result<bool, String>;
 
     /// Resolves a reference to the key text just in time. `None` means the
     /// reference is missing or revoked.
@@ -174,7 +178,7 @@ pub trait MachineKeyPort: fmt::Debug + Send + Sync {
     /// # Errors
     ///
     /// Fails with a secret-free detail when the store errors.
-    async fn resolve(&self, reference: &str) -> Result<Option<String>, String>;
+    async fn resolve(&self, reference: &str, machine_id: &str) -> Result<Option<String>, String>;
 }
 
 /// What to run.
@@ -320,7 +324,7 @@ pub struct MachineAccess {
     files: Option<Arc<dyn MachineFilePort>>,
     blobs: Option<Arc<dyn ArtifactBlobPort>>,
     policy: ArtifactPolicy,
-    blob_lock: tokio::sync::Mutex<()>,
+    blob_lock: Arc<tokio::sync::Mutex<()>>,
 }
 
 impl MachineAccess {
@@ -342,7 +346,7 @@ impl MachineAccess {
             files: None,
             blobs: None,
             policy: ArtifactPolicy::default(),
-            blob_lock: tokio::sync::Mutex::new(()),
+            blob_lock: Arc::new(tokio::sync::Mutex::new(())),
         }
     }
 
@@ -371,6 +375,15 @@ impl MachineAccess {
         self.files = Some(files);
         self.blobs = Some(blobs);
         self.policy = policy;
+        self
+    }
+
+    /// Shares the blob lock with the Lab artifact use cases, so a commit
+    /// here and a retention delete there never interleave on the same
+    /// content-addressed blob.
+    #[must_use]
+    pub fn with_blob_lock(mut self, lock: Arc<tokio::sync::Mutex<()>>) -> Self {
+        self.blob_lock = lock;
         self
     }
 
@@ -410,6 +423,7 @@ impl MachineAccess {
         authorizer: &dyn Authorizer,
         principal: &ActingPrincipal,
         private_key: &str,
+        machine_id: Option<&str>,
     ) -> Result<String, LabUseCaseError> {
         authorize(
             authorizer,
@@ -420,18 +434,35 @@ impl MachineAccess {
             },
         )
         .map_err(LabUseCaseError::Denied)?;
+        if let Some(machine_id) = machine_id {
+            // A key bound to a machine is usable only there; the machine
+            // must exist and the caller must be allowed to change it.
+            authorize(
+                authorizer,
+                AccessRequest {
+                    principal_id: &principal.id,
+                    action: Permission::MachineUpdate,
+                    resource: Some(machine_id),
+                },
+            )
+            .map_err(LabUseCaseError::Denied)?;
+            self.machine(machine_id).await?;
+        }
         let keys = self.keys_port()?;
+        let reference = keys
+            .create(private_key, machine_id)
+            .await
+            .map_err(|detail| LabUseCaseError::Invalid { detail })?;
+        // The event names the new opaque reference, which exists only now.
         self.audit_event(
             principal,
             Permission::SecretWrite,
-            None,
+            machine_id,
             "machine_ssh_key_stored",
-            &[],
+            &[("credentialRef", reference.clone())],
         )
         .await?;
-        keys.create(private_key)
-            .await
-            .map_err(|detail| LabUseCaseError::Invalid { detail })
+        Ok(reference)
     }
 
     /// An endpoint's recorded default auth.
@@ -452,7 +483,7 @@ impl MachineAccess {
             AccessRequest {
                 principal_id: &principal.id,
                 action: Permission::MachineRead,
-                resource: None,
+                resource: Some(machine_id),
             },
         )
         .map_err(LabUseCaseError::Denied)?;
@@ -493,7 +524,7 @@ impl MachineAccess {
         if let Some(auth) = auth {
             auth.validate()
                 .map_err(|detail| LabUseCaseError::Invalid { detail })?;
-            self.require_key(auth).await?;
+            self.require_key(auth, machine_id).await?;
         }
         // The intent records the kind and the opaque reference, never a key.
         let mut facts = vec![
@@ -553,7 +584,9 @@ impl MachineAccess {
         }
         let (script, arguments, digest) =
             prepare_command(&request.command, request.target.guest_os)?;
-        let (endpoint_id, auth) = self.resolve_target(&request.target).await?;
+        let (endpoint_id, auth) = self
+            .resolve_target(authorizer, principal, &request.target)
+            .await?;
         let facts = [
             ("endpointId", endpoint_id.clone()),
             ("authKind", auth.kind().to_owned()),
@@ -738,7 +771,8 @@ impl MachineAccess {
                 detail: format!("guest path: {detail}"),
             }
         })?;
-        self.resolve_target(&request.target).await
+        self.resolve_target(authorizer, principal, &request.target)
+            .await
     }
 
     /// Validates a collection of guest paths and answers the
@@ -767,7 +801,7 @@ impl MachineAccess {
         self.files_port()?;
         validate_collect_paths_for(target.guest_os, paths)
             .map_err(|detail| LabUseCaseError::Invalid { detail })?;
-        let (endpoint_id, auth) = self.resolve_target(target).await?;
+        let (endpoint_id, auth) = self.resolve_target(authorizer, principal, target).await?;
         self.audit_event(
             principal,
             Permission::MachineCollect,
@@ -1020,8 +1054,26 @@ impl MachineAccess {
     /// fall back.
     async fn resolve_target(
         &self,
+        authorizer: &dyn Authorizer,
+        principal: &ActingPrincipal,
         target: &AccessTarget<'_>,
     ) -> Result<(String, EndpointAuth), LabUseCaseError> {
+        // The endpoint's default is the credential an operator granted to
+        // everyone who may run commands there. Naming another one (a stored
+        // key, an identity file on the controller, the controller's agent)
+        // chooses which credential the controller uses, so it needs the
+        // right to change the machine.
+        if target.auth.is_some() {
+            authorize(
+                authorizer,
+                AccessRequest {
+                    principal_id: &principal.id,
+                    action: Permission::MachineUpdate,
+                    resource: Some(target.machine_id),
+                },
+            )
+            .map_err(LabUseCaseError::Denied)?;
+        }
         let machine = self.machine(target.machine_id).await?;
         let endpoint_id = if let Some(id) = target.endpoint_id {
             ssh_endpoint(&machine, id)?.id.clone()
@@ -1069,22 +1121,28 @@ impl MachineAccess {
         };
         auth.validate()
             .map_err(|detail| LabUseCaseError::Invalid { detail })?;
-        self.require_key(&auth).await?;
+        self.require_key(&auth, target.machine_id).await?;
         Ok((endpoint_id, auth))
     }
 
     /// A secret reference must resolve to a live key; other auth kinds have
     /// nothing to check here.
-    async fn require_key(&self, auth: &EndpointAuth) -> Result<(), LabUseCaseError> {
+    async fn require_key(
+        &self,
+        auth: &EndpointAuth,
+        machine_id: &str,
+    ) -> Result<(), LabUseCaseError> {
         let EndpointAuth::Secret { credential } = auth else {
             return Ok(());
         };
         let keys = self.keys_port()?;
-        if keys.exists(credential).await.map_err(backend)? {
+        if keys.exists(credential, machine_id).await.map_err(backend)? {
             Ok(())
         } else {
             Err(LabUseCaseError::Invalid {
-                detail: "the credential reference does not name a stored SSH key".to_owned(),
+                detail:
+                    "the credential reference does not name a stored SSH key usable on this machine"
+                        .to_owned(),
             })
         }
     }
@@ -1343,6 +1401,18 @@ mod tests {
             prepare_command(&other, GuestOs::Linux).unwrap().2,
             prepare_command(&split, GuestOs::Linux).unwrap().2
         );
+    }
+
+    #[test]
+    fn the_windows_argv_script_is_fixed_text_and_carries_no_caller_data() {
+        let hostile = ExecCommand::Argv(vec!["cmd.exe".to_owned(), "\"; calc \"$(x)".to_owned()]);
+        let (script, arguments, _) = prepare_command(&hostile, GuestOs::Windows).unwrap();
+        assert_eq!(script, POWERSHELL_ARGV_SCRIPT);
+        assert!(!script.contains("calc"));
+        assert_eq!(arguments[1], "\"; calc \"$(x)");
+        // The script is one line of the safe alphabet the shell layer checks
+        // its own text against: no quotes that could end a string early.
+        assert!(!script.contains('"'));
     }
 
     #[test]

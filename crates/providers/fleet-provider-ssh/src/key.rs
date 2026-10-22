@@ -6,7 +6,8 @@
 //! a mode-0600 file in a mode-0700 directory under the provider's work
 //! directory. [`KeyFile`] removes that file when it drops, which covers the
 //! success, failure, deadline-kill and cancellation paths alike (every one
-//! drops the session that owns it), and [`SshProvider::new`](crate::SshProvider::new)
+//! drops the session that owns it; the owner-only modes are Unix modes, so key
+//! files are supported on a Linux (Unix) controller only), and [`SshProvider::new`](crate::SshProvider::new)
 //! removes what a crashed process left behind.
 
 use std::io::Write as _;
@@ -20,6 +21,9 @@ use crate::{SshProvider, SshProviderError};
 pub(crate) const KEY_DIR: &str = "keys";
 /// The largest private key accepted (a 16 KiB PEM is far beyond any real key).
 pub const MAX_KEY_BYTES: usize = 16 * 1024;
+/// A key file older than this belongs to no live session (the longest runs
+/// six hours) and is removed at start.
+const STALE_KEY_AGE: std::time::Duration = std::time::Duration::from_hours(7);
 
 /// A private key in OpenSSH, PKCS#8 or PEM form, as plain unencrypted text.
 #[derive(Clone, Eq, PartialEq)]
@@ -125,8 +129,21 @@ impl SshProvider {
             }
         };
         if first && let Ok(entries) = std::fs::read_dir(&dir) {
+            // Only what this process wrote, or what outlived any session
+            // (the longest is a six-hour put): another process sharing the
+            // directory keeps its live keys.
+            let own = format!("key-{}-", std::process::id());
             for entry in entries.flatten() {
-                let _ = std::fs::remove_file(entry.path());
+                let ours = entry.file_name().to_string_lossy().starts_with(&own);
+                let stale = entry
+                    .metadata()
+                    .and_then(|meta| meta.modified())
+                    .ok()
+                    .and_then(|modified| modified.elapsed().ok())
+                    .is_some_and(|age| age >= STALE_KEY_AGE);
+                if ours || stale {
+                    let _ = std::fs::remove_file(entry.path());
+                }
             }
         }
         Ok(())
@@ -292,17 +309,39 @@ mod tests {
     }
 
     #[test]
-    fn a_new_provider_removes_key_files_another_process_left() {
+    fn the_start_sweep_removes_this_processs_leftovers_and_keeps_another_processs_live_keys() {
         let dir = tempfile::tempdir().expect("tempdir");
-        let stale = dir.path().join(KEY_DIR).join("key-1-0");
-        std::fs::create_dir_all(stale.parent().expect("parent")).expect("dir");
-        std::fs::write(&stale, "left behind").expect("seed");
+        let keys = dir.path().join(KEY_DIR);
+        std::fs::create_dir_all(&keys).expect("dir");
+        let leftover = keys.join(format!("key-{}-0", std::process::id()));
+        let other_live = keys.join("key-1-0");
+        std::fs::write(&leftover, "left behind").expect("seed");
+        std::fs::write(&other_live, "another process's session").expect("seed");
         let provider = SshProvider::new(dir.path().to_path_buf()).expect("provider");
-        assert!(!stale.exists(), "a leftover key file survived the sweep");
+        assert!(!leftover.exists(), "this process's leftover survived");
+        assert!(other_live.exists(), "another process's live key was swept");
         let mine = provider
             .materialize_key(&PrivateKey::parse(KEY).expect("parses"))
             .expect("written");
         let _second = SshProvider::new(dir.path().to_path_buf()).expect("provider");
         assert!(mine.path().exists(), "a live session's key was swept");
+    }
+
+    #[test]
+    fn the_stored_key_config_offers_no_agent_and_no_certificate() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let provider = SshProvider::new(dir.path().to_path_buf()).expect("provider");
+        let auth = crate::SshAuth::StoredKey {
+            key: PrivateKey::parse(KEY).expect("parses"),
+        };
+        let config = provider.write_config(&auth).expect("config");
+        let text = std::fs::read_to_string(config).expect("text");
+        for line in [
+            "IdentitiesOnly yes",
+            "IdentityAgent none",
+            "CertificateFile none",
+        ] {
+            assert!(text.contains(line), "{line} missing: {text}");
+        }
     }
 }

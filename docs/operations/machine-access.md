@@ -11,7 +11,7 @@ How an operator lets agents run commands on, and copy files to and from, a Fleet
    fleetctl machines ssh-key store < ~/.ssh/id_ed25519_for_this_machine
    ```
 
-   It prints a `credentialRef` and nothing else. The key is read once from stdin and is never shown again by any command. A key that Fleet generated for a machine (issue #489) is stored the same way by its use case.
+   Add `--machine <machine-id>` to bind the key to one machine; it then resolves for that machine only (an unbound key works on any machine for a caller allowed to change its credentials). It prints a `credentialRef` and nothing else. The key is read once from stdin and is never shown again by any command. A key that Fleet generated for a machine (issue #489) is stored the same way by its use case.
 3. Make it the endpoint's default, so callers pass no credential:
 
    ```sh
@@ -34,14 +34,17 @@ fleetctl --output json machines file-get <file-id> --out ./error.log
 
 ## Permissions and audit
 
+`machines.put` is exec-equivalent: a file written to a machine can be a script, a cron entry, or `authorized_keys`, so granting put grants command execution as the endpoint's user. `machines.collect` reads any file the login can read. A caller with only `machines.exec` uses the endpoint's default auth; naming another auth for a request needs `machines.update`. The operation record keeps the plaintext command and output of an exec (readable only with `machines.exec` on that machine), so never put a secret in a command.
+
 `machines.exec`, `machines.put` and `machines.collect` are separate catalog entries scoped to the machine; `machines.update` sets a default. A delegated Lab credential holds none of them. Each request writes an audit event (`machine_exec_requested`, `machine_put_requested`, `machine_collect_requested`, `machine_file_downloaded`, `machine_endpoint_auth_set`, `machine_ssh_key_stored`) with the machine, endpoint, auth kind and, for an exec, the SHA-256 of the command, never the command, the key, or file content.
 
 ## Revoke access
 
-Delete the endpoint's default (`machines endpoint-auth clear`) to stop callers that pass nothing; delete the secret record, or remove the key from the machine's `authorized_keys`, to stop everything. The next command re-resolves the key, so a revoked secret fails the queued operation with "no longer exists" and no key file is written.
+Delete the endpoint's default (`machines endpoint-auth clear`) to stop callers that rely on it; delete the secret record, or remove the key from the machine's `authorized_keys`, to stop every use of that key. Taking `machines.exec` from a principal stops that principal. The next command re-resolves the key, so a revoked secret fails a queued operation with "no longer exists" and no key file is written.
 
 ## Known limits
 
 - The `machines onboard test` connection check, run again after the host key is confirmed, reported `connected: false` for a Windows machine in the live check (its probe runs `true`, which PowerShell does not have), and the draft then needed a new test and confirm. Confirm the host key, then add the machine without repeating that probe. The onboarding probe may also observe a different host key type on each run (RSA, ECDSA, ED25519): confirm the fingerprint it shows, and start a new draft if it reports a changed key.
-- Passphrase-protected keys are refused; the session is non-interactive.
+- Passphrase-protected keys are refused; the session is non-interactive. Key files need Unix modes, so the controller must run on Linux (or another Unix).
+- On Windows (PowerShell 5.1) an argv argument containing a double quote may be split or merged differently than given; use `--script` for such arguments.
 - One command at a time per request: no interactive terminal, port forwarding, or fan-out across machines.

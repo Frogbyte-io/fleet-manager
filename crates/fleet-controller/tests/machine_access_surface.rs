@@ -457,3 +457,34 @@ async fn an_upload_over_the_cap_or_with_the_wrong_digest_is_refused_and_nothing_
             .unwrap();
     assert_eq!(queued, 1);
 }
+
+#[tokio::test]
+async fn post_operations_refuses_a_stored_key_auth_and_the_machine_kinds() {
+    let harness = Harness::new(Arc::new(fleet_auth::LanAllowAllAuthorizer)).await;
+    let reference = harness.store_key().await;
+    let payload = json!({
+        "machineId": harness.machine_id,
+        "endpointId": harness.endpoint_id,
+        "script": "id",
+        "timeoutSeconds": 10,
+        "auth": { "type": "secret", "credential": reference },
+    })
+    .to_string();
+    for kind in ["ssh.exec", "machine.exec", "machine.put", "machine.collect"] {
+        let (status, body) = harness
+            .call(
+                "POST",
+                "/operations",
+                Some(json!({ "kind": kind, "payloadJson": payload })),
+            )
+            .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{kind}: {body}");
+    }
+    let queued: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM operations WHERE kind IN ('ssh.exec', 'machine.exec', 'machine.put', 'machine.collect')",
+    )
+    .fetch_one(harness.store.pool())
+    .await
+    .unwrap();
+    assert_eq!(queued, 0);
+}

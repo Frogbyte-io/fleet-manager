@@ -113,6 +113,10 @@ pub struct StoreSshKeyRequest {
     /// An unencrypted PEM or OpenSSH private key. It is stored in the
     /// encrypted secret store and never returned or recorded.
     pub private_key: String,
+    /// Binds the key to one machine: it then resolves for that machine only.
+    /// Absent, the key is unbound and usable on any machine by a caller who
+    /// may change that machine's credentials.
+    pub machine_id: Option<String>,
 }
 
 /// The reference of a stored SSH key.
@@ -160,7 +164,12 @@ pub async fn store_machine_ssh_key(
         )
     })?;
     let credential_ref = access
-        .store_key(state.authorizer.as_ref(), &principal, &request.private_key)
+        .store_key(
+            state.authorizer.as_ref(),
+            &principal,
+            &request.private_key,
+            request.machine_id.as_deref(),
+        )
         .await
         .map_err(|error| map_lab_error(&error, correlation_id))?;
     Ok((

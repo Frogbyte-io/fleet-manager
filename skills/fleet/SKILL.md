@@ -85,7 +85,8 @@ is only needed when the machine has more than one SSH endpoint.
 - Words after `--` are passed to the program as data, with no shell: pipes,
   `&&` and `$VAR` do nothing. For shell syntax use `--script` with exactly one
   word, the script text (bash; PowerShell on Windows, with `--os windows`).
-  Empty arguments cannot be passed; use `--script` for those.
+  Empty arguments cannot be passed, and on Windows an argument containing a
+  double quote may be re-split; use `--script` for those.
 - `--os` is `linux` (default) or `windows`. A Windows machine takes
   drive-absolute paths (`C:\Users\...`) for `put` and `collect`.
 - `put` sends one local file to an absolute path; it fails rather than replace

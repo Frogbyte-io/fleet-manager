@@ -426,20 +426,26 @@ pub trait GuestFiles: std::fmt::Debug + Send + Sync {
 
     /// [`GuestFiles::fetch`] authenticating with `auth` (#493): a machine's
     /// endpoint credential, where a Lab guest uses the controller's agent
-    /// (`None`). The default ignores `auth`, which is right for a stand-in
-    /// that never connects; the SSH implementation overrides it.
+    /// (`None`). The default serves only `None` and refuses an authenticated
+    /// copy it cannot honour; the SSH implementation overrides it.
     #[allow(clippy::too_many_arguments)]
     async fn fetch_with_auth(
         &self,
         machine_id: &str,
         endpoint_id: &str,
-        _auth: Option<&fleet_application::machine_access::EndpointAuth>,
+        auth: Option<&fleet_application::machine_access::EndpointAuth>,
         guest_os: fleet_core::GuestOs,
         path: &str,
         max_bytes: u64,
         deadline: Duration,
         sink: StagingFile,
     ) -> (Result<FetchOutcome, String>, StagingFile) {
+        if auth.is_some() {
+            return (
+                Err("this guest cannot authenticate with a stored credential".to_owned()),
+                sink,
+            );
+        }
         self.fetch(
             machine_id,
             endpoint_id,
@@ -471,11 +477,14 @@ pub trait GuestFiles: std::fmt::Debug + Send + Sync {
         &self,
         machine_id: &str,
         endpoint_id: &str,
-        _auth: Option<&fleet_application::machine_access::EndpointAuth>,
+        auth: Option<&fleet_application::machine_access::EndpointAuth>,
         request: GuestPut,
         deadline: Duration,
         source: std::fs::File,
     ) -> Result<fleet_provider_ssh::PutOutcome, String> {
+        if auth.is_some() {
+            return Err("this guest cannot authenticate with a stored credential".to_owned());
+        }
         self.put(machine_id, endpoint_id, request, deadline, source)
             .await
     }
@@ -537,11 +546,12 @@ impl SshGuestFiles {
 
     async fn ssh_auth(
         &self,
+        machine_id: &str,
         auth: Option<&fleet_application::machine_access::EndpointAuth>,
     ) -> Result<fleet_provider_ssh::SshAuth, String> {
         match (auth, &self.resolver) {
             (None, _) => Ok(fleet_provider_ssh::SshAuth::Agent),
-            (Some(auth), Some(resolver)) => resolver.resolve(auth).await,
+            (Some(auth), Some(resolver)) => resolver.resolve(auth, machine_id).await,
             (Some(fleet_application::machine_access::EndpointAuth::Agent), None) => {
                 Ok(fleet_provider_ssh::SshAuth::Agent)
             }
@@ -598,7 +608,7 @@ impl GuestFiles for SshGuestFiles {
         deadline: Duration,
         mut sink: StagingFile,
     ) -> (Result<FetchOutcome, String>, StagingFile) {
-        let ssh_auth = match self.ssh_auth(auth).await {
+        let ssh_auth = match self.ssh_auth(machine_id, auth).await {
             Ok(ssh_auth) => ssh_auth,
             Err(error) => return (Err(error), sink),
         };
@@ -656,7 +666,7 @@ impl GuestFiles for SshGuestFiles {
         deadline: Duration,
         mut source: std::fs::File,
     ) -> Result<fleet_provider_ssh::PutOutcome, String> {
-        let ssh_auth = self.ssh_auth(auth).await?;
+        let ssh_auth = self.ssh_auth(machine_id, auth).await?;
         let (mut spec, _, _) = crate::exec::resolve_ssh_endpoint(
             self.machines.as_ref(),
             machine_id,

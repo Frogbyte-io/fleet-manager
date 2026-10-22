@@ -92,7 +92,8 @@ impl World {
         }
         let secrets = Arc::new(fleet_secrets::SecretStore::open(pool.clone(), &key_file).unwrap());
         let keys = Arc::new(SecretBackedMachineKeys::new(secrets.clone()));
-        let resolver = Arc::new(SshAuthResolver::new(keys.clone()));
+        let resolver =
+            Arc::new(SshAuthResolver::new(keys.clone()).protecting(vec![dir.path().to_path_buf()]));
 
         let machines: Arc<dyn fleet_application::machine::MachinePort> =
             Arc::new(MachineRepository::new(pool.clone()));
@@ -162,7 +163,7 @@ impl World {
         // The sshd's authorized key, stored as a Fleet secret.
         let key_text = std::fs::read_to_string(sshd.keys_dir.path().join("user_ed25519")).unwrap();
         let key_ref = access
-            .store_key(&fleet_auth::LanAllowAllAuthorizer, &lan(), &key_text)
+            .store_key(&fleet_auth::LanAllowAllAuthorizer, &lan(), &key_text, None)
             .await
             .unwrap();
         Self {
@@ -425,6 +426,7 @@ async fn a_wrong_key_fails_authentication_and_leaves_no_key_file() {
             &fleet_auth::LanAllowAllAuthorizer,
             &lan(),
             &std::fs::read_to_string(&other).unwrap(),
+            None,
         )
         .await
         .unwrap();
@@ -855,4 +857,382 @@ async fn put_and_collect_move_files_with_the_stored_key() {
     assert!(audit.contains("machine_collect_requested"), "{audit}");
     assert!(!audit.contains("bytes for the machine"), "{audit}");
     let _ = &world.sshd;
+}
+
+/// Registers a second SSH machine whose host key is confirmed.
+async fn second_machine(world: &World) -> (String, String) {
+    use fleet_application::machine::MachinePort as _;
+    let machines = MachineRepository::new(world.pool.clone());
+    let machine = machines
+        .register(&RegisterMachine {
+            name: "other-box".to_owned(),
+            description: String::new(),
+            endpoints: vec![NewEndpoint {
+                kind: EndpointKind::Ssh,
+                reference: format!("{}@127.0.0.1:{}", whoami(), world.sshd.port),
+            }],
+            tags: vec![],
+            groups: vec![],
+        })
+        .await
+        .unwrap();
+    let endpoint = machine.endpoints[0].id.clone();
+    machines
+        .confirm_fingerprint(&endpoint, "SHA256:x", 0)
+        .await
+        .unwrap();
+    (machine.id, endpoint)
+}
+
+fn request<'a>(world: &'a World, auth: Option<&'a EndpointAuth>) -> ExecRequest<'a> {
+    ExecRequest {
+        target: AccessTarget {
+            machine_id: &world.machine_id,
+            endpoint_id: None,
+            auth,
+            guest_os: GuestOs::Linux,
+        },
+        command: ExecCommand::Script("true".to_owned()),
+        timeout_seconds: Some(10),
+        idempotency_key: None,
+    }
+}
+
+#[tokio::test]
+async fn an_explicit_auth_needs_machine_update_but_the_default_needs_only_exec() {
+    let world = World::new().await;
+    world.use_stored_key_by_default().await;
+    let only_exec = Deny(Permission::MachineUpdate);
+    let explicit = EndpointAuth::Secret {
+        credential: world.key_ref.clone(),
+    };
+    for auth in [
+        EndpointAuth::Agent,
+        EndpointAuth::IdentityFile {
+            path: "/somewhere/key".to_owned(),
+        },
+        explicit,
+    ] {
+        let refused = world
+            .access
+            .request_exec(&only_exec, &lan(), &request(&world, Some(&auth)))
+            .await;
+        assert!(
+            matches!(refused, Err(LabUseCaseError::Denied(_))),
+            "{auth:?}: {refused:?}"
+        );
+    }
+    // The endpoint's default is what a caller with only machines.exec uses.
+    world
+        .access
+        .request_exec(&only_exec, &lan(), &request(&world, None))
+        .await
+        .expect("the default needs no machine.update");
+}
+
+#[tokio::test]
+async fn an_identity_file_inside_the_controllers_data_is_refused_at_execution() {
+    let world = World::new().await;
+    // The SSH work directory holds other sessions' key files.
+    let inside = world.dir.path().join("ssh").join("known_hosts");
+    let auth = EndpointAuth::IdentityFile {
+        path: inside.display().to_string(),
+    };
+    let new = world
+        .access
+        .request_exec(
+            &fleet_auth::LanAllowAllAuthorizer,
+            &lan(),
+            &request(&world, Some(&auth)),
+        )
+        .await
+        .unwrap();
+    let queued = world
+        .operations
+        .create_machine_access(
+            &fleet_auth::LanAllowAllAuthorizer,
+            &lan().id,
+            &world.machine_id,
+            &new,
+        )
+        .await
+        .unwrap();
+    let done = world.run(&queued).await;
+    assert_eq!(done.state, "failed");
+    let text = format!("{:?}", done.error_json);
+    assert!(text.contains("inside the controller"), "{text}");
+}
+
+#[tokio::test]
+async fn a_key_bound_to_a_machine_resolves_for_that_machine_only() {
+    use fleet_application::machine_access::MachineKeyPort as _;
+    let world = World::new().await;
+    let (other_machine, other_endpoint) = second_machine(&world).await;
+    let bound = world
+        .access
+        .store_key(
+            &fleet_auth::LanAllowAllAuthorizer,
+            &lan(),
+            &world.key_text,
+            Some(&world.machine_id),
+        )
+        .await
+        .unwrap();
+    // Usable on its own machine.
+    world
+        .access
+        .set_default_auth(
+            &fleet_auth::LanAllowAllAuthorizer,
+            &lan(),
+            &world.machine_id,
+            &world.endpoint_id,
+            Some(&EndpointAuth::Secret {
+                credential: bound.clone(),
+            }),
+        )
+        .await
+        .unwrap();
+    let done = world
+        .exec(ExecCommand::Script("echo bound".to_owned()), 15)
+        .await;
+    assert_eq!(done.state, "succeeded", "{:?}", done.error_json);
+    // Refused on another machine, when set and when resolved.
+    let refused = world
+        .access
+        .set_default_auth(
+            &fleet_auth::LanAllowAllAuthorizer,
+            &lan(),
+            &other_machine,
+            &other_endpoint,
+            Some(&EndpointAuth::Secret {
+                credential: bound.clone(),
+            }),
+        )
+        .await;
+    assert!(
+        matches!(refused, Err(LabUseCaseError::Invalid { .. })),
+        "{refused:?}"
+    );
+    let keys = SecretBackedMachineKeys::new(world.secrets.clone());
+    assert!(keys.exists(&bound, &world.machine_id).await.unwrap());
+    assert!(!keys.exists(&bound, &other_machine).await.unwrap());
+    assert_eq!(keys.resolve(&bound, &other_machine).await.unwrap(), None);
+    // A key bound to a machine that does not exist cannot be stored.
+    let missing = world
+        .access
+        .store_key(
+            &fleet_auth::LanAllowAllAuthorizer,
+            &lan(),
+            &world.key_text,
+            Some("no-such-machine"),
+        )
+        .await;
+    assert!(matches!(missing, Err(LabUseCaseError::NotFound { .. })));
+    // The storing event names the reference, never the key.
+    let audit = world.audit_text().await;
+    assert!(audit.contains("machine_ssh_key_stored"), "{audit}");
+    assert!(audit.contains(&bound), "{audit}");
+    assert!(!audit.contains(world.key_text.lines().nth(1).unwrap()));
+}
+
+#[tokio::test]
+async fn only_the_key_namespaces_resolve_and_a_repository_ssh_key_works() {
+    let world = World::new().await;
+    let value = fleet_secrets::SecretValue::new(world.key_text.trim().as_bytes().to_vec());
+    let set = |credential: String| {
+        let world = &world;
+        async move {
+            world
+                .access
+                .set_default_auth(
+                    &fleet_auth::LanAllowAllAuthorizer,
+                    &lan(),
+                    &world.machine_id,
+                    &world.endpoint_id,
+                    Some(&EndpointAuth::Secret { credential }),
+                )
+                .await
+        }
+    };
+    // A valid key under another integration's namespace never resolves.
+    let foreign = world
+        .secrets
+        .create("images/build-key", value.clone())
+        .await
+        .unwrap();
+    let refused = set(foreign.id).await;
+    assert!(
+        matches!(refused, Err(LabUseCaseError::Invalid { .. })),
+        "{refused:?}"
+    );
+    // A token in the repository-credential namespace is not a key.
+    let token = world
+        .secrets
+        .create(
+            "git/token-1",
+            fleet_secrets::SecretValue::new(b"ghp_notakey".to_vec()),
+        )
+        .await
+        .unwrap();
+    let refused = set(token.id).await;
+    assert!(
+        matches!(refused, Err(LabUseCaseError::Invalid { .. })),
+        "{refused:?}"
+    );
+    // An SSH key kept as a repository credential does work.
+    let repo_key = world.secrets.create("git/deploy-key", value).await.unwrap();
+    set(repo_key.id).await.unwrap();
+    let done = world
+        .exec(
+            ExecCommand::Script("echo via-repository-key".to_owned()),
+            15,
+        )
+        .await;
+    assert_eq!(done.state, "succeeded", "{:?}", done.error_json);
+    assert_eq!(result_of(&done)["stdout"], "via-repository-key\n");
+}
+
+#[tokio::test]
+async fn reading_a_machine_operation_needs_that_kinds_permission_on_its_machine() {
+    let world = World::new().await;
+    world.use_stored_key_by_default().await;
+    let done = world
+        .exec(ExecCommand::Script("echo hidden".to_owned()), 15)
+        .await;
+    let hidden = world
+        .operations
+        .get(&Deny(Permission::MachineExec), &lan().id, &done.id)
+        .await;
+    assert!(hidden.is_err(), "the command and output were readable");
+    let listed = world
+        .operations
+        .list(&Deny(Permission::MachineExec), &lan().id, 50)
+        .await
+        .unwrap();
+    assert!(listed.iter().all(|operation| operation.id != done.id));
+    // Another kind's permission is not this kind's.
+    assert!(
+        world
+            .operations
+            .get(&Deny(Permission::MachineCollect), &lan().id, &done.id)
+            .await
+            .is_ok()
+    );
+    let visible = world
+        .operations
+        .list(&fleet_auth::LanAllowAllAuthorizer, &lan().id, 50)
+        .await
+        .unwrap();
+    assert!(visible.iter().any(|operation| operation.id == done.id));
+}
+
+#[tokio::test]
+async fn the_generic_route_never_queues_a_machine_kind_or_a_stored_key_auth() {
+    let world = World::new().await;
+    world.use_stored_key_by_default().await;
+    let machine_kind = world
+        .operations
+        .create(
+            &fleet_auth::LanAllowAllAuthorizer,
+            &lan().id,
+            &fleet_application::operation::NewOperation {
+                kind: "machine.exec".to_owned(),
+                idempotency_key: None,
+                deadline_at: None,
+                correlation_id: None,
+                payload_json: Some(serde_json::json!({"machineId": world.machine_id}).to_string()),
+                review_token: None,
+            },
+        )
+        .await;
+    assert!(machine_kind.is_err());
+    for kind in ["ssh.exec", "agentless.inventory"] {
+        let bypass = world
+            .operations
+            .create(
+                &fleet_auth::LanAllowAllAuthorizer,
+                &lan().id,
+                &fleet_application::operation::NewOperation {
+                    kind: kind.to_owned(),
+                    idempotency_key: None,
+                    deadline_at: None,
+                    correlation_id: None,
+                    payload_json: Some(
+                        serde_json::json!({
+                            "machineId": world.machine_id,
+                            "endpointId": world.endpoint_id,
+                            "script": "id",
+                            "timeoutSeconds": 10,
+                            "auth": {"type": "secret", "credential": world.key_ref},
+                        })
+                        .to_string(),
+                    ),
+                    review_token: None,
+                },
+            )
+            .await;
+        assert!(bypass.is_err(), "{kind} accepted a stored-key auth");
+    }
+}
+
+#[tokio::test]
+async fn cancelling_a_running_exec_leaves_no_key_file_once_the_session_ends() {
+    let world = World::new().await;
+    world.use_stored_key_by_default().await;
+    let new = world
+        .access
+        .request_exec(
+            &fleet_auth::LanAllowAllAuthorizer,
+            &lan(),
+            &ExecRequest {
+                target: world.target(),
+                command: ExecCommand::Script("sleep 30".to_owned()),
+                timeout_seconds: Some(3),
+                idempotency_key: None,
+            },
+        )
+        .await
+        .unwrap();
+    world
+        .operations
+        .create_machine_access(
+            &fleet_auth::LanAllowAllAuthorizer,
+            &lan().id,
+            &world.machine_id,
+            &new,
+        )
+        .await
+        .unwrap();
+    // Run the worker tick and drop it while the session is open: this is
+    // what a cancelled or shut-down worker does to the future.
+    let tick = world.operations.tick(
+        &world.dispatch,
+        "worker-a",
+        fleet_core::SystemClock::now_unix_millis(),
+        60_000,
+    );
+    let _ = tokio::time::timeout(Duration::from_millis(1500), tick).await;
+    // The session's deadline ends the ssh child; its guard removes the key.
+    for _ in 0..80 {
+        if world.key_files() == 0 {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    panic!("the key file outlived a cancelled session");
+}
+
+#[tokio::test]
+async fn reading_an_endpoints_default_needs_machine_read_on_that_machine() {
+    let world = World::new().await;
+    let refused = world
+        .access
+        .default_auth(
+            &Deny(Permission::MachineRead),
+            &lan(),
+            &world.machine_id,
+            &world.endpoint_id,
+        )
+        .await;
+    assert!(matches!(refused, Err(LabUseCaseError::Denied(_))));
 }

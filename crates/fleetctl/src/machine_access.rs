@@ -84,8 +84,12 @@ pub struct Target {
 /// One `machines` access subcommand.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum MachineAccessAction {
-    /// `machines ssh-key store`: the private key is read from stdin.
-    SshKeyStore,
+    /// `machines ssh-key store [--machine <id>]`: the private key is read
+    /// from stdin; with a machine it is usable on that machine only.
+    SshKeyStore {
+        /// The machine the key is bound to.
+        machine: Option<String>,
+    },
     /// `machines endpoint-auth get <machine> <endpoint>`.
     EndpointAuthGet {
         /// The machine.
@@ -171,8 +175,15 @@ pub(crate) fn parse(verb: &str, rest: &[&str], output: &mut Output) -> Result<Co
     let action = match verb {
         "ssh-key" => match rest {
             ["store", flags @ ..] => {
-                parse_flags(flags, output, |flag, _| Err(unknown(flag)))?;
-                MachineAccessAction::SshKeyStore
+                let mut machine = None;
+                parse_flags(flags, output, |flag, value| match flag {
+                    "--machine" => {
+                        machine = Some(value()?);
+                        Ok(())
+                    }
+                    other => Err(unknown(other)),
+                })?;
+                MachineAccessAction::SshKeyStore { machine }
             }
             _ => return Err(CliError { message: usage() }),
         },
@@ -496,7 +507,7 @@ fn target_body(target: &Target) -> Result<serde_json::Map<String, Value>, CliErr
 /// commands that stream (`put`, `file-get`) the one that starts them.
 pub(crate) fn request(action: &MachineAccessAction) -> Result<RequestShape, CliError> {
     Ok(match action {
-        MachineAccessAction::SshKeyStore => (
+        MachineAccessAction::SshKeyStore { .. } => (
             reqwest::Method::POST,
             "/api/v1/machine-ssh-keys".to_owned(),
             Vec::new(),
@@ -644,7 +655,7 @@ pub(crate) fn run(
             )?;
             Ok((rendered(&body), 0))
         }
-        MachineAccessAction::SshKeyStore => {
+        MachineAccessAction::SshKeyStore { machine } => {
             let key = crate::read_stdin_to_eof("the SSH private key")?;
             let body = crate::send(
                 &client,
@@ -652,7 +663,7 @@ pub(crate) fn run(
                 reqwest::Method::POST,
                 "/api/v1/machine-ssh-keys",
                 &[],
-                Some(&json!({ "privateKey": key })),
+                Some(&json!({ "privateKey": key, "machineId": machine })),
                 correlation_id,
             )?;
             Ok((rendered(&body["data"]), 0))

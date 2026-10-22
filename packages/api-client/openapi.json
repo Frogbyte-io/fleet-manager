@@ -28345,6 +28345,13 @@
           "privateKey"
         ],
         "properties": {
+          "machineId": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Binds the key to one machine: it then resolves for that machine only.\nAbsent, the key is unbound and usable on any machine by a caller who\nmay change that machine's credentials."
+          },
           "privateKey": {
             "type": "string",
             "description": "An unencrypted PEM or OpenSSH private key. It is stored in the\nencrypted secret store and never returned or recorded."

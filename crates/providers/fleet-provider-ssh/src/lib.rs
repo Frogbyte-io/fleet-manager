@@ -387,7 +387,7 @@ impl SshProvider {
         let (name, identity) = match auth {
             SshAuth::Agent => ("config-agent", AGENT_IDENTITY_POLICY),
             SshAuth::IdentityFile { .. } => ("config-identity-file", IDENTITY_FILE_POLICY),
-            SshAuth::StoredKey { .. } => ("config-stored-key", IDENTITY_FILE_POLICY),
+            SshAuth::StoredKey { .. } => ("config-stored-key", STORED_KEY_POLICY),
         };
         let path = self.work_dir.join(name);
         // The known-hosts path must be absolute: the ssh process runs with
@@ -427,6 +427,10 @@ impl SshProvider {
 const AGENT_IDENTITY_POLICY: &str = "IdentitiesOnly no\n";
 /// Offers only the identity file passed with `-i`.
 const IDENTITY_FILE_POLICY: &str = "IdentitiesOnly yes\n";
+/// A stored key offers only the key file passed with `-i`: no agent (a
+/// controller agent's keys are not the machine's credential) and no
+/// certificate from the user's ssh configuration.
+const STORED_KEY_POLICY: &str = "IdentitiesOnly yes\nIdentityAgent none\nCertificateFile none\n";
 
 pub(crate) fn add_ssh_destination(command: &mut Command, endpoint: &SshConnectionSpec) {
     command
