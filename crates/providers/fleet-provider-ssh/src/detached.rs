@@ -711,9 +711,13 @@ pub const PRECONDITION_REFUSAL: u8 = 73;
 /// (`AllowDevelopmentWithoutDevLicense`) is off, so the user cannot make
 /// file symlinks. The handle checks refuse file symlinks anyway; this fails
 /// readiness early instead. Local accounts only: a holder that is a group
-/// this guest cannot enumerate (for example a domain group) is not seen.
-/// Reads the policy and the registry; changes nothing. Needs `$fleetUser`.
-const WINDOWS_IMAGE_PRECONDITIONS: &str = r#"try { Add-Type -TypeDefinition @'
+/// this guest cannot enumerate (for example a domain group) is refused with
+/// 79 rather than assumed harmless: the check fails closed. Reads the policy,
+/// the account database and the registry; changes nothing.
+///
+/// This part defines the helpers (`fleetLsaHolders`, `fleetGroupMembers`),
+/// which a test replaces with stubs; [`WINDOWS_IMAGE_CHECK`] is the logic.
+const WINDOWS_IMAGE_HELPERS: &str = r#"try { Add-Type -TypeDefinition @'
 using System;
 using System.Collections.Generic;
 using System.Runtime.InteropServices;
@@ -762,45 +766,84 @@ public static class FleetLsa {
 }
 '@
 } catch { [Console]::Error.WriteLine('fleet: the policy helper could not be compiled on this guest'); fleetRefuse 79 }
-try {
-  $fleetUserSid = (New-Object Security.Principal.NTAccount($env:COMPUTERNAME, $fleetUser)).Translate([Security.Principal.SecurityIdentifier]).Value
+function fleetUserSidOf($user) { return (New-Object Security.Principal.NTAccount($env:COMPUTERNAME, $user)).Translate([Security.Principal.SecurityIdentifier]).Value }
+# The raw AllowDevelopmentWithoutDevLicense value, from the 64-bit registry
+# view; $null when the key or value does not exist.
+function fleetDevModeValue() {
+  $hive = [Microsoft.Win32.RegistryKey]::OpenBaseKey([Microsoft.Win32.RegistryHive]::LocalMachine, [Microsoft.Win32.RegistryView]::Registry64)
+  try {
+    $key = $hive.OpenSubKey('SOFTWARE\Microsoft\Windows\CurrentVersion\AppModelUnlock')
+    if ($null -eq $key) { return $null }
+    try { return $key.GetValue('AllowDevelopmentWithoutDevLicense') } finally { $key.Dispose() }
+  } finally { $hive.Dispose() }
+}
+function fleetLsaHolders() { return ,@([FleetLsa]::Holders('SeCreateSymbolicLinkPrivilege')) }
+# SIDs that name no group (SYSTEM, the service accounts and service SIDs).
+function fleetIsServiceSid($sid) { return ($sid -in @('S-1-5-18', 'S-1-5-19', 'S-1-5-20')) -or ($sid -match '^S-1-5-(80|82|83|87|90|96)-') }
+# The member SIDs of the local group with this SID; $null when the SID is not
+# a group (a user, a service). A SID or group this guest cannot resolve or
+# enumerate throws, except an unresolvable nested member ($strict false),
+# which is an orphaned account and not a group.
+function fleetGroupMembers($sid, $strict) {
+  if (fleetIsServiceSid $sid) { return $null }
+  $text = $null
+  try { $text = (New-Object Security.Principal.SecurityIdentifier($sid)).Translate([Security.Principal.NTAccount]).Value } catch { if ($strict) { throw } else { return $null } }
+  $name = $text.Substring($text.LastIndexOf('\') + 1)
+  if ($name -cnotmatch '^[^/,\\:*?"<>|]{1,256}\z') { throw 'unusable group name' }
+  $entry = [ADSI]('WinNT://./' + $name)
+  if ($entry.SchemaClassName -ne 'Group') { return $null }
+  $list = New-Object 'System.Collections.Generic.List[string]'
+  foreach ($member in @($entry.Invoke('Members'))) {
+    $raw = $member.GetType().InvokeMember('objectSid', 'GetProperty', $null, $member, $null)
+    $list.Add((New-Object Security.Principal.SecurityIdentifier($raw, 0)).Value)
+  }
+  return ,$list.ToArray()
+}
+"#;
+
+/// The image-precondition logic (see [`WINDOWS_IMAGE_HELPERS`]). Needs
+/// `$fleetUser`; prints the reason and exits 73 when the image lets the user
+/// make symlinks, 78 when the account does not exist yet, and 79 when the
+/// answer cannot be established.
+const WINDOWS_IMAGE_CHECK: &str = r"try {
+  $fleetUserSid = fleetUserSidOf $fleetUser
 } catch { [Console]::Error.WriteLine('fleet: the interactive user has no local account on this guest'); fleetRefuse 78 }
-$fleetDevMode = $null
-try { $fleetDevMode = (Get-ItemProperty -LiteralPath 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\AppModelUnlock' -Name AllowDevelopmentWithoutDevLicense -ErrorAction Stop).AllowDevelopmentWithoutDevLicense } catch { }
-if ($null -ne $fleetDevMode -and [int64]$fleetDevMode -ne 0) {
+$fleetDevMode = $false
+try {
+  $fleetValue = fleetDevModeValue
+  $fleetDevMode = ($null -ne $fleetValue) -and ([int64]$fleetValue -ne 0)
+} catch { [Console]::Error.WriteLine('fleet: Developer Mode could not be read on this guest'); fleetRefuse 79 }
+if ($fleetDevMode) {
   [Console]::Error.WriteLine('fleet: Developer Mode (AllowDevelopmentWithoutDevLicense) is on in this image; the interactive user could create file symlinks')
   fleetRefuse 73
 }
 # Whether the group with this SID, or a group nested in it, has the user as a
-# member. Anything that is not an enumerable local group has no members here.
+# member. A group that cannot be enumerated throws.
 function fleetHasMember($groupSid, $depth) {
-  if ($depth -gt 4) { return $false }
-  try {
-    $name = (New-Object Security.Principal.SecurityIdentifier($groupSid)).Translate([Security.Principal.NTAccount]).Value
-    $name = $name.Substring($name.LastIndexOf('\') + 1)
-    if ($name -cnotmatch '^[^/,\\:*?"<>|]{1,256}\z') { return $false }
-    $group = [ADSI]('WinNT://./' + $name + ',group')
-    foreach ($member in @($group.Invoke('Members'))) {
-      $raw = $member.GetType().InvokeMember('objectSid', 'GetProperty', $null, $member, $null)
-      $memberSid = (New-Object Security.Principal.SecurityIdentifier($raw, 0)).Value
-      if ($memberSid -eq $fleetUserSid) { return $true }
-      if ($memberSid -ne $groupSid -and (fleetHasMember $memberSid ($depth + 1))) { return $true }
-    }
-  } catch { }
+  if ($depth -gt 8) { throw 'group nesting too deep' }
+  $members = fleetGroupMembers $groupSid ($depth -eq 0)
+  if ($null -eq $members) { return $false }
+  foreach ($memberSid in $members) {
+    if ($memberSid -eq $fleetUserSid) { return $true }
+    if ($memberSid -ne $groupSid -and (fleetHasMember $memberSid ($depth + 1))) { return $true }
+  }
   return $false
 }
 $fleetImplicit = @('S-1-1-0', 'S-1-2-1', 'S-1-5-4', 'S-1-5-11', 'S-1-5-32-545')
-try { $fleetHolders = [FleetLsa]::Holders('SeCreateSymbolicLinkPrivilege') } catch {
-  [Console]::Error.WriteLine('fleet: the symlink privilege could not be read on this guest')
+$fleetHeld = $false
+try {
+  foreach ($fleetHolder in (fleetLsaHolders)) {
+    if ($fleetHolder -eq $fleetUserSid -or $fleetImplicit -contains $fleetHolder -or (fleetHasMember $fleetHolder 0)) { $fleetHeld = $true; break }
+  }
+} catch {
+  [Console]::Error.WriteLine('fleet: the symlink privilege holders could not be resolved on this guest')
   fleetRefuse 79
 }
-foreach ($fleetHolder in $fleetHolders) {
-  if ($fleetHolder -eq $fleetUserSid -or $fleetImplicit -contains $fleetHolder -or (fleetHasMember $fleetHolder 0)) {
-    [Console]::Error.WriteLine('fleet: the interactive user holds SeCreateSymbolicLinkPrivilege in this image (directly or through a group); it could create file symlinks')
-    fleetRefuse 73
-  }
+if ($fleetHeld) {
+  [Console]::Error.WriteLine('fleet: the interactive user holds SeCreateSymbolicLinkPrivilege in this image (directly or through a group); it could create file symlinks')
+  fleetRefuse 73
 }
-"#;
+";
 
 /// The readiness probe (#397): exits 0 and prints `session=<id>` when the
 /// interactive user has an Active desktop session; otherwise prints why on
@@ -1051,7 +1094,17 @@ pub fn interactive_start_metadata(
 #[must_use]
 pub fn session_probe_script() -> String {
     format!(
-        "{WINDOWS_SESSION_PROBE}{WINDOWS_IMAGE_PRECONDITIONS}{WINDOWS_SESSION_FIND}[Console]::Out.Write(\"session=\" + $fleetSessionId + \"`n\")\nexit 0\n"
+        "{WINDOWS_SESSION_PROBE}{WINDOWS_IMAGE_HELPERS}{WINDOWS_IMAGE_CHECK}{WINDOWS_SESSION_FIND}[Console]::Out.Write(\"session=\" + $fleetSessionId + \"`n\")\nexit 0\n"
+    )
+}
+
+/// [`session_probe_script`] without the image preconditions, for the retries
+/// after one run of the full probe passed them (they do not change while the
+/// guest waits for its session, and they compile helpers).
+#[must_use]
+pub fn session_probe_script_session_only() -> String {
+    format!(
+        "{WINDOWS_SESSION_PROBE}{WINDOWS_SESSION_FIND}[Console]::Out.Write(\"session=\" + $fleetSessionId + \"`n\")\nexit 0\n"
     )
 }
 
@@ -1814,6 +1867,10 @@ mod tests {
                 probe.find("FleetLsa").unwrap() < probe.find("FleetSessions").unwrap(),
                 "preconditions come first"
             );
+            // The retry script skips them.
+            let retry = session_probe_script_session_only();
+            assert!(retry.contains("FleetSessions") && !retry.contains("FleetLsa"));
+            assert!(regex_free_bare_refusals(&retry).is_empty());
             assert!(wait.contains("exit $fleetCode"), "the command's own exit");
         }
 
@@ -1838,7 +1895,7 @@ mod tests {
         #[test]
         fn the_policy_helper_compiles() {
             let Some(pwsh) = require_pwsh() else { return };
-            let find = WINDOWS_IMAGE_PRECONDITIONS;
+            let find = WINDOWS_IMAGE_HELPERS;
             let end = find.find("fleetRefuse 79 }\n").unwrap() + "fleetRefuse 79 }\n".len();
             let snippet = format!(
                 "function fleetRefuse([int]$code) {{ exit $code }}\n{}\n[Console]::Out.Write([FleetLsa].FullName)\n",
@@ -1847,6 +1904,81 @@ mod tests {
             let out = run_ps(&pwsh, &snippet, &ScriptMetadata::default(), b"", None);
             assert_eq!(out.status.code(), Some(0), "{out:?}");
             assert!(String::from_utf8_lossy(&out.stdout).contains("FleetLsa"));
+        }
+
+        /// Runs the real precondition logic with the account, registry, LSA and
+        /// group-walk helpers stubbed (the real ones need a Windows guest), and
+        /// answers the exit code and the last stderr line.
+        fn run_preconditions(stubs: &str) -> Option<(Option<i32>, String, String)> {
+            let pwsh = require_pwsh()?;
+            let snippet = format!(
+                "function fleetRefuse([int]$code) {{ [Console]::Error.WriteLine('fleet: refusal ' + $code); exit $code }}\n$ErrorActionPreference = 'Stop'\n$fleetUser = 'qa'\n{WINDOWS_IMAGE_HELPERS}\n\
+                 function fleetUserSidOf($user) {{ 'S-1-5-21-1-2-3-1001' }}\n\
+                 function fleetDevModeValue() {{ $null }}\n\
+                 function fleetLsaHolders() {{ return ,@('S-1-5-32-544') }}\n\
+                 function fleetGroupMembers($sid, $strict) {{ if ($sid -eq 'S-1-5-32-544') {{ return ,@('S-1-5-21-1-2-3-500') }}; return $null }}\n\
+                 {stubs}\n{WINDOWS_IMAGE_CHECK}[Console]::Out.Write('passed')\n"
+            );
+            let out = run_ps(&pwsh, &snippet, &ScriptMetadata::default(), b"", None);
+            let stderr = String::from_utf8_lossy(&out.stderr).replace("\r\n", "\n");
+            Some((
+                out.status.code(),
+                String::from_utf8_lossy(&out.stdout).into_owned(),
+                stderr.trim_end().lines().last().unwrap_or("").to_owned(),
+            ))
+        }
+
+        #[test]
+        fn the_precondition_logic_passes_refuses_and_fails_closed() {
+            // An administrator-only holder passes.
+            let Some(pass) = run_preconditions("") else {
+                return;
+            };
+            assert_eq!((pass.0, pass.1.as_str()), (Some(0), "passed"), "{pass:?}");
+            let refusal = |stubs: &str| run_preconditions(stubs).unwrap();
+            // The user holds the right directly, through an implicit group,
+            // and through a group nested in the holder.
+            let direct = refusal("function fleetLsaHolders() { return ,@('S-1-5-21-1-2-3-1001') }");
+            assert_eq!(
+                (direct.0, direct.2.as_str()),
+                (Some(73), "fleet: refusal 73"),
+                "{direct:?}"
+            );
+            let implicit = refusal("function fleetLsaHolders() { return ,@('S-1-5-32-545') }");
+            assert_eq!(implicit.0, Some(73), "{implicit:?}");
+            let nested = refusal(
+                "function fleetGroupMembers($sid, $strict) { if ($sid -eq 'S-1-5-32-544') { return ,@('S-1-5-21-1-2-3-1100') }; if ($sid -eq 'S-1-5-21-1-2-3-1100') { return ,@('S-1-5-21-1-2-3-1001') }; return $null }",
+            );
+            assert_eq!(
+                (nested.0, nested.2.as_str()),
+                (Some(73), "fleet: refusal 73"),
+                "{nested:?}"
+            );
+            // Developer Mode on refuses; off or absent does not.
+            let dev = refusal("function fleetDevModeValue() { 1 }");
+            assert_eq!(dev.0, Some(73), "{dev:?}");
+            assert_eq!(refusal("function fleetDevModeValue() { 0 }").0, Some(0));
+            // A missing account is retried (78); anything that cannot be
+            // established fails closed (79): the group walk, the holder
+            // list, the registry read, a bad registry value.
+            let no_account = refusal("function fleetUserSidOf($user) { throw 'none' }");
+            assert_eq!(
+                (no_account.0, no_account.2.as_str()),
+                (Some(78), "fleet: refusal 78")
+            );
+            for stubs in [
+                "function fleetGroupMembers($sid, $strict) { throw 'adsi failed' }",
+                "function fleetLsaHolders() { throw 'lsa failed' }",
+                "function fleetDevModeValue() { throw 'registry failed' }",
+                "function fleetDevModeValue() { 'not a number' }",
+            ] {
+                let closed = refusal(stubs);
+                assert_eq!(
+                    (closed.0, closed.1.as_str(), closed.2.as_str()),
+                    (Some(79), "", "fleet: refusal 79"),
+                    "{stubs}: {closed:?}"
+                );
+            }
         }
 
         #[test]
@@ -1871,6 +2003,7 @@ mod tests {
                 interactive_start_script("echo hi", true),
                 status_script_for(GuestShell::PowerShell),
                 session_probe_script(),
+                session_probe_script_session_only(),
             ] {
                 let out = std::process::Command::new(&pwsh)
                     .args(["-NoProfile", "-Command", "-"])

@@ -634,6 +634,11 @@ mod tests {
         assert_eq!(guest_refusal(Some(77), "fleet: refusal 77\nmore\n"), None);
         assert_eq!(guest_refusal(Some(77), "x fleet: refusal 77\n"), None);
         assert_eq!(guest_refusal(Some(77), "fleet: refusal 7x\n"), None);
+        // A Windows guest ends its lines with CRLF.
+        assert_eq!(
+            guest_refusal(Some(77), "fleet: no session\r\nfleet: refusal 77\r\n"),
+            Some((77, "fleet: no session".to_owned()))
+        );
     }
 
     /// The guest-side deadline watchdog (#455) is on unless a payload turns
