@@ -66,7 +66,7 @@ pub const BROKER_IDEMPOTENCY_PREFIX: &str = "action-request:";
 /// machine-scoped shape plus the plan and its approval identities
 /// (FM-402); the source kinds carry the remote/commit payloads and are
 /// catalog-level (FM-403).
-pub const CREATABLE_KINDS: [&str; 73] = [
+pub const CREATABLE_KINDS: [&str; 75] = [
     "noop",
     // Brokered Coolify lifecycle kind (FM-1033): created only through the
     // action broker.
@@ -130,6 +130,9 @@ pub const CREATABLE_KINDS: [&str; 73] = [
     "proxmox.guest.clone",
     "proxmox.guest.template",
     "proxmox.task-cancel",
+    // Reviewed persistent-VM kinds (#489).
+    "proxmox.guest.config",
+    "machine.create",
     "image.build",
     "lab.provision",
     "lab.cleanup",
@@ -177,6 +180,8 @@ fn catalog_scoped_kind_permission(kind: &str) -> Option<Permission> {
         | "proxmox.guest.clone"
         | "proxmox.guest.template"
         | "proxmox.task-cancel" => Some(Permission::ProxmoxDestructive),
+        "proxmox.guest.config" => Some(Permission::ProxmoxGuestConfig),
+        "machine.create" => Some(Permission::MachineProvision),
         _ => None,
     }
 }
@@ -236,7 +241,7 @@ pub const MAX_PAYLOAD_JSON: usize = 128 * 1024;
 
 /// The destructive-adjacent kinds: their creation requires a review token
 /// computed over exactly the payload being created.
-pub const DESTRUCTIVE_KINDS: [&str; 7] = [
+pub const DESTRUCTIVE_KINDS: [&str; 9] = [
     "proxmox.guest.snapshot",
     "proxmox.guest.snapshot-revert",
     "proxmox.guest.snapshot-delete",
@@ -244,6 +249,8 @@ pub const DESTRUCTIVE_KINDS: [&str; 7] = [
     "proxmox.guest.clone",
     "proxmox.guest.template",
     "proxmox.task-cancel",
+    "proxmox.guest.config",
+    "machine.create",
 ];
 
 /// The review token for one destructive operation: the SHA-256 of the
@@ -812,7 +819,7 @@ impl Operations {
         };
         if !matches!(
             new.kind.as_str(),
-            "proxmox.guest.destroy" | "proxmox.guest.snapshot-delete"
+            "proxmox.guest.destroy" | "proxmox.guest.snapshot-delete" | "proxmox.guest.config"
         ) {
             return Ok(());
         }

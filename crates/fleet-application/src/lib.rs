@@ -30,6 +30,7 @@ pub mod observed;
 pub mod observed_assembly;
 pub mod onboarding;
 pub mod operation;
+pub mod persistent;
 pub mod planner;
 pub mod planning;
 pub mod project;

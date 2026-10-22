@@ -37,6 +37,7 @@ pub struct ProxmoxPoolGuests {
     credentials: Arc<dyn ProxmoxCredentialStore>,
     client: fleet_provider_proxmox::ProxmoxClient,
     artifacts: Arc<dyn ImageArtifactPort>,
+    persistent: Option<Arc<dyn fleet_application::persistent::PersistentGuestPort>>,
 }
 
 impl ProxmoxPoolGuests {
@@ -53,7 +54,19 @@ impl ProxmoxPoolGuests {
             credentials,
             client,
             artifacts,
+            persistent: None,
         }
+    }
+
+    /// Refuses persistent guests (#489): the marker, not the name, keeps a
+    /// permanent VM out of every Lab pool.
+    #[must_use]
+    pub fn with_persistent(
+        mut self,
+        persistent: Arc<dyn fleet_application::persistent::PersistentGuestPort>,
+    ) -> Self {
+        self.persistent = Some(persistent);
+        self
     }
 
     async fn request(
@@ -94,6 +107,13 @@ impl PoolGuestPort for ProxmoxPoolGuests {
         vmid: u32,
         baseline: &str,
     ) -> Result<GuestObservation, String> {
+        if let Some(persistent) = &self.persistent
+            && persistent.get(account_id, vmid).await?.is_some()
+        {
+            return Err(format!(
+                "VMID {vmid} is a persistent Fleet machine; a Lab pool never takes one"
+            ));
+        }
         let request = self.request(account_id).await?;
         let protected = self
             .artifacts

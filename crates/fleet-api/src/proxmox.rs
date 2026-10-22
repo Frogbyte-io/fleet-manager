@@ -1210,6 +1210,16 @@ fn review_token(kind: &str, payload_json: &str) -> String {
     fleet_application::operation::review_token_for(kind, payload_json)
 }
 
+/// The permission a reviewed action needs: the guest config action has its
+/// own catalog entry (#489), every other reviewed action is destructive.
+fn destructive_permission(action: &str) -> fleet_application::authz::Permission {
+    if action == "config" {
+        fleet_application::authz::Permission::ProxmoxGuestConfig
+    } else {
+        fleet_application::authz::Permission::ProxmoxDestructive
+    }
+}
+
 /// Validates one action's required parameters: a malformed review is a
 /// client error, not a durable failure.
 fn validate_destructive_params(action: &str, params: &serde_json::Value) -> Result<(), String> {
@@ -1270,14 +1280,27 @@ fn validate_destructive_params(action: &str, params: &serde_json::Value) -> Resu
             if !params.is_object()
                 || params
                     .as_object()
-                    .is_some_and(|params| params.keys().any(|key| key != "purge"))
+                    .is_some_and(|params| {
+                        params
+                            .keys()
+                            .any(|key| !matches!(key.as_str(), "purge" | "confirmPersistent"))
+                    })
             {
-                return Err("destroy parameters must be an object containing only purge".to_owned());
+                return Err(
+                    "destroy parameters must be an object containing only purge and confirmPersistent"
+                        .to_owned(),
+                );
             }
-            if params.get("purge").is_some_and(|value| !value.is_boolean()) {
-                return Err("destroy purge must be a boolean".to_owned());
+            if ["purge", "confirmPersistent"]
+                .iter()
+                .any(|key| params.get(key).is_some_and(|value| !value.is_boolean()))
+            {
+                return Err("destroy purge and confirmPersistent must be booleans".to_owned());
             }
             Ok(())
+        }
+        "config" => {
+            fleet_application::persistent::GuestConfigChange::from_params(params).map(|_| ())
         }
         // `template` carries no parameters.
         _ => Ok(()),
@@ -1298,7 +1321,7 @@ fn validate_destructive_params(action: &str, params: &serde_json::Value) -> Resu
     params(
         ("accountId" = String, Path, description = "The account's identity."),
         ("vmid" = u32, Path, description = "The guest's VMID."),
-        ("action" = String, Path, description = "The destructive action: snapshot, snapshot-revert, snapshot-delete, clone, template, destroy, or task-cancel.")
+        ("action" = String, Path, description = "The destructive action: snapshot, snapshot-revert, snapshot-delete, clone, template, destroy, task-cancel, or config (an allow-listed settings change).")
     ),
     request_body = ReviewProxmoxOperationRequest,
     responses(
@@ -1336,6 +1359,7 @@ pub async fn review_proxmox_operation(
             | "template"
             | "destroy"
             | "task-cancel"
+            | "config"
     ) {
         return Err(crate::machines::invalid_request(
             &format!("unrecognized destructive action {action:?}"),
@@ -1358,7 +1382,7 @@ pub async fn review_proxmox_operation(
         state.authorizer.as_ref(),
         fleet_application::authz::AccessRequest {
             principal_id: &principal.id,
-            action: fleet_application::authz::Permission::ProxmoxDestructive,
+            action: destructive_permission(&action),
             resource: None,
         },
     ) {
@@ -1465,6 +1489,7 @@ pub async fn start_reviewed_proxmox_operation(
             | "template"
             | "destroy"
             | "task-cancel"
+            | "config"
     ) {
         return Err(crate::machines::invalid_request(
             &format!("unrecognized destructive action {action:?}"),
@@ -1475,7 +1500,7 @@ pub async fn start_reviewed_proxmox_operation(
         state.authorizer.as_ref(),
         fleet_application::authz::AccessRequest {
             principal_id: &principal.id,
-            action: fleet_application::authz::Permission::ProxmoxDestructive,
+            action: destructive_permission(&action),
             resource: None,
         },
     ) {

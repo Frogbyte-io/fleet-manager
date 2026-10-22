@@ -102,6 +102,23 @@ is only needed when the machine has more than one SSH endpoint.
   access. There is no interactive terminal and no privilege elevation here;
   if `sudo` needs a password, tell the user.
 
+### Creating a permanent VM
+
+```bash
+fleetctl --output json machines create --account <account-id> --image-version <version-id> --name build-box --cores 4 --memory 8192
+fleetctl --output json machines create --account <account-id> --image-version <version-id> --name build-box --review-only
+```
+
+`machines create` makes a long-lived VM Fleet manages and never cleans up: it
+clones a promoted image, applies the settings, starts it, registers and links
+the machine, gives it its own SSH key (held by the controller, never shown) and
+removes the image's shared key. It waits and answers `{state, machineId,
+endpointId, vmid, address, hostKeyFingerprint, bootstrapKeyRemoved}`. It is a
+privileged action: do it only when the user asked for a permanent machine, and
+use `--review-only` first when unsure. A failed creation keeps the VM and names
+the `step` that failed; re-running the same command resumes it. Destroying a
+persistent VM is a separate, confirmed act by the user.
+
 ## Projects
 
 ```bash

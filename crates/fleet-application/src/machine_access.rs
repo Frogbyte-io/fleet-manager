@@ -321,6 +321,7 @@ pub struct MachineAccess {
     blobs: Option<Arc<dyn ArtifactBlobPort>>,
     policy: ArtifactPolicy,
     blob_lock: tokio::sync::Mutex<()>,
+    persistent: Option<Arc<crate::persistent::PersistentMachines>>,
 }
 
 impl MachineAccess {
@@ -343,7 +344,25 @@ impl MachineAccess {
             blobs: None,
             policy: ArtifactPolicy::default(),
             blob_lock: tokio::sync::Mutex::new(()),
+            persistent: None,
         }
+    }
+
+    /// Serves persistent VM creation (#489) next to the other machine
+    /// surfaces: they share the key store and the machine routes.
+    #[must_use]
+    pub fn with_persistent(
+        mut self,
+        persistent: Arc<crate::persistent::PersistentMachines>,
+    ) -> Self {
+        self.persistent = Some(persistent);
+        self
+    }
+
+    /// The persistent VM creation use case, when wired.
+    #[must_use]
+    pub fn persistent(&self) -> Option<&Arc<crate::persistent::PersistentMachines>> {
+        self.persistent.as_ref()
     }
 
     /// Serves stored-key authentication from a key store.

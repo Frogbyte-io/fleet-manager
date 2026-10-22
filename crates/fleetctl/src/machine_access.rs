@@ -86,6 +86,11 @@ pub struct Target {
 pub enum MachineAccessAction {
     /// `machines ssh-key store`: the private key is read from stdin.
     SshKeyStore,
+    /// `machines product-key store`: the Windows product key is read from
+    /// stdin (#489).
+    ProductKeyStore,
+    /// `machines create ...`: a permanent, Fleet-managed VM (#489).
+    Create(Box<crate::persistent::CreateArgs>),
     /// `machines endpoint-auth get <machine> <endpoint>`.
     EndpointAuthGet {
         /// The machine.
@@ -176,6 +181,16 @@ pub(crate) fn parse(verb: &str, rest: &[&str], output: &mut Output) -> Result<Co
             }
             _ => return Err(CliError { message: usage() }),
         },
+        "product-key" => match rest {
+            ["store", flags @ ..] => {
+                parse_flags(flags, output, |flag, _| Err(unknown(flag)))?;
+                MachineAccessAction::ProductKeyStore
+            }
+            _ => return Err(CliError { message: usage() }),
+        },
+        "create" => MachineAccessAction::Create(Box::new(crate::persistent::parse_create(
+            rest, output,
+        )?)),
         "endpoint-auth" => parse_endpoint_auth(rest, output)?,
         "exec" => parse_exec(rest, output)?,
         "put" => parse_put(rest, output)?,
@@ -503,6 +518,19 @@ pub(crate) fn request(action: &MachineAccessAction) -> Result<RequestShape, CliE
             // The key is read from stdin when the command runs, never here.
             None,
         ),
+        MachineAccessAction::ProductKeyStore => (
+            reqwest::Method::POST,
+            "/api/v1/machine-product-keys".to_owned(),
+            Vec::new(),
+            // The key is read from stdin when the command runs, never here.
+            None,
+        ),
+        MachineAccessAction::Create(args) => (
+            reqwest::Method::POST,
+            "/api/v1/machines/create/review".to_owned(),
+            Vec::new(),
+            Some(json!({ "spec": args.spec() })),
+        ),
         MachineAccessAction::EndpointAuthGet { machine, endpoint } => (
             reqwest::Method::GET,
             format!("/api/v1/machines/{machine}/endpoints/{endpoint}/auth"),
@@ -656,6 +684,23 @@ pub(crate) fn run(
                 correlation_id,
             )?;
             Ok((rendered(&body["data"]), 0))
+        }
+        MachineAccessAction::ProductKeyStore => {
+            let key = crate::read_stdin_to_eof("the Windows product key")?;
+            let body = crate::send(
+                &client,
+                invocation,
+                reqwest::Method::POST,
+                "/api/v1/machine-product-keys",
+                &[],
+                Some(&json!({ "productKey": key.trim() })),
+                correlation_id,
+            )?;
+            Ok((rendered(&body["data"]), 0))
+        }
+        MachineAccessAction::Create(args) => {
+            let (payload, exit) = crate::persistent::run_create(invocation, args)?;
+            Ok((rendered(&payload), exit))
         }
         MachineAccessAction::Put {
             target,
@@ -872,6 +917,13 @@ pub(crate) fn render(payload: &Value) -> String {
             );
         }
         return out;
+    }
+    // The persistent VM results (#489) are structured: show them whole.
+    if ["vmid", "secretRef", "reviewToken", "step"]
+        .iter()
+        .any(|key| payload.get(*key).is_some())
+    {
+        return serde_json::to_string_pretty(payload).unwrap_or_default();
     }
     if let Some(credential) = payload["credentialRef"].as_str() {
         return format!("credential {}", clean(credential));

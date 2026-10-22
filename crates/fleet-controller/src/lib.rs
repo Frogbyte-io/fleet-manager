@@ -34,6 +34,7 @@ pub mod machine_access;
 pub mod mise;
 pub mod node_crypto;
 pub mod onboard;
+pub mod persistent_machines;
 pub mod proxmox_exec;
 pub mod proxmox_store;
 pub mod proxmox_tasks_store;

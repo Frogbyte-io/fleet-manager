@@ -442,6 +442,7 @@ pub struct ProxmoxDestructiveExecutor {
     links: Option<Arc<dyn ProxmoxTaskLinkPort>>,
     artifacts: Option<Arc<dyn fleet_application::lab::ImageArtifactPort>>,
     pool_members: Option<Arc<dyn fleet_application::operation::PoolMemberLookup>>,
+    persistent: Option<Arc<dyn fleet_application::persistent::PersistentGuestPort>>,
 }
 
 impl ProxmoxDestructiveExecutor {
@@ -459,7 +460,20 @@ impl ProxmoxDestructiveExecutor {
             links: None,
             artifacts: None,
             pool_members: None,
+            persistent: None,
         }
+    }
+
+    /// Supplies the persistent marker store (#489). With it, destroying a
+    /// persistent guest needs the reviewed `confirmPersistent` parameter, and
+    /// a destroy that succeeds removes the marker.
+    #[must_use]
+    pub fn with_persistent(
+        mut self,
+        persistent: Arc<dyn fleet_application::persistent::PersistentGuestPort>,
+    ) -> Self {
+        self.persistent = Some(persistent);
+        self
     }
 
     /// Supplies the Lab pool membership lookup (#368). With it, a destroy or
@@ -561,6 +575,35 @@ impl OperationExecutor for ProxmoxDestructiveExecutor {
             .await?
         {
             return Ok(());
+        }
+        let persistent_marker = if operation.kind == "proxmox.guest.destroy" {
+            match &self.persistent {
+                Some(store) => store
+                    .get(&payload.account_id, payload.vmid)
+                    .await
+                    .map_err(|detail| format!("the persistent marker is unreadable: {detail}"))?,
+                None => None,
+            }
+        } else {
+            None
+        };
+        if let Some(marker) = &persistent_marker
+            && payload
+                .params
+                .get("confirmPersistent")
+                .and_then(serde_json::Value::as_bool)
+                != Some(true)
+        {
+            return complete_failure(
+                operations,
+                &operation.id,
+                "persistent_guest",
+                &format!(
+                    "VMID {} is the persistent machine {}; destroying it needs the reviewed confirmPersistent parameter (and its protection lifted first)",
+                    payload.vmid, marker.name
+                ),
+            )
+            .await;
         }
         let (account, secret) = self.bound(&payload.account_id).await?;
         let request = self.request(&account, &secret);
@@ -896,6 +939,16 @@ impl OperationExecutor for ProxmoxDestructiveExecutor {
             other => return Err(format!("not a Proxmox destructive kind: {other}")),
         };
         outcome?;
+        // The guest is gone: so is its marker, so the VMID and name are free.
+        if persistent_marker.is_some()
+            && let Some(store) = &self.persistent
+            && operations
+                .get_state(&operation.id)
+                .await
+                .is_ok_and(|state| state == "succeeded")
+        {
+            let _ = store.remove(&payload.account_id, payload.vmid).await;
+        }
         Ok(())
     }
 }
@@ -2385,6 +2438,8 @@ pub struct ProvisionExecutor {
     /// The bound on one disk resize task (#372).
     hardware_task_timeout: Duration,
     hardware_confirm_timeout: Duration,
+    /// The persistent marker (#489): Lab cleanup never destroys such a guest.
+    persistent: Option<Arc<dyn fleet_application::persistent::PersistentGuestPort>>,
 }
 
 /// The placement and capacity reservation parts (FM-715).
@@ -2470,7 +2525,19 @@ impl ProvisionExecutor {
             pools: None,
             hardware_task_timeout: HARDWARE_TASK_TIMEOUT,
             hardware_confirm_timeout: HARDWARE_CONFIRM_TIMEOUT,
+            persistent: None,
         }
+    }
+
+    /// Supplies the persistent marker store (#489): the Lab cleanup guard
+    /// refuses to destroy a guest that carries it.
+    #[must_use]
+    pub fn with_persistent(
+        mut self,
+        persistent: Arc<dyn fleet_application::persistent::PersistentGuestPort>,
+    ) -> Self {
+        self.persistent = Some(persistent);
+        self
     }
 
     /// Bounds how long a written hardware value may stay unreported by the
@@ -2725,6 +2792,13 @@ impl ProvisionExecutor {
     /// unreadable account, artifact store, or resource listing). An
     /// undecided guard is a refusal too.
     pub async fn guard_destroy_target(&self, account_id: &str, vmid: u32) -> Result<(), String> {
+        if let Some(persistent) = &self.persistent
+            && persistent.get(account_id, vmid).await?.is_some()
+        {
+            return Err(format!(
+                "VMID {vmid} is a persistent Fleet machine; Lab cleanup never destroys one"
+            ));
+        }
         let (account, secret) = self.bound(account_id).await?;
         self.destroy_guard(pve_request(&account, secret), vmid)
             .await?
