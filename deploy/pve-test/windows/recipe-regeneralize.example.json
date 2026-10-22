@@ -1,0 +1,44 @@
+{
+  "builders": [
+    {
+      "type": "proxmox-clone",
+      "proxmox_url": "https://pve.example.test:8006/api2/json",
+      "node": "pve",
+      "clone_vm_id": 7100,
+      "full_clone": true,
+      "vm_id": 7110,
+      "vm_name": "fleet-windows11-image",
+      "template_name": "fleet-windows11-image",
+      "scsi_controller": "virtio-scsi-single",
+      "cores": 4,
+      "memory": 8192,
+      "network_adapters": [
+        {
+          "model": "virtio",
+          "bridge": "vmbr0"
+        }
+      ],
+      "qemu_agent": true,
+      "cloud_init": true,
+      "cloud_init_storage_pool": "local-lvm",
+      "communicator": "ssh",
+      "ssh_username": "fleetadmin",
+      "ssh_timeout": "30m",
+      "task_timeout": "20m",
+      "cpu_type": "host",
+      "os": "win11",
+      "tags": "fleet-pve-test"
+    }
+  ],
+  "provisioners": [
+    {
+      "type": "shell",
+      "execute_command": "powershell -NoProfile -ExecutionPolicy Bypass -File {{.Path}}",
+      "remote_path": "C:/Windows/Temp/fleet-regeneralize.ps1",
+      "expect_disconnect": true,
+      "inline": [
+        "& 'C:\\ProgramData\\fleet\\generalize.ps1'"
+      ]
+    }
+  ]
+}

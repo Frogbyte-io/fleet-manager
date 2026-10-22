@@ -35,6 +35,21 @@ Editing any recipe, including an existing version, creates an editable draft/new
 
 Promotion pins the build record that justified it (issue #281). The gate reads the version's latest build record, and the promotion commits only while that record is still the latest, succeeded, and matches the version's inputs. The pinned record id is stored on the version (`promotedBuildId`) and named in both promotion audit events. Lab clones the pinned build's template. Rebuilding a promoted version only adds evidence: even when the rebuild succeeds into a new template, Lab keeps cloning the pinned build. To clone the new template, promote the version again; that re-promotion is the audited step that changes the clone source. A demotion keeps the pin, so a lease pinned to the version before the demotion keeps its clone source. A version promoted before migration 0039 has no pin until it is promoted again; until then Lab uses the earlier rule, the version's newest successful build.
 
+### Windows images and re-generalization (#452)
+
+The Proxmox builder always boots its clone. A `--source clone` image built from a generalized Windows template therefore ends specialized (computer name, SID, SSH host key), and clones of it are not unique. Re-generalizing at the end of the build needs a communicator login, and the recipe gate (above) admits no key file and no credential Fleet could keep out of Git.
+
+Decision: **Cloudbase-Init in the base template** (Apache-2.0), so Packer's temporary key pair works on Windows. The other two options were rejected:
+
+- A gate-safe way to hand the build the fixture key does not exist: the key file options are refused on purpose (the SDK reads them on the controller), and a literal `ssh_password` puts a credential in a stored recipe.
+- A Fleet-side boot-free clone-to-template would bypass Packer and so cover only recipes without provisioners, which is a copy of the base. It would add a second build path (records, pinning, cancellation) for little. Revisit it if image copies without software become a need.
+
+How it works: with `cloud_init: true` and an `ssh` communicator, the proxmox-clone builder puts Packer's public key and `ssh_username` on the VM's cloud-init drive. Proxmox writes that drive as `configdrive2` for a Windows `ostype` ([Proxmox cloud-init support](https://pve.proxmox.com/wiki/Cloud-Init_Support)), which Cloudbase-Init reads. Its `SetUserSSHPublicKeysPlugin` ([plugins](https://cloudbase-init.readthedocs.io/en/latest/plugins.html)) writes the key to the user's `authorized_keys`. OpenSSH for Windows reads `administrators_authorized_keys` for administrators, so the base needs a Cloudbase-Init local script that copies the key there, and the base's sysprep answer file must run Cloudbase-Init in the specialize pass. The recipe then runs a base-baked generalize script (`expect_disconnect: true`, since the script ends the session). The build's own boot runs specialize, so the base ships its own generalize helper and the Cloudbase-Init config must leave the key plugin and `sshd` host-key regeneration in place for the clones.
+
+Also required in the recipe, whatever the option: `cpu_type: host` and `os: win11` (the builder defaults to `kvm64` and `other`, and Windows 11 guests then stop at recovery). `deploy/pve-test/windows/recipe-regeneralize.example.json` is the gate-checked example (a unit test runs both Windows example recipes through `recipe_build_refusal`).
+
+Status: the Cloudbase-Init base and a Packer build of this recipe are **not built or verified**. Until they are, pool members and Windows clones come from the generalized base template, as the [fixture runbook](../operations/windows-lab-fixture.md) says.
+
 ### Build credentials and TLS trust
 
 A build gets its target account's API token in the `packer build` child environment only (#272). Unless the version opted out of verification (below), the Proxmox plugin's own API connection, which carries the token, reaches only the certificate the operator confirmed for that account (FM-600, issue #284). That is the whole scope of the pin.
