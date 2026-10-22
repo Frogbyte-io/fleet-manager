@@ -1694,6 +1694,30 @@ impl ProvisionReadiness {
         guest_os: fleet_core::GuestOs,
         remaining: Duration,
     ) -> Result<bool, String> {
+        Ok(self
+            .run_probe_finished(
+                operations, parent_id, record, command, arguments, guest_os, false, remaining,
+            )
+            .await?
+            .state
+            == "succeeded")
+    }
+
+    /// [`Self::run_probe`], returning the finished child so a caller can read
+    /// why it failed. `guest_refusals` asks the executor to tell the guest
+    /// script's own refusals from the command's exit code (#490).
+    #[allow(clippy::too_many_arguments)]
+    async fn run_probe_finished(
+        &self,
+        operations: &Operations,
+        parent_id: &str,
+        record: &fleet_application::lab::ProvisionRecord,
+        command: &str,
+        arguments: &[String],
+        guest_os: fleet_core::GuestOs,
+        guest_refusals: bool,
+        remaining: Duration,
+    ) -> Result<Operation, String> {
         let child = operations.create(&fleet_auth::LanAllowAllAuthorizer, fleet_auth::LAN_PRINCIPAL_ID,
             &fleet_application::operation::NewOperation {
                 kind: "ssh.exec".to_owned(), idempotency_key: None,
@@ -1703,6 +1727,7 @@ impl ProvisionReadiness {
                     "auth": {"type": "agent"}, "script": command,
                     "arguments": arguments,
                     "guestOs": guest_os.id(),
+                    "guestRefusals": guest_refusals,
                     "labParentOperationId": parent_id,
                     "timeoutSeconds": remaining.as_secs().clamp(1, crate::exec::MAX_SCRIPT_TIMEOUT),
                 }).to_string()),
@@ -1714,7 +1739,7 @@ impl ProvisionReadiness {
                 return Err("SSH probe was cancelled".to_owned());
             }
             if !matches!(finished.state.as_str(), "pending" | "running") {
-                return Ok(finished.state == "succeeded");
+                return Ok(finished);
             }
             if tokio::time::Instant::now() >= deadline
                 || operations.cancel_requested(parent_id).await.unwrap_or(true)
@@ -1729,6 +1754,44 @@ impl ProvisionReadiness {
                 return Err("SSH probe deadline expired".to_owned());
             }
             tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    }
+}
+
+/// Whether a failed probe's error is the guest script refusing because the
+/// image does not hold the interactive preconditions (#490).
+fn is_precondition_refusal(error_json: Option<&str>) -> bool {
+    error_json
+        .and_then(|raw| serde_json::from_str::<serde_json::Value>(raw).ok())
+        .is_some_and(|error| {
+            error["reason"] == "guest_refused"
+                && error["refusalCode"].as_i64()
+                    == Some(i64::from(
+                        fleet_provider_ssh::detached::PRECONDITION_REFUSAL,
+                    ))
+        })
+}
+
+#[cfg(test)]
+mod precondition_refusal_tests {
+    use super::is_precondition_refusal;
+
+    #[test]
+    fn only_the_guests_precondition_refusal_stops_the_readiness_retry() {
+        assert!(is_precondition_refusal(Some(
+            r#"{"reason":"guest_refused","refusalCode":73,"detail":"x"}"#
+        )));
+        // No session yet (77), a missing account (78), a command exit, a
+        // transport failure and no error at all keep retrying.
+        for error in [
+            Some(r#"{"reason":"guest_refused","refusalCode":77,"detail":"x"}"#),
+            Some(r#"{"reason":"guest_refused","refusalCode":78,"detail":"x"}"#),
+            Some(r#"{"exitCode":73,"stdout":"","stderr":""}"#),
+            Some(r#"{"reason":"connection_failed","detail":"x"}"#),
+            Some("not json"),
+            None,
+        ] {
+            assert!(!is_precondition_refusal(error), "{error:?}");
         }
     }
 }
@@ -1837,16 +1900,28 @@ impl fleet_application::lab::LabReadinessPort for ProvisionReadiness {
     ) -> Result<bool, String> {
         fleet_core::validate_interactive_user_name(user)?;
         let metadata = fleet_provider_ssh::detached::session_probe_metadata(user);
-        self.run_probe(
-            operations,
-            parent_id,
-            record,
-            &fleet_provider_ssh::detached::session_probe_script(),
-            &metadata.arguments,
-            fleet_core::GuestOs::Windows,
-            remaining,
-        )
-        .await
+        let finished = self
+            .run_probe_finished(
+                operations,
+                parent_id,
+                record,
+                &fleet_provider_ssh::detached::session_probe_script(),
+                &metadata.arguments,
+                fleet_core::GuestOs::Windows,
+                true,
+                remaining,
+            )
+            .await?;
+        if finished.state == "succeeded" {
+            return Ok(true);
+        }
+        // An image that does not hold the preconditions never will: fail the
+        // step now instead of retrying to the deadline. Every other refusal
+        // (no session yet, an account still being created) is retried.
+        if is_precondition_refusal(finished.error_json.as_deref()) {
+            return Err("the interactive test image does not hold its preconditions".to_owned());
+        }
+        Ok(false)
     }
 
     async fn create_project(
@@ -4552,6 +4627,9 @@ impl LabDispatch {
                     "script": script,
                     "arguments": metadata.arguments,
                     "guestOs": "windows",
+                    // The script's refusals (64, 70-79) are not the command's
+                    // exit code (#490).
+                    "guestRefusals": true,
                     // The guest bound, the start and the wait margin.
                     "timeoutSeconds": seconds + fleet_application::lab::INTERACTIVE_EXEC_MARGIN_SECONDS,
                 })
