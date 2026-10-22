@@ -163,12 +163,17 @@ impl LabArtifactPort for LabArtifactRepository {
     }
 
     async fn location_references(&self, location: &str) -> Result<u64, String> {
-        sqlx::query_scalar::<_, i64>("SELECT count(*) FROM lab_artifacts WHERE location = ?1")
-            .bind(location)
-            .fetch_one(&self.pool)
-            .await
-            .map(|count| u64::try_from(count).unwrap_or(0))
-            .map_err(|error| format!("artifact location check failed: {error}"))
+        // The blob store is shared with collected machine files (#493), so a
+        // blob is referenced by either table.
+        sqlx::query_scalar::<_, i64>(
+            "SELECT (SELECT count(*) FROM lab_artifacts WHERE location = ?1) \
+             + (SELECT count(*) FROM machine_files WHERE location = ?1)",
+        )
+        .bind(location)
+        .fetch_one(&self.pool)
+        .await
+        .map(|count| u64::try_from(count).unwrap_or(0))
+        .map_err(|error| format!("artifact location check failed: {error}"))
     }
 
     async fn record_collection_failure(&self, failure: &CollectionFailure) -> Result<(), String> {

@@ -244,7 +244,7 @@ fn spawn_copy(
     path: &str,
     max_bytes: u64,
     deadline: Duration,
-) -> Result<std::process::Child, SshProviderError> {
+) -> Result<crate::key::SshChild, SshProviderError> {
     let mut child = spawn_script_session(
         provider,
         endpoint,

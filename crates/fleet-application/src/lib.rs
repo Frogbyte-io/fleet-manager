@@ -24,6 +24,7 @@ pub mod lab_placement;
 pub mod lab_pool;
 pub mod lab_put;
 pub mod machine;
+pub mod machine_access;
 pub mod node;
 pub mod observed;
 pub mod observed_assembly;

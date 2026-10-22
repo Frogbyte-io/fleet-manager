@@ -66,7 +66,7 @@ pub const BROKER_IDEMPOTENCY_PREFIX: &str = "action-request:";
 /// machine-scoped shape plus the plan and its approval identities
 /// (FM-402); the source kinds carry the remote/commit payloads and are
 /// catalog-level (FM-403).
-pub const CREATABLE_KINDS: [&str; 70] = [
+pub const CREATABLE_KINDS: [&str; 73] = [
     "noop",
     // Brokered Coolify lifecycle kind (FM-1033): created only through the
     // action broker.
@@ -137,6 +137,11 @@ pub const CREATABLE_KINDS: [&str; 70] = [
     "lab.exec_detach",
     "lab.collect",
     "lab.put",
+    // Brokered machine access kinds (#493, ADR 0017): created only through
+    // their dedicated machine routes.
+    "machine.exec",
+    "machine.put",
+    "machine.collect",
     "lab.pool.fill",
     // Brokered DNS kinds (FM-1042): created only through the action broker.
     "dns.record.upsert",
@@ -224,6 +229,45 @@ fn machine_scoped_kind_permission_inner(kind: &str, payload: Option<&str>) -> Op
 
         _ => None,
     }
+}
+
+/// The permission that reads a machine access operation (ADR 0017): its
+/// payload names the command or the files, and its result holds the output.
+fn machine_access_kind_permission(kind: &str) -> Option<Permission> {
+    match kind {
+        "machine.exec" => Some(Permission::MachineExec),
+        "machine.put" => Some(Permission::MachinePut),
+        "machine.collect" => Some(Permission::MachineCollect),
+        _ => None,
+    }
+}
+
+/// Whether the principal may see this operation: any kind but the machine
+/// access kinds, which need that kind's permission on the payload's machine.
+fn machine_operation_readable(
+    authorizer: &dyn Authorizer,
+    principal_id: &str,
+    operation: &Operation,
+) -> bool {
+    let Some(permission) = machine_access_kind_permission(&operation.kind) else {
+        return true;
+    };
+    let machine = operation
+        .payload_json
+        .as_deref()
+        .and_then(|payload| serde_json::from_str::<serde_json::Value>(payload).ok())
+        .and_then(|payload| payload["machineId"].as_str().map(str::to_owned));
+    machine.is_some_and(|machine| {
+        authorize(
+            authorizer,
+            AccessRequest {
+                principal_id,
+                action: permission,
+                resource: Some(&machine),
+            },
+        )
+        .is_ok()
+    })
 }
 
 /// The payload bound for provider inputs.
@@ -1115,6 +1159,54 @@ impl Operations {
         .await
     }
 
+    /// Queues a `machine.exec`, `machine.put` or `machine.collect` that
+    /// `MachineAccess` validated (#493), by a caller allowed to use that
+    /// kind's permission on the machine named in the payload.
+    ///
+    /// # Errors
+    ///
+    /// Fails on an unknown kind, a payload that names another machine,
+    /// denial, or a backend failure.
+    pub async fn create_machine_access(
+        &self,
+        authorizer: &dyn Authorizer,
+        principal_id: &str,
+        machine_id: &str,
+        new: &NewOperation,
+    ) -> Result<Operation, OperationUseCaseError> {
+        let permission = match new.kind.as_str() {
+            "machine.exec" => Permission::MachineExec,
+            "machine.put" => Permission::MachinePut,
+            "machine.collect" => Permission::MachineCollect,
+            other => {
+                return Err(OperationUseCaseError::Invalid {
+                    detail: format!("{other} is not a machine access kind"),
+                });
+            }
+        };
+        let linked = new
+            .payload_json
+            .as_deref()
+            .and_then(|payload| serde_json::from_str::<serde_json::Value>(payload).ok())
+            .and_then(|payload| payload["machineId"].as_str().map(str::to_owned));
+        if linked.as_deref() != Some(machine_id) {
+            return Err(OperationUseCaseError::Invalid {
+                detail: format!("the {} payload must match its machine", new.kind),
+            });
+        }
+        authorize(
+            authorizer,
+            AccessRequest {
+                principal_id,
+                action: permission,
+                resource: Some(machine_id),
+            },
+        )
+        .map_err(OperationUseCaseError::Denied)?;
+        self.create_inner(authorizer, principal_id, new, CreateRoute::Dedicated)
+            .await
+    }
+
     /// Queues the `lab.cleanup` operation for one releasing lease (the
     /// release and sweep routes), by a caller allowed to lease Lab guests.
     ///
@@ -1397,6 +1489,23 @@ impl Operations {
         }
         let rollout_payload = catalog_rollout_payload(new)?;
 
+        // A stored-key auth (ADR 0017) is resolved by the executor with the
+        // controller's key store, so only the machine routes, which authorize
+        // the caller against the machine and audit the request, may queue it.
+        // Without this, anyone who can queue `ssh.exec` could name a stored
+        // key reference and run commands as that key.
+        if route != CreateRoute::Dedicated
+            && new
+                .payload_json
+                .as_deref()
+                .and_then(|payload| serde_json::from_str::<serde_json::Value>(payload).ok())
+                .is_some_and(|payload| payload["auth"]["type"] == "secret")
+        {
+            return Err(OperationUseCaseError::Invalid {
+                detail: "a stored-key auth is accepted only through the machine routes".to_owned(),
+            });
+        }
+
         // The checkout and skills kinds act on a machine through SSH, so
         // their creation carries the machine-scoped authorization the
         // dedicated endpoints enforce: a caller with operation.create but
@@ -1493,6 +1602,17 @@ impl Operations {
             if route != CreateRoute::Dedicated {
                 return Err(OperationUseCaseError::Invalid {
                     detail: "lab.put runs through the lease files route".to_owned(),
+                });
+            }
+        } else if matches!(
+            new.kind.as_str(),
+            "machine.exec" | "machine.put" | "machine.collect"
+        ) {
+            // Authorized by `create_machine_access` against its machine, and
+            // audited with the command digest by the machine access use case.
+            if route != CreateRoute::Dedicated {
+                return Err(OperationUseCaseError::Invalid {
+                    detail: format!("{} runs through its machine route", new.kind),
                 });
             }
         } else if new.kind == crate::lab_pool::FILL_KIND {
@@ -1732,6 +1852,11 @@ impl Operations {
         )
         .map_err(OperationUseCaseError::Denied)?;
         let operation = self.port.get(id).await.map_err(map_port_failure("get"))?;
+        if !machine_operation_readable(authorizer, principal_id, &operation) {
+            return Err(OperationUseCaseError::NotFound {
+                what: format!("operation {id}"),
+            });
+        }
         if crate::authz::is_delegated_principal(principal_id) {
             self.require_own_lab_operation(principal_id, &operation)
                 .await?;
@@ -1803,10 +1928,27 @@ impl Operations {
             },
         )
         .map_err(OperationUseCaseError::Denied)?;
-        self.port
-            .list(limit)
-            .await
-            .map_err(map_port_failure("list"))
+        // Hidden operations must not shorten the page: read further back
+        // until the page is full or the history ends.
+        let wanted = limit as usize;
+        let mut ask = limit;
+        loop {
+            let rows = self
+                .port
+                .list(ask)
+                .await
+                .map_err(map_port_failure("list"))?;
+            let exhausted = rows.len() < ask as usize;
+            let mut visible: Vec<Operation> = rows
+                .into_iter()
+                .filter(|operation| machine_operation_readable(authorizer, principal_id, operation))
+                .collect();
+            if visible.len() >= wanted || exhausted || ask >= 10_000 {
+                visible.truncate(wanted);
+                return Ok(visible);
+            }
+            ask = ask.saturating_mul(4).min(10_000);
+        }
     }
 
     /// Requests cancellation of an operation.

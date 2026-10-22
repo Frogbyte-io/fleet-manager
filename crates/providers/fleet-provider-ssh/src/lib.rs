@@ -19,7 +19,8 @@
 //!   against the Fleet known-hosts file, so a key swap at connection time
 //!   still fails closed.
 //!
-//! Authentication supports the agent and identity files only. Password
+//! Authentication supports the agent, identity files and a Fleet-held key
+//! (delivered for one session through a private file, see [`key`]) only. Password
 //! authentication is deliberately unsupported: it needs interactive prompts
 //! or helper binaries, and Fleet's remote execution must run unattended and
 //! non-interactive (see FM-202). This crate never prints or stores key
@@ -38,6 +39,7 @@ pub mod discovery;
 pub mod exec;
 pub mod fetch;
 pub mod inventory;
+pub mod key;
 pub mod put;
 pub mod shell;
 
@@ -54,6 +56,7 @@ pub use exec::{
 };
 pub use fetch::{FetchOutcome, fetch_file};
 pub use inventory::{COLLECTION_DEADLINE, PROBE_SOURCE, collect, parse_probe_output, probe_script};
+pub use key::PrivateKey;
 pub use put::{PutOutcome, PutRequest, put_file};
 pub use shell::GuestShell;
 
@@ -140,7 +143,7 @@ impl std::error::Error for SshProviderError {}
 /// shares the same directory on purpose: one trust store per controller.
 #[derive(Clone, Debug)]
 pub struct SshProvider {
-    work_dir: PathBuf,
+    pub(crate) work_dir: PathBuf,
 }
 
 impl SshProvider {
@@ -167,7 +170,9 @@ impl SshProvider {
         }
         #[cfg(not(unix))]
         let _ = &work_dir;
-        Ok(Self { work_dir })
+        let provider = Self { work_dir };
+        provider.sweep_keys()?;
+        Ok(provider)
     }
 
     /// The Fleet-owned `known_hosts` file.
@@ -324,6 +329,11 @@ impl SshProvider {
         timeout: Duration,
     ) -> Result<(), SshProviderError> {
         let config_path = self.write_config(&endpoint.auth)?;
+        // Held until the process ends; dropping it removes a stored key's file.
+        let key_file = match &endpoint.auth {
+            SshAuth::StoredKey { key } => Some(self.materialize_key(key)?),
+            _ => None,
+        };
         let mut command = Command::new("ssh");
         command
             .arg("-F")
@@ -335,7 +345,13 @@ impl SshProvider {
         match &endpoint.auth {
             SshAuth::Agent => {}
             SshAuth::IdentityFile { path } => {
+                self.check_identity_file(path)?;
                 command.arg("-i").arg(path);
+            }
+            SshAuth::StoredKey { .. } => {
+                if let Some(file) = &key_file {
+                    command.arg("-i").arg(file.path());
+                }
             }
         }
         add_ssh_destination(&mut command, endpoint);
@@ -345,6 +361,7 @@ impl SshProvider {
             tool: "ssh",
             detail: format!("cannot start: {error}"),
         })?;
+        drop(key_file);
         if output.status.success() {
             return Ok(());
         }
@@ -371,6 +388,7 @@ impl SshProvider {
         let (name, identity) = match auth {
             SshAuth::Agent => ("config-agent", AGENT_IDENTITY_POLICY),
             SshAuth::IdentityFile { .. } => ("config-identity-file", IDENTITY_FILE_POLICY),
+            SshAuth::StoredKey { .. } => ("config-stored-key", STORED_KEY_POLICY),
         };
         let path = self.work_dir.join(name);
         // The known-hosts path must be absolute: the ssh process runs with
@@ -410,6 +428,10 @@ impl SshProvider {
 const AGENT_IDENTITY_POLICY: &str = "IdentitiesOnly no\n";
 /// Offers only the identity file passed with `-i`.
 const IDENTITY_FILE_POLICY: &str = "IdentitiesOnly yes\n";
+/// A stored key offers only the key file passed with `-i`: no agent (a
+/// controller agent's keys are not the machine's credential) and no
+/// certificate from the user's ssh configuration.
+const STORED_KEY_POLICY: &str = "IdentitiesOnly yes\nIdentityAgent none\nCertificateFile none\n";
 
 pub(crate) fn add_ssh_destination(command: &mut Command, endpoint: &SshConnectionSpec) {
     command
@@ -432,6 +454,14 @@ pub enum SshAuth {
     IdentityFile {
         /// The identity file's path.
         path: String,
+    },
+    /// A private key Fleet holds as a secret (ADR 0017). The provider writes
+    /// it to a private file for the one session and removes it afterwards;
+    /// only this key is offered.
+    StoredKey {
+        /// The key, resolved just in time by the caller. Its `Debug` is
+        /// redacted.
+        key: PrivateKey,
     },
 }
 
