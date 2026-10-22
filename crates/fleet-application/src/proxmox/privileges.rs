@@ -67,11 +67,19 @@ pub enum PrivilegeTier {
     Destructive,
     /// Lab leases: clone a pinned image, start it, probe readiness.
     Lab,
+    /// The VM screen: the VNC proxy and its WebSocket (FM-495).
+    Console,
 }
 
 impl PrivilegeTier {
     /// Every tier, in report order.
-    pub const ALL: [Self; 4] = [Self::Discover, Self::Operate, Self::Destructive, Self::Lab];
+    pub const ALL: [Self; 5] = [
+        Self::Discover,
+        Self::Operate,
+        Self::Destructive,
+        Self::Lab,
+        Self::Console,
+    ];
 
     /// The stable identifier.
     #[must_use]
@@ -81,6 +89,7 @@ impl PrivilegeTier {
             Self::Operate => "operate",
             Self::Destructive => "destructive",
             Self::Lab => "lab",
+            Self::Console => "console",
         }
     }
 }
@@ -766,6 +775,19 @@ pub const PROXMOX_PRIVILEGE_TABLE: &[PrivilegeRequirement] = &[
         matching: PrivilegeMatch::All,
         required: true,
         note: "The provision executor always polls agent/info for readiness, whatever the template's probe; on 8.x that needs VM.Monitor (which also permits agent exec) on the new guest.",
+    },
+    // ── console ─────────────────────────────────────────────────────────
+    PrivilegeRequirement {
+        id: "console.vncproxy",
+        capability: "proxmox.console",
+        tier: PrivilegeTier::Console,
+        endpoint: "POST /nodes/{node}/qemu/{vmid}/vncproxy",
+        majors: BOTH,
+        scope: PrivilegeScope::Guest,
+        privileges: &["VM.Console"],
+        matching: PrivilegeMatch::All,
+        required: true,
+        note: "The VNC proxy (websocket=1) and its WebSocket check VM.Console on the guest; verified live on PVE 8.4 and 9.2 with an API token (PVEAuditor alone is refused with 403).",
     },
 ];
 

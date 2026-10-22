@@ -19,13 +19,14 @@ From the PVE admin guide, chapter *User Management* ([9.x](https://pve.proxmox.c
 
 ## Tier table
 
-Fleet's permission vocabulary (`crates/fleet-application/src/authz.rs`) and operation kinds (`crates/fleet-application/src/operation.rs`) group into four capability tiers. Each tier has one role, except Lab, which adds `FleetLabTarget` on its clone targets (and, on 8.x, `FleetAgent8`). A tier's roles hold every privilege it requires, so granting them on the recommended paths is enough for that tier.
+Fleet's permission vocabulary (`crates/fleet-application/src/authz.rs`) and operation kinds (`crates/fleet-application/src/operation.rs`) group into five capability tiers. Each tier has one role, except Lab, which adds `FleetLabTarget` on its clone targets (and, on 8.x, `FleetAgent8`). A tier's roles hold every privilege it requires, so granting them on the recommended paths is enough for that tier.
 
 | Tier | Fleet permission → operations | Role | Recommended ACL path |
 |---|---|---|---|
 | **discover** | `proxmox.read` → discovery, nodes, guests, guest observe (config MACs, agent info, network, OS), snapshot list, task status | `FleetDiscover` (8.x: plus the opt-in `FleetAgent8`) | `/nodes`, `/pool/<pool>` (storage in the pool, or `/storage/<id>`) — or `/` for whole-cluster inventory |
 | **operate** | `proxmox.operate` → `proxmox.guest.start`, `.stop`, `.shutdown`, `.reboot` | `FleetOperate` | `/pool/<pool>` |
 | **destructive** | `proxmox.destructive` → `proxmox.guest.snapshot`, `.snapshot-revert`, `.snapshot-delete`, `.clone`, `.template`, `.destroy`, `proxmox.task-cancel` | `FleetDestructive` | `/pool/<pool>` for existing guests and storage; clone targets also need `/vms/<newid>` (see [clone targets](#why-clone-and-lab-need-more-than-the-pool)); `/sdn/zones/<zone>/<bridge>` |
+| **console** | `proxmox.console` → the VM screen (`POST …/qemu/{vmid}/vncproxy` and its `vncwebsocket`, FM-495) | `FleetConsole` | `/pool/<pool>`, or `/vms/<vmid>` for individual guests |
 | **lab** | `lab.provision` → clone the pinned image, clear the clone's inherited protection flag, give it the template's cores, memory, and disk, start it, probe readiness | `FleetLab`, plus `FleetLabTarget` (8.x: and `FleetAgent8`) on the new guests' `/vms/<newid>` | the template's `/vms/<id>` (protected), `/storage/<id>`, the new guests' `/vms/<newid>`, `/sdn/zones/<zone>/<bridge>`; never `/pool/<pool>` |
 
 ### Required privileges per tier
@@ -47,6 +48,7 @@ The two tables below are the PVE privileges per tier, keyed by major. Each entry
 | operate | `FleetOperate` | `VM.PowerMgmt` on `/vms/{vmid}` | — | — |
 | destructive | `FleetDestructive` | `VM.Audit` on `/vms/{vmid}`, `VM.PowerMgmt` on `/vms/{vmid}`, `VM.Snapshot` on `/vms/{vmid}`, `VM.Clone` on `/vms/{vmid}`, `VM.Allocate` on `/vms/{newid}`, `Datastore.AllocateSpace` on `/storage/{storage}`, `SDN.Use` on `/sdn/zones/{zone}/{bridge}`, `VM.Allocate` on `/vms/{vmid}` | `Sys.Modify` on `/nodes/{node}` | `VM.Snapshot.Rollback`: the revert row accepts either it or `VM.Snapshot`; it is kept so a rollback-only role can be split off |
 | lab | `FleetLab`, `FleetLabTarget` | `VM.Audit` on `/vms/{vmid}`, `VM.Clone` on `/vms/{vmid}`, `VM.Allocate` on `/vms/{newid}`, `Datastore.AllocateSpace` on `/storage/{storage}`, `SDN.Use` on `/sdn/zones/{zone}/{bridge}`, `VM.Audit` on `/vms/{newid}`, `VM.Config.Options` on `/vms/{newid}`, `VM.Config.CPU` on `/vms/{newid}`, `VM.Config.Memory` on `/vms/{newid}`, `VM.Config.Disk` on `/vms/{newid}`, `VM.PowerMgmt` on `/vms/{newid}`, `VM.GuestAgent.Audit` or `VM.GuestAgent.Unrestricted` on `/vms/{newid}` | `VM.Config.HWType` on `/vms/{newid}` | — |
+| console | `FleetConsole` | `VM.Console` on `/vms/{vmid}` | — | — |
 <!-- privilege-table:end -->
 
 Grant `VM.GuestAgent.Audit`, never `VM.GuestAgent.Unrestricted`: Unrestricted also permits agent `exec`.
@@ -60,6 +62,7 @@ Grant `VM.GuestAgent.Audit`, never `VM.GuestAgent.Unrestricted`: Unrestricted al
 | operate | `FleetOperate` | `VM.PowerMgmt` on `/vms/{vmid}` | — | — |
 | destructive | `FleetDestructive` | `VM.Audit` on `/vms/{vmid}`, `VM.PowerMgmt` on `/vms/{vmid}`, `VM.Snapshot` on `/vms/{vmid}`, `VM.Clone` on `/vms/{vmid}`, `VM.Allocate` on `/vms/{newid}`, `Datastore.AllocateSpace` on `/storage/{storage}`, `SDN.Use` on `/sdn/zones/{zone}/{bridge}`, `VM.Allocate` on `/vms/{vmid}` | `Sys.Modify` on `/nodes/{node}` | `VM.Snapshot.Rollback`: as on 9.x |
 | lab | `FleetLab`, `FleetLabTarget`, `FleetAgent8` | `VM.Audit` on `/vms/{vmid}`, `VM.Clone` on `/vms/{vmid}`, `VM.Allocate` on `/vms/{newid}`, `Datastore.AllocateSpace` on `/storage/{storage}`, `SDN.Use` on `/sdn/zones/{zone}/{bridge}`, `VM.Audit` on `/vms/{newid}`, `VM.Config.Options` on `/vms/{newid}`, `VM.Config.CPU` on `/vms/{newid}`, `VM.Config.Memory` on `/vms/{newid}`, `VM.Config.Disk` on `/vms/{newid}`, `VM.PowerMgmt` on `/vms/{newid}`, `VM.Monitor` on `/vms/{newid}` | `VM.Config.HWType` on `/vms/{newid}` | — |
+| console | `FleetConsole` | `VM.Console` on `/vms/{vmid}` | — | — |
 <!-- privilege-table:end -->
 
 On 8.x, `VM.Monitor` is opt-in for discover (agent facts), because it also permits agent `exec`. For lab it is **required**: the provision executor polls `agent/info` for readiness on every template today, whatever its readiness probe setting, so a token without it reaches `never_ready`. Grant `FleetAgent8` on the reserved clone-target VMIDs only ([clone targets](#why-clone-and-lab-need-more-than-the-pool)), not on the template or the pool. See [8.x vs 9.x differences](#8x-vs-9x-differences).
@@ -148,6 +151,9 @@ Create the roles for your PVE major; the two blocks are not interchangeable (see
 ```sh
 pveum role add FleetDiscover    --privs "Sys.Audit,VM.Audit,Datastore.Audit,Pool.Audit,VM.GuestAgent.Audit"
 pveum role add FleetOperate     --privs "VM.PowerMgmt"
+# The VM screen (FM-495). Screen access implies keyboard and pointer input in
+# the guest, so grant it deliberately, on the guests Fleet may show.
+pveum role add FleetConsole     --privs "VM.Console"
 pveum role add FleetDestructive --privs "VM.Audit,VM.PowerMgmt,VM.Snapshot,VM.Snapshot.Rollback,VM.Clone,VM.Allocate,Datastore.AllocateSpace,SDN.Use"
 pveum role add FleetLab         --privs "VM.Clone,VM.Allocate,Datastore.AllocateSpace,SDN.Use,VM.PowerMgmt,VM.Audit,VM.GuestAgent.Audit"
 # Only on the clone-target VMIDs, never on the template or the pool: it lets
@@ -173,6 +179,9 @@ pveum role add FleetLabAudio --privs "VM.Config.HWType"
 ```sh
 pveum role add FleetDiscover    --privs "Sys.Audit,VM.Audit,Datastore.Audit,Pool.Audit"
 pveum role add FleetOperate     --privs "VM.PowerMgmt"
+# The VM screen (FM-495). Screen access implies keyboard and pointer input in
+# the guest, so grant it deliberately, on the guests Fleet may show.
+pveum role add FleetConsole     --privs "VM.Console"
 pveum role add FleetDestructive --privs "VM.Audit,VM.PowerMgmt,VM.Snapshot,VM.Snapshot.Rollback,VM.Clone,VM.Allocate,Datastore.AllocateSpace,SDN.Use"
 pveum role add FleetLab         --privs "VM.Clone,VM.Allocate,Datastore.AllocateSpace,SDN.Use,VM.PowerMgmt,VM.Audit"
 # Only on the clone-target VMIDs (see the 9.x block).
@@ -227,6 +236,9 @@ for who in "--users fleet@pve" "--tokens $TOKEN"; do
 
   # operate
   pveum acl modify /pool/fleet      --roles FleetOperate $who
+
+  # console: the VM screen. Also grants keyboard and pointer input.
+  pveum acl modify /pool/fleet      --roles FleetConsole $who
 
   # destructive (snapshot, rollback, delete snapshot, template, destroy, clone source)
   pveum acl modify /pool/fleet      --roles FleetDestructive $who

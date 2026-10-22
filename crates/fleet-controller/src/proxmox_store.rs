@@ -222,6 +222,11 @@ impl ProviderDiscovery {
     pub fn new(client: fleet_provider_proxmox::ProxmoxClient) -> Self {
         Self { client }
     }
+
+    /// The provider client, for the console relay's VNC proxy (FM-495).
+    pub(crate) fn client(&self) -> &fleet_provider_proxmox::ProxmoxClient {
+        &self.client
+    }
 }
 
 #[async_trait]
@@ -473,7 +478,8 @@ pub fn compose_proxmox_with_events(
         machines_for(pool.clone(), audit.clone()),
         audit,
     )
-    .with_permissions(discovery)
+    .with_permissions(discovery.clone())
+    .with_console(discovery)
     .with_task_history(
         Arc::new(crate::proxmox_tasks_store::ProviderTaskHistory::new(client)),
         Arc::new(fleet_storage_sqlite::ProxmoxTaskLinkRepository::new(pool)),
