@@ -39,7 +39,7 @@ const streams = computed(() => [
       <span
         v-if="output.reason"
         class="font-mono text-[10.5px] text-fc-err"
-      >{{ output.reason }}</span>
+      >{{ output.reason }}<template v-if="output.refusalCode !== null"> (guest code {{ output.refusalCode }})</template></span>
     </div>
     <p
       v-if="output.detail"

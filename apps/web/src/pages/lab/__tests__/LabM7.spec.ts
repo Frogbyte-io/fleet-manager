@@ -546,6 +546,21 @@ describe('review follow-ups', () => {
     expect(result.querySelector('[data-testid="exec-stdout"]')!.textContent).toContain('half')
   })
 
+  it('shows a guest refusal with its code, not as the command\'s exit code', async () => {
+    execLabLease.mockResolvedValue(ok({ data: { id: 'op-exec', kind: 'lab.exec', state: 'pending' } }, 202))
+    getOperation.mockResolvedValue(operation({ id: 'op-exec', state: 'failed', errorJson: '{"reason":"guest_refused","refusalCode":77,"detail":"fleet: no active session"}' }))
+    await mountPage('/lab?lease=lease-ready-0001')
+    q<HTMLButtonElement>('[data-testid="lease-tab-exec"]').click()
+    await settle()
+    await type('textarea[id^="script-"]', 'notepad')
+    q<HTMLButtonElement>('[data-testid="run-command"]').click()
+    await settle()
+    const result = q('[data-testid="exec-current"]')
+    expect(result.querySelector('[data-testid="exit-code"]')!.textContent).toContain('no exit code')
+    expect(result.textContent).toContain('guest_refused (guest code 77)')
+    expect(result.textContent).toContain('fleet: no active session')
+  })
+
   it('says when a history entry\'s operation recorded no output', async () => {
     listLabArtifacts.mockResolvedValue(ok(page([artifact({ id: 'log-1', kind: 'exec-log', name: 'exec-op-c.log', operationId: 'op-c' })])))
     getOperation.mockResolvedValue(operation({ id: 'op-c', state: 'cancelled' }))

@@ -184,16 +184,17 @@ pub fn start_script(command: &str) -> String {
 /// the same call (the creator is the owner; nothing sets it), then checked
 /// again: a directory someone else created first fails the check.
 const WINDOWS_RESOLVE: &str = r#"$ErrorActionPreference = 'Stop'
+function fleetRefuse([int]$code) { [Console]::Error.WriteLine('fleet: refusal ' + $code); exit $code }
 $fleetHandle = $args[0]
 $fleetNum = $args[1]
 $fleetBase = $args[2]
-if ($fleetHandle -cnotmatch '^[A-Za-z0-9_-]{1,64}\z' -or $fleetNum -cnotmatch '^[0-9]{1,18}\z') { exit 64 }
+if ($fleetHandle -cnotmatch '^[A-Za-z0-9_-]{1,64}\z' -or $fleetNum -cnotmatch '^[0-9]{1,18}\z') { fleetRefuse 64 }
 $fleetWindows = [Environment]::OSVersion.Platform -eq 'Win32NT'
 $fleetUser = $null
 if ($fleetBase -cmatch '^interactive:(.*)\z') {
   $fleetUser = $Matches[1]
   $fleetBase = $null
-  if ($fleetUser -cnotmatch '^[A-Za-z0-9_][A-Za-z0-9_.-]{0,19}\z') { exit 64 }
+  if ($fleetUser -cnotmatch '^[A-Za-z0-9_][A-Za-z0-9_.-]{0,19}\z') { fleetRefuse 64 }
 }
 $fleetOverride = [bool]$fleetBase
 $fleetSystem = $null
@@ -206,10 +207,10 @@ if ($fleetWindows) {
 }
 if (-not $fleetBase) {
   if ($fleetWindows) {
-    if (-not $env:LOCALAPPDATA) { exit 71 }
+    if (-not $env:LOCALAPPDATA) { fleetRefuse 71 }
     $fleetBase = [IO.Path]::Combine($env:LOCALAPPDATA, 'fleet-lab', 'exec')
   } else {
-    if (-not $env:HOME) { exit 71 }
+    if (-not $env:HOME) { fleetRefuse 71 }
     $fleetBase = [IO.Path]::Combine($env:HOME, '.local', 'state', 'fleet-lab', 'exec')
   }
 }
@@ -236,8 +237,8 @@ $fleetIBase = $null
 $fleetIDir = $null
 $fleetResolveUser = $null
 if ($fleetUser) {
-  if (-not $fleetWindows) { exit 64 }
-  if (-not $env:ProgramData) { exit 71 }
+  if (-not $fleetWindows) { fleetRefuse 64 }
+  if (-not $env:ProgramData) { fleetRefuse 71 }
   $fleetIParent = [IO.Path]::Combine($env:ProgramData, 'fleet-lab')
   $fleetIBase = [IO.Path]::Combine($fleetIParent, 'interactive')
   $fleetIDir = [IO.Path]::Combine($fleetIBase, $fleetHandle)
@@ -248,7 +249,7 @@ if ($fleetUser) {
       $fleetISid = (New-Object Security.Principal.NTAccount($env:COMPUTERNAME, $fleetUser)).Translate([Security.Principal.SecurityIdentifier])
       $fleetIProfile = [string](Get-ItemProperty -LiteralPath ('HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\ProfileList\' + $fleetISid.Value) -Name ProfileImagePath -ErrorAction Stop).ProfileImagePath
       if (-not [IO.Directory]::Exists($fleetIProfile)) { throw 'profile' }
-    } catch { [Console]::Error.WriteLine('fleet: the interactive user has no local account or profile on this guest'); exit 78 }
+    } catch { [Console]::Error.WriteLine('fleet: the interactive user has no local account or profile on this guest'); fleetRefuse 78 }
     # Reads of the run's files go through a handle opened without following
     # a reparse point and checked on that same handle (no reparse point, not
     # a directory, one link).
@@ -280,7 +281,7 @@ public static class FleetFile {
   }
 }
 '@
-    } catch { [Console]::Error.WriteLine('fleet: the file helper could not be compiled on this guest'); exit 79 }
+    } catch { [Console]::Error.WriteLine('fleet: the file helper could not be compiled on this guest'); fleetRefuse 79 }
     $fleetLeafSid = $fleetISid
   }
 }
@@ -504,13 +505,13 @@ if ($fleetUser) {
   $fleetParent = $fleetIParent; $fleetBase = $fleetIBase; $fleetDir = $fleetIDir
 }
 if ($fleetWindows -and -not $fleetOverride) {
-  if (-not (fleetMakeDir $fleetParent)) { [Console]::Error.WriteLine('fleet: a guest directory the run needs exists but is not trusted (wrong owner or access list); another account may have created it first'); exit 71 }
-  if (-not (fleetMakeDir $fleetBase)) { [Console]::Error.WriteLine('fleet: a guest directory the run needs exists but is not trusted (wrong owner or access list); another account may have created it first'); exit 71 }
+  if (-not (fleetMakeDir $fleetParent)) { [Console]::Error.WriteLine('fleet: a guest directory the run needs exists but is not trusted (wrong owner or access list); another account may have created it first'); fleetRefuse 71 }
+  if (-not (fleetMakeDir $fleetBase)) { [Console]::Error.WriteLine('fleet: a guest directory the run needs exists but is not trusted (wrong owner or access list); another account may have created it first'); fleetRefuse 71 }
 } else {
-  try { [void][IO.Directory]::CreateDirectory($fleetBase) } catch { exit 71 }
+  try { [void][IO.Directory]::CreateDirectory($fleetBase) } catch { fleetRefuse 71 }
 }
 if ([IO.Directory]::Exists($fleetDir)) {
-  if (-not (fleetSecure $fleetDir $true)) { exit 71 }
+  if (-not (fleetSecure $fleetDir $true)) { fleetRefuse 71 }
   # A synchronous interactive run that finds its handle already started (a
   # retried operation) waits for that run instead of starting another.
   if (-not $fleetWait) {
@@ -524,14 +525,14 @@ if (-not $fleetExisting) {
 if ($fleetUser) {
   FLEET_SESSION_FIND_INLINE
 }
-if (-not (fleetMakeDir $fleetDir)) { exit 71 }
+if (-not (fleetMakeDir $fleetDir)) { fleetRefuse 71 }
 try {
   if ($fleetLeafSid) { fleetWriteFile ([IO.Path]::Combine($fleetDir, '.fleet')) ([byte[]]@()) }
   fleetWriteFile ([IO.Path]::Combine($fleetDir, 'body.ps1')) ([Convert]::FromBase64String($fleetCmd64))
   fleetWriteFile ([IO.Path]::Combine($fleetDir, 'run.ps1')) ([Text.Encoding]::UTF8.GetBytes($fleetWrapper))
   if ($fleetLeafSid) { fleetGrantUser $fleetDir }
-} catch { exit 72 }
-if ($fleetLeafSid -and -not (fleetSecure $fleetDir $true)) { exit 71 }
+} catch { fleetRefuse 72 }
+if ($fleetLeafSid -and -not (fleetSecure $fleetDir $true)) { fleetRefuse 71 }
 # A start that gives up and a wrapper that runs race for the gate: whoever
 # creates it first decides. The loser of the start's side only reports; the
 # marker keeps a late wrapper from running.
@@ -616,7 +617,7 @@ public static class FleetLaunch {
 # A launch that failed (a launch error) never started a wrapper unless one slipped
 # in: take the gate to say so, and if the gate is already taken, wait for the
 # wrapper like any other start.
-if (-not $fleetLaunched -and (fleetGiveUp)) { fleetDropTask; exit 75 }
+if (-not $fleetLaunched -and (fleetGiveUp)) { fleetDropTask; fleetRefuse 75 }
 # Worst case in this session: a few seconds to compile the launch helper, 25 s
 # here, 5 s below,
 # inside the 60 s session deadline together with ssh setup and PowerShell's
@@ -625,7 +626,7 @@ $fleetPidFile = [IO.Path]::Combine($fleetDir, 'pid')
 $fleetWaited = 0
 while (-not [IO.File]::Exists($fleetPidFile) -and $fleetWaited -lt 250) { Start-Sleep -Milliseconds 100; $fleetWaited++ }
 if (-not [IO.File]::Exists($fleetPidFile)) {
-  if (fleetGiveUp) { fleetDropTask; exit 75 }
+  if (fleetGiveUp) { fleetDropTask; fleetRefuse 75 }
   # The wrapper holds the gate, so it is running (or about to). Give it a
   # little longer; if its pid is still not there the outcome is unknown, which
   # is not the same as failed: status decides.
@@ -633,7 +634,7 @@ if (-not [IO.File]::Exists($fleetPidFile)) {
   while (-not [IO.File]::Exists($fleetPidFile) -and $fleetWaited -lt 50) { Start-Sleep -Milliseconds 100; $fleetWaited++ }
   if (-not [IO.File]::Exists($fleetPidFile)) {
     # In wait mode the run may still start: go on waiting instead of reporting.
-    if (-not $fleetWait) { fleetDropTask; exit 76 }
+    if (-not $fleetWait) { fleetDropTask; fleetRefuse 76 }
   }
 }
 fleetDropTask
@@ -684,7 +685,7 @@ public static class FleetSessions {
   }
 }
 '@
-} catch { [Console]::Error.WriteLine('fleet: the session helper could not be compiled on this guest'); exit 79 }
+} catch { [Console]::Error.WriteLine('fleet: the session helper could not be compiled on this guest'); fleetRefuse 79 }
 $fleetSessionId = -1
 $fleetSessionState = ''
 foreach ($fleetEntry in [FleetSessions]::Sessions($env:COMPUTERNAME, $fleetUser)) {
@@ -695,18 +696,166 @@ if ($fleetSessionId -lt 0) {
   $fleetNote = 'fleet: interactive user ' + $fleetUser + ' has no active desktop session'
   if ($fleetSessionState -ne '') { $fleetNote += ' (a session exists in WTS state ' + $fleetSessionState + ')' }
   [Console]::Error.WriteLine($fleetNote + '; the image or operator must log that user on (autologon)')
-  exit 77
+  fleetRefuse 77
 }
 "#;
+
+/// The refusal code of a Windows image that does not hold the interactive
+/// run's preconditions (#490): the readiness probe prints why on stderr and
+/// exits with it. Unlike 77 (no session yet), it is never retried.
+pub const PRECONDITION_REFUSAL: u8 = 73;
+
+/// The image preconditions of an interactive run (#397, #490): the test user
+/// holds no `SeCreateSymbolicLinkPrivilege` (directly, through a local group
+/// or an implicit group) and Developer Mode
+/// (`AllowDevelopmentWithoutDevLicense`) is off, so the user cannot make
+/// file symlinks. The handle checks refuse file symlinks anyway; this fails
+/// readiness early instead. Local accounts only: a holder that is a group
+/// this guest cannot enumerate (for example a domain group) is refused with
+/// 79 rather than assumed harmless: the check fails closed. Reads the policy,
+/// the account database and the registry; changes nothing.
+///
+/// This part defines the helpers (`fleetLsaHolders`, `fleetGroupMembers`),
+/// which a test replaces with stubs; [`WINDOWS_IMAGE_CHECK`] is the logic.
+const WINDOWS_IMAGE_HELPERS: &str = r#"try { Add-Type -TypeDefinition @'
+using System;
+using System.Collections.Generic;
+using System.Runtime.InteropServices;
+using System.Security.Principal;
+public static class FleetLsa {
+  [StructLayout(LayoutKind.Sequential)] struct LSA_UNICODE_STRING { public ushort Length; public ushort MaximumLength; public IntPtr Buffer; }
+  [StructLayout(LayoutKind.Sequential)] struct LSA_OBJECT_ATTRIBUTES { public int Length; public IntPtr RootDirectory; public IntPtr ObjectName; public int Attributes; public IntPtr SecurityDescriptor; public IntPtr SecurityQualityOfService; }
+  [StructLayout(LayoutKind.Sequential)] struct LSA_ENUMERATION_INFORMATION { public IntPtr Sid; }
+  [DllImport("advapi32.dll")] static extern uint LsaOpenPolicy(IntPtr system, ref LSA_OBJECT_ATTRIBUTES attrs, uint access, out IntPtr handle);
+  [DllImport("advapi32.dll")] static extern uint LsaEnumerateAccountsWithUserRight(IntPtr handle, ref LSA_UNICODE_STRING right, out IntPtr buffer, out int count);
+  [DllImport("advapi32.dll")] static extern uint LsaFreeMemory(IntPtr p);
+  [DllImport("advapi32.dll")] static extern uint LsaClose(IntPtr handle);
+  public static string[] Holders(string right) {
+    LSA_OBJECT_ATTRIBUTES attrs = new LSA_OBJECT_ATTRIBUTES();
+    attrs.Length = Marshal.SizeOf(typeof(LSA_OBJECT_ATTRIBUTES));
+    IntPtr policy;
+    // POLICY_LOOKUP_NAMES | POLICY_VIEW_LOCAL_INFORMATION
+    uint status = LsaOpenPolicy(IntPtr.Zero, ref attrs, 0x801, out policy);
+    if (status != 0) throw new InvalidOperationException("LsaOpenPolicy " + status.ToString("X8"));
+    IntPtr name = IntPtr.Zero;
+    try {
+      LSA_UNICODE_STRING text = new LSA_UNICODE_STRING();
+      name = Marshal.StringToHGlobalUni(right);
+      text.Buffer = name;
+      text.Length = (ushort)(right.Length * 2);
+      text.MaximumLength = (ushort)(right.Length * 2 + 2);
+      IntPtr buffer; int count;
+      status = LsaEnumerateAccountsWithUserRight(policy, ref text, out buffer, out count);
+      // STATUS_NO_MORE_ENTRIES: nobody holds the right.
+      if (status == 0xC000001A) return new string[0];
+      if (status != 0) throw new InvalidOperationException("LsaEnumerateAccountsWithUserRight " + status.ToString("X8"));
+      try {
+        List<string> list = new List<string>();
+        int size = Marshal.SizeOf(typeof(LSA_ENUMERATION_INFORMATION));
+        for (int i = 0; i < count; i++) {
+          IntPtr sid = Marshal.ReadIntPtr(new IntPtr(buffer.ToInt64() + (long)i * size));
+          list.Add(new SecurityIdentifier(sid).Value);
+        }
+        return list.ToArray();
+      } finally { LsaFreeMemory(buffer); }
+    } finally {
+      if (name != IntPtr.Zero) Marshal.FreeHGlobal(name);
+      LsaClose(policy);
+    }
+  }
+}
+'@
+} catch { [Console]::Error.WriteLine('fleet: the policy helper could not be compiled on this guest'); fleetRefuse 79 }
+function fleetUserSidOf($user) { return (New-Object Security.Principal.NTAccount($env:COMPUTERNAME, $user)).Translate([Security.Principal.SecurityIdentifier]).Value }
+# The raw AllowDevelopmentWithoutDevLicense value, from the 64-bit registry
+# view; $null when the key or value does not exist.
+function fleetDevModeValue() {
+  $hive = [Microsoft.Win32.RegistryKey]::OpenBaseKey([Microsoft.Win32.RegistryHive]::LocalMachine, [Microsoft.Win32.RegistryView]::Registry64)
+  try {
+    $key = $hive.OpenSubKey('SOFTWARE\Microsoft\Windows\CurrentVersion\AppModelUnlock')
+    if ($null -eq $key) { return $null }
+    try { return $key.GetValue('AllowDevelopmentWithoutDevLicense') } finally { $key.Dispose() }
+  } finally { $hive.Dispose() }
+}
+function fleetLsaHolders() { return ,@([FleetLsa]::Holders('SeCreateSymbolicLinkPrivilege')) }
+# SIDs that name no group (SYSTEM, the service accounts and service SIDs).
+function fleetIsServiceSid($sid) { return ($sid -in @('S-1-5-18', 'S-1-5-19', 'S-1-5-20')) -or ($sid -match '^S-1-5-(80|82|83|87|90|96)-') }
+# The member SIDs of the local group with this SID; $null when the SID is not
+# a group (a user, a service). A SID or group this guest cannot resolve or
+# enumerate throws, except an unresolvable nested member ($strict false),
+# which is an orphaned account and not a group.
+function fleetGroupMembers($sid, $strict) {
+  if (fleetIsServiceSid $sid) { return $null }
+  $text = $null
+  try { $text = (New-Object Security.Principal.SecurityIdentifier($sid)).Translate([Security.Principal.NTAccount]).Value } catch { if ($strict) { throw } else { return $null } }
+  $name = $text.Substring($text.LastIndexOf('\') + 1)
+  if ($name -cnotmatch '^[^/,\\:*?"<>|]{1,256}\z') { throw 'unusable group name' }
+  $entry = [ADSI]('WinNT://./' + $name)
+  if ($entry.SchemaClassName -ne 'Group') { return $null }
+  $list = New-Object 'System.Collections.Generic.List[string]'
+  foreach ($member in @($entry.Invoke('Members'))) {
+    $raw = $member.GetType().InvokeMember('objectSid', 'GetProperty', $null, $member, $null)
+    $list.Add((New-Object Security.Principal.SecurityIdentifier($raw, 0)).Value)
+  }
+  return ,$list.ToArray()
+}
+"#;
+
+/// The image-precondition logic (see [`WINDOWS_IMAGE_HELPERS`]). Needs
+/// `$fleetUser`; prints the reason and exits 73 when the image lets the user
+/// make symlinks, 78 when the account does not exist yet, and 79 when the
+/// answer cannot be established.
+const WINDOWS_IMAGE_CHECK: &str = r"try {
+  $fleetUserSid = fleetUserSidOf $fleetUser
+} catch { [Console]::Error.WriteLine('fleet: the interactive user has no local account on this guest'); fleetRefuse 78 }
+$fleetDevMode = $false
+try {
+  $fleetValue = fleetDevModeValue
+  $fleetDevMode = ($null -ne $fleetValue) -and ([int64]$fleetValue -ne 0)
+} catch { [Console]::Error.WriteLine('fleet: Developer Mode could not be read on this guest'); fleetRefuse 79 }
+if ($fleetDevMode) {
+  [Console]::Error.WriteLine('fleet: Developer Mode (AllowDevelopmentWithoutDevLicense) is on in this image; the interactive user could create file symlinks')
+  fleetRefuse 73
+}
+# Whether the group with this SID, or a group nested in it, has the user as a
+# member. A group that cannot be enumerated throws.
+function fleetHasMember($groupSid, $depth) {
+  if ($depth -gt 8) { throw 'group nesting too deep' }
+  $members = fleetGroupMembers $groupSid ($depth -eq 0)
+  if ($null -eq $members) { return $false }
+  foreach ($memberSid in $members) {
+    if ($memberSid -eq $fleetUserSid) { return $true }
+    if ($memberSid -ne $groupSid -and (fleetHasMember $memberSid ($depth + 1))) { return $true }
+  }
+  return $false
+}
+$fleetImplicit = @('S-1-1-0', 'S-1-2-1', 'S-1-5-4', 'S-1-5-11', 'S-1-5-32-545')
+$fleetHeld = $false
+try {
+  foreach ($fleetHolder in (fleetLsaHolders)) {
+    if ($fleetHolder -eq $fleetUserSid -or $fleetImplicit -contains $fleetHolder -or (fleetHasMember $fleetHolder 0)) { $fleetHeld = $true; break }
+  }
+} catch {
+  [Console]::Error.WriteLine('fleet: the symlink privilege holders could not be resolved on this guest')
+  fleetRefuse 79
+}
+if ($fleetHeld) {
+  [Console]::Error.WriteLine('fleet: the interactive user holds SeCreateSymbolicLinkPrivilege in this image (directly or through a group); it could create file symlinks')
+  fleetRefuse 73
+}
+";
 
 /// The readiness probe (#397): exits 0 and prints `session=<id>` when the
 /// interactive user has an Active desktop session; otherwise prints why on
 /// stderr and exits 77 (`78` when the account has no profile, `64` for an
-/// invalid user name). Run with the argument `[user]`. It reads nothing
+/// invalid user name, [`PRECONDITION_REFUSAL`] when the image lets the user
+/// create symlinks, checked first). Every refusal also prints the marker line
+/// `fleet: refusal <code>` last. Run with the argument `[user]`. It reads nothing
 /// secret and changes nothing.
 const WINDOWS_SESSION_PROBE: &str = r"$ErrorActionPreference = 'Stop'
+function fleetRefuse([int]$code) { [Console]::Error.WriteLine('fleet: refusal ' + $code); exit $code }
 $fleetUser = $args[0]
-if ($fleetUser -cnotmatch '^[A-Za-z0-9_][A-Za-z0-9_.-]{0,19}\z') { exit 64 }
+if ($fleetUser -cnotmatch '^[A-Za-z0-9_][A-Za-z0-9_.-]{0,19}\z') { fleetRefuse 64 }
 ";
 
 /// The synchronous tail (#397): after the interactive start, wait for the
@@ -718,20 +867,20 @@ const WINDOWS_INTERACTIVE_WAIT: &str = r"$fleetExitFile = [IO.Path]::Combine($fl
 $fleetEnd = $fleetBegan.AddSeconds([double]$fleetNum + 75)
 if ([IO.File]::Exists([IO.Path]::Combine($fleetDir, 'abandoned')) -and -not (fleetReg ([IO.Path]::Combine($fleetDir, 'pid')))) {
   [Console]::Error.WriteLine('fleet: the interactive command was abandoned before it started')
-  exit 75
+  fleetRefuse 75
 }
 $fleetAbandonedFile = [IO.Path]::Combine($fleetDir, 'abandoned')
 $fleetPidPath = [IO.Path]::Combine($fleetDir, 'pid')
 while (-not (fleetReg $fleetExitFile) -and [DateTime]::UtcNow -lt $fleetEnd) {
   if ([IO.File]::Exists($fleetAbandonedFile) -and -not (fleetReg $fleetPidPath)) {
     [Console]::Error.WriteLine('fleet: the interactive command was abandoned before it started')
-    exit 75
+    fleetRefuse 75
   }
   Start-Sleep -Milliseconds 250
 }
 if (-not (fleetReg $fleetExitFile)) {
   [Console]::Error.WriteLine('fleet: the interactive command did not report an exit status within its bound (the start used part of it)')
-  exit 70
+  fleetRefuse 70
 }
 $fleetCode = 1
 try {
@@ -944,6 +1093,16 @@ pub fn interactive_start_metadata(
 /// [`WINDOWS_SESSION_PROBE`]); run with [`session_probe_metadata`].
 #[must_use]
 pub fn session_probe_script() -> String {
+    format!(
+        "{WINDOWS_SESSION_PROBE}{WINDOWS_IMAGE_HELPERS}{WINDOWS_IMAGE_CHECK}{WINDOWS_SESSION_FIND}[Console]::Out.Write(\"session=\" + $fleetSessionId + \"`n\")\nexit 0\n"
+    )
+}
+
+/// [`session_probe_script`] without the image preconditions, for the retries
+/// after one run of the full probe passed them (they do not change while the
+/// guest waits for its session, and they compile helpers).
+#[must_use]
+pub fn session_probe_script_session_only() -> String {
     format!(
         "{WINDOWS_SESSION_PROBE}{WINDOWS_SESSION_FIND}[Console]::Out.Write(\"session=\" + $fleetSessionId + \"`n\")\nexit 0\n"
     )
@@ -1672,18 +1831,161 @@ mod tests {
             assert!(plain.contains("FleetLaunch"));
             assert!(!plain.contains("FLEET_SESSION_FIND_INLINE"));
             let probe = session_probe_script();
-            assert!(probe.contains("exit 77") && probe.contains("session="));
+            assert!(
+                probe.contains("fleetRefuse 77")
+                    && probe.contains("SeCreateSymbolicLinkPrivilege")
+                    && probe.contains("AllowDevelopmentWithoutDevLicense")
+                    && probe.contains("session=")
+            );
             assert_eq!(session_probe_metadata("qa").arguments, ["qa"]);
             let status_args = status_metadata_for("h", 10, Some("qa")).arguments;
             assert_eq!(status_args, ["h", "10", "interactive:qa"]);
             assert_eq!(status_metadata_for("h", 10, None).arguments, ["h", "10"]);
         }
 
+        /// Every refusal of the interactive scripts goes through
+        /// `fleetRefuse`, which prints the marker the controller maps to a
+        /// failed operation (#490); only the command's own exit is bare.
+        #[test]
+        fn interactive_refusals_print_the_marker_and_only_the_commands_exit_is_bare() {
+            assert!(
+                WINDOWS_RESOLVE.contains(
+                    "function fleetRefuse([int]$code) { [Console]::Error.WriteLine('fleet: refusal ' + $code); exit $code }"
+                ) && WINDOWS_SESSION_PROBE.contains("function fleetRefuse(")
+            );
+            let wait = interactive_start_script("echo hi", true);
+            let bare = regex_free_bare_refusals(&wait);
+            assert!(bare.is_empty(), "{bare:?}");
+            let probe = session_probe_script();
+            let bare = regex_free_bare_refusals(&probe);
+            assert!(bare.is_empty(), "{bare:?}");
+            // The precondition probe has its own code and runs before the
+            // session lookup, so a bad image is never retried.
+            assert_eq!(PRECONDITION_REFUSAL, 73);
+            assert!(probe.contains("fleetRefuse 73"));
+            assert!(
+                probe.find("FleetLsa").unwrap() < probe.find("FleetSessions").unwrap(),
+                "preconditions come first"
+            );
+            // The retry script skips them.
+            let retry = session_probe_script_session_only();
+            assert!(retry.contains("FleetSessions") && !retry.contains("FleetLsa"));
+            assert!(regex_free_bare_refusals(&retry).is_empty());
+            assert!(wait.contains("exit $fleetCode"), "the command's own exit");
+        }
+
+        /// The non-comment lines of `script` that exit with a refusal code
+        /// (64 or 70 to 79) without the marker.
+        fn regex_free_bare_refusals(script: &str) -> Vec<String> {
+            script
+                .lines()
+                .filter(|line| !line.trim_start().starts_with('#'))
+                .filter(|line| {
+                    line.split("exit ").skip(1).any(|rest| {
+                        let digits: String =
+                            rest.chars().take_while(char::is_ascii_digit).collect();
+                        matches!(digits.parse::<u32>(), Ok(64 | 70..=79))
+                            && !line.contains("function fleetRefuse")
+                    })
+                })
+                .map(str::to_owned)
+                .collect()
+        }
+
+        #[test]
+        fn the_policy_helper_compiles() {
+            let Some(pwsh) = require_pwsh() else { return };
+            let find = WINDOWS_IMAGE_HELPERS;
+            let end = find.find("fleetRefuse 79 }\n").unwrap() + "fleetRefuse 79 }\n".len();
+            let snippet = format!(
+                "function fleetRefuse([int]$code) {{ exit $code }}\n{}\n[Console]::Out.Write([FleetLsa].FullName)\n",
+                &find[..end]
+            );
+            let out = run_ps(&pwsh, &snippet, &ScriptMetadata::default(), b"", None);
+            assert_eq!(out.status.code(), Some(0), "{out:?}");
+            assert!(String::from_utf8_lossy(&out.stdout).contains("FleetLsa"));
+        }
+
+        /// Runs the real precondition logic with the account, registry, LSA and
+        /// group-walk helpers stubbed (the real ones need a Windows guest), and
+        /// answers the exit code and the last stderr line.
+        fn run_preconditions(stubs: &str) -> Option<(Option<i32>, String, String)> {
+            let pwsh = require_pwsh()?;
+            let snippet = format!(
+                "function fleetRefuse([int]$code) {{ [Console]::Error.WriteLine('fleet: refusal ' + $code); exit $code }}\n$ErrorActionPreference = 'Stop'\n$fleetUser = 'qa'\n{WINDOWS_IMAGE_HELPERS}\n\
+                 function fleetUserSidOf($user) {{ 'S-1-5-21-1-2-3-1001' }}\n\
+                 function fleetDevModeValue() {{ $null }}\n\
+                 function fleetLsaHolders() {{ return ,@('S-1-5-32-544') }}\n\
+                 function fleetGroupMembers($sid, $strict) {{ if ($sid -eq 'S-1-5-32-544') {{ return ,@('S-1-5-21-1-2-3-500') }}; return $null }}\n\
+                 {stubs}\n{WINDOWS_IMAGE_CHECK}[Console]::Out.Write('passed')\n"
+            );
+            let out = run_ps(&pwsh, &snippet, &ScriptMetadata::default(), b"", None);
+            let stderr = String::from_utf8_lossy(&out.stderr).replace("\r\n", "\n");
+            Some((
+                out.status.code(),
+                String::from_utf8_lossy(&out.stdout).into_owned(),
+                stderr.trim_end().lines().last().unwrap_or("").to_owned(),
+            ))
+        }
+
+        #[test]
+        fn the_precondition_logic_passes_refuses_and_fails_closed() {
+            // An administrator-only holder passes.
+            let Some(pass) = run_preconditions("") else {
+                return;
+            };
+            assert_eq!((pass.0, pass.1.as_str()), (Some(0), "passed"), "{pass:?}");
+            let refusal = |stubs: &str| run_preconditions(stubs).unwrap();
+            // The user holds the right directly, through an implicit group,
+            // and through a group nested in the holder.
+            let direct = refusal("function fleetLsaHolders() { return ,@('S-1-5-21-1-2-3-1001') }");
+            assert_eq!(
+                (direct.0, direct.2.as_str()),
+                (Some(73), "fleet: refusal 73"),
+                "{direct:?}"
+            );
+            let implicit = refusal("function fleetLsaHolders() { return ,@('S-1-5-32-545') }");
+            assert_eq!(implicit.0, Some(73), "{implicit:?}");
+            let nested = refusal(
+                "function fleetGroupMembers($sid, $strict) { if ($sid -eq 'S-1-5-32-544') { return ,@('S-1-5-21-1-2-3-1100') }; if ($sid -eq 'S-1-5-21-1-2-3-1100') { return ,@('S-1-5-21-1-2-3-1001') }; return $null }",
+            );
+            assert_eq!(
+                (nested.0, nested.2.as_str()),
+                (Some(73), "fleet: refusal 73"),
+                "{nested:?}"
+            );
+            // Developer Mode on refuses; off or absent does not.
+            let dev = refusal("function fleetDevModeValue() { 1 }");
+            assert_eq!(dev.0, Some(73), "{dev:?}");
+            assert_eq!(refusal("function fleetDevModeValue() { 0 }").0, Some(0));
+            // A missing account is retried (78); anything that cannot be
+            // established fails closed (79): the group walk, the holder
+            // list, the registry read, a bad registry value.
+            let no_account = refusal("function fleetUserSidOf($user) { throw 'none' }");
+            assert_eq!(
+                (no_account.0, no_account.2.as_str()),
+                (Some(78), "fleet: refusal 78")
+            );
+            for stubs in [
+                "function fleetGroupMembers($sid, $strict) { throw 'adsi failed' }",
+                "function fleetLsaHolders() { throw 'lsa failed' }",
+                "function fleetDevModeValue() { throw 'registry failed' }",
+                "function fleetDevModeValue() { 'not a number' }",
+            ] {
+                let closed = refusal(stubs);
+                assert_eq!(
+                    (closed.0, closed.1.as_str(), closed.2.as_str()),
+                    (Some(79), "", "fleet: refusal 79"),
+                    "{stubs}: {closed:?}"
+                );
+            }
+        }
+
         #[test]
         fn the_session_helper_compiles() {
             let Some(pwsh) = require_pwsh() else { return };
             let find = WINDOWS_SESSION_FIND;
-            let end = find.find("exit 79 }\n").unwrap() + "exit 79 }\n".len();
+            let end = find.find("fleetRefuse 79 }\n").unwrap() + "fleetRefuse 79 }\n".len();
             let snippet = format!(
                 "{}\n[Console]::Out.Write([FleetSessions].FullName)\n",
                 &find[..end]
@@ -1701,6 +2003,7 @@ mod tests {
                 interactive_start_script("echo hi", true),
                 status_script_for(GuestShell::PowerShell),
                 session_probe_script(),
+                session_probe_script_session_only(),
             ] {
                 let out = std::process::Command::new(&pwsh)
                     .args(["-NoProfile", "-Command", "-"])
@@ -1737,7 +2040,22 @@ mod tests {
                     &["h1", "5", bad],
                 );
                 assert_eq!(out.status.code(), Some(64), "{bad}: {out:?}");
+                // The refusal carries the marker the controller maps (#490).
+                assert!(
+                    String::from_utf8_lossy(&out.stderr)
+                        .trim_end()
+                        .ends_with("fleet: refusal 64"),
+                    "{bad}: {out:?}"
+                );
             }
+            let out = run(&pwsh, &session_probe_script(), &["a b"]);
+            assert_eq!(out.status.code(), Some(64), "{out:?}");
+            assert!(
+                String::from_utf8_lossy(&out.stderr)
+                    .trim_end()
+                    .ends_with("fleet: refusal 64"),
+                "{out:?}"
+            );
         }
 
         fn pid_of(base: &Path, handle: &str) -> String {
@@ -2057,7 +2375,7 @@ mod tests {
                 start.contains("$fleetWaited -lt 250") && start.contains("$fleetWaited -lt 50")
             );
             assert!(10 + 25 + 5 < SESSION_DEADLINE.as_secs());
-            assert!(start.contains("exit 76"));
+            assert!(start.contains("fleetRefuse 76"));
 
             let Some(pwsh) = require_pwsh() else { return };
             let base = tempfile::tempdir().unwrap();

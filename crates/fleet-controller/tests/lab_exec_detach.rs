@@ -35,6 +35,8 @@ use fleet_storage_sqlite::{
     OperationRepository, ProxmoxAccountRepository, RecipeRepository, Store,
 };
 
+static INTERACTIVE_STARTS: AtomicUsize = AtomicUsize::new(0);
+
 /// Stands in for the SSH exec executor: runs the payload's script and
 /// arguments under local bash (the way the SSH session feeds them, with the
 /// temporary guest directory appended as the base-directory argument) and
@@ -61,6 +63,15 @@ impl OperationExecutor for LocalBash {
             .iter()
             .map(|value| value.as_str().unwrap().to_owned())
             .collect();
+        // The interactive start marks its refusals and asks for them to be
+        // mapped (#490); every other start does not.
+        let interactive = args
+            .get(2)
+            .is_some_and(|argument| argument.starts_with("interactive:"));
+        assert_eq!(payload["guestRefusals"] == true, interactive);
+        if interactive {
+            INTERACTIVE_STARTS.fetch_add(1, Ordering::SeqCst);
+        }
         args.push(self.base.display().to_string());
         let mut child = std::process::Command::new("bash")
             .arg("-s")
@@ -1297,6 +1308,11 @@ async fn an_interactive_start_follows_the_templates_user_and_is_refused_elsewher
             .any(|event| event.contains("interactive")),
         "the audit names the session"
     );
+    // The valid interactive start reaches SSH asking for refusal mapping.
+    let before = INTERACTIVE_STARTS.load(Ordering::SeqCst);
+    let handle = windows.queue(&prepared).await;
+    windows.run(&handle).await;
+    assert_eq!(INTERACTIVE_STARTS.load(Ordering::SeqCst), before + 1);
     // A payload edited to a hostile user name is refused before any guest session.
     let mut hostile = prepared.clone();
     let mut edited = payload;
