@@ -3731,4 +3731,34 @@ mod tests {
             }
         }
     }
+
+    #[test]
+    fn the_windows_fixture_recipes_pass_the_gate() {
+        // #452: the Windows recipes set the CPU type and OS Windows 11
+        // needs, and the re-generalizing recipe (Packer's temporary key,
+        // installed by Cloudbase-Init in the base) holds no credential.
+        for (name, content, communicator) in [
+            (
+                "recipe.example.json",
+                include_str!("../../../deploy/pve-test/windows/recipe.example.json"),
+                "none",
+            ),
+            (
+                "recipe-regeneralize.example.json",
+                include_str!("../../../deploy/pve-test/windows/recipe-regeneralize.example.json"),
+                "ssh",
+            ),
+        ] {
+            assert_eq!(fleet_core::recipe_build_refusal(content), None, "{name}");
+            let value: serde_json::Value = serde_json::from_str(content).unwrap();
+            let builder = &value["builders"][0];
+            assert_eq!(builder["cpu_type"], "host", "{name}");
+            assert_eq!(builder["os"], "win11", "{name}");
+            assert_eq!(builder["communicator"], communicator, "{name}");
+            for key in ["ssh_password", "ssh_private_key_file", "winrm_password"] {
+                assert!(builder.get(key).is_none(), "{name} {key}");
+            }
+            assert!(!has_external_assets(content), "{name}");
+        }
+    }
 }

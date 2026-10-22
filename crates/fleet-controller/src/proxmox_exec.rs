@@ -1542,6 +1542,10 @@ pub struct ProvisionReadiness {
     operations: Arc<Operations>,
     work_dir: std::path::PathBuf,
     started: Arc<std::sync::Mutex<std::collections::HashSet<String>>>,
+    /// Provision records whose interactive image preconditions already passed
+    /// in this controller, so the retries while the guest waits for its
+    /// session run only the session lookup (#490). A restart just checks again.
+    preconditions_passed: std::sync::Mutex<std::collections::HashSet<String>>,
 }
 
 impl ProvisionReadiness {
@@ -1563,6 +1567,7 @@ impl ProvisionReadiness {
             operations,
             work_dir,
             started: Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
+            preconditions_passed: std::sync::Mutex::new(std::collections::HashSet::new()),
         }
     }
 
@@ -1694,6 +1699,30 @@ impl ProvisionReadiness {
         guest_os: fleet_core::GuestOs,
         remaining: Duration,
     ) -> Result<bool, String> {
+        Ok(self
+            .run_probe_finished(
+                operations, parent_id, record, command, arguments, guest_os, false, remaining,
+            )
+            .await?
+            .state
+            == "succeeded")
+    }
+
+    /// [`Self::run_probe`], returning the finished child so a caller can read
+    /// why it failed. `guest_refusals` asks the executor to tell the guest
+    /// script's own refusals from the command's exit code (#490).
+    #[allow(clippy::too_many_arguments)]
+    async fn run_probe_finished(
+        &self,
+        operations: &Operations,
+        parent_id: &str,
+        record: &fleet_application::lab::ProvisionRecord,
+        command: &str,
+        arguments: &[String],
+        guest_os: fleet_core::GuestOs,
+        guest_refusals: bool,
+        remaining: Duration,
+    ) -> Result<Operation, String> {
         let child = operations.create(&fleet_auth::LanAllowAllAuthorizer, fleet_auth::LAN_PRINCIPAL_ID,
             &fleet_application::operation::NewOperation {
                 kind: "ssh.exec".to_owned(), idempotency_key: None,
@@ -1703,6 +1732,7 @@ impl ProvisionReadiness {
                     "auth": {"type": "agent"}, "script": command,
                     "arguments": arguments,
                     "guestOs": guest_os.id(),
+                    "guestRefusals": guest_refusals,
                     "labParentOperationId": parent_id,
                     "timeoutSeconds": remaining.as_secs().clamp(1, crate::exec::MAX_SCRIPT_TIMEOUT),
                 }).to_string()),
@@ -1714,7 +1744,7 @@ impl ProvisionReadiness {
                 return Err("SSH probe was cancelled".to_owned());
             }
             if !matches!(finished.state.as_str(), "pending" | "running") {
-                return Ok(finished.state == "succeeded");
+                return Ok(finished);
             }
             if tokio::time::Instant::now() >= deadline
                 || operations.cancel_requested(parent_id).await.unwrap_or(true)
@@ -1729,6 +1759,204 @@ impl ProvisionReadiness {
                 return Err("SSH probe deadline expired".to_owned());
             }
             tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    }
+}
+
+/// Whether a failed probe's error is the guest script refusing because the
+/// image does not hold the interactive preconditions (#490).
+fn is_precondition_refusal(error_json: Option<&str>) -> bool {
+    refusal_code(error_json)
+        == Some(i64::from(
+            fleet_provider_ssh::detached::PRECONDITION_REFUSAL,
+        ))
+}
+
+/// The guest refusal code of a failed `ssh.exec` whose script refused (#490).
+fn refusal_code(error_json: Option<&str>) -> Option<i64> {
+    error_json
+        .and_then(|raw| serde_json::from_str::<serde_json::Value>(raw).ok())
+        .filter(|error| error["reason"] == "guest_refused")
+        .and_then(|error| error["refusalCode"].as_i64())
+}
+
+#[cfg(test)]
+mod precondition_refusal_tests {
+    use super::*;
+
+    /// Completes each `ssh.exec` child the readiness probe creates with the
+    /// next scripted outcome and keeps its payload.
+    #[derive(Debug)]
+    struct ScriptedProbe {
+        outcomes: std::sync::Mutex<std::collections::VecDeque<Option<i64>>>,
+        payloads: std::sync::Mutex<Vec<serde_json::Value>>,
+    }
+
+    #[async_trait::async_trait]
+    impl OperationExecutor for ScriptedProbe {
+        async fn execute(
+            &self,
+            operations: &Operations,
+            operation: &Operation,
+        ) -> Result<(), String> {
+            self.payloads
+                .lock()
+                .unwrap()
+                .push(serde_json::from_str(operation.payload_json.as_deref().unwrap()).unwrap());
+            let outcome = self.outcomes.lock().unwrap().pop_front().unwrap();
+            let refused;
+            let (state, result, error) = match outcome {
+                None => ("succeeded", Some("{}"), None),
+                Some(code) => {
+                    refused = serde_json::json!({
+                        "reason": "guest_refused", "refusalCode": code, "detail": "x"
+                    })
+                    .to_string();
+                    ("failed", None, Some(refused.as_str()))
+                }
+            };
+            operations
+                .complete(&operation.id, state, result, error)
+                .await
+                .map(|_| ())
+                .map_err(|error| error.to_string())
+        }
+    }
+
+    async fn probe_with(
+        outcomes: Vec<Option<i64>>,
+    ) -> (
+        ProvisionReadiness,
+        Arc<ScriptedProbe>,
+        Arc<Operations>,
+        tempfile::TempDir,
+        fleet_storage_sqlite::Store,
+    ) {
+        let dir = tempfile::tempdir().unwrap();
+        let store = fleet_storage_sqlite::Store::open(&dir.path().join("fleet.db"))
+            .await
+            .unwrap();
+        let audit = Arc::new(fleet_storage_sqlite::AuditSink::new(store.pool().clone()));
+        let operations = Arc::new(Operations::new(
+            Arc::new(fleet_storage_sqlite::OperationRepository::new(
+                store.pool().clone(),
+            )),
+            audit.clone(),
+        ));
+        let probe = Arc::new(ScriptedProbe {
+            outcomes: std::sync::Mutex::new(outcomes.into()),
+            payloads: std::sync::Mutex::new(Vec::new()),
+        });
+        let readiness = ProvisionReadiness::new(
+            Arc::new(fleet_storage_sqlite::MachineRepository::new(
+                store.pool().clone(),
+            )),
+            Arc::new(fleet_storage_sqlite::ProjectRepository::new(
+                store.pool().clone(),
+            )),
+            audit,
+            probe.clone(),
+            operations.clone(),
+            dir.path().join("ssh"),
+        );
+        (readiness, probe, operations, dir, store)
+    }
+
+    fn record() -> fleet_application::lab::ProvisionRecord {
+        fleet_application::lab::ProvisionRecord {
+            id: "provision-1".to_owned(),
+            template_version_id: "version-1".to_owned(),
+            lease_id: None,
+            state: fleet_core::GuestState::Bootstrapping,
+            node: None,
+            vmid: None,
+            clone_upid: None,
+            guest_ipv4: None,
+            machine_id: Some("machine-1".to_owned()),
+            endpoint_id: Some("endpoint-1".to_owned()),
+            ready_project_operation_id: None,
+            readiness_deadline_at: Some(fleet_core::SystemClock::now_unix_millis() + 60_000),
+            failed_step: None,
+            account_id: None,
+            idempotency_key: None,
+            ready_at: None,
+            created_at: 0,
+            updated_at: 0,
+        }
+    }
+
+    /// The probe asks for refusal mapping; a 77 keeps retrying (the
+    /// preconditions are checked once, then only the session lookup runs); a
+    /// 73 is an error, which the readiness loop turns into the failed step
+    /// `interactive_session`.
+    #[tokio::test]
+    async fn the_session_probe_maps_refusals_and_checks_the_preconditions_once() {
+        use fleet_application::lab::LabReadinessPort as _;
+        let (readiness, probe, operations, _dir, _store) =
+            probe_with(vec![Some(77), Some(77), None, Some(73)]).await;
+        let record = record();
+        let wait = Duration::from_secs(30);
+        let parent = operations
+            .create(
+                &fleet_auth::LanAllowAllAuthorizer,
+                fleet_auth::LAN_PRINCIPAL_ID,
+                &fleet_application::operation::NewOperation {
+                    kind: "noop".to_owned(),
+                    idempotency_key: None,
+                    deadline_at: None,
+                    correlation_id: None,
+                    payload_json: None,
+                    review_token: None,
+                },
+            )
+            .await
+            .unwrap()
+            .id;
+        let try_once = || readiness.interactive_session(&operations, &parent, &record, "qa", wait);
+        assert_eq!(try_once().await, Ok(false));
+        assert_eq!(try_once().await, Ok(false));
+        assert_eq!(try_once().await, Ok(true));
+        let payloads = probe.payloads.lock().unwrap().clone();
+        assert!(
+            payloads
+                .iter()
+                .all(|payload| payload["guestRefusals"] == true)
+        );
+        let has_checks = |index: usize| {
+            payloads[index]["script"]
+                .as_str()
+                .unwrap()
+                .contains("FleetLsa")
+        };
+        assert!(has_checks(0), "the first probe checks the image");
+        assert!(
+            !has_checks(1) && !has_checks(2),
+            "the retries only look for the session"
+        );
+        // The pass is forgotten once the session is up; a 73 fails the step.
+        assert!(readiness.preconditions_passed.lock().unwrap().is_empty());
+        let error = try_once().await.unwrap_err();
+        assert!(error.contains("preconditions"), "{error}");
+        let last = probe.payloads.lock().unwrap().last().cloned().unwrap();
+        assert!(last["script"].as_str().unwrap().contains("FleetLsa"));
+    }
+
+    #[test]
+    fn only_the_guests_precondition_refusal_stops_the_readiness_retry() {
+        assert!(is_precondition_refusal(Some(
+            r#"{"reason":"guest_refused","refusalCode":73,"detail":"x"}"#
+        )));
+        // No session yet (77), a missing account (78), a command exit, a
+        // transport failure and no error at all keep retrying.
+        for error in [
+            Some(r#"{"reason":"guest_refused","refusalCode":77,"detail":"x"}"#),
+            Some(r#"{"reason":"guest_refused","refusalCode":78,"detail":"x"}"#),
+            Some(r#"{"exitCode":73,"stdout":"","stderr":""}"#),
+            Some(r#"{"reason":"connection_failed","detail":"x"}"#),
+            Some("not json"),
+            None,
+        ] {
+            assert!(!is_precondition_refusal(error), "{error:?}");
         }
     }
 }
@@ -1837,16 +2065,50 @@ impl fleet_application::lab::LabReadinessPort for ProvisionReadiness {
     ) -> Result<bool, String> {
         fleet_core::validate_interactive_user_name(user)?;
         let metadata = fleet_provider_ssh::detached::session_probe_metadata(user);
-        self.run_probe(
-            operations,
-            parent_id,
-            record,
-            &fleet_provider_ssh::detached::session_probe_script(),
-            &metadata.arguments,
-            fleet_core::GuestOs::Windows,
-            remaining,
-        )
-        .await
+        let checked = self
+            .preconditions_passed
+            .lock()
+            .is_ok_and(|passed| passed.contains(&record.id));
+        let script = if checked {
+            fleet_provider_ssh::detached::session_probe_script_session_only()
+        } else {
+            fleet_provider_ssh::detached::session_probe_script()
+        };
+        let finished = self
+            .run_probe_finished(
+                operations,
+                parent_id,
+                record,
+                &script,
+                &metadata.arguments,
+                fleet_core::GuestOs::Windows,
+                true,
+                remaining,
+            )
+            .await?;
+        if finished.state == "succeeded" {
+            if let Ok(mut passed) = self.preconditions_passed.lock() {
+                passed.remove(&record.id);
+            }
+            return Ok(true);
+        }
+        // The preconditions run before the session lookup, so a refusal of 77
+        // (no session yet) means they passed.
+        if refusal_code(finished.error_json.as_deref()) == Some(77)
+            && let Ok(mut passed) = self.preconditions_passed.lock()
+        {
+            if passed.len() >= 1024 {
+                passed.clear();
+            }
+            passed.insert(record.id.clone());
+        }
+        // An image that does not hold the preconditions never will: fail the
+        // step now instead of retrying to the deadline. Every other refusal
+        // (no session yet, an account still being created) is retried.
+        if is_precondition_refusal(finished.error_json.as_deref()) {
+            return Err("the interactive test image does not hold its preconditions".to_owned());
+        }
+        Ok(false)
     }
 
     async fn create_project(
@@ -4552,6 +4814,9 @@ impl LabDispatch {
                     "script": script,
                     "arguments": metadata.arguments,
                     "guestOs": "windows",
+                    // The script's refusals (64, 70-79) are not the command's
+                    // exit code (#490).
+                    "guestRefusals": true,
                     // The guest bound, the start and the wait margin.
                     "timeoutSeconds": seconds + fleet_application::lab::INTERACTIVE_EXEC_MARGIN_SECONDS,
                 })

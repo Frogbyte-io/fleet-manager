@@ -275,6 +275,8 @@ async fn lab_exec_runs_on_the_lease_machine_and_refuses_an_expired_lease() {
     assert_eq!(payload["arguments"][0], done.id.as_str());
     assert_eq!(payload["arguments"][1], "30");
     assert_eq!(payload["arguments"][2], "interactive:qa");
+    // The guest script's refusals are told from the command's exit code.
+    assert_eq!(payload["guestRefusals"], true);
     assert_eq!(payload["timeoutSeconds"], 30 + 90);
     let script = payload["script"].as_str().unwrap();
     assert!(script.contains("-LogonType Interactive") && script.contains("fleetEmit"));

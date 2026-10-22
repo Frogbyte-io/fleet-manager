@@ -334,6 +334,8 @@ export interface ExecOutput {
   /** Why it did not finish normally (`deadline_killed`, `connection_failed`, …). */
   reason: string | null
   detail: string | null
+  /** The guest script's own refusal code (`guest_refused`), which is not an exit code. */
+  refusalCode: number | null
 }
 
 /**
@@ -372,6 +374,7 @@ export function execOutput(operation: { resultJson?: string | null, errorJson?: 
     truncatedStderr: flag('truncatedStderr'),
     reason: typeof outer.reason === 'string' ? outer.reason : null,
     detail: typeof outer.detail === 'string' ? outer.detail : null,
+    refusalCode: typeof outer.refusalCode === 'number' ? outer.refusalCode : null,
   }
 }
 
