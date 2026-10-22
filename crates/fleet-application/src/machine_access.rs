@@ -172,6 +172,16 @@ pub trait MachineKeyPort: fmt::Debug + Send + Sync {
     /// Fails with a secret-free detail when the store errors.
     async fn exists(&self, reference: &str, machine_id: &str) -> Result<bool, String>;
 
+    /// Refuses an identity-file path the controller must never offer to
+    /// `ssh` (its own key directory and master key). The default accepts.
+    ///
+    /// # Errors
+    ///
+    /// Answers why the path is refused.
+    fn check_identity_path(&self, _path: &str) -> Result<(), String> {
+        Ok(())
+    }
+
     /// Resolves a reference to the key text just in time. `None` means the
     /// reference is missing or revoked.
     ///
@@ -1151,6 +1161,10 @@ impl MachineAccess {
         auth: &EndpointAuth,
         machine_id: &str,
     ) -> Result<(), LabUseCaseError> {
+        if let (EndpointAuth::IdentityFile { path }, Some(keys)) = (auth, &self.keys) {
+            keys.check_identity_path(path)
+                .map_err(|detail| LabUseCaseError::Invalid { detail })?;
+        }
         let EndpointAuth::Secret { credential } = auth else {
             return Ok(());
         };

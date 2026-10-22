@@ -43,13 +43,26 @@ const GIT_PREFIX: &str = "git/";
 #[derive(Debug)]
 pub struct SecretBackedMachineKeys {
     secrets: Arc<SecretStore>,
+    protected: Vec<std::path::PathBuf>,
 }
 
 impl SecretBackedMachineKeys {
     /// Composes the store over the controller's secret store.
     #[must_use]
     pub fn new(secrets: Arc<SecretStore>) -> Self {
-        Self { secrets }
+        Self {
+            secrets,
+            protected: Vec::new(),
+        }
+    }
+
+    /// Refuses identity files at or under these paths (the SSH work
+    /// directory and the master key file). The rest of the data directory,
+    /// including the controller user's own `~/.ssh`, stays usable.
+    #[must_use]
+    pub fn protecting(mut self, paths: Vec<std::path::PathBuf>) -> Self {
+        self.protected = paths;
+        self
     }
 
     /// Whether `reference` names a live record inside a namespace usable on
@@ -104,6 +117,29 @@ impl MachineKeyPort for SecretBackedMachineKeys {
             .map_err(|error| format!("the key could not be stored: {error}"))
     }
 
+    fn check_identity_path(&self, path: &str) -> Result<(), String> {
+        let given = std::path::Path::new(path);
+        // The canonical path when it exists (a symlink cannot hide a
+        // protected file); otherwise the path as written.
+        let resolved = std::fs::canonicalize(given).unwrap_or_else(|_| given.to_path_buf());
+        let protected = self.protected.iter().any(|root| {
+            let root = std::fs::canonicalize(root).unwrap_or_else(|_| root.clone());
+            resolved.starts_with(&root) || given.starts_with(&root)
+        });
+        if protected
+            || given
+                .components()
+                .any(|c| c == std::path::Component::ParentDir)
+        {
+            Err(
+                "the identity file is one of the controller's own key files; it is refused"
+                    .to_owned(),
+            )
+        } else {
+            Ok(())
+        }
+    }
+
     async fn exists(&self, reference: &str, machine_id: &str) -> Result<bool, String> {
         // A live record that is not a usable key (an HTTPS token in the
         // repository-credential namespace) does not count: it could never
@@ -124,47 +160,13 @@ impl MachineKeyPort for SecretBackedMachineKeys {
 #[derive(Debug)]
 pub struct SshAuthResolver {
     keys: Arc<dyn MachineKeyPort>,
-    protected: Vec<std::path::PathBuf>,
 }
 
 impl SshAuthResolver {
     /// Composes the resolver over a key store.
     #[must_use]
     pub fn new(keys: Arc<dyn MachineKeyPort>) -> Self {
-        Self {
-            keys,
-            protected: Vec::new(),
-        }
-    }
-
-    /// Refuses identity files under these paths (the controller's data
-    /// directory and master key): the SSH work directory holds other
-    /// sessions' key files, and an identity-file auth could otherwise name
-    /// one.
-    #[must_use]
-    pub fn protecting(mut self, paths: Vec<std::path::PathBuf>) -> Self {
-        self.protected = paths;
-        self
-    }
-
-    fn check_identity_path(&self, path: &str) -> Result<(), String> {
-        let given = std::path::Path::new(path);
-        // The canonical path when it exists (a symlink cannot hide a
-        // protected file); otherwise the path as written.
-        let resolved = std::fs::canonicalize(given).unwrap_or_else(|_| given.to_path_buf());
-        let protected = self.protected.iter().any(|root| {
-            let root = std::fs::canonicalize(root).unwrap_or_else(|_| root.clone());
-            resolved.starts_with(&root) || given.starts_with(&root)
-        });
-        if protected
-            || given
-                .components()
-                .any(|c| c == std::path::Component::ParentDir)
-        {
-            Err("the identity file is inside the controller's own data; it is refused".to_owned())
-        } else {
-            Ok(())
-        }
+        Self { keys }
     }
 
     /// The provider auth for `auth`.
@@ -177,7 +179,7 @@ impl SshAuthResolver {
         match auth {
             EndpointAuth::Agent => Ok(SshAuth::Agent),
             EndpointAuth::IdentityFile { path } => {
-                self.check_identity_path(path)?;
+                self.keys.check_identity_path(path)?;
                 Ok(SshAuth::IdentityFile { path: path.clone() })
             }
             EndpointAuth::Secret { credential } => {

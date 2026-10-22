@@ -286,17 +286,18 @@ fn run_serve(mut config: fleet_config::ControllerConfig) -> ExitCode {
         // missing instead of failing the controller.
         let machine_keys = secrets.as_ref().map(|secrets| {
             std::sync::Arc::new(
-                fleet_controller::machine_access::SecretBackedMachineKeys::new(secrets.clone()),
+                fleet_controller::machine_access::SecretBackedMachineKeys::new(secrets.clone())
+                    .protecting(
+                        std::iter::once(config.data_dir.join("ssh"))
+                            .chain(config.master_key_file.clone())
+                            .collect(),
+                    ),
             )
         });
         let ssh_auth_resolver = machine_keys.as_ref().map(|keys| {
-            std::sync::Arc::new(
-                fleet_controller::machine_access::SshAuthResolver::new(keys.clone()).protecting(
-                    std::iter::once(config.data_dir.clone())
-                        .chain(config.master_key_file.clone())
-                        .collect(),
-                ),
-            )
+            std::sync::Arc::new(fleet_controller::machine_access::SshAuthResolver::new(
+                keys.clone(),
+            ))
         });
         // #489: the persistent marker, and the product-key store the
         // creation executor reads.

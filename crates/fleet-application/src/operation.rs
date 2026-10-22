@@ -1935,15 +1935,27 @@ impl Operations {
             },
         )
         .map_err(OperationUseCaseError::Denied)?;
-        let operations = self
-            .port
-            .list(limit)
-            .await
-            .map_err(map_port_failure("list"))?;
-        Ok(operations
-            .into_iter()
-            .filter(|operation| machine_operation_readable(authorizer, principal_id, operation))
-            .collect())
+        // Hidden operations must not shorten the page: read further back
+        // until the page is full or the history ends.
+        let wanted = limit as usize;
+        let mut ask = limit;
+        loop {
+            let rows = self
+                .port
+                .list(ask)
+                .await
+                .map_err(map_port_failure("list"))?;
+            let exhausted = rows.len() < ask as usize;
+            let mut visible: Vec<Operation> = rows
+                .into_iter()
+                .filter(|operation| machine_operation_readable(authorizer, principal_id, operation))
+                .collect();
+            if visible.len() >= wanted || exhausted || ask >= 10_000 {
+                visible.truncate(wanted);
+                return Ok(visible);
+            }
+            ask = ask.saturating_mul(4).min(10_000);
+        }
     }
 
     /// Requests cancellation of an operation.

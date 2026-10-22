@@ -34,9 +34,9 @@ fleetctl --output json machines file-get <file-id> --out ./error.log
 
 ## Permissions and audit
 
-`machines.put` is exec-equivalent: a file written to a machine can be a script, a cron entry, or `authorized_keys`, so granting put grants command execution as the endpoint's user. `machines.collect` reads any file the login can read. A caller with only `machines.exec` uses the endpoint's default auth; naming another auth for a request needs `machines.update`. The operation record keeps the plaintext command and output of an exec (readable only with `machines.exec` on that machine), so never put a secret in a command.
+`machines.put` is exec-equivalent: a file written to a machine can be a script, a cron entry, or `authorized_keys`, so granting put grants command execution as the endpoint's user. `machines.collect` reads any file the login can read. A caller with only `machines.exec` uses the endpoint's default auth; naming another auth for a request needs `machine.update`. The operation record keeps the plaintext command and output of an exec (readable only with `machines.exec` on that machine), so never put a secret in a command.
 
-`machines.exec`, `machines.put` and `machines.collect` are separate catalog entries scoped to the machine; `machines.update` sets a default. A delegated Lab credential holds none of them. Each request writes an audit event (`machine_exec_requested`, `machine_put_requested`, `machine_collect_requested`, `machine_file_downloaded`, `machine_endpoint_auth_set`, `machine_ssh_key_stored`) with the machine, endpoint, auth kind and, for an exec, the SHA-256 of the command, never the command, the key, or file content.
+`machines.exec`, `machines.put` and `machines.collect` are separate catalog entries scoped to the machine; `machine.update` sets a default. A delegated Lab credential holds none of them. Each request writes an audit event (`machine_exec_requested`, `machine_put_requested`, `machine_collect_requested`, `machine_file_downloaded`, `machine_endpoint_auth_set`, `machine_ssh_key_stored`) with the machine, endpoint, auth kind and, for an exec, the SHA-256 of the command, never the command, the key, or file content.
 
 ## Revoke access
 

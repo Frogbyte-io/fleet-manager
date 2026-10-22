@@ -346,6 +346,7 @@ impl SshProvider {
         match &endpoint.auth {
             SshAuth::Agent => {}
             SshAuth::IdentityFile { path } => {
+                self.check_identity_file(path)?;
                 command.arg("-i").arg(path);
             }
             SshAuth::StoredKey { .. } => {
