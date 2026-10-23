@@ -40,6 +40,7 @@ pub mod exec;
 pub mod fetch;
 pub mod inventory;
 pub mod key;
+pub mod persistent;
 pub mod put;
 pub mod shell;
 #[cfg(unix)]
@@ -58,7 +59,7 @@ pub use exec::{
 };
 pub use fetch::{FetchOutcome, fetch_file};
 pub use inventory::{COLLECTION_DEADLINE, PROBE_SOURCE, collect, parse_probe_output, probe_script};
-pub use key::PrivateKey;
+pub use key::{GeneratedKey, PrivateKey};
 pub use put::{PutOutcome, PutRequest, put_file};
 pub use shell::GuestShell;
 #[cfg(unix)]

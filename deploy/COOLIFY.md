@@ -188,6 +188,14 @@ reconnection. Do not attach a backup copy to a second active controller with
 the same enrolled nodes. Test recovery periodically; Coolify deployment
 rollback does not roll back SQLite migrations or the data volume.
 
+## Persistent machines
+
+This deployment is the reference controller for permanent, Fleet-managed VMs
+([operator guide](../docs/operations/persistent-machines.md)). Its database and
+master key are the machine records and the SSH keys Fleet generated for them, so
+the backup and recovery steps above apply before and after creating machines.
+A temporary controller (trusted LAN in `/tmp`) is unsuitable for them.
+
 ## Sources
 
 - [Coolify Docker Compose](https://coolify.io/docs/applications/builds/docker-compose)

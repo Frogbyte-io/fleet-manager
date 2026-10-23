@@ -22,7 +22,10 @@
 //! bounds is a payload error, not silent truncation.
 #![warn(missing_docs)]
 
+mod guest_config;
 mod tasks;
+
+pub use guest_config::{PveQemuSettings, PveQemuWrite, with_bridge};
 
 pub use tasks::{
     MAX_TASKS_PER_NODE, PveTaskHistory, PveTaskOutcome, PveTaskQuery, PveTaskSource, PveTaskSummary,

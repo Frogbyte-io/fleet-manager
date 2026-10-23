@@ -68,6 +68,13 @@ impl PrivateKey {
     fn expose(&self) -> &str {
         &self.0
     }
+
+    /// The key text, for handing to the encrypted secret store and nowhere
+    /// else. Callers must never log, return or serialize it.
+    #[must_use]
+    pub fn expose_for_store(&self) -> &str {
+        &self.0
+    }
 }
 
 /// A key file that exists for one session and is removed when dropped.
@@ -225,6 +232,111 @@ impl SshProvider {
     }
 }
 
+/// A freshly generated key pair: the private half as a [`PrivateKey`]
+/// (redacted `Debug`) and the public half as one OpenSSH line.
+#[derive(Clone, Debug)]
+pub struct GeneratedKey {
+    /// The private key, to be stored in the secret store and nowhere else.
+    pub private: PrivateKey,
+    /// The public key line (`ssh-ed25519 AAAA... comment`).
+    pub public: String,
+}
+
+/// Removes a generated key's files when dropped, whatever path returns.
+struct GeneratedFiles(PathBuf);
+
+impl Drop for GeneratedFiles {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.0);
+        let mut public = self.0.clone().into_os_string();
+        public.push(".pub");
+        let _ = std::fs::remove_file(PathBuf::from(public));
+    }
+}
+
+impl SshProvider {
+    /// Generates an unencrypted ed25519 key pair with `ssh-keygen` inside
+    /// the private key directory. The files are removed before this
+    /// returns, on every path.
+    ///
+    /// # Errors
+    ///
+    /// Fails, without any key text, when `ssh-keygen` is missing or fails.
+    pub fn generate_ed25519(&self, comment: &str) -> Result<GeneratedKey, SshProviderError> {
+        static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let dir = self.key_dir();
+        std::fs::create_dir_all(&dir).map_err(|error| SshProviderError::Setup {
+            detail: format!("cannot create {}: {error}", dir.display()),
+        })?;
+        let comment: String = comment
+            .chars()
+            .filter(|c| c.is_ascii_alphanumeric() || matches!(c, '@' | '.' | '_' | '-'))
+            .take(64)
+            .collect();
+        let path = dir.join(format!(
+            "gen-{}-{}",
+            std::process::id(),
+            NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        ));
+        let _files = GeneratedFiles(path.clone());
+        let output = std::process::Command::new("ssh-keygen")
+            .args(["-q", "-t", "ed25519", "-N", "", "-C", &comment, "-f"])
+            .arg(&path)
+            .output()
+            .map_err(|error| SshProviderError::Tool {
+                tool: "ssh-keygen",
+                detail: format!("cannot run ssh-keygen: {error}"),
+            })?;
+        if !output.status.success() {
+            return Err(SshProviderError::Tool {
+                tool: "ssh-keygen",
+                detail: "ssh-keygen could not generate a key".to_owned(),
+            });
+        }
+        let private = std::fs::read_to_string(&path).map_err(|error| SshProviderError::Setup {
+            detail: format!("cannot read the generated key: {error}"),
+        })?;
+        let mut public_path = path.clone().into_os_string();
+        public_path.push(".pub");
+        let public = std::fs::read_to_string(PathBuf::from(public_path))
+            .map_err(|error| SshProviderError::Setup {
+                detail: format!("cannot read the generated public key: {error}"),
+            })?
+            .trim()
+            .to_owned();
+        Ok(GeneratedKey {
+            private: PrivateKey::parse(&private)
+                .map_err(|detail| SshProviderError::Setup { detail })?,
+            public,
+        })
+    }
+
+    /// The public key line of a private key (`ssh-keygen -y`).
+    ///
+    /// # Errors
+    ///
+    /// Fails, without key text, when the key is unusable.
+    pub fn public_key_of(&self, key: &PrivateKey) -> Result<String, SshProviderError> {
+        let file = self.materialize_key(key)?;
+        let output = std::process::Command::new("ssh-keygen")
+            .arg("-y")
+            .arg("-f")
+            .arg(file.path())
+            .output()
+            .map_err(|error| SshProviderError::Tool {
+                tool: "ssh-keygen",
+                detail: format!("cannot run ssh-keygen: {error}"),
+            })?;
+        if !output.status.success() {
+            return Err(SshProviderError::Tool {
+                tool: "ssh-keygen",
+                detail: "the key is not a usable private key".to_owned(),
+            });
+        }
+        Ok(String::from_utf8_lossy(&output.stdout).trim().to_owned())
+    }
+}
+
 /// A started `ssh` process and the key file it was started with. Dropping it
 /// removes the key file; the process is reaped by its owner as before.
 #[derive(Debug)]
@@ -258,6 +370,32 @@ mod tests {
 
     const KEY: &str =
         "-----BEGIN OPENSSH PRIVATE KEY-----\nAAAAfake\n-----END OPENSSH PRIVATE KEY-----";
+
+    #[cfg(unix)]
+    #[test]
+    fn a_generated_key_round_trips_and_leaves_no_file() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let provider = SshProvider::new(dir.path().to_path_buf()).expect("provider");
+        let generated = provider
+            .generate_ed25519("fleet@build box")
+            .expect("generated");
+        assert!(generated.public.starts_with("ssh-ed25519 "));
+        assert!(generated.public.ends_with("fleet@buildbox"));
+        assert_eq!(
+            provider.public_key_of(&generated.private).expect("derived"),
+            generated.public
+        );
+        assert_eq!(
+            std::fs::read_dir(provider.key_dir()).expect("dir").count(),
+            0,
+            "a key file outlived its call"
+        );
+        let other = provider.generate_ed25519("x").expect("generated");
+        assert_ne!(
+            other.public.split(' ').nth(1),
+            generated.public.split(' ').nth(1)
+        );
+    }
 
     #[test]
     fn debug_never_shows_the_key() {

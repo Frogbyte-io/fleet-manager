@@ -244,6 +244,14 @@ pub enum Permission {
     /// when a session is created and again when its socket attaches; never
     /// delegated to Lab credentials.
     MachineTerminal,
+    /// Change one allow-listed setting of a Proxmox guest that is not a Lab
+    /// guest: tags, description, onboot, protection, cores, memory (#489).
+    /// Infrastructure, not a Fleet machine, so it is catalog-level.
+    ProxmoxGuestConfig,
+    /// Create a permanent, Fleet-managed VM from a promoted image and
+    /// register it as a machine (#489). It clones, configures and starts a
+    /// guest and installs credentials on it: privileged, catalog-level.
+    MachineProvision,
     /// List and read Registry types and entries, and their relations
     /// (FM-1012). A read of descriptive, never-secret data: the Registry
     /// holds no credentials, so it is not risky.
@@ -355,6 +363,8 @@ impl Permission {
         Permission::MachinePut,
         Permission::MachineTerminal,
         Permission::MachineCollect,
+        Permission::ProxmoxGuestConfig,
+        Permission::MachineProvision,
     ];
 
     /// The stable action id, as recorded in decisions and audit events.
@@ -438,6 +448,8 @@ impl Permission {
             Permission::MachinePut => "machines.put",
             Permission::MachineTerminal => "machines.terminal",
             Permission::MachineCollect => "machines.collect",
+            Permission::ProxmoxGuestConfig => "proxmox.guest.config",
+            Permission::MachineProvision => "machines.provision",
         }
     }
 
@@ -523,6 +535,8 @@ impl Permission {
             | Permission::MachinePut
             | Permission::MachineTerminal
             | Permission::MachineCollect
+            | Permission::ProxmoxGuestConfig
+            | Permission::MachineProvision
             | Permission::RegistryObserve => true,
         }
     }
@@ -568,6 +582,8 @@ impl Permission {
             | Permission::LabArtifactRead
             | Permission::ActionRead
             | Permission::DnsRead
+            | Permission::ProxmoxGuestConfig
+            | Permission::MachineProvision
             | Permission::RegistryObserve => false,
             Permission::MachineReadSensitive
             | Permission::OperationCancel

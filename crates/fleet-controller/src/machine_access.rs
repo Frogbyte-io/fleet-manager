@@ -117,6 +117,58 @@ impl MachineKeyPort for SecretBackedMachineKeys {
             .map_err(|error| format!("the key could not be stored: {error}"))
     }
 
+    async fn is_machine_key(&self, reference: &str) -> Result<bool, String> {
+        Ok(self
+            .secrets
+            .list()
+            .await
+            .map_err(|error| format!("the secret store is unreadable: {error}"))?
+            .iter()
+            .any(|record| record.id == reference && record.name.starts_with(KEY_PREFIX)))
+    }
+
+    async fn list_for_machine(&self, machine_id: &str) -> Result<Vec<String>, String> {
+        let prefix = format!("{KEY_PREFIX}{machine_id}/");
+        Ok(self
+            .secrets
+            .list()
+            .await
+            .map_err(|error| format!("the secret store is unreadable: {error}"))?
+            .iter()
+            .filter(|record| record.name.starts_with(&prefix))
+            .map(|record| record.id.clone())
+            .collect())
+    }
+
+    async fn revoke_for_machine(&self, machine_id: &str) -> Result<usize, String> {
+        let prefixes = [
+            format!("{KEY_PREFIX}{machine_id}/"),
+            format!(
+                "{}{machine_id}/",
+                fleet_application::persistent::ADMIN_PASSWORD_PREFIX
+            ),
+        ];
+        let records = self
+            .secrets
+            .list()
+            .await
+            .map_err(|error| format!("the secret store is unreadable: {error}"))?;
+        let mut deleted = 0;
+        for record in records.iter().filter(|record| {
+            prefixes
+                .iter()
+                .any(|prefix| record.name.starts_with(prefix))
+        }) {
+            match self.secrets.delete(&record.id).await {
+                Ok(()) | Err(SecretError::NotFound { .. }) => deleted += 1,
+                Err(error) => {
+                    return Err(format!("a machine secret could not be deleted: {error}"));
+                }
+            }
+        }
+        Ok(deleted)
+    }
+
     fn check_identity_path(&self, path: &str) -> Result<(), String> {
         let given = std::path::Path::new(path);
         // The canonical path when it exists (a symlink cannot hide a

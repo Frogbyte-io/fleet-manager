@@ -70,6 +70,7 @@ pub struct ProxmoxLabGuests {
     accounts: Arc<dyn fleet_application::proxmox::ProxmoxAccountPort>,
     credentials: Arc<dyn fleet_application::proxmox::ProxmoxCredentialStore>,
     client: fleet_provider_proxmox::ProxmoxClient,
+    persistent: Option<Arc<dyn fleet_application::persistent::PersistentGuestPort>>,
 }
 
 impl ProxmoxLabGuests {
@@ -84,7 +85,19 @@ impl ProxmoxLabGuests {
             accounts,
             credentials,
             client,
+            persistent: None,
         }
+    }
+
+    /// Leaves persistent guests (#489) out of the inventory: the marker,
+    /// not the name, decides that Lab does not own a guest.
+    #[must_use]
+    pub fn with_persistent(
+        mut self,
+        persistent: Arc<dyn fleet_application::persistent::PersistentGuestPort>,
+    ) -> Self {
+        self.persistent = Some(persistent);
+        self
     }
 }
 
@@ -114,6 +127,18 @@ impl LabGuestInventory for ProxmoxLabGuests {
                     continue;
                 };
                 if guest.kind == "qemu" && name.starts_with(LAB_GUEST_PREFIX) {
+                    // An unreadable marker store skips the guest: reporting
+                    // an orphan is the sweeper's only act, and it must not
+                    // name a persistent guest as one.
+                    if let Some(persistent) = &self.persistent {
+                        match persistent.get(&account.id, vmid).await {
+                            Ok(None) => {}
+                            // Only a marker that still guards this guest
+                            // counts; a stale one names no guest here.
+                            Ok(Some(marker)) if !marker.guards(Some(name.as_str())) => {}
+                            _ => continue,
+                        }
+                    }
                     guests.push(LabGuest {
                         account_id: account.id.clone(),
                         node,
