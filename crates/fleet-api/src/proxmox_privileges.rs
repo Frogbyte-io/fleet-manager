@@ -36,6 +36,8 @@ pub enum ProxmoxPrivilegeTierDto {
     Destructive,
     /// Lab lease provisioning.
     Lab,
+    /// The VM screen (VNC proxy).
+    Console,
 }
 
 impl From<PrivilegeTier> for ProxmoxPrivilegeTierDto {
@@ -45,6 +47,7 @@ impl From<PrivilegeTier> for ProxmoxPrivilegeTierDto {
             PrivilegeTier::Operate => Self::Operate,
             PrivilegeTier::Destructive => Self::Destructive,
             PrivilegeTier::Lab => Self::Lab,
+            PrivilegeTier::Console => Self::Console,
         }
     }
 }
@@ -180,7 +183,7 @@ pub struct ProxmoxPrivilegesDto {
     pub pve_version: Option<String>,
     /// The PVE major whose rules were applied (8 or 9).
     pub rules_major: Option<u8>,
-    /// The four tiers: discover, operate, destructive, lab.
+    /// The five tiers: discover, operate, destructive, lab, console.
     pub tiers: Vec<ProxmoxTierPrivilegesDto>,
     /// Why every tier is unknown: the permissions read was refused (403),
     /// or the PVE version is unsupported because it has no major number

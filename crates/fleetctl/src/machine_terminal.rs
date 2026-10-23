@@ -487,6 +487,7 @@ mod tests {
         );
         assert_eq!(output, b"hello\r\n");
         assert_eq!(ended.exit_status(), 3);
+        drop(socket);
         server.join().unwrap();
     }
 
@@ -528,6 +529,7 @@ mod tests {
             },
         );
         assert_eq!(ended.exit_status(), 0);
+        drop(socket);
         server.join().unwrap();
     }
 
@@ -555,6 +557,7 @@ mod tests {
             },
         );
         assert_eq!(ended.reason, "interrupted");
+        drop(socket);
         server.join().unwrap();
     }
 
@@ -576,6 +579,7 @@ mod tests {
             },
         );
         assert_ne!(ended.exit_status(), 0, "{ended:?}");
+        drop(socket);
         server.join().unwrap();
     }
 

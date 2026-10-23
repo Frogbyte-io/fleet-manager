@@ -222,6 +222,11 @@ impl ProviderDiscovery {
     pub fn new(client: fleet_provider_proxmox::ProxmoxClient) -> Self {
         Self { client }
     }
+
+    /// The provider client, for the console relay's VNC proxy (FM-495).
+    pub(crate) fn client(&self) -> &fleet_provider_proxmox::ProxmoxClient {
+        &self.client
+    }
 }
 
 #[async_trait]
@@ -440,6 +445,40 @@ pub(crate) fn map_api_error(error: fleet_provider_proxmox::PveApiError) -> Proxm
     }
 }
 
+/// The environment variable that sets how long an attached Proxmox console
+/// may go without keyboard, pointer, or paste input before the controller
+/// closes it (FM-495). Watching a screen without input counts as idle.
+pub const CONSOLE_IDLE_VAR: &str = "FLEET_CONSOLE_IDLE_SECONDS";
+
+/// The idle bounds in seconds: not so short that a person reading a screen
+/// is cut off, not so long that a forgotten tab holds a session for hours
+/// (the console's maximum duration is one hour regardless).
+pub const CONSOLE_IDLE_RANGE_SECONDS: std::ops::RangeInclusive<u64> = 30..=3600;
+
+/// Parses [`CONSOLE_IDLE_VAR`]: unset is the default; anything else must be a
+/// whole number of seconds within [`CONSOLE_IDLE_RANGE_SECONDS`].
+///
+/// # Errors
+///
+/// Fails with a printable explanation when the value is malformed or out of
+/// range.
+pub fn console_idle_from(raw: Option<&str>) -> Result<std::time::Duration, String> {
+    let Some(raw) = raw else {
+        return Ok(fleet_application::proxmox::console::DEFAULT_IDLE_TIMEOUT);
+    };
+    let seconds: u64 = raw.trim().parse().map_err(|_| {
+        format!("{CONSOLE_IDLE_VAR} must be a whole number of seconds, not {raw:?}")
+    })?;
+    if !CONSOLE_IDLE_RANGE_SECONDS.contains(&seconds) {
+        return Err(format!(
+            "{CONSOLE_IDLE_VAR} must be {}..={} seconds, not {seconds}",
+            CONSOLE_IDLE_RANGE_SECONDS.start(),
+            CONSOLE_IDLE_RANGE_SECONDS.end()
+        ));
+    }
+    Ok(std::time::Duration::from_secs(seconds))
+}
+
 /// Composes the Proxmox use cases over its ports.
 #[must_use]
 pub fn compose_proxmox(
@@ -473,7 +512,9 @@ pub fn compose_proxmox_with_events(
         machines_for(pool.clone(), audit.clone()),
         audit,
     )
-    .with_permissions(discovery)
+    .with_permissions(discovery.clone())
+    .with_console(discovery)
+    .with_console_limits(console_limits())
     .with_task_history(
         Arc::new(crate::proxmox_tasks_store::ProviderTaskHistory::new(client)),
         Arc::new(fleet_storage_sqlite::ProxmoxTaskLinkRepository::new(pool)),
@@ -482,6 +523,18 @@ pub fn compose_proxmox_with_events(
         Some(hub) => accounts.with_events(hub),
         None => accounts,
     }
+}
+
+/// The console bounds: the default maximum duration and the configured idle
+/// limit. A malformed or out-of-range setting is reported once at startup and
+/// the default applies, so a typo cannot disable the bound.
+fn console_limits() -> fleet_application::proxmox::console::ConsoleLimits {
+    let mut limits = fleet_application::proxmox::console::ConsoleLimits::default();
+    match console_idle_from(std::env::var(CONSOLE_IDLE_VAR).ok().as_deref()) {
+        Ok(idle) => limits.idle = idle,
+        Err(message) => eprintln!("warning: {message}; using the default"),
+    }
+    limits
 }
 
 /// The machine use cases over the shared pool and audit sink.
@@ -553,5 +606,25 @@ impl fleet_application::lab::ImagePinValidator for RecipeImagePinValidator {
             // Only a promoted version pins.
             version.promoted_at.is_some().then_some(version)
         })
+    }
+}
+
+#[cfg(test)]
+mod console_idle_tests {
+    use super::*;
+
+    #[test]
+    fn the_idle_limit_defaults_and_is_bounded() {
+        assert_eq!(
+            console_idle_from(None).unwrap(),
+            std::time::Duration::from_secs(600)
+        );
+        assert_eq!(
+            console_idle_from(Some(" 90 ")).unwrap(),
+            std::time::Duration::from_secs(90)
+        );
+        for bad in ["29", "3601", "0", "soon", "-5", ""] {
+            assert!(console_idle_from(Some(bad)).is_err(), "{bad:?}");
+        }
     }
 }

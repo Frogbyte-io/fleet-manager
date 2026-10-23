@@ -35,6 +35,7 @@ pub mod machine_terminal;
 pub mod mise;
 pub mod node_crypto;
 pub mod onboard;
+pub mod proxmox_console;
 pub mod proxmox_exec;
 pub mod proxmox_store;
 pub mod proxmox_tasks_store;
@@ -684,6 +685,7 @@ fn build_router_for_caller(
         events,
     ));
     let credentials = api_state.credentials.clone();
+    let console_authorizer = api_state.authorizer.clone();
     let terminal_authorizer = api_state.authorizer.clone();
     let external_accounts = services.and_then(|services| services.external_accounts.clone());
     let dns = services.and_then(|services| services.dns.clone());
@@ -746,6 +748,14 @@ fn build_router_for_caller(
             "/downloads",
             artifacts::artifacts_router(artifacts_dir.clone()),
         );
+    }
+    if let Some(proxmox) = proxmox {
+        // The Proxmox VM screen relay (FM-495): one WebSocket route that
+        // authenticates with the single-use console session token.
+        router = router.merge(proxmox_console::console_router(
+            proxmox.clone(),
+            console_authorizer,
+        ));
     }
     if let Some(access) = lab.and_then(|lab| lab.machine_access()) {
         // The interactive machine terminal relay (#494): one WebSocket
@@ -1063,6 +1073,23 @@ pub async fn serve_on_with_events(
     // Attached machine terminals close cleanly (and audit their end) before
     // the server drains: upgraded sockets are not tracked by the drain.
     let shutdown = machine_terminal::drain_on_shutdown(lab.as_ref(), shutdown);
+    // Attached Proxmox consoles close cleanly (and audit their end) before
+    // the server drains: upgraded sockets are not tracked by the drain.
+    let shutdown = {
+        let console = proxmox.clone();
+        async move {
+            shutdown.await;
+            if let Some(console) = console {
+                console.console_shutdown();
+                for _ in 0..30 {
+                    if console.console_active_count() == 0 {
+                        break;
+                    }
+                    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                }
+            }
+        }
+    };
     let tailscale_listener = match settings.tailscale_serve_listen {
         Some(address) => {
             let listener = tokio::net::TcpListener::bind(address).await?;

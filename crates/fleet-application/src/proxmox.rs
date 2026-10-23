@@ -21,6 +21,7 @@
 //! nothing here mutates a PVE host.
 #![warn(missing_docs)]
 
+pub mod console;
 pub mod tasks;
 
 use std::fmt;
@@ -759,6 +760,9 @@ pub struct ProxmoxAccounts {
     /// The token-permissions read (FM-604), attached with
     /// [`ProxmoxAccounts::with_permissions`].
     permissions: Option<Arc<dyn privileges::ProxmoxPermissionsPort>>,
+    /// The console sessions (FM-495), attached by
+    /// [`ProxmoxAccounts::with_console`].
+    console: Option<Arc<console::ConsoleState>>,
 }
 
 impl ProxmoxAccounts {
@@ -784,6 +788,7 @@ impl ProxmoxAccounts {
             events: None,
             task_history: None,
             permissions: None,
+            console: None,
         }
     }
 

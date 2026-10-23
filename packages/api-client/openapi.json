@@ -8863,6 +8863,99 @@
         }
       }
     },
+    "/api/v1/proxmox/accounts/{accountId}/console-sessions": {
+      "post": {
+        "tags": [
+          "proxmox"
+        ],
+        "summary": "Creates a console session for one Proxmox guest.",
+        "description": "# Errors\n\nReturns the public error envelope on refusal, an unknown or unconfirmed\naccount, a token that lacks `VM.Console` (the refusal names the\nprivilege), the session cap, or an unwired console relay.",
+        "operationId": "createProxmoxConsoleSession",
+        "parameters": [
+          {
+            "name": "accountId",
+            "in": "path",
+            "description": "The account's identity.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateConsoleSessionRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "description": "The session was created; the token is shown once.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Resource_ConsoleSessionDto"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The node or VMID is malformed.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The caller may not open guest screens (`proxmox.console`).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "The account does not exist.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The account's trust is unconfirmed, its token secret is unavailable, or the console session cap is reached.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "The account's API token lacks `VM.Console` on the guest, or the PVE API failed.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/proxmox/accounts/{accountId}/discovery": {
       "get": {
         "tags": [
@@ -13821,6 +13914,79 @@
           }
         }
       },
+      "ConsoleSessionDto": {
+        "type": "object",
+        "description": "A created console session. The token is shown here once.",
+        "required": [
+          "sessionId",
+          "token",
+          "expiresAt",
+          "accountId",
+          "node",
+          "vmid",
+          "socketPath",
+          "subprotocols",
+          "consolePath",
+          "idleTimeoutSeconds",
+          "maxDurationSeconds"
+        ],
+        "properties": {
+          "accountId": {
+            "type": "string",
+            "description": "The account."
+          },
+          "consolePath": {
+            "type": "string",
+            "description": "The console page in the web app, relative to the controller's\norigin, with the token in the fragment. A human can open it."
+          },
+          "expiresAt": {
+            "type": "integer",
+            "format": "int64",
+            "description": "When an unattached token stops being valid (epoch millis)."
+          },
+          "idleTimeoutSeconds": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Close after this many seconds without browser input.",
+            "minimum": 0
+          },
+          "maxDurationSeconds": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Close after this many seconds regardless.",
+            "minimum": 0
+          },
+          "node": {
+            "type": "string",
+            "description": "The node."
+          },
+          "sessionId": {
+            "type": "string",
+            "description": "The session's identity, as it appears in audit events."
+          },
+          "socketPath": {
+            "type": "string",
+            "description": "The WebSocket path, relative to the controller's origin."
+          },
+          "subprotocols": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "The WebSocket subprotocols to offer: `binary`, then the token\nsubprotocol."
+          },
+          "token": {
+            "type": "string",
+            "description": "The single-use token that attaches to the console WebSocket. It\nexpires at `expiresAt` and is spent by the first attach."
+          },
+          "vmid": {
+            "type": "integer",
+            "format": "int32",
+            "description": "The guest's VMID.",
+            "minimum": 0
+          }
+        }
+      },
       "CoolifyApplicationDto": {
         "type": "object",
         "description": "A deployed application.",
@@ -14567,6 +14733,26 @@
           "target": {
             "type": "string",
             "description": "What the action acts on, in the provider's terms (at most 256\ncharacters)."
+          }
+        }
+      },
+      "CreateConsoleSessionRequest": {
+        "type": "object",
+        "description": "The guest to open.",
+        "required": [
+          "node",
+          "vmid"
+        ],
+        "properties": {
+          "node": {
+            "type": "string",
+            "description": "The node the guest runs on."
+          },
+          "vmid": {
+            "type": "integer",
+            "format": "int32",
+            "description": "The QEMU guest's VMID.",
+            "minimum": 0
           }
         }
       },
@@ -21637,7 +21823,8 @@
           "discover",
           "operate",
           "destructive",
-          "lab"
+          "lab",
+          "console"
         ]
       },
       "ProxmoxPrivilegesDto": {
@@ -21697,7 +21884,7 @@
             "items": {
               "$ref": "#/components/schemas/ProxmoxTierPrivilegesDto"
             },
-            "description": "The four tiers: discover, operate, destructive, lab."
+            "description": "The five tiers: discover, operate, destructive, lab, console."
           },
           "unknownReason": {
             "type": [
@@ -23336,6 +23523,88 @@
               "zone": {
                 "$ref": "#/components/schemas/DnsZoneDto",
                 "description": "The zone the name belongs to."
+              }
+            }
+          }
+        }
+      },
+      "Resource_ConsoleSessionDto": {
+        "type": "object",
+        "description": "A single resource.\n\nThe payload is nested under `data` so that later top-level fields are an\nadditive change rather than a breaking one.",
+        "required": [
+          "data"
+        ],
+        "properties": {
+          "data": {
+            "type": "object",
+            "description": "A created console session. The token is shown here once.",
+            "required": [
+              "sessionId",
+              "token",
+              "expiresAt",
+              "accountId",
+              "node",
+              "vmid",
+              "socketPath",
+              "subprotocols",
+              "consolePath",
+              "idleTimeoutSeconds",
+              "maxDurationSeconds"
+            ],
+            "properties": {
+              "accountId": {
+                "type": "string",
+                "description": "The account."
+              },
+              "consolePath": {
+                "type": "string",
+                "description": "The console page in the web app, relative to the controller's\norigin, with the token in the fragment. A human can open it."
+              },
+              "expiresAt": {
+                "type": "integer",
+                "format": "int64",
+                "description": "When an unattached token stops being valid (epoch millis)."
+              },
+              "idleTimeoutSeconds": {
+                "type": "integer",
+                "format": "int64",
+                "description": "Close after this many seconds without browser input.",
+                "minimum": 0
+              },
+              "maxDurationSeconds": {
+                "type": "integer",
+                "format": "int64",
+                "description": "Close after this many seconds regardless.",
+                "minimum": 0
+              },
+              "node": {
+                "type": "string",
+                "description": "The node."
+              },
+              "sessionId": {
+                "type": "string",
+                "description": "The session's identity, as it appears in audit events."
+              },
+              "socketPath": {
+                "type": "string",
+                "description": "The WebSocket path, relative to the controller's origin."
+              },
+              "subprotocols": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                },
+                "description": "The WebSocket subprotocols to offer: `binary`, then the token\nsubprotocol."
+              },
+              "token": {
+                "type": "string",
+                "description": "The single-use token that attaches to the console WebSocket. It\nexpires at `expiresAt` and is spent by the first attach."
+              },
+              "vmid": {
+                "type": "integer",
+                "format": "int32",
+                "description": "The guest's VMID.",
+                "minimum": 0
               }
             }
           }
@@ -25783,7 +26052,7 @@
                 "items": {
                   "$ref": "#/components/schemas/ProxmoxTierPrivilegesDto"
                 },
-                "description": "The four tiers: discover, operate, destructive, lab."
+                "description": "The five tiers: discover, operate, destructive, lab, console."
               },
               "unknownReason": {
                 "type": [
