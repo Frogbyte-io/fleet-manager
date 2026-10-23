@@ -130,6 +130,10 @@ fn the_named_refusals_of_the_issue_are_refused() {
         (Permission::ProjectsGitWrite, Some("machine-1")),
         (Permission::ApplyExecute, Some("machine-1")),
         (Permission::MachineDelete, Some("machine-1")),
+        // brokered machine access (#493, ADR 0017): never a Lab credential
+        (Permission::MachineExec, Some("machine-1")),
+        (Permission::MachinePut, Some("machine-1")),
+        (Permission::MachineCollect, Some("machine-1")),
         // secrets
         (Permission::SecretRead, Some("secret-1")),
         (Permission::SecretWrite, None),

@@ -280,6 +280,60 @@ fn run_serve(mut config: fleet_config::ControllerConfig) -> ExitCode {
                 std::sync::Arc::new(fleet_storage_sqlite::AuditSink::new(store.pool().clone())),
             ))
         });
+        // #493 (ADR 0017): agent SSH access with Fleet-held keys. Stored-key
+        // auth needs the secret store; puts and collects need the artifact
+        // directory. Each part is optional, and the surface says which is
+        // missing instead of failing the controller.
+        let machine_keys = secrets.as_ref().map(|secrets| {
+            std::sync::Arc::new(
+                fleet_controller::machine_access::SecretBackedMachineKeys::new(secrets.clone())
+                    .protecting(
+                        std::iter::once(config.data_dir.join("ssh"))
+                            .chain(config.master_key_file.clone())
+                            .collect(),
+                    ),
+            )
+        });
+        let ssh_auth_resolver = machine_keys.as_ref().map(|keys| {
+            std::sync::Arc::new(fleet_controller::machine_access::SshAuthResolver::new(
+                keys.clone(),
+            ))
+        });
+        let machine_access = {
+            let mut access = fleet_application::machine_access::MachineAccess::new(
+                std::sync::Arc::new(fleet_storage_sqlite::MachineRepository::new(
+                    store.pool().clone(),
+                )),
+                std::sync::Arc::new(fleet_storage_sqlite::EndpointAuthRepository::new(
+                    store.pool().clone(),
+                )),
+                std::sync::Arc::new(fleet_storage_sqlite::AuditSink::new(store.pool().clone())),
+            );
+            if let Some(keys) = &machine_keys {
+                access = access.with_keys(keys.clone());
+            }
+            if let Some(stage) = &lab_put_store {
+                access = access.with_uploads(stage.clone());
+            }
+            if let Some(blobs) = &lab_artifact_store {
+                access = access.with_files(
+                    std::sync::Arc::new(fleet_storage_sqlite::MachineFileRepository::new(
+                        store.pool().clone(),
+                    )),
+                    blobs.clone(),
+                    fleet_application::lab_artifacts::ArtifactPolicy {
+                        retention_seconds: config.lab_artifact_retention_seconds,
+                        max_bytes: config.lab_artifact_max_bytes,
+                    },
+                );
+            }
+            // One lock serializes blob commits and deletes for the Lab
+            // artifacts and the machine files that share the blob store.
+            if let Some(artifacts) = &lab_artifacts {
+                access = access.with_blob_lock(artifacts.blob_lock());
+            }
+            std::sync::Arc::new(access)
+        };
         // The executor routes by kind: node kinds dispatch through the
         // gateway, onboarding kinds work against the draft record, and
         // everything else is SSH work.
@@ -318,11 +372,15 @@ fn run_serve(mut config: fleet_config::ControllerConfig) -> ExitCode {
                     std::sync::Arc::new(fleet_storage_sqlite::MachineRepository::new(
                         store.pool().clone(),
                     ));
-                std::sync::Arc::new(ScriptExecutor::new(
+                let executor = ScriptExecutor::new(
                     machines,
                     config.data_dir.join("ssh"),
                     exec_limiter.clone(),
-                ))
+                );
+                std::sync::Arc::new(match &ssh_auth_resolver {
+                    Some(resolver) => executor.with_resolver(resolver.clone()),
+                    None => executor,
+                })
             };
             let limiter = fleet_provider_ssh::ExecutionLimiter::new(4);
             let onboarding: std::sync::Arc<dyn fleet_application::worker::OperationExecutor> =
@@ -928,6 +986,41 @@ fn run_serve(mut config: fleet_config::ControllerConfig) -> ExitCode {
                     }
                     None => with_lab,
                 };
+            // #493: `machine.exec`, `machine.put` and `machine.collect` run a
+            // command, or move a file, on a machine over its SSH endpoint
+            // with the endpoint's stored credential.
+            let with_lab: std::sync::Arc<dyn fleet_application::worker::OperationExecutor> = {
+                let files: std::sync::Arc<dyn fleet_controller::lab_artifacts_store::GuestFiles> =
+                    match fleet_controller::lab_artifacts_store::SshGuestFiles::new(
+                        std::sync::Arc::new(fleet_storage_sqlite::MachineRepository::new(
+                            store.pool().clone(),
+                        )),
+                        config.data_dir.join("ssh"),
+                        exec_limiter.clone(),
+                    ) {
+                        Ok(files) => std::sync::Arc::new(match &ssh_auth_resolver {
+                            Some(resolver) => files.with_resolver(resolver.clone()),
+                            None => files,
+                        }),
+                        Err(error) => {
+                            eprintln!("warning: machine file copies unavailable: {error}");
+                            std::sync::Arc::new(
+                                fleet_controller::lab_artifacts_store::UnavailableGuestFiles {
+                                    reason: error,
+                                },
+                            )
+                        }
+                    };
+                std::sync::Arc::new(
+                    fleet_controller::machine_access::MachineAccessDispatch::new(
+                        with_lab,
+                        machine_access.clone(),
+                        lab_put_store.clone(),
+                        lab_artifact_store.clone(),
+                        files,
+                    ),
+                )
+            };
             // #394: `lab.exec_detach` starts a command that outlives the
             // SSH session; its status is read directly from the guest.
             let with_lab: std::sync::Arc<dyn fleet_application::worker::OperationExecutor> =
@@ -1162,6 +1255,7 @@ fn run_serve(mut config: fleet_config::ControllerConfig) -> ExitCode {
                 std::sync::Arc::new(fleet_storage_sqlite::AuditSink::new(store.pool().clone())),
             ),
         ));
+        let lab = lab.with_machine_access(machine_access.clone());
         let lab = std::sync::Arc::new(match &lab_artifacts {
             Some(artifacts) => lab.with_artifacts(artifacts.clone()),
             None => lab,

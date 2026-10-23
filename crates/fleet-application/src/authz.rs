@@ -224,6 +224,18 @@ pub enum Permission {
     /// risky like [`Permission::LabArtifacts`]. A delegated credential reads
     /// its own owner's handles only.
     LabExecRead,
+    /// Run a bounded command on a Fleet machine over its SSH endpoint with
+    /// the endpoint's stored credential (ADR 0017). The most privileged
+    /// machine action: it is arbitrary command execution as the endpoint's
+    /// user. Scoped to the machine; never delegated to Lab credentials.
+    MachineExec,
+    /// Copy one file onto a Fleet machine over its SSH endpoint (ADR 0017).
+    /// A privileged mutation, scoped to the machine.
+    MachinePut,
+    /// Copy files off a Fleet machine over its SSH endpoint and read them
+    /// back (ADR 0017). A privileged read: a collected file can be
+    /// sensitive. Scoped to the machine.
+    MachineCollect,
     /// List and read Registry types and entries, and their relations
     /// (FM-1012). A read of descriptive, never-secret data: the Registry
     /// holds no credentials, so it is not risky.
@@ -331,6 +343,9 @@ impl Permission {
         Permission::ActionRead,
         Permission::DnsRead,
         Permission::RegistryObserve,
+        Permission::MachineExec,
+        Permission::MachinePut,
+        Permission::MachineCollect,
     ];
 
     /// The stable action id, as recorded in decisions and audit events.
@@ -410,6 +425,9 @@ impl Permission {
             Permission::ActionRead => "action.read",
             Permission::DnsRead => "dns.read",
             Permission::RegistryObserve => "registry.observe",
+            Permission::MachineExec => "machines.exec",
+            Permission::MachinePut => "machines.put",
+            Permission::MachineCollect => "machines.collect",
         }
     }
 
@@ -491,6 +509,9 @@ impl Permission {
             | Permission::ActionApprove
             | Permission::DnsRead
             | Permission::ActionDeny
+            | Permission::MachineExec
+            | Permission::MachinePut
+            | Permission::MachineCollect
             | Permission::RegistryObserve => true,
         }
     }
@@ -573,6 +594,9 @@ impl Permission {
             | Permission::LabExecRead
             | Permission::ActionRequest
             | Permission::ActionApprove
+            | Permission::MachineExec
+            | Permission::MachinePut
+            | Permission::MachineCollect
             | Permission::ActionDeny => true,
         }
     }

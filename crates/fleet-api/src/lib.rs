@@ -29,6 +29,7 @@ pub mod lab_artifacts;
 pub mod lab_exec_detach;
 pub mod lab_pools;
 pub mod lab_put;
+pub mod machine_access;
 pub mod machines;
 mod meta;
 pub mod mise;
@@ -549,6 +550,20 @@ pub fn api(state: Arc<operations::ApiState>) -> (Router, utoipa::openapi::OpenAp
                 .routes(routes!(lab::sweep_lab_leases))
                 .routes(routes!(lab_artifacts::collect_lab_artifacts))
                 .routes(routes!(lab_put::put_lab_file))
+                .routes(routes!(machine_access::store_machine_ssh_key))
+                .routes(routes!(
+                    machine_access::get_machine_endpoint_auth,
+                    machine_access::set_machine_endpoint_auth,
+                    machine_access::clear_machine_endpoint_auth
+                ))
+                .routes(routes!(machine_access::exec_machine))
+                .routes(routes!(machine_access::collect_machine_files))
+                .routes(routes!(
+                    machine_access::put_machine_file,
+                    machine_access::list_machine_files
+                ))
+                .routes(routes!(machine_access::get_machine_file))
+                .routes(routes!(machine_access::download_machine_file))
                 .routes(routes!(lab_artifacts::list_lab_artifacts))
                 .routes(routes!(lab_artifacts::get_lab_artifact))
                 .routes(routes!(lab_artifacts::download_lab_artifact))

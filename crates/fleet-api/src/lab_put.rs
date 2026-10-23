@@ -65,7 +65,7 @@ fn puts_or_error(
     })
 }
 
-fn too_large(max_bytes: u64, correlation_id: CorrelationId) -> ApiErrorResponse {
+pub(crate) fn too_large(max_bytes: u64, correlation_id: CorrelationId) -> ApiErrorResponse {
     let public = PublicError::new(
         ErrorCode::from_str("payload_too_large").expect("the literal is valid error code syntax"),
         format!("the file exceeds the {max_bytes}-byte upload cap"),
@@ -77,7 +77,7 @@ fn too_large(max_bytes: u64, correlation_id: CorrelationId) -> ApiErrorResponse 
 /// Streams the request body into the staging writer, chunk by chunk. A
 /// refusal (cap exceeded, unreadable body) drops the writer, which removes
 /// the partial file, and stops reading.
-async fn stream_upload(
+pub(crate) async fn stream_upload(
     mut writer: Box<dyn UploadWriter>,
     body: Body,
     correlation_id: CorrelationId,
@@ -214,7 +214,7 @@ async fn queue_put(
     Ok(operation)
 }
 
-fn sha256_hex(bytes: &[u8]) -> String {
+pub(crate) fn sha256_hex(bytes: &[u8]) -> String {
     use sha2::Digest as _;
     sha2::Sha256::digest(bytes)
         .iter()

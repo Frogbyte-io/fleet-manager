@@ -396,6 +396,23 @@ pub async fn download_lab_artifact(
         .open(state.authorizer.as_ref(), &principal, &artifact_id)
         .await
         .map_err(|error| map_lab_error(&error, correlation_id))?;
+    Ok(artifact_response(
+        reader,
+        artifact.size_bytes,
+        &artifact.sha256,
+        &artifact.name,
+    ))
+}
+
+/// Streams verified bytes as a download: the controller re-hashed them
+/// first, and the response carries their digest as `Repr-Digest` and `ETag`.
+/// Shared by the Lab artifact and collected machine file downloads.
+pub(crate) fn artifact_response(
+    reader: fleet_application::lab_artifacts::ArtifactReader,
+    size_bytes: u64,
+    sha256: &str,
+    name: &str,
+) -> Response {
     let stream = futures_util::stream::unfold(Some(reader), |reader| async move {
         let mut reader = reader?;
         let mut chunk = vec![0_u8; DOWNLOAD_CHUNK];
@@ -414,24 +431,22 @@ pub async fn download_lab_artifact(
         header::CONTENT_TYPE,
         HeaderValue::from_static("application/octet-stream"),
     );
-    if let Ok(length) = HeaderValue::from_str(&artifact.size_bytes.to_string()) {
+    if let Ok(length) = HeaderValue::from_str(&size_bytes.to_string()) {
         headers.insert(header::CONTENT_LENGTH, length);
     }
-    if let Some(digest) =
-        repr_digest(&artifact.sha256).and_then(|digest| HeaderValue::from_str(&digest).ok())
+    if let Some(digest) = repr_digest(sha256).and_then(|digest| HeaderValue::from_str(&digest).ok())
     {
         headers.insert("repr-digest", digest);
     }
-    if let Ok(etag) = HeaderValue::from_str(&format!("\"sha256:{}\"", artifact.sha256)) {
+    if let Ok(etag) = HeaderValue::from_str(&format!("\"sha256:{sha256}\"")) {
         headers.insert(header::ETAG, etag);
     }
-    if let Ok(disposition) = HeaderValue::from_str(&format!(
-        "attachment; filename=\"{}\"",
-        download_name(&artifact.name)
-    )) {
+    if let Ok(disposition) =
+        HeaderValue::from_str(&format!("attachment; filename=\"{}\"", download_name(name)))
+    {
         headers.insert(header::CONTENT_DISPOSITION, disposition);
     }
-    Ok(response)
+    response
 }
 
 /// The RFC 9530 `Repr-Digest` value for a hex sha256.
