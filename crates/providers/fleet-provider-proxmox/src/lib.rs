@@ -44,6 +44,9 @@ use rustls::{DigitallySignedStruct, SignatureScheme};
 use sha2::Digest;
 
 mod permissions;
+mod vnc;
+
+pub use vnc::{HANDSHAKE_TIMEOUT, MAX_MESSAGE_BYTES, PveSocket, PveVncProxy, vnc_auth_response};
 
 pub use permissions::{
     MAX_PERMISSION_PATHS, MAX_PRIVILEGES_PER_PATH, MAX_VMID_CHECKS, PveTokenPermissions,
@@ -159,6 +162,12 @@ pub enum PveTransportError {
         /// The limit that was exceeded.
         limit: usize,
     },
+    /// The WebSocket upgrade was answered with an HTTP status instead of
+    /// `101` (401 token refused, 403 privilege missing).
+    UpgradeRefused {
+        /// The HTTP status.
+        status: u16,
+    },
 }
 
 impl fmt::Display for PveTransportError {
@@ -182,6 +191,9 @@ impl fmt::Display for PveTransportError {
             Self::Connect { detail } => write!(f, "the connection failed: {detail}"),
             Self::BodyTooLarge { limit } => {
                 write!(f, "the response exceeds the {limit}-byte bound")
+            }
+            Self::UpgradeRefused { status } => {
+                write!(f, "the WebSocket upgrade was refused with HTTP {status}")
             }
         }
     }
@@ -232,6 +244,25 @@ pub trait PveTransport: fmt::Debug + Send + Sync {
         let _ = (host, port);
         Err(PveTransportError::Connect {
             detail: "this transport cannot capture certificates".to_owned(),
+        })
+    }
+
+    /// Opens a binary WebSocket to one PVE endpoint (FM-495): the same
+    /// pinned TLS policy, the same token header, no redirect. The request's
+    /// path carries the query string.
+    ///
+    /// # Errors
+    ///
+    /// Fails with [`PveTransportError`]; a refused upgrade is
+    /// [`PveTransportError::UpgradeRefused`]. The default (fixture
+    /// transports) cannot open sockets.
+    async fn connect_websocket(
+        &self,
+        request: PveHttpRequest,
+    ) -> Result<Box<dyn PveSocket>, PveTransportError> {
+        let _ = request;
+        Err(PveTransportError::Connect {
+            detail: "this transport cannot open WebSockets".to_owned(),
         })
     }
 }
@@ -419,6 +450,90 @@ impl PveTransport for ReqwestPveTransport {
         self.execute_inner(request, None).await
     }
 
+    async fn connect_websocket(
+        &self,
+        request: PveHttpRequest,
+    ) -> Result<Box<dyn PveSocket>, PveTransportError> {
+        use tokio_tungstenite::tungstenite::client::IntoClientRequest as _;
+        use tokio_tungstenite::tungstenite::protocol::WebSocketConfig;
+
+        let connect_error = |detail: &str| PveTransportError::Connect {
+            detail: detail.to_owned(),
+        };
+        let policy = match &request.pinned_fingerprint {
+            Some(pinned) => TlsPolicy::Pin(normalize_fingerprint(pinned)),
+            None => TlsPolicy::Observe,
+        };
+        let (config, captured) = Self::tls_config(policy)?;
+        let server_name = ServerName::try_from(request.host.clone())
+            .map_err(|_| connect_error("the host is not a valid TLS server name"))?;
+        let tcp = tokio::time::timeout(
+            REQUEST_TIMEOUT,
+            tokio::net::TcpStream::connect((request.host.as_str(), request.port)),
+        )
+        .await
+        .map_err(|_| connect_error("the TCP connection timed out"))?
+        .map_err(|error| PveTransportError::Connect {
+            detail: format!("the TCP connection failed: {}", error.kind()),
+        })?;
+        let tls = tokio::time::timeout(
+            REQUEST_TIMEOUT,
+            tokio_rustls::TlsConnector::from(Arc::new(config)).connect(server_name, tcp),
+        )
+        .await
+        .map_err(|_| connect_error("the TLS handshake timed out"))?
+        .map_err(|error| {
+            Self::handshake_error(
+                &captured,
+                request.pinned_fingerprint.as_deref(),
+                error.to_string(),
+            )
+        })?;
+
+        let url = format!(
+            "wss://{}:{}{}",
+            request.authority(),
+            request.port,
+            request.path
+        );
+        let mut upgrade = url
+            .into_client_request()
+            .map_err(|_| connect_error("the WebSocket request could not be built"))?;
+        let headers = upgrade.headers_mut();
+        let authorization = format!(
+            "PVEAPIToken={}={}",
+            request.credentials.token_id,
+            request.credentials.token.expose()
+        );
+        let mut authorization =
+            tokio_tungstenite::tungstenite::http::HeaderValue::from_str(&authorization)
+                .map_err(|_| connect_error("the token is not a valid header value"))?;
+        authorization.set_sensitive(true);
+        headers.insert("Authorization", authorization);
+        headers.insert(
+            "Sec-WebSocket-Protocol",
+            tokio_tungstenite::tungstenite::http::HeaderValue::from_static("binary"),
+        );
+        let limits = WebSocketConfig::default()
+            .max_message_size(Some(MAX_MESSAGE_BYTES))
+            .max_frame_size(Some(MAX_MESSAGE_BYTES));
+        let (socket, _response) = tokio::time::timeout(
+            REQUEST_TIMEOUT,
+            tokio_tungstenite::client_async_with_config(upgrade, tls, Some(limits)),
+        )
+        .await
+        .map_err(|_| connect_error("the WebSocket upgrade timed out"))?
+        .map_err(|error| match error {
+            tokio_tungstenite::tungstenite::Error::Http(response) => {
+                PveTransportError::UpgradeRefused {
+                    status: response.status().as_u16(),
+                }
+            }
+            _ => connect_error("the WebSocket upgrade failed"),
+        })?;
+        Ok(Box::new(vnc::TlsSocket { inner: socket }))
+    }
+
     async fn observe_certificate(
         &self,
         host: &str,
@@ -459,6 +574,23 @@ impl ReqwestPveTransport {
     /// A client whose every handshake runs `policy`, and the capture its
     /// verifier writes the observed leaf into.
     fn client(policy: TlsPolicy) -> Result<(reqwest::Client, Captured), PveTransportError> {
+        let (config, captured) = Self::tls_config(policy)?;
+        let client = reqwest::Client::builder()
+            .timeout(REQUEST_TIMEOUT)
+            .redirect(reqwest::redirect::Policy::none())
+            .use_preconfigured_tls(config)
+            .build()
+            .map_err(|error| PveTransportError::Connect {
+                detail: format!("the TLS configuration was rejected: {error}"),
+            })?;
+        Ok((client, captured))
+    }
+
+    /// The rustls configuration every PVE connection (HTTP or WebSocket)
+    /// uses: the pinning verifier and nothing else.
+    fn tls_config(
+        policy: TlsPolicy,
+    ) -> Result<(rustls::ClientConfig, Captured), PveTransportError> {
         let provider = Arc::new(rustls::crypto::ring::default_provider());
         let captured = Arc::new(Mutex::new(None));
         let verifier = Arc::new(PinningVerifier {
@@ -475,16 +607,33 @@ impl ReqwestPveTransport {
             .with_custom_certificate_verifier(verifier)
             .with_no_client_auth();
         config.alpn_protocols = Vec::new();
+        Ok((config, captured))
+    }
 
-        let client = reqwest::Client::builder()
-            .timeout(REQUEST_TIMEOUT)
-            .redirect(reqwest::redirect::Policy::none())
-            .use_preconfigured_tls(config)
-            .build()
-            .map_err(|error| PveTransportError::Connect {
-                detail: format!("the TLS configuration was rejected: {error}"),
-            })?;
-        Ok((client, captured))
+    /// Classifies a failed handshake: the verifier's capture says whether
+    /// the pin refused it.
+    fn handshake_error(
+        captured: &Captured,
+        pinned: Option<&str>,
+        detail: String,
+    ) -> PveTransportError {
+        let observed = captured
+            .lock()
+            .expect("the capture lock is not poisoned")
+            .take()
+            .map(|certificate| certificate.fingerprint);
+        match (observed, pinned) {
+            (Some(observed), Some(pinned))
+                if normalize_fingerprint(&observed) != normalize_fingerprint(pinned) =>
+            {
+                PveTransportError::FingerprintMismatch {
+                    observed,
+                    pinned: Some(pinned.to_owned()),
+                }
+            }
+            (Some(_), Some(_)) | (None, _) => PveTransportError::Connect { detail },
+            (Some(observed), None) => PveTransportError::ObserveRefused { observed },
+        }
     }
 
     async fn execute_inner(

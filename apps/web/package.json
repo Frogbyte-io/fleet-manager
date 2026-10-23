@@ -16,6 +16,7 @@
     "@codemirror/state": "6.7.6",
     "@frogbyte-io/fleet-api-client": "workspace:*",
     "@lucide/vue": "1.48.0",
+    "@novnc/novnc": "1.7.0",
     "@tanstack/vue-query": "5.103.2",
     "@vueuse/core": "15.0.0",
     "class-variance-authority": "0.7.1",

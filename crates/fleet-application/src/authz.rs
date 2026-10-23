@@ -153,6 +153,10 @@ pub enum Permission {
     /// snapshot delete, clone, template conversion, or remote task
     /// cancellation. A mutation: it changes or destroys guest state.
     ProxmoxDestructive,
+    /// Open a Proxmox guest's screen through the VNC proxy (FM-495). A
+    /// mutation in effect: screen access implies keyboard and pointer
+    /// input in the guest, so it is privileged and never delegated.
+    ProxmoxConsole,
     /// List external provider accounts (Coolify, Cloudflare) and their
     /// last probe results. A read, but a topology-revealing one.
     ExternalAccountRead,
@@ -318,6 +322,7 @@ impl Permission {
         Permission::ProxmoxConfig,
         Permission::ProxmoxOperate,
         Permission::ProxmoxDestructive,
+        Permission::ProxmoxConsole,
         Permission::ExternalAccountRead,
         Permission::ExternalAccountConfig,
         Permission::ImagesRead,
@@ -401,6 +406,7 @@ impl Permission {
             Permission::ProxmoxConfig => "proxmox.config",
             Permission::ProxmoxOperate => "proxmox.operate",
             Permission::ProxmoxDestructive => "proxmox.destructive",
+            Permission::ProxmoxConsole => "proxmox.console",
             Permission::ExternalAccountRead => "external_account.read",
             Permission::ExternalAccountConfig => "external_account.config",
             Permission::ImagesRead => "images.read",
@@ -493,6 +499,7 @@ impl Permission {
             | Permission::ProxmoxConfig
             | Permission::ProxmoxOperate
             | Permission::ProxmoxDestructive
+            | Permission::ProxmoxConsole
             | Permission::ExternalAccountRead
             | Permission::ExternalAccountConfig
             | Permission::ImagesConfig
@@ -549,6 +556,7 @@ impl Permission {
             | Permission::ProxmoxConfig
             | Permission::ProxmoxOperate
             | Permission::ProxmoxDestructive
+            | Permission::ProxmoxConsole
             | Permission::ExternalAccountRead
             | Permission::ExternalAccountConfig
             | Permission::ImagesRead

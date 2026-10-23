@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { useQueryClient } from '@tanstack/vue-query'
-import { computed, ref } from 'vue'
+import { computed, defineAsyncComponent, ref } from 'vue'
 import { RouterLink } from 'vue-router'
 
 import { startProxmoxLifecycle, type OperationDto } from '@frogbyte-io/fleet-api-client'
@@ -19,6 +19,9 @@ import { discoveryKey, guestsKey } from '../useProxmox'
 // confirmed here and runs as a durable operation. Reviewed destructive
 // operations (snapshot, clone, template) stay on the machine's Guest tab.
 const props = defineProps<{ rows: GuestRow[], views: AccountView[] }>()
+
+// The VM screen (FM-495) loads, with noVNC, only when a row's Screen is opened.
+const ProxmoxConsole = defineAsyncComponent(() => import('../console/ProxmoxConsole.vue'))
 
 const queryClient = useQueryClient()
 const TIMEOUT_SECONDS = 300
@@ -42,7 +45,7 @@ const reports = computed(() => new Map(props.views.map(v => [v.account.id, v.pri
 
 // Why the token cannot run a tier's actions on this guest's account, from
 // the privilege report; null (offered) unless the tier is reported missing.
-function blockedBy(row: GuestRow, tier: 'operate' | 'destructive'): string | null {
+function blockedBy(row: GuestRow, tier: 'operate' | 'destructive' | 'console'): string | null {
   return tierBlockReason(reports.value.get(row.accountId), tier)
 }
 
@@ -51,6 +54,16 @@ function key(row: GuestRow) {
 }
 
 const open = ref<string | null>(null)
+const screenOpen = ref<string | null>(null)
+
+// Only QEMU guests have a VNC screen; LXC consoles are out of scope.
+function hasScreen(row: GuestRow) {
+  return row.guest.kind !== 'lxc' && row.guest.vmid != null && !!row.guest.node && actionsAllowed(row.state)
+}
+
+function toggleScreen(row: GuestRow) {
+  screenOpen.value = screenOpen.value === key(row) ? null : key(row)
+}
 const action = ref<LifecycleAction | null>(null)
 const busy = ref(false)
 const error = ref('')
@@ -233,6 +246,17 @@ function settled(row: GuestRow) {
                     class="text-fc-info hover:text-fc-ink"
                   >PVE ↗</a>
                   <button
+                    v-if="row.guest.kind !== 'lxc'"
+                    type="button"
+                    class="text-fc-info hover:text-fc-ink disabled:opacity-50"
+                    :disabled="!hasScreen(row)"
+                    :aria-expanded="screenOpen === key(row)"
+                    :data-testid="`guest-screen-${row.guest.vmid}`"
+                    @click="toggleScreen(row)"
+                  >
+                    Screen
+                  </button>
+                  <button
                     type="button"
                     class="text-fc-info hover:text-fc-ink disabled:opacity-50"
                     :disabled="!actionsAllowed(row.state) || row.guest.vmid == null || !row.guest.node"
@@ -243,6 +267,23 @@ function settled(row: GuestRow) {
                     Actions
                   </button>
                 </div>
+              </td>
+            </tr>
+            <tr
+              v-if="screenOpen === key(row) && hasScreen(row)"
+              class="bg-fc-inset"
+            >
+              <td
+                colspan="6"
+                class="px-3 py-3"
+              >
+                <ProxmoxConsole
+                  :account-id="row.accountId"
+                  :node="row.guest.node!"
+                  :vmid="row.guest.vmid!"
+                  :guest-status="row.guest.status ?? null"
+                  :blocked-reason="blockedBy(row, 'console')"
+                />
               </td>
             </tr>
             <tr

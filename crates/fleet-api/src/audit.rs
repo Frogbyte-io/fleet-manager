@@ -169,9 +169,31 @@ fn safe_metadata_entry(key: &str, value: &serde_json::Value) -> bool {
                         || matches!(byte, b'_' | b'.' | b'-')
                 })
         }
-        "attempt" | "vmid" | "invalidatedEnrollmentCount" => {
-            !value.is_empty() && value.bytes().all(|byte| byte.is_ascii_digit())
+        "attempt" | "vmid" | "invalidatedEnrollmentCount" | "durationMs" => {
+            !value.is_empty()
+                && value.len() <= 16
+                && value.bytes().all(|byte| byte.is_ascii_digit())
         }
+        // Proxmox console facts (FM-495): a close reason from a closed set
+        // of identifiers, a node name from the console's validated
+        // character set, and the console session's generated identity.
+        "reason" => {
+            !value.is_empty()
+                && value.len() <= 32
+                && value
+                    .bytes()
+                    .all(|byte| byte.is_ascii_lowercase() || byte == b'_')
+        }
+        "node" => {
+            !value.is_empty()
+                && value.len() <= 64
+                && value
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'.' | b'_'))
+        }
+        "session" => value.strip_prefix("console-").is_some_and(|id| {
+            (8..=32).contains(&id.len()) && id.bytes().all(|byte| byte.is_ascii_hexdigit())
+        }),
         // Names, purposes, notes, hostnames, remotes, and opaque ids are
         // deliberately omitted because they can be caller-controlled text.
         _ => false,
