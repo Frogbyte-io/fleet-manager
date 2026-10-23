@@ -62,7 +62,9 @@ pub use lab::{
     LabAudio, LabTemplateContent, Lease, LeaseState, MAX_INTERACTIVE_USER_LEN,
     MAX_LAB_LEASE_LIFETIME_MILLIS, ReadinessProbe, validate_interactive_user_name,
 };
-pub use machine::{CapabilityFact, CapabilityStatus, EndpointKind, MAX_CAPABILITY_FACTS};
+pub use machine::{
+    CapabilityFact, CapabilityStatus, EndpointKind, MAX_CAPABILITY_FACTS, RESERVED_FACT_NAMESPACE,
+};
 pub use operation::{
     InvalidTransitionError, OperationState, can_transition, deadline_passed, validate_transition,
 };

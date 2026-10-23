@@ -469,6 +469,15 @@ pub trait OperationPort: fmt::Debug + Send + Sync {
     ///
     /// Fails when the id is unknown or the backend errors.
     async fn get(&self, id: &str) -> Result<Operation, PortFailure>;
+    /// The operation holding an idempotency key, when there is one. The
+    /// default knows none; a store overrides it.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the backend errors.
+    async fn find_by_idempotency(&self, _key: &str) -> Result<Option<Operation>, PortFailure> {
+        Ok(None)
+    }
     /// Lists operations, newest first.
     ///
     /// # Errors
@@ -1395,7 +1404,10 @@ impl Operations {
                 },
             )
             .map_err(OperationUseCaseError::Denied)?;
-            if self.brokered_kinds.contains(&new.kind) {
+            // A kind with a dedicated route of its own (`machine.create`,
+            // #489) is also offered through the broker (#496): only the
+            // generic surface refuses it.
+            if route == CreateRoute::Generic && self.brokered_kinds.contains(&new.kind) {
                 return Err(OperationUseCaseError::Invalid {
                     detail: "this kind is run through an action request; POST /requests instead"
                         .to_owned(),
@@ -1666,7 +1678,7 @@ impl Operations {
             // auth, an SSH key, a product key) that the generic surface must
             // never be able to queue. The review token still binds the exact
             // payload, and the catalog entry still applies.
-            if route != CreateRoute::Dedicated {
+            if route == CreateRoute::Generic {
                 return Err(OperationUseCaseError::Invalid {
                     detail: "machine.create runs through the machine create route".to_owned(),
                 });
@@ -1683,15 +1695,21 @@ impl Operations {
                     });
                 }
             }
-            authorize(
-                authorizer,
-                AccessRequest {
-                    principal_id,
-                    action: Permission::MachineProvision,
-                    resource: None,
-                },
-            )
-            .map_err(OperationUseCaseError::Denied)?;
+            // The brokered route (#496) is authorized by the broker: policy
+            // for an auto request, or an approver the broker has checked
+            // holds `machines.provision`, now and again at execution. The
+            // requesting agent never holds it.
+            if route == CreateRoute::Dedicated {
+                authorize(
+                    authorizer,
+                    AccessRequest {
+                        principal_id,
+                        action: Permission::MachineProvision,
+                        resource: None,
+                    },
+                )
+                .map_err(OperationUseCaseError::Denied)?;
+            }
         } else if new.kind == "lab.provision" {
             if route != CreateRoute::Dedicated {
                 return Err(OperationUseCaseError::Invalid {
@@ -1866,6 +1884,20 @@ impl Operations {
             .map_err(|error| error.to_string())?;
         }
         Ok(())
+    }
+
+    /// The operation holding an idempotency key, when there is one. The
+    /// broker uses it to link an operation it already created before it
+    /// decides whether to create one.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the backend errors.
+    pub async fn find_by_idempotency_key(
+        &self,
+        key: &str,
+    ) -> Result<Option<Operation>, PortFailure> {
+        self.port.find_by_idempotency(key).await
     }
 
     /// Reads one operation's current state id, when it exists. The

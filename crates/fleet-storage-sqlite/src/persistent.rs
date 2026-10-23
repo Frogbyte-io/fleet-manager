@@ -4,7 +4,9 @@ use async_trait::async_trait;
 use sqlx::Row as _;
 use sqlx::SqlitePool;
 
-use fleet_application::persistent::{PersistentGuest, PersistentGuestPort, PersistentState};
+use fleet_application::persistent::{
+    PersistentGuest, PersistentGuestPort, PersistentState, RequestedBy,
+};
 
 /// Persistent guest markers over a pool.
 #[derive(Debug)]
@@ -38,6 +40,17 @@ fn read(row: &sqlx::sqlite::SqliteRow) -> Result<PersistentGuest, String> {
         created_at: row.get("created_at"),
         updated_at: row.get("updated_at"),
     })
+}
+
+fn owner_from(row: &sqlx::sqlite::SqliteRow) -> RequestedBy {
+    RequestedBy {
+        principal: row.get("owner"),
+        purpose: row.get::<Option<String>, _>("purpose").unwrap_or_default(),
+        request_id: row
+            .get::<Option<String>, _>("request_id")
+            .unwrap_or_default(),
+        approved_by: None,
+    }
 }
 
 #[async_trait]
@@ -143,6 +156,55 @@ impl PersistentGuestPort for PersistentGuestRepository {
             .iter()
             .map(read)
             .collect()
+    }
+
+    async fn record_owner(
+        &self,
+        account_id: &str,
+        vmid: u32,
+        owner: &RequestedBy,
+    ) -> Result<(), String> {
+        let done = sqlx::query(
+            "UPDATE persistent_guests SET owner = ?3, purpose = ?4, request_id = ?5 \
+             WHERE account_id = ?1 AND vmid = ?2",
+        )
+        .bind(account_id)
+        .bind(i64::from(vmid))
+        .bind(&owner.principal)
+        .bind(&owner.purpose)
+        .bind(&owner.request_id)
+        .execute(&self.pool)
+        .await
+        .map_err(|error| format!("persistent guest owner write failed: {error}"))?;
+        if done.rows_affected() == 0 {
+            return Err("the persistent guest is unknown".to_owned());
+        }
+        Ok(())
+    }
+
+    async fn owner_of(&self, account_id: &str, vmid: u32) -> Result<Option<RequestedBy>, String> {
+        let row = sqlx::query(
+            "SELECT owner, purpose, request_id FROM persistent_guests \
+             WHERE account_id = ?1 AND vmid = ?2 AND owner IS NOT NULL",
+        )
+        .bind(account_id)
+        .bind(i64::from(vmid))
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(|error| format!("persistent guest owner read failed: {error}"))?;
+        Ok(row.map(|row| owner_from(&row)))
+    }
+
+    async fn owner_of_machine(&self, machine_id: &str) -> Result<Option<RequestedBy>, String> {
+        let row = sqlx::query(
+            "SELECT owner, purpose, request_id FROM persistent_guests \
+             WHERE machine_id = ?1 AND owner IS NOT NULL",
+        )
+        .bind(machine_id)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(|error| format!("persistent guest owner read failed: {error}"))?;
+        Ok(row.map(|row| owner_from(&row)))
     }
 
     async fn remove(&self, account_id: &str, vmid: u32) -> Result<(), String> {

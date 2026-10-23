@@ -578,6 +578,18 @@ pub(crate) fn request(action: &MachineAccessAction) -> Result<RequestShape, CliE
             Vec::new(),
             None,
         ),
+        MachineAccessAction::Create(args) if args.request => (
+            reqwest::Method::POST,
+            "/api/v1/machines/create/request".to_owned(),
+            Vec::new(),
+            {
+                let mut body = json!({ "spec": args.spec(), "purpose": args.purpose });
+                if let Some(key) = &args.idempotency_key {
+                    body["idempotencyKey"] = json!(key);
+                }
+                Some(body)
+            },
+        ),
         MachineAccessAction::Create(args) => (
             reqwest::Method::POST,
             "/api/v1/machines/create/review".to_owned(),

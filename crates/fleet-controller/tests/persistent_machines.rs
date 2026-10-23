@@ -834,6 +834,127 @@ async fn a_persistent_vm_is_created_registered_and_rekeyed_in_order() {
     drop(world.resolver.clone());
 }
 
+/// #496: a machine created from a brokered request records who asked and why
+/// (the same executor, one extra fact write); a direct create records nothing.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_requested_machine_records_its_owner_and_purpose_and_a_direct_one_does_not() {
+    let world = World::new().await;
+    let mut spec = world.spec("requested-1");
+    spec["requestedBy"] = json!({
+        "principal": "credential:ci:cred-1",
+        "purpose": "nightly build host",
+        "requestId": "req-1",
+    });
+    let operation = world.create(&spec).await;
+    assert_eq!(operation.state, "succeeded", "{:?}", error_of(&operation));
+    let result = result_of(&operation);
+    assert_eq!(result["requestId"], "req-1");
+    // Recorded on the controller's own marker, not as a machine fact.
+    let machine_id = result["machineId"].as_str().unwrap().to_owned();
+    let markers = PersistentGuestRepository::new(world.pool.clone());
+    let owner = markers
+        .owner_of_machine(&machine_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(owner.principal, "credential:ci:cred-1");
+    assert_eq!(owner.purpose, "nightly build host");
+    assert_eq!(owner.request_id, "req-1");
+    let count_facts = || async {
+        sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM machine_capabilities WHERE namespace = 'fleet'",
+        )
+        .fetch_one(&world.pool)
+        .await
+        .unwrap()
+    };
+    assert_eq!(count_facts().await, 0);
+
+    // A report (fleetd or an SSH inventory) cannot set or replace it.
+    let forged = |name: &str, value: &str| fleet_core::CapabilityFact {
+        namespace: "fleet".to_owned(),
+        name: name.to_owned(),
+        value: Some(value.to_owned()),
+        status: fleet_core::CapabilityStatus::Known,
+        observed_at: fleet_core::Timestamp::from_unix_millis(1),
+        source: "fleetd/9".to_owned(),
+    };
+    fleet_application::machine::MachinePort::record_capabilities(
+        &MachineRepository::new(world.pool.clone()),
+        &machine_id,
+        &[forged("owner", "someone-else"), forged("purpose", "x")],
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        count_facts().await,
+        0,
+        "the fleet namespace is never written from a report"
+    );
+    assert_eq!(
+        markers
+            .owner_of_machine(&machine_id)
+            .await
+            .unwrap()
+            .unwrap()
+            .principal,
+        "credential:ci:cred-1"
+    );
+
+    // The use case drops fleet facts and records the rest of the batch.
+    let machines = fleet_application::machine::Machines::new(
+        Arc::new(MachineRepository::new(world.pool.clone())),
+        Arc::new(AuditSink::new(world.pool.clone())),
+    );
+    let mut os_fact = forged("distribution", "ubuntu");
+    os_fact.namespace = "os".to_owned();
+    machines
+        .record_capabilities(
+            &fleet_auth::LanAllowAllAuthorizer,
+            &fleet_application::authz::ActingPrincipal {
+                id: fleet_auth::LAN_PRINCIPAL_ID.to_owned(),
+            },
+            &machine_id,
+            &[forged("owner", "x"), os_fact],
+        )
+        .await
+        .unwrap();
+    assert_eq!(count_facts().await, 0);
+    let os_rows: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM machine_capabilities WHERE namespace = 'os' AND name = 'distribution'",
+    )
+    .fetch_one(&world.pool)
+    .await
+    .unwrap();
+    assert_eq!(os_rows, 1);
+
+    // The brokered creation's audit event carries the request id and the
+    // operation, linking it to the request's own events.
+    let linked: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM audit_events WHERE operation_id = ?1 \
+         AND metadata_json LIKE '%machine_provision_requested%' \
+         AND metadata_json LIKE '%\"requestId\":\"req-1\"%'",
+    )
+    .bind(&operation.id)
+    .fetch_one(&world.pool)
+    .await
+    .unwrap();
+    assert_eq!(linked, 1);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_direct_machine_records_no_owner_facts() {
+    let world = World::new().await;
+    let operation = world.create(&world.spec("direct-1")).await;
+    assert_eq!(operation.state, "succeeded", "{:?}", error_of(&operation));
+    let count: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM machine_capabilities WHERE namespace = 'fleet'")
+            .fetch_one(&world.pool)
+            .await
+            .unwrap();
+    assert_eq!(count, 0);
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn a_failed_install_leaves_the_image_key_working_and_nothing_removed() {
     if is_root() {
@@ -914,6 +1035,81 @@ async fn a_rerun_after_a_failure_adopts_the_guest_instead_of_cloning_again() {
             .unwrap()
             .state,
         PersistentState::Ready
+    );
+}
+
+fn stamped(mut spec: Value, request: &str) -> Value {
+    spec["requestedBy"] = json!({
+        "principal": "credential:ci:cred-1",
+        "purpose": "nightly build host",
+        "requestId": request,
+        "approvedBy": "operator",
+    });
+    spec
+}
+
+/// #496: a half-made guest is resumed only by the request (or the direct
+/// create) that started it; nothing else adopts it.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_half_made_guest_is_not_adopted_by_another_request_or_a_direct_create() {
+    // Request A fails part-way; request B for the same name is refused.
+    let world = World::new().await;
+    let a = stamped(world.spec("persist-9"), "req-a");
+    world.pve.fail_next_starts(1);
+    let a1 = world.create(&a).await;
+    assert_eq!(a1.state, "failed");
+    let b = world
+        .create(&stamped(world.spec("persist-9"), "req-b"))
+        .await;
+    assert_eq!(b.state, "failed");
+    assert_eq!(error_of(&b)["reason"], "conflict", "{:?}", error_of(&b));
+    // A direct create does not adopt a brokered marker either.
+    let direct = world.create(&world.spec("persist-9")).await;
+    assert_eq!(error_of(&direct)["reason"], "conflict");
+    let owner = PersistentGuestRepository::new(world.pool.clone())
+        .owner_of(&world.account_id, 7100)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(owner.request_id, "req-a", "the owner is never replaced");
+    // The request that started it resumes it, and the creation's audit event
+    // was written once, on the first run only.
+    let resumed = world.create(&a).await;
+    assert_eq!(resumed.state, "succeeded", "{:?}", error_of(&resumed));
+    let events: Vec<(String, String)> = sqlx::query_as(
+        "SELECT actor, metadata_json FROM audit_events \
+         WHERE intent_seq IS NULL AND metadata_json LIKE '%machine_provision_requested%'",
+    )
+    .fetch_all(&world.pool)
+    .await
+    .unwrap();
+    assert_eq!(events.len(), 1, "{events:?}");
+    assert_eq!(events[0].0, "system:machine-create");
+    for needle in [
+        "\"requestId\":\"req-a\"",
+        "\"requester\":\"credential:ci:cred-1\"",
+        "\"approver\":\"operator\"",
+    ] {
+        assert!(events[0].1.contains(needle), "{needle} in {}", events[0].1);
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_brokered_request_does_not_adopt_a_half_made_direct_guest() {
+    let world = World::new().await;
+    world.pve.fail_next_starts(1);
+    assert_eq!(world.create(&world.spec("persist-8")).await.state, "failed");
+    let brokered = world
+        .create(&stamped(world.spec("persist-8"), "req-a"))
+        .await;
+    assert_eq!(brokered.state, "failed");
+    assert_eq!(error_of(&brokered)["reason"], "conflict");
+    assert!(
+        PersistentGuestRepository::new(world.pool.clone())
+            .owner_of(&world.account_id, 7100)
+            .await
+            .unwrap()
+            .is_none()
     );
 }
 

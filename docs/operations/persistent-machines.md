@@ -53,6 +53,46 @@ Activation is optional; unactivated is a valid state.
 - KMS: `--activate-kms <host[:port]>` (`slmgr /skms`).
 - A failed activation (no internet, key in use, wrong edition) fails only that step, with Microsoft's error code; the VM stays created and registered. A retail key activates one machine at a time: to move it, deactivate the old machine first (`slmgr /upk`).
 
+## Agents ask; people approve (#496)
+
+A restricted agent credential cannot create a persistent VM: `machines.provision` is refused to delegated credentials, so the direct create and its review answer 403. Such a caller asks instead:
+
+```
+fleetctl machines create --request --purpose "nightly build host" --account <a> --image-version <v> --name build-box --cores 4 --memory 8192 --disk 40 --wait-approval=15m
+```
+
+`POST /api/v1/machines/create/request` (`requestMachineCreate`) takes the same `spec` and a `purpose`, runs the same checks as the review (rules, promoted image, references), and files an action request for `proxmox.machine.create` (needs `action.request`, not `machines.provision`). The parameters are the spec's references and public keys only, with the credential-shaped key names (`credential`, `secret`, `publicKey`, `adminPassword`) renamed so the broker's credential check passes honestly; an activation key is only ever a `machines/product-key/` id. The request is `approve` class: it waits for a person (`fleetctl requests approve <id>`, or the Approvals page), and the answer says whether policy or a person decided.
+
+On approval the broker builds the same `machine.create` operation and review token a direct create builds, with one addition: the spec is stamped with the requesting principal, the purpose (the request's reason, folded to one line) and the request id. #489's executor then runs unchanged, and when it registers the machine it records the stamp on the machine's persistent marker (`persistent_guests.owner`, `purpose`, `request_id`, migration 0064). It is **not** a machine fact: fleetd and SSH inventory reports can write arbitrary fact namespaces, so the `fleet` fact namespace is reserved and dropped from every report. `GET /machines/{id}` returns the record as `ownership` and the machine page shows it under Summary. A direct create records none, and a direct call that carries the stamp is refused. The executor also records the `machine_provision_requested` audit event with the request id when a brokered creation starts.
+
+### Authorization is checked again when it runs
+
+- Whoever approved it, the requester must still hold `action.request`.
+- The approver needs `action.approve` and `machines.provision`. An approver without the second is refused when approving and the request stays pending for one who has it.
+- When the operation starts, the broker checks again: an approval by a person needs that person to still hold both; an approval by policy needs the requester to still hold `action.request` and the request to still be inside the bounds. A request that fails the check ends `failed` with the reason and creates nothing.
+- An operation the request already created (a crash before it was linked) is linked as it is; only creating a new one is gated.
+- A policy that turned to `deny` ends a pending request `denied` when someone approves it, as for any action.
+- A rejection or an expiry creates nothing.
+
+### Policy bounds
+
+By default every request waits for a person. An operator can allow small requests without one with `FLEET_PERSISTENT_AUTO_POLICY`, a JSON object (a malformed value stops startup):
+
+```
+FLEET_PERSISTENT_AUTO_POLICY='{"maxCores":4,"maxMemoryMib":8192,"maxDiskGib":64,"imageVersions":["<version-id>"],"nodes":["pve1"],"storages":["local-lvm"],"maxPerPrincipal":2}'
+```
+
+With none set nothing is auto-approved. When any is set, `maxCores`, `maxMemoryMib` and `maxDiskGib` must all be set (otherwise startup stops: bounds without size limits would approve any size). Other fields: `imageVersions`, `nodes`, `storages`, `bridges` (allow-lists; empty means any), `allowedTags` (tags that may be requested; empty means none), `allowVmid` and `allowLoginUser` (default false) and `maxPerPrincipal`. A request inside **all** set bounds, and of the plain shape below, is approved by policy and starts at once; anything else waits for a person.
+
+- A limit the request leaves to the image's default (no `--cores`, `--memory`, `--disk`, `--node`, `--storage` or `--bridge` where that bound is set) cannot be shown to be inside it, so it needs a person.
+- Only the plain shape is auto-approved: the default first-login (the controller's agent), a `generate`d or `--public-key` credential, no explicit VMID, tags outside `allowedTags` or login user unless allowed, and protection on.
+- `maxPerPrincipal` counts the principal's requests for this action that are pending, approved, running or succeeded. A machine destroyed later still counts: the quota guards against a runaway agent, it is not an inventory.
+- `FLEET_ACTION_POLICY=proxmox.machine.create=deny` refuses every request outright; `=approve` keeps everything for a person whatever the bounds; `=auto` is an explicit decision to approve by policy: without bounds it auto-approves **every** request, so combine it with bounds (an out-of-bounds request then waits).
+
+### Audit
+
+The request, the decision (the approver, or `policy:auto`), the start of the operation (with its id) and the outcome are the broker's linked events, keyed by the request id. The machine's `fleet/request` fact and the operation result's `requestId` carry that id forward, so the creation can be traced back to the request, the requester and the approver.
+
 ## Lab never selects it
 
 The persistent marker (not the name) keeps the guest out of the Lab sweeper's inventory, Lab pools and Lab cleanup. Persistent names may not start with `fm-lab-`.

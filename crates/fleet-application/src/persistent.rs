@@ -173,6 +173,24 @@ fn default_trust() -> HostKeyTrust {
     HostKeyTrust::Tofu
 }
 
+/// Who asked for a machine through the action broker (#496), stamped by the
+/// broker's action when it builds the operation. A direct create never
+/// carries it: the review refuses a spec that does.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct RequestedBy {
+    /// The requesting principal.
+    pub principal: String,
+    /// Why the machine is needed (the request's reason).
+    pub purpose: String,
+    /// The action request that asked for it.
+    pub request_id: String,
+    /// Who decided it: a person, or `policy:auto`. Stamped by the broker's
+    /// action; recorded in the creation's audit event.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub approved_by: Option<String>,
+}
+
 /// Everything a `machine.create` needs. The wire shape of the review and
 /// create calls and of the operation payload.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -241,6 +259,10 @@ pub struct CreateMachineSpec {
     /// The operation deadline, in seconds.
     #[serde(default = "default_timeout")]
     pub timeout_seconds: u64,
+    /// Who asked for it through the action broker; absent for a direct
+    /// create. Set only by the broker's action, never by a caller.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub requested_by: Option<RequestedBy>,
 }
 
 fn identifier(value: &str, what: &str, max: usize) -> Result<(), String> {
@@ -397,6 +419,7 @@ impl CreateMachineSpec {
     /// # Errors
     ///
     /// Answers the first rule the spec breaks, naming the field.
+    #[allow(clippy::too_many_lines)]
     pub fn validate(&self) -> Result<(), String> {
         identifier(&self.account_id, "account id", 128)?;
         identifier(&self.image_version_id, "image version id", 128)?;
@@ -490,6 +513,19 @@ impl CreateMachineSpec {
             return Err(format!(
                 "the timeout must be between 60 and {MAX_TIMEOUT_SECONDS} seconds"
             ));
+        }
+        if let Some(by) = &self.requested_by
+            && (by.principal.is_empty()
+                || by.principal.len() > 256
+                || by.purpose.trim().is_empty()
+                || by.purpose.chars().count() > 1_000
+                || by.request_id.is_empty()
+                || by.request_id.len() > 96
+                || [&by.principal, &by.purpose, &by.request_id]
+                    .iter()
+                    .any(|text| text.chars().any(char::is_control)))
+        {
+            return Err("the requestedBy stamp is malformed".to_owned());
         }
         Ok(())
     }
@@ -759,6 +795,31 @@ pub trait PersistentGuestPort: fmt::Debug + Send + Sync {
     ///
     /// Fails when the store errors.
     async fn remove(&self, account_id: &str, vmid: u32) -> Result<(), String>;
+    /// Records who asked for a guest and why. Only the create executor calls
+    /// this, from the broker's stamp on the reviewed payload.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the marker is unknown or the store errors.
+    async fn record_owner(
+        &self,
+        account_id: &str,
+        vmid: u32,
+        owner: &RequestedBy,
+    ) -> Result<(), String>;
+    /// Who asked for the guest at a VMID, when it was requested (recorded
+    /// when the marker is reserved, so a half-made creation has it too).
+    ///
+    /// # Errors
+    ///
+    /// Fails when the store cannot be read.
+    async fn owner_of(&self, account_id: &str, vmid: u32) -> Result<Option<RequestedBy>, String>;
+    /// Who asked for the guest behind a machine, when it was requested.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the store cannot be read.
+    async fn owner_of_machine(&self, machine_id: &str) -> Result<Option<RequestedBy>, String>;
 }
 
 /// Windows product keys, held as encrypted secret records. The value is
@@ -878,6 +939,21 @@ impl PersistentMachines {
     ) -> Result<Option<PersistentGuest>, LabUseCaseError> {
         match &self.markers {
             Some(markers) => markers.get(account_id, vmid).await.map_err(backend),
+            None => Ok(None),
+        }
+    }
+
+    /// Who asked for a machine and why, when it was created from a request.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the marker store cannot be read.
+    pub async fn ownership(
+        &self,
+        machine_id: &str,
+    ) -> Result<Option<RequestedBy>, LabUseCaseError> {
+        match &self.markers {
+            Some(markers) => markers.owner_of_machine(machine_id).await.map_err(backend),
             None => Ok(None),
         }
     }
@@ -1023,6 +1099,25 @@ impl PersistentMachines {
             },
         )
         .map_err(LabUseCaseError::Denied)?;
+        if spec.requested_by.is_some() {
+            return Err(invalid(
+                "requestedBy is set by the action broker; a direct create cannot carry it"
+                    .to_owned(),
+            ));
+        }
+        self.check_spec(spec).await
+    }
+
+    /// The checks of a create that need no permission of the caller: every
+    /// rule, the promoted image, and the references. The request path runs
+    /// them at request time with `action.request` as the permission; the
+    /// executor re-verifies at run time.
+    ///
+    /// # Errors
+    ///
+    /// Fails on a broken rule, an image version that is not promoted, or a
+    /// credential or product-key reference that does not exist.
+    pub async fn check_spec(&self, spec: &CreateMachineSpec) -> Result<Prepared, LabUseCaseError> {
         spec.validate()
             .map_err(|detail| LabUseCaseError::Invalid { detail })?;
         let version = self
@@ -1137,43 +1232,62 @@ impl PersistentMachines {
         operation_id: &str,
         spec: &CreateMachineSpec,
     ) -> Result<(), LabUseCaseError> {
-        let mut metadata = crate::audit::AuditMetadata::default();
-        let credential = match &spec.credential {
-            CredentialChoice::Generate => "generate",
-            CredentialChoice::Reference { .. } => "reference",
-            CredentialChoice::PublicKey { .. } => "publicKey",
-        };
-        let activation = match spec.windows.as_ref().map(|options| &options.activation) {
-            Some(Activation::ProductKey { .. }) => "productKey",
-            Some(Activation::Kms { .. }) => "kms",
-            _ => "none",
-        };
-        for (key, value) in [
-            ("event", "machine_provision_requested"),
-            ("accountId", spec.account_id.as_str()),
-            ("imageVersionId", spec.image_version_id.as_str()),
-            ("name", spec.name.as_str()),
-            ("guestOs", spec.guest_os.id()),
-            ("credential", credential),
-            ("activation", activation),
-        ] {
-            metadata
-                .insert(key, value)
-                .map_err(|error| backend(error.to_string()))?;
-        }
-        self.audit
-            .record_intent(&crate::audit::AuditIntent {
-                actor: principal.id.clone(),
-                action: Permission::MachineProvision.id().to_owned(),
-                resource: Some(operation_id.to_owned()),
-                decision: crate::authz::Decision::allow(),
-                correlation_id: None,
-                operation_id: Some(operation_id.to_owned()),
-                metadata,
-            })
-            .await
-            .map_err(backend)
+        let intent = requested_intent(&principal.id, operation_id, spec)
+            .map_err(|error| backend(error.to_string()))?;
+        self.audit.record_intent(&intent).await.map_err(backend)
     }
+}
+
+/// The `machine_provision_requested` audit event of a creation: facts and
+/// no secrets. A direct create records it when it queues the operation; a
+/// brokered one records it when the executor starts, carrying the request id
+/// that links it to the request's own events.
+///
+/// # Errors
+///
+/// Fails when a value is not valid audit metadata.
+pub fn requested_intent(
+    actor: &str,
+    operation_id: &str,
+    spec: &CreateMachineSpec,
+) -> Result<crate::audit::AuditIntent, crate::audit::MetadataError> {
+    let mut metadata = crate::audit::AuditMetadata::default();
+    let credential = match &spec.credential {
+        CredentialChoice::Generate => "generate",
+        CredentialChoice::Reference { .. } => "reference",
+        CredentialChoice::PublicKey { .. } => "publicKey",
+    };
+    let activation = match spec.windows.as_ref().map(|options| &options.activation) {
+        Some(Activation::ProductKey { .. }) => "productKey",
+        Some(Activation::Kms { .. }) => "kms",
+        _ => "none",
+    };
+    let mut pairs = vec![
+        ("event", "machine_provision_requested"),
+        ("accountId", spec.account_id.as_str()),
+        ("imageVersionId", spec.image_version_id.as_str()),
+        ("name", spec.name.as_str()),
+        ("guestOs", spec.guest_os.id()),
+        ("credential", credential),
+        ("activation", activation),
+    ];
+    if let Some(by) = &spec.requested_by {
+        pairs.push(("requestId", by.request_id.as_str()));
+        pairs.push(("requester", by.principal.as_str()));
+        pairs.push(("approver", by.approved_by.as_deref().unwrap_or("unknown")));
+    }
+    for (key, value) in pairs {
+        metadata.insert(key, value)?;
+    }
+    Ok(crate::audit::AuditIntent {
+        actor: actor.to_owned(),
+        action: Permission::MachineProvision.id().to_owned(),
+        resource: Some(operation_id.to_owned()),
+        decision: crate::authz::Decision::allow(),
+        correlation_id: None,
+        operation_id: Some(operation_id.to_owned()),
+        metadata,
+    })
 }
 
 #[cfg(test)]

@@ -136,6 +136,36 @@ impl ActionRequestPort for ActionRequestRepository {
             .transpose()
     }
 
+    async fn count_for(
+        &self,
+        requester: &str,
+        action_id: &str,
+        states: &[ActionRequestState],
+        except_request: Option<&str>,
+    ) -> Result<u32, String> {
+        // A pending request past its deadline is expired, whatever its
+        // stored state says: expiry is lazy, so it must not hold a quota.
+        let now = fleet_core::SystemClock::now_unix_millis();
+        let mut count = 0_i64;
+        for state in states {
+            let row: i64 = sqlx::query_scalar(
+                "SELECT COUNT(*) FROM action_requests \
+                 WHERE requester = ?1 AND action_id = ?2 AND state = ?3 \
+                 AND id != ?4 AND (state != 'pending' OR expires_at > ?5)",
+            )
+            .bind(requester)
+            .bind(action_id)
+            .bind(state.id())
+            .bind(except_request.unwrap_or_default())
+            .bind(now)
+            .fetch_one(&self.pool)
+            .await
+            .map_err(|error| format!("action request count failed: {error}"))?;
+            count += row;
+        }
+        Ok(u32::try_from(count).unwrap_or(u32::MAX))
+    }
+
     async fn list(
         &self,
         state: Option<ActionRequestState>,

@@ -221,6 +221,98 @@ pub async fn create_machine(
     ))
 }
 
+/// The body of `POST /machines/create/request`.
+#[derive(Clone, Debug, Deserialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct MachineCreateRequestBody {
+    /// The machine to create: the same spec `POST /machines/create` takes,
+    /// references and public keys only. It must not carry `requestedBy`.
+    #[schema(value_type = Object)]
+    pub spec: serde_json::Value,
+    /// Why the machine is needed (at most 1000 characters). Recorded on the
+    /// machine as its purpose, next to the requesting principal.
+    pub purpose: String,
+    /// A key (1 to 128 printable ASCII characters) making a retry return the
+    /// request already made.
+    #[serde(default)]
+    pub idempotency_key: Option<String>,
+}
+
+/// Asks for a persistent machine instead of creating it: the same spec the
+/// direct create takes, checked the same way, filed as an action request for
+/// a person to approve (the default), or approved by policy when the
+/// operator configured bounds and the spec is inside them. The machine is
+/// created by the same executor once approved, and records the requesting
+/// principal and the purpose. The answer is the action request: follow it at
+/// `/requests/{id}` and its operation at `/operations/{id}`. A caller needs
+/// `action.request`, not `machines.provision`.
+///
+/// # Errors
+///
+/// Returns the public error envelope on refusal, an invalid spec, a missing
+/// purpose, an image that is not promoted, or a broker refusal.
+#[utoipa::path(
+    post,
+    path = "/machines/create/request",
+    tag = "machines",
+    operation_id = "requestMachineCreate",
+    request_body = MachineCreateRequestBody,
+    responses(
+        (status = 201, description = "The action request was recorded; its state shows what policy did.", body = Resource<crate::requests::ActionRequestDto>),
+        (status = 400, description = "The spec or purpose is invalid, the image version is not promoted, or a reference names nothing.", body = crate::error::ApiError),
+        (status = 403, description = "The caller may not request actions, or policy denies this one.", body = crate::error::ApiError),
+        (status = 409, description = "The idempotency key was already used for a different request.", body = crate::error::ApiError),
+        (status = 503, description = "Persistent machine creation or the broker is not wired.", body = crate::error::ApiError),
+    )
+)]
+pub async fn request_machine_create(
+    State(state): State<Arc<crate::operations::ApiState>>,
+    principal: Option<Extension<crate::ActingPrincipal>>,
+    Extension(correlation_id): Extension<CorrelationId>,
+    request: Result<Json<MachineCreateRequestBody>, axum::extract::rejection::JsonRejection>,
+) -> Result<
+    (
+        StatusCode,
+        Json<Resource<crate::requests::ActionRequestDto>>,
+    ),
+    ApiErrorResponse,
+> {
+    let persistent = persistent_or_error(&state, correlation_id)?;
+    let broker = crate::requests::broker_or_error(&state, correlation_id)?;
+    let principal = crate::operations::principal_or_error(principal, correlation_id)?;
+    let Json(body) = request.map_err(|_| {
+        crate::machines::invalid_request(
+            "the request body must be valid JSON with a spec and a purpose",
+            correlation_id,
+        )
+    })?;
+    let spec = read_spec(body.spec, correlation_id)?;
+    let created = fleet_application::persistent_request::request_machine(
+        &persistent,
+        &broker,
+        state.authorizer.as_ref(),
+        &principal,
+        fleet_application::persistent_request::MachineRequest {
+            spec,
+            purpose: body.purpose,
+            origin: "api".to_owned(),
+            correlation_id: Some(correlation_id.to_string()),
+            idempotency_key: body.idempotency_key,
+        },
+        fleet_core::SystemClock::now_unix_millis(),
+    )
+    .await
+    .map_err(|error| match error {
+        fleet_application::persistent_request::RequestError::Lab(error) => {
+            map_lab_error(&error, correlation_id)
+        }
+        fleet_application::persistent_request::RequestError::Broker(error) => {
+            crate::requests::map_broker_error(&error, correlation_id)
+        }
+    })?;
+    Ok((StatusCode::CREATED, Json(Resource::new(created.into()))))
+}
+
 /// The body of `POST /machine-product-keys`.
 #[derive(Clone, Deserialize, ToSchema)]
 #[serde(rename_all = "camelCase")]

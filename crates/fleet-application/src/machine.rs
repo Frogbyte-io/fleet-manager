@@ -1192,6 +1192,18 @@ impl Machines {
             fact.validate()
                 .map_err(|detail| MachineUseCaseError::Invalid { detail })?;
         }
+        // The `fleet` namespace is Fleet's own record keeping: facts in it
+        // are dropped, not recorded, and do not fail the rest of the batch.
+        let facts: Vec<CapabilityFact> = facts
+            .iter()
+            .filter(|fact| {
+                !fact
+                    .namespace
+                    .eq_ignore_ascii_case(fleet_core::RESERVED_FACT_NAMESPACE)
+            })
+            .cloned()
+            .collect();
+        let facts = facts.as_slice();
         if facts.len() > fleet_core::MAX_CAPABILITY_FACTS {
             return Err(MachineUseCaseError::Invalid {
                 detail: format!(
