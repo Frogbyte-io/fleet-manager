@@ -30,6 +30,12 @@ class FakeTerm {
 vi.mock('@xterm/xterm', () => ({ Terminal: FakeTerm }))
 vi.mock('@xterm/addon-fit', () => ({ FitAddon: class { fit() {} } }))
 vi.mock('@xterm/xterm/css/xterm.css', () => ({}))
+vi.mock('@xterm/addon-webgl', () => ({
+  WebglAddon: class {
+    onContextLoss() {}
+    dispose() {}
+  },
+}))
 
 const sockets: FakeSocket[] = []
 class FakeSocket extends EventTarget {
@@ -91,12 +97,15 @@ describe('MachineTerminal', () => {
     vi.stubGlobal('WebSocket', FakeSocket)
   })
 
-  const mountIt = () => mount(MachineTerminal, { props: { machineId: 'm1' }, attachTo: document.body })
+  const mountIt = (trustedLan = true) => mount(MachineTerminal, { props: { machineId: 'm1', trustedLan }, attachTo: document.body })
 
-  it('starts idle and always shows the trusted-LAN note', () => {
+  it('starts idle and shows the trusted-LAN note only in that mode', () => {
     const wrapper = mountIt()
     expect(wrapper.get('[data-testid="terminal-state"]').text()).toContain('not connected')
     expect(wrapper.get('[data-testid="terminal-lan-note"]').text()).toContain('trusted-LAN')
+    const other = mountIt(false)
+    expect(other.find('[data-testid="terminal-lan-note"]').exists()).toBe(false)
+    expect(other.get('[data-testid="terminal-audit-note"]').text()).toContain('audits')
     expect(createMachineTerminalSession).not.toHaveBeenCalled()
   })
 
@@ -146,13 +155,15 @@ describe('MachineTerminal', () => {
       [1001, '', 'Controller restarting'],
       [4403, '', 'No permission'],
       [4404, '', 'Session expired'],
-      [1000, 'the shell ended (exit status 2)', 'Session ended'],
+      [1000, 'the shell ended', 'Session ended'],
     ]
     for (const [code, reason, title] of cases) {
       await connect(wrapper)
       const socket = sockets.at(-1)!
       socket.open()
       socket.message('{"type":"ready"}')
+      if (code === 1000)
+        socket.message('{"type":"exit","code":2}')
       socket.finish(code, reason)
       await flushPromises()
       expect(wrapper.get('[data-testid="terminal-end-title"]').text()).toBe(title)

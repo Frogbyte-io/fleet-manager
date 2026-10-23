@@ -171,6 +171,16 @@ impl Harness {
         }));
         let response = app.oneshot(request).await.unwrap();
         let status = response.status();
+        if status == StatusCode::CREATED {
+            // The answer carries a bearer token: it must never be cached.
+            assert_eq!(
+                response
+                    .headers()
+                    .get("cache-control")
+                    .and_then(|value| value.to_str().ok()),
+                Some("no-store")
+            );
+        }
         let bytes = axum::body::to_bytes(response.into_body(), 1 << 20)
             .await
             .unwrap();

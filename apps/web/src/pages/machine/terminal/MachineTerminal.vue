@@ -9,11 +9,13 @@ import {
   describeClose,
   describeRequestFailure,
   endOf,
+  exitCodeOf,
   isReady,
   resizeMessage,
   socketUrl,
   type TerminalView,
 } from './session'
+import { allowXtermStyles } from './styleNonce'
 
 // The machine terminal (#494): xterm.js (MIT) talking to the controller's
 // relay over its own WebSocket. The browser holds a single-use Fleet session
@@ -23,6 +25,8 @@ const props = defineProps<{
   machineId: string
   /** Connect as soon as the panel is shown. */
   autoConnect?: boolean
+  /** Whether the controller runs in trusted-LAN mode, where every caller may open a shell. */
+  trustedLan?: boolean
 }>()
 
 const view = ref<TerminalView>({ kind: 'idle' })
@@ -51,6 +55,7 @@ let observer: ResizeObserver | null = null
 let themeObserver: MutationObserver | null = null
 let subscriptions: Array<{ dispose: () => void }> = []
 let userClosed = false
+let exitStatus: number | null = null
 let generation = 0
 
 const connecting = computed(() => view.value.kind === 'connecting')
@@ -102,7 +107,7 @@ function finish(code: number, reason: string, opened: boolean) {
     kind: 'ended',
     cause: code === 1006 && !opened
       ? endOf('unavailable', 'The controller refused the terminal connection. Check that you are signed in and that terminals are enabled.')
-      : describeClose(code, reason),
+      : describeClose(code, reason, exitStatus),
   }
 }
 
@@ -111,6 +116,7 @@ async function connect() {
     return
   const mine = ++generation
   userClosed = false
+  exitStatus = null
   teardown()
   view.value = { kind: 'connecting' }
   let session: TerminalSessionDto
@@ -135,6 +141,7 @@ async function connect() {
     ])
     if (mine !== generation || container.value === null)
       return
+    allowXtermStyles()
     const created = new Terminal({
       cursorBlink: true,
       fontFamily: 'ui-monospace, SFMono-Regular, Menlo, Consolas, monospace',
@@ -148,6 +155,18 @@ async function connect() {
     fitAddon.fit()
     term.value = created as unknown as Term
     fit = fitAddon
+    // The GPU renderer draws to a canvas, so it needs no injected <style>
+    // elements (the nonce policy blocks them). Without WebGL, or after the
+    // context is lost, xterm falls back to its DOM renderer.
+    try {
+      const { WebglAddon } = await import('@xterm/addon-webgl')
+      const webgl = new WebglAddon()
+      webgl.onContextLoss(() => webgl.dispose())
+      created.loadAddon(webgl)
+    }
+    catch {
+      // DOM renderer.
+    }
 
     let opened = false
     const ws = new WebSocket(socketUrl(session.socketPath, window.location), session.subprotocols)
@@ -159,6 +178,9 @@ async function connect() {
     })
     ws.addEventListener('message', (event) => {
       if (typeof event.data === 'string') {
+        const status = exitCodeOf(event.data)
+        if (status !== null)
+          exitStatus = status
         if (isReady(event.data)) {
           view.value = { kind: 'connected' }
           created.focus()
@@ -268,10 +290,18 @@ defineExpose({ connect, disconnect })
     </div>
 
     <p
+      v-if="trustedLan"
       class="border-l-2 border-l-fc-warn pl-2 text-xs text-fc-muted"
       data-testid="terminal-lan-note"
     >
       This controller runs in trusted-LAN mode: anyone who can reach it can open a shell here as the machine's SSH user. Fleet audits who opened a terminal and for how long, never what is typed or shown.
+    </p>
+    <p
+      v-else
+      class="text-[11px] text-fc-faint"
+      data-testid="terminal-audit-note"
+    >
+      Fleet audits who opened a terminal and for how long, never what is typed or shown.
     </p>
 
     <div class="relative overflow-hidden rounded-sm border border-fc-line bg-fc-inset">

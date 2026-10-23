@@ -15,8 +15,9 @@
 //! the guest, so those signals come from outside). The window size is sent
 //! at the start and on every `SIGWINCH`.
 
+#![cfg_attr(not(unix), allow(dead_code))]
+
 use std::io::{Read, Write};
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
 use std::time::Duration;
 
@@ -24,11 +25,15 @@ use serde_json::{Value, json};
 use tungstenite::protocol::Message;
 
 use crate::machine_access::Target;
-use crate::{CliError, Invocation, Output};
+use crate::{CliError, Invocation};
 
 /// How long a read on the socket waits before the loop looks at local input
 /// and signals again.
 const POLL: Duration = Duration::from_millis(40);
+
+/// How long a write may block before the loop looks at signals again, so a
+/// stalled controller cannot hold the terminal in raw mode.
+const WRITE_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// The largest chunk of local input sent in one message.
 const INPUT_CHUNK: usize = 16 * 1024;
@@ -44,19 +49,16 @@ pub(crate) struct Ended {
     pub code: u16,
     /// The controller's reason, or a description of the drop.
     pub reason: String,
+    /// The shell's exit status, from the controller's `exit` message.
+    pub exit_code: Option<i32>,
 }
 
 impl Ended {
     /// The process exit status: the shell's own exit status when the
     /// controller reported one, 0 for an ordinary close, 1 otherwise.
     pub(crate) fn exit_status(&self) -> u8 {
-        if let Some(status) = self
-            .reason
-            .split("exit status ")
-            .nth(1)
-            .and_then(|rest| rest.trim_end_matches(')').parse::<u16>().ok())
-        {
-            return u8::try_from(status.min(255)).unwrap_or(255);
+        if let Some(status) = self.exit_code {
+            return u8::try_from(status.clamp(0, 255)).unwrap_or(255);
         }
         u8::from(!matches!(self.code, 1000 | 1001))
     }
@@ -104,6 +106,8 @@ pub(crate) struct LocalSide<'a> {
     pub resized: &'a mut dyn FnMut() -> Option<(u16, u16)>,
     /// Whether a signal asked the command to stop.
     pub stop: &'a dyn Fn() -> bool,
+    /// Whether a second signal asked to give up without a close handshake.
+    pub force: &'a dyn Fn() -> bool,
 }
 
 /// Sets a read timeout on the socket's transport so the loop can interleave
@@ -113,8 +117,14 @@ pub(crate) fn set_poll_timeout(
 ) {
     use tungstenite::stream::MaybeTlsStream;
     let _ = match socket.get_ref() {
-        MaybeTlsStream::Plain(stream) => stream.set_read_timeout(Some(POLL)),
-        MaybeTlsStream::Rustls(stream) => stream.get_ref().set_read_timeout(Some(POLL)),
+        MaybeTlsStream::Plain(stream) => stream
+            .set_read_timeout(Some(POLL))
+            .and_then(|()| stream.set_write_timeout(Some(WRITE_TIMEOUT))),
+        MaybeTlsStream::Rustls(stream) => {
+            let tcp = stream.get_ref();
+            tcp.set_read_timeout(Some(POLL))
+                .and_then(|()| tcp.set_write_timeout(Some(WRITE_TIMEOUT)))
+        }
         _ => Ok(()),
     };
 }
@@ -127,13 +137,23 @@ pub(crate) fn pump<S: Read + Write>(
     local: &mut LocalSide<'_>,
 ) -> Ended {
     use tungstenite::Error;
+    // The shell's exit status, announced just before the close.
+    let mut exit_code: Option<i32> = None;
     loop {
+        if (local.force)() {
+            return Ended {
+                code: 1000,
+                reason: "interrupted".to_owned(),
+                exit_code: None,
+            };
+        }
         if (local.stop)() {
             let _ = socket.close(None);
             let _ = socket.flush();
             return Ended {
                 code: 1000,
                 reason: "interrupted".to_owned(),
+                exit_code: None,
             };
         }
         if let Some((cols, rows)) = (local.resized)() {
@@ -160,6 +180,7 @@ pub(crate) fn pump<S: Read + Write>(
                     return Ended {
                         code: 1000,
                         reason: "the local terminal went away".to_owned(),
+                        exit_code: None,
                     };
                 }
             }
@@ -167,7 +188,20 @@ pub(crate) fn pump<S: Read + Write>(
                 let (code, reason) = frame.map_or((1005, String::new()), |frame| {
                     (u16::from(frame.code), frame.reason.to_string())
                 });
-                return Ended { code, reason };
+                return Ended {
+                    code,
+                    reason,
+                    exit_code,
+                };
+            }
+            Ok(Message::Text(text)) => {
+                if let Ok(value) = serde_json::from_str::<Value>(text.as_str())
+                    && value["type"] == "exit"
+                {
+                    exit_code = value["code"]
+                        .as_i64()
+                        .and_then(|code| i32::try_from(code).ok());
+                }
             }
             Ok(_) => {}
             Err(error) if would_block(&error) => {}
@@ -175,6 +209,7 @@ pub(crate) fn pump<S: Read + Write>(
                 return Ended {
                     code: 1000,
                     reason: "closed".to_owned(),
+                    exit_code: None,
                 };
             }
             Err(error) => return dropped(&error),
@@ -191,6 +226,7 @@ fn dropped(error: &tungstenite::Error) -> Ended {
     Ended {
         code: 1006,
         reason: format!("the connection to the controller dropped ({error})"),
+        exit_code: None,
     }
 }
 
@@ -225,6 +261,9 @@ pub(crate) fn run(invocation: &Invocation, target: &Target) -> Result<(String, u
     use rustix::stdio::{stdin, stdout};
     use rustix::termios::{OptionalActions, isatty, tcgetattr, tcgetwinsize, tcsetattr};
     use signal_hook::consts::{SIGHUP, SIGINT, SIGTERM, SIGWINCH};
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    use crate::Output;
 
     if !isatty(stdin()) || !isatty(stdout()) {
         return Err(CliError {
@@ -280,17 +319,29 @@ pub(crate) fn run(invocation: &Invocation, target: &Target) -> Result<(String, u
     })?;
     set_poll_timeout(&socket);
 
-    // Signals: the flags are polled by the loop.
+    // Signals are counted by a watcher thread; the loop polls the flags. The
+    // first interrupt closes the session politely, a second one abandons the
+    // handshake. Neither exits from inside the handler, so the terminal is
+    // always restored by the guard below.
     let stop = std::sync::Arc::new(AtomicBool::new(false));
+    let force = std::sync::Arc::new(AtomicBool::new(false));
     let winch = std::sync::Arc::new(AtomicBool::new(true));
-    for signal in [SIGINT, SIGTERM, SIGHUP] {
-        signal_hook::flag::register(signal, stop.clone()).map_err(|error| CliError {
+    let mut signals = signal_hook::iterator::Signals::new([SIGINT, SIGTERM, SIGHUP, SIGWINCH])
+        .map_err(|error| CliError {
             message: format!("cannot watch for signals: {error}"),
         })?;
+    {
+        let (stop, force, winch) = (stop.clone(), force.clone(), winch.clone());
+        std::thread::spawn(move || {
+            for signal in signals.forever() {
+                if signal == SIGWINCH {
+                    winch.store(true, Ordering::SeqCst);
+                } else if stop.swap(true, Ordering::SeqCst) {
+                    force.store(true, Ordering::SeqCst);
+                }
+            }
+        });
     }
-    signal_hook::flag::register(SIGWINCH, winch.clone()).map_err(|error| CliError {
-        message: format!("cannot watch for window changes: {error}"),
-    })?;
 
     // Raw mode, restored on every way out of this function.
     let original = tcgetattr(stdin()).map_err(|error| CliError {
@@ -323,6 +374,7 @@ pub(crate) fn run(invocation: &Invocation, target: &Target) -> Result<(String, u
         })
     };
     let stopped = || stop.load(Ordering::SeqCst);
+    let forced = || force.load(Ordering::SeqCst);
     let ended = pump(
         &mut socket,
         &mut LocalSide {
@@ -330,6 +382,7 @@ pub(crate) fn run(invocation: &Invocation, target: &Target) -> Result<(String, u
             output: &mut standard_output,
             resized: &mut resized,
             stop: &stopped,
+            force: &forced,
         },
     );
     // Back to the user's terminal settings before anything is printed.
@@ -380,15 +433,20 @@ mod tests {
         let ended = |code, reason: &str| Ended {
             code,
             reason: reason.to_owned(),
+            exit_code: None,
         };
+        // The status comes from the structured message, never the reason.
         assert_eq!(
             ended(1000, "the shell ended (exit status 7)").exit_status(),
-            7
+            0
         );
-        assert_eq!(
-            ended(1000, "the shell ended (exit status 300)").exit_status(),
-            255
-        );
+        let with = |status| Ended {
+            code: 1000,
+            reason: String::new(),
+            exit_code: Some(status),
+        };
+        assert_eq!(with(7).exit_status(), 7);
+        assert_eq!(with(300).exit_status(), 255);
         assert_eq!(ended(1000, "closed").exit_status(), 0);
         assert_eq!(
             ended(1001, "the controller is shutting down").exit_status(),
@@ -405,6 +463,7 @@ mod tests {
             Ended {
                 code,
                 reason: String::new(),
+                exit_code: None,
             }
             .describe()
         };
@@ -484,8 +543,9 @@ mod tests {
                 .send(Message::Binary(b"hello\r\n".to_vec().into()))
                 .unwrap();
             socket
-                .send(close_frame(1000, "the shell ended (exit status 3)"))
+                .send(Message::Text(r#"{"type":"exit","code":3}"#.into()))
                 .unwrap();
+            socket.send(close_frame(1000, "the shell ended")).unwrap();
             let _ = socket.flush();
             while socket.read().is_ok() {}
         });
@@ -499,6 +559,7 @@ mod tests {
                 output: &mut output,
                 resized: &mut || None,
                 stop: &|| false,
+                force: &|| false,
             },
         );
         assert_eq!(output, b"hello\r\n");
@@ -542,6 +603,7 @@ mod tests {
                 output: &mut output,
                 resized: &mut || pending.take(),
                 stop: &|| false,
+                force: &|| false,
             },
         );
         assert_eq!(ended.exit_status(), 0);
@@ -570,6 +632,29 @@ mod tests {
                 output: &mut output,
                 resized: &mut || None,
                 stop: &|| true,
+                force: &|| false,
+            },
+        );
+        assert_eq!(ended.reason, "interrupted");
+        drop(socket);
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn a_second_signal_gives_up_without_waiting_for_the_controller() {
+        // The server never answers; a forced stop must still return at once.
+        let (url, server) = serve(|socket| while socket.read().is_ok() {});
+        let mut socket = connect(&url);
+        let (_keep, input) = mpsc::channel();
+        let mut output = Vec::new();
+        let ended = pump(
+            &mut socket,
+            &mut LocalSide {
+                input,
+                output: &mut output,
+                resized: &mut || None,
+                stop: &|| true,
+                force: &|| true,
             },
         );
         assert_eq!(ended.reason, "interrupted");
@@ -592,6 +677,7 @@ mod tests {
                 output: &mut output,
                 resized: &mut || None,
                 stop: &|| false,
+                force: &|| false,
             },
         );
         assert_ne!(ended.exit_status(), 0, "{ended:?}");

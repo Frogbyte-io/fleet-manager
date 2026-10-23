@@ -35,14 +35,19 @@ use axum::{
 };
 use fleet_application::authz::{ActingPrincipal, Authorizer};
 use fleet_application::lab::LabUseCaseError;
+#[cfg(unix)]
 use fleet_application::machine::MachinePort;
 use fleet_application::machine_access::MachineAccess;
 use fleet_application::machine_terminal::{
-    ClientMessage, TerminalChannel, TerminalClient, TerminalCloseReason, TerminalLimits,
-    TerminalOpen, TerminalOutput, TerminalPort, TerminalSessions,
+    ClientMessage, TerminalClient, TerminalCloseReason, TerminalLimits, TerminalSessions,
+};
+#[cfg(unix)]
+use fleet_application::machine_terminal::{
+    TerminalChannel, TerminalOpen, TerminalOutput, TerminalPort,
 };
 use futures_util::StreamExt as _;
 
+#[cfg(unix)]
 use crate::machine_access::SshAuthResolver;
 
 /// The largest message the relay accepts from the caller. Keystrokes and
@@ -467,6 +472,17 @@ impl TerminalClient for WsClient {
             ),
             TerminalCloseReason::Error => (close::UPSTREAM, "the terminal failed".to_owned()),
         };
+        if reason == TerminalCloseReason::Exited
+            && let Some(status) = exit_code
+        {
+            // The shell's exit status travels as data, not as reason text.
+            let frame = serde_json::json!({ "type": "exit", "code": status }).to_string();
+            let _ = tokio::time::timeout(
+                Duration::from_secs(5),
+                self.socket.send(Message::Text(frame.into())),
+            )
+            .await;
+        }
         refuse_in_place(&mut self.socket, code, &text).await;
     }
 }

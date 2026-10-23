@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 
-import { describeClose, describeRequestFailure, isReady, resizeMessage, socketUrl } from '../session'
+import { describeClose, describeRequestFailure, exitCodeOf, isReady, resizeMessage, socketUrl } from '../session'
 
 describe('terminal session logic', () => {
   it('names every close the relay can send', () => {
@@ -18,10 +18,15 @@ describe('terminal session logic', () => {
   })
 
   it('reports the shell exit status', () => {
-    const end = describeClose(1000, 'the shell ended (exit status 7)')
+    const end = describeClose(1000, 'the shell ended', 7)
     expect(end.kind).toBe('exited')
     expect(end.detail).toContain('exit status 7')
+    // Reason text is never parsed for a status.
+    expect(describeClose(1000, 'the shell ended (exit status 9)').detail).not.toContain('9')
     expect(describeClose(1000, 'closed').kind).toBe('closed')
+    expect(exitCodeOf('{"type":"exit","code":5}')).toBe(5)
+    expect(exitCodeOf('{"type":"ready"}')).toBeNull()
+    expect(exitCodeOf('nope')).toBeNull()
   })
 
   it('maps request failures', () => {

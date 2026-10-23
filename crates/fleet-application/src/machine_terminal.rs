@@ -280,7 +280,17 @@ struct Pending {
     endpoint_id: String,
     auth: EndpointAuth,
     size: (u16, u16),
+    /// Whether the creator named the auth (so attach re-checks
+    /// `machine.update`, as create did).
+    explicit_auth: bool,
     expires_at: i64,
+}
+
+/// What a reservation records besides who and where.
+#[derive(Clone, Copy)]
+struct Shape {
+    size: (u16, u16),
+    explicit_auth: bool,
 }
 
 /// An attached session.
@@ -378,7 +388,7 @@ impl TerminalSessions {
         machine_id: &str,
         endpoint_id: &str,
         auth: &EndpointAuth,
-        size: (u16, u16),
+        shape: Shape,
         now: i64,
     ) -> Result<(String, String, i64), LabUseCaseError> {
         let token = self.port.new_session_token();
@@ -417,7 +427,8 @@ impl TerminalSessions {
                 machine_id: machine_id.to_owned(),
                 endpoint_id: endpoint_id.to_owned(),
                 auth: auth.clone(),
-                size,
+                size: shape.size,
+                explicit_auth: shape.explicit_auth,
                 expires_at,
             },
         );
@@ -638,8 +649,17 @@ impl MachineAccess {
             .await?;
         // Reserve before the audit await so two concurrent creates cannot
         // both pass a cap.
-        let (token, session_id, expires_at) =
-            sessions.reserve(&principal.id, machine_id, &endpoint_id, &auth, size, now)?;
+        let (token, session_id, expires_at) = sessions.reserve(
+            &principal.id,
+            machine_id,
+            &endpoint_id,
+            &auth,
+            Shape {
+                size,
+                explicit_auth: request.target.auth.is_some(),
+            },
+            now,
+        )?;
         let facts = [
             ("terminalSession", session_id.clone()),
             ("endpointId", endpoint_id.clone()),
@@ -689,6 +709,19 @@ impl MachineAccess {
         let (pending, slot) = sessions.claim(&principal.id, token, now)?;
         // From here the slot guard releases the session on every early exit.
         Self::authorize_terminal(authorizer, principal, &pending.machine_id)?;
+        if pending.explicit_auth {
+            // Create named the credential, which needed `machine.update`;
+            // a revocation since then must stop the attach too.
+            authorize(
+                authorizer,
+                AccessRequest {
+                    principal_id: &principal.id,
+                    action: Permission::MachineUpdate,
+                    resource: Some(&pending.machine_id),
+                },
+            )
+            .map_err(LabUseCaseError::Denied)?;
+        }
         let facts = [
             ("terminalSession", pending.session_id.clone()),
             ("endpointId", pending.endpoint_id.clone()),
@@ -702,6 +735,28 @@ impl MachineAccess {
             &facts,
         )
         .await?;
+        if *sessions.shutdown.borrow() {
+            // The controller is shutting down: nothing new starts. The
+            // refusal is audited as the end of the session it was.
+            let end = [
+                ("terminalSession", pending.session_id.clone()),
+                ("endpointId", pending.endpoint_id.clone()),
+                ("closeReason", TerminalCloseReason::Shutdown.id().to_owned()),
+                ("elapsedMs", "0".to_owned()),
+            ];
+            let _ = self
+                .audit_event(
+                    principal,
+                    Permission::MachineTerminal,
+                    Some(&pending.machine_id),
+                    "terminal_session_ended",
+                    &end,
+                )
+                .await;
+            return Err(LabUseCaseError::Busy {
+                detail: "the controller is shutting down".to_owned(),
+            });
+        }
         let open = TerminalOpen {
             machine_id: pending.machine_id.clone(),
             endpoint_id: pending.endpoint_id.clone(),
@@ -828,6 +883,10 @@ async fn run_session(
     let mut idle_deadline = started + limits.idle;
     let mut next_ping = started + PING_INTERVAL;
     let mut last_heard = started;
+    // A receiver subscribed after the signal never sees it as a change.
+    if *shutdown.borrow() {
+        return (TerminalCloseReason::Shutdown, None);
+    }
     loop {
         tokio::select! {
             output = channel.next() => match output {
@@ -997,7 +1056,17 @@ mod tests {
         principal: &str,
         now: i64,
     ) -> Result<(String, String, i64), LabUseCaseError> {
-        sessions.reserve(principal, "m1", "e1", &EndpointAuth::Agent, (80, 24), now)
+        sessions.reserve(
+            principal,
+            "m1",
+            "e1",
+            &EndpointAuth::Agent,
+            Shape {
+                size: (80, 24),
+                explicit_auth: false,
+            },
+            now,
+        )
     }
 
     #[test]

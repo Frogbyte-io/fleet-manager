@@ -74,6 +74,7 @@ pub enum TerminalEvent {
 pub struct Terminal {
     child: tokio::process::Child,
     reader: OwnedReadPty,
+    buffer: Vec<u8>,
     writer: OwnedWritePty,
     #[allow(clippy::option_option)]
     exited: Option<Option<i32>>,
@@ -163,6 +164,7 @@ impl SshProvider {
         Ok(Terminal {
             child,
             reader,
+            buffer: vec![0_u8; 16 * 1024],
             writer,
             exited: None,
             _key: key_file,
@@ -178,12 +180,8 @@ impl Terminal {
         if let Some(code) = self.exited {
             return TerminalEvent::Exited(code);
         }
-        let mut buffer = vec![0_u8; 16 * 1024];
-        match self.reader.read(&mut buffer).await {
-            Ok(count) if count > 0 => {
-                buffer.truncate(count);
-                TerminalEvent::Output(buffer)
-            }
+        match self.reader.read(&mut self.buffer).await {
+            Ok(count) if count > 0 => TerminalEvent::Output(self.buffer[..count].to_vec()),
             // End of file, or the EIO Linux reports once the slave closed:
             // the session is over; its exit status says how.
             Ok(_) | Err(_) => {

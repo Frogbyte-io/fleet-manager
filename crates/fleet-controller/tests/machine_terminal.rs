@@ -419,8 +419,19 @@ async fn a_real_shell_relays_input_output_resize_and_exit() {
         .send(Message::Binary(b"exit 7\n".to_vec().into()))
         .await
         .unwrap();
-    let (code, reason) = closed(&mut socket).await;
+    // The exit status arrives as data just before the close.
+    let mut exit_frame = None;
+    let (code, reason) = loop {
+        match next(&mut socket, Duration::from_secs(20)).await {
+            Some(Seen::Text(text)) => exit_frame = Some(text),
+            Some(Seen::Closed(code, reason)) => break (code, reason),
+            Some(Seen::Output(_)) => {}
+            None => panic!("the socket never closed"),
+        }
+    };
     assert_eq!(code, 1000);
+    let exit_frame: serde_json::Value = serde_json::from_str(&exit_frame.unwrap()).unwrap();
+    assert_eq!(exit_frame, serde_json::json!({ "type": "exit", "code": 7 }));
     assert!(reason.contains("exit status 7"), "{reason}");
     world.settled().await;
     assert_eq!(world.key_files(), 0, "the key file outlived the session");
@@ -728,4 +739,51 @@ async fn a_machine_that_refuses_the_key_ends_with_an_audited_error() {
     let audit = world.audit_text().await;
     assert!(audit.contains(r#""closeReason":"error""#), "{audit}");
     let _ = &world.sshd;
+}
+
+#[tokio::test]
+async fn nothing_attaches_after_shutdown_began_and_the_refusal_is_audited() {
+    let world = World::new(TerminalLimits::default()).await;
+    let address = world.serve(Policy::allow_all(), Some(lan())).await;
+    let token = world.create().await;
+    world.sessions.shutdown();
+    let mut socket = attach(address, &token, None).await.unwrap();
+    let (code, _) = closed(&mut socket).await;
+    assert_eq!(code, 4409);
+    world.settled().await;
+    let audit = world.audit_text().await;
+    assert!(audit.contains(r#""closeReason":"shutdown""#), "{audit}");
+}
+
+#[tokio::test]
+async fn an_explicit_auth_is_rechecked_at_attach() {
+    let world = World::new(TerminalLimits::default()).await;
+    let auth = EndpointAuth::Secret {
+        credential: world.key_ref.clone(),
+    };
+    let created = world
+        .access
+        .terminal_create(
+            &*Policy::allow_all(),
+            &lan(),
+            &TerminalRequest {
+                target: AccessTarget {
+                    machine_id: &world.machine_id,
+                    auth: Some(&auth),
+                    ..AccessTarget::default()
+                },
+                cols: None,
+                rows: None,
+            },
+            fleet_core::SystemClock::now_unix_millis(),
+        )
+        .await
+        .unwrap();
+    // `machine.update` was revoked between create and attach.
+    let address = world
+        .serve(Policy::deny(Permission::MachineUpdate), Some(lan()))
+        .await;
+    let mut socket = attach(address, created.token.expose(), None).await.unwrap();
+    assert_eq!(closed(&mut socket).await.0, 4403);
+    assert_eq!(world.sessions.session_count(), 0);
 }

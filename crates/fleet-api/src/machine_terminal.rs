@@ -129,7 +129,14 @@ pub async fn create_machine_terminal_session(
     Extension(correlation_id): Extension<CorrelationId>,
     Path(machine_id): Path<String>,
     request: Result<Json<CreateTerminalSessionRequest>, axum::extract::rejection::JsonRejection>,
-) -> Result<(StatusCode, Json<Resource<TerminalSessionDto>>), ApiErrorResponse> {
+) -> Result<
+    (
+        StatusCode,
+        [(axum::http::HeaderName, &'static str); 1],
+        Json<Resource<TerminalSessionDto>>,
+    ),
+    ApiErrorResponse,
+> {
     let access = access_or_error(&state, correlation_id)?;
     let principal = crate::operations::principal_or_error(principal, correlation_id)?;
     let Json(request) = request.map_err(|_| {
@@ -159,6 +166,8 @@ pub async fn create_machine_terminal_session(
         .map_err(|error| map_lab_error(&error, correlation_id))?;
     Ok((
         StatusCode::CREATED,
+        // The answer holds a bearer token: no cache or proxy may keep it.
+        [(axum::http::header::CACHE_CONTROL, "no-store")],
         Json(Resource::new(TerminalSessionDto::from(session))),
     ))
 }

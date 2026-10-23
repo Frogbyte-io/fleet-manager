@@ -155,7 +155,14 @@ pub async fn create_proxmox_console_session(
     Extension(correlation_id): Extension<CorrelationId>,
     Path(account_id): Path<String>,
     Json(request): Json<CreateConsoleSessionRequest>,
-) -> Result<(StatusCode, Json<Resource<ConsoleSessionDto>>), ApiErrorResponse> {
+) -> Result<
+    (
+        StatusCode,
+        [(axum::http::HeaderName, &'static str); 1],
+        Json<Resource<ConsoleSessionDto>>,
+    ),
+    ApiErrorResponse,
+> {
     let proxmox = proxmox_or_error(&state, correlation_id)?;
     let principal = crate::operations::principal_or_error(principal, correlation_id)?;
     let session = proxmox
@@ -171,6 +178,8 @@ pub async fn create_proxmox_console_session(
         .map_err(|error| map_proxmox_error(&error, correlation_id))?;
     Ok((
         StatusCode::CREATED,
+        // The answer holds a bearer token: no cache or proxy may keep it.
+        [(axum::http::header::CACHE_CONTROL, "no-store")],
         Json(Resource::new(ConsoleSessionDto::from(session))),
     ))
 }

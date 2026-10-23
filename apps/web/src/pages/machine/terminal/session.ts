@@ -88,7 +88,7 @@ export function endOf(kind: TerminalEndKind, detail?: string): TerminalEnd {
  * (crates/fleet-controller/src/machine_terminal.rs); the reason text is the
  * controller's own, already free of credentials.
  */
-export function describeClose(code: number, reason: string): TerminalEnd {
+export function describeClose(code: number, reason: string, exitCode: number | null = null): TerminalEnd {
   switch (code) {
     case 4401: return endOf('sign-in')
     case 4403: return endOf('no-permission')
@@ -100,12 +100,12 @@ export function describeClose(code: number, reason: string): TerminalEnd {
     case 1001: return endOf('shutdown')
     case 4502: return endOf('refused', reason)
     case 4503: return endOf('unavailable', reason)
-    case 1000: {
-      const status = /exit status (\d+)/.exec(reason)
-      return status
-        ? endOf('exited', `The shell ended (exit status ${status[1]}).`)
+    case 1000:
+      // The shell's status comes from the controller's `exit` message, never
+      // from the reason text.
+      return exitCode !== null
+        ? endOf('exited', `The shell ended (exit status ${exitCode}).`)
         : reason.startsWith('the shell ended') ? endOf('exited') : endOf('closed')
-    }
     default:
       return endOf('unavailable', code === 1006 ? 'The connection to the controller dropped.' : undefined)
   }
@@ -138,5 +138,16 @@ export function isReady(text: string): boolean {
   }
   catch {
     return false
+  }
+}
+
+/** The exit status in a text frame from the controller, when it is one. */
+export function exitCodeOf(text: string): number | null {
+  try {
+    const message = JSON.parse(text) as { type?: string, code?: unknown }
+    return message.type === 'exit' && typeof message.code === 'number' ? message.code : null
+  }
+  catch {
+    return null
   }
 }
