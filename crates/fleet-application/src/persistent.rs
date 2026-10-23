@@ -27,7 +27,7 @@ pub const LAB_NAME_PREFIX: &str = "fm-lab-";
 /// Proxmox which guests Fleet keeps. It is a label, never the marker: the
 /// marker is the `persistent_guests` record.
 pub const PERSISTENT_TAG: &str = "fleet-persistent";
-/// The longest computer name Windows accepts (NetBIOS).
+/// The longest computer name Windows accepts (`NetBIOS`).
 pub const MAX_WINDOWS_NAME: usize = 15;
 /// The secret-record name prefix of Windows product keys.
 pub const PRODUCT_KEY_PREFIX: &str = "machines/product-key/";

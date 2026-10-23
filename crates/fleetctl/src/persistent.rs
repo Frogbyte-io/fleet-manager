@@ -50,6 +50,7 @@ fn number(name: &str, raw: &str) -> Result<u64, CliError> {
 }
 
 /// Parses the flags of `machines create`.
+#[allow(clippy::too_many_lines)]
 pub(crate) fn parse_create(rest: &[&str], output: &mut Output) -> Result<CreateArgs, CliError> {
     let mut args = CreateArgs::default();
     let mut iter = rest.iter().copied();

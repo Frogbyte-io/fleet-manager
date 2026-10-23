@@ -11,6 +11,7 @@ use super::{
 
 /// The settings of a QEMU guest that Fleet manages on persistent VMs.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[allow(clippy::struct_excessive_bools)]
 pub struct PveQemuSettings {
     /// The guest's name.
     pub name: Option<String>,

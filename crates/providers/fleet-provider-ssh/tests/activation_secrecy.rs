@@ -14,6 +14,7 @@
 use std::os::unix::fs::PermissionsExt as _;
 use std::time::Duration;
 
+use base64::Engine as _;
 use fleet_core::GuestOs;
 use fleet_provider_ssh::persistent::{
     ActivationMethod, parse_activation, windows_activation_script,
@@ -61,7 +62,6 @@ fn check(root: &std::path::Path) {
     );
     assert!(!env.contains(PRODUCT_KEY), "the key is in the environment");
     // The Windows layer sends the script as one base64 line on stdin.
-    use base64::Engine as _;
     let script_line = stdin.lines().nth(1).expect("the script line");
     let sent = String::from_utf8(
         base64::engine::general_purpose::STANDARD
