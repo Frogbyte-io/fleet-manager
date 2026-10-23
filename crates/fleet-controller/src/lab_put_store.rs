@@ -319,9 +319,9 @@ fn hex(bytes: &[u8]) -> String {
 
 /// Removes the staged upload when the executor is done with it, whatever
 /// path it took out.
-struct StagedGuard<'a> {
-    store: &'a FsUploadStore,
-    id: String,
+pub(crate) struct StagedGuard<'a> {
+    pub(crate) store: &'a FsUploadStore,
+    pub(crate) id: String,
 }
 
 impl Drop for StagedGuard<'_> {
@@ -331,16 +331,16 @@ impl Drop for StagedGuard<'_> {
 }
 
 /// What a `lab.put` operation's payload carries.
-struct PutPayload {
-    guest_os: fleet_core::GuestOs,
-    guest_path: String,
-    upload_id: String,
-    size: u64,
-    sha256: String,
-    overwrite: bool,
+pub(crate) struct PutPayload {
+    pub(crate) guest_os: fleet_core::GuestOs,
+    pub(crate) guest_path: String,
+    pub(crate) upload_id: String,
+    pub(crate) size: u64,
+    pub(crate) sha256: String,
+    pub(crate) overwrite: bool,
 }
 
-fn parse_payload(operation: &Operation) -> Result<PutPayload, String> {
+pub(crate) fn parse_payload(operation: &Operation) -> Result<PutPayload, String> {
     let value: serde_json::Value = operation
         .payload_json
         .as_deref()
@@ -367,6 +367,76 @@ fn parse_payload(operation: &Operation) -> Result<PutPayload, String> {
         size: value["sizeBytes"].as_u64().ok_or("no size")?,
         sha256,
         overwrite: value["overwrite"].as_bool().unwrap_or(false),
+    })
+}
+
+/// Maps a guest put's outcome to the stable failure reason and detail, or
+/// `None` when the file was put. `who` names the target in the controller
+/// log only. Shared by `lab.put` and `machine.put`.
+pub(crate) fn put_failure(
+    outcome: Result<PutOutcome, String>,
+    who: &str,
+) -> Option<(&'static str, &'static str)> {
+    Some(match outcome {
+        Ok(PutOutcome::Put { .. }) => return None,
+        Ok(PutOutcome::TargetExists) => (
+            "target_exists",
+            "a file already exists at the guest path; set overwrite to replace it",
+        ),
+        Ok(PutOutcome::TargetNotFile) => (
+            "target_not_file",
+            "the guest path exists and is not a regular file; it is never replaced",
+        ),
+        Ok(PutOutcome::TargetReadOnly) => (
+            "target_read_only",
+            "the guest path is a read-only file; it is never replaced",
+        ),
+        Ok(PutOutcome::PathRejected) => (
+            "path_rejected",
+            "the guest refused the path (for example it is longer than the platform allows)",
+        ),
+        Ok(PutOutcome::NoDirectory) => {
+            ("no_directory", "the guest path's directory does not exist")
+        }
+        Ok(PutOutcome::DirectoryNotWritable) => (
+            "directory_not_writable",
+            "the guest user cannot create files in the guest path's directory",
+        ),
+        Ok(PutOutcome::HashMismatch) => (
+            "hash_mismatch",
+            "the SHA-256 computed inside the guest did not match; nothing was left at the guest path",
+        ),
+        Ok(PutOutcome::SizeMismatch) => (
+            "size_mismatch",
+            "the byte count that reached the guest did not match; nothing was left at the guest path",
+        ),
+        Ok(PutOutcome::DeadlineKilled) => (
+            "deadline_exceeded",
+            "the transfer did not finish before its deadline; nothing was left at the guest path",
+        ),
+        Ok(PutOutcome::SourceFailed { detail }) => {
+            eprintln!("lab put: {who}: reading the staged upload failed: {detail}");
+            (
+                "upload_unavailable",
+                "the staged upload could not be read; upload the file again",
+            )
+        }
+        Ok(PutOutcome::Failed { exit_code }) => {
+            eprintln!("lab put: {who}: the guest copy failed (exit {exit_code:?})");
+            (
+                "copy_failed",
+                "the copy failed inside the guest; nothing was left at the guest path",
+            )
+        }
+        Err(error) => {
+            // The transport's error can carry node or tool text.
+            let error = fleet_core::scrub_failure_detail(&error);
+            eprintln!("lab put: {who}: the transfer failed: {error}");
+            (
+                "transfer_failed",
+                "the transfer to the guest failed; the detail is in the controller log",
+            )
+        }
     })
 }
 
@@ -490,8 +560,8 @@ impl LabPutDispatch {
                 source,
             )
             .await;
-        let (reason, detail): (&'static str, &'static str) = match outcome {
-            Ok(PutOutcome::Put { .. }) => {
+        let (reason, detail) = match put_failure(outcome, &format!("lease {lease_id}")) {
+            None => {
                 let result = serde_json::json!({
                     "leaseId": lease_id,
                     "guestPath": payload.guest_path,
@@ -505,64 +575,7 @@ impl LabPutDispatch {
                     .map(|_| ())
                     .map_err(|error| error.to_string());
             }
-            Ok(PutOutcome::TargetExists) => (
-                "target_exists",
-                "a file already exists at the guest path; set overwrite to replace it",
-            ),
-            Ok(PutOutcome::TargetNotFile) => (
-                "target_not_file",
-                "the guest path exists and is not a regular file; it is never replaced",
-            ),
-            Ok(PutOutcome::TargetReadOnly) => (
-                "target_read_only",
-                "the guest path is a read-only file; it is never replaced",
-            ),
-            Ok(PutOutcome::PathRejected) => (
-                "path_rejected",
-                "the guest refused the path (for example it is longer than the platform allows)",
-            ),
-            Ok(PutOutcome::NoDirectory) => {
-                ("no_directory", "the guest path's directory does not exist")
-            }
-            Ok(PutOutcome::DirectoryNotWritable) => (
-                "directory_not_writable",
-                "the guest user cannot create files in the guest path's directory",
-            ),
-            Ok(PutOutcome::HashMismatch) => (
-                "hash_mismatch",
-                "the SHA-256 computed inside the guest did not match; nothing was left at the guest path",
-            ),
-            Ok(PutOutcome::SizeMismatch) => (
-                "size_mismatch",
-                "the byte count that reached the guest did not match; nothing was left at the guest path",
-            ),
-            Ok(PutOutcome::DeadlineKilled) => (
-                "deadline_exceeded",
-                "the transfer did not finish before its deadline; nothing was left at the guest path",
-            ),
-            Ok(PutOutcome::SourceFailed { detail }) => {
-                eprintln!("lab put: lease {lease_id}: reading the staged upload failed: {detail}");
-                (
-                    "upload_unavailable",
-                    "the staged upload could not be read; upload the file again",
-                )
-            }
-            Ok(PutOutcome::Failed { exit_code }) => {
-                eprintln!("lab put: lease {lease_id}: the guest copy failed (exit {exit_code:?})");
-                (
-                    "copy_failed",
-                    "the copy failed inside the guest; nothing was left at the guest path",
-                )
-            }
-            Err(error) => {
-                // The transport's error can carry node or tool text.
-                let error = fleet_core::scrub_failure_detail(&error);
-                eprintln!("lab put: lease {lease_id}: the transfer failed: {error}");
-                (
-                    "transfer_failed",
-                    "the transfer to the guest failed; the detail is in the controller log",
-                )
-            }
+            Some(failure) => failure,
         };
         fail(reason, detail.to_owned()).await
     }

@@ -1027,6 +1027,7 @@ dependencies = [
  "fleet-core",
  "fleet-provider-ssh",
  "fleet-schema",
+ "fleet-secrets",
  "fleet-storage-sqlite",
  "fleetd",
  "reqwest",
