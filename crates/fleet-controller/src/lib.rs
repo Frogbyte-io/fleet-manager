@@ -1309,7 +1309,7 @@ mod tailscale_identity_tests {
                     .headers()
                     .get(axum::http::header::CONTENT_SECURITY_POLICY)
                     .unwrap(),
-                "default-src 'self'; img-src 'self' data:; style-src 'self'"
+                "default-src 'self'; img-src 'self' data:; style-src-attr 'unsafe-inline'; style-src 'self'"
             );
             assert_eq!(
                 response

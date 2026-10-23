@@ -125,7 +125,12 @@ pub const CSP_NONCE_PLACEHOLDER: &str = "__FLEET_CSP_NONCE__";
 
 /// The policy for every response that does not carry a nonce. `style-src`
 /// stays the last directive: the shell's nonce is appended to it.
-const CSP: &str = "default-src 'self'; img-src 'self' data:; style-src 'self'";
+/// `style-src-attr 'unsafe-inline'` lets a library set `style="..."`
+/// attributes (the machine terminal's xterm.js does, for colours and cell
+/// metrics); it does not allow `<style>` elements or any script, which stay
+/// nonce- and `'self'`-only.
+const CSP: &str =
+    "default-src 'self'; img-src 'self' data:; style-src-attr 'unsafe-inline'; style-src 'self'";
 
 /// The largest HTML body the nonce rewrite will buffer. The shell's
 /// `index.html` is about a kilobyte; an HTML response that does not declare a

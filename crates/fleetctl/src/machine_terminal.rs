@@ -86,7 +86,9 @@ pub(crate) fn websocket_url(base: &str, path: &str) -> Result<String, CliError> 
         format!("ws://{rest}")
     } else {
         return Err(CliError {
-            message: format!("the controller URL must start with http:// or https://, not {base:?}"),
+            message: format!(
+                "the controller URL must start with http:// or https://, not {base:?}"
+            ),
         });
     };
     Ok(format!("{}{path}", rest.trim_end_matches('/')))
@@ -136,10 +138,10 @@ pub(crate) fn pump<S: Read + Write>(
         }
         if let Some((cols, rows)) = (local.resized)() {
             let message = json!({ "type": "resize", "cols": cols, "rows": rows }).to_string();
-            if let Err(error) = socket.send(Message::Text(message.into())) {
-                if !would_block(&error) {
-                    return dropped(&error);
-                }
+            if let Err(error) = socket.send(Message::Text(message.into()))
+                && !would_block(&error)
+            {
+                return dropped(&error);
             }
         }
         while let Ok(bytes) = local.input.try_recv() {
@@ -182,7 +184,7 @@ pub(crate) fn pump<S: Read + Write>(
 
 fn would_block(error: &tungstenite::Error) -> bool {
     matches!(error, tungstenite::Error::Io(io)
-        if matches!(io.kind(), std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut))
+        if matches!(io.kind(), std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut | std::io::ErrorKind::Interrupted))
 }
 
 fn dropped(error: &tungstenite::Error) -> Ended {
@@ -204,13 +206,24 @@ pub(crate) fn session_body(target: &Target, cols: u16, rows: u16) -> Result<Valu
     Ok(body)
 }
 
+/// Puts the terminal's settings back when dropped.
+#[cfg(unix)]
+struct Restore(rustix::termios::Termios);
+
+#[cfg(unix)]
+impl Drop for Restore {
+    fn drop(&mut self) {
+        use rustix::termios::{OptionalActions, tcsetattr};
+        let _ = tcsetattr(rustix::stdio::stdin(), OptionalActions::Flush, &self.0);
+    }
+}
+
 /// Runs `machines terminal`.
 #[cfg(unix)]
+#[allow(clippy::too_many_lines)]
 pub(crate) fn run(invocation: &Invocation, target: &Target) -> Result<(String, u8), CliError> {
     use rustix::stdio::{stdin, stdout};
-    use rustix::termios::{
-        OptionalActions, isatty, tcgetattr, tcgetwinsize, tcsetattr,
-    };
+    use rustix::termios::{OptionalActions, isatty, tcgetattr, tcgetwinsize, tcsetattr};
     use signal_hook::consts::{SIGHUP, SIGINT, SIGTERM, SIGWINCH};
 
     if !isatty(stdin()) || !isatty(stdout()) {
@@ -288,12 +301,6 @@ pub(crate) fn run(invocation: &Invocation, target: &Target) -> Result<(String, u
     tcsetattr(stdin(), OptionalActions::Flush, &raw).map_err(|error| CliError {
         message: format!("cannot enter raw mode: {error}"),
     })?;
-    struct Restore(rustix::termios::Termios);
-    impl Drop for Restore {
-        fn drop(&mut self) {
-            let _ = tcsetattr(stdin(), OptionalActions::Flush, &self.0);
-        }
-    }
     let restore = Restore(original);
 
     let (sender, input) = mpsc::channel::<Vec<u8>>();
@@ -374,10 +381,19 @@ mod tests {
             code,
             reason: reason.to_owned(),
         };
-        assert_eq!(ended(1000, "the shell ended (exit status 7)").exit_status(), 7);
-        assert_eq!(ended(1000, "the shell ended (exit status 300)").exit_status(), 255);
+        assert_eq!(
+            ended(1000, "the shell ended (exit status 7)").exit_status(),
+            7
+        );
+        assert_eq!(
+            ended(1000, "the shell ended (exit status 300)").exit_status(),
+            255
+        );
         assert_eq!(ended(1000, "closed").exit_status(), 0);
-        assert_eq!(ended(1001, "the controller is shutting down").exit_status(), 0);
+        assert_eq!(
+            ended(1001, "the controller is shutting down").exit_status(),
+            0
+        );
         assert_eq!(ended(4403, "denied").exit_status(), 1);
         assert_eq!(ended(4408, "the terminal was idle").exit_status(), 1);
         assert_eq!(ended(1006, "dropped").exit_status(), 1);

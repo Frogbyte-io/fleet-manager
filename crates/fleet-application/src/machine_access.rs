@@ -371,7 +371,10 @@ impl MachineAccess {
 
     /// Serves interactive terminals (#494) through the session ledger.
     #[must_use]
-    pub fn with_terminals(mut self, terminals: Arc<crate::machine_terminal::TerminalSessions>) -> Self {
+    pub fn with_terminals(
+        mut self,
+        terminals: Arc<crate::machine_terminal::TerminalSessions>,
+    ) -> Self {
         self.terminals = Some(terminals);
         self
     }

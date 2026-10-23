@@ -236,7 +236,13 @@ fn policy_nonce(parts: &Parts) -> String {
         .unwrap()
         .to_str()
         .unwrap();
-    assert!(!csp.contains("unsafe-inline"), "{csp}");
+    // Only style *attributes* may be inline (the terminal's xterm.js sets
+    // them); `<style>` elements, scripts and everything else may not.
+    assert!(
+        !csp.replace("style-src-attr 'unsafe-inline'", "")
+            .contains("unsafe-inline"),
+        "{csp}"
+    );
     let (_, rest) = csp
         .split_once("style-src 'self' 'nonce-")
         .unwrap_or_else(|| panic!("no style nonce in {csp}"));
@@ -302,7 +308,7 @@ async fn responses_without_the_placeholder_keep_the_static_policy() {
         assert_eq!(parts.status, StatusCode::OK, "{uri}");
         assert_eq!(
             parts.headers.get("content-security-policy").unwrap(),
-            "default-src 'self'; img-src 'self' data:; style-src 'self'",
+            "default-src 'self'; img-src 'self' data:; style-src-attr 'unsafe-inline'; style-src 'self'",
             "{uri}"
         );
     }
@@ -393,6 +399,6 @@ async fn html_too_large_to_be_the_shell_passes_through_untouched() {
     assert_eq!(body, big);
     assert_eq!(
         parts.headers.get("content-security-policy").unwrap(),
-        "default-src 'self'; img-src 'self' data:; style-src 'self'"
+        "default-src 'self'; img-src 'self' data:; style-src-attr 'unsafe-inline'; style-src 'self'"
     );
 }

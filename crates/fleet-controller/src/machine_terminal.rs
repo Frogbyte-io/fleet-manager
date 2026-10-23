@@ -104,9 +104,8 @@ pub fn terminal_limits_from(
     if let Some(seconds) = number(&lookup, "FLEET_TERMINAL_MAX_DURATION_SECONDS")? {
         limits.max_duration = Duration::from_secs(seconds);
     }
-    let count = |value: u64, name: &str| {
-        usize::try_from(value).map_err(|_| format!("{name} is too large"))
-    };
+    let count =
+        |value: u64, name: &str| usize::try_from(value).map_err(|_| format!("{name} is too large"));
     if let Some(value) = number(&lookup, "FLEET_TERMINAL_MAX_SESSIONS")? {
         limits.max_sessions = count(value, "FLEET_TERMINAL_MAX_SESSIONS")?;
     }
@@ -462,9 +461,10 @@ impl TerminalClient for WsClient {
                 close::SHUTDOWN,
                 "the controller is shutting down".to_owned(),
             ),
-            TerminalCloseReason::PeerLost => {
-                (close::PEER_LOST, "the connection stopped answering".to_owned())
-            }
+            TerminalCloseReason::PeerLost => (
+                close::PEER_LOST,
+                "the connection stopped answering".to_owned(),
+            ),
             TerminalCloseReason::Error => (close::UPSTREAM, "the terminal failed".to_owned()),
         };
         refuse_in_place(&mut self.socket, code, &text).await;
@@ -513,7 +513,10 @@ mod tests {
     #[test]
     fn limits_come_from_the_environment_and_refuse_nonsense() {
         let none = |_: &str| None;
-        assert_eq!(terminal_limits_from(none).unwrap(), TerminalLimits::default());
+        assert_eq!(
+            terminal_limits_from(none).unwrap(),
+            TerminalLimits::default()
+        );
         let set = |name: &str| match name {
             "FLEET_TERMINAL_IDLE_SECONDS" => Some("30".to_owned()),
             "FLEET_TERMINAL_MAX_DURATION_SECONDS" => Some("600".to_owned()),
@@ -526,7 +529,8 @@ mod tests {
         assert_eq!(limits.max_duration, Duration::from_secs(600));
         assert_eq!((limits.max_sessions, limits.max_per_principal), (3, 2));
         for bad in ["0", "-1", "ten", ""] {
-            let lookup = |name: &str| (name == "FLEET_TERMINAL_IDLE_SECONDS").then(|| bad.to_owned());
+            let lookup =
+                |name: &str| (name == "FLEET_TERMINAL_IDLE_SECONDS").then(|| bad.to_owned());
             assert!(terminal_limits_from(lookup).is_err(), "{bad:?}");
         }
         // A maximum duration past the ceiling is refused.

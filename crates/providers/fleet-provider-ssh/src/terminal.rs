@@ -18,7 +18,6 @@
 //! Nothing read from or written to the terminal is logged or retained here.
 
 use std::io;
-use std::process::Stdio;
 
 use pty_process::{Command, OwnedReadPty, OwnedWritePty, Size};
 use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
@@ -76,6 +75,7 @@ pub struct Terminal {
     child: tokio::process::Child,
     reader: OwnedReadPty,
     writer: OwnedWritePty,
+    #[allow(clippy::option_option)]
     exited: Option<Option<i32>>,
     // Dropped with the session: removes a stored key's file.
     _key: Option<KeyFile>,
@@ -157,7 +157,6 @@ impl SshProvider {
             .args(args)
             .env("TERM", TERM)
             .kill_on_drop(true)
-            .stderr(Stdio::inherit())
             .spawn(pts)
             .map_err(|error| tool(format!("cannot start: {error}")))?;
         let (reader, writer) = pty.into_split();

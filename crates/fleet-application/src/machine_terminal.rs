@@ -284,6 +284,7 @@ struct Pending {
 }
 
 /// An attached session.
+#[allow(clippy::struct_field_names)]
 struct Active {
     principal_id: String,
     machine_id: String,
@@ -390,7 +391,12 @@ impl TerminalSessions {
             .pending
             .values()
             .map(|pending| pending.principal_id.as_str())
-            .chain(ledger.active.values().map(|active| active.principal_id.as_str()))
+            .chain(
+                ledger
+                    .active
+                    .values()
+                    .map(|active| active.principal_id.as_str()),
+            )
             .filter(|owner| *owner == principal_id)
             .count();
         if ledger.pending.len() + ledger.active.len() >= self.limits.max_sessions
@@ -842,9 +848,8 @@ async fn run_session(
                         idle_deadline = Instant::now() + limits.idle;
                         match tokio::time::timeout(SEND_TIMEOUT, channel.write(&bytes)).await {
                             Ok(Ok(())) => {}
-                            Ok(Err(_)) => return (TerminalCloseReason::Error, None),
-                            // The guest stopped reading its terminal.
-                            Err(_) => return (TerminalCloseReason::Error, None),
+                            // The guest refused the input, or stopped reading its terminal.
+                            Ok(Err(_)) | Err(_) => return (TerminalCloseReason::Error, None),
                         }
                     }
                     ClientMessage::Resize { cols, rows } => {
@@ -1084,7 +1089,9 @@ mod tests {
         };
         assert!(bad(|l| l.idle = Duration::ZERO));
         assert!(bad(|l| l.max_duration = Duration::ZERO));
-        assert!(bad(|l| l.max_duration = MAX_CONFIGURED_DURATION + Duration::from_secs(1)));
+        assert!(bad(
+            |l| l.max_duration = MAX_CONFIGURED_DURATION + Duration::from_secs(1)
+        ));
         assert!(bad(|l| l.max_sessions = 0));
         assert!(bad(|l| l.max_per_principal = 0));
     }
@@ -1169,9 +1176,14 @@ mod tests {
         let (mut client, sender) = client();
         let mut channel = FakeChannel::default();
         sender
-            .send(ClientMessage::Resize { cols: 120, rows: 40 })
+            .send(ClientMessage::Resize {
+                cols: 120,
+                rows: 40,
+            })
             .unwrap();
-        sender.send(ClientMessage::Resize { cols: 0, rows: 40 }).unwrap();
+        sender
+            .send(ClientMessage::Resize { cols: 0, rows: 40 })
+            .unwrap();
         let keep = sender.clone();
         let (reason, _) = run(&mut channel, &mut client, short_limits(30, 600)).await;
         // Resize frames do not defer the idle close.
@@ -1253,7 +1265,8 @@ mod tests {
             tokio::time::sleep(Duration::from_secs(1)).await;
             tx.send_replace(true);
         });
-        let (reason, _) = run_session(&mut channel, &mut client, short_limits(300, 600), &mut rx).await;
+        let (reason, _) =
+            run_session(&mut channel, &mut client, short_limits(300, 600), &mut rx).await;
         assert_eq!(reason, TerminalCloseReason::Shutdown);
         trigger.await.unwrap();
     }

@@ -160,7 +160,10 @@ impl Harness {
                 "{API_BASE_PATH}/machines/{machine_id}/terminal-sessions"
             ))
             .header("content-type", "application/json")
-            .header(CORRELATION_ID_HEADER, "01900000-0000-7000-8000-000000000000")
+            .header(
+                CORRELATION_ID_HEADER,
+                "01900000-0000-7000-8000-000000000000",
+            )
             .body(Body::from(body.to_string()))
             .unwrap();
         let app = router(self.state.clone()).layer(axum::Extension(fleet_api::ActingPrincipal {

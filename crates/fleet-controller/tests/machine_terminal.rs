@@ -126,7 +126,8 @@ impl World {
         let resolver = Arc::new(SshAuthResolver::new(keys.clone()));
         let machines: Arc<dyn fleet_application::machine::MachinePort> =
             Arc::new(MachineRepository::new(pool.clone()));
-        let port = SshTerminalPort::new(machines.clone(), resolver, dir.path().join("ssh")).unwrap();
+        let port =
+            SshTerminalPort::new(machines.clone(), resolver, dir.path().join("ssh")).unwrap();
         let sessions = TerminalSessions::new(Arc::new(port), limits);
         let access = Arc::new(
             MachineAccess::new(
@@ -227,7 +228,9 @@ impl World {
     }
 
     async fn create(&self) -> String {
-        self.create_for(&*Policy::allow_all(), &lan()).await.unwrap()
+        self.create_for(&*Policy::allow_all(), &lan())
+            .await
+            .unwrap()
     }
 
     async fn create_for(
@@ -281,9 +284,8 @@ impl World {
     }
 }
 
-type Socket = tokio_tungstenite::WebSocketStream<
-    tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
->;
+type Socket =
+    tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
 
 async fn attach(
     address: SocketAddr,
@@ -323,7 +325,9 @@ async fn next(socket: &mut Socket, wait: Duration) -> Option<Seen> {
             Some(Ok(Message::Close(Some(frame)))) => {
                 Some(Seen::Closed(frame.code.into(), frame.reason.to_string()))
             }
-            Some(Ok(Message::Close(None))) | None | Some(Err(_)) => Some(Seen::Closed(1006, String::new())),
+            Some(Ok(Message::Close(None))) | None | Some(Err(_)) => {
+                Some(Seen::Closed(1006, String::new()))
+            }
             Some(Ok(_)) => continue,
         };
     }
@@ -441,7 +445,10 @@ async fn a_real_shell_relays_input_output_resize_and_exit() {
     assert!(!audit.contains("marker-42"), "typed text reached the audit");
     assert!(!audit.contains("stty"), "typed text reached the audit");
     assert!(!audit.contains("BEGIN OPENSSH"), "{audit}");
-    assert!(!audit.contains(&token), "the session token reached the audit");
+    assert!(
+        !audit.contains(&token),
+        "the session token reached the audit"
+    );
 }
 
 #[tokio::test]
@@ -487,9 +494,10 @@ async fn a_foreign_origin_and_a_missing_token_are_refused_before_the_upgrade() {
     let mut request = format!("ws://{address}/api/v1/terminal/socket")
         .into_client_request()
         .unwrap();
-    request
-        .headers_mut()
-        .insert("Sec-WebSocket-Protocol", HeaderValue::from_static("fleet-terminal"));
+    request.headers_mut().insert(
+        "Sec-WebSocket-Protocol",
+        HeaderValue::from_static("fleet-terminal"),
+    );
     match tokio_tungstenite::connect_async(request).await {
         Err(tokio_tungstenite::tungstenite::Error::Http(response)) => {
             assert_eq!(response.status(), 400);
@@ -535,7 +543,10 @@ async fn machines_terminal_is_required_when_creating_and_again_when_attaching() 
     let denied = world
         .create_for(&*Policy::deny(Permission::MachineTerminal), &lan())
         .await;
-    assert!(matches!(denied, Err(LabUseCaseError::Denied(_))), "{denied:?}");
+    assert!(
+        matches!(denied, Err(LabUseCaseError::Denied(_))),
+        "{denied:?}"
+    );
     assert_eq!(world.sessions.session_count(), 0);
     // `machines.exec` is not a substitute: allowing everything but the
     // terminal permission still refuses.
@@ -576,7 +587,10 @@ async fn an_explicit_auth_needs_machine_update_like_exec() {
             fleet_core::SystemClock::now_unix_millis(),
         )
         .await;
-    assert!(matches!(result, Err(LabUseCaseError::Denied(_))), "{result:?}");
+    assert!(
+        matches!(result, Err(LabUseCaseError::Denied(_))),
+        "{result:?}"
+    );
 }
 
 #[tokio::test]
@@ -667,12 +681,18 @@ async fn the_caps_count_waiting_and_attaching_sessions() {
     let _second = world.create().await;
     // Two waiting sessions fill the controller.
     let third = world.create_for(&*Policy::allow_all(), &lan()).await;
-    assert!(matches!(third, Err(LabUseCaseError::Busy { .. })), "{third:?}");
+    assert!(
+        matches!(third, Err(LabUseCaseError::Busy { .. })),
+        "{third:?}"
+    );
     // Attaching one does not free its slot...
     let mut socket = attach(address, &first, None).await.unwrap();
     expect_ready(&mut socket).await;
     let still = world.create_for(&*Policy::allow_all(), &lan()).await;
-    assert!(matches!(still, Err(LabUseCaseError::Busy { .. })), "{still:?}");
+    assert!(
+        matches!(still, Err(LabUseCaseError::Busy { .. })),
+        "{still:?}"
+    );
     // ...ending it does.
     socket.close(None).await.unwrap();
     for _ in 0..100 {
@@ -700,7 +720,10 @@ async fn a_machine_that_refuses_the_key_ends_with_an_audited_error() {
     let mut socket = attach(address, &token, None).await.unwrap();
     let (code, reason) = closed(&mut socket).await;
     assert_eq!(code, 4502, "{reason}");
-    assert!(reason.contains("revoked") || reason.contains("no longer"), "{reason}");
+    assert!(
+        reason.contains("revoked") || reason.contains("no longer"),
+        "{reason}"
+    );
     world.settled().await;
     let audit = world.audit_text().await;
     assert!(audit.contains(r#""closeReason":"error""#), "{audit}");
