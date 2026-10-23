@@ -128,6 +128,9 @@ describe('MachineTerminal', () => {
     expect(wrapper.get('[data-testid="terminal-state"]').text()).toContain('live')
     expect(wrapper.find('[data-testid="terminal-overlay"]').exists()).toBe(false)
     expect(wrapper.get('[data-testid="terminal-limits"]').text()).toContain('idle 10 min')
+    // The nonce wrapper was scoped to xterm's calls: other code's style
+    // elements are never nonced.
+    expect(document.createElement('style').nonce ?? '').toBe('')
   })
 
   it('relays output, keystrokes and resizes', async () => {

@@ -487,6 +487,12 @@ impl TerminalSessions {
         self.shutdown.send_replace(true);
     }
 
+    /// Whether the controller began shutting down.
+    #[must_use]
+    pub fn is_shutting_down(&self) -> bool {
+        *self.shutdown.borrow()
+    }
+
     /// How many terminals are attached right now.
     #[must_use]
     pub fn active_count(&self) -> usize {

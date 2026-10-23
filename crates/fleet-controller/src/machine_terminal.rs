@@ -369,6 +369,18 @@ async fn serve(
                     close::NOT_FOUND,
                     "the terminal session is unknown, already used, or expired".to_owned(),
                 ),
+                // Shutdown began: the same close as an attached terminal gets.
+                LabUseCaseError::Busy { .. }
+                    if route
+                        .access
+                        .terminals()
+                        .is_some_and(|sessions| sessions.is_shutting_down()) =>
+                {
+                    (
+                        close::SHUTDOWN,
+                        "the controller is shutting down".to_owned(),
+                    )
+                }
                 LabUseCaseError::Busy { detail } | LabUseCaseError::Conflict { detail } => {
                     (close::CONFLICT, detail.clone())
                 }

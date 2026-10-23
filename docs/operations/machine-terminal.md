@@ -43,6 +43,7 @@ Other bounds are fixed: a session token lives 120 s and works once; a stalled pe
 
 ## Known limits
 
+- Without WebGL (or after a lost WebGL context) xterm falls back to its DOM renderer. Under the nonce-only content security policy that renderer shows truecolor cells in the default colours and the browser logs CSP violations for them; the terminal stays usable.
 - No session recording or playback, no shared sessions, no file browser, no port forwarding (`ssh` runs with all forwarding disabled).
 - Passphrase-protected keys are refused, as for exec.
 - On Windows the shell's exit status did not reach `fleetctl` in the first live check (the session ended with 0). The status is the local `ssh` client's exit status, so this is most likely an upstream Windows OpenSSH / ConPTY limitation (the server does not report the PowerShell exit code for an interactive session); it was not re-checked against plain `ssh -tt` after the test VM was destroyed.

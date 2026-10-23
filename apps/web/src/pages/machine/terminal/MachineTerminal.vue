@@ -15,7 +15,7 @@ import {
   socketUrl,
   type TerminalView,
 } from './session'
-import { allowXtermStyles } from './styleNonce'
+import { withXtermStyleNonce } from './styleNonce'
 
 // The machine terminal (#494): xterm.js (MIT) talking to the controller's
 // relay over its own WebSocket. The browser holds a single-use Fleet session
@@ -141,17 +141,17 @@ async function connect() {
     ])
     if (mine !== generation || container.value === null)
       return
-    allowXtermStyles()
-    const created = new Terminal({
+    const created = withXtermStyleNonce(() => new Terminal({
       cursorBlink: true,
       fontFamily: 'ui-monospace, SFMono-Regular, Menlo, Consolas, monospace',
       fontSize: 13,
       scrollback: 5000,
       theme: theme(),
-    })
+    }))
     const fitAddon = new FitAddon()
     created.loadAddon(fitAddon)
-    created.open(container.value)
+    const host = container.value
+    withXtermStyleNonce(() => created.open(host))
     fitAddon.fit()
     term.value = created as unknown as Term
     fit = fitAddon
@@ -161,8 +161,10 @@ async function connect() {
     try {
       const { WebglAddon } = await import('@xterm/addon-webgl')
       const webgl = new WebglAddon()
-      webgl.onContextLoss(() => webgl.dispose())
-      created.loadAddon(webgl)
+      // Disposing falls back to the DOM renderer, which creates style
+      // elements again: nonce those too, and only those.
+      webgl.onContextLoss(() => withXtermStyleNonce(() => webgl.dispose()))
+      withXtermStyleNonce(() => created.loadAddon(webgl))
     }
     catch {
       // DOM renderer.
@@ -214,7 +216,7 @@ async function connect() {
     }
     themeObserver = new MutationObserver(() => {
       if (term.value)
-        term.value.options.theme = theme()
+        withXtermStyleNonce(() => { term.value!.options.theme = theme() })
     })
     themeObserver.observe(document.documentElement, { attributes: true, attributeFilter: ['class', 'data-theme'] })
   }

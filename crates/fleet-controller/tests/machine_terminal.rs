@@ -749,7 +749,7 @@ async fn nothing_attaches_after_shutdown_began_and_the_refusal_is_audited() {
     world.sessions.shutdown();
     let mut socket = attach(address, &token, None).await.unwrap();
     let (code, _) = closed(&mut socket).await;
-    assert_eq!(code, 4409);
+    assert_eq!(code, 1001);
     world.settled().await;
     let audit = world.audit_text().await;
     assert!(audit.contains(r#""closeReason":"shutdown""#), "{audit}");
