@@ -1191,6 +1191,17 @@ impl Machines {
         for fact in facts {
             fact.validate()
                 .map_err(|detail| MachineUseCaseError::Invalid { detail })?;
+            if fact
+                .namespace
+                .eq_ignore_ascii_case(fleet_core::RESERVED_FACT_NAMESPACE)
+            {
+                return Err(MachineUseCaseError::Invalid {
+                    detail: format!(
+                        "the {} fact namespace is reserved",
+                        fleet_core::RESERVED_FACT_NAMESPACE
+                    ),
+                });
+            }
         }
         if facts.len() > fleet_core::MAX_CAPABILITY_FACTS {
             return Err(MachineUseCaseError::Invalid {

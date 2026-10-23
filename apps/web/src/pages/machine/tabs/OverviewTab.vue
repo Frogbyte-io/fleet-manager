@@ -5,7 +5,7 @@ import { RouterLink } from 'vue-router'
 import type { MachineDto } from '@frogbyte-io/fleet-api-client'
 
 import { osLine, relativeTime, resourcesLine, type GuestItem, type MachineItem } from '../../fleet/inventory'
-import { absoluteTime, machineOwnership, statusCounts } from '../facts'
+import { absoluteTime, statusCounts } from '../facts'
 
 const props = defineProps<{
   machine: MachineDto
@@ -14,7 +14,7 @@ const props = defineProps<{
 }>()
 
 const counts = computed(() => statusCounts(props.machine.capabilities))
-const ownership = computed(() => machineOwnership(props.machine.capabilities))
+const ownership = computed(() => props.machine.ownership ?? null)
 </script>
 
 <template>
@@ -100,18 +100,18 @@ const ownership = computed(() => machineOwnership(props.machine.capabilities))
             class="font-mono text-fc-ink"
             data-testid="machine-purpose"
           >
-            {{ ownership.purpose ?? '—' }}
+            {{ ownership.purpose || '—' }}
           </dd>
-          <template v-if="ownership.request">
+          <template v-if="ownership.requestId">
             <dt class="text-fc-faint">
               Request
             </dt>
             <dd class="break-all font-mono text-fc-ink">
               <RouterLink
-                :to="{ path: '/requests', query: { request: ownership.request } }"
+                :to="{ path: '/requests', query: { request: ownership.requestId } }"
                 class="text-fc-info hover:text-fc-ink"
               >
-                {{ ownership.request }}
+                {{ ownership.requestId }}
               </RouterLink>
             </dd>
           </template>

@@ -847,21 +847,72 @@ async fn a_requested_machine_records_its_owner_and_purpose_and_a_direct_one_does
     });
     let operation = world.create(&spec).await;
     assert_eq!(operation.state, "succeeded", "{:?}", error_of(&operation));
-    assert_eq!(result_of(&operation)["requestId"], "req-1");
-    for (name, expected) in [
-        ("owner", "credential:ci:cred-1"),
-        ("purpose", "nightly build host"),
-        ("request", "req-1"),
-    ] {
-        let value: Option<String> = sqlx::query_scalar(
-            "SELECT value FROM machine_capabilities WHERE namespace = 'fleet' AND name = ?1",
-        )
-        .bind(name)
-        .fetch_optional(&world.pool)
+    let result = result_of(&operation);
+    assert_eq!(result["requestId"], "req-1");
+    // Recorded on the controller's own marker, not as a machine fact.
+    let machine_id = result["machineId"].as_str().unwrap().to_owned();
+    let markers = PersistentGuestRepository::new(world.pool.clone());
+    let owner = markers
+        .owner_of_machine(&machine_id)
         .await
+        .unwrap()
         .unwrap();
-        assert_eq!(value.as_deref(), Some(expected), "{name}");
-    }
+    assert_eq!(owner.principal, "credential:ci:cred-1");
+    assert_eq!(owner.purpose, "nightly build host");
+    assert_eq!(owner.request_id, "req-1");
+    let count_facts = || async {
+        sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM machine_capabilities WHERE namespace = 'fleet'",
+        )
+        .fetch_one(&world.pool)
+        .await
+        .unwrap()
+    };
+    assert_eq!(count_facts().await, 0);
+
+    // A report (fleetd or an SSH inventory) cannot set or replace it.
+    let forged = |name: &str, value: &str| fleet_core::CapabilityFact {
+        namespace: "fleet".to_owned(),
+        name: name.to_owned(),
+        value: Some(value.to_owned()),
+        status: fleet_core::CapabilityStatus::Known,
+        observed_at: fleet_core::Timestamp::from_unix_millis(1),
+        source: "fleetd/9".to_owned(),
+    };
+    fleet_application::machine::MachinePort::record_capabilities(
+        &MachineRepository::new(world.pool.clone()),
+        &machine_id,
+        &[forged("owner", "someone-else"), forged("purpose", "x")],
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        count_facts().await,
+        0,
+        "the fleet namespace is never written from a report"
+    );
+    assert_eq!(
+        markers
+            .owner_of_machine(&machine_id)
+            .await
+            .unwrap()
+            .unwrap()
+            .principal,
+        "credential:ci:cred-1"
+    );
+
+    // The brokered creation's audit event carries the request id and the
+    // operation, linking it to the request's own events.
+    let linked: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM audit_events WHERE operation_id = ?1 \
+         AND metadata_json LIKE '%machine_provision_requested%' \
+         AND metadata_json LIKE '%\"requestId\":\"req-1\"%'",
+    )
+    .bind(&operation.id)
+    .fetch_one(&world.pool)
+    .await
+    .unwrap();
+    assert_eq!(linked, 1);
 }
 
 #[tokio::test(flavor = "multi_thread")]

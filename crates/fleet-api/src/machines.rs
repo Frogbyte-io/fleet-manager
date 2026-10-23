@@ -161,10 +161,27 @@ pub struct MachineDto {
     pub last_observation: Option<InventoryObservationDto>,
     /// The capability facts with effective statuses at the read time.
     pub capabilities: Vec<CapabilityFactDto>,
+    /// Who asked for the machine and why, when it was created from an agent's
+    /// request (#496). Recorded by the controller, never reported by the
+    /// machine; absent for a machine an operator created or registered.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ownership: Option<MachineOwnershipDto>,
     /// Registration time (epoch milliseconds).
     pub created_at: i64,
     /// Last mutation (epoch milliseconds).
     pub updated_at: i64,
+}
+
+/// Who asked for a persistent machine, and why.
+#[derive(Clone, Debug, Serialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct MachineOwnershipDto {
+    /// The requesting principal.
+    pub owner: String,
+    /// Why the machine was requested.
+    pub purpose: String,
+    /// The action request that asked for it.
+    pub request_id: String,
 }
 
 impl From<MachineView> for MachineDto {
@@ -208,6 +225,7 @@ impl From<MachineView> for MachineDto {
                     source: fact.source,
                 })
                 .collect(),
+            ownership: None,
             created_at: view.created_at,
             updated_at: view.updated_at,
         }
@@ -462,7 +480,23 @@ pub async fn get_machine(
         )
         .await
         .map_err(|error| map_machine_error(&error, correlation_id))?;
-    Ok(Json(Resource::new(MachineDto::from(view))))
+    let mut dto = MachineDto::from(view);
+    // Who asked for it is read from the controller's own record, after the
+    // machine read was authorized.
+    if let Some(persistent) = state
+        .lab
+        .as_ref()
+        .and_then(|lab| lab.machine_access())
+        .and_then(|access| access.persistent().cloned())
+        && let Ok(Some(by)) = persistent.ownership(&dto.id).await
+    {
+        dto.ownership = Some(MachineOwnershipDto {
+            owner: by.principal,
+            purpose: by.purpose,
+            request_id: by.request_id,
+        });
+    }
+    Ok(Json(Resource::new(dto)))
 }
 
 /// Confirms a current Proxmox guest candidate for a Fleet machine.

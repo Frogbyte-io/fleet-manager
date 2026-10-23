@@ -389,6 +389,38 @@ fn run_serve(mut config: fleet_config::ControllerConfig) -> ExitCode {
             if let Some(artifacts) = &lab_artifacts {
                 access = access.with_blob_lock(artifacts.blob_lock());
             }
+            // #494: interactive terminals over SSH, with the same stored
+            // keys. They need the secret store (for the key resolver) and a
+            // Unix controller (PTY and key files).
+            #[cfg(unix)]
+            if let Some(resolver) = &ssh_auth_resolver {
+                match fleet_controller::machine_terminal::terminal_limits_from(|name| {
+                    std::env::var(name).ok()
+                }) {
+                    Err(error) => {
+                        eprintln!("warning: machine terminals unavailable: {error}");
+                    }
+                    Ok(limits) => match fleet_controller::machine_terminal::SshTerminalPort::new(
+                        std::sync::Arc::new(fleet_storage_sqlite::MachineRepository::new(
+                            store.pool().clone(),
+                        )),
+                        resolver.clone(),
+                        config.data_dir.join("ssh"),
+                    ) {
+                        Ok(port) => {
+                            access = access.with_terminals(
+                                fleet_application::machine_terminal::TerminalSessions::new(
+                                    std::sync::Arc::new(port),
+                                    limits,
+                                ),
+                            );
+                        }
+                        Err(error) => {
+                            eprintln!("warning: machine terminals unavailable: {error}");
+                        }
+                    },
+                }
+            }
             std::sync::Arc::new(access)
         };
         // The executor routes by kind: node kinds dispatch through the

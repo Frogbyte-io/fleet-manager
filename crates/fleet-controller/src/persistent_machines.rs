@@ -2229,43 +2229,20 @@ impl Run<'_> {
         Ok(guest::parse_activation(&out))
     }
 
-    /// Records who asked for the machine and why (#496), as machine facts the
-    /// console and `fleetctl machines show` read. A direct create carries no
-    /// stamp and records nothing. Recording is an upsert, so a resumed run is
-    /// harmless, and a failure is reported but does not fail a machine that
-    /// exists.
-    async fn record_owner(&self) {
-        let (Some(machine_id), Some(by)) = (&self.machine_id, &self.spec.requested_by) else {
-            return;
+    /// Records who asked for the machine and why (#496) on the persistent
+    /// marker, from the stamp the broker put on the reviewed payload. It is
+    /// written only here, never from a node-reported fact. A direct create
+    /// carries no stamp and records nothing. Recording is idempotent, so a
+    /// resumed run is harmless.
+    async fn record_owner(&self) -> Step<()> {
+        let Some(by) = &self.spec.requested_by else {
+            return Ok(());
         };
-        let now = Timestamp::from_unix_millis(fleet_core::SystemClock::now_unix_millis());
-        let facts: Vec<CapabilityFact> = [
-            ("owner", &by.principal),
-            ("purpose", &by.purpose),
-            ("request", &by.request_id),
-        ]
-        .into_iter()
-        .map(|(name, value)| CapabilityFact {
-            namespace: "fleet".to_owned(),
-            name: name.to_owned(),
-            value: Some(value.clone()),
-            status: CapabilityStatus::Known,
-            observed_at: now,
-            source: "machine.create/1".to_owned(),
-        })
-        .collect();
-        let machines = Machines::new(self.exec.machines.clone(), self.exec.audit.clone());
-        if let Err(error) = machines
-            .record_capabilities(
-                &fleet_auth::LanAllowAllAuthorizer,
-                &lan(),
-                machine_id,
-                &facts,
-            )
+        self.exec
+            .persistent
+            .record_owner(&self.spec.account_id, self.vmid, by)
             .await
-        {
-            eprintln!("machine.create: the owner facts were not recorded: {error}");
-        }
+            .map_err(|detail| failure("machine", "owner_failed", detail))
     }
 
     async fn record_activation(&self, report: &guest::ActivationReport) {
@@ -2306,6 +2283,19 @@ impl MachineCreateExecutor {
         )
         .map_err(|error| format!("the payload is not a valid machine.create record: {error}"))?;
         spec.validate()?;
+        if let Some(by) = &spec.requested_by {
+            // The brokered creation's own event, linked to the request by id.
+            let intent = fleet_application::persistent::requested_intent(
+                &by.principal,
+                &operation.id,
+                &spec,
+            )
+            .map_err(|error| error.to_string())?;
+            self.audit
+                .record_intent(&intent)
+                .await
+                .map_err(|error| format!("the request audit event was not recorded: {error}"))?;
+        }
         let request = self.pve.bound(&spec.account_id).await?;
         let mut run = Run {
             exec: self,
@@ -2377,7 +2367,7 @@ impl Run<'_> {
         self.address().await?;
         self.progress(5, "registering the machine").await;
         self.register().await?;
-        self.record_owner().await;
+        self.record_owner().await?;
         self.checkpoint("machine").await?;
         self.progress(6, "waiting for SSH and recording the host key")
             .await;

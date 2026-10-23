@@ -126,15 +126,19 @@ fleetctl --output json requests get <request-id> --wait=15m
 
 - `--purpose` is required: say what the machine is for in a sentence. It is
   recorded on the machine with you as its owner, and the approver reads it.
-  State the cores, memory and disk you need; a request that leaves them to the
-  image default may need a person even where small ones are approved
-  automatically.
+  State the cores, memory and disk you need, and leave the placement, tags,
+  login user and credential options at their defaults unless the task needs
+  them: a request that leaves sizes to the image default or sets those options
+  needs a person even where small plain requests are approved automatically.
 - Without a wait the command files the request and returns it (`state`
   `pending`, an `id`). With `--wait-approval[=<duration>]` (1s to 1h, default
   5m) it stays for the answer, which is `{outcome, request, result}`: exit 0
   is `executed` (`result` names `machineId`, `endpointId`, `vmid`, `address`),
   2 is `still_pending`, 1 is anything else. The creation itself takes minutes
-  after the approval; the wait covers it. Waiting is bounded: do not loop.
+  after the approval; the wait covers it. `still_pending` also covers a
+  request that was approved and is still being created, so it does not mean
+  nobody decided. Report the request id and stop: do not loop or re-file; the
+  user (or you, once, when asked) can read it with `requests get <request-id>`.
 - A request that policy approves starts at once (`state` `executing`); you
   cannot tell in advance, so always pass the wait or read `requests get`.
 - Handle the outcomes as in Brokered actions below. In particular on `denied`

@@ -44,8 +44,9 @@ use crate::broker::{
     ProviderAction,
 };
 use crate::lab::LabUseCaseError;
+use crate::machine_access::EndpointAuth;
 use crate::operation::{NewOperation, review_token_for};
-use crate::persistent::{CreateMachineSpec, PersistentMachines, RequestedBy};
+use crate::persistent::{CreateMachineSpec, CredentialChoice, PersistentMachines, RequestedBy};
 
 /// The id of the action.
 pub const ACTION_ID: &str = "proxmox.machine.create";
@@ -62,6 +63,18 @@ const QUOTA_STATES: [ActionRequestState; 4] = [
     ActionRequestState::Executing,
     ActionRequestState::Succeeded,
 ];
+
+/// A purpose as one line: runs of whitespace and control characters become
+/// one space. The same rule applies at request time and when the stamp is
+/// built, so a multi-line reason cannot make the stamp invalid.
+#[must_use]
+pub fn normalize_purpose(purpose: &str) -> String {
+    purpose
+        .split(|c: char| c.is_whitespace() || c.is_control())
+        .filter(|word| !word.is_empty())
+        .collect::<Vec<_>>()
+        .join(" ")
+}
 
 /// The target a request names: `machine:<account>:<name>`.
 #[must_use]
@@ -93,6 +106,22 @@ pub struct PersistentBounds {
     /// The storages that may be requested; empty means any.
     #[serde(default)]
     pub storages: BTreeSet<String>,
+    /// The bridges that may be requested; empty means any. A request that
+    /// leaves the bridge to the template cannot be shown to be inside a
+    /// list, so it needs a person.
+    #[serde(default)]
+    pub bridges: BTreeSet<String>,
+    /// Whether an explicit VMID may be auto-approved (default no).
+    #[serde(default)]
+    pub allow_vmid: bool,
+    /// The tags that may be requested; a request with any other tag needs a
+    /// person. Empty means no tags are auto-approved.
+    #[serde(default)]
+    pub allowed_tags: BTreeSet<String>,
+    /// Whether a login user other than the image's may be auto-approved
+    /// (default no).
+    #[serde(default)]
+    pub allow_login_user: bool,
     /// The most live requests one principal may have (pending, approved,
     /// running or succeeded). Machines destroyed later still count: the
     /// quota is a guard against a runaway agent, not an inventory.
@@ -110,8 +139,22 @@ impl PersistentBounds {
     pub fn from_env_value(value: Option<&str>) -> Result<Self, String> {
         match value.map(str::trim).filter(|value| !value.is_empty()) {
             None => Ok(Self::default()),
-            Some(text) => serde_json::from_str(text)
-                .map_err(|error| format!("{POLICY_VAR} must be a JSON object of bounds: {error}")),
+            Some(text) => {
+                let bounds: Self = serde_json::from_str(text).map_err(|error| {
+                    format!("{POLICY_VAR} must be a JSON object of bounds: {error}")
+                })?;
+                // Bounds without size limits would auto-approve any size.
+                if bounds.is_configured()
+                    && (bounds.max_cores.is_none()
+                        || bounds.max_memory_mib.is_none()
+                        || bounds.max_disk_gib.is_none())
+                {
+                    return Err(format!(
+                        "{POLICY_VAR} must set maxCores, maxMemoryMib and maxDiskGib whenever any bound is set"
+                    ));
+                }
+                Ok(bounds)
+            }
         }
     }
 
@@ -134,7 +177,20 @@ impl PersistentBounds {
         let listed = |set: &BTreeSet<String>, value: Option<&str>| {
             set.is_empty() || value.is_some_and(|value| set.contains(value))
         };
-        spec.protection
+        // Only the plain shape is auto-approved: the controller's agent for
+        // the first login, a key Fleet generates or a public key, and no
+        // placement or login choices unless the operator allowed them.
+        let plain = spec.bootstrap.auth == EndpointAuth::Agent
+            && matches!(
+                spec.credential,
+                CredentialChoice::Generate | CredentialChoice::PublicKey { .. }
+            )
+            && (spec.vmid.is_none() || self.allow_vmid)
+            && (spec.login_user.is_none() || self.allow_login_user)
+            && spec.tags.iter().all(|tag| self.allowed_tags.contains(tag));
+        plain
+            && spec.protection
+            && listed(&self.bridges, spec.bridge.as_deref())
             && within(self.max_cores, spec.cores)
             && within(self.max_memory_mib, spec.memory_mib)
             && within(self.max_disk_gib, spec.disk_gib)
@@ -231,7 +287,7 @@ impl ProviderAction for PersistentCreateAction {
         let mut spec = from_parameters(&request.parameters)?;
         spec.requested_by = Some(RequestedBy {
             principal: request.requester.clone(),
-            purpose: request.reason.clone(),
+            purpose: normalize_purpose(&request.reason),
             request_id: request.id.clone(),
         });
         spec.validate()?;
@@ -381,7 +437,8 @@ pub async fn request_machine(
             detail: "requestedBy is set by the broker; a request cannot carry it".to_owned(),
         }));
     }
-    if request.purpose.trim().is_empty() {
+    let purpose = normalize_purpose(&request.purpose);
+    if purpose.is_empty() {
         return Err(RequestError::Lab(LabUseCaseError::Invalid {
             detail: "a persistent machine request needs a purpose".to_owned(),
         }));
@@ -398,7 +455,7 @@ pub async fn request_machine(
                 action_id: ACTION_ID.to_owned(),
                 target: target_of(&request.spec),
                 parameters: to_parameters(&request.spec),
-                reason: request.purpose,
+                reason: purpose,
                 origin: request.origin,
                 correlation_id: request.correlation_id,
                 idempotency_key: request.idempotency_key,
@@ -450,13 +507,41 @@ mod tests {
             max_disk_gib: Some(100),
             image_versions: ["ver-1".to_owned()].into(),
             nodes: ["pve1".to_owned()].into(),
-            storages: BTreeSet::new(),
-            max_per_principal: None,
+            bridges: ["vmbr1".to_owned()].into(),
+            allowed_tags: ["ci".to_owned()].into(),
+            ..PersistentBounds::default()
         };
         let inside = serde_json::json!({
             "cores": 4, "memoryMib": 8192, "diskGib": 100, "node": "pve1",
+            "bridge": "vmbr1", "tags": ["ci"],
         });
         assert!(bounds.admits(&spec(&inside)));
+        // Only the plain shape is auto-approved.
+        for (key, value) in [
+            ("bridge", serde_json::json!("vmbr0")),
+            ("vmid", serde_json::json!(7100)),
+            ("tags", serde_json::json!(["ci", "prod"])),
+            ("loginUser", serde_json::json!("dev")),
+            (
+                "credential",
+                serde_json::json!({"type": "reference", "credential": "machines/ssh/a"}),
+            ),
+            (
+                "bootstrap",
+                serde_json::json!({"auth": {"type": "secret", "credential": "machines/ssh/b"}}),
+            ),
+        ] {
+            let mut odd = inside.clone();
+            odd[key] = value;
+            assert!(!bounds.admits(&spec(&odd)), "{key}");
+        }
+        let mut allowed = bounds.clone();
+        allowed.allow_vmid = true;
+        allowed.allow_login_user = true;
+        let mut placed = inside.clone();
+        placed["vmid"] = serde_json::json!(7100);
+        placed["loginUser"] = serde_json::json!("dev");
+        assert!(allowed.admits(&spec(&placed)));
         for (key, value) in [
             ("cores", serde_json::json!(5)),
             ("memoryMib", serde_json::json!(8193)),
@@ -470,7 +555,7 @@ mod tests {
             assert!(!bounds.admits(&spec(&over)), "{key}");
         }
         // A limit the spec leaves to the template default cannot be shown.
-        for key in ["cores", "memoryMib", "diskGib", "node"] {
+        for key in ["cores", "memoryMib", "diskGib", "node", "bridge"] {
             let mut missing = inside.clone();
             missing.as_object_mut().unwrap().remove(key);
             assert!(!bounds.admits(&spec(&missing)), "missing {key}");
@@ -489,9 +574,14 @@ mod tests {
                 .unwrap()
                 .is_configured()
         );
-        let bounds =
-            PersistentBounds::from_env_value(Some(r#"{"maxCores":2,"nodes":["pve1"]}"#)).unwrap();
+        let bounds = PersistentBounds::from_env_value(Some(
+            r#"{"maxCores":2,"maxMemoryMib":4096,"maxDiskGib":40,"nodes":["pve1"]}"#,
+        ))
+        .unwrap();
         assert!(bounds.is_configured());
+        // Any bound without all three size limits would auto-approve any size.
+        assert!(PersistentBounds::from_env_value(Some(r#"{"maxCores":2}"#)).is_err());
+        assert!(PersistentBounds::from_env_value(Some(r#"{"nodes":["pve1"]}"#)).is_err());
         assert_eq!(bounds.max_cores, Some(2));
         assert!(PersistentBounds::from_env_value(Some(r#"{"maxCore":2}"#)).is_err());
         assert!(PersistentBounds::from_env_value(Some("nope")).is_err());
@@ -546,6 +636,44 @@ mod tests {
             action.operation(&request).unwrap().payload_json.unwrap(),
             payload
         );
+    }
+
+    #[test]
+    fn a_multi_line_purpose_is_one_line_in_the_stamp() {
+        assert_eq!(
+            normalize_purpose("  nightly\r\nbuild\thost\n\nfor X \u{7} "),
+            "nightly build host for X"
+        );
+        assert_eq!(normalize_purpose(" \n\t "), "");
+        let action = PersistentCreateAction::new(PersistentBounds::default(), None);
+        let parameters = to_parameters(&spec(&serde_json::json!({})));
+        let request = ActionRequest {
+            id: "req-2".to_owned(),
+            requester: "agent".to_owned(),
+            origin: "api".to_owned(),
+            action_id: ACTION_ID.to_owned(),
+            target: "machine:acct-1:build-box".to_owned(),
+            parameters,
+            risk_class: RiskClass::Approve,
+            reason: "line one\nline two".to_owned(),
+            state: ActionRequestState::Approved,
+            decided_by: Some("operator".to_owned()),
+            decided_at: Some(1),
+            decision_note: None,
+            operation_id: None,
+            failure: None,
+            correlation_id: None,
+            idempotency_key: None,
+            created_at: 0,
+            expires_at: 10,
+            updated_at: 1,
+        };
+        // A reason filed through the generic route may have newlines; the
+        // stamp must still be valid.
+        let new = action.operation(&request).unwrap();
+        let stamped: CreateMachineSpec =
+            serde_json::from_str(new.payload_json.as_deref().unwrap()).unwrap();
+        assert_eq!(stamped.requested_by.unwrap().purpose, "line one line two");
     }
 
     #[test]

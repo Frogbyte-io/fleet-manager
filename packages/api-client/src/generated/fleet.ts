@@ -226,6 +226,18 @@ export interface InventoryObservationDto {
 }
 
 /**
+ * Who asked for a persistent machine, and why.
+ */
+export interface MachineOwnershipDto {
+  /** The requesting principal. */
+  owner: string;
+  /** Why the machine was requested. */
+  purpose: string;
+  /** The action request that asked for it. */
+  requestId: string;
+}
+
+/**
  * One explicitly confirmed Proxmox guest association.
  */
 export interface GuestLinkDto {
@@ -277,6 +289,7 @@ export interface MachineDto {
   machineStatus: string;
   /** The mutable, unique label. */
   name: string;
+  ownership?: null | MachineOwnershipDto;
   runsOn?: null | GuestLinkDto;
   /** Tags. */
   tags: string[];
@@ -1777,6 +1790,46 @@ export interface CreateProxmoxAccountRequest {
 }
 
 /**
+ * How an SSH endpoint authenticates. A stored key is named by reference and
+ * is never returned.
+ */
+export type EndpointAuthDto = {
+  type: 'agent';
+} | {
+  /** The identity file's path. */
+  path: string;
+  type: 'identityFile';
+} | {
+  /** The reference returned when the key was stored. */
+  credential: string;
+  type: 'secret';
+};
+
+/**
+ * The body of `POST /machines/{machineId}/terminal-sessions`.
+ */
+export interface CreateTerminalSessionRequest {
+  auth?: null | EndpointAuthDto;
+  /**
+     * The terminal's initial width in columns (1-1000; default 80).
+     * @minimum 0
+     * @nullable
+     */
+  cols?: number | null;
+  /**
+     * The SSH endpoint; absent means the machine's only SSH endpoint.
+     * @nullable
+     */
+  endpointId?: string | null;
+  /**
+     * The terminal's initial height in rows (1-1000; default 24).
+     * @minimum 0
+     * @nullable
+     */
+  rows?: number | null;
+}
+
+/**
  * A credential's metadata. The token and its hash are never part of it.
  */
 export interface CredentialDto {
@@ -2421,22 +2474,6 @@ export interface DriftCountsDto {
      */
   unsupported: number;
 }
-
-/**
- * How an SSH endpoint authenticates. A stored key is named by reference and
- * is never returned.
- */
-export type EndpointAuthDto = {
-  type: 'agent';
-} | {
-  /** The identity file's path. */
-  path: string;
-  type: 'identityFile';
-} | {
-  /** The reference returned when the key was stored. */
-  credential: string;
-  type: 'secret';
-};
 
 /**
  * An endpoint's recorded default auth.
@@ -4643,6 +4680,7 @@ export type PageMachineDtoItemsItem = {
   machineStatus: string;
   /** The mutable, unique label. */
   name: string;
+  ownership?: null | MachineOwnershipDto;
   runsOn?: null | GuestLinkDto;
   /** Tags. */
   tags: string[];
@@ -7471,6 +7509,7 @@ export type ResourceMachineDtoData = {
   machineStatus: string;
   /** The mutable, unique label. */
   name: string;
+  ownership?: null | MachineOwnershipDto;
   runsOn?: null | GuestLinkDto;
   /** Tags. */
   tags: string[];
@@ -8827,6 +8866,53 @@ export interface ResourceTailnetStatusDto {
 }
 
 /**
+ * A created terminal session. The token is shown here once.
+ */
+export type ResourceTerminalSessionDtoData = {
+  /** The SSH endpoint the shell uses. */
+  endpointId: string;
+  /** When an unattached token stops being valid (epoch millis). */
+  expiresAt: number;
+  /**
+     * Close after this many seconds without input from the caller.
+     * @minimum 0
+     */
+  idleTimeoutSeconds: number;
+  /** The machine. */
+  machineId: string;
+  /**
+     * Close after this many seconds regardless.
+     * @minimum 0
+     */
+  maxDurationSeconds: number;
+  /** The session's identity, as it appears in audit events. */
+  sessionId: string;
+  /** The WebSocket path, relative to the controller's origin. */
+  socketPath: string;
+  /**
+     * The WebSocket subprotocols to offer: `fleet-terminal`, then the token
+     * subprotocol.
+     */
+  subprotocols: string[];
+  /**
+     * The single-use token that attaches to the terminal WebSocket. It
+     * expires at `expiresAt` and is spent by the first attach.
+     */
+  token: string;
+};
+
+/**
+ * A single resource.
+ *
+ * The payload is nested under `data` so that later top-level fields are an
+ * additive change rather than a breaking one.
+ */
+export interface ResourceTerminalSessionDto {
+  /** A created terminal session. The token is shown here once. */
+  data: ResourceTerminalSessionDtoData;
+}
+
+/**
  * The machine to create: account, promoted image version, name, optional
  * placement and hardware, tags, description, `onboot`, `protection`
  * (default on), the guest OS, the bootstrap login, the host-key trust,
@@ -9719,6 +9805,42 @@ export interface TailnetStatusDto {
   configured: boolean;
   /** The scope the integration requests: always `devices:core:read`. */
   scope: string;
+}
+
+/**
+ * A created terminal session. The token is shown here once.
+ */
+export interface TerminalSessionDto {
+  /** The SSH endpoint the shell uses. */
+  endpointId: string;
+  /** When an unattached token stops being valid (epoch millis). */
+  expiresAt: number;
+  /**
+     * Close after this many seconds without input from the caller.
+     * @minimum 0
+     */
+  idleTimeoutSeconds: number;
+  /** The machine. */
+  machineId: string;
+  /**
+     * Close after this many seconds regardless.
+     * @minimum 0
+     */
+  maxDurationSeconds: number;
+  /** The session's identity, as it appears in audit events. */
+  sessionId: string;
+  /** The WebSocket path, relative to the controller's origin. */
+  socketPath: string;
+  /**
+     * The WebSocket subprotocols to offer: `fleet-terminal`, then the token
+     * subprotocol.
+     */
+  subprotocols: string[];
+  /**
+     * The single-use token that attaches to the terminal WebSocket. It
+     * expires at `expiresAt` and is spent by the first attach.
+     */
+  token: string;
 }
 
 /**
@@ -18314,6 +18436,93 @@ const res = await fetch(getStartSkillsOperationUrl(machineId),
 
   const data: startSkillsOperationResponse['data'] = body ? JSON.parse(body) : {}
   return { data, status: res.status, headers: res.headers } as startSkillsOperationResponse
+}
+
+
+
+export type createMachineTerminalSessionResponse201 = {
+  data: ResourceTerminalSessionDto
+  status: 201
+}
+
+export type createMachineTerminalSessionResponse400 = {
+  data: ApiError
+  status: 400
+}
+
+export type createMachineTerminalSessionResponse403 = {
+  data: ApiError
+  status: 403
+}
+
+export type createMachineTerminalSessionResponse404 = {
+  data: ApiError
+  status: 404
+}
+
+export type createMachineTerminalSessionResponse500 = {
+  data: ApiError
+  status: 500
+}
+
+export type createMachineTerminalSessionResponse503 = {
+  data: ApiError
+  status: 503
+}
+
+export type createMachineTerminalSessionResponseSuccess = (createMachineTerminalSessionResponse201) & {
+  headers: Headers;
+};
+export type createMachineTerminalSessionResponseError = (createMachineTerminalSessionResponse400 | createMachineTerminalSessionResponse403 | createMachineTerminalSessionResponse404 | createMachineTerminalSessionResponse500 | createMachineTerminalSessionResponse503) & {
+  headers: Headers;
+};
+
+export type createMachineTerminalSessionResponse = (createMachineTerminalSessionResponseSuccess | createMachineTerminalSessionResponseError)
+
+export const getCreateMachineTerminalSessionUrl = (machineId: string,) => {
+
+
+
+
+  return `/api/v1/machines/${machineId}/terminal-sessions`
+}
+
+/**
+ * # Errors
+ *
+ * Returns the public error envelope on refusal, an unknown machine or
+ * endpoint, an endpoint whose host key was never confirmed, no usable auth,
+ * the session cap, or an unwired terminal relay.
+ * @summary Creates an interactive terminal session on a machine. The session token
+is single use and short-lived; the caller attaches to the terminal
+WebSocket with it. Every session is authorized (`machines.terminal`,
+separate from `machines.exec`), audited at its start and end, and bounded
+by an idle timeout and a maximum duration. Nothing typed or shown is
+recorded.
+ */
+export const createMachineTerminalSession = async (machineId: string,
+    createTerminalSessionRequest: CreateTerminalSessionRequest, options?: RequestInit): Promise<createMachineTerminalSessionResponse> => {
+
+    const getHeaders = (h?: NonNullable<RequestInit['headers']>): Record<string, string | readonly string[]> => {
+    if (!h) return {};
+    if (h instanceof Headers) return Object.fromEntries(h.entries());
+    if (Array.isArray(h)) return Object.fromEntries(h);
+    return h;
+  };
+const res = await fetch(getCreateMachineTerminalSessionUrl(machineId),
+  {
+    ...options,
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...getHeaders(options?.headers) },
+    body: JSON.stringify(createTerminalSessionRequest)
+  }
+)
+
+
+  const body = [204, 205, 304].includes(res.status) ? null : await res.text();
+
+  const data: createMachineTerminalSessionResponse['data'] = body ? JSON.parse(body) : {}
+  return { data, status: res.status, headers: res.headers } as createMachineTerminalSessionResponse
 }
 
 

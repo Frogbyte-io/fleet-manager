@@ -8,10 +8,11 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use async_trait::async_trait;
+use fleet_application::audit::{AuditIntent, AuditMetadata};
 use fleet_application::authz::{AccessRequest, Authorizer, Decision, Permission, ReasonId};
 use fleet_application::broker::{
-    ActionRegistry, ActionRequest, AutoGuard, Bounds, Broker, BrokerError, BrokerSettings,
-    NewActionRequest, ProviderAction,
+    ActionRegistry, ActionRequest, ActionRequestPort as _, AutoGuard, Bounds, Broker, BrokerError,
+    BrokerSettings, NewActionRequest, ProviderAction, TransitionUpdate,
 };
 use fleet_application::operation::{NewOperation, Operations};
 use fleet_core::{ActionRequestState, RiskClass};
@@ -116,6 +117,8 @@ impl ProviderAction for Bounded {
 struct World {
     _dir: tempfile::TempDir,
     broker: Broker,
+    operations: Arc<Operations>,
+    requests: Arc<ActionRequestRepository>,
 }
 
 impl World {
@@ -141,14 +144,20 @@ impl World {
                 approver,
             }))
             .unwrap();
+        let requests = Arc::new(ActionRequestRepository::new(store.pool().clone()));
         let broker = Broker::new(
-            Arc::new(ActionRequestRepository::new(store.pool().clone())),
+            requests.clone(),
             Arc::new(registry),
-            operations,
+            operations.clone(),
             BrokerSettings::new(86_400, overrides).unwrap(),
         );
         std::mem::forget(store);
-        Self { _dir: dir, broker }
+        Self {
+            _dir: dir,
+            broker,
+            operations,
+            requests,
+        }
     }
 
     async fn ask(&self, authorizer: &dyn Authorizer) -> Result<ActionRequest, BrokerError> {
@@ -350,4 +359,95 @@ async fn a_rejected_request_never_creates_an_operation() {
         matches!(late, Err(BrokerError::Conflict { .. })),
         "{late:?}"
     );
+}
+
+#[tokio::test]
+async fn a_requester_who_lost_the_right_to_ask_after_a_human_approved_fails_the_request() {
+    let world = World::new(vec![Bounds::Outside], None, none()).await;
+    let request = world.ask(&Permit).await.unwrap();
+    // The approver is fine; the requester's `action.request` was revoked.
+    let ended = world
+        .broker
+        .approve(
+            &WithoutFor("agent-1", Permission::ActionRequest),
+            "human-1",
+            &request.id,
+            NOW,
+        )
+        .await
+        .unwrap();
+    assert_eq!(ended.state, ActionRequestState::Failed);
+    assert!(ended.operation_id.is_none());
+    assert!(
+        ended
+            .failure
+            .as_deref()
+            .is_some_and(|failure| failure.contains("may no longer ask"))
+    );
+}
+
+#[tokio::test]
+async fn an_operation_already_created_is_linked_even_when_the_recheck_would_now_fail() {
+    // The crash this models: the operation was created on the brokered
+    // route, then the process died before the request was linked to it.
+    let world = World::new(vec![Bounds::Outside], None, none()).await;
+    let request = world.ask(&Permit).await.unwrap();
+    let approved = world
+        .requests
+        .transition(
+            &request.id,
+            &TransitionUpdate {
+                from: ActionRequestState::Pending,
+                to: ActionRequestState::Approved,
+                decided_by: Some("human-1".to_owned()),
+                decision_note: None,
+                operation_id: None,
+                failure: None,
+                at: NOW,
+                require_unexpired: true,
+            },
+            &AuditIntent {
+                actor: "human-1".to_owned(),
+                action: "action.approve".to_owned(),
+                resource: Some(request.id.clone()),
+                decision: Decision::allow(),
+                correlation_id: None,
+                operation_id: None,
+                metadata: AuditMetadata::default(),
+            },
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    let orphan = world
+        .operations
+        .create_brokered(
+            &Permit,
+            "human-1",
+            &NewOperation {
+                kind: "noop".to_owned(),
+                idempotency_key: Some(format!("action-request:{}", request.id)),
+                deadline_at: None,
+                correlation_id: None,
+                payload_json: Some(format!("{{\"request\":\"{}\"}}", request.id)),
+                review_token: None,
+            },
+        )
+        .await
+        .unwrap();
+    // Recovery, after the grace, by someone for whom the approver's
+    // approval no longer holds: the existing operation is still linked.
+    let later = NOW + 5 * 60_000;
+    let recovered = world
+        .broker
+        .get(
+            &WithoutFor("human-1", Permission::ActionApprove),
+            "reader",
+            &approved.id,
+            later,
+        )
+        .await
+        .unwrap();
+    assert_eq!(recovered.state, ActionRequestState::Executing);
+    assert_eq!(recovered.operation_id.as_deref(), Some(orphan.id.as_str()));
 }

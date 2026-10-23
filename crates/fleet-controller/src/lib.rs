@@ -31,6 +31,7 @@ pub mod lab_pool;
 pub mod lab_put_store;
 pub mod lab_sweeper;
 pub mod machine_access;
+pub mod machine_terminal;
 pub mod mise;
 pub mod node_crypto;
 pub mod onboard;
@@ -719,6 +720,7 @@ fn build_router_for_caller(
     ));
     let credentials = api_state.credentials.clone();
     let console_authorizer = api_state.authorizer.clone();
+    let terminal_authorizer = api_state.authorizer.clone();
     let external_accounts = services.and_then(|services| services.external_accounts.clone());
     let dns = services.and_then(|services| services.dns.clone());
     let coolify_discovery = services.and_then(|services| services.coolify_discovery.clone());
@@ -788,6 +790,16 @@ fn build_router_for_caller(
             proxmox.clone(),
             console_authorizer,
         ));
+    }
+    if let Some(access) = lab.and_then(|lab| lab.machine_access()) {
+        // The interactive machine terminal relay (#494): one WebSocket
+        // route that authenticates with the single-use session token.
+        if access.terminals().is_some() {
+            router = router.merge(machine_terminal::terminal_router(
+                access.clone(),
+                terminal_authorizer,
+            ));
+        }
     }
     if let Some(services) = services {
         // The machine-facing node surface: versioned with the node protocol,
@@ -1092,6 +1104,9 @@ pub async fn serve_on_with_events(
 ) -> io::Result<()> {
     eprintln!("{}", fleet_auth::TrustMode::TrustedLan.warning());
     eprintln!("fleet-controller listening on {}", listener.local_addr()?);
+    // Attached machine terminals close cleanly (and audit their end) before
+    // the server drains: upgraded sockets are not tracked by the drain.
+    let shutdown = machine_terminal::drain_on_shutdown(lab.as_ref(), shutdown);
     // Attached Proxmox consoles close cleanly (and audit their end) before
     // the server drains: upgraded sockets are not tracked by the drain.
     let shutdown = {

@@ -206,18 +206,22 @@ describe('MachinePage', () => {
     expect(wrapper.find('[data-testid="open-vscode"]').attributes('href')).toBe('vscode://vscode-remote/ssh-remote+build.lan/')
   })
 
-  it('overview shows who asked for the machine and why, even when the fact has aged', async () => {
+  it('overview shows who asked for the machine and why', async () => {
     const owned = machine()
-    owned.capabilities.push(
-      { namespace: 'fleet', name: 'owner', value: 'credential:ci:cred-1', status: 'stale', observedAt: NOW - 86_400_000 * 30, source: 'machine.create/1' },
-      { namespace: 'fleet', name: 'purpose', value: 'nightly build host', status: 'stale', observedAt: NOW - 86_400_000 * 30, source: 'machine.create/1' },
-      { namespace: 'fleet', name: 'request', value: 'req-1', status: 'stale', observedAt: NOW - 86_400_000 * 30, source: 'machine.create/1' },
-    )
+    owned.ownership = { owner: 'credential:ci:cred-1', purpose: 'nightly build host', requestId: 'req-1' }
     api.getMachine.mockResolvedValue(ok({ data: owned }))
     const { wrapper } = await mountAt('/fleet/machines/m1')
     expect(wrapper.find('[data-testid="machine-owner"]').text()).toBe('credential:ci:cred-1')
     expect(wrapper.find('[data-testid="machine-purpose"]').text()).toBe('nightly build host')
     expect(wrapper.find('a[href*="request=req-1"]').exists()).toBe(true)
+  })
+
+  it('a reported fleet fact is not shown as ownership', async () => {
+    const forged = machine()
+    forged.capabilities.push({ namespace: 'fleet', name: 'owner', value: 'someone', status: 'known', observedAt: NOW, source: 'fleetd/1' })
+    api.getMachine.mockResolvedValue(ok({ data: forged }))
+    const { wrapper } = await mountAt('/fleet/machines/m1')
+    expect(wrapper.find('[data-testid="machine-owner"]').exists()).toBe(false)
   })
 
   it('overview shows no owner rows for a machine that was not requested', async () => {

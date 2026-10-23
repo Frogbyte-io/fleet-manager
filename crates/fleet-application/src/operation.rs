@@ -469,6 +469,15 @@ pub trait OperationPort: fmt::Debug + Send + Sync {
     ///
     /// Fails when the id is unknown or the backend errors.
     async fn get(&self, id: &str) -> Result<Operation, PortFailure>;
+    /// The operation holding an idempotency key, when there is one. The
+    /// default knows none; a store overrides it.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the backend errors.
+    async fn find_by_idempotency(&self, _key: &str) -> Result<Option<Operation>, PortFailure> {
+        Ok(None)
+    }
     /// Lists operations, newest first.
     ///
     /// # Errors
@@ -1875,6 +1884,20 @@ impl Operations {
             .map_err(|error| error.to_string())?;
         }
         Ok(())
+    }
+
+    /// The operation holding an idempotency key, when there is one. The
+    /// broker uses it to link an operation it already created before it
+    /// decides whether to create one.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the backend errors.
+    pub async fn find_by_idempotency_key(
+        &self,
+        key: &str,
+    ) -> Result<Option<Operation>, PortFailure> {
+        self.port.find_by_idempotency(key).await
     }
 
     /// Reads one operation's current state id, when it exists. The

@@ -79,6 +79,7 @@ struct Harness {
     _dir: tempfile::TempDir,
     state: Arc<ApiState>,
     operations: Arc<OperationRepository>,
+    pool: sqlx::SqlitePool,
 }
 
 impl Harness {
@@ -148,6 +149,7 @@ impl Harness {
             _dir: dir,
             state,
             operations: operation_repo,
+            pool,
         }
     }
 
@@ -300,6 +302,36 @@ async fn approval_runs_the_direct_creates_operation_stamped_with_owner_and_purpo
     assert_eq!(payload["requestedBy"]["purpose"], "ci runner");
     assert_eq!(payload["requestedBy"]["requestId"], id);
     assert_eq!(harness.operation_count().await, 1);
+
+    // Request, approval and start are linked audit events: the request id
+    // is the resource of all three, and the start names the operation.
+    let events: Vec<(String, String)> = sqlx::query_as(
+        "SELECT action, metadata_json FROM audit_events WHERE resource = ?1 ORDER BY seq",
+    )
+    .bind(&id)
+    .fetch_all(&harness.pool)
+    .await
+    .unwrap();
+    let actions: Vec<&str> = events.iter().map(|(action, _)| action.as_str()).collect();
+    assert_eq!(
+        actions,
+        ["action.request", "action.approve", "action.execute"]
+    );
+    assert!(events[2].1.contains(operation_id), "{}", events[2].1);
+}
+
+#[tokio::test]
+async fn a_multi_line_purpose_is_filed_and_stamped_as_one_line() {
+    let harness = Harness::new(PersistentBounds::default(), &[]).await;
+    let (status, body) = harness
+        .ask(
+            AGENT,
+            key_spec("agent-box"),
+            "line one\nline two\r\n  three",
+        )
+        .await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    assert_eq!(body["data"]["reason"], "line one line two three");
 }
 
 #[tokio::test]

@@ -18,6 +18,10 @@ use serde::{Deserialize, Serialize};
 
 use crate::time::Timestamp;
 
+/// The capability-fact namespace Fleet reserves for its own record keeping.
+/// No report, probe or node may write it.
+pub const RESERVED_FACT_NAMESPACE: &str = "fleet";
+
 /// The status of one capability fact, as recorded and as displayed.
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]

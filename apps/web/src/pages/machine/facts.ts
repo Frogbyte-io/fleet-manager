@@ -34,17 +34,3 @@ export function statusCounts(facts: CapabilityFactDto[]): Record<string, number>
 export function absoluteTime(ms: number | null | undefined): string {
   return ms === null || ms === undefined ? '—' : new Date(ms).toISOString().replace('T', ' ').slice(0, 19) + 'Z'
 }
-
-/**
- * Who asked for a machine and why, as the controller recorded when a
- * brokered request created it (`fleet/owner`, `fleet/purpose`,
- * `fleet/request`). These are record keeping, not observations, so they are
- * read whatever their age-derived status says. Null when the machine was not
- * created through a request.
- */
-export function machineOwnership(facts: CapabilityFactDto[]): { owner: string, purpose: string | null, request: string | null } | null {
-  const value = (name: string): string | null =>
-    facts.find(fact => fact.namespace === 'fleet' && fact.name === name)?.value ?? null
-  const owner = value('owner')
-  return owner === null ? null : { owner, purpose: value('purpose'), request: value('request') }
-}

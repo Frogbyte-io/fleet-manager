@@ -330,6 +330,15 @@ impl MachinePort for MachineRepository {
             .map_err(|error| backend("record_capabilities", &error))?;
         require_machine(&mut tx, id).await?;
         for fact in facts {
+            // The `fleet` namespace is Fleet's own record keeping and is
+            // never written from a report: a node or an inventory probe
+            // could otherwise forge it.
+            if fact
+                .namespace
+                .eq_ignore_ascii_case(fleet_core::RESERVED_FACT_NAMESPACE)
+            {
+                continue;
+            }
             sqlx::query(
                 "INSERT INTO machine_capabilities (machine_id, namespace, name, value, status, observed_at, source) \
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7) \

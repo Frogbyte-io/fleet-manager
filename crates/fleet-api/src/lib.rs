@@ -30,6 +30,7 @@ pub mod lab_exec_detach;
 pub mod lab_pools;
 pub mod lab_put;
 pub mod machine_access;
+pub mod machine_terminal;
 pub mod machines;
 mod meta;
 pub mod mise;
@@ -558,6 +559,7 @@ pub fn api(state: Arc<operations::ApiState>) -> (Router, utoipa::openapi::OpenAp
                     machine_access::clear_machine_endpoint_auth
                 ))
                 .routes(routes!(machine_access::exec_machine))
+                .routes(routes!(machine_terminal::create_machine_terminal_session))
                 .routes(routes!(persistent_machines::review_machine_create))
                 .routes(routes!(persistent_machines::create_machine))
                 .routes(routes!(persistent_machines::request_machine_create))

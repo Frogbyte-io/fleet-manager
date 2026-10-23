@@ -8191,6 +8191,99 @@
         }
       }
     },
+    "/api/v1/machines/{machineId}/terminal-sessions": {
+      "post": {
+        "tags": [
+          "machines"
+        ],
+        "summary": "Creates an interactive terminal session on a machine. The session token\nis single use and short-lived; the caller attaches to the terminal\nWebSocket with it. Every session is authorized (`machines.terminal`,\nseparate from `machines.exec`), audited at its start and end, and bounded\nby an idle timeout and a maximum duration. Nothing typed or shown is\nrecorded.",
+        "description": "# Errors\n\nReturns the public error envelope on refusal, an unknown machine or\nendpoint, an endpoint whose host key was never confirmed, no usable auth,\nthe session cap, or an unwired terminal relay.",
+        "operationId": "createMachineTerminalSession",
+        "parameters": [
+          {
+            "name": "machineId",
+            "in": "path",
+            "description": "The machine's identity.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateTerminalSessionRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "description": "The session was created; the token is shown once.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Resource_TerminalSessionDto"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The size or target is invalid, the host key was never confirmed, or the endpoint has no auth.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The caller may not open a terminal on this machine (`machines.terminal`).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "The machine or endpoint does not exist.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "A backend port failed.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The terminal session cap is reached (retry later), or machine access is not wired.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/meta": {
       "get": {
         "tags": [
@@ -15515,6 +15608,48 @@
           }
         }
       },
+      "CreateTerminalSessionRequest": {
+        "type": "object",
+        "description": "The body of `POST /machines/{machineId}/terminal-sessions`.",
+        "properties": {
+          "auth": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/EndpointAuthDto",
+                "description": "An explicit auth, overriding the endpoint's default. Naming one needs\n`machine.update` on the machine."
+              }
+            ]
+          },
+          "cols": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "The terminal's initial width in columns (1-1000; default 80).",
+            "minimum": 0
+          },
+          "endpointId": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The SSH endpoint; absent means the machine's only SSH endpoint."
+          },
+          "rows": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "The terminal's initial height in rows (1-1000; default 24).",
+            "minimum": 0
+          }
+        }
+      },
       "CredentialDto": {
         "type": "object",
         "description": "A credential's metadata. The token and its hash are never part of it.",
@@ -18303,6 +18438,17 @@
             "type": "string",
             "description": "The mutable, unique label."
           },
+          "ownership": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/MachineOwnershipDto",
+                "description": "Who asked for the machine and why, when it was created from an agent's\nrequest (#496). Recorded by the controller, never reported by the\nmachine; absent for a machine an operator created or registered."
+              }
+            ]
+          },
           "runsOn": {
             "oneOf": [
               {
@@ -18441,6 +18587,29 @@
             "format": "int64",
             "description": "The size in bytes.",
             "minimum": 0
+          }
+        }
+      },
+      "MachineOwnershipDto": {
+        "type": "object",
+        "description": "Who asked for a persistent machine, and why.",
+        "required": [
+          "owner",
+          "purpose",
+          "requestId"
+        ],
+        "properties": {
+          "owner": {
+            "type": "string",
+            "description": "The requesting principal."
+          },
+          "purpose": {
+            "type": "string",
+            "description": "Why the machine was requested."
+          },
+          "requestId": {
+            "type": "string",
+            "description": "The action request that asked for it."
           }
         }
       },
@@ -20783,6 +20952,17 @@
                 "name": {
                   "type": "string",
                   "description": "The mutable, unique label."
+                },
+                "ownership": {
+                  "oneOf": [
+                    {
+                      "type": "null"
+                    },
+                    {
+                      "$ref": "#/components/schemas/MachineOwnershipDto",
+                      "description": "Who asked for the machine and why, when it was created from an agent's\nrequest (#496). Recorded by the controller, never reported by the\nmachine; absent for a machine an operator created or registered."
+                    }
+                  ]
                 },
                 "runsOn": {
                   "oneOf": [
@@ -25588,6 +25768,17 @@
                 "type": "string",
                 "description": "The mutable, unique label."
               },
+              "ownership": {
+                "oneOf": [
+                  {
+                    "type": "null"
+                  },
+                  {
+                    "$ref": "#/components/schemas/MachineOwnershipDto",
+                    "description": "Who asked for the machine and why, when it was created from an agent's\nrequest (#496). Recorded by the controller, never reported by the\nmachine; absent for a machine an operator created or registered."
+                  }
+                ]
+              },
               "runsOn": {
                 "oneOf": [
                   {
@@ -27179,6 +27370,76 @@
               "scope": {
                 "type": "string",
                 "description": "The scope the integration requests: always `devices:core:read`."
+              }
+            }
+          }
+        }
+      },
+      "Resource_TerminalSessionDto": {
+        "type": "object",
+        "description": "A single resource.\n\nThe payload is nested under `data` so that later top-level fields are an\nadditive change rather than a breaking one.",
+        "required": [
+          "data"
+        ],
+        "properties": {
+          "data": {
+            "type": "object",
+            "description": "A created terminal session. The token is shown here once.",
+            "required": [
+              "sessionId",
+              "token",
+              "expiresAt",
+              "machineId",
+              "endpointId",
+              "socketPath",
+              "subprotocols",
+              "idleTimeoutSeconds",
+              "maxDurationSeconds"
+            ],
+            "properties": {
+              "endpointId": {
+                "type": "string",
+                "description": "The SSH endpoint the shell uses."
+              },
+              "expiresAt": {
+                "type": "integer",
+                "format": "int64",
+                "description": "When an unattached token stops being valid (epoch millis)."
+              },
+              "idleTimeoutSeconds": {
+                "type": "integer",
+                "format": "int64",
+                "description": "Close after this many seconds without input from the caller.",
+                "minimum": 0
+              },
+              "machineId": {
+                "type": "string",
+                "description": "The machine."
+              },
+              "maxDurationSeconds": {
+                "type": "integer",
+                "format": "int64",
+                "description": "Close after this many seconds regardless.",
+                "minimum": 0
+              },
+              "sessionId": {
+                "type": "string",
+                "description": "The session's identity, as it appears in audit events."
+              },
+              "socketPath": {
+                "type": "string",
+                "description": "The WebSocket path, relative to the controller's origin."
+              },
+              "subprotocols": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                },
+                "description": "The WebSocket subprotocols to offer: `fleet-terminal`, then the token\nsubprotocol."
+              },
+              "token": {
+                "type": "string",
+                "description": "The single-use token that attaches to the terminal WebSocket. It\nexpires at `expiresAt` and is spent by the first attach."
               }
             }
           }
@@ -29573,6 +29834,67 @@
           "scope": {
             "type": "string",
             "description": "The scope the integration requests: always `devices:core:read`."
+          }
+        }
+      },
+      "TerminalSessionDto": {
+        "type": "object",
+        "description": "A created terminal session. The token is shown here once.",
+        "required": [
+          "sessionId",
+          "token",
+          "expiresAt",
+          "machineId",
+          "endpointId",
+          "socketPath",
+          "subprotocols",
+          "idleTimeoutSeconds",
+          "maxDurationSeconds"
+        ],
+        "properties": {
+          "endpointId": {
+            "type": "string",
+            "description": "The SSH endpoint the shell uses."
+          },
+          "expiresAt": {
+            "type": "integer",
+            "format": "int64",
+            "description": "When an unattached token stops being valid (epoch millis)."
+          },
+          "idleTimeoutSeconds": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Close after this many seconds without input from the caller.",
+            "minimum": 0
+          },
+          "machineId": {
+            "type": "string",
+            "description": "The machine."
+          },
+          "maxDurationSeconds": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Close after this many seconds regardless.",
+            "minimum": 0
+          },
+          "sessionId": {
+            "type": "string",
+            "description": "The session's identity, as it appears in audit events."
+          },
+          "socketPath": {
+            "type": "string",
+            "description": "The WebSocket path, relative to the controller's origin."
+          },
+          "subprotocols": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "The WebSocket subprotocols to offer: `fleet-terminal`, then the token\nsubprotocol."
+          },
+          "token": {
+            "type": "string",
+            "description": "The single-use token that attaches to the terminal WebSocket. It\nexpires at `expiresAt` and is spent by the first attach."
           }
         }
       },

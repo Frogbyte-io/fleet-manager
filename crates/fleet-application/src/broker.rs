@@ -214,8 +214,9 @@ pub trait ActionRequestPort: fmt::Debug + Send + Sync {
     ) -> Result<Vec<ActionRequest>, String>;
 
     /// How many requests of one action a requester has in the given states
-    /// (a quota's input). The default counts the newest page of requests;
-    /// a store should override it with an exact count.
+    /// (a quota's input). The default counts the newest page of requests and
+    /// fails, rather than undercount, when that page is full; a store should
+    /// override it with an exact count.
     ///
     /// # Errors
     ///
@@ -228,6 +229,11 @@ pub trait ActionRequestPort: fmt::Debug + Send + Sync {
         except_request: Option<&str>,
     ) -> Result<u32, String> {
         let all = self.list(None, MAX_LIST_LIMIT).await?;
+        if all.len() >= usize::try_from(MAX_LIST_LIMIT).unwrap_or(usize::MAX) {
+            // A full page may hide older requests: a quota must not be
+            // computed from a partial view.
+            return Err("too many action requests to count without a store count".to_owned());
+        }
         let count = all
             .iter()
             .filter(|request| {
@@ -916,21 +922,22 @@ impl Broker {
         if !guarded {
             return Ok(None);
         }
+        // The requester may still ask, however the request was approved.
+        if authorize(
+            authorizer,
+            AccessRequest {
+                principal_id: &request.requester,
+                action: Permission::ActionRequest,
+                resource: Some(&request.action_id),
+            },
+        )
+        .is_err()
+        {
+            return Ok(Some(
+                "the requester may no longer ask for this action".to_owned(),
+            ));
+        }
         if request.decided_by.as_deref() == Some(POLICY_AUTO) {
-            if authorize(
-                authorizer,
-                AccessRequest {
-                    principal_id: &request.requester,
-                    action: Permission::ActionRequest,
-                    resource: Some(&request.action_id),
-                },
-            )
-            .is_err()
-            {
-                return Ok(Some(
-                    "the requester may no longer ask for this action".to_owned(),
-                ));
-            }
             let class = self
                 .classify(
                     action,
@@ -1354,9 +1361,22 @@ impl Broker {
                 .fail(&request, "the action is no longer offered", now)
                 .await;
         };
-        match self.recheck(authorizer, action.as_ref(), &request).await? {
-            None => {}
-            Some(reason) => return self.fail(&request, &reason, now).await,
+        // An operation this request already created (a start that crashed
+        // before it linked it) is linked whatever the policy says now: it
+        // exists, and only the creation of a new one is gated.
+        let existing = self
+            .operations
+            .find_by_idempotency_key(&format!("{BROKER_IDEMPOTENCY_PREFIX}{}", request.id))
+            .await
+            .map_err(|error| BrokerError::Backend {
+                context: "operations",
+                detail: error.to_string(),
+            })?;
+        if existing.is_none() {
+            match self.recheck(authorizer, action.as_ref(), &request).await? {
+                None => {}
+                Some(reason) => return self.fail(&request, &reason, now).await,
+            }
         }
         let mut new = match action.operation(&request) {
             Ok(new) => new,
