@@ -134,6 +134,9 @@ fn the_named_refusals_of_the_issue_are_refused() {
         (Permission::MachineExec, Some("machine-1")),
         (Permission::MachinePut, Some("machine-1")),
         (Permission::MachineCollect, Some("machine-1")),
+        // persistent VM creation and guest config (#489): never a Lab credential
+        (Permission::MachineProvision, None),
+        (Permission::ProxmoxGuestConfig, None),
         // secrets
         (Permission::SecretRead, Some("secret-1")),
         (Permission::SecretWrite, None),

@@ -78,7 +78,7 @@ impl Drop for TestSshd {
 /// start surfaces immediately instead of failing every test later on the
 /// first SSH probe with a misleading error.
 pub fn start_sshd() -> TestSshd {
-    start_sshd_inner(None)
+    start_sshd_inner(None, false)
 }
 
 /// Like [`start_sshd`], but every session sshd opens sees `HOME` set to
@@ -86,10 +86,18 @@ pub fn start_sshd() -> TestSshd {
 /// on the "remote" side gets a private tree per test instead of racing other
 /// runs through the developer's real home.
 pub fn start_sshd_with_home(home: &std::path::Path) -> TestSshd {
-    start_sshd_inner(Some(home))
+    start_sshd_inner(Some(home), false)
 }
 
-fn start_sshd_inner(home: Option<&std::path::Path>) -> TestSshd {
+/// Like [`start_sshd_with_home`], but the only `authorized_keys` sshd reads
+/// is `<home>/.ssh/authorized_keys`, which starts with the test user's key
+/// (`keys_dir/user_ed25519`) as the image's shared bootstrap key. A suite
+/// that installs and removes keys on the "guest" sees the logins change.
+pub fn start_sshd_with_home_keys(home: &std::path::Path) -> TestSshd {
+    start_sshd_inner(Some(home), true)
+}
+
+fn start_sshd_inner(home: Option<&std::path::Path>, keys_in_home: bool) -> TestSshd {
     let _guard = acquire_startup_lock();
     let dir = tempfile::tempdir().unwrap();
     let host_key = dir.path().join("host_ed25519");
@@ -112,7 +120,11 @@ fn start_sshd_inner(home: Option<&std::path::Path>) -> TestSshd {
         );
     }
     let public = std::fs::read_to_string(format!("{}.pub", user_key.display())).unwrap();
-    let authz = dir.path().join("authorized_keys");
+    let authz = match (home, keys_in_home) {
+        (Some(home), true) => home.join(".ssh").join("authorized_keys"),
+        _ => dir.path().join("authorized_keys"),
+    };
+    std::fs::create_dir_all(authz.parent().unwrap()).unwrap();
     std::fs::write(&authz, public).unwrap();
 
     // The port is claimed by binding a listener and handing the bound

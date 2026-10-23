@@ -3,6 +3,31 @@
  * Do not edit: run `pnpm --filter @frogbyte-io/fleet-api-client generate`.
  */
 /**
+ * The body of the abandon call.
+ */
+export interface AbandonMarkerRequest {
+  /** The token from the review call. */
+  reviewToken: string;
+}
+
+/**
+ * What abandoning a marker will do, and the token that binds it.
+ */
+export interface AbandonReviewDto {
+  /** The Proxmox account. */
+  accountId: string;
+  /** The machine name the marker records. */
+  name: string;
+  /** The token the abandon call must present. */
+  reviewToken: string;
+  /**
+     * The VMID whose marker will be removed.
+     * @minimum 0
+     */
+  vmid: number;
+}
+
+/**
  * One Coolify account's observation state.
  */
 export interface AccountCoverageDto {
@@ -3259,6 +3284,36 @@ export interface MachineCollectRequest {
 }
 
 /**
+ * The spec, identical to the reviewed one.
+ */
+export type MachineCreateRequestSpec = { [key: string]: unknown };
+
+/**
+ * The body of `POST /machines/create`.
+ */
+export interface MachineCreateRequest {
+  /** The token from the review call. */
+  reviewToken: string;
+  /** The spec, identical to the reviewed one. */
+  spec: MachineCreateRequestSpec;
+}
+
+/**
+ * The spec as it will run, with every default filled in.
+ */
+export type MachineCreateReviewDtoSpec = { [key: string]: unknown };
+
+/**
+ * What a reviewed create will run, and the token that binds it.
+ */
+export interface MachineCreateReviewDto {
+  /** The token the create call must present. */
+  reviewToken: string;
+  /** The spec as it will run, with every default filled in. */
+  spec: MachineCreateReviewDtoSpec;
+}
+
+/**
  * The desired revision a plan was computed against.
  */
 export interface PlanRevisionDto {
@@ -6091,6 +6146,34 @@ export interface ReleaseLeaseRequest {
 }
 
 /**
+ * What abandoning a marker will do, and the token that binds it.
+ */
+export type ResourceAbandonReviewDtoData = {
+  /** The Proxmox account. */
+  accountId: string;
+  /** The machine name the marker records. */
+  name: string;
+  /** The token the abandon call must present. */
+  reviewToken: string;
+  /**
+     * The VMID whose marker will be removed.
+     * @minimum 0
+     */
+  vmid: number;
+};
+
+/**
+ * A single resource.
+ *
+ * The payload is nested under `data` so that later top-level fields are an
+ * additive change rather than a breaking one.
+ */
+export interface ResourceAbandonReviewDto {
+  /** What abandoning a marker will do, and the token that binds it. */
+  data: ResourceAbandonReviewDtoData;
+}
+
+/**
  * The structured, secret-free parameters.
  */
 export type ResourceActionRequestDtoDataParameters = { [key: string]: unknown };
@@ -7258,6 +7341,32 @@ export type ResourceLeaseDtoData = {
 export interface ResourceLeaseDto {
   /** One lease. */
   data: ResourceLeaseDtoData;
+}
+
+/**
+ * The spec as it will run, with every default filled in.
+ */
+export type ResourceMachineCreateReviewDtoDataSpec = { [key: string]: unknown };
+
+/**
+ * What a reviewed create will run, and the token that binds it.
+ */
+export type ResourceMachineCreateReviewDtoData = {
+  /** The token the create call must present. */
+  reviewToken: string;
+  /** The spec as it will run, with every default filled in. */
+  spec: ResourceMachineCreateReviewDtoDataSpec;
+};
+
+/**
+ * A single resource.
+ *
+ * The payload is nested under `data` so that later top-level fields are an
+ * additive change rather than a breaking one.
+ */
+export interface ResourceMachineCreateReviewDto {
+  /** What a reviewed create will run, and the token that binds it. */
+  data: ResourceMachineCreateReviewDtoData;
 }
 
 /**
@@ -8622,6 +8731,25 @@ export interface ResourceStoredCredentialDto {
 }
 
 /**
+ * The reference of a stored product key.
+ */
+export type ResourceStoredProductKeyDtoData = {
+  /** The reference to use as `secret` in a product-key activation. */
+  secretRef: string;
+};
+
+/**
+ * A single resource.
+ *
+ * The payload is nested under `data` so that later top-level fields are an
+ * additive change rather than a breaking one.
+ */
+export interface ResourceStoredProductKeyDto {
+  /** The reference of a stored product key. */
+  data: ResourceStoredProductKeyDtoData;
+}
+
+/**
  * The reference of a stored SSH key.
  */
 export type ResourceStoredSshKeyDtoData = {
@@ -8668,6 +8796,33 @@ export interface ResourceTailnetStatusDto {
      * fixed read-only scope.
      */
   data: ResourceTailnetStatusDtoData;
+}
+
+/**
+ * The machine to create: account, promoted image version, name, optional
+ * placement and hardware, tags, description, `onboot`, `protection`
+ * (default on), the guest OS, the bootstrap login, the host-key trust,
+ * the SSH credential choice (`generate`, `reference` or `publicKey`),
+ * an optional login user, the Windows options (administrator password
+ * policy and activation) and the deadline. It holds references and
+ * public keys only, never a secret value.
+ */
+export type ReviewMachineCreateRequestSpec = { [key: string]: unknown };
+
+/**
+ * The body of `POST /machines/create/review`.
+ */
+export interface ReviewMachineCreateRequest {
+  /**
+     * The machine to create: account, promoted image version, name, optional
+     * placement and hardware, tags, description, `onboot`, `protection`
+     * (default on), the guest OS, the bootstrap login, the host-key trust,
+     * the SSH credential choice (`generate`, `reference` or `publicKey`),
+     * an optional login user, the Windows options (administrator password
+     * policy and activation) and the deadline. It holds references and
+     * public keys only, never a secret value.
+     */
+  spec: ReviewMachineCreateRequestSpec;
 }
 
 /**
@@ -9451,6 +9606,14 @@ export interface StoreCredentialRequest {
 }
 
 /**
+ * The body of `POST /machine-product-keys`.
+ */
+export interface StoreProductKeyRequest {
+  /** The Windows product key (five groups of five letters and digits). */
+  productKey: string;
+}
+
+/**
  * The body of `POST /machine-ssh-keys`.
  */
 export interface StoreSshKeyRequest {
@@ -9474,6 +9637,14 @@ export interface StoreSshKeyRequest {
 export interface StoredCredentialDto {
   /** The opaque reference to pass as `credentialRef`. */
   credentialRef: string;
+}
+
+/**
+ * The reference of a stored product key.
+ */
+export interface StoredProductKeyDto {
+  /** The reference to use as `secret` in a product-key activation. */
+  secretRef: string;
 }
 
 /**
@@ -15429,6 +15600,78 @@ export const downloadMachineFile = async (fileId: string, options?: RequestInit)
 
 
 
+export type storeMachineProductKeyResponse201 = {
+  data: ResourceStoredProductKeyDto
+  status: 201
+}
+
+export type storeMachineProductKeyResponse400 = {
+  data: ApiError
+  status: 400
+}
+
+export type storeMachineProductKeyResponse403 = {
+  data: ApiError
+  status: 403
+}
+
+export type storeMachineProductKeyResponse503 = {
+  data: ApiError
+  status: 503
+}
+
+export type storeMachineProductKeyResponseSuccess = (storeMachineProductKeyResponse201) & {
+  headers: Headers;
+};
+export type storeMachineProductKeyResponseError = (storeMachineProductKeyResponse400 | storeMachineProductKeyResponse403 | storeMachineProductKeyResponse503) & {
+  headers: Headers;
+};
+
+export type storeMachineProductKeyResponse = (storeMachineProductKeyResponseSuccess | storeMachineProductKeyResponseError)
+
+export const getStoreMachineProductKeyUrl = () => {
+
+
+
+
+  return `/api/v1/machine-product-keys`
+}
+
+/**
+ * # Errors
+ *
+ * Returns the public error envelope on refusal, a value that is not a
+ * product key, or when no secret store is configured.
+ * @summary Stores a Windows product key as an encrypted secret and returns its
+reference. The key is readable only by the create executor and is never
+returned, logged, or recorded in an audit event.
+ */
+export const storeMachineProductKey = async (storeProductKeyRequest: StoreProductKeyRequest, options?: RequestInit): Promise<storeMachineProductKeyResponse> => {
+
+    const getHeaders = (h?: NonNullable<RequestInit['headers']>): Record<string, string | readonly string[]> => {
+    if (!h) return {};
+    if (h instanceof Headers) return Object.fromEntries(h.entries());
+    if (Array.isArray(h)) return Object.fromEntries(h);
+    return h;
+  };
+const res = await fetch(getStoreMachineProductKeyUrl(),
+  {
+    ...options,
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...getHeaders(options?.headers) },
+    body: JSON.stringify(storeProductKeyRequest)
+  }
+)
+
+
+  const body = [204, 205, 304].includes(res.status) ? null : await res.text();
+
+  const data: storeMachineProductKeyResponse['data'] = body ? JSON.parse(body) : {}
+  return { data, status: res.status, headers: res.headers } as storeMachineProductKeyResponse
+}
+
+
+
 export type storeMachineSshKeyResponse201 = {
   data: ResourceStoredSshKeyDto
   status: 201
@@ -15567,6 +15810,153 @@ export const listMachines = async (params?: ListMachinesParams, options?: Reques
 
   const data: listMachinesResponse['data'] = body ? JSON.parse(body) : {}
   return { data, status: res.status, headers: res.headers } as listMachinesResponse
+}
+
+
+
+export type createMachineResponse202 = {
+  data: ResourceOperationDto
+  status: 202
+}
+
+export type createMachineResponse400 = {
+  data: ApiError
+  status: 400
+}
+
+export type createMachineResponse403 = {
+  data: ApiError
+  status: 403
+}
+
+export type createMachineResponse503 = {
+  data: ApiError
+  status: 503
+}
+
+export type createMachineResponseSuccess = (createMachineResponse202) & {
+  headers: Headers;
+};
+export type createMachineResponseError = (createMachineResponse400 | createMachineResponse403 | createMachineResponse503) & {
+  headers: Headers;
+};
+
+export type createMachineResponse = (createMachineResponseSuccess | createMachineResponseError)
+
+export const getCreateMachineUrl = () => {
+
+
+
+
+  return `/api/v1/machines/create`
+}
+
+/**
+ * # Errors
+ *
+ * Returns the public error envelope on refusal, an invalid spec, or a
+ * review token that does not match the spec.
+ * @summary Creates a permanent VM as a durable `machine.create` operation. The
+operation clones the promoted image, applies the reviewed settings,
+starts the guest, waits for its address and SSH host key, registers and
+links the machine, installs the chosen SSH key and removes the image's
+shared key, and optionally finishes the Windows setup. Its result names
+the machine and endpoint, never a key.
+ */
+export const createMachine = async (machineCreateRequest: MachineCreateRequest, options?: RequestInit): Promise<createMachineResponse> => {
+
+    const getHeaders = (h?: NonNullable<RequestInit['headers']>): Record<string, string | readonly string[]> => {
+    if (!h) return {};
+    if (h instanceof Headers) return Object.fromEntries(h.entries());
+    if (Array.isArray(h)) return Object.fromEntries(h);
+    return h;
+  };
+const res = await fetch(getCreateMachineUrl(),
+  {
+    ...options,
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...getHeaders(options?.headers) },
+    body: JSON.stringify(machineCreateRequest)
+  }
+)
+
+
+  const body = [204, 205, 304].includes(res.status) ? null : await res.text();
+
+  const data: createMachineResponse['data'] = body ? JSON.parse(body) : {}
+  return { data, status: res.status, headers: res.headers } as createMachineResponse
+}
+
+
+
+export type reviewMachineCreateResponse200 = {
+  data: ResourceMachineCreateReviewDto
+  status: 200
+}
+
+export type reviewMachineCreateResponse400 = {
+  data: ApiError
+  status: 400
+}
+
+export type reviewMachineCreateResponse403 = {
+  data: ApiError
+  status: 403
+}
+
+export type reviewMachineCreateResponse503 = {
+  data: ApiError
+  status: 503
+}
+
+export type reviewMachineCreateResponseSuccess = (reviewMachineCreateResponse200) & {
+  headers: Headers;
+};
+export type reviewMachineCreateResponseError = (reviewMachineCreateResponse400 | reviewMachineCreateResponse403 | reviewMachineCreateResponse503) & {
+  headers: Headers;
+};
+
+export type reviewMachineCreateResponse = (reviewMachineCreateResponseSuccess | reviewMachineCreateResponseError)
+
+export const getReviewMachineCreateUrl = () => {
+
+
+
+
+  return `/api/v1/machines/create/review`
+}
+
+/**
+ * # Errors
+ *
+ * Returns the public error envelope on refusal or an invalid spec.
+ * @summary Reviews a persistent machine creation: validates the spec, checks that
+the image version is promoted and that the credential references exist,
+and returns the spec as it will run with the review token. Nothing is
+created.
+ */
+export const reviewMachineCreate = async (reviewMachineCreateRequest: ReviewMachineCreateRequest, options?: RequestInit): Promise<reviewMachineCreateResponse> => {
+
+    const getHeaders = (h?: NonNullable<RequestInit['headers']>): Record<string, string | readonly string[]> => {
+    if (!h) return {};
+    if (h instanceof Headers) return Object.fromEntries(h.entries());
+    if (Array.isArray(h)) return Object.fromEntries(h);
+    return h;
+  };
+const res = await fetch(getReviewMachineCreateUrl(),
+  {
+    ...options,
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...getHeaders(options?.headers) },
+    body: JSON.stringify(reviewMachineCreateRequest)
+  }
+)
+
+
+  const body = [204, 205, 304].includes(res.status) ? null : await res.text();
+
+  const data: reviewMachineCreateResponse['data'] = body ? JSON.parse(body) : {}
+  return { data, status: res.status, headers: res.headers } as reviewMachineCreateResponse
 }
 
 
@@ -16068,6 +16458,163 @@ export const testOnboardingDraft = async (draftId: string, options?: RequestInit
 
   const data: testOnboardingDraftResponse['data'] = body ? JSON.parse(body) : {}
   return { data, status: res.status, headers: res.headers } as testOnboardingDraftResponse
+}
+
+
+
+export type abandonPersistentMarkerResponse204 = {
+  data: void
+  status: 204
+}
+
+export type abandonPersistentMarkerResponse400 = {
+  data: ApiError
+  status: 400
+}
+
+export type abandonPersistentMarkerResponse403 = {
+  data: ApiError
+  status: 403
+}
+
+export type abandonPersistentMarkerResponse404 = {
+  data: ApiError
+  status: 404
+}
+
+export type abandonPersistentMarkerResponse409 = {
+  data: ApiError
+  status: 409
+}
+
+export type abandonPersistentMarkerResponse503 = {
+  data: ApiError
+  status: 503
+}
+
+export type abandonPersistentMarkerResponseSuccess = (abandonPersistentMarkerResponse204) & {
+  headers: Headers;
+};
+export type abandonPersistentMarkerResponseError = (abandonPersistentMarkerResponse400 | abandonPersistentMarkerResponse403 | abandonPersistentMarkerResponse404 | abandonPersistentMarkerResponse409 | abandonPersistentMarkerResponse503) & {
+  headers: Headers;
+};
+
+export type abandonPersistentMarkerResponse = (abandonPersistentMarkerResponseSuccess | abandonPersistentMarkerResponseError)
+
+export const getAbandonPersistentMarkerUrl = (accountId: string,
+    vmid: number,) => {
+
+
+
+
+  return `/api/v1/machines/persistent/${accountId}/${vmid}/abandon`
+}
+
+/**
+ * # Errors
+ *
+ * Returns the public error envelope on refusal, a review token that does
+ * not match, or an unknown marker.
+ * @summary Abandons a reviewed marker: it is removed, with an audit event, and its
+VMID and name are free again.
+ */
+export const abandonPersistentMarker = async (accountId: string,
+    vmid: number,
+    abandonMarkerRequest: AbandonMarkerRequest, options?: RequestInit): Promise<abandonPersistentMarkerResponse> => {
+
+    const getHeaders = (h?: NonNullable<RequestInit['headers']>): Record<string, string | readonly string[]> => {
+    if (!h) return {};
+    if (h instanceof Headers) return Object.fromEntries(h.entries());
+    if (Array.isArray(h)) return Object.fromEntries(h);
+    return h;
+  };
+const res = await fetch(getAbandonPersistentMarkerUrl(accountId,vmid),
+  {
+    ...options,
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...getHeaders(options?.headers) },
+    body: JSON.stringify(abandonMarkerRequest)
+  }
+)
+
+
+  const body = [204, 205, 304].includes(res.status) ? null : await res.text();
+
+  const data: abandonPersistentMarkerResponse['data'] = body ? JSON.parse(body) : undefined
+  return { data, status: res.status, headers: res.headers } as abandonPersistentMarkerResponse
+}
+
+
+
+export type reviewAbandonPersistentMarkerResponse200 = {
+  data: ResourceAbandonReviewDto
+  status: 200
+}
+
+export type reviewAbandonPersistentMarkerResponse403 = {
+  data: ApiError
+  status: 403
+}
+
+export type reviewAbandonPersistentMarkerResponse404 = {
+  data: ApiError
+  status: 404
+}
+
+export type reviewAbandonPersistentMarkerResponse409 = {
+  data: ApiError
+  status: 409
+}
+
+export type reviewAbandonPersistentMarkerResponse503 = {
+  data: ApiError
+  status: 503
+}
+
+export type reviewAbandonPersistentMarkerResponseSuccess = (reviewAbandonPersistentMarkerResponse200) & {
+  headers: Headers;
+};
+export type reviewAbandonPersistentMarkerResponseError = (reviewAbandonPersistentMarkerResponse403 | reviewAbandonPersistentMarkerResponse404 | reviewAbandonPersistentMarkerResponse409 | reviewAbandonPersistentMarkerResponse503) & {
+  headers: Headers;
+};
+
+export type reviewAbandonPersistentMarkerResponse = (reviewAbandonPersistentMarkerResponseSuccess | reviewAbandonPersistentMarkerResponseError)
+
+export const getReviewAbandonPersistentMarkerUrl = (accountId: string,
+    vmid: number,) => {
+
+
+
+
+  return `/api/v1/machines/persistent/${accountId}/${vmid}/abandon/review`
+}
+
+/**
+ * # Errors
+ *
+ * Returns the public error envelope on refusal, an unknown marker, or a
+ * marker of a created machine.
+ * @summary Reviews abandoning a persistent marker whose creation never completed
+(a failed clone, or a guest removed by hand). A marker of a created
+machine is refused: destroy that machine instead.
+ */
+export const reviewAbandonPersistentMarker = async (accountId: string,
+    vmid: number, options?: RequestInit): Promise<reviewAbandonPersistentMarkerResponse> => {
+
+  const res = await fetch(getReviewAbandonPersistentMarkerUrl(accountId,vmid),
+  {
+    ...options,
+    method: 'POST'
+
+
+  }
+)
+
+
+  const body = [204, 205, 304].includes(res.status) ? null : await res.text();
+
+  const data: reviewAbandonPersistentMarkerResponse['data'] = body ? JSON.parse(body) : {}
+  return { data, status: res.status, headers: res.headers } as reviewAbandonPersistentMarkerResponse
 }
 
 

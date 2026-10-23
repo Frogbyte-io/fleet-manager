@@ -5331,6 +5331,68 @@
         }
       }
     },
+    "/api/v1/machine-product-keys": {
+      "post": {
+        "tags": [
+          "machines"
+        ],
+        "summary": "Stores a Windows product key as an encrypted secret and returns its\nreference. The key is readable only by the create executor and is never\nreturned, logged, or recorded in an audit event.",
+        "description": "# Errors\n\nReturns the public error envelope on refusal, a value that is not a\nproduct key, or when no secret store is configured.",
+        "operationId": "storeMachineProductKey",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/StoreProductKeyRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "description": "The key is stored; the reference is the only thing returned.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Resource_StoredProductKeyDto"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The value is not a product key.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The caller may not write secrets.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Persistent machine creation is not wired.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/machine-ssh-keys": {
       "post": {
         "tags": [
@@ -5492,6 +5554,144 @@
           },
           "403": {
             "description": "The caller may not read machines.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/machines/create": {
+      "post": {
+        "tags": [
+          "machines"
+        ],
+        "summary": "Creates a permanent VM as a durable `machine.create` operation. The\noperation clones the promoted image, applies the reviewed settings,\nstarts the guest, waits for its address and SSH host key, registers and\nlinks the machine, installs the chosen SSH key and removes the image's\nshared key, and optionally finishes the Windows setup. Its result names\nthe machine and endpoint, never a key.",
+        "description": "# Errors\n\nReturns the public error envelope on refusal, an invalid spec, or a\nreview token that does not match the spec.",
+        "operationId": "createMachine",
+        "parameters": [
+          {
+            "name": "Idempotency-Key",
+            "in": "header",
+            "description": "A caller-chosen key: a retry with the same key returns the operation already queued.",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/MachineCreateRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "202": {
+            "description": "The creation is queued as a `machine.create` operation.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Resource_OperationDto"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The spec is invalid or the review token does not match it.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The caller may not provision machines.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Persistent machine creation is not wired.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/machines/create/review": {
+      "post": {
+        "tags": [
+          "machines"
+        ],
+        "summary": "Reviews a persistent machine creation: validates the spec, checks that\nthe image version is promoted and that the credential references exist,\nand returns the spec as it will run with the review token. Nothing is\ncreated.",
+        "description": "# Errors\n\nReturns the public error envelope on refusal or an invalid spec.",
+        "operationId": "reviewMachineCreate",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ReviewMachineCreateRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "The review record; present its token to the create call.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Resource_MachineCreateReviewDto"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The spec is invalid, the image version is not promoted, or a reference names nothing.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The caller may not provision machines.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Persistent machine creation is not wired.",
             "content": {
               "application/json": {
                 "schema": {
@@ -5928,6 +6128,187 @@
           },
           "404": {
             "description": "No such draft.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/machines/persistent/{accountId}/{vmid}/abandon": {
+      "post": {
+        "tags": [
+          "machines"
+        ],
+        "summary": "Abandons a reviewed marker: it is removed, with an audit event, and its\nVMID and name are free again.",
+        "description": "# Errors\n\nReturns the public error envelope on refusal, a review token that does\nnot match, or an unknown marker.",
+        "operationId": "abandonPersistentMarker",
+        "parameters": [
+          {
+            "name": "accountId",
+            "in": "path",
+            "description": "The Proxmox account.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "vmid",
+            "in": "path",
+            "description": "The guest's VMID.",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "format": "int32",
+              "minimum": 0
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AbandonMarkerRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "204": {
+            "description": "The marker was removed."
+          },
+          "400": {
+            "description": "The review token does not match.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The caller may not provision machines.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "The marker does not exist.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The marker belongs to a created machine.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Persistent machine creation is not wired.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/machines/persistent/{accountId}/{vmid}/abandon/review": {
+      "post": {
+        "tags": [
+          "machines"
+        ],
+        "summary": "Reviews abandoning a persistent marker whose creation never completed\n(a failed clone, or a guest removed by hand). A marker of a created\nmachine is refused: destroy that machine instead.",
+        "description": "# Errors\n\nReturns the public error envelope on refusal, an unknown marker, or a\nmarker of a created machine.",
+        "operationId": "reviewAbandonPersistentMarker",
+        "parameters": [
+          {
+            "name": "accountId",
+            "in": "path",
+            "description": "The Proxmox account.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "vmid",
+            "in": "path",
+            "description": "The guest's VMID.",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "format": "int32",
+              "minimum": 0
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The review record; present its token to the abandon call.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Resource_AbandonReviewDto"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The caller may not provision machines.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "The marker does not exist.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The marker belongs to a created machine.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Persistent machine creation is not wired.",
             "content": {
               "application/json": {
                 "schema": {
@@ -9251,7 +9632,7 @@
           {
             "name": "action",
             "in": "path",
-            "description": "The destructive action: snapshot, snapshot-revert, snapshot-delete, clone, template, destroy, or task-cancel.",
+            "description": "The destructive action: snapshot, snapshot-revert, snapshot-delete, clone, template, destroy, task-cancel, or config (an allow-listed settings change).",
             "required": true,
             "schema": {
               "type": "string"
@@ -12487,6 +12868,49 @@
   },
   "components": {
     "schemas": {
+      "AbandonMarkerRequest": {
+        "type": "object",
+        "description": "The body of the abandon call.",
+        "required": [
+          "reviewToken"
+        ],
+        "properties": {
+          "reviewToken": {
+            "type": "string",
+            "description": "The token from the review call."
+          }
+        }
+      },
+      "AbandonReviewDto": {
+        "type": "object",
+        "description": "What abandoning a marker will do, and the token that binds it.",
+        "required": [
+          "reviewToken",
+          "accountId",
+          "vmid",
+          "name"
+        ],
+        "properties": {
+          "accountId": {
+            "type": "string",
+            "description": "The Proxmox account."
+          },
+          "name": {
+            "type": "string",
+            "description": "The machine name the marker records."
+          },
+          "reviewToken": {
+            "type": "string",
+            "description": "The token the abandon call must present."
+          },
+          "vmid": {
+            "type": "integer",
+            "format": "int32",
+            "description": "The VMID whose marker will be removed.",
+            "minimum": 0
+          }
+        }
+      },
       "AccountCoverageDto": {
         "type": "object",
         "description": "One Coolify account's observation state.",
@@ -17607,6 +18031,42 @@
               "type": "string"
             },
             "description": "1 to 16 distinct absolute guest paths of regular files, each at most\n1024 bytes, without `.`, `..` or empty components or control\ncharacters (a Windows guest takes drive-absolute paths). Each file\nmust fit the controller's artifact size cap."
+          }
+        }
+      },
+      "MachineCreateRequest": {
+        "type": "object",
+        "description": "The body of `POST /machines/create`.",
+        "required": [
+          "spec",
+          "reviewToken"
+        ],
+        "properties": {
+          "reviewToken": {
+            "type": "string",
+            "description": "The token from the review call."
+          },
+          "spec": {
+            "type": "object",
+            "description": "The spec, identical to the reviewed one."
+          }
+        }
+      },
+      "MachineCreateReviewDto": {
+        "type": "object",
+        "description": "What a reviewed create will run, and the token that binds it.",
+        "required": [
+          "reviewToken",
+          "spec"
+        ],
+        "properties": {
+          "reviewToken": {
+            "type": "string",
+            "description": "The token the create call must present."
+          },
+          "spec": {
+            "type": "object",
+            "description": "The spec as it will run, with every default filled in."
           }
         }
       },
@@ -22978,6 +23438,45 @@
           }
         }
       },
+      "Resource_AbandonReviewDto": {
+        "type": "object",
+        "description": "A single resource.\n\nThe payload is nested under `data` so that later top-level fields are an\nadditive change rather than a breaking one.",
+        "required": [
+          "data"
+        ],
+        "properties": {
+          "data": {
+            "type": "object",
+            "description": "What abandoning a marker will do, and the token that binds it.",
+            "required": [
+              "reviewToken",
+              "accountId",
+              "vmid",
+              "name"
+            ],
+            "properties": {
+              "accountId": {
+                "type": "string",
+                "description": "The Proxmox account."
+              },
+              "name": {
+                "type": "string",
+                "description": "The machine name the marker records."
+              },
+              "reviewToken": {
+                "type": "string",
+                "description": "The token the abandon call must present."
+              },
+              "vmid": {
+                "type": "integer",
+                "format": "int32",
+                "description": "The VMID whose marker will be removed.",
+                "minimum": 0
+              }
+            }
+          }
+        }
+      },
       "Resource_ActionRequestDto": {
         "type": "object",
         "description": "A single resource.\n\nThe payload is nested under `data` so that later top-level fields are an\nadditive change rather than a breaking one.",
@@ -24813,6 +25312,33 @@
           }
         }
       },
+      "Resource_MachineCreateReviewDto": {
+        "type": "object",
+        "description": "A single resource.\n\nThe payload is nested under `data` so that later top-level fields are an\nadditive change rather than a breaking one.",
+        "required": [
+          "data"
+        ],
+        "properties": {
+          "data": {
+            "type": "object",
+            "description": "What a reviewed create will run, and the token that binds it.",
+            "required": [
+              "reviewToken",
+              "spec"
+            ],
+            "properties": {
+              "reviewToken": {
+                "type": "string",
+                "description": "The token the create call must present."
+              },
+              "spec": {
+                "type": "object",
+                "description": "The spec as it will run, with every default filled in."
+              }
+            }
+          }
+        }
+      },
       "Resource_MachineDriftDto": {
         "type": "object",
         "description": "A single resource.\n\nThe payload is nested under `data` so that later top-level fields are an\nadditive change rather than a breaking one.",
@@ -26483,6 +27009,28 @@
           }
         }
       },
+      "Resource_StoredProductKeyDto": {
+        "type": "object",
+        "description": "A single resource.\n\nThe payload is nested under `data` so that later top-level fields are an\nadditive change rather than a breaking one.",
+        "required": [
+          "data"
+        ],
+        "properties": {
+          "data": {
+            "type": "object",
+            "description": "The reference of a stored product key.",
+            "required": [
+              "secretRef"
+            ],
+            "properties": {
+              "secretRef": {
+                "type": "string",
+                "description": "The reference to use as `secret` in a product-key activation."
+              }
+            }
+          }
+        }
+      },
       "Resource_StoredSshKeyDto": {
         "type": "object",
         "description": "A single resource.\n\nThe payload is nested under `data` so that later top-level fields are an\nadditive change rather than a breaking one.",
@@ -26547,6 +27095,19 @@
           "immediate",
           "backoff"
         ]
+      },
+      "ReviewMachineCreateRequest": {
+        "type": "object",
+        "description": "The body of `POST /machines/create/review`.",
+        "required": [
+          "spec"
+        ],
+        "properties": {
+          "spec": {
+            "type": "object",
+            "description": "The machine to create: account, promoted image version, name, optional\nplacement and hardware, tags, description, `onboot`, `protection`\n(default on), the guest OS, the bootstrap login, the host-key trust,\nthe SSH credential choice (`generate`, `reference` or `publicKey`),\nan optional login user, the Windows options (administrator password\npolicy and activation) and the deadline. It holds references and\npublic keys only, never a secret value."
+          }
+        }
       },
       "ReviewProxmoxOperationRequest": {
         "type": "object",
@@ -28607,6 +29168,19 @@
         },
         "additionalProperties": false
       },
+      "StoreProductKeyRequest": {
+        "type": "object",
+        "description": "The body of `POST /machine-product-keys`.",
+        "required": [
+          "productKey"
+        ],
+        "properties": {
+          "productKey": {
+            "type": "string",
+            "description": "The Windows product key (five groups of five letters and digits)."
+          }
+        }
+      },
       "StoreSshKeyRequest": {
         "type": "object",
         "description": "The body of `POST /machine-ssh-keys`.",
@@ -28637,6 +29211,19 @@
           "credentialRef": {
             "type": "string",
             "description": "The opaque reference to pass as `credentialRef`."
+          }
+        }
+      },
+      "StoredProductKeyDto": {
+        "type": "object",
+        "description": "The reference of a stored product key.",
+        "required": [
+          "secretRef"
+        ],
+        "properties": {
+          "secretRef": {
+            "type": "string",
+            "description": "The reference to use as `secret` in a product-key activation."
           }
         }
       },

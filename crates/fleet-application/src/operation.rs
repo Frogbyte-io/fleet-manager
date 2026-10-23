@@ -66,7 +66,7 @@ pub const BROKER_IDEMPOTENCY_PREFIX: &str = "action-request:";
 /// machine-scoped shape plus the plan and its approval identities
 /// (FM-402); the source kinds carry the remote/commit payloads and are
 /// catalog-level (FM-403).
-pub const CREATABLE_KINDS: [&str; 73] = [
+pub const CREATABLE_KINDS: [&str; 75] = [
     "noop",
     // Brokered Coolify lifecycle kind (FM-1033): created only through the
     // action broker.
@@ -130,6 +130,9 @@ pub const CREATABLE_KINDS: [&str; 73] = [
     "proxmox.guest.clone",
     "proxmox.guest.template",
     "proxmox.task-cancel",
+    // Reviewed persistent-VM kinds (#489).
+    "proxmox.guest.config",
+    "machine.create",
     "image.build",
     "lab.provision",
     "lab.cleanup",
@@ -177,6 +180,8 @@ fn catalog_scoped_kind_permission(kind: &str) -> Option<Permission> {
         | "proxmox.guest.clone"
         | "proxmox.guest.template"
         | "proxmox.task-cancel" => Some(Permission::ProxmoxDestructive),
+        "proxmox.guest.config" => Some(Permission::ProxmoxGuestConfig),
+        "machine.create" => Some(Permission::MachineProvision),
         _ => None,
     }
 }
@@ -275,7 +280,7 @@ pub const MAX_PAYLOAD_JSON: usize = 128 * 1024;
 
 /// The destructive-adjacent kinds: their creation requires a review token
 /// computed over exactly the payload being created.
-pub const DESTRUCTIVE_KINDS: [&str; 7] = [
+pub const DESTRUCTIVE_KINDS: [&str; 9] = [
     "proxmox.guest.snapshot",
     "proxmox.guest.snapshot-revert",
     "proxmox.guest.snapshot-delete",
@@ -283,6 +288,8 @@ pub const DESTRUCTIVE_KINDS: [&str; 7] = [
     "proxmox.guest.clone",
     "proxmox.guest.template",
     "proxmox.task-cancel",
+    "proxmox.guest.config",
+    "machine.create",
 ];
 
 /// The review token for one destructive operation: the SHA-256 of the
@@ -851,7 +858,7 @@ impl Operations {
         };
         if !matches!(
             new.kind.as_str(),
-            "proxmox.guest.destroy" | "proxmox.guest.snapshot-delete"
+            "proxmox.guest.destroy" | "proxmox.guest.snapshot-delete" | "proxmox.guest.config"
         ) {
             return Ok(());
         }
@@ -1028,6 +1035,28 @@ impl Operations {
             });
         }
         self.require_own_lease(principal_id, lease_id).await?;
+        self.create_inner(authorizer, principal_id, new, CreateRoute::Dedicated)
+            .await
+    }
+
+    /// Creates the `machine.create` operation of a reviewed persistent VM
+    /// request (#489). Generic operation creation refuses the kind.
+    ///
+    /// # Errors
+    ///
+    /// Fails on denial, a missing or wrong review token, or a backend
+    /// failure.
+    pub async fn create_machine_create(
+        &self,
+        authorizer: &dyn Authorizer,
+        principal_id: &str,
+        new: &NewOperation,
+    ) -> Result<Operation, OperationUseCaseError> {
+        if new.kind != "machine.create" {
+            return Err(OperationUseCaseError::Invalid {
+                detail: "this route creates machine.create operations only".to_owned(),
+            });
+        }
         self.create_inner(authorizer, principal_id, new, CreateRoute::Dedicated)
             .await
     }
@@ -1631,6 +1660,38 @@ impl Operations {
                         .to_owned(),
                 });
             }
+        } else if new.kind == "machine.create" {
+            // Persistent VM creation (#489) runs through its dedicated route
+            // only: its payload names credential references (the bootstrap
+            // auth, an SSH key, a product key) that the generic surface must
+            // never be able to queue. The review token still binds the exact
+            // payload, and the catalog entry still applies.
+            if route != CreateRoute::Dedicated {
+                return Err(OperationUseCaseError::Invalid {
+                    detail: "machine.create runs through the machine create route".to_owned(),
+                });
+            }
+            let expected =
+                review_token_for(&new.kind, new.payload_json.as_deref().unwrap_or_default());
+            match new.review_token.as_deref() {
+                Some(presented) if constant_time_eq(presented, &expected) => {}
+                _ => {
+                    return Err(OperationUseCaseError::Invalid {
+                        detail:
+                            "machine.create requires a valid review token; review the machine first"
+                                .to_owned(),
+                    });
+                }
+            }
+            authorize(
+                authorizer,
+                AccessRequest {
+                    principal_id,
+                    action: Permission::MachineProvision,
+                    resource: None,
+                },
+            )
+            .map_err(OperationUseCaseError::Denied)?;
         } else if new.kind == "lab.provision" {
             if route != CreateRoute::Dedicated {
                 return Err(OperationUseCaseError::Invalid {

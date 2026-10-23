@@ -36,6 +36,7 @@ pub mod mise;
 pub mod node;
 pub mod onboarding;
 pub mod operations;
+pub mod persistent_machines;
 pub mod plans;
 pub mod projects;
 pub mod proxmox;
@@ -557,6 +558,11 @@ pub fn api(state: Arc<operations::ApiState>) -> (Router, utoipa::openapi::OpenAp
                     machine_access::clear_machine_endpoint_auth
                 ))
                 .routes(routes!(machine_access::exec_machine))
+                .routes(routes!(persistent_machines::review_machine_create))
+                .routes(routes!(persistent_machines::create_machine))
+                .routes(routes!(persistent_machines::store_machine_product_key))
+                .routes(routes!(persistent_machines::review_abandon_marker))
+                .routes(routes!(persistent_machines::abandon_marker))
                 .routes(routes!(machine_access::collect_machine_files))
                 .routes(routes!(
                     machine_access::put_machine_file,

@@ -189,6 +189,39 @@ pub trait MachineKeyPort: fmt::Debug + Send + Sync {
     ///
     /// Fails with a secret-free detail when the store errors.
     async fn resolve(&self, reference: &str, machine_id: &str) -> Result<Option<String>, String>;
+
+    /// Whether the reference names a key Fleet itself stores for machines
+    /// (`machines/ssh/`), as opposed to a repository credential (`git/`)
+    /// that is usable for SSH but belongs to another purpose. The default
+    /// accepts, for stores that hold only machine keys.
+    ///
+    /// # Errors
+    ///
+    /// Fails with a secret-free detail when the store errors.
+    async fn is_machine_key(&self, _reference: &str) -> Result<bool, String> {
+        Ok(true)
+    }
+
+    /// The references of the keys bound to one machine, oldest first.
+    ///
+    /// # Errors
+    ///
+    /// Fails with a secret-free detail when the store errors.
+    async fn list_for_machine(&self, _machine_id: &str) -> Result<Vec<String>, String> {
+        Ok(Vec::new())
+    }
+
+    /// Deletes every secret bound to one machine (its keys, and the
+    /// administrator passwords Fleet rotated for it) and answers how many.
+    /// Called when the machine is deleted, so a deleted machine leaves no
+    /// credential behind.
+    ///
+    /// # Errors
+    ///
+    /// Fails with a secret-free detail when the store errors.
+    async fn revoke_for_machine(&self, _machine_id: &str) -> Result<usize, String> {
+        Ok(0)
+    }
 }
 
 /// What to run.
@@ -335,6 +368,7 @@ pub struct MachineAccess {
     blobs: Option<Arc<dyn ArtifactBlobPort>>,
     policy: ArtifactPolicy,
     blob_lock: Arc<tokio::sync::Mutex<()>>,
+    persistent: Option<Arc<crate::persistent::PersistentMachines>>,
 }
 
 impl MachineAccess {
@@ -357,7 +391,25 @@ impl MachineAccess {
             blobs: None,
             policy: ArtifactPolicy::default(),
             blob_lock: Arc::new(tokio::sync::Mutex::new(())),
+            persistent: None,
         }
+    }
+
+    /// Serves persistent VM creation (#489) next to the other machine
+    /// surfaces: they share the key store and the machine routes.
+    #[must_use]
+    pub fn with_persistent(
+        mut self,
+        persistent: Arc<crate::persistent::PersistentMachines>,
+    ) -> Self {
+        self.persistent = Some(persistent);
+        self
+    }
+
+    /// The persistent VM creation use case, when wired.
+    #[must_use]
+    pub fn persistent(&self) -> Option<&Arc<crate::persistent::PersistentMachines>> {
+        self.persistent.as_ref()
     }
 
     /// Serves stored-key authentication from a key store.

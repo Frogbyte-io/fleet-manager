@@ -90,6 +90,19 @@ pub enum MachineAccessAction {
         /// The machine the key is bound to.
         machine: Option<String>,
     },
+    /// `machines product-key store`: the Windows product key is read from
+    /// stdin (#489).
+    ProductKeyStore,
+    /// `machines create ...`: a permanent, Fleet-managed VM (#489).
+    Create(Box<crate::persistent::CreateArgs>),
+    /// `machines abandon --account <id> --vmid <n>`: drop the marker of a
+    /// creation that never completed (#489).
+    Abandon {
+        /// The Proxmox account.
+        account: String,
+        /// The VMID.
+        vmid: u32,
+    },
     /// `machines endpoint-auth get <machine> <endpoint>`.
     EndpointAuthGet {
         /// The machine.
@@ -187,6 +200,17 @@ pub(crate) fn parse(verb: &str, rest: &[&str], output: &mut Output) -> Result<Co
             }
             _ => return Err(CliError { message: usage() }),
         },
+        "product-key" => match rest {
+            ["store", flags @ ..] => {
+                parse_flags(flags, output, |flag, _| Err(unknown(flag)))?;
+                MachineAccessAction::ProductKeyStore
+            }
+            _ => return Err(CliError { message: usage() }),
+        },
+        "abandon" => crate::persistent::parse_abandon(rest, output)?,
+        "create" => {
+            MachineAccessAction::Create(Box::new(crate::persistent::parse_create(rest, output)?))
+        }
         "endpoint-auth" => parse_endpoint_auth(rest, output)?,
         "exec" => parse_exec(rest, output)?,
         "put" => parse_put(rest, output)?,
@@ -505,6 +529,7 @@ fn target_body(target: &Target) -> Result<serde_json::Map<String, Value>, CliErr
 
 /// The controller request of one subcommand: the primary request, for the
 /// commands that stream (`put`, `file-get`) the one that starts them.
+#[allow(clippy::too_many_lines)]
 pub(crate) fn request(action: &MachineAccessAction) -> Result<RequestShape, CliError> {
     Ok(match action {
         MachineAccessAction::SshKeyStore { .. } => (
@@ -513,6 +538,25 @@ pub(crate) fn request(action: &MachineAccessAction) -> Result<RequestShape, CliE
             Vec::new(),
             // The key is read from stdin when the command runs, never here.
             None,
+        ),
+        MachineAccessAction::ProductKeyStore => (
+            reqwest::Method::POST,
+            "/api/v1/machine-product-keys".to_owned(),
+            Vec::new(),
+            // The key is read from stdin when the command runs, never here.
+            None,
+        ),
+        MachineAccessAction::Abandon { account, vmid } => (
+            reqwest::Method::POST,
+            format!("/api/v1/machines/persistent/{account}/{vmid}/abandon/review"),
+            Vec::new(),
+            None,
+        ),
+        MachineAccessAction::Create(args) => (
+            reqwest::Method::POST,
+            "/api/v1/machines/create/review".to_owned(),
+            Vec::new(),
+            Some(json!({ "spec": args.spec() })),
         ),
         MachineAccessAction::EndpointAuthGet { machine, endpoint } => (
             reqwest::Method::GET,
@@ -667,6 +711,27 @@ pub(crate) fn run(
                 correlation_id,
             )?;
             Ok((rendered(&body["data"]), 0))
+        }
+        MachineAccessAction::ProductKeyStore => {
+            let key = crate::read_stdin_to_eof("the Windows product key")?;
+            let body = crate::send(
+                &client,
+                invocation,
+                reqwest::Method::POST,
+                "/api/v1/machine-product-keys",
+                &[],
+                Some(&json!({ "productKey": key.trim() })),
+                correlation_id,
+            )?;
+            Ok((rendered(&body["data"]), 0))
+        }
+        MachineAccessAction::Abandon { account, vmid } => {
+            let payload = crate::persistent::run_abandon(invocation, account, *vmid)?;
+            Ok((rendered(&payload), 0))
+        }
+        MachineAccessAction::Create(args) => {
+            let (payload, exit) = crate::persistent::run_create(invocation, args)?;
+            Ok((rendered(&payload), exit))
         }
         MachineAccessAction::Put {
             target,
@@ -883,6 +948,13 @@ pub(crate) fn render(payload: &Value) -> String {
             );
         }
         return out;
+    }
+    // The persistent VM results (#489) are structured: show them whole.
+    if ["vmid", "secretRef", "reviewToken", "step"]
+        .iter()
+        .any(|key| payload.get(*key).is_some())
+    {
+        return serde_json::to_string_pretty(payload).unwrap_or_default();
     }
     if let Some(credential) = payload["credentialRef"].as_str() {
         return format!("credential {}", clean(credential));
