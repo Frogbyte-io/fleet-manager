@@ -232,6 +232,14 @@ pub enum Permission {
     /// back (ADR 0017). A privileged read: a collected file can be
     /// sensitive. Scoped to the machine.
     MachineCollect,
+    /// Open an interactive shell on a Fleet machine over its SSH endpoint
+    /// (#494). Arbitrary command execution as the endpoint's user with a
+    /// human at the keyboard, so it is privileged like
+    /// [`Permission::MachineExec`] and separate from it: neither implies the
+    /// other, and read access implies neither. Scoped to the machine; checked
+    /// when a session is created and again when its socket attaches; never
+    /// delegated to Lab credentials.
+    MachineTerminal,
     /// List and read Registry types and entries, and their relations
     /// (FM-1012). A read of descriptive, never-secret data: the Registry
     /// holds no credentials, so it is not risky.
@@ -340,6 +348,7 @@ impl Permission {
         Permission::RegistryObserve,
         Permission::MachineExec,
         Permission::MachinePut,
+        Permission::MachineTerminal,
         Permission::MachineCollect,
     ];
 
@@ -421,6 +430,7 @@ impl Permission {
             Permission::RegistryObserve => "registry.observe",
             Permission::MachineExec => "machines.exec",
             Permission::MachinePut => "machines.put",
+            Permission::MachineTerminal => "machines.terminal",
             Permission::MachineCollect => "machines.collect",
         }
     }
@@ -504,6 +514,7 @@ impl Permission {
             | Permission::ActionDeny
             | Permission::MachineExec
             | Permission::MachinePut
+            | Permission::MachineTerminal
             | Permission::MachineCollect
             | Permission::RegistryObserve => true,
         }
@@ -588,6 +599,7 @@ impl Permission {
             | Permission::ActionApprove
             | Permission::MachineExec
             | Permission::MachinePut
+            | Permission::MachineTerminal
             | Permission::MachineCollect
             | Permission::ActionDeny => true,
         }

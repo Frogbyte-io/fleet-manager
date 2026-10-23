@@ -11,6 +11,10 @@ base64 = "0.22.1"
 fleet-application = { path = "../../fleet-application" }
 fleet-core = { path = "../../fleet-core" }
 serde_json = "1.0.151"
+tokio = { version = "1.53.1", features = ["io-util", "process"] }
+
+[target.'cfg(unix)'.dependencies]
+pty-process = { version = "0.5.4", features = ["async"] }
 
 [lints]
 workspace = true

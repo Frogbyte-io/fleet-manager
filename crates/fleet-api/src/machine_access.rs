@@ -75,7 +75,7 @@ impl From<EndpointAuthDto> for EndpointAuth {
     }
 }
 
-fn access_or_error(
+pub(crate) fn access_or_error(
     state: &crate::operations::ApiState,
     correlation_id: CorrelationId,
 ) -> Result<Arc<MachineAccess>, ApiErrorResponse> {

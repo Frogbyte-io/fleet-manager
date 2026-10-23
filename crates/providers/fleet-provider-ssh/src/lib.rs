@@ -42,6 +42,8 @@ pub mod inventory;
 pub mod key;
 pub mod put;
 pub mod shell;
+#[cfg(unix)]
+pub mod terminal;
 
 #[cfg(test)]
 mod pwsh_support;
@@ -59,6 +61,8 @@ pub use inventory::{COLLECTION_DEADLINE, PROBE_SOURCE, collect, parse_probe_outp
 pub use key::PrivateKey;
 pub use put::{PutOutcome, PutRequest, put_file};
 pub use shell::GuestShell;
+#[cfg(unix)]
+pub use terminal::{Terminal, TerminalEvent, TerminalSize};
 
 /// One host's key, as observed from the network.
 #[derive(Clone, Debug, Eq, PartialEq)]

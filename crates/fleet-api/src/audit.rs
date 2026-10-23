@@ -172,6 +172,22 @@ fn safe_metadata_entry(key: &str, value: &serde_json::Value) -> bool {
         "attempt" | "vmid" | "invalidatedEnrollmentCount" => {
             !value.is_empty() && value.bytes().all(|byte| byte.is_ascii_digit())
         }
+        // Machine terminal facts (#494): a duration and an exit status are
+        // decimal counts, the close reason is from a closed set of
+        // identifiers, and the session's identity is generated.
+        "elapsedMs" | "exitCode" => {
+            !value.is_empty() && value.len() <= 16 && value.bytes().all(|byte| byte.is_ascii_digit())
+        }
+        "closeReason" => {
+            !value.is_empty()
+                && value.len() <= 32
+                && value
+                    .bytes()
+                    .all(|byte| byte.is_ascii_lowercase() || byte == b'_')
+        }
+        "terminalSession" => value.strip_prefix("terminal-").is_some_and(|id| {
+            (8..=32).contains(&id.len()) && id.bytes().all(|byte| byte.is_ascii_hexdigit())
+        }),
         // Names, purposes, notes, hostnames, remotes, and opaque ids are
         // deliberately omitted because they can be caller-controlled text.
         _ => false,
