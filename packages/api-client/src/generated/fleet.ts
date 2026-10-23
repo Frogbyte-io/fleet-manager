@@ -1008,6 +1008,52 @@ export interface ConfirmProxmoxFingerprintRequest {
 }
 
 /**
+ * A created console session. The token is shown here once.
+ */
+export interface ConsoleSessionDto {
+  /** The account. */
+  accountId: string;
+  /**
+     * The console page in the web app, relative to the controller's
+     * origin, with the token in the fragment. A human can open it.
+     */
+  consolePath: string;
+  /** When an unattached token stops being valid (epoch millis). */
+  expiresAt: number;
+  /**
+     * Close after this many seconds without browser input.
+     * @minimum 0
+     */
+  idleTimeoutSeconds: number;
+  /**
+     * Close after this many seconds regardless.
+     * @minimum 0
+     */
+  maxDurationSeconds: number;
+  /** The node. */
+  node: string;
+  /** The session's identity, as it appears in audit events. */
+  sessionId: string;
+  /** The WebSocket path, relative to the controller's origin. */
+  socketPath: string;
+  /**
+     * The WebSocket subprotocols to offer: `binary`, then the token
+     * subprotocol.
+     */
+  subprotocols: string[];
+  /**
+     * The single-use token that attaches to the console WebSocket. It
+     * expires at `expiresAt` and is spent by the first attach.
+     */
+  token: string;
+  /**
+     * The guest's VMID.
+     * @minimum 0
+     */
+  vmid: number;
+}
+
+/**
  * A deployed application.
  */
 export interface CoolifyApplicationDto {
@@ -1431,6 +1477,19 @@ export interface CreateActionRequest {
      * characters).
      */
   target: string;
+}
+
+/**
+ * The guest to open.
+ */
+export interface CreateConsoleSessionRequest {
+  /** The node the guest runs on. */
+  node: string;
+  /**
+     * The QEMU guest's VMID.
+     * @minimum 0
+     */
+  vmid: number;
 }
 
 /**
@@ -5431,6 +5490,7 @@ export const ProxmoxPrivilegeTierDto = {
   operate: 'operate',
   destructive: 'destructive',
   lab: 'lab',
+  console: 'console',
 } as const;
 
 /**
@@ -5477,7 +5537,7 @@ export interface ProxmoxPrivilegesDto {
      * @nullable
      */
   rulesMajor?: number | null;
-  /** The four tiers: discover, operate, destructive, lab. */
+  /** The five tiers: discover, operate, destructive, lab, console. */
   tiers: ProxmoxTierPrivilegesDto[];
   /**
      * Why every tier is unknown: the permissions read was refused (403),
@@ -6306,6 +6366,63 @@ export type ResourceCloudflareDnsRecordsDtoData = {
 export interface ResourceCloudflareDnsRecordsDto {
   /** The records at one name. */
   data: ResourceCloudflareDnsRecordsDtoData;
+}
+
+/**
+ * A created console session. The token is shown here once.
+ */
+export type ResourceConsoleSessionDtoData = {
+  /** The account. */
+  accountId: string;
+  /**
+     * The console page in the web app, relative to the controller's
+     * origin, with the token in the fragment. A human can open it.
+     */
+  consolePath: string;
+  /** When an unattached token stops being valid (epoch millis). */
+  expiresAt: number;
+  /**
+     * Close after this many seconds without browser input.
+     * @minimum 0
+     */
+  idleTimeoutSeconds: number;
+  /**
+     * Close after this many seconds regardless.
+     * @minimum 0
+     */
+  maxDurationSeconds: number;
+  /** The node. */
+  node: string;
+  /** The session's identity, as it appears in audit events. */
+  sessionId: string;
+  /** The WebSocket path, relative to the controller's origin. */
+  socketPath: string;
+  /**
+     * The WebSocket subprotocols to offer: `binary`, then the token
+     * subprotocol.
+     */
+  subprotocols: string[];
+  /**
+     * The single-use token that attaches to the console WebSocket. It
+     * expires at `expiresAt` and is spent by the first attach.
+     */
+  token: string;
+  /**
+     * The guest's VMID.
+     * @minimum 0
+     */
+  vmid: number;
+};
+
+/**
+ * A single resource.
+ *
+ * The payload is nested under `data` so that later top-level fields are an
+ * additive change rather than a breaking one.
+ */
+export interface ResourceConsoleSessionDto {
+  /** A created console session. The token is shown here once. */
+  data: ResourceConsoleSessionDtoData;
 }
 
 /**
@@ -7789,7 +7906,7 @@ export type ResourceProxmoxPrivilegesDtoData = {
      * @nullable
      */
   rulesMajor?: number | null;
-  /** The four tiers: discover, operate, destructive, lab. */
+  /** The five tiers: discover, operate, destructive, lab, console. */
   tiers: ProxmoxTierPrivilegesDto[];
   /**
      * Why every tier is unknown: the permissions read was refused (403),
@@ -18620,6 +18737,88 @@ const res = await fetch(getConfirmProxmoxFingerprintUrl(accountId),
 
   const data: confirmProxmoxFingerprintResponse['data'] = body ? JSON.parse(body) : {}
   return { data, status: res.status, headers: res.headers } as confirmProxmoxFingerprintResponse
+}
+
+
+
+export type createProxmoxConsoleSessionResponse201 = {
+  data: ResourceConsoleSessionDto
+  status: 201
+}
+
+export type createProxmoxConsoleSessionResponse400 = {
+  data: ApiError
+  status: 400
+}
+
+export type createProxmoxConsoleSessionResponse403 = {
+  data: ApiError
+  status: 403
+}
+
+export type createProxmoxConsoleSessionResponse404 = {
+  data: ApiError
+  status: 404
+}
+
+export type createProxmoxConsoleSessionResponse409 = {
+  data: ApiError
+  status: 409
+}
+
+export type createProxmoxConsoleSessionResponse502 = {
+  data: ApiError
+  status: 502
+}
+
+export type createProxmoxConsoleSessionResponseSuccess = (createProxmoxConsoleSessionResponse201) & {
+  headers: Headers;
+};
+export type createProxmoxConsoleSessionResponseError = (createProxmoxConsoleSessionResponse400 | createProxmoxConsoleSessionResponse403 | createProxmoxConsoleSessionResponse404 | createProxmoxConsoleSessionResponse409 | createProxmoxConsoleSessionResponse502) & {
+  headers: Headers;
+};
+
+export type createProxmoxConsoleSessionResponse = (createProxmoxConsoleSessionResponseSuccess | createProxmoxConsoleSessionResponseError)
+
+export const getCreateProxmoxConsoleSessionUrl = (accountId: string,) => {
+
+
+
+
+  return `/api/v1/proxmox/accounts/${accountId}/console-sessions`
+}
+
+/**
+ * # Errors
+ *
+ * Returns the public error envelope on refusal, an unknown or unconfirmed
+ * account, a token that lacks `VM.Console` (the refusal names the
+ * privilege), the session cap, or an unwired console relay.
+ * @summary Creates a console session for one Proxmox guest.
+ */
+export const createProxmoxConsoleSession = async (accountId: string,
+    createConsoleSessionRequest: CreateConsoleSessionRequest, options?: RequestInit): Promise<createProxmoxConsoleSessionResponse> => {
+
+    const getHeaders = (h?: NonNullable<RequestInit['headers']>): Record<string, string | readonly string[]> => {
+    if (!h) return {};
+    if (h instanceof Headers) return Object.fromEntries(h.entries());
+    if (Array.isArray(h)) return Object.fromEntries(h);
+    return h;
+  };
+const res = await fetch(getCreateProxmoxConsoleSessionUrl(accountId),
+  {
+    ...options,
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...getHeaders(options?.headers) },
+    body: JSON.stringify(createConsoleSessionRequest)
+  }
+)
+
+
+  const body = [204, 205, 304].includes(res.status) ? null : await res.text();
+
+  const data: createProxmoxConsoleSessionResponse['data'] = body ? JSON.parse(body) : {}
+  return { data, status: res.status, headers: res.headers } as createProxmoxConsoleSessionResponse
 }
 
 

@@ -39,6 +39,7 @@ pub mod operations;
 pub mod plans;
 pub mod projects;
 pub mod proxmox;
+pub mod proxmox_console;
 pub mod proxmox_privileges;
 pub mod proxmox_tasks;
 pub mod ready;
@@ -278,6 +279,8 @@ pub const API_BASE_PATH: &str = "/api/v1";
         images::PublishRecipeRequest,
         proxmox::ProviderAgentDto,
         proxmox::ProviderInterfaceDto,
+        proxmox_console::CreateConsoleSessionRequest,
+        proxmox_console::ConsoleSessionDto,
         proxmox_privileges::ProxmoxPrivilegesDto,
         proxmox_privileges::ProxmoxTierPrivilegesDto,
         proxmox_privileges::ProxmoxPrivilegeCheckDto,
@@ -482,6 +485,7 @@ pub fn api(state: Arc<operations::ApiState>) -> (Router, utoipa::openapi::OpenAp
                 .routes(routes!(proxmox::confirm_proxmox_fingerprint))
                 .routes(routes!(proxmox::discover_proxmox_cluster))
                 .routes(routes!(proxmox_privileges::get_proxmox_privileges))
+                .routes(routes!(proxmox_console::create_proxmox_console_session))
                 .routes(routes!(proxmox::list_proxmox_guests))
                 .routes(routes!(proxmox::observe_proxmox_guest))
                 .routes(routes!(proxmox::start_proxmox_lifecycle))
