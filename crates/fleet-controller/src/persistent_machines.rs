@@ -968,6 +968,13 @@ impl Run<'_> {
         }
         let target_node = spec.node.clone().unwrap_or(template_node.clone());
         let now = fleet_core::SystemClock::now_unix_millis();
+        let first = self
+            .exec
+            .persistent
+            .get(&spec.account_id, vmid)
+            .await
+            .map_err(|detail| failure(step, "conflict", detail))?
+            .is_none();
         let marker = self
             .exec
             .persistent
@@ -991,6 +998,7 @@ impl Run<'_> {
         self.marker = Some(marker);
         self.vmid = vmid;
         self.node = target_node;
+        self.settle_owner(first).await?;
         // Remember the template's node for the clone call.
         Ok((template_vmid, template_node))
     }
@@ -2229,20 +2237,57 @@ impl Run<'_> {
         Ok(guest::parse_activation(&out))
     }
 
-    /// Records who asked for the machine and why (#496) on the persistent
-    /// marker, from the stamp the broker put on the reviewed payload. It is
-    /// written only here, never from a node-reported fact. A direct create
-    /// carries no stamp and records nothing. Recording is idempotent, so a
-    /// resumed run is harmless.
-    async fn record_owner(&self) -> Step<()> {
-        let Some(by) = &self.spec.requested_by else {
+    /// Settles who owns the marker (#496), right after it is reserved, so a
+    /// half-made creation carries its owner. A marker this run found (a
+    /// resume) must belong to the same request, or to no request on both
+    /// sides; anything else is a conflict, and nothing is adopted. The first
+    /// run of a brokered creation records the owner and its audit event.
+    async fn settle_owner(&self, first: bool) -> Step<()> {
+        let step = "reserve";
+        let stamp = self.spec.requested_by.as_ref();
+        let existing = self
+            .exec
+            .persistent
+            .owner_of(&self.spec.account_id, self.vmid)
+            .await
+            .map_err(|detail| failure(step, "conflict", detail))?;
+        let same_run = self.marker.as_ref().is_some_and(|marker| {
+            marker.operation_id.as_deref() == Some(self.operation.id.as_str())
+        });
+        if !first && !same_run {
+            let held = existing.as_ref().map(|owner| owner.request_id.as_str());
+            if held != stamp.map(|by| by.request_id.as_str()) {
+                return Err(failure(
+                    step,
+                    "conflict",
+                    "the guest was started by another request or create; it is not adopted by this one",
+                ));
+            }
+        }
+        let Some(by) = stamp else {
             return Ok(());
         };
         self.exec
             .persistent
             .record_owner(&self.spec.account_id, self.vmid, by)
             .await
-            .map_err(|detail| failure("machine", "owner_failed", detail))
+            .map_err(|detail| failure(step, "owner_failed", detail))?;
+        if first {
+            // The brokered creation's own event, linked to the request; the
+            // actor is the system, the requester and approver are metadata.
+            let intent = fleet_application::persistent::requested_intent(
+                "system:machine-create",
+                &self.operation.id,
+                &self.spec,
+            )
+            .map_err(|error| failure(step, "audit_failed", error.to_string()))?;
+            self.exec
+                .audit
+                .record_intent(&intent)
+                .await
+                .map_err(|error| failure(step, "audit_failed", error.to_string()))?;
+        }
+        Ok(())
     }
 
     async fn record_activation(&self, report: &guest::ActivationReport) {
@@ -2283,19 +2328,6 @@ impl MachineCreateExecutor {
         )
         .map_err(|error| format!("the payload is not a valid machine.create record: {error}"))?;
         spec.validate()?;
-        if let Some(by) = &spec.requested_by {
-            // The brokered creation's own event, linked to the request by id.
-            let intent = fleet_application::persistent::requested_intent(
-                &by.principal,
-                &operation.id,
-                &spec,
-            )
-            .map_err(|error| error.to_string())?;
-            self.audit
-                .record_intent(&intent)
-                .await
-                .map_err(|error| format!("the request audit event was not recorded: {error}"))?;
-        }
         let request = self.pve.bound(&spec.account_id).await?;
         let mut run = Run {
             exec: self,
@@ -2367,7 +2399,6 @@ impl Run<'_> {
         self.address().await?;
         self.progress(5, "registering the machine").await;
         self.register().await?;
-        self.record_owner().await?;
         self.checkpoint("machine").await?;
         self.progress(6, "waiting for SSH and recording the host key")
             .await;

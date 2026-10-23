@@ -46,7 +46,10 @@ use crate::broker::{
 use crate::lab::LabUseCaseError;
 use crate::machine_access::EndpointAuth;
 use crate::operation::{NewOperation, review_token_for};
-use crate::persistent::{CreateMachineSpec, CredentialChoice, PersistentMachines, RequestedBy};
+use crate::persistent::{
+    Activation, AdminPasswordPolicy, CreateMachineSpec, CredentialChoice, PersistentMachines,
+    RequestedBy,
+};
 
 /// The id of the action.
 pub const ACTION_ID: &str = "proxmox.machine.create";
@@ -190,7 +193,16 @@ impl PersistentBounds {
             && spec.tags.iter().all(|tag| self.allowed_tags.contains(tag));
         plain
             && spec.protection
-            && listed(&self.bridges, spec.bridge.as_deref())
+            // No bridge means the template's; an explicit one needs a list.
+            && spec
+                .bridge
+                .as_deref()
+                .is_none_or(|bridge| self.bridges.contains(bridge))
+            // No Windows account or licence handling without a person.
+            && spec.windows.as_ref().is_none_or(|options| {
+                options.activation == Activation::None
+                    && options.admin_password == AdminPasswordPolicy::None
+            })
             && within(self.max_cores, spec.cores)
             && within(self.max_memory_mib, spec.memory_mib)
             && within(self.max_disk_gib, spec.disk_gib)
@@ -289,6 +301,7 @@ impl ProviderAction for PersistentCreateAction {
             principal: request.requester.clone(),
             purpose: normalize_purpose(&request.reason),
             request_id: request.id.clone(),
+            approved_by: request.decided_by.clone(),
         });
         spec.validate()?;
         let payload = spec.to_payload()?;
@@ -535,6 +548,29 @@ mod tests {
             odd[key] = value;
             assert!(!bounds.admits(&spec(&odd)), "{key}");
         }
+        // No bridge is the template's, always fine; an explicit one needs a
+        // list, and an empty list admits none.
+        let mut template_bridge = inside.clone();
+        template_bridge.as_object_mut().unwrap().remove("bridge");
+        assert!(bounds.admits(&spec(&template_bridge)));
+        let mut no_list = bounds.clone();
+        no_list.bridges.clear();
+        assert!(!no_list.admits(&spec(&inside)));
+        // Windows account or licence handling needs a person.
+        for windows in [
+            serde_json::json!({"adminPassword": "store"}),
+            serde_json::json!({"activation": {"type": "kms", "host": "kms.example.test"}}),
+            serde_json::json!({"activation": {"type": "productKey", "secret": "machines/product-key/k"}}),
+        ] {
+            let mut win = inside.clone();
+            win["guestOs"] = serde_json::json!("windows");
+            win["windows"] = windows;
+            assert!(!bounds.admits(&spec(&win)));
+        }
+        let mut plain_win = inside.clone();
+        plain_win["guestOs"] = serde_json::json!("windows");
+        plain_win["windows"] = serde_json::json!({});
+        assert!(bounds.admits(&spec(&plain_win)));
         let mut allowed = bounds.clone();
         allowed.allow_vmid = true;
         allowed.allow_login_user = true;
@@ -555,7 +591,7 @@ mod tests {
             assert!(!bounds.admits(&spec(&over)), "{key}");
         }
         // A limit the spec leaves to the template default cannot be shown.
-        for key in ["cores", "memoryMib", "diskGib", "node", "bridge"] {
+        for key in ["cores", "memoryMib", "diskGib", "node"] {
             let mut missing = inside.clone();
             missing.as_object_mut().unwrap().remove(key);
             assert!(!bounds.admits(&spec(&missing)), "missing {key}");
@@ -684,6 +720,7 @@ mod tests {
             principal: "someone".to_owned(),
             purpose: "x".to_owned(),
             request_id: "r".to_owned(),
+            approved_by: None,
         });
         assert!(
             action

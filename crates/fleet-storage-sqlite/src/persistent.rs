@@ -42,6 +42,17 @@ fn read(row: &sqlx::sqlite::SqliteRow) -> Result<PersistentGuest, String> {
     })
 }
 
+fn owner_from(row: &sqlx::sqlite::SqliteRow) -> RequestedBy {
+    RequestedBy {
+        principal: row.get("owner"),
+        purpose: row.get::<Option<String>, _>("purpose").unwrap_or_default(),
+        request_id: row
+            .get::<Option<String>, _>("request_id")
+            .unwrap_or_default(),
+        approved_by: None,
+    }
+}
+
 #[async_trait]
 impl PersistentGuestPort for PersistentGuestRepository {
     async fn reserve(&self, guest: &PersistentGuest) -> Result<PersistentGuest, String> {
@@ -171,6 +182,19 @@ impl PersistentGuestPort for PersistentGuestRepository {
         Ok(())
     }
 
+    async fn owner_of(&self, account_id: &str, vmid: u32) -> Result<Option<RequestedBy>, String> {
+        let row = sqlx::query(
+            "SELECT owner, purpose, request_id FROM persistent_guests \
+             WHERE account_id = ?1 AND vmid = ?2 AND owner IS NOT NULL",
+        )
+        .bind(account_id)
+        .bind(i64::from(vmid))
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(|error| format!("persistent guest owner read failed: {error}"))?;
+        Ok(row.map(|row| owner_from(&row)))
+    }
+
     async fn owner_of_machine(&self, machine_id: &str) -> Result<Option<RequestedBy>, String> {
         let row = sqlx::query(
             "SELECT owner, purpose, request_id FROM persistent_guests \
@@ -180,13 +204,7 @@ impl PersistentGuestPort for PersistentGuestRepository {
         .fetch_optional(&self.pool)
         .await
         .map_err(|error| format!("persistent guest owner read failed: {error}"))?;
-        Ok(row.map(|row| RequestedBy {
-            principal: row.get("owner"),
-            purpose: row.get::<Option<String>, _>("purpose").unwrap_or_default(),
-            request_id: row
-                .get::<Option<String>, _>("request_id")
-                .unwrap_or_default(),
-        }))
+        Ok(row.map(|row| owner_from(&row)))
     }
 
     async fn remove(&self, account_id: &str, vmid: u32) -> Result<(), String> {

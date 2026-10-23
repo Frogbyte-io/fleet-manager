@@ -185,6 +185,10 @@ pub struct RequestedBy {
     pub purpose: String,
     /// The action request that asked for it.
     pub request_id: String,
+    /// Who decided it: a person, or `policy:auto`. Stamped by the broker's
+    /// action; recorded in the creation's audit event.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub approved_by: Option<String>,
 }
 
 /// Everything a `machine.create` needs. The wire shape of the review and
@@ -803,6 +807,13 @@ pub trait PersistentGuestPort: fmt::Debug + Send + Sync {
         vmid: u32,
         owner: &RequestedBy,
     ) -> Result<(), String>;
+    /// Who asked for the guest at a VMID, when it was requested (recorded
+    /// when the marker is reserved, so a half-made creation has it too).
+    ///
+    /// # Errors
+    ///
+    /// Fails when the store cannot be read.
+    async fn owner_of(&self, account_id: &str, vmid: u32) -> Result<Option<RequestedBy>, String>;
     /// Who asked for the guest behind a machine, when it was requested.
     ///
     /// # Errors
@@ -1262,6 +1273,8 @@ pub fn requested_intent(
     ];
     if let Some(by) = &spec.requested_by {
         pairs.push(("requestId", by.request_id.as_str()));
+        pairs.push(("requester", by.principal.as_str()));
+        pairs.push(("approver", by.approved_by.as_deref().unwrap_or("unknown")));
     }
     for (key, value) in pairs {
         metadata.insert(key, value)?;

@@ -15,11 +15,13 @@ use fleet_application::broker::{ActionRegistry, Broker, BrokerSettings};
 use fleet_application::lab::Lab;
 use fleet_application::machine_access::MachineAccess;
 use fleet_application::operation::Operations;
-use fleet_application::persistent::PersistentMachines;
+use fleet_application::persistent::{
+    PersistentGuest, PersistentGuestPort as _, PersistentMachines, PersistentState, RequestedBy,
+};
 use fleet_application::persistent_request::{PersistentBounds, persistent_actions};
 use fleet_storage_sqlite::{
     ActionRequestRepository, AuditSink, EndpointAuthRepository, LabRepository, LeaseRepository,
-    MachineRepository, OperationRepository, ProjectRepository, Store,
+    MachineRepository, OperationRepository, PersistentGuestRepository, ProjectRepository, Store,
 };
 use serde_json::{Value, json};
 use tower::ServiceExt as _;
@@ -80,6 +82,7 @@ struct Harness {
     state: Arc<ApiState>,
     operations: Arc<OperationRepository>,
     pool: sqlx::SqlitePool,
+    markers: Arc<PersistentGuestRepository>,
 }
 
 impl Harness {
@@ -88,16 +91,17 @@ impl Harness {
         let store = Store::open(&dir.path().join("fleet.db")).await.unwrap();
         let pool = store.pool().clone();
         std::mem::forget(store);
+        let markers = Arc::new(PersistentGuestRepository::new(pool.clone()));
         let access = Arc::new(
             MachineAccess::new(
                 Arc::new(MachineRepository::new(pool.clone())),
                 Arc::new(EndpointAuthRepository::new(pool.clone())),
                 Arc::new(AuditSink::new(pool.clone())),
             )
-            .with_persistent(Arc::new(PersistentMachines::new(
-                Arc::new(Promoted),
-                Arc::new(AuditSink::new(pool.clone())),
-            ))),
+            .with_persistent(Arc::new(
+                PersistentMachines::new(Arc::new(Promoted), Arc::new(AuditSink::new(pool.clone())))
+                    .with_markers(markers.clone()),
+            )),
         );
         let labs = Arc::new(LabRepository::new(pool.clone()));
         let lab = Arc::new(
@@ -142,6 +146,10 @@ impl Harness {
             operations,
             authorizer: Arc::new(Roles),
             lab: Some(lab),
+            machines: Some(Arc::new(fleet_application::machine::Machines::new(
+                Arc::new(MachineRepository::new(pool.clone())),
+                Arc::new(AuditSink::new(pool.clone())),
+            ))),
             requests: Some(Arc::new(broker)),
             ..ApiState::for_document()
         });
@@ -150,6 +158,7 @@ impl Harness {
             state,
             operations: operation_repo,
             pool,
+            markers,
         }
     }
 
@@ -440,4 +449,56 @@ async fn a_request_that_forges_the_stamp_or_omits_the_purpose_is_refused() {
         .await;
     assert_ne!(status, StatusCode::ACCEPTED);
     assert_eq!(harness.operation_count().await, 0);
+}
+
+#[tokio::test]
+async fn the_machine_read_returns_ownership_to_an_authorized_caller_only() {
+    let harness = Harness::new(PersistentBounds::default(), &[]).await;
+    sqlx::query("INSERT INTO machines (id, name, description, created_at, updated_at) VALUES ('m-1', 'build-box', '', 1, 1)")
+        .execute(&harness.pool)
+        .await
+        .unwrap();
+    harness
+        .markers
+        .reserve(&PersistentGuest {
+            account_id: "acct-1".to_owned(),
+            vmid: 7100,
+            name: "build-box".to_owned(),
+            node: "pve".to_owned(),
+            image_version_id: "ver-1".to_owned(),
+            machine_id: Some("m-1".to_owned()),
+            cloned: true,
+            state: PersistentState::Ready,
+            step: None,
+            operation_id: None,
+            created_at: 1,
+            updated_at: 1,
+        })
+        .await
+        .unwrap();
+    harness
+        .markers
+        .record_owner(
+            "acct-1",
+            7100,
+            &RequestedBy {
+                principal: AGENT.to_owned(),
+                purpose: "nightly build host".to_owned(),
+                request_id: "req-1".to_owned(),
+                approved_by: None,
+            },
+        )
+        .await
+        .unwrap();
+    let (status, body) = harness
+        .call(OPERATOR, "GET", "/machines/m-1", json!({}))
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["data"]["ownership"]["owner"], AGENT);
+    assert_eq!(body["data"]["ownership"]["purpose"], "nightly build host");
+    assert_eq!(body["data"]["ownership"]["requestId"], "req-1");
+    // The agent holds no machine read: an error, and no ownership anywhere.
+    let (status, body) = harness.call(AGENT, "GET", "/machines/m-1", json!({})).await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
+    assert!(body.get("data").is_none() && !body.to_string().contains("nightly"));
 }
