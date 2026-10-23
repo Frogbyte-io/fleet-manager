@@ -155,6 +155,71 @@ impl ProductKeyPort for SecretBackedProductKeys {
     }
 }
 
+/// The live checks of abandoning a marker: its creation must not still be
+/// running, and no guest with the marked name may exist at any VMID.
+#[derive(Debug)]
+pub struct ProxmoxAbandonGuard {
+    operations: Arc<dyn fleet_application::operation::OperationPort>,
+    pve: Pve,
+}
+
+impl ProxmoxAbandonGuard {
+    /// Composes the guard.
+    #[must_use]
+    pub fn new(
+        operations: Arc<dyn fleet_application::operation::OperationPort>,
+        accounts: Arc<dyn ProxmoxAccountPort>,
+        credentials: Arc<dyn ProxmoxCredentialStore>,
+        client: ProxmoxClient,
+    ) -> Self {
+        Self {
+            operations,
+            pve: Pve {
+                accounts,
+                credentials,
+                client,
+            },
+        }
+    }
+}
+
+#[async_trait]
+impl fleet_application::persistent::AbandonGuard for ProxmoxAbandonGuard {
+    async fn blocking_reason(&self, marker: &PersistentGuest) -> Result<Option<String>, String> {
+        if let Some(operation_id) = &marker.operation_id
+            && let Ok(operation) = self.operations.get(operation_id).await
+            && matches!(
+                operation.state.as_str(),
+                "pending" | "running" | "cancelling"
+            )
+        {
+            return Ok(Some(format!(
+                "the creation operation {operation_id} is still {}; cancel it or wait for it to finish",
+                operation.state
+            )));
+        }
+        let request = self.pve.bound(&marker.account_id).await?;
+        let resources = self
+            .pve
+            .client
+            .list_guest_resources(request)
+            .await
+            .map_err(|error| format!("the resource listing failed: {error}"))?;
+        Ok(resources
+            .iter()
+            .find(|resource| {
+                resource.kind == "qemu" && resource.name.as_deref() == Some(marker.name.as_str())
+            })
+            .map(|resource| {
+                format!(
+                    "a guest named {} exists as VMID {}; destroy it instead of abandoning its marker",
+                    marker.name,
+                    resource.vmid.unwrap_or_default()
+                )
+            }))
+    }
+}
+
 /// The ports and clients both executors share.
 #[derive(Debug, Clone)]
 struct Pve {
@@ -882,6 +947,22 @@ impl Run<'_> {
                     "a guest with VMID {vmid} already exists ({} named {}); it is not this machine",
                     found.kind,
                     found.name.as_deref().unwrap_or("nothing")
+                ),
+            ));
+        }
+        // The requested name must not already belong to a guest elsewhere.
+        if let Some(other) = resources.iter().find(|resource| {
+            resource.kind == "qemu"
+                && resource.name.as_deref() == Some(spec.name.as_str())
+                && resource.vmid != Some(vmid)
+        }) {
+            return Err(failure(
+                step,
+                "conflict",
+                format!(
+                    "a guest named {} already exists as VMID {}; pick another name",
+                    spec.name,
+                    other.vmid.unwrap_or_default()
                 ),
             ));
         }
@@ -1659,6 +1740,34 @@ impl Run<'_> {
         }
     }
 
+    /// Refuses a re-run whose credential choice differs from the key the
+    /// endpoint was already switched to.
+    async fn require_switched_key_matches(&self, credential: &str) -> Step<()> {
+        let step = "credential";
+        let machine_id = self.machine_id.clone().unwrap_or_default();
+        let matches = match &self.spec.credential {
+            CredentialChoice::Generate => self
+                .exec
+                .keys
+                .list_for_machine(&machine_id)
+                .await
+                .map_err(|detail| failure(step, "credential_failed", detail))?
+                .iter()
+                .any(|bound| bound == credential),
+            CredentialChoice::Reference { credential: asked } => asked == credential,
+            CredentialChoice::PublicKey { .. } => false,
+        };
+        if matches {
+            Ok(())
+        } else {
+            Err(failure(
+                step,
+                "credential_changed",
+                "the endpoint already uses another Fleet-held key than this request asks for; nothing was changed. Re-run with the original credential choice, or change the endpoint's key deliberately",
+            ))
+        }
+    }
+
     /// The Fleet-held key the endpoint already defaults to, when a login
     /// with it works: the proof that the credential switch of an earlier run
     /// completed. It is never the bootstrap credential.
@@ -1811,8 +1920,30 @@ impl Run<'_> {
         let login_user = self.spec.endpoint_user().to_owned();
         let target = (login_user != bootstrap_user).then_some(login_user.as_str());
         let windows = self.spec.guest_os == GuestOs::Windows;
-        let (public, reference) = self.key_material().await?;
         let switched = self.switched_key().await?;
+        let (public, reference) = if let Some((credential, _)) = &switched {
+            // An earlier run already switched the endpoint to this key: the
+            // spec must still ask for it, and the public key to keep is its
+            // own, so a re-run with another choice can never rewrite
+            // authorized_keys to a key the endpoint does not use.
+            self.require_switched_key_matches(credential).await?;
+            let text = self
+                .exec
+                .keys
+                .resolve(credential, &machine_id)
+                .await
+                .map_err(|detail| failure(step, "credential_failed", detail))?
+                .ok_or_else(|| {
+                    failure(
+                        step,
+                        "credential_failed",
+                        "the endpoint's stored key no longer resolves",
+                    )
+                })?;
+            (self.public_of(&text).await?, Some(credential.clone()))
+        } else {
+            self.key_material().await?
+        };
         let bootstrap = self.bootstrap_auth(step).await?;
         let resumed = switched.is_some();
         let mut stored = None;

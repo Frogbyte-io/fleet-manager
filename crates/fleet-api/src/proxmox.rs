@@ -1421,15 +1421,6 @@ pub async fn review_proxmox_operation(
     if let Err(detail) = validate_destructive_params(&action, &request.params) {
         return Err(crate::machines::invalid_request(&detail, correlation_id));
     }
-    require_persistent_confirmation(
-        &state,
-        &action,
-        &account_id,
-        vmid,
-        &request.params,
-        correlation_id,
-    )
-    .await?;
     if let Err(decision) = fleet_application::authz::authorize(
         state.authorizer.as_ref(),
         fleet_application::authz::AccessRequest {
@@ -1440,6 +1431,15 @@ pub async fn review_proxmox_operation(
     ) {
         return Err(crate::machines::denied_error(decision, correlation_id));
     }
+    require_persistent_confirmation(
+        &state,
+        &action,
+        &account_id,
+        vmid,
+        &request.params,
+        correlation_id,
+    )
+    .await?;
     // The token binds the exact payload the run will carry, so the
     // reviewed bytes and the executed bytes are the same by construction.
     let kind = if action == "task-cancel" {

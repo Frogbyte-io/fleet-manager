@@ -712,6 +712,18 @@ impl PersistentGuest {
     }
 }
 
+/// What stops a marker from being abandoned: the controller checks the live
+/// world (a creation still running, a guest that has the marked name).
+#[async_trait]
+pub trait AbandonGuard: fmt::Debug + Send + Sync {
+    /// Why this marker must not be abandoned now, or `None` when it may.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the world cannot be read; the abandon is refused then.
+    async fn blocking_reason(&self, marker: &PersistentGuest) -> Result<Option<String>, String>;
+}
+
 /// The persistent marker store.
 #[async_trait]
 pub trait PersistentGuestPort: fmt::Debug + Send + Sync {
@@ -806,6 +818,7 @@ pub struct PersistentMachines {
     keys: Option<Arc<dyn MachineKeyPort>>,
     product_keys: Option<Arc<dyn ProductKeyPort>>,
     markers: Option<Arc<dyn PersistentGuestPort>>,
+    abandon_guard: Option<Arc<dyn AbandonGuard>>,
     audit: Arc<dyn crate::operation::AuditPort>,
 }
 
@@ -832,8 +845,17 @@ impl PersistentMachines {
             keys: None,
             product_keys: None,
             markers: None,
+            abandon_guard: None,
             audit,
         }
+    }
+
+    /// Wires the live checks an abandon needs: without them an abandon is
+    /// refused.
+    #[must_use]
+    pub fn with_abandon_guard(mut self, guard: Arc<dyn AbandonGuard>) -> Self {
+        self.abandon_guard = Some(guard);
+        self
     }
 
     /// Wires the marker store, for the guards the API applies before it
@@ -922,6 +944,15 @@ impl PersistentMachines {
                     marker.name
                 ),
             });
+        }
+        // An abandon needs the live checks: a creation still running, or a
+        // guest with the marked name anywhere, means the marker is not stale.
+        let guard = self
+            .abandon_guard
+            .as_ref()
+            .ok_or_else(|| backend("no abandon guard is wired".to_owned()))?;
+        if let Some(reason) = guard.blocking_reason(&marker).await.map_err(backend)? {
+            return Err(LabUseCaseError::Conflict { detail: reason });
         }
         let mut metadata = crate::audit::AuditMetadata::default();
         for (key, value) in [

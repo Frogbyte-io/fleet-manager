@@ -1324,8 +1324,68 @@ async fn an_abandon_is_reviewed_audited_and_refuses_a_created_machine() {
         Arc::new(Promoted(true)),
         Arc::new(AuditSink::new(world.pool.clone())),
     )
-    .with_markers(markers.clone());
+    .with_markers(markers.clone())
+    .with_abandon_guard(Arc::new(
+        fleet_controller::persistent_machines::ProxmoxAbandonGuard::new(
+            Arc::new(OperationRepository::new(world.pool.clone())),
+            world.accounts.clone(),
+            Arc::new(Credentials),
+            fleet_provider_proxmox::ProxmoxClient::new(world.pve.clone()),
+        ),
+    ));
     let allow = fleet_auth::LanAllowAllAuthorizer;
+
+    // Not stale yet: a guest with the marked name exists at another VMID, or
+    // the creation operation is still queued.
+    world
+        .pve
+        .state
+        .lock()
+        .unwrap()
+        .guests
+        .insert(7410, plain_guest("named-elsewhere"));
+    markers
+        .reserve(&marker(&world.account_id, 7402, "named-elsewhere", false))
+        .await
+        .unwrap();
+    let (_, token) = PersistentMachines::abandon_payload(&world.account_id, 7402);
+    let refused = access
+        .abandon(&allow, &lan(), &world.account_id, 7402, &token)
+        .await
+        .unwrap_err();
+    assert!(refused.to_string().contains("7410"), "{refused}");
+    let queued = world
+        .operations
+        .create(
+            &allow,
+            &lan().id,
+            &NewOperation {
+                kind: "noop".to_owned(),
+                idempotency_key: None,
+                deadline_at: None,
+                correlation_id: None,
+                review_token: None,
+                payload_json: None,
+            },
+        )
+        .await
+        .unwrap();
+    let mut running = marker(&world.account_id, 7403, "still-running", false);
+    running.operation_id = Some(queued.id.clone());
+    markers.reserve(&running).await.unwrap();
+    let (_, token) = PersistentMachines::abandon_payload(&world.account_id, 7403);
+    let refused = access
+        .abandon(&allow, &lan(), &world.account_id, 7403, &token)
+        .await
+        .unwrap_err();
+    assert!(refused.to_string().contains("still"), "{refused}");
+    assert!(
+        markers
+            .get(&world.account_id, 7403)
+            .await
+            .unwrap()
+            .is_some()
+    );
 
     // A token for another VMID does not abandon.
     let (_, other) = PersistentMachines::abandon_payload(&world.account_id, 7401);
@@ -1749,4 +1809,111 @@ async fn a_repository_credential_is_not_a_persistent_machines_ssh_key() {
         .prepare(&fleet_auth::LanAllowAllAuthorizer, &lan(), &spec)
         .await
         .unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_rerun_with_another_credential_choice_is_refused_and_rewrites_nothing() {
+    let world = World::new().await;
+    // A Fleet-held key B the operator names; the removal is blocked so the
+    // first run fails after the switch to B.
+    let provider = SshProvider::new(world.dir.path().join("keygen")).unwrap();
+    let other = provider.generate_ed25519("other").unwrap();
+    let other_ref = world
+        .keys
+        .create(other.private.expose_for_store(), None)
+        .await
+        .unwrap();
+    let blocker = world
+        .home
+        .path()
+        .join(".ssh")
+        .join("authorized_keys.fleet-new");
+    std::fs::create_dir_all(&blocker).unwrap();
+    let mut spec = world.spec("persist-19");
+    spec["credential"] = json!({ "type": "reference", "credential": other_ref });
+    let failed = world.create(&spec).await;
+    assert_eq!(error_of(&failed)["reason"], "revoke_failed");
+    assert_eq!(world.authorized_keys().len(), 2);
+    let before = world.authorized_keys();
+
+    // The same machine, asked for a generated key this time: refused before
+    // any session, and authorized_keys is untouched.
+    std::fs::remove_dir(&blocker).unwrap();
+    spec["credential"] = json!({ "type": "generate" });
+    let refused = world.create(&spec).await;
+    assert_eq!(refused.state, "failed");
+    assert_eq!(error_of(&refused)["reason"], "credential_changed");
+    assert_eq!(world.authorized_keys(), before);
+    // And the original choice still resumes.
+    spec["credential"] = json!({ "type": "reference", "credential": other_ref });
+    let resumed = world.create(&spec).await;
+    assert_eq!(resumed.state, "succeeded", "{:?}", error_of(&resumed));
+    assert_eq!(world.authorized_keys(), vec![other.public.clone()]);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_guard_refusal_leaves_a_persistent_guests_protection_on() {
+    let world = World::new().await;
+    // A marker over the image template: the guards refuse to destroy a
+    // template, and that refusal must come before protection is touched.
+    let markers = PersistentGuestRepository::new(world.pool.clone());
+    markers
+        .reserve(&marker(
+            &world.account_id,
+            TEMPLATE_VMID,
+            "fleet-image",
+            true,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(
+        world.pve.guest(TEMPLATE_VMID).unwrap().config["protection"],
+        1
+    );
+    let refused = world
+        .run(
+            world.destroy.as_ref(),
+            "proxmox.guest.destroy",
+            &json!({
+                "accountId": world.account_id, "node": "pve", "vmid": TEMPLATE_VMID,
+                "timeoutSeconds": 300,
+                "params": { "purge": false, "confirmPersistent": true },
+            }),
+        )
+        .await;
+    assert_eq!(refused.state, "failed");
+    assert_eq!(
+        world.pve.guest(TEMPLATE_VMID).unwrap().config["protection"],
+        1,
+        "protection was lifted before the guard refused"
+    );
+    assert!(
+        !world
+            .pve
+            .calls()
+            .iter()
+            .any(|call| call.starts_with("config"))
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_name_that_already_belongs_to_a_guest_elsewhere_is_refused() {
+    let world = World::new().await;
+    world
+        .pve
+        .state
+        .lock()
+        .unwrap()
+        .guests
+        .insert(7500, plain_guest("persist-18"));
+    let operation = world.create(&world.spec("persist-18")).await;
+    assert_eq!(operation.state, "failed");
+    assert_eq!(error_of(&operation)["reason"], "conflict");
+    assert!(
+        error_of(&operation)["detail"]
+            .as_str()
+            .unwrap()
+            .contains("7500")
+    );
+    assert!(world.pve.calls().is_empty());
 }

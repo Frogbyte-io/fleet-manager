@@ -190,8 +190,11 @@ pub enum ActivationMethod<'a> {
 ///
 /// With a product key, the key goes to the licensing service's
 /// `InstallProductKey` method through CIM, so no child process ever has it in
-/// its argument list (`slmgr /ipk <key>` would, and echoes it besides); only
-/// the HRESULT of a failure is printed. The key is still part of the script
+/// its argument list (`slmgr /ipk <key>` would, and echoes it besides). A
+/// failure prints only its code: the `CimException.StatusCode` (a `uint32`
+/// that carries the WMI provider's status, where the licensing HRESULT
+/// `0xC004F...` appears; `NativeErrorCode` is a coarse enum and `HResult` a
+/// generic wrapper), or a non-zero `ReturnValue`. The key is still part of the script
 /// text, which Windows PowerShell script-block logging, when enabled by
 /// policy on the guest, records: see `docs/operations/persistent-machines.md`.
 /// The script then runs `/ato`, reads
@@ -205,8 +208,13 @@ pub fn windows_activation_script(method: &ActivationMethod<'_>) -> String {
             "$k = {key}\n\
              try {{\n\
              \x20 $svc = Get-CimInstance -ClassName SoftwareLicensingService\n\
-             \x20 Invoke-CimMethod -InputObject $svc -MethodName InstallProductKey -Arguments @{{ ProductKey = $k }} -ErrorAction Stop | Out-Null\n\
-             }} catch {{ Write-Output ('FLEET_IPK_ERROR=0x{{0:X8}}' -f $_.Exception.HResult) }}\n\
+             \x20 $r = Invoke-CimMethod -InputObject $svc -MethodName InstallProductKey -Arguments @{{ ProductKey = $k }} -ErrorAction Stop\n\
+             \x20 if ($r -and $null -ne $r.ReturnValue -and [uint32]$r.ReturnValue -ne 0) {{ Write-Output ('FLEET_IPK_ERROR=0x{{0:X8}}' -f [uint32]$r.ReturnValue) }}\n\
+             }} catch {{\n\
+             \x20 $e = $_.Exception\n\
+             \x20 $c = if ($e.PSObject.Properties['StatusCode']) {{ [uint32]$e.StatusCode }} else {{ [uint32]$e.HResult }}\n\
+             \x20 Write-Output ('FLEET_IPK_ERROR=0x{{0:X8}}' -f $c)\n\
+             }}\n\
              $k = $null\n",
             key = ps_quote(key.trim()),
         ),
@@ -361,6 +369,8 @@ mod tests {
         // The key is passed to the service's own method, never to a child
         // process.
         assert!(script.contains("InstallProductKey -Arguments @{ ProductKey = $k }"));
+        assert!(script.contains("$e.StatusCode"));
+        assert!(script.contains("$r.ReturnValue"));
         assert!(!script.contains("/ipk"));
         // The key appears once, in the assignment, and is cleared at once.
         assert_eq!(script.matches("AAAAA-BBBBB").count(), 1);

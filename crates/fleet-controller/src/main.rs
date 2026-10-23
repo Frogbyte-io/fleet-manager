@@ -326,7 +326,9 @@ fn run_serve(mut config: fleet_config::ControllerConfig) -> ExitCode {
             if let Some(keys) = &machine_keys {
                 access = access.with_keys(keys.clone());
             }
-            if let (Some(keys), Some(product_keys)) = (&machine_keys, &product_keys) {
+            if let (Some(keys), Some(product_keys), Some(secrets)) =
+                (&machine_keys, &product_keys, &secrets)
+            {
                 access = access.with_persistent(std::sync::Arc::new(
                     fleet_application::persistent::PersistentMachines::new(
                         std::sync::Arc::new(
@@ -342,7 +344,25 @@ fn run_serve(mut config: fleet_config::ControllerConfig) -> ExitCode {
                     )
                     .with_keys(keys.clone())
                     .with_product_keys(product_keys.clone())
-                    .with_markers(persistent_guests.clone()),
+                    .with_markers(persistent_guests.clone())
+                    .with_abandon_guard(std::sync::Arc::new(
+                        fleet_controller::persistent_machines::ProxmoxAbandonGuard::new(
+                            std::sync::Arc::new(fleet_storage_sqlite::OperationRepository::new(
+                                store.pool().clone(),
+                            )),
+                            std::sync::Arc::new(fleet_storage_sqlite::ProxmoxAccountRepository::new(
+                                store.pool().clone(),
+                            )),
+                            std::sync::Arc::new(
+                                fleet_controller::proxmox_store::SecretBackedProxmoxCredentials::new(
+                                    secrets.clone(),
+                                ),
+                            ),
+                            fleet_provider_proxmox::ProxmoxClient::new(std::sync::Arc::new(
+                                fleet_provider_proxmox::ReqwestPveTransport::new(),
+                            )),
+                        ),
+                    )),
                 ));
             }
             if let Some(stage) = &lab_put_store {

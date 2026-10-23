@@ -486,23 +486,55 @@ impl ProxmoxDestructiveExecutor {
         self
     }
 
+    /// Puts a persistent guest's protection back after a destroy that did
+    /// not delete it. Best effort: the guest may be gone, and a failure here
+    /// must not hide the destroy's own failure.
+    async fn restore_protection(
+        &self,
+        payload: &DestructivePayload,
+        request: &fleet_provider_proxmox::PveHttpRequest,
+    ) {
+        let Ok(settings) = self
+            .client
+            .qemu_settings(request.clone(), &payload.node, payload.vmid)
+            .await
+        else {
+            return;
+        };
+        if let (false, Some(digest)) = (settings.protection, settings.digest) {
+            let _ = self
+                .client
+                .qemu_write_settings(
+                    request.clone(),
+                    &payload.node,
+                    payload.vmid,
+                    &fleet_provider_proxmox::PveQemuWrite {
+                        protection: Some(true),
+                        ..fleet_provider_proxmox::PveQemuWrite::default()
+                    },
+                    &digest,
+                )
+                .await;
+        }
+    }
+
     /// Clears a confirmed persistent guest's Proxmox protection, with a
-    /// conditional write and an audit event. A guest that is not protected
-    /// is left alone.
+    /// conditional write and an audit event, and answers whether it changed
+    /// anything. A guest that is not protected is left alone.
     async fn lift_protection(
         &self,
         operation: &Operation,
         payload: &DestructivePayload,
         marker: &fleet_application::persistent::PersistentGuest,
         request: &fleet_provider_proxmox::PveHttpRequest,
-    ) -> Result<(), String> {
+    ) -> Result<bool, String> {
         let settings = self
             .client
             .qemu_settings(request.clone(), &payload.node, payload.vmid)
             .await
             .map_err(|error| format!("the guest config is unreadable: {error}"))?;
         if !settings.protection {
-            return Ok(());
+            return Ok(false);
         }
         let digest = settings.digest.ok_or(
             "the guest config carries no digest, so protection is not lifted unconditionally",
@@ -545,6 +577,7 @@ impl ProxmoxDestructiveExecutor {
                 &digest,
             )
             .await
+            .map(|()| true)
             .map_err(|error| format!("PVE refused to lift the protection: {error}"))
     }
 
@@ -695,17 +728,6 @@ impl OperationExecutor for ProxmoxDestructiveExecutor {
             )
             .await;
         }
-        // The confirmation is the operator's reviewed act of lifting the
-        // protection too: do it here, audited, before the guards and the
-        // delete (Proxmox refuses to delete a protected guest).
-        if let Some(marker) = &persistent_marker
-            && let Err(detail) = self
-                .lift_protection(operation, &payload, marker, &request)
-                .await
-        {
-            return complete_failure(operations, &operation.id, "protection_not_lifted", &detail)
-                .await;
-        }
         let deadline = Duration::from_secs(payload.timeout_seconds.min(MAX_LIFECYCLE_TIMEOUT));
         let kind = operation.kind.as_str();
         let outcome: Result<(), String> = match kind {
@@ -729,21 +751,57 @@ impl OperationExecutor for ProxmoxDestructiveExecutor {
                     .get("purge")
                     .and_then(serde_json::Value::as_bool)
                     .unwrap_or(false);
-                self.run_to_terminal(
-                    operations,
-                    &operation.id,
-                    &payload.account_id,
-                    &request,
-                    &payload.node,
-                    vmid,
-                    remaining,
-                    move |client, request| {
-                        Box::pin(
-                            async move { client.guest_destroy(request, &node, vmid, purge).await },
-                        )
-                    },
-                )
-                .await
+                // The confirmation is the operator's reviewed act of lifting
+                // the protection too. It happens here, after the stop and
+                // every guard, immediately before the delete (Proxmox
+                // refuses to delete a protected guest), so a refusal by a
+                // guard leaves the protection on.
+                let lifted = if let Some(marker) = &persistent_marker {
+                    match self
+                        .lift_protection(operation, &payload, marker, &request)
+                        .await
+                    {
+                        Ok(lifted) => lifted,
+                        Err(detail) => {
+                            return complete_failure(
+                                operations,
+                                &operation.id,
+                                "protection_not_lifted",
+                                &detail,
+                            )
+                            .await;
+                        }
+                    }
+                } else {
+                    false
+                };
+                let result = self
+                    .run_to_terminal(
+                        operations,
+                        &operation.id,
+                        &payload.account_id,
+                        &request,
+                        &payload.node,
+                        vmid,
+                        remaining,
+                        move |client, request| {
+                            Box::pin(async move {
+                                client.guest_destroy(request, &node, vmid, purge).await
+                            })
+                        },
+                    )
+                    .await;
+                // A delete that did not happen must not leave a persistent
+                // machine unprotected.
+                if lifted
+                    && !operations
+                        .get_state(&operation.id)
+                        .await
+                        .is_ok_and(|state| state == "succeeded")
+                {
+                    self.restore_protection(&payload, &request).await;
+                }
+                result
             }
             "proxmox.guest.snapshot" => {
                 let name = payload
