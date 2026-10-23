@@ -233,6 +233,29 @@ fn mask_header(text: &str, name: &str) -> String {
     result
 }
 
+/// A typographic quote (smart-quote autocorrection in chat tools and
+/// documents): it quotes like an ASCII one.
+fn is_curly_quote(c: char) -> bool {
+    matches!(c, '\u{201c}' | '\u{201d}' | '\u{2018}' | '\u{2019}')
+}
+
+/// Whether `c` closes a quote opened by the typographic quote `open`: any
+/// typographic quote of its family (autocorrect is not always consistent).
+fn closes_curly_quote(open: char, c: char) -> bool {
+    match open {
+        '\u{201c}' | '\u{201d}' => matches!(c, '\u{201c}' | '\u{201d}'),
+        _ => matches!(c, '\u{2018}' | '\u{2019}'),
+    }
+}
+
+/// The end of a value quoted with the typographic quote `open`, whose inside
+/// starts at `from`: its closing quote on the same line. `None` when there is
+/// none, and the quote is then an ordinary character (`don’t`).
+fn curly_quoted_end(text: &str, from: usize, open: char) -> Option<usize> {
+    let at = text[from..].find(|c: char| c == '\n' || closes_curly_quote(open, c))?;
+    (text.as_bytes()[from + at] != b'\n').then_some(from + at)
+}
+
 /// The extent of a value starting at `start` (after optional spaces): a
 /// quoted value runs to its matching quote or the line end; an unquoted one
 /// to whitespace, a quote, `&`, `;` or `,`, or (for a header, `to_line_end`)
@@ -261,6 +284,12 @@ fn value_extent(text: &str, start: usize, mode: Extent) -> (usize, usize) {
     if let Some(quote) = rest.chars().next().filter(|c| matches!(c, '"' | '\'')) {
         let inner = start + 1;
         return (inner, quoted_end(text, inner, quote as u8));
+    }
+    if let Some(quote) = rest.chars().next().filter(|c| is_curly_quote(*c))
+        && let inner = start + quote.len_utf8()
+        && let Some(end) = curly_quoted_end(text, inner, quote)
+    {
+        return (inner, end);
     }
     let end = match mode {
         Extent::Line { quote: Some(quote) } => Some(quoted_end(text, start, quote as u8) - start),
@@ -476,14 +505,78 @@ fn armor_header_end(text: &str, at: usize) -> Option<usize> {
         .then(|| line_end_from(text, at + colon))
 }
 
+/// How far back from a fence its line prefix is looked for.
+const PREFIX_MAX: usize = 48;
+
+/// How many blank lines may sit in a row inside key armor.
+const BLANK_LINES_MAX: usize = 2;
+
+/// What stands before a fence on its line when that is a log prefix
+/// (`web-1  | `, `app: `, not indentation): every line of the key carries
+/// it. `None` when the fence starts its line or only follows indentation, or
+/// the line is too long to tell. `floor` is as far back as the line may start.
+fn fence_line_prefix(text: &str, floor: usize, fence: usize) -> Option<&str> {
+    let mut lo = fence.saturating_sub(PREFIX_MAX).max(floor);
+    while !text.is_char_boundary(lo) {
+        lo += 1;
+    }
+    let head = &text[lo..fence];
+    let line_start = match (head.rfind('\n'), head.rfind("\\n")) {
+        (None, None) if lo == floor => 0,
+        (None, None) => return None,
+        (raw, escaped) => raw
+            .map(|at| at + 1)
+            .max(escaped.map(|at| at + 2))
+            .unwrap_or(0),
+    };
+    let prefix = &head[line_start..];
+    (!prefix.trim_matches([' ', '\t']).is_empty()).then_some(prefix)
+}
+
+/// Where the content of the line starting at `line` begins: past the log
+/// prefix when the line has it (also with its trailing blanks trimmed, as a
+/// blank line has it, or with another value of a changing prefix).
+fn skip_line_prefix(text: &str, line: usize, prefix: Option<&str>) -> usize {
+    let Some(prefix) = prefix else { return line };
+    let rest = &text[line..];
+    if rest.starts_with(prefix) {
+        return line + prefix.len();
+    }
+    let trimmed = prefix.trim_end_matches([' ', '\t']);
+    if rest.starts_with(trimmed) {
+        return line + trimmed.len();
+    }
+    // A prefix that differs per line (`web-2  | `, a timestamp and
+    // `app[1]: `): up to the last delimiter of the fence's own prefix within
+    // the first bytes of the line.
+    let Some(delimiter) = trimmed
+        .chars()
+        .next_back()
+        .filter(|c| matches!(c, '|' | ':' | ']' | '>'))
+    else {
+        return line;
+    };
+    let mut window = (PREFIX_MAX + 16).min(rest.len());
+    while !rest.is_char_boundary(window) {
+        window -= 1;
+    }
+    let window = &rest[..window];
+    let window = &window[..window.find('\n').unwrap_or(window.len())];
+    window
+        .rfind(delimiter)
+        .map_or(line, |at| line + at + delimiter.len_utf8())
+}
+
 /// The end of the armor lines (base64, or `Proc-Type:` / `Version:` style
-/// headers and at most one blank line before the body) that follow `from`:
+/// headers and up to two blank lines before the body) that follow `from`:
 /// key material on the fence line itself (a key joined with spaces), then
 /// each following line. `from` when nothing there is armor. This is what a
 /// PEM body looks like when its END line was cut off. Lines may be indented
-/// (YAML); a first body line may carry a `name: ` prefix. A short plain word
-/// is prose, except as the last line after a full one.
-fn armor_end(text: &str, from: usize) -> usize {
+/// (YAML) or carry the log prefix of the fence's line (`web-1  | `); a first
+/// body line may carry a `name: ` prefix. A blank line inside the body is
+/// skipped when a full line follows it. A short plain word is prose, except
+/// as the last line after a full one.
+fn armor_end(text: &str, from: usize, prefix: Option<&str>) -> usize {
     let bytes = text.as_bytes();
     let mut end = from;
     let mut body = false;
@@ -504,20 +597,20 @@ fn armor_end(text: &str, from: usize) -> usize {
         body = true;
         last_run = run;
     }
-    let mut blank = false;
+    let mut blanks = 0;
     let mut scan = end;
     while let Some(break_len) = line_break_len(text, scan) {
-        let content = skip_blanks(bytes, scan + break_len);
+        let content = skip_blanks(bytes, skip_line_prefix(text, scan + break_len, prefix));
         if at_line_end(text, content) {
-            // One blank line may separate the headers from the body.
-            if body || blank {
+            blanks += 1;
+            if blanks > BLANK_LINES_MAX {
                 break;
             }
-            blank = true;
             scan = content;
             continue;
         }
         if !body && let Some(header_end) = armor_header_end(text, content) {
+            blanks = 0;
             end = header_end;
             scan = header_end;
             continue;
@@ -531,12 +624,16 @@ fn armor_end(text: &str, from: usize) -> usize {
         let prefixed = start > content;
         let key = if prefixed {
             run >= PREFIXED_RUN_MIN && is_key_run(&bytes[start..after])
+        } else if body && blanks > 0 {
+            // Past a blank line inside the body only a full line continues it.
+            run >= FULL_LINE_MIN
         } else {
             is_key_run(&bytes[start..after]) || (body && last_run >= FULL_LINE_MIN && run > 0)
         };
         if !key {
             break;
         }
+        blanks = 0;
         let short_last = run < KEY_RUN_MIN && !is_key_run(&bytes[start..after]);
         let tail = skip_blanks(bytes, after);
         if at_line_end(text, tail) {
@@ -583,11 +680,34 @@ fn armor_prefix_len(line: &str) -> Option<usize> {
 /// (the prefix stays). A short plain word is prose, except as the line right
 /// before the fence after a full one.
 fn armor_start(text: &str, floor: usize, fence: usize) -> usize {
+    let start = armor_start_lines(text, floor, fence);
+    // Only the log prefix of the fence's own line, and no key line before it:
+    // nothing to mask but the fence.
+    let own_line = !text[start..fence].contains('\n') && !text[start..fence].contains("\\n");
+    if own_line && fence_line_prefix(text, floor, fence).is_some() {
+        return fence;
+    }
+    start
+}
+
+fn armor_start_lines(text: &str, floor: usize, fence: usize) -> usize {
     let bytes = text.as_bytes();
+    // Every line of the key carries the log prefix of the fence's line.
+    let prefix =
+        fence_line_prefix(text, floor, fence).map(|prefix| prefix.trim_end_matches([' ', '\t']));
     // The fence may be indented; its line must start after a line break.
     let mut indent = fence;
     while indent > floor && is_blank_byte(bytes[indent - 1]) {
         indent -= 1;
+    }
+    if let Some(prefix) = prefix
+        && indent >= floor + prefix.len()
+        && text[..indent].ends_with(prefix)
+    {
+        indent -= prefix.len();
+        while indent > floor && is_blank_byte(bytes[indent - 1]) {
+            indent -= 1;
+        }
     }
     let mut start = indent;
     // `start` before a short plain line was accepted: where to fall back to
@@ -632,6 +752,12 @@ fn armor_start(text: &str, floor: usize, fence: usize) -> usize {
         let mut line_start = run_start;
         while line_start > floor && is_blank_byte(bytes[line_start - 1]) {
             line_start -= 1;
+        }
+        if let Some(prefix) = prefix
+            && line_start >= floor + prefix.len()
+            && text[..line_start].ends_with(prefix)
+        {
+            line_start -= prefix.len();
         }
         let at_line_start = line_start == floor
             || (1..=4).any(|len| {
@@ -722,7 +848,7 @@ fn mask_private_keys(text: &str) -> String {
                 None
             };
             let end = found.map_or_else(
-                || armor_end(text, marker_end),
+                || armor_end(text, marker_end, fence_line_prefix(text, 0, fence)),
                 |at| marker_end + at + end_marker.len(),
             );
             (fence, end)
@@ -982,6 +1108,16 @@ fn is_command_end(byte: u8) -> bool {
 /// scanning resumes.
 fn argument_extent(text: &str, start: usize) -> (usize, usize, usize) {
     let rest = &text[start..];
+    if let Some(quote) = rest.chars().next().filter(|c| is_curly_quote(*c))
+        && let inner = start + quote.len_utf8()
+        && let Some(end) = curly_quoted_end(text, inner, quote)
+    {
+        return (
+            inner,
+            end,
+            end + text[end..].chars().next().map_or(0, char::len_utf8),
+        );
+    }
     if let Some(quote) = rest.chars().next().filter(|c| matches!(c, '"' | '\'')) {
         let inner = start + 1;
         return match text[inner..].find([quote, '\n']) {
@@ -1017,6 +1153,14 @@ fn argument_extent(text: &str, start: usize) -> (usize, usize, usize) {
         },
         end,
     )
+}
+
+/// Whether the quote at `at` is an element of a JSON array: the last
+/// character before it that is not a blank is `,` or `[`.
+fn in_json_array(text: &str, at: usize) -> bool {
+    text[..at]
+        .trim_end_matches([' ', '\t'])
+        .ends_with([',', '['])
 }
 
 /// `htpasswd -b [file] user password`: collects the positional arguments of
@@ -1074,6 +1218,9 @@ impl HtpasswdArgs {
     }
 }
 
+/// How much of a word is read to tell whether it is a command name or a flag.
+const WORD_READ_MAX: usize = 256;
+
 /// The state of one [`mask_short_flags`] pass over the words of the text.
 struct ShortFlagScan<'a> {
     text: &'a str,
@@ -1121,60 +1268,78 @@ impl ShortFlagScan<'_> {
     fn word(&mut self, index: usize) -> usize {
         let text = self.text;
         let quote = self.quote.take();
-        let word_end = text[index..]
-            .find(|c: char| {
-                c.is_ascii_whitespace()
-                    || c == ','
-                    || (c.is_ascii() && is_command_end(c as u8))
-                    || quote.is_some_and(|q| c == q as char)
-            })
-            .map_or(text.len(), |at| index + at);
+        let ends = |c: char| {
+            c.is_ascii_whitespace()
+                || c == ','
+                || (c.is_ascii() && is_command_end(c as u8))
+                || quote.is_some_and(|q| c == q as char)
+        };
+        // Only the start of a long word is read to classify it (no command
+        // name or flag is that long); a word that is not one of them is
+        // skipped whole, once. A long run with no blank in it (`"a":"b":"c"...`)
+        // is otherwise read to its end from every quote inside it.
+        let mut cap = (index + WORD_READ_MAX).min(text.len());
+        while !text.is_char_boundary(cap) {
+            cap -= 1;
+        }
+        let word_end = text[index..cap].find(ends).map_or(cap, |at| index + at);
+        let truncated = word_end == cap && cap < text.len();
+        let resume = |end: usize| {
+            if truncated {
+                text[index..].find(ends).map_or(text.len(), |at| index + at)
+            } else {
+                end
+            }
+        };
         let word = &text[index..word_end];
         // A command name may follow `cmd=` or `"cmd":`.
         // (a quote may glue to it: `cmd="mysql -pX"`, `\"mysql` in JSON text).
         let command = word.rsplit(['=', ':']).next().unwrap_or(word);
+        // (`$'...'` is shell ANSI-C quoting; typographic quotes quote too).
         let command = command
-            .trim_start_matches(['"', '\'', '\\', '['])
-            .trim_end_matches(['"', '\'']);
+            .trim_start_matches(|c: char| {
+                matches!(c, '"' | '\'' | '\\' | '[' | '$') || is_curly_quote(c)
+            })
+            .trim_end_matches(|c: char| matches!(c, '"' | '\'') || is_curly_quote(c));
         if let Some(named) = tool_named(command) {
             self.finish_command();
             self.tool = Some(named);
             self.htpasswd.active = named == Tool::Htpasswd;
             // The closing quote of a quoted name is not an argument's opening.
             let closed = quote.is_some_and(|q| text.as_bytes().get(word_end) == Some(&q));
-            return word_end + usize::from(closed && self.htpasswd.active);
+            return resume(word_end) + usize::from(closed && self.htpasswd.active);
         }
         if matches!(command.rsplit('/').next(), Some("docker" | "podman")) {
             self.finish_command();
             self.docker_login_next = true;
-            return word_end;
+            return resume(word_end);
         }
         if self.docker_login_next {
             if word == "login" {
                 self.docker_login_next = false;
                 self.tool = Some(Tool::DockerLogin);
-                return word_end;
+                return resume(word_end);
             }
             if word.starts_with('-') {
                 self.docker_after_option = !word.contains('=');
-                return word_end;
+                return resume(word_end);
             }
             if std::mem::take(&mut self.docker_after_option) {
-                return word_end;
+                return resume(word_end);
             }
             self.docker_login_next = false;
         }
         let Some(current) = self.tool else {
-            return word_end;
+            return resume(word_end);
         };
         if current == Tool::Htpasswd {
             if word.starts_with('-') {
                 self.htpasswd.flags(word);
-                return word_end;
+                return resume(word_end);
             }
             if word == "\\" {
                 // A line continuation is not an argument.
-                return word_end;
+                return resume(word_end);
             }
             let (start, end, next) = argument_extent(text, index);
             self.htpasswd.argument(start, end);
@@ -1183,7 +1348,7 @@ impl ShortFlagScan<'_> {
         if current == Tool::Sshpass && !word.starts_with('-') {
             // The wrapped command starts here; its flags are not sshpass's.
             self.tool = None;
-            return word_end;
+            return resume(word_end);
         }
         let flag = if long_secret_flag(current, word) {
             Some(ShortFlag {
@@ -1200,11 +1365,13 @@ impl ShortFlagScan<'_> {
         } else {
             short_secret_flag(current, word)
         };
-        let Some(flag) = flag else { return word_end };
+        let Some(flag) = flag else {
+            return resume(word_end);
+        };
         let (start, end, next) = if let Some(offset) = flag.attached {
             argument_extent(text, index + offset)
         } else if flag.next {
-            let mut at = word_end;
+            let mut at = resume(word_end);
             if quote.is_some_and(|q| text.as_bytes().get(word_end) == Some(&q)) {
                 // `"-p", "x"`: past the closing quote and the comma.
                 at += 1;
@@ -1216,18 +1383,18 @@ impl ShortFlagScan<'_> {
             at += text[at..].len() - text[at..].trim_start_matches([' ', '\t']).len();
             argument_extent(text, at)
         } else {
-            return word_end;
+            return resume(word_end);
         };
         let value = &text[start..end];
         if (flag.attached.is_none() && value.starts_with('-'))
             || (flag.needs_eq && !value.contains('='))
         {
-            return word_end;
+            return resume(word_end);
         }
         if self.mask(start, end) {
             next
         } else {
-            word_end
+            resume(word_end)
         }
     }
 }
@@ -1261,6 +1428,19 @@ fn mask_short_flags(text: &str) -> String {
         } else if byte.is_ascii_whitespace() || matches!(byte, b'[' | b'{' | b',') {
             // Brackets and commas separate the elements of a JSON argv array.
             index += 1;
+        } else if let Some(curly) = text[index..].chars().next().filter(|c| is_curly_quote(*c)) {
+            // A typographic quote quotes like an ASCII one.
+            if scan.htpasswd.active {
+                let (start, end, next) = argument_extent(text, index);
+                if text[start..end].starts_with('-') {
+                    scan.htpasswd.flags(&text[start..end]);
+                } else {
+                    scan.htpasswd.argument(start, end);
+                }
+                index = next;
+            } else {
+                index += curly.len_utf8();
+            }
         } else if matches!(byte, b'"' | b'\'') {
             // A quote opens an argument of `htpasswd`; elsewhere it only
             // wraps words that are scanned as usual (`sh -c "mysql -pX"`).
@@ -1269,6 +1449,26 @@ fn mask_short_flags(text: &str) -> String {
                 let (start, end, next) = argument_extent(text, index);
                 if text[start..end].starts_with('-') {
                     scan.htpasswd.flags(&text[start..end]);
+                } else if matches!(&text[start..end], "\\" | "\\\\")
+                    && in_json_array(text, index)
+                    && text[next..]
+                        .trim_start_matches([' ', '\t'])
+                        .starts_with(',')
+                {
+                    // A line continuation element (`"\\"` in JSON text) is
+                    // not an argument.
+                } else if next > end
+                    && text[next..].starts_with(':')
+                    && text[next + 1..]
+                        .trim_start_matches([' ', '\t', '\r'])
+                        .chars()
+                        .next()
+                        .is_some_and(|c| !c.is_whitespace() && !matches!(c, ']' | '}' | ',' | ';'))
+                {
+                    // A JSON key (`{"pass":"x`) is not an argument either; the
+                    // value after it is read as the next element.
+                    index = next + 1;
+                    continue;
                 } else {
                     scan.htpasswd.argument(start, end);
                 }
@@ -1561,8 +1761,17 @@ fn is_benign_value(key: &str, value: &str) -> bool {
 /// Whether the value of a bare `PASS: value` line is a test-log entry: a path
 /// with an extension (`tests/foo.sh`), `suite::case`, a status word, and, for
 /// the upper-case log keyword only, a lower-case test name with separators
-/// (`cat-prints-a-file`, `t0001-init`) or a Go test name (`TestParse`,
+/// (`cat-prints-a-file`, git's `t0001-init`) or a Go test name (`TestParse`,
 /// `ExampleParse`). A plain word with a digit (`s3cretvalue`) is none of them.
+///
+/// The trade-off (#450): a lower-case separated word is read as a test name
+/// after `PASS:` even when it holds a digit (`hunter2_secret`). Test logs print
+/// `test_utf8_2`, `io-uring-v2`, `http2-push`, `parse_ipv4_addr`, `sha256-sum`
+/// and `abc-1.2.3` on every line, and no rule on the word alone tells them
+/// from such a secret, so masking one would hide the log. A secret of that
+/// shape is caught by every other rule that sees its key (`password=`,
+/// `--password`, JSON) and only escapes in this one bare upper-case
+/// `PASS: <word>` form.
 fn is_test_log_value(key: &str, value: &str) -> bool {
     // Only the first bytes are read: `value` may run to the end of a very
     // long text, and this is asked once per key.
@@ -1677,7 +1886,7 @@ fn mask_key_values(text: &str) -> String {
             // Blanks may sit before the colon (`password : x`).
             let trimmed = text[..separator].trim_end_matches([' ', '\t']);
             match trimmed.chars().next_back() {
-                Some(quote @ ('"' | '\'')) => {
+                Some(quote) if matches!(quote, '"' | '\'') || is_curly_quote(quote) => {
                     key_end = trimmed.len() - quote.len_utf8();
                     // The key of JSON inside a JSON string: `\"password\":`.
                     if text[..key_end].ends_with('\\') {
@@ -1709,7 +1918,7 @@ fn mask_key_values(text: &str) -> String {
             let quoted = text[..extent.0]
                 .chars()
                 .next_back()
-                .is_some_and(|c| matches!(c, '"' | '\''));
+                .is_some_and(|c| matches!(c, '"' | '\'') || is_curly_quote(c));
             unquoted_end = if quoted { 0 } else { extent.1 };
             extent
         };
@@ -1768,7 +1977,7 @@ fn bare_value_is_secret(
     let quoted = text[..value_start]
         .chars()
         .next_back()
-        .is_some_and(|c| matches!(c, '"' | '\''));
+        .is_some_and(|c| matches!(c, '"' | '\'') || is_curly_quote(c));
     // Walk back over indentation and a list dash only, so a long line of
     // keys stays linear: the walk ends at the first other character.
     let yaml_shape = text[..key_start]
@@ -1806,39 +2015,29 @@ fn credentials_pass(text: &str) -> String {
     )))
 }
 
-/// Removes terminal escape sequences: CSI (`ESC [ ... final`, also the C1
-/// form), OSC / DCS / APC / PM / SOS strings (to BEL, `ESC \` or the end of
-/// the line, so an unterminated one cannot swallow the rest of the output),
-/// the common two-byte escapes and the same sequences written out inside JSON
-/// text (`\u001b[0m`). Colour codes split a credential from its name
-/// (`token\x1b[0m=x`), so this runs before any rule looks at the text. A
-/// bare `ESC` that starts none of them stays for [`flatten_control_characters`].
-/// One forward pass; nothing is re-read.
-#[must_use]
-pub fn strip_terminal_escapes(text: &str) -> String {
-    strip_escapes(text, true)
+// Terminal escape sequences are removed by [`clean`]: CSI (`ESC [ ... final`,
+// also the C1 form), OSC / DCS / APC / PM / SOS strings (to BEL, `ESC \`
+// or the end of the line, so an unterminated one cannot swallow the rest of
+// the output), the common two-byte escapes and the same sequences written
+// out inside JSON text (`\u001b[0m`). Colour codes split a credential from
+// its name (`token\x1b[0m=x`), so this runs before any rule looks at the
+// text.
+
+/// The written-out forms of `ESC` that start a sequence.
+const LITERAL_ESCAPES: [&str; 7] = [
+    "\\u001b", "\\u001B", "\\x1b", "\\x1B", "\\033", "\\e", "\\E",
+];
+
+/// The length of the written-out `ESC` at the start of `rest`, if there is one.
+fn literal_escape_len(rest: &[u8]) -> Option<usize> {
+    LITERAL_ESCAPES
+        .iter()
+        .find(|literal| rest.starts_with(literal.as_bytes()))
+        .map(|literal| literal.len())
 }
 
-/// [`strip_terminal_escapes`], with or without the written-out forms.
-fn strip_escapes(text: &str, literal: bool) -> String {
-    let bytes = text.as_bytes();
-    let mut result = String::with_capacity(text.len());
-    let mut copied = 0;
-    let mut at = 0;
-    while at < bytes.len() {
-        if let Some(len) = escape_len(bytes, at, literal) {
-            result.push_str(&text[copied..at]);
-            at += len;
-            copied = at;
-        } else {
-            at += 1;
-        }
-    }
-    result.push_str(&text[copied..]);
-    result
-}
-
-/// The length of the terminal escape sequence that starts at `at`, if one does.
+/// The length of the terminal escape sequence that starts at `at`, if one
+/// does.
 fn escape_len(bytes: &[u8], at: usize, literal: bool) -> Option<usize> {
     let rest = &bytes[at..];
     match rest[0] {
@@ -1846,12 +2045,9 @@ fn escape_len(bytes: &[u8], at: usize, literal: bool) -> Option<usize> {
         b'\\' if literal => {
             // `\u001b`, `\x1b` or `\033` followed by `[` or `]`: an escape
             // written out in JSON or a debug dump.
-            let literal = ["\\u001b", "\\u001B", "\\x1b", "\\x1B", "\\033"]
-                .iter()
-                .find(|literal| rest.starts_with(literal.as_bytes()))?
-                .len();
+            let literal = literal_escape_len(rest)?;
             matches!(rest.get(literal), Some(b'[' | b']'))
-                .then(|| escape_body_len(bytes, at + literal, true).map(|len| literal + len))?
+                .then(|| written_body_len(bytes, at + literal, literal).map(|len| literal + len))?
         }
         // C1 controls: CSI, DCS, SOS, OSC, PM, APC.
         0xc2 => match rest.get(1)? {
@@ -1859,6 +2055,27 @@ fn escape_len(bytes: &[u8], at: usize, literal: bool) -> Option<usize> {
             0x90 | 0x98 | 0x9d | 0x9e | 0x9f => Some(2 + string_len(bytes, at + 2, false)),
             _ => None,
         },
+        _ => None,
+    }
+}
+
+/// The length of what follows a written-out `ESC` of `literal` bytes at `at`.
+/// The short `\e` is also an ordinary backslash escape (`C:\Users\e]x`,
+/// `printf '\e]0;t\a'`), so it only starts a short CSI.
+fn written_body_len(bytes: &[u8], at: usize, literal: usize) -> Option<usize> {
+    if literal > 2 {
+        return escape_body_len(bytes, at, true);
+    }
+    if bytes.get(at) != Some(&b'[') {
+        return None;
+    }
+    let params = bytes[at + 1..]
+        .iter()
+        .take_while(|byte| byte.is_ascii_digit() || **byte == b';')
+        .count();
+    let end = at + 1 + params;
+    match bytes.get(end) {
+        Some(b'm' | b'A'..=b'K') if !letter_starts_secret_name(bytes, end) => Some(params + 2),
         _ => None,
     }
 }
@@ -1884,7 +2101,35 @@ fn escape_body_len(bytes: &[u8], at: usize, literal: bool) -> Option<usize> {
     })
 }
 
-/// Parameter, intermediate and final bytes of a CSI sequence from `at`.
+/// The longest word that is looked at after a bare `ESC [ letter`.
+const BARE_CSI_WORD_MAX: usize = 64;
+
+/// Whether the letter at `at`, right after `ESC [` with no parameters, starts
+/// a secret name that the CSI reading would cut in two: `\e[password=x` is
+/// `ESC [` and `password` (a lone `p` is no useful final), while
+/// `\e[Kpassword=x` is the erase-line final `K` and `password`. The letter is
+/// text only when the word with it names a secret and the word without it
+/// does not.
+fn letter_starts_secret_name(bytes: &[u8], at: usize) -> bool {
+    let run = bytes[at..]
+        .iter()
+        .take(BARE_CSI_WORD_MAX + 1)
+        .take_while(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-' | b'.'))
+        .count();
+    if !(2..=BARE_CSI_WORD_MAX).contains(&run) || !bytes[at].is_ascii_alphabetic() {
+        return false;
+    }
+    let (Ok(with), Ok(without)) = (
+        std::str::from_utf8(&bytes[at..at + run]),
+        std::str::from_utf8(&bytes[at + 1..at + run]),
+    ) else {
+        return false;
+    };
+    names_a_secret(with) && !names_a_secret(without)
+}
+
+/// Parameter, intermediate and final bytes of a CSI sequence from `at`. A bare
+/// introducer whose letter starts a secret name has no final.
 fn csi_len(bytes: &[u8], at: usize) -> usize {
     let mut len = 0;
     while matches!(bytes.get(at + len), Some(b'0'..=b'?')) {
@@ -1892,6 +2137,10 @@ fn csi_len(bytes: &[u8], at: usize) -> usize {
     }
     while matches!(bytes.get(at + len), Some(b' '..=b'/')) {
         len += 1;
+    }
+    // Also with parameters: `\e[1;31password=x` is `ESC [ 1;31` and `password`.
+    if letter_starts_secret_name(bytes, at + len) {
+        return len;
     }
     len + usize::from(matches!(bytes.get(at + len), Some(b'@'..=b'~')))
 }
@@ -1922,7 +2171,7 @@ fn string_len(bytes: &[u8], at: usize, literal: bool) -> usize {
     len
 }
 
-/// How [`normalize`] treats a control character that is neither whitespace
+/// How [`clean`] treats a control character that is neither whitespace
 /// nor part of an escape sequence (NUL, BEL, BS, DEL, C1): inside a value it
 /// splits the value (`pass\x07word`), between words it separates them
 /// (`--password\0value`, as in `/proc/*/cmdline`). The scrubber tries both.
@@ -1932,58 +2181,211 @@ enum Soft {
     Delete,
 }
 
-/// Escape sequences stripped, vertical whitespace and soft controls handled,
-/// and a lone `\r` made a space: the form every rule scans. `\n` always
-/// stays; `\t` and `\r\n` stay unless `whitespace` flattens them too.
-fn normalize(text: &str, soft: Soft, whitespace: bool) -> String {
-    normalize_with(text, soft, whitespace, true)
+/// What [`clean`] does.
+#[derive(Clone, Copy)]
+struct Norm {
+    soft: Soft,
+    /// Flatten tabs and `\r\n` too.
+    whitespace: bool,
+    /// Strip the written-out escape forms too.
+    literal: bool,
 }
 
-/// How many times stripping and flattening repeat: removing one sequence can
-/// join the pieces of another (`\u001b\u001b[0m[0m`). The cap keeps the cost
-/// a constant factor.
-const MAX_NORMALIZE_PASSES: usize = 4;
+impl Norm {
+    /// Stored text: every form, tabs and carriage returns flattened.
+    const STORED: Norm = Norm {
+        soft: Soft::Space,
+        whitespace: true,
+        literal: true,
+    };
+}
 
-fn normalize_with(text: &str, soft: Soft, whitespace: bool, literal: bool) -> String {
-    let mut current = normalize_once(text, soft, whitespace, literal);
-    for _ in 0..MAX_NORMALIZE_PASSES {
-        let next = normalize_once(&current, soft, whitespace, literal);
-        if next == current {
+/// The cleaned text, and what the cleaning saw.
+struct Cleaned {
+    text: String,
+    /// For each byte of `text`, the byte offset in the input of the
+    /// character it came from. Empty unless asked for.
+    origins: Vec<usize>,
+    /// A control character whose treatment is a choice (see [`Soft`]).
+    soft_seen: bool,
+}
+
+/// How many more times [`clean_once`] repeats: one pass already handles
+/// nesting of any depth, but a sequence cut by a character that only a later
+/// step removes (`\u001b[` and a NUL before `0m`) is joined by the next pass.
+/// The cap keeps the cost a constant factor.
+const MAX_CLEAN_PASSES: usize = 4;
+
+/// [`clean_once`] until the text is stable.
+fn clean(text: &str, norm: Norm, track: bool) -> Cleaned {
+    let mut current = clean_once(text, norm, track);
+    for _ in 0..MAX_CLEAN_PASSES {
+        let next = clean_once(&current.text, norm, track);
+        if next.text == current.text {
             break;
         }
-        current = next;
+        let origins = next
+            .origins
+            .iter()
+            .map(|origin| current.origins[*origin])
+            .collect();
+        current = Cleaned {
+            text: next.text,
+            origins,
+            soft_seen: current.soft_seen,
+        };
     }
     current
 }
 
-fn normalize_once(text: &str, soft: Soft, whitespace: bool, literal: bool) -> String {
-    let stripped = strip_escapes(text, literal);
-    let mut result = String::with_capacity(stripped.len());
-    let mut chars = stripped.chars().peekable();
-    while let Some(c) = chars.next() {
-        match c {
-            '\n' => result.push('\n'),
-            '\t' if !whitespace => result.push('\t'),
-            '\r' if chars.peek() == Some(&'\n') => {
-                // CRLF: stored text drops the `\r`, so `\` + CRLF stays a
-                // line continuation.
-                if !whitespace {
-                    result.push('\r');
-                }
-            }
-            '\t' | '\r' | '\u{b}' | '\u{c}' | '\u{85}' => result.push(' '),
+/// Escape sequences stripped, vertical whitespace and soft controls handled,
+/// and a lone `\r` made a space: the form every rule scans. `\n` always
+/// stays; `\t` and `\r\n` stay unless `whitespace` flattens them too.
+///
+/// One forward pass. Removing a sequence or a character can join the pieces
+/// of another sequence (`\u001b\u001b[0m[0m`), so after every removal the end
+/// of the output is checked for an opener that now continues into the rest of
+/// the input. Each such join removes bytes, so the pass stays linear however
+/// deep the nesting.
+fn clean_once(text: &str, norm: Norm, track: bool) -> Cleaned {
+    let bytes = text.as_bytes();
+    let mut result = Cleaned {
+        text: String::with_capacity(text.len()),
+        origins: Vec::new(),
+        soft_seen: false,
+    };
+    let mut at = 0;
+    while at < bytes.len() {
+        if let Some(len) = escape_len(bytes, at, norm.literal) {
+            at += len;
+            rejoin(&mut result, bytes, &mut at, norm);
+            continue;
+        }
+        let c = text[at..].chars().next().expect("a character boundary");
+        let kept = match c {
+            '\n' => Some(c),
+            '\t' if !norm.whitespace => Some(c),
+            // CRLF: stored text drops the `\r`, so `\` + CRLF stays a line
+            // continuation.
+            '\r' if bytes.get(at + 1) == Some(&b'\n') => (!norm.whitespace).then_some(c),
+            '\t' | '\r' | '\u{b}' | '\u{c}' | '\u{85}' => Some(' '),
             c if c.is_control() => {
-                if soft == Soft::Space {
-                    result.push(' ');
-                }
+                result.soft_seen |= !c.is_ascii_whitespace();
+                (norm.soft == Soft::Space).then_some(' ')
             }
-            c => result.push(c),
+            c => Some(c),
+        };
+        if let Some(kept) = kept {
+            result.text.push(kept);
+            if track {
+                result
+                    .origins
+                    .extend(std::iter::repeat_n(at, kept.len_utf8()));
+            }
+            at += c.len_utf8();
+        } else {
+            at += c.len_utf8();
+            rejoin(&mut result, bytes, &mut at, norm);
         }
     }
     result
 }
 
-/// Whether `text` has a control character that [`normalize`] would change.
+/// After a removal: while the end of the output and the start of the rest of
+/// the input (`bytes[*at..]`) form an escape sequence together, drops the
+/// part in the output and skips the part in the input.
+fn rejoin(result: &mut Cleaned, bytes: &[u8], at: &mut usize, norm: Norm) {
+    while let Some((back, ahead)) = joined_escape(result.text.as_bytes(), bytes, *at, norm) {
+        let keep = result.text.len() - back;
+        result.text.truncate(keep);
+        result.origins.truncate(keep.min(result.origins.len()));
+        *at += ahead;
+    }
+}
+
+/// A written-out `\e[` and some parameters at the end of the output that the
+/// rest of the input completes into a short CSI (`\e[1` and `;31m`): the
+/// bytes of it in `output` and in the input.
+fn joined_short_csi(output: &[u8], bytes: &[u8], at: usize) -> Option<(usize, usize)> {
+    let params = output
+        .iter()
+        .rev()
+        .take(40)
+        .take_while(|byte| byte.is_ascii_digit() || **byte == b';')
+        .count();
+    let head = &output[..output.len() - params];
+    if !(head.ends_with(b"\\e[") || head.ends_with(b"\\E[")) {
+        return None;
+    }
+    let more = bytes[at..]
+        .iter()
+        .take_while(|byte| byte.is_ascii_digit() || **byte == b';')
+        .count();
+    match bytes.get(at + more) {
+        Some(b'm' | b'A'..=b'K') if !letter_starts_secret_name(bytes, at + more) => {
+            Some((params + 3, more + 1))
+        }
+        _ => None,
+    }
+}
+
+/// An escape sequence whose opener ends the output: the bytes of it in
+/// `output` and in `rest`.
+fn joined_escape(output: &[u8], bytes: &[u8], at: usize, norm: Norm) -> Option<(usize, usize)> {
+    // A raw `ESC` is a control character and never stays in the output.
+    if !norm.literal {
+        return None;
+    }
+    if let Some(joined) = joined_short_csi(output, bytes, at) {
+        return Some(joined);
+    }
+    let rest = &bytes[at..];
+    // A written-out `ESC` is at most 6 bytes: the last `back` of them are in
+    // the output, the others at the start of the rest (and then a `[` or `]`).
+    for back in (1..=output.len().min(6)).rev() {
+        let mut window = [0u8; 16];
+        let tail = &output[output.len() - back..];
+        window[..back].copy_from_slice(tail);
+        let ahead = rest.len().min(7);
+        window[back..back + ahead].copy_from_slice(&rest[..ahead]);
+        let window = &window[..back + ahead];
+        let Some(literal) = literal_escape_len(window) else {
+            continue;
+        };
+        if literal < back || !matches!(window.get(literal), Some(b'[' | b']')) {
+            continue;
+        }
+        let from_rest = literal - back;
+        if let Some(body) = written_body_len(bytes, at + from_rest, literal) {
+            // A CSI with no final yet may be completed by what a later step
+            // removes; the next pass over the text joins it then.
+            let complete = bytes[at + from_rest] != b'['
+                || (body > 1 && matches!(bytes[at + from_rest + body - 1], b'@'..=b'~'));
+            if complete {
+                return Some((back, from_rest + body));
+            }
+        }
+    }
+    None
+}
+
+/// [`clean`] for stored or returned text: escapes (written-out ones too),
+/// whitespace and controls, with `soft` controls as given.
+fn normalize(text: &str, soft: Soft, whitespace: bool) -> String {
+    let norm = Norm {
+        soft,
+        whitespace,
+        ..Norm::STORED
+    };
+    clean(text, norm, false).text
+}
+
+/// Whether `text` has a control character whose treatment is a choice.
+fn has_soft_controls(text: &str) -> bool {
+    clean(text, Norm::STORED, false).soft_seen
+}
+
+/// Whether `text` has a control character that [`clean`] would change.
 fn has_noise(text: &str) -> bool {
     text.chars()
         .any(|c| c.is_control() && !matches!(c, '\n' | '\t'))
@@ -1995,43 +2397,199 @@ fn has_escape(text: &str) -> bool {
     (0..bytes.len()).any(|at| escape_len(bytes, at, true).is_some())
 }
 
-/// Whether `text` has a control character whose treatment is a choice.
-fn has_soft_controls(text: &str) -> bool {
-    text.chars().any(|c| {
-        c.is_control() && !c.is_ascii_whitespace() && !matches!(c, '\u{b}' | '\u{c}' | '\u{85}')
-    })
-}
-
-/// Runs `pass` to a fixed point over the normalised text. When a soft control
-/// character is present the text is scrubbed both ways and the more heavily
-/// masked (shorter) result is kept, so neither a split value nor a separator
-/// hides a credential.
+/// Runs `pass` to a fixed point over the cleaned text. A soft control
+/// character has two readings (a space, or nothing), and a credential must be
+/// masked under both. Each reading is scrubbed on its own and the one that
+/// masks most (then the shortest, which has a split value joined back) gives
+/// the result, exactly as its own scrub produced it. What the other reading
+/// masked is added to that result as masks only, mapped through the offsets
+/// of the input, and clipped at the soft controls the result reads as
+/// separators (a part past a separator that is a `name=value` of its own is left out; a plain word the other reading joined to the value, like `db` after a password, is masked: the readings cannot tell it from more of the value): no rule runs again over text with the other reading's masks
+/// in it, which would change what the rules see.
 fn scrub_normalized(text: &str, whitespace: bool, pass: impl Fn(&str) -> String + Copy) -> String {
     let tabs = whitespace && text.contains('\t');
     if !(has_noise(text) || has_escape(text) || tabs) {
         return settle(text, pass);
     }
-    let spaced = settle(&normalize(text, Soft::Space, whitespace), pass);
-    if !has_soft_controls(&strip_terminal_escapes(text)) {
-        return spaced;
+    let spaced = Norm {
+        whitespace,
+        ..Norm::STORED
+    };
+    let first = clean(text, spaced, false);
+    if !first.soft_seen {
+        return settle(&first.text, pass);
     }
-    let deleted = settle(&normalize(text, Soft::Delete, whitespace), pass);
-    // The variant that masks more wins (a deleted separator joins words and
-    // hides a flag); on a tie the shorter one, which has the split value
-    // joined back.
+    let deleted = Norm {
+        soft: Soft::Delete,
+        ..spaced
+    };
+    let cleaned: Vec<Cleaned> = [spaced, deleted]
+        .iter()
+        .map(|reading| clean(text, *reading, true))
+        .collect();
+    let mut scrubbed: Vec<String> = cleaned
+        .iter()
+        .map(|cleaned| settle(&cleaned.text, pass))
+        .collect();
     let masks = |text: &str| text.matches(MASK).count();
-    if (masks(&deleted), spaced.len()) > (masks(&spaced), deleted.len()) {
-        deleted
-    } else {
-        spaced
+    let best = usize::from(
+        (masks(&scrubbed[1]), scrubbed[0].len()) > (masks(&scrubbed[0]), scrubbed[1].len()),
+    );
+    let other = 1 - best;
+    // The spans each reading masked, when they can be told exactly.
+    let spans_of = |index: usize| {
+        masked_ranges(&cleaned[index].text, &scrubbed[index]).filter(|spans| {
+            mask_ranges(&cleaned[index].text, spans.clone(), false) == scrubbed[index]
+        })
+    };
+    let (Some(mut spans), Some(borrowed)) = (spans_of(best), spans_of(other)) else {
+        return scrubbed.swap_remove(best);
+    };
+    if borrowed.is_empty() {
+        return scrubbed.swap_remove(best);
     }
+    let (from, into) = (&cleaned[other], &cleaned[best]);
+    let into_bytes = into.text.as_bytes();
+    for (start, end) in borrowed {
+        // The same characters of the input, in the text of the best reading.
+        let first = from.origins[start];
+        let last = from.origins[end - 1];
+        let last_end = last + text[last..].chars().next().map_or(1, char::len_utf8);
+        let lo = into.origins.partition_point(|origin| *origin < first);
+        let hi = into.origins.partition_point(|origin| *origin < last_end);
+        let mut piece = lo;
+        for at in lo..=hi {
+            let separator = at < hi
+                && into_bytes[at] == b' '
+                && text[into.origins[at]..]
+                    .chars()
+                    .next()
+                    .is_some_and(|c| c.is_control() && !c.is_ascii_whitespace());
+            if at == hi || separator {
+                // Past the first separator what the other reading masked can be
+                // words it joined to the value (`HOME=/root`); one that is a
+                // `name=value` of its own is left to the rules.
+                let part = &into.text[piece..at];
+                if at > piece && !part.trim().is_empty() && (piece == lo || !is_assignment(part)) {
+                    spans.push((piece, at));
+                }
+                piece = at + 1;
+            }
+        }
+    }
+    // Adjacent masks are one, so the result is what a second scrub leaves.
+    let merged = mask_ranges(&into.text, spans, true);
+    if settle(&merged, pass) == merged {
+        merged
+    } else {
+        scrubbed.swap_remove(best)
+    }
+}
+
+/// Whether `word` reads as `name=value` or `name:value`: a name, a separator
+/// and something after it that is not another separator (a base64 tail
+/// `AAAA==` is not).
+fn is_assignment(word: &str) -> bool {
+    let name = word
+        .find(|c: char| !(c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.')))
+        .unwrap_or(word.len());
+    let rest = &word[name..];
+    name > 0
+        && rest.starts_with(['=', ':'])
+        && rest[1..]
+            .chars()
+            .next()
+            .is_some_and(|c| !matches!(c, '=' | ':'))
+}
+
+/// A byte range of a text: start and end.
+type ByteRange = (usize, usize);
+
+/// The byte ranges of `before` that `after` masked, when `after` is `before`
+/// with spans replaced by [`MASK`] and each can be told where it ends. `None`
+/// when it cannot be aligned.
+fn masked_ranges(before: &str, after: &str) -> Option<Vec<ByteRange>> {
+    const SYNC: usize = 24;
+    let before = before.as_bytes();
+    let after = after.as_bytes();
+    let mut spans = Vec::new();
+    let (mut i, mut o) = (0, 0);
+    loop {
+        while i < before.len() && o < after.len() && before[i] == after[o] {
+            i += 1;
+            o += 1;
+        }
+        if i == before.len() && o == after.len() {
+            break;
+        }
+        if !after[o..].starts_with(MASK.as_bytes()) {
+            return None;
+        }
+        o += MASK.len();
+        let tail = &after[o..];
+        let end = if tail.is_empty() {
+            before.len()
+        } else {
+            // What follows the span in the output, up to the next mask.
+            let window = &tail[..tail.len().min(SYNC)];
+            let probe = window
+                .windows(MASK.len())
+                .position(|piece| piece == MASK.as_bytes())
+                .map_or(window, |next| &window[..next]);
+            if probe.is_empty() {
+                return None;
+            }
+            (i + 1..=before.len().saturating_sub(probe.len()))
+                .find(|&j| before[j..].starts_with(probe))?
+        };
+        if end <= i {
+            return None;
+        }
+        spans.push((i, end));
+        i = end;
+    }
+    Some(spans)
+}
+
+/// `text` with each range replaced by [`MASK`]; overlapping ranges (and, with
+/// `touching`, adjacent ones) are one mask.
+fn mask_ranges(text: &str, mut ranges: Vec<ByteRange>, touching: bool) -> String {
+    ranges.sort_unstable();
+    let mut result = String::with_capacity(text.len());
+    let mut cursor = 0;
+    let mut ranges = ranges.into_iter().peekable();
+    while let Some((start, mut end)) = ranges.next() {
+        while let Some(&(next_start, next_end)) = ranges.peek() {
+            if next_start > end || (next_start == end && !touching) {
+                break;
+            }
+            end = end.max(next_end);
+            ranges.next();
+        }
+        if start < cursor {
+            continue;
+        }
+        result.push_str(&text[cursor..start]);
+        result.push_str(MASK);
+        cursor = end;
+    }
+    result.push_str(&text[cursor..]);
+    result
 }
 
 /// Strips terminal escape sequences and flattens control characters (except
 /// newlines) to spaces: hostile terminal output stays data.
 #[must_use]
 pub fn flatten_control_characters(text: &str) -> String {
-    normalize_with(text, Soft::Space, true, false)
+    clean(
+        text,
+        Norm {
+            literal: false,
+            ..Norm::STORED
+        },
+        false,
+    )
+    .text
 }
 
 /// The bound for stored result and failure text; output is trimmed to fit.
@@ -2894,17 +3452,13 @@ mod tests {
 
     #[test]
     fn secret_pair_scrub_is_linear_on_pathological_input() {
-        let text = "=a".repeat(100_000) + &"token=".repeat(50_000);
-        let _ = redact_credentials(&text);
+        assert_scales_linearly("=a token=", &|size| {
+            "=a".repeat(size / 5) + &"token=".repeat(size / 10)
+        });
         // One very long line of bare keys must not be quadratic.
-        let started = std::time::Instant::now();
-        let long = "x password: ab ".repeat(70_000);
-        let _ = redact_credentials(&long);
-        assert!(
-            started.elapsed() < std::time::Duration::from_secs(2),
-            "{:?}",
-            started.elapsed()
-        );
+        assert_scales_linearly("x password: ab ", &|size| {
+            "x password: ab ".repeat(size / 15)
+        });
         for unit in [
             "--password ",
             "Bearer\n",
@@ -3155,6 +3709,49 @@ mod tests {
         assert_eq!(value["creds"]["pass"], "***");
     }
 
+    /// The shortest of `runs` timings of the scrub of `text`.
+    fn fastest_scrub(text: &str, runs: usize) -> std::time::Duration {
+        (0..runs)
+            .map(|_| {
+                let started = std::time::Instant::now();
+                let _ = redact_credentials(text);
+                started.elapsed()
+            })
+            .min()
+            .expect("at least one run")
+    }
+
+    /// The scrub is linear: four times the input takes about four times as
+    /// long, where a quadratic rule takes sixteen. `make(size)` builds a text
+    /// of about `size` bytes with its own generator (not a prefix of a larger
+    /// one), so what a long text adds (a join of nested escapes, a late END)
+    /// is timed at both sizes. A ratio of the fastest of several runs, not a
+    /// wall-clock limit alone, so a loaded host, which slows both sizes, does
+    /// not fail the test; the ceiling is far past any linear time and far
+    /// below a quadratic one.
+    fn assert_scales_linearly(what: &str, make: &dyn Fn(usize) -> String) {
+        const SMALL: usize = 128 * 1024;
+        let (small, big) = (make(SMALL), make(4 * SMALL));
+        // A loaded host can slow one run only; a quadratic rule is over the
+        // limit in every attempt.
+        let mut last = String::new();
+        for _ in 0..3 {
+            let small_time = fastest_scrub(&small, 3);
+            let big_time = fastest_scrub(&big, 2);
+            // Below 20 ms the small run says nothing about the ratio.
+            let floor = small_time.max(std::time::Duration::from_millis(20));
+            let allowed = floor * 8 + std::time::Duration::from_millis(50);
+            if big_time < allowed && big_time < std::time::Duration::from_secs(30) {
+                return;
+            }
+            last = format!(
+                "{what:?}: {} bytes took {big_time:?}, {SMALL} bytes {small_time:?}",
+                big.len()
+            );
+        }
+        panic!("{last}");
+    }
+
     /// Every new rule on 1 MB of its own trigger: a quadratic rule takes
     /// minutes here.
     #[test]
@@ -3163,6 +3760,16 @@ mod tests {
         use std::fmt::Write as _;
         let units = [
             "-----BEGIN PRIVATE KEY-----",
+            // #450: log-prefixed fences and bodies, blank lines, END-only keys.
+            "web-1  | -----BEGIN PRIVATE KEY-----\nweb-1  |\n\n\n",
+            "web-1  | AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\n\n",
+            "web-1  | -----END PRIVATE KEY-----\n",
+            "\\u001b\\u001b[0m[0m",
+            "\\e[pa ",
+            "\u{1b}[pa ",
+            "pass\u{7}word=x\0 -p ",
+            "htpasswd -b f bob {\"pass\":\"x ",
+            "\u{201c}mysql -p\u{201d} \u{201c}",
             "-----BEGIN X PRIVATE KEY-----a-----END X PRIVATE KEY-----",
             "-----BEGIN ",
             "-----BEGIN CERTIFICATE-----",
@@ -3274,17 +3881,16 @@ mod tests {
             "  -----END PRIVATE KEY-----\n",
             "-----BEGIN PRIVATE KEY----- AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA ",
         ];
-        let mut texts: Vec<(String, String)> = units
-            .iter()
-            .map(|unit| ((*unit).to_owned(), unit.repeat(1_048_576 / unit.len() + 1)))
-            .collect();
+        for unit in units {
+            assert_scales_linearly(unit, &|size| unit.repeat(size / unit.len() + 1));
+        }
         // Item 1 of #445: distinct PEM labels, which no per-unit repeat can
         // express. With no END, with a far END of the first label only, and
         // each with its own END.
-        let distinct = |end: bool| {
+        let distinct = |size: usize, end: bool| {
             let mut text = String::new();
             let mut i = 0;
-            while text.len() < 1_048_576 {
+            while text.len() < size {
                 let _ = writeln!(text, "-----BEGIN K{i} PRIVATE KEY-----");
                 if end {
                     let _ = write!(text, "AAAA\n-----END K{i} PRIVATE KEY-----\n");
@@ -3293,25 +3899,21 @@ mod tests {
             }
             text
         };
-        texts.push(("distinct BEGIN labels".into(), distinct(false)));
-        texts.push(("distinct BEGIN/END labels".into(), distinct(true)));
-        texts.push((
-            "distinct labels, one far END".into(),
-            distinct(false) + "-----END K0 PRIVATE KEY-----",
-        ));
-        texts.push((
-            "distinct END labels".into(),
-            distinct(false).replace("BEGIN", "END"),
-        ));
-        for (unit, text) in texts {
-            let started = std::time::Instant::now();
-            let _ = redact_credentials(&text);
-            assert!(
-                started.elapsed() < std::time::Duration::from_secs(3),
-                "{unit:?}: {:?}",
-                started.elapsed()
-            );
+        // #450: escapes nested as deep as the text is long.
+        for open in ["\\u001b", "\\e"] {
+            assert_scales_linearly(&format!("{open} nested"), &|size| {
+                let half = size / (open.len() + 3) / 2;
+                format!("token{}{}=x", open.repeat(half), "[0m".repeat(half))
+            });
         }
+        assert_scales_linearly("distinct BEGIN labels", &|size| distinct(size, false));
+        assert_scales_linearly("distinct BEGIN/END labels", &|size| distinct(size, true));
+        assert_scales_linearly("distinct labels, one far END", &|size| {
+            distinct(size, false) + "-----END K0 PRIVATE KEY-----"
+        });
+        assert_scales_linearly("distinct END labels", &|size| {
+            distinct(size, false).replace("BEGIN", "END")
+        });
     }
 
     /// Random fragment soup: the scrubber never panics (multibyte text
@@ -3408,6 +4010,18 @@ mod tests {
             "\\u001b[1m",
             "\\u001b]0;t",
             "\\u0007",
+            "\\u001b",
+            "\\e",
+            "[0m",
+            "\u{1b}[p",
+            "\u{7}",
+            "\0",
+            "\u{201c}",
+            "\u{201d}",
+            "$'",
+            "web-1  | ",
+            "web-1  |\n",
+            "\"\\\\\",",
             "[\\\"",
             "Version: ",
             "Proc-Type: 4,ENCRYPTED",
@@ -3556,5 +4170,245 @@ mod tests {
 
         // No whitespace after a cut front: nothing is kept.
         assert_eq!(scrub_tail(&[b'a'; 100], true), ("…".to_owned(), true));
+    }
+
+    /// Every case: scrubbed to the expected text, and scrubbing that again (and
+    /// the stored form) changes nothing.
+    fn assert_scrubbed(cases: &[(String, &str)]) {
+        for (input, expected) in cases {
+            let out = redact_credentials(input);
+            assert_eq!(&out, expected, "input {input:?}");
+            assert_eq!(redact_credentials(&out), out, "not idempotent: {input:?}");
+            let stored = scrub_failure_detail(input);
+            assert_eq!(scrub_failure_detail(&stored), stored, "stored: {input:?}");
+        }
+    }
+
+    /// Item 1 of #450: a key behind a per-line log prefix, blank lines after
+    /// BEGIN and inside the body. Fake values only.
+    #[test]
+    fn pem_bodies_behind_log_prefixes_are_masked() {
+        let one = "MIIfake1234567890abcdefghijklmnopqrstuvwxyz0123";
+        let two = "Zm9vYmFyZmFrZWtleTEyMzQ1Njc4OTBhYmNkZWZnaGlqa2xt";
+        assert_scrubbed(&[
+            (
+                format!(
+                    "web-1  | -----BEGIN PRIVATE KEY-----\nweb-1  | {one}\nweb-1  | {two}\nweb-1  | Zm9v==\nweb-1  | done"
+                ),
+                "web-1  | ***\nweb-1  | done",
+            ),
+            (
+                format!(
+                    "app: -----BEGIN PRIVATE KEY-----\napp: {one}\napp: {two}\napp: Zm9v==\napp: done"
+                ),
+                "app: ***\napp: done",
+            ),
+            // The prefix of a blank line has its trailing blank trimmed.
+            (
+                format!(
+                    "web-1  | -----BEGIN PRIVATE KEY-----\nweb-1  |\nweb-1  | {one}\nweb-1  |\nweb-1  | {two}\nweb-1  | Zm9v==\nweb-1  | done"
+                ),
+                "web-1  | ***\nweb-1  | done",
+            ),
+            // Interleaved services and timestamped prefixes: the prefix differs
+            // per line.
+            (
+                format!(
+                    "web-1  | -----BEGIN PRIVATE KEY-----\nweb-2  | {one}\nweb-1  | {two}\nweb-1  | server started ok"
+                ),
+                "web-1  | ***\nweb-1  | server started ok",
+            ),
+            (
+                format!(
+                    "2024-01-01T00:00:00Z app[1]: -----BEGIN PRIVATE KEY-----\n2024-01-01T00:00:01Z app[1]: {one}\n2024-01-01T00:00:02Z app[1]: {two}\n2024-01-01T00:00:03Z app[1]: server started ok"
+                ),
+                "2024-01-01T00:00:00Z app[1]: ***\n2024-01-01T00:00:03Z app[1]: server started ok",
+            ),
+            // An END with no BEGIN.
+            (
+                format!(
+                    "web-1  | {one}\nweb-1  | {two}\nweb-1  | -----END PRIVATE KEY-----\nweb-1  | after"
+                ),
+                "***\nweb-1  | after",
+            ),
+            // Two blank lines after BEGIN.
+            (
+                format!("-----BEGIN PRIVATE KEY-----\n\n\n{one}\n{two}\nZm9v==\nafter"),
+                "***\nafter",
+            ),
+            // A blank line inside the body.
+            (
+                format!("-----BEGIN PRIVATE KEY-----\n{one}\n\n{two}\nZm9v==\nafter"),
+                "***\nafter",
+            ),
+            // Three blank lines end the key; prose after a blank line is kept.
+            (
+                format!("-----BEGIN PRIVATE KEY-----\n{one}\n\n\n\n{two}\nafter"),
+                &format!("***\n\n\n\n{two}\nafter"),
+            ),
+            (
+                format!("-----BEGIN PRIVATE KEY-----\n{one}\n\nnext step: ok"),
+                "***\n\nnext step: ok",
+            ),
+        ]);
+    }
+
+    /// Item 2 of #450: a soft control read both ways masks both readings.
+    #[test]
+    fn mixed_soft_controls_mask_every_reading() {
+        assert_scrubbed(&[
+            (
+                "mysql --password\0A1fake pass\u{7}word=B1fake pass\u{7}word=C1fake".into(),
+                "mysql --password*** password=*** password=***",
+            ),
+            (
+                "pass\u{7}word=B1fake mysql\0--password\0A1fake".into(),
+                "password=*** mysql--password***",
+            ),
+            // NUL-separated environ and cmdline (`/proc/*/environ`): every
+            // secret is masked, and what follows a mask is kept.
+            (
+                "DB_PASSWORD=fakeaaa1\0API_TOKEN=fakebbb2\0HOME=/root".into(),
+                "DB_PASSWORD=*** API_TOKEN=*** HOME=/root",
+            ),
+            (
+                "PGPASSWORD=fakeaaa1\0PATH=/bin\0GITHUB_TOKEN=ghp_fakebbb2\0LANG=C\0".into(),
+                "PGPASSWORD=*** PATH=/bin GITHUB_TOKEN=*** LANG=C ",
+            ),
+            (
+                "mysql\0-ufoo\0-pfakeaaa1\0--password=fakebbb2\0db".into(),
+                "mysql -ufoo -p*** --password=*** ***",
+            ),
+            (
+                "curl\0-u\0bob:fakeaaa1\0--header\0Authorization: Bearer fakebbb2abc\0http://h"
+                    .into(),
+                "curl -u *** --header Authorization: ***",
+            ),
+            // One reading only is unchanged.
+            ("--password\0fakepw1".into(), "--password ***"),
+            ("x\u{0}u:p@h".into(), "***@h"),
+        ]);
+    }
+
+    /// Item 3 of #450: escapes nested deeper than any fixed number of passes.
+    #[test]
+    fn deeply_nested_escapes_are_stripped() {
+        for depth in [6, 7, 40, 500] {
+            for (open, close) in [
+                ("\\u001b", "[0m"),
+                ("\\x1b", "[0m"),
+                ("\\033", "[1;31m"),
+                ("\\e", "[0m"),
+            ] {
+                let input = format!("token{}{}=fakepw1", open.repeat(depth), close.repeat(depth));
+                assert_scrubbed(&[(input, "token=***")]);
+            }
+        }
+        // Mixed with soft controls and raw escapes between the pieces.
+        let input = format!(
+            "token{}{}=fakepw1",
+            "\\u001b\0".repeat(8),
+            "[0m\u{7f}".repeat(8)
+        );
+        assert_scrubbed(&[(input, "token=***")]);
+        let input = format!(
+            "token{}{}=fakepw1",
+            "\\u001b\u{1b}[0m".repeat(9),
+            "[0m".repeat(9)
+        );
+        assert_scrubbed(&[(input, "token=***")]);
+    }
+
+    /// Item 4 of #450: the argv continuation element, `ESC [ letter`,
+    /// `$'...'` and typographic quotes. Fake values only.
+    #[test]
+    fn residual_shapes_from_the_second_audit_are_masked() {
+        assert_scrubbed(&[
+            (
+                r#"["htpasswd","-b","f","\\","bob","PW1fake"]"#.into(),
+                r#"["htpasswd","-b","f","\\","bob","***"]"#,
+            ),
+            // `ESC [` and a letter is a CSI final or the start of a word.
+            ("\u{1b}[password=X1fake".into(), "password=***"),
+            ("\u{1b}[Kpassword=X1fake".into(), "password=***"),
+            ("\u{1b}[mtoken=X1fake".into(), "token=***"),
+            ("\\u001b[password=X1fake".into(), "password=***"),
+            // With parameters too, and the written-out `\e` only as a short CSI.
+            ("\u{1b}[1;31password=fake1".into(), "password=***"),
+            ("\\e[1;31password=fake1".into(), "\\e[1;31password=***"),
+            ("\\e[1;31mtoken=fake1 ok".into(), "token=*** ok"),
+            (
+                "printf '\\e]0;title\\a' && echo ok rest".into(),
+                "printf '\\e]0;title\\a' && echo ok rest",
+            ),
+            ("C:\\Users\\e]x\\file".into(), "C:\\Users\\e]x\\file"),
+            // An apostrophe inside a value does not end it.
+            ("password=don\u{2019}tleak1".into(), "password=***"),
+            (
+                "password=\u{201c}don\u{2019}t leak\u{201d} x".into(),
+                "password=\u{201c}***\u{201d} x",
+            ),
+            // An unclosed typographic quote is an ordinary character.
+            (
+                "htpasswd -b \u{201c}f bob fakepw1".into(),
+                "htpasswd -b \u{201c}f bob ***",
+            ),
+            // The `"\\"` element continues the command only inside an array.
+            (
+                r#"htpasswd -b f bob "\\""#.into(),
+                r#"htpasswd -b f bob "***""#,
+            ),
+            (
+                r#"["htpasswd","-b","f","bob","\\"]"#.into(),
+                r#"["htpasswd","-b","f","bob","***"]"#,
+            ),
+            ("cmd=$'mysql -pfakepw1'".into(), "cmd=$'mysql -p***'"),
+            (
+                "\u{201c}mysql -pfakepw1\u{201d} x".into(),
+                "\u{201c}mysql -p*** x",
+            ),
+            (
+                "mysql \u{201c}-pfakepw1\u{201d}".into(),
+                "mysql \u{201c}-p***",
+            ),
+            (
+                "password=\u{201c}hunter two\u{201d} rest".into(),
+                "password=\u{201c}***\u{201d} rest",
+            ),
+            (
+                "\u{201c}password\u{201d}: \u{201c}hunter two\u{201d} rest".into(),
+                "\u{201c}password\u{201d}: \u{201c}***\u{201d} rest",
+            ),
+        ]);
+    }
+
+    /// Item 5 of #450: the `PASS:` test-log trade-off and an `htpasswd`
+    /// password with a quote inside it.
+    #[test]
+    fn test_log_names_and_odd_htpasswd_arguments() {
+        assert_scrubbed(&[
+            // Test names with digits and separators are kept (documented
+            // trade-off), and so is a secret of that shape.
+            ("PASS: hunter2_secret".into(), "PASS: hunter2_secret"),
+            ("PASS: test_utf8_2".into(), "PASS: test_utf8_2"),
+            ("PASS: io-uring-v2".into(), "PASS: io-uring-v2"),
+            ("PASS: http2-push".into(), "PASS: http2-push"),
+            ("PASS: parse_ipv4_addr".into(), "PASS: parse_ipv4_addr"),
+            ("PASS: sha256-sum".into(), "PASS: sha256-sum"),
+            ("PASS: ext4-resize.sh".into(), "PASS: ext4-resize.sh"),
+            ("PASS: abc-1.2.3".into(), "PASS: abc-1.2.3"),
+            ("PASS: t0001-init".into(), "PASS: t0001-init"),
+            ("PASS: cat-prints-a-file".into(), "PASS: cat-prints-a-file"),
+            // Kept on purpose: indistinguishable from a test name.
+            ("PASS: my_secret_value".into(), "PASS: my_secret_value"),
+            (
+                "htpasswd -b f bob {\"pass\":\"x1fake rest".into(),
+                "htpasswd -b f bob {\"pass\":\"***",
+            ),
+            (
+                "sh -c \"htpasswd -b f bob pw1fake\" tail".into(),
+                "sh -c \"htpasswd -b f bob ***\" tail",
+            ),
+        ]);
     }
 }
