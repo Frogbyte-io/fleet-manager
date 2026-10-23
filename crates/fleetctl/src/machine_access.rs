@@ -39,7 +39,7 @@ pub struct AuthArgs {
 
 impl AuthArgs {
     /// The wire object of the controller's `EndpointAuth`, when one was given.
-    fn to_json(&self) -> Result<Option<Value>, CliError> {
+    pub(crate) fn to_json(&self) -> Result<Option<Value>, CliError> {
         let missing = |flag: &str, kind: &str| CliError {
             message: format!("--auth {kind} needs {flag}"),
         };
@@ -167,6 +167,12 @@ pub enum MachineAccessAction {
         /// How long to wait, in seconds.
         timeout: Option<u64>,
     },
+    /// `machines terminal <machine>`: an interactive shell on the local TTY
+    /// (#494).
+    Terminal {
+        /// The machine and how to reach it (`--os` does not apply).
+        target: Target,
+    },
     /// `machines files <machine>`: the files collected from a machine.
     Files {
         /// The machine.
@@ -215,6 +221,7 @@ pub(crate) fn parse(verb: &str, rest: &[&str], output: &mut Output) -> Result<Co
         "exec" => parse_exec(rest, output)?,
         "put" => parse_put(rest, output)?,
         "collect" => parse_collect(rest, output)?,
+        "terminal" => parse_terminal(rest, output)?,
         "files" => {
             let Some((machine, flags)) = rest.split_first() else {
                 return Err(CliError { message: usage() });
@@ -466,6 +473,25 @@ fn parse_put(rest: &[&str], output: &mut Output) -> Result<MachineAccessAction, 
     })
 }
 
+fn parse_terminal(rest: &[&str], output: &mut Output) -> Result<MachineAccessAction, CliError> {
+    let Some((machine, flags)) = rest.split_first() else {
+        return Err(CliError { message: usage() });
+    };
+    let mut target = Target {
+        machine: (*machine).to_owned(),
+        ..Target::default()
+    };
+    parse_flags(flags, output, |flag, value| {
+        // A shell has no guest-OS-specific layer: the guest starts its own.
+        if flag != "--os" && target_flag(&mut target, flag, value)? {
+            return Ok(());
+        }
+        Err(unknown(flag))
+    })?;
+    target.auth.to_json()?;
+    Ok(MachineAccessAction::Terminal { target })
+}
+
 fn parse_collect(rest: &[&str], output: &mut Output) -> Result<MachineAccessAction, CliError> {
     let mut target = Target::default();
     let (mut no_wait, mut timeout) = (false, None);
@@ -625,6 +651,12 @@ pub(crate) fn request(action: &MachineAccessAction) -> Result<RequestShape, CliE
                 Some(Value::Object(body)),
             )
         }
+        MachineAccessAction::Terminal { target } => (
+            reqwest::Method::POST,
+            format!("/api/v1/machines/{}/terminal-sessions", target.machine),
+            Vec::new(),
+            Some(crate::machine_terminal::session_body(target, 80, 24)?),
+        ),
         MachineAccessAction::Files { machine, limit } => (
             reqwest::Method::GET,
             format!("/api/v1/machines/{machine}/files"),
@@ -689,6 +721,9 @@ pub(crate) fn run(
     let correlation_id = uuid::Uuid::now_v7().to_string();
     let rendered = |payload: &Value| crate::render(invocation, payload);
     match action {
+        MachineAccessAction::Terminal { target } => {
+            crate::machine_terminal::run(invocation, target)
+        }
         MachineAccessAction::FileGet { file_id, out } => {
             let body = crate::download_from(
                 invocation,

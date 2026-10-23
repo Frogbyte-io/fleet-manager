@@ -368,6 +368,7 @@ pub struct MachineAccess {
     blobs: Option<Arc<dyn ArtifactBlobPort>>,
     policy: ArtifactPolicy,
     blob_lock: Arc<tokio::sync::Mutex<()>>,
+    pub(crate) terminals: Option<Arc<crate::machine_terminal::TerminalSessions>>,
     persistent: Option<Arc<crate::persistent::PersistentMachines>>,
 }
 
@@ -391,6 +392,7 @@ impl MachineAccess {
             blobs: None,
             policy: ArtifactPolicy::default(),
             blob_lock: Arc::new(tokio::sync::Mutex::new(())),
+            terminals: None,
             persistent: None,
         }
     }
@@ -416,6 +418,16 @@ impl MachineAccess {
     #[must_use]
     pub fn with_keys(mut self, keys: Arc<dyn MachineKeyPort>) -> Self {
         self.keys = Some(keys);
+        self
+    }
+
+    /// Serves interactive terminals (#494) through the session ledger.
+    #[must_use]
+    pub fn with_terminals(
+        mut self,
+        terminals: Arc<crate::machine_terminal::TerminalSessions>,
+    ) -> Self {
+        self.terminals = Some(terminals);
         self
     }
 
@@ -1114,7 +1126,7 @@ impl MachineAccess {
     /// recorded default. With neither there is no auth: the controller's own
     /// agent keys are not the machine's credential, so there is no implicit
     /// fall back.
-    async fn resolve_target(
+    pub(crate) async fn resolve_target(
         &self,
         authorizer: &dyn Authorizer,
         principal: &ActingPrincipal,
@@ -1240,7 +1252,7 @@ impl MachineAccess {
         self.files.as_ref().ok_or_else(unwired_files)
     }
 
-    async fn audit_event(
+    pub(crate) async fn audit_event(
         &self,
         principal: &ActingPrincipal,
         action: Permission,
