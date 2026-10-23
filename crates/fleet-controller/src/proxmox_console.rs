@@ -500,6 +500,10 @@ struct ClientActivity {
     /// Whether the one-byte `ClientInit` that follows the security result
     /// (before any typed message) has been consumed.
     client_init_done: bool,
+    /// Whether the client asked for the extended-mouse-buttons
+    /// pseudo-encoding in a `SetEncodings`; only then is a 7-byte
+    /// `PointerEvent` possible.
+    extended_pointer: bool,
 }
 
 impl ClientActivity {
@@ -518,7 +522,8 @@ impl ClientActivity {
         loop {
             let rest = &self.buffer[offset..];
             let Some(&kind) = rest.first() else { break };
-            let Some((length, is_input)) = Self::classify(kind, rest)? else {
+            let Some((length, is_input)) = Self::classify(kind, rest, self.extended_pointer)?
+            else {
                 break;
             };
             if length > MAX_CLIENT_MESSAGE_BYTES {
@@ -526,6 +531,9 @@ impl ClientActivity {
             }
             if rest.len() < length {
                 break;
+            }
+            if kind == 2 && rest.len() >= length {
+                self.extended_pointer |= Self::asks_for_extended_pointer(&rest[..length]);
             }
             // Extended clipboard: only "provide" carries user text.
             let is_input = match (kind, is_input) {
@@ -544,7 +552,11 @@ impl ClientActivity {
 
     /// The total length of the message starting at `rest[0]` and whether it
     /// is input; `None` when more bytes are needed to know.
-    fn classify(kind: u8, rest: &[u8]) -> Result<Option<(usize, bool)>, Unfollowable> {
+    fn classify(
+        kind: u8,
+        rest: &[u8],
+        extended_pointer: bool,
+    ) -> Result<Option<(usize, bool)>, Unfollowable> {
         let be16 = |at: usize| {
             rest.get(at..at + 2)
                 .map(|b| usize::from(u16::from_be_bytes([b[0], b[1]])))
@@ -558,11 +570,20 @@ impl ClientActivity {
             3 => Some((10, false)),
             // KeyEvent.
             4 => Some((8, true)),
-            // PointerEvent: 6 bytes, 7 with noVNC's extended-button marker
-            // (bit 7 of the mask byte).
-            5 => rest
-                .get(1)
-                .map(|mask| (if mask & 0x80 == 0 { 6 } else { 7 }, true)),
+            // PointerEvent: 6 bytes; 7 only when the extended-mouse-buttons
+            // pseudo-encoding was requested and the mask carries its marker
+            // (bit 7). Without the request, bit 7 is just a (reserved) button
+            // bit of the standard form.
+            5 => rest.get(1).map(|mask| {
+                (
+                    if extended_pointer && mask & 0x80 != 0 {
+                        7
+                    } else {
+                        6
+                    },
+                    true,
+                )
+            }),
             // ClientCutText: 8 + |length|; a negative length is the
             // extended-clipboard form.
             6 => rest.get(4..8).map(|len| {
@@ -591,6 +612,17 @@ impl ClientActivity {
             _ => return Err(Unfollowable),
         };
         Ok(length)
+    }
+
+    /// Whether one complete `SetEncodings` lists the extended-mouse-buttons
+    /// pseudo-encoding (-316).
+    fn asks_for_extended_pointer(message: &[u8]) -> bool {
+        message.get(4..).is_some_and(|list| {
+            list.as_chunks::<4>()
+                .0
+                .iter()
+                .any(|entry| i32::from_be_bytes(*entry) == -316)
+        })
     }
 
     /// Whether one complete `ClientCutText` is user text: a plain one is; an
@@ -665,7 +697,6 @@ mod tests {
             "keyEvent",
             "qemuKey",
             "pointer",
-            "extPointer",
             "cutText",
             "extClipProvide",
         ];
@@ -691,6 +722,28 @@ mod tests {
             assert_eq!(activity.observe(&messages[name]), Ok(false), "{name}");
             assert!(activity.buffer.is_empty(), "{name} was consumed whole");
         }
+    }
+
+    #[test]
+    fn the_extended_pointer_form_needs_its_pseudo_encoding_first() {
+        let messages = novnc();
+        // Without the request, the standard 6-byte form applies: the seventh
+        // byte is not part of the pointer event.
+        let mut standard = after_client_init();
+        assert_eq!(standard.observe(&messages["extPointer"]), Ok(true));
+        assert_eq!(standard.buffer.len(), 1);
+        // After SetEncodings lists -316 (extended mouse buttons), the 7-byte
+        // form is followed whole.
+        let mut extended = after_client_init();
+        assert_eq!(
+            extended.observe(&[2, 0, 0, 1, 0xFF, 0xFF, 0xFE, 0xC4]),
+            Ok(false)
+        );
+        assert_eq!(extended.observe(&messages["extPointer"]), Ok(true));
+        assert!(extended.buffer.is_empty());
+        // The plain 6-byte pointer is still 6 bytes after the request.
+        assert_eq!(extended.observe(&messages["pointer"]), Ok(true));
+        assert!(extended.buffer.is_empty());
     }
 
     #[test]

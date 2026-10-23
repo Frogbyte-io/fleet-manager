@@ -514,7 +514,7 @@ impl ProxmoxAccounts {
             });
         };
         match self
-            .attach_reserved(state, authorizer, principal, &pending, now)
+            .attach_reserved(state, authorizer, principal, &pending)
             .await
         {
             Ok(channel) => Ok(AttachedConsole {
@@ -538,14 +538,25 @@ impl ProxmoxAccounts {
         authorizer: &dyn Authorizer,
         principal: &ActingPrincipal,
         pending: &Pending,
-        now: i64,
     ) -> Result<Box<dyn ConsoleChannel>, ProxmoxUseCaseError> {
         Self::authorize_console(authorizer, principal, &pending.account_id)?;
         if *state.shutdown.borrow() {
-            // No new screen opens once the controller is shutting down; the
-            // refusal is audited as an end so the trail shows the attempt.
+            // No new screen opens once the controller is shutting down. The
+            // refusal is audited as its own event: no screen ever started,
+            // so there is no `..._started` to pair an `..._ended` with.
+            let vmid = pending.vmid.to_string();
             let _ = self
-                .console_end(&pending.session_id, ConsoleCloseReason::Shutdown, now)
+                .console_audit(
+                    &principal.id,
+                    &pending.account_id,
+                    "proxmox_console_session_refused",
+                    &[
+                        ("session", pending.session_id.as_str()),
+                        ("node", pending.node.as_str()),
+                        ("vmid", vmid.as_str()),
+                        ("reason", ConsoleCloseReason::Shutdown.id()),
+                    ],
+                )
                 .await;
             return Err(ProxmoxUseCaseError::Conflict {
                 detail: "the controller is shutting down; try again once it is back".to_owned(),
@@ -584,9 +595,11 @@ impl ProxmoxAccounts {
             channel.close().await;
             return Err(error);
         }
-        // The duration counts from the moment the screen opened.
+        // The duration counts from the moment the screen opened, not from
+        // when the token was presented: a fresh reading after the open.
+        let opened_at = fleet_core::SystemClock::now_unix_millis();
         if let Some(active) = state.ledger().active.get_mut(&pending.session_id) {
-            active.started_at = now;
+            active.started_at = opened_at;
         }
         Ok(channel)
     }

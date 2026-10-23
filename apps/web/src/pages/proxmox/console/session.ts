@@ -69,7 +69,7 @@ const BASE: Record<ConsoleEndKind, Omit<ConsoleEnd, 'kind'>> = {
   },
   'idle': {
     title: 'Closed after inactivity',
-    detail: 'No keyboard or pointer input arrived for a while, so the controller closed the console.',
+    detail: 'No keyboard or pointer input arrived for a while, so the controller closed the console. Watching without input counts as idle.',
     tone: 'muted',
     retry: true,
   },

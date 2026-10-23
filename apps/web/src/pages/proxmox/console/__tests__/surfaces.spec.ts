@@ -5,8 +5,10 @@ import { createMemoryHistory, createRouter } from 'vue-router'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
 const getProxmoxPrivileges = vi.fn()
+const getSystemInfo = vi.fn()
 vi.mock('@frogbyte-io/fleet-api-client', () => ({
   getProxmoxPrivileges: (...args: unknown[]) => getProxmoxPrivileges(...args),
+  getSystemInfo: (...args: unknown[]) => getSystemInfo(...args),
   createProxmoxConsoleSession: vi.fn(),
 }))
 
@@ -88,7 +90,11 @@ function mountTab(guests: GuestItem[], loading = false) {
 }
 
 describe('ScreenTab', () => {
-  beforeEach(() => getProxmoxPrivileges.mockReset())
+  beforeEach(() => {
+    getProxmoxPrivileges.mockReset()
+    getSystemInfo.mockReset()
+    getSystemInfo.mockResolvedValue({ status: 200, data: { trustMode: 'trusted-lan' }, headers: new Headers() })
+  })
 
   it('says so when no QEMU guest is associated', () => {
     const wrapper = mountTab([guest({ kind: 'lxc', key: 'acc1/200', vmid: 200 })])
@@ -104,6 +110,16 @@ describe('ScreenTab', () => {
     expect(stub.attributes()).toMatchObject({ 'data-account': 'acc1', 'data-node': 'pve-a', 'data-vmid': '101', 'data-status': 'running', 'data-blocked': '' })
     // The trusted-LAN caveat is shown beside the console.
     expect(wrapper.get('[data-testid="screen-lan-note"]').text()).toContain('every caller is the same principal')
+    expect(wrapper.get('[data-testid="screen-idle-note"]').text()).toContain('idle limit')
+  })
+
+  it('shows the trusted-LAN note only in trusted-LAN mode', async () => {
+    getProxmoxPrivileges.mockResolvedValue(report('granted'))
+    getSystemInfo.mockResolvedValue({ status: 200, data: { trustMode: 'tailscale-identity' }, headers: new Headers() })
+    const wrapper = mountTab([guest()])
+    await flushPromises()
+    expect(wrapper.find('[data-testid="screen-lan-note"]').exists()).toBe(false)
+    expect(wrapper.find('[data-testid="screen-idle-note"]').exists()).toBe(true)
   })
 
   it('withholds the console when the privilege report says VM.Console is missing', async () => {

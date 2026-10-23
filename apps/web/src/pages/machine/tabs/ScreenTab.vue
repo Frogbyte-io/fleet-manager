@@ -2,7 +2,7 @@
 import { useQuery } from '@tanstack/vue-query'
 import { computed, defineAsyncComponent, ref, watch } from 'vue'
 
-import { getProxmoxPrivileges, type ProxmoxPrivilegesDto } from '@frogbyte-io/fleet-api-client'
+import { getProxmoxPrivileges, getSystemInfo, type ProxmoxPrivilegesDto } from '@frogbyte-io/fleet-api-client'
 
 import type { GuestItem } from '../../fleet/inventory'
 import { tierBlockReason } from '../../proxmox/proxmox'
@@ -35,6 +35,13 @@ const privileges = useQuery({
   queryFn: async () => unwrap<ProxmoxPrivilegesDto>(await getProxmoxPrivileges(guest.value!.accountId)),
   enabled: computed(() => guest.value !== null),
   retry: retryTransient,
+})
+// The trusted-LAN caveat only applies in that mode; the shell already asks
+// for the system view (same cache key), which names the mode.
+const system = useQuery({ queryKey: ['system'], queryFn: () => getSystemInfo(), retry: 1 })
+const trustedLan = computed(() => {
+  const answer = system.data.value
+  return answer?.status === 200 && answer.data.trustMode === 'trusted-lan'
 })
 // A report that failed to load is not evidence either way: the controller
 // stays the authority and explains any refusal.
@@ -77,10 +84,17 @@ const blocked = computed(() => privileges.error.value ? null : tierBlockReason(p
         </select>
       </label>
       <p
+        v-if="trustedLan"
         class="text-[11px] text-fc-faint"
         data-testid="screen-lan-note"
       >
         On a trusted-LAN controller every caller is the same principal: any client that can reach it may open consoles, and the session limit is shared.
+      </p>
+      <p
+        class="text-[11px] text-fc-faint"
+        data-testid="screen-idle-note"
+      >
+        The controller closes a screen after its idle limit (10 minutes by default) with no keyboard or pointer input, even while you are watching it.
       </p>
       <ProxmoxConsole
         :key="guest.key"

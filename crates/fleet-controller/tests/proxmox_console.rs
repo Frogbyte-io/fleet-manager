@@ -1173,7 +1173,8 @@ async fn a_failed_attach_releases_its_slot_and_none_open_after_shutdown() {
         .await
         .expect("the failed attach freed a slot");
 
-    // Once shutdown has begun no console opens; the refusal is audited as an end.
+    // Once shutdown has begun no console opens; the refusal is audited as its
+    // own event, never as an end without a start.
     harness.proxmox.console_shutdown();
     let refused = harness
         .proxmox
@@ -1188,12 +1189,26 @@ async fn a_failed_attach_releases_its_slot_and_none_open_after_shutdown() {
         ),
         "{refused}"
     );
-    let events = console_events(&harness).await;
-    let ended = events
+    let (_, audit) = raw(
+        harness.address,
+        "GET",
+        "/api/v1/audit?action=proxmox.console",
+        None,
+    )
+    .await;
+    let names = event_names(&audit["items"].as_array().unwrap().clone());
+    assert!(
+        !names.contains(&"proxmox_console_session_ended".to_owned())
+            && !names.contains(&"proxmox_console_session_started".to_owned()),
+        "{names:?}"
+    );
+    let refused_event = audit["items"]
+        .as_array()
+        .unwrap()
         .iter()
-        .find(|event| event["metadata"]["event"] == "proxmox_console_session_ended")
-        .expect("an audited end for the refused attach");
-    assert_eq!(ended["metadata"]["reason"], "shutdown");
+        .find(|event| event["metadata"]["event"] == "proxmox_console_session_refused")
+        .expect("an audited refusal");
+    assert_eq!(refused_event["metadata"]["reason"], "shutdown");
     assert_eq!(harness.proxmox.console_active_count(), 0);
 }
 

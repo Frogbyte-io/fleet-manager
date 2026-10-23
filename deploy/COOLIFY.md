@@ -73,6 +73,7 @@ Compose project name. Never share it between two controller instances.
    | Variable | Effect |
    |---|---|
    | `FLEET_DESIRED_FETCH_INTERVAL_SECONDS` | Periodic fetch of the Fleet Git source; `0` (default) is off, otherwise at least `30`. Needed for pushed Registry edits to appear without a manual fetch. |
+   | `FLEET_CONSOLE_IDLE_SECONDS` | How long a Proxmox VM screen may go without keyboard, pointer, or paste input before the controller closes it (FM-495); default `600`, accepted range `30` to `3600`. Watching without input counts as idle; an invalid value is ignored with a startup warning. |
    | `FLEET_REGISTRY_ENRICH_INTERVAL_SECONDS` | Domain RDAP/DNS sweep; default daily, `0` off, otherwise at least `900`. |
    | `FLEET_REGISTRY_EXPIRY_WINDOW_DAYS` | Domain expiry warning window; default `30`. |
    | `FLEET_ACTION_REQUEST_TTL_SECONDS` | How long an action request waits for approval; default `86400`. |
