@@ -30,6 +30,7 @@ fn read(row: &sqlx::sqlite::SqliteRow) -> Result<PersistentGuest, String> {
         node: row.get("node"),
         image_version_id: row.get("image_version_id"),
         machine_id: row.get("machine_id"),
+        cloned: row.get::<i64, _>("cloned") != 0,
         state: PersistentState::from_id(&state)
             .ok_or_else(|| "a stored persistent state is unknown".to_owned())?,
         step: row.get("step"),
@@ -77,8 +78,8 @@ impl PersistentGuestPort for PersistentGuestRepository {
         }
         sqlx::query(
             "INSERT INTO persistent_guests (account_id, vmid, name, node, image_version_id, \
-             machine_id, state, step, operation_id, created_at, updated_at) \
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?10)",
+             machine_id, cloned, state, step, operation_id, created_at, updated_at) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?11, ?7, ?8, ?9, ?10, ?10)",
         )
         .bind(&guest.account_id)
         .bind(i64::from(guest.vmid))
@@ -90,6 +91,7 @@ impl PersistentGuestPort for PersistentGuestRepository {
         .bind(&guest.step)
         .bind(&guest.operation_id)
         .bind(guest.created_at)
+        .bind(i64::from(guest.cloned))
         .execute(&mut *tx)
         .await
         .map_err(|error| format!("persistent guest insert failed: {error}"))?;
@@ -113,7 +115,7 @@ impl PersistentGuestPort for PersistentGuestRepository {
     async fn update(&self, guest: &PersistentGuest) -> Result<(), String> {
         let done = sqlx::query(
             "UPDATE persistent_guests SET node = ?3, machine_id = ?4, state = ?5, step = ?6, \
-             operation_id = ?7, updated_at = ?8 WHERE account_id = ?1 AND vmid = ?2",
+             operation_id = ?7, updated_at = ?8, cloned = ?9 WHERE account_id = ?1 AND vmid = ?2",
         )
         .bind(&guest.account_id)
         .bind(i64::from(guest.vmid))
@@ -123,6 +125,7 @@ impl PersistentGuestPort for PersistentGuestRepository {
         .bind(&guest.step)
         .bind(&guest.operation_id)
         .bind(fleet_core::SystemClock::now_unix_millis())
+        .bind(i64::from(guest.cloned))
         .execute(&self.pool)
         .await
         .map_err(|error| format!("persistent guest update failed: {error}"))?;
@@ -166,6 +169,7 @@ mod tests {
             node: "pve".to_owned(),
             image_version_id: "ver".to_owned(),
             machine_id: None,
+            cloned: false,
             state: PersistentState::Creating,
             step: None,
             operation_id: None,

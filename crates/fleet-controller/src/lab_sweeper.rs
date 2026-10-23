@@ -130,10 +130,14 @@ impl LabGuestInventory for ProxmoxLabGuests {
                     // An unreadable marker store skips the guest: reporting
                     // an orphan is the sweeper's only act, and it must not
                     // name a persistent guest as one.
-                    if let Some(persistent) = &self.persistent
-                        && !matches!(persistent.get(&account.id, vmid).await, Ok(None))
-                    {
-                        continue;
+                    if let Some(persistent) = &self.persistent {
+                        match persistent.get(&account.id, vmid).await {
+                            Ok(None) => {}
+                            // Only a marker that still guards this guest
+                            // counts; a stale one names no guest here.
+                            Ok(Some(marker)) if !marker.guards(Some(name.as_str())) => {}
+                            _ => continue,
+                        }
                     }
                     guests.push(LabGuest {
                         account_id: account.id.clone(),

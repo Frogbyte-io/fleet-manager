@@ -1039,6 +1039,28 @@ impl Operations {
             .await
     }
 
+    /// Creates the `machine.create` operation of a reviewed persistent VM
+    /// request (#489). Generic operation creation refuses the kind.
+    ///
+    /// # Errors
+    ///
+    /// Fails on denial, a missing or wrong review token, or a backend
+    /// failure.
+    pub async fn create_machine_create(
+        &self,
+        authorizer: &dyn Authorizer,
+        principal_id: &str,
+        new: &NewOperation,
+    ) -> Result<Operation, OperationUseCaseError> {
+        if new.kind != "machine.create" {
+            return Err(OperationUseCaseError::Invalid {
+                detail: "this route creates machine.create operations only".to_owned(),
+            });
+        }
+        self.create_inner(authorizer, principal_id, new, CreateRoute::Dedicated)
+            .await
+    }
+
     /// Checks, before a release or sweep changes any lease, that the caller
     /// may also queue the cleanup that change owes: otherwise the lease
     /// would commit to `releasing` with no cleanup queued.
@@ -1638,6 +1660,38 @@ impl Operations {
                         .to_owned(),
                 });
             }
+        } else if new.kind == "machine.create" {
+            // Persistent VM creation (#489) runs through its dedicated route
+            // only: its payload names credential references (the bootstrap
+            // auth, an SSH key, a product key) that the generic surface must
+            // never be able to queue. The review token still binds the exact
+            // payload, and the catalog entry still applies.
+            if route != CreateRoute::Dedicated {
+                return Err(OperationUseCaseError::Invalid {
+                    detail: "machine.create runs through the machine create route".to_owned(),
+                });
+            }
+            let expected =
+                review_token_for(&new.kind, new.payload_json.as_deref().unwrap_or_default());
+            match new.review_token.as_deref() {
+                Some(presented) if constant_time_eq(presented, &expected) => {}
+                _ => {
+                    return Err(OperationUseCaseError::Invalid {
+                        detail:
+                            "machine.create requires a valid review token; review the machine first"
+                                .to_owned(),
+                    });
+                }
+            }
+            authorize(
+                authorizer,
+                AccessRequest {
+                    principal_id,
+                    action: Permission::MachineProvision,
+                    resource: None,
+                },
+            )
+            .map_err(OperationUseCaseError::Denied)?;
         } else if new.kind == "lab.provision" {
             if route != CreateRoute::Dedicated {
                 return Err(OperationUseCaseError::Invalid {

@@ -189,6 +189,39 @@ pub trait MachineKeyPort: fmt::Debug + Send + Sync {
     ///
     /// Fails with a secret-free detail when the store errors.
     async fn resolve(&self, reference: &str, machine_id: &str) -> Result<Option<String>, String>;
+
+    /// Whether the reference names a key Fleet itself stores for machines
+    /// (`machines/ssh/`), as opposed to a repository credential (`git/`)
+    /// that is usable for SSH but belongs to another purpose. The default
+    /// accepts, for stores that hold only machine keys.
+    ///
+    /// # Errors
+    ///
+    /// Fails with a secret-free detail when the store errors.
+    async fn is_machine_key(&self, _reference: &str) -> Result<bool, String> {
+        Ok(true)
+    }
+
+    /// The references of the keys bound to one machine, oldest first.
+    ///
+    /// # Errors
+    ///
+    /// Fails with a secret-free detail when the store errors.
+    async fn list_for_machine(&self, _machine_id: &str) -> Result<Vec<String>, String> {
+        Ok(Vec::new())
+    }
+
+    /// Deletes every secret bound to one machine (its keys, and the
+    /// administrator passwords Fleet rotated for it) and answers how many.
+    /// Called when the machine is deleted, so a deleted machine leaves no
+    /// credential behind.
+    ///
+    /// # Errors
+    ///
+    /// Fails with a secret-free detail when the store errors.
+    async fn revoke_for_machine(&self, _machine_id: &str) -> Result<usize, String> {
+        Ok(0)
+    }
 }
 
 /// What to run.

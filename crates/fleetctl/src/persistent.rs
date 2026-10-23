@@ -268,6 +268,81 @@ impl CreateArgs {
     }
 }
 
+/// Parses `machines abandon --account <id> --vmid <n>`.
+pub(crate) fn parse_abandon(
+    rest: &[&str],
+    output: &mut Output,
+) -> Result<crate::machine_access::MachineAccessAction, CliError> {
+    let (mut account, mut vmid) = (None, None);
+    let mut iter = rest.iter().copied();
+    while let Some(flag) = iter.next() {
+        let mut value = |name: &str| {
+            iter.next().map(str::to_owned).ok_or_else(|| CliError {
+                message: format!("--{name} requires a value"),
+            })
+        };
+        match flag {
+            "--output" => {
+                *output = match value("output")?.as_str() {
+                    "json" => Output::Json,
+                    _ => Output::Text,
+                };
+            }
+            "--account" => account = Some(value("account")?),
+            "--vmid" => vmid = Some(number("vmid", &value("vmid")?)?),
+            other => {
+                return Err(CliError {
+                    message: format!("unknown flag {other:?}; see the usage below\n\n{}", usage()),
+                });
+            }
+        }
+    }
+    match (account, vmid.and_then(|vmid| u32::try_from(vmid).ok())) {
+        (Some(account), Some(vmid)) => {
+            Ok(crate::machine_access::MachineAccessAction::Abandon { account, vmid })
+        }
+        _ => Err(CliError {
+            message: "machines abandon needs --account and --vmid".to_owned(),
+        }),
+    }
+}
+
+/// Reviews and runs the abandon of a marker.
+pub(crate) fn run_abandon(
+    invocation: &crate::Invocation,
+    account: &str,
+    vmid: u32,
+) -> Result<Value, CliError> {
+    let client = crate::http_client()?;
+    let base = format!("/api/v1/machines/persistent/{account}/{vmid}/abandon");
+    let reviewed = crate::send(
+        &client,
+        invocation,
+        reqwest::Method::POST,
+        &format!("{base}/review"),
+        &[],
+        None,
+        uuid::Uuid::now_v7().to_string(),
+    )?;
+    let token = reviewed["data"]["reviewToken"]
+        .as_str()
+        .ok_or_else(|| CliError {
+            message: "the review did not answer with a token".to_owned(),
+        })?;
+    crate::send(
+        &client,
+        invocation,
+        reqwest::Method::POST,
+        &base,
+        &[],
+        Some(&json!({ "reviewToken": token })),
+        uuid::Uuid::now_v7().to_string(),
+    )?;
+    Ok(
+        json!({ "abandoned": true, "accountId": account, "vmid": vmid, "name": reviewed["data"]["name"] }),
+    )
+}
+
 /// Reviews, creates and (unless `--no-wait`) waits. Answers the payload and
 /// the exit code.
 pub(crate) fn run_create(

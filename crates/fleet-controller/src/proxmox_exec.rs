@@ -443,6 +443,7 @@ pub struct ProxmoxDestructiveExecutor {
     artifacts: Option<Arc<dyn fleet_application::lab::ImageArtifactPort>>,
     pool_members: Option<Arc<dyn fleet_application::operation::PoolMemberLookup>>,
     persistent: Option<Arc<dyn fleet_application::persistent::PersistentGuestPort>>,
+    audit: Option<Arc<dyn fleet_application::operation::AuditPort>>,
 }
 
 impl ProxmoxDestructiveExecutor {
@@ -461,6 +462,7 @@ impl ProxmoxDestructiveExecutor {
             artifacts: None,
             pool_members: None,
             persistent: None,
+            audit: None,
         }
     }
 
@@ -474,6 +476,76 @@ impl ProxmoxDestructiveExecutor {
     ) -> Self {
         self.persistent = Some(persistent);
         self
+    }
+
+    /// Supplies the audit sink for the events this executor records itself
+    /// (lifting a persistent guest's protection, #489).
+    #[must_use]
+    pub fn with_audit(mut self, audit: Arc<dyn fleet_application::operation::AuditPort>) -> Self {
+        self.audit = Some(audit);
+        self
+    }
+
+    /// Clears a confirmed persistent guest's Proxmox protection, with a
+    /// conditional write and an audit event. A guest that is not protected
+    /// is left alone.
+    async fn lift_protection(
+        &self,
+        operation: &Operation,
+        payload: &DestructivePayload,
+        marker: &fleet_application::persistent::PersistentGuest,
+        request: &fleet_provider_proxmox::PveHttpRequest,
+    ) -> Result<(), String> {
+        let settings = self
+            .client
+            .qemu_settings(request.clone(), &payload.node, payload.vmid)
+            .await
+            .map_err(|error| format!("the guest config is unreadable: {error}"))?;
+        if !settings.protection {
+            return Ok(());
+        }
+        let digest = settings.digest.ok_or(
+            "the guest config carries no digest, so protection is not lifted unconditionally",
+        )?;
+        if let Some(audit) = &self.audit {
+            let mut metadata = fleet_application::audit::AuditMetadata::default();
+            for (key, value) in [
+                ("event", "persistent_protection_lifted"),
+                ("accountId", payload.account_id.as_str()),
+                ("vmid", &payload.vmid.to_string()),
+                ("name", marker.name.as_str()),
+            ] {
+                metadata
+                    .insert(key, value)
+                    .map_err(|error| error.to_string())?;
+            }
+            audit
+                .record_intent(&fleet_application::audit::AuditIntent {
+                    actor: fleet_auth::LAN_PRINCIPAL_ID.to_owned(),
+                    action: fleet_application::authz::Permission::ProxmoxDestructive
+                        .id()
+                        .to_owned(),
+                    resource: Some(format!("{}/{}", payload.account_id, payload.vmid)),
+                    decision: fleet_application::authz::Decision::allow(),
+                    correlation_id: None,
+                    operation_id: Some(operation.id.clone()),
+                    metadata,
+                })
+                .await?;
+        }
+        self.client
+            .qemu_write_settings(
+                request.clone(),
+                &payload.node,
+                payload.vmid,
+                &fleet_provider_proxmox::PveQemuWrite {
+                    protection: Some(false),
+                    ..fleet_provider_proxmox::PveQemuWrite::default()
+                },
+                &digest,
+            )
+            .await
+            .map_err(|error| format!("PVE refused to lift the protection: {error}"))
     }
 
     /// Supplies the Lab pool membership lookup (#368). With it, a destroy or
@@ -576,12 +648,30 @@ impl OperationExecutor for ProxmoxDestructiveExecutor {
         {
             return Ok(());
         }
+        let (account, secret) = self.bound(&payload.account_id).await?;
+        let request = self.request(&account, &secret);
         let persistent_marker = if operation.kind == "proxmox.guest.destroy" {
             match &self.persistent {
-                Some(store) => store
+                Some(store) => match store
                     .get(&payload.account_id, payload.vmid)
                     .await
-                    .map_err(|detail| format!("the persistent marker is unreadable: {detail}"))?,
+                    .map_err(|detail| format!("the persistent marker is unreadable: {detail}"))?
+                {
+                    // A marker counts only while it guards the guest now at
+                    // the VMID (its clone completed, or the name matches).
+                    Some(marker) => {
+                        let live = self
+                            .client
+                            .list_guest_resources(request.clone())
+                            .await
+                            .map_err(|error| format!("the resource listing failed: {error}"))?
+                            .into_iter()
+                            .find(|resource| resource.vmid == Some(payload.vmid))
+                            .and_then(|resource| resource.name);
+                        marker.guards(live.as_deref()).then_some(marker)
+                    }
+                    None => None,
+                },
                 None => None,
             }
         } else {
@@ -599,14 +689,23 @@ impl OperationExecutor for ProxmoxDestructiveExecutor {
                 &operation.id,
                 "persistent_guest",
                 &format!(
-                    "VMID {} is the persistent machine {}; destroying it needs the reviewed confirmPersistent parameter (and its protection lifted first)",
+                    "VMID {} is the persistent machine {}; destroying it needs the reviewed confirmPersistent parameter",
                     payload.vmid, marker.name
                 ),
             )
             .await;
         }
-        let (account, secret) = self.bound(&payload.account_id).await?;
-        let request = self.request(&account, &secret);
+        // The confirmation is the operator's reviewed act of lifting the
+        // protection too: do it here, audited, before the guards and the
+        // delete (Proxmox refuses to delete a protected guest).
+        if let Some(marker) = &persistent_marker
+            && let Err(detail) = self
+                .lift_protection(operation, &payload, marker, &request)
+                .await
+        {
+            return complete_failure(operations, &operation.id, "protection_not_lifted", &detail)
+                .await;
+        }
         let deadline = Duration::from_secs(payload.timeout_seconds.min(MAX_LIFECYCLE_TIMEOUT));
         let kind = operation.kind.as_str();
         let outcome: Result<(), String> = match kind {
@@ -2792,17 +2891,25 @@ impl ProvisionExecutor {
     /// unreadable account, artifact store, or resource listing). An
     /// undecided guard is a refusal too.
     pub async fn guard_destroy_target(&self, account_id: &str, vmid: u32) -> Result<(), String> {
-        if let Some(persistent) = &self.persistent
-            && persistent.get(account_id, vmid).await?.is_some()
-        {
-            return Err(format!(
-                "VMID {vmid} is a persistent Fleet machine; Lab cleanup never destroys one"
-            ));
-        }
         let (account, secret) = self.bound(account_id).await?;
-        self.destroy_guard(pve_request(&account, secret), vmid)
-            .await?
-            .0
+        let request = pve_request(&account, secret);
+        let (decision, resources) = self.destroy_guard(request, vmid).await?;
+        if let Some(persistent) = &self.persistent
+            && let Some(marker) = persistent.get(account_id, vmid).await?
+        {
+            // A marker shields the guest now at the VMID only while its
+            // clone completed or the guest still has the marked name.
+            let live = resources
+                .iter()
+                .find(|resource| resource.vmid == Some(vmid))
+                .and_then(|resource| resource.name.as_deref());
+            if marker.guards(live) {
+                return Err(format!(
+                    "VMID {vmid} is a persistent Fleet machine; Lab cleanup never destroys one"
+                ));
+            }
+        }
+        decision
     }
 
     /// The guard's decision over a fresh resource listing, which it also
@@ -2981,6 +3088,19 @@ impl ProvisionExecutor {
                 .promoted_template_vmids()
                 .await
                 .map_err(|detail| format!("the image artifacts are unreadable: {detail}"))?;
+            // A VMID a persistent marker holds is never a Lab guest's, even
+            // when the cluster shows nothing there (a failed or hand-removed
+            // creation): abandon the marker to release the number.
+            if let Some(persistent) = &self.persistent
+                && persistent.get(account_id, candidate).await?.is_some()
+            {
+                return Ok(Err(Refusal::new(
+                    "conflict",
+                    format!(
+                        "the next free VMID {candidate} is held by a persistent machine marker; abandon the marker (fleetctl machines abandon) or move the next-id range"
+                    ),
+                )));
+            }
             if protected.contains(&candidate) {
                 return Ok(Err(Refusal::new(
                     "conflict",

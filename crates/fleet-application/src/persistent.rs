@@ -454,7 +454,17 @@ impl CreateMachineSpec {
                 credential: credential.clone(),
             }
             .validate()?,
-            CredentialChoice::PublicKey { public_key } => validate_public_key(public_key)?,
+            CredentialChoice::PublicKey { public_key } => {
+                validate_public_key(public_key)?;
+                // Fleet cannot log in with a key it does not hold, so it would
+                // have no way to use the endpoint of another user.
+                if self.login_user.is_some() {
+                    return Err(
+                        "a loginUser cannot be combined with a publicKey: Fleet cannot log in with that key, so the endpoint would not be reachable"
+                            .to_owned(),
+                    );
+                }
+            }
         }
         if let Some(user) = &self.login_user {
             validate_login_user(user, self.guest_os)?;
@@ -670,6 +680,11 @@ pub struct PersistentGuest {
     pub image_version_id: String,
     /// The machine record, once registered.
     pub machine_id: Option<String>,
+    /// Whether the clone completed. Until it has, the marker guards a VMID
+    /// only while the live guest there still carries the marked name: a
+    /// clone that failed leaves a marker that must never shield whatever
+    /// guest later takes the VMID.
+    pub cloned: bool,
     /// How far the creation got.
     pub state: PersistentState,
     /// The step the creation last completed or failed at.
@@ -680,6 +695,21 @@ pub struct PersistentGuest {
     pub created_at: i64,
     /// Last update (epoch milliseconds).
     pub updated_at: i64,
+}
+
+impl PersistentGuest {
+    /// Whether this marker protects the guest now at its VMID: the clone
+    /// completed, or the live guest still has the marked name. `live_name`
+    /// is the name the cluster reports at the VMID (`None` when nothing is
+    /// there). A stale marker (failed clone, another guest on the VMID)
+    /// protects nothing.
+    #[must_use]
+    pub fn guards(&self, live_name: Option<&str>) -> bool {
+        match live_name {
+            Some(name) => self.cloned || name == self.name,
+            None => self.cloned,
+        }
+    }
 }
 
 /// The persistent marker store.
@@ -775,6 +805,7 @@ pub struct PersistentMachines {
     images: Arc<dyn crate::lab::ImagePinValidator>,
     keys: Option<Arc<dyn MachineKeyPort>>,
     product_keys: Option<Arc<dyn ProductKeyPort>>,
+    markers: Option<Arc<dyn PersistentGuestPort>>,
     audit: Arc<dyn crate::operation::AuditPort>,
 }
 
@@ -800,8 +831,123 @@ impl PersistentMachines {
             images,
             keys: None,
             product_keys: None,
+            markers: None,
             audit,
         }
+    }
+
+    /// Wires the marker store, for the guards the API applies before it
+    /// queues a destroy and for abandoning a stale marker.
+    #[must_use]
+    pub fn with_markers(mut self, markers: Arc<dyn PersistentGuestPort>) -> Self {
+        self.markers = Some(markers);
+        self
+    }
+
+    /// The marker of one guest, when it has one.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the marker store cannot be read.
+    pub async fn marker(
+        &self,
+        account_id: &str,
+        vmid: u32,
+    ) -> Result<Option<PersistentGuest>, LabUseCaseError> {
+        match &self.markers {
+            Some(markers) => markers.get(account_id, vmid).await.map_err(backend),
+            None => Ok(None),
+        }
+    }
+
+    /// The review token of abandoning one marker: it binds the call to the
+    /// exact account and VMID that were reviewed.
+    #[must_use]
+    pub fn abandon_payload(account_id: &str, vmid: u32) -> (String, String) {
+        let payload = serde_json::json!({ "accountId": account_id, "vmid": vmid }).to_string();
+        let token = crate::operation::review_token_for("persistent.abandon", &payload);
+        (payload, token)
+    }
+
+    /// Abandons a marker whose creation never completed (a failed clone, a
+    /// guest the operator removed by hand): the marker goes, and the VMID
+    /// and name are free again. A marker of a finished machine (state
+    /// `ready`, or a completed clone) is refused: that guest is destroyed
+    /// through the reviewed destroy, which removes the marker itself. The
+    /// event is audited with the marker's facts.
+    ///
+    /// # Errors
+    ///
+    /// Fails on denial, a review token that does not match, an unknown
+    /// marker, or a marker of a guest that exists.
+    pub async fn abandon(
+        &self,
+        authorizer: &dyn Authorizer,
+        principal: &ActingPrincipal,
+        account_id: &str,
+        vmid: u32,
+        review_token: &str,
+    ) -> Result<(), LabUseCaseError> {
+        authorize(
+            authorizer,
+            AccessRequest {
+                principal_id: &principal.id,
+                action: Permission::MachineProvision,
+                resource: None,
+            },
+        )
+        .map_err(LabUseCaseError::Denied)?;
+        let (_, expected) = Self::abandon_payload(account_id, vmid);
+        if expected != review_token {
+            return Err(invalid(
+                "the review token does not match this account and VMID; review the abandon first"
+                    .to_owned(),
+            ));
+        }
+        let markers = self
+            .markers
+            .as_ref()
+            .ok_or_else(|| backend("no marker store is wired".to_owned()))?;
+        let marker = markers
+            .get(account_id, vmid)
+            .await
+            .map_err(backend)?
+            .ok_or_else(|| LabUseCaseError::NotFound {
+                what: format!("a persistent marker for {account_id}/{vmid}"),
+            })?;
+        if marker.cloned || marker.state == PersistentState::Ready {
+            return Err(LabUseCaseError::Conflict {
+                detail: format!(
+                    "{} is a created machine, not an abandoned creation; destroy it with the reviewed destroy",
+                    marker.name
+                ),
+            });
+        }
+        let mut metadata = crate::audit::AuditMetadata::default();
+        for (key, value) in [
+            ("event", "persistent_marker_abandoned"),
+            ("accountId", account_id),
+            ("vmid", &vmid.to_string()),
+            ("name", marker.name.as_str()),
+            ("step", marker.step.as_deref().unwrap_or("none")),
+        ] {
+            metadata
+                .insert(key, value)
+                .map_err(|error| backend(error.to_string()))?;
+        }
+        self.audit
+            .record_intent(&crate::audit::AuditIntent {
+                actor: principal.id.clone(),
+                action: Permission::MachineProvision.id().to_owned(),
+                resource: Some(format!("{account_id}/{vmid}")),
+                decision: crate::authz::Decision::allow(),
+                correlation_id: None,
+                operation_id: None,
+                metadata,
+            })
+            .await
+            .map_err(backend)?;
+        markers.remove(account_id, vmid).await.map_err(backend)
     }
 
     /// Wires the SSH key store, so a credential reference can be checked.
@@ -853,9 +999,9 @@ impl PersistentMachines {
             .promoted_version(&spec.image_version_id)
             .await
             .map_err(backend)?;
-        if version.is_none() {
+        if version.is_none_or(|version| version.promoted_build_id.is_none()) {
             return Err(invalid(format!(
-                "the image version {} does not exist or is not promoted",
+                "the image version {} does not exist or is not promoted with a pinned build",
                 spec.image_version_id
             )));
         }
@@ -866,6 +1012,12 @@ impl PersistentMachines {
                 .ok_or_else(|| backend("no SSH key store is wired".to_owned()))?;
             // The machine does not exist yet, so only a key not bound to a
             // machine can be named here (an empty machine id matches none).
+            if !keys.is_machine_key(credential).await.map_err(backend)? {
+                return Err(invalid(
+                    "a repository (git/) credential cannot be a persistent machine's SSH key; store a machine key"
+                        .to_owned(),
+                ));
+            }
             if !keys.exists(credential, "").await.map_err(backend)? {
                 return Err(invalid(
                     "the SSH credential reference names no usable key".to_owned(),
@@ -1160,6 +1312,46 @@ mod tests {
         ] {
             assert!(GuestConfigChange::from_params(&bad).is_err(), "{bad}");
         }
+    }
+
+    #[test]
+    fn a_public_key_cannot_be_combined_with_another_login_user() {
+        let mut spec = spec();
+        spec.credential = CredentialChoice::PublicKey {
+            public_key: "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMq c".to_owned(),
+        };
+        spec.validate().unwrap();
+        spec.login_user = Some("ops".to_owned());
+        assert!(spec.validate().unwrap_err().contains("loginUser"));
+        // A Fleet-held key may name another login user.
+        spec.credential = CredentialChoice::Generate;
+        spec.validate().unwrap();
+    }
+
+    #[test]
+    fn a_marker_guards_only_a_completed_clone_or_a_guest_with_its_name() {
+        let mut marker = PersistentGuest {
+            account_id: "a".to_owned(),
+            vmid: 7100,
+            name: "box".to_owned(),
+            node: "pve".to_owned(),
+            image_version_id: "v".to_owned(),
+            machine_id: None,
+            cloned: false,
+            state: PersistentState::Creating,
+            step: None,
+            operation_id: None,
+            created_at: 0,
+            updated_at: 0,
+        };
+        // A failed clone: nothing there, or another guest there.
+        assert!(!marker.guards(None));
+        assert!(!marker.guards(Some("fm-lab-x")));
+        assert!(marker.guards(Some("box")));
+        // A completed clone guards whatever the guest is called now.
+        marker.cloned = true;
+        assert!(marker.guards(Some("renamed")));
+        assert!(marker.guards(None));
     }
 
     #[test]

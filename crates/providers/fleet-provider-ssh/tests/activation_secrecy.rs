@@ -74,7 +74,8 @@ fn check(root: &std::path::Path) {
         1,
         "the key must be in the script on stdin, once"
     );
-    assert!(sent.contains("/ipk $k *> $null"));
+    assert!(sent.contains("InstallProductKey"));
+    assert!(!sent.contains("/ipk"));
     // What comes back is the guest's result lines, parsed; no key.
     assert!(!result.stdout.contains(PRODUCT_KEY));
     let report = parse_activation(&result.stdout);

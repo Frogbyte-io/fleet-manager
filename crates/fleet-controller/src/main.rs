@@ -341,7 +341,8 @@ fn run_serve(mut config: fleet_config::ControllerConfig) -> ExitCode {
                         )),
                     )
                     .with_keys(keys.clone())
-                    .with_product_keys(product_keys.clone()),
+                    .with_product_keys(product_keys.clone())
+                    .with_markers(persistent_guests.clone()),
                 ));
             }
             if let Some(stage) = &lab_put_store {
@@ -667,6 +668,9 @@ fn run_serve(mut config: fleet_config::ControllerConfig) -> ExitCode {
                             )),
                         ))
                         .with_persistent(persistent_guests.clone())
+                        .with_audit(std::sync::Arc::new(fleet_storage_sqlite::AuditSink::new(
+                            store.pool().clone(),
+                        )))
                         .with_task_links(task_links),
                     ),
                 ))
@@ -821,6 +825,9 @@ fn run_serve(mut config: fleet_config::ControllerConfig) -> ExitCode {
                         )),
                     ))
                     .with_persistent(persistent_guests.clone())
+                    .with_audit(std::sync::Arc::new(fleet_storage_sqlite::AuditSink::new(
+                        store.pool().clone(),
+                    )))
                     .with_task_links(std::sync::Arc::new(
                         fleet_storage_sqlite::ProxmoxTaskLinkRepository::new(store.pool().clone()),
                     )),
@@ -1063,100 +1070,102 @@ fn run_serve(mut config: fleet_config::ControllerConfig) -> ExitCode {
             // the secret store (keys, product keys, rotated passwords), so
             // a controller without one answers the surface as unavailable
             // and leaves the kinds to the rest of the chain.
-            let with_lab: std::sync::Arc<dyn fleet_application::worker::OperationExecutor> =
-                match (&secrets, &machine_keys, &ssh_auth_resolver, &product_keys) {
-                    (Some(secrets), Some(keys), Some(resolver), Some(product_keys)) => {
-                        let accounts: std::sync::Arc<
-                            dyn fleet_application::proxmox::ProxmoxAccountPort,
-                        > = std::sync::Arc::new(
-                            fleet_storage_sqlite::ProxmoxAccountRepository::new(
-                                store.pool().clone(),
-                            ),
-                        );
-                        let credentials: std::sync::Arc<
-                            dyn fleet_application::proxmox::ProxmoxCredentialStore,
-                        > = std::sync::Arc::new(
-                            fleet_controller::proxmox_store::SecretBackedProxmoxCredentials::new(
-                                secrets.clone(),
-                            ),
-                        );
-                        let client =
-                            fleet_provider_proxmox::ProxmoxClient::new(pve_transport.clone());
-                        let artifacts: std::sync::Arc<
-                            dyn fleet_application::lab::ImageArtifactPort,
-                        > = std::sync::Arc::new(fleet_storage_sqlite::RecipeRepository::new(
+            let with_lab: std::sync::Arc<dyn fleet_application::worker::OperationExecutor> = match (
+                &secrets,
+                &machine_keys,
+                &ssh_auth_resolver,
+                &product_keys,
+            ) {
+                (Some(secrets), Some(keys), Some(resolver), Some(product_keys)) => {
+                    let accounts: std::sync::Arc<
+                        dyn fleet_application::proxmox::ProxmoxAccountPort,
+                    > = std::sync::Arc::new(fleet_storage_sqlite::ProxmoxAccountRepository::new(
+                        store.pool().clone(),
+                    ));
+                    let credentials: std::sync::Arc<
+                        dyn fleet_application::proxmox::ProxmoxCredentialStore,
+                    > = std::sync::Arc::new(
+                        fleet_controller::proxmox_store::SecretBackedProxmoxCredentials::new(
+                            secrets.clone(),
+                        ),
+                    );
+                    let client = fleet_provider_proxmox::ProxmoxClient::new(pve_transport.clone());
+                    let artifacts: std::sync::Arc<dyn fleet_application::lab::ImageArtifactPort> =
+                        std::sync::Arc::new(fleet_storage_sqlite::RecipeRepository::new(
                             store.pool().clone(),
                         ));
-                        let audit: std::sync::Arc<dyn fleet_application::operation::AuditPort> =
-                            std::sync::Arc::new(fleet_storage_sqlite::AuditSink::new(
-                                store.pool().clone(),
-                            ));
-                        let task_links: std::sync::Arc<
-                            dyn fleet_application::proxmox::tasks::ProxmoxTaskLinkPort,
-                        > = std::sync::Arc::new(
-                            fleet_storage_sqlite::ProxmoxTaskLinkRepository::new(
-                                store.pool().clone(),
+                    let audit: std::sync::Arc<dyn fleet_application::operation::AuditPort> =
+                        std::sync::Arc::new(fleet_storage_sqlite::AuditSink::new(
+                            store.pool().clone(),
+                        ));
+                    let task_links: std::sync::Arc<
+                        dyn fleet_application::proxmox::tasks::ProxmoxTaskLinkPort,
+                    > = std::sync::Arc::new(fleet_storage_sqlite::ProxmoxTaskLinkRepository::new(
+                        store.pool().clone(),
+                    ));
+                    let create = fleet_controller::persistent_machines::MachineCreateExecutor::new(
+                        fleet_controller::persistent_machines::MachineCreateParts {
+                            accounts: accounts.clone(),
+                            credentials: credentials.clone(),
+                            client: client.clone(),
+                            artifacts: artifacts.clone(),
+                            images: std::sync::Arc::new(
+                                fleet_controller::proxmox_store::RecipeImagePinValidator::new(
+                                    std::sync::Arc::new(
+                                        fleet_storage_sqlite::RecipeRepository::new(
+                                            store.pool().clone(),
+                                        ),
+                                    ),
+                                ),
                             ),
-                        );
-                        let create =
-                            fleet_controller::persistent_machines::MachineCreateExecutor::new(
-                                fleet_controller::persistent_machines::MachineCreateParts {
-                                    accounts: accounts.clone(),
-                                    credentials: credentials.clone(),
-                                    client: client.clone(),
-                                    artifacts: artifacts.clone(),
-                                    persistent: persistent_guests.clone(),
-                                    machines: std::sync::Arc::new(
-                                        fleet_storage_sqlite::MachineRepository::new(
-                                            store.pool().clone(),
-                                        ),
-                                    ),
-                                    guest_links: std::sync::Arc::new(
-                                        fleet_storage_sqlite::GuestLinkRepository::new(
-                                            store.pool().clone(),
-                                        ),
-                                    ),
-                                    endpoint_auths: std::sync::Arc::new(
-                                        fleet_storage_sqlite::EndpointAuthRepository::new(
-                                            store.pool().clone(),
-                                        ),
-                                    ),
-                                    access: machine_access.clone(),
-                                    keys: keys.clone(),
-                                    resolver: resolver.clone(),
-                                    secrets: secrets.clone(),
-                                    product_keys: product_keys.clone(),
-                                    audit: audit.clone(),
-                                    work_dir: config.data_dir.join("ssh"),
-                                    limiter: exec_limiter.clone(),
-                                },
-                            )
-                            .with_task_links(task_links);
-                        let config_executor =
-                            fleet_controller::persistent_machines::GuestConfigExecutor::new(
-                                accounts,
-                                credentials,
-                                client,
-                                artifacts,
-                                audit,
-                            )
-                            .with_pool_members(std::sync::Arc::new(
-                                fleet_application::operation::PoolMembership(std::sync::Arc::new(
-                                    fleet_storage_sqlite::LabPoolRepository::new(
-                                        store.pool().clone(),
-                                    ),
-                                )),
-                            ));
-                        std::sync::Arc::new(
-                            fleet_controller::persistent_machines::PersistentDispatch::new(
-                                with_lab,
-                                std::sync::Arc::new(create),
-                                std::sync::Arc::new(config_executor),
+                            persistent: persistent_guests.clone(),
+                            machines: std::sync::Arc::new(
+                                fleet_storage_sqlite::MachineRepository::new(store.pool().clone()),
                             ),
+                            guest_links: std::sync::Arc::new(
+                                fleet_storage_sqlite::GuestLinkRepository::new(
+                                    store.pool().clone(),
+                                ),
+                            ),
+                            endpoint_auths: std::sync::Arc::new(
+                                fleet_storage_sqlite::EndpointAuthRepository::new(
+                                    store.pool().clone(),
+                                ),
+                            ),
+                            access: machine_access.clone(),
+                            keys: keys.clone(),
+                            resolver: resolver.clone(),
+                            secrets: secrets.clone(),
+                            product_keys: product_keys.clone(),
+                            audit: audit.clone(),
+                            work_dir: config.data_dir.join("ssh"),
+                            limiter: exec_limiter.clone(),
+                        },
+                    )
+                    .with_task_links(task_links);
+                    let config_executor =
+                        fleet_controller::persistent_machines::GuestConfigExecutor::new(
+                            accounts,
+                            credentials,
+                            client,
+                            artifacts,
+                            audit,
                         )
-                    }
-                    _ => with_lab,
-                };
+                        .with_pool_members(std::sync::Arc::new(
+                            fleet_application::operation::PoolMembership(std::sync::Arc::new(
+                                fleet_storage_sqlite::LabPoolRepository::new(store.pool().clone()),
+                            )),
+                        ));
+                    std::sync::Arc::new(
+                        fleet_controller::persistent_machines::PersistentDispatch::new(
+                            with_lab,
+                            std::sync::Arc::new(create),
+                            std::sync::Arc::new(config_executor),
+                        ),
+                    )
+                }
+                _ => with_lab,
+            };
             // #394: `lab.exec_detach` starts a command that outlives the
             // SSH session; its status is read directly from the guest.
             let with_lab: std::sync::Arc<dyn fleet_application::worker::OperationExecutor> =
@@ -1285,14 +1294,22 @@ fn run_serve(mut config: fleet_config::ControllerConfig) -> ExitCode {
                         ),
                     )),
                     onboarding.clone(),
-                    std::sync::Arc::new(fleet_application::machine::Machines::new(
-                        std::sync::Arc::new(fleet_storage_sqlite::MachineRepository::new(
-                            store.pool().clone(),
-                        )),
-                        std::sync::Arc::new(fleet_storage_sqlite::AuditSink::new(
-                            store.pool().clone(),
-                        )),
-                    )),
+                    std::sync::Arc::new({
+                        let machines = fleet_application::machine::Machines::new(
+                            std::sync::Arc::new(fleet_storage_sqlite::MachineRepository::new(
+                                store.pool().clone(),
+                            )),
+                            std::sync::Arc::new(fleet_storage_sqlite::AuditSink::new(
+                                store.pool().clone(),
+                            )),
+                        );
+                        // A deleted machine takes its bound keys and rotated
+                        // passwords with it (#489).
+                        match &machine_keys {
+                            Some(keys) => machines.with_key_revocation(keys.clone()),
+                            None => machines,
+                        }
+                    }),
                     std::sync::Arc::new(fleet_storage_sqlite::AuditSink::new(store.pool().clone())),
                     Some(events.clone()),
                 ),

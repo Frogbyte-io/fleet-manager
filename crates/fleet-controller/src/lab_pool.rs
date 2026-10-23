@@ -107,13 +107,10 @@ impl PoolGuestPort for ProxmoxPoolGuests {
         vmid: u32,
         baseline: &str,
     ) -> Result<GuestObservation, String> {
-        if let Some(persistent) = &self.persistent
-            && persistent.get(account_id, vmid).await?.is_some()
-        {
-            return Err(format!(
-                "VMID {vmid} is a persistent Fleet machine; a Lab pool never takes one"
-            ));
-        }
+        let marker = match &self.persistent {
+            Some(persistent) => persistent.get(account_id, vmid).await?,
+            None => None,
+        };
         let request = self.request(account_id).await?;
         let protected = self
             .artifacts
@@ -125,10 +122,20 @@ impl PoolGuestPort for ProxmoxPoolGuests {
             .list_guest_resources(request.clone())
             .await
             .map_err(|error| format!("the resource listing failed: {error}"))?;
-        let Some(guest) = resources
+        let guest = resources
             .into_iter()
-            .find(|resource| resource.vmid == Some(vmid))
-        else {
+            .find(|resource| resource.vmid == Some(vmid));
+        // A marker guards the guest now at the VMID only when its clone
+        // completed or the guest still has the marked name: a stale marker
+        // (a failed clone) never shields another guest.
+        if let Some(marker) = &marker
+            && marker.guards(guest.as_ref().and_then(|guest| guest.name.as_deref()))
+        {
+            return Err(format!(
+                "VMID {vmid} is a persistent Fleet machine; a Lab pool never takes one"
+            ));
+        }
+        let Some(guest) = guest else {
             return Ok(GuestObservation {
                 protected_artifact: protected.contains(&vmid),
                 ..GuestObservation::default()

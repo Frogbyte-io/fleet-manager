@@ -74,6 +74,10 @@ struct HostState {
     digest: u32,
     /// How many `start` calls still fail with a server error.
     fail_starts: u32,
+    /// How many `clone` calls still fail with a server error.
+    fail_clones: u32,
+    /// The MAC address the guest agent reports.
+    agent_mac: String,
 }
 
 /// A stateful fake Proxmox VE.
@@ -84,7 +88,10 @@ struct FakePve {
 
 impl FakePve {
     fn new() -> Arc<Self> {
-        let mut state = HostState::default();
+        let mut state = HostState {
+            agent_mac: "aa:bb:cc:dd:ee:01".to_owned(),
+            ..HostState::default()
+        };
         let config = json!({
             "name": "fleet-image",
             "tags": "fleet-pve-test;image",
@@ -111,6 +118,14 @@ impl FakePve {
         Arc::new(Self {
             state: Mutex::new(state),
         })
+    }
+
+    fn fail_next_clones(&self, times: u32) {
+        self.state.lock().unwrap().fail_clones = times;
+    }
+
+    fn set_agent_mac(&self, mac: &str) {
+        self.state.lock().unwrap().agent_mac = mac.to_owned();
     }
 
     fn fail_next_starts(&self, times: u32) {
@@ -181,6 +196,10 @@ impl FakePve {
             }
             ("POST", ["nodes", node, "qemu", source, "clone"]) => {
                 state.calls.push(format!("clone {source}"));
+                if state.fail_clones > 0 {
+                    state.fail_clones -= 1;
+                    return (500, json!({ "data": null }));
+                }
                 let body = body.unwrap_or_default();
                 state.bodies.push(("clone".to_owned(), body.clone()));
                 let new_id = body["newid"].as_u64().unwrap() as u32;
@@ -301,7 +320,7 @@ impl FakePve {
             ("GET", ["nodes", _, "qemu", _, "agent", "network-get-interfaces"]) => {
                 ok(json!({ "result": [{
                     "name": "ens18",
-                    "hardware-address": "aa:bb:cc:dd:ee:01",
+                    "hardware-address": state.agent_mac,
                     "ip-addresses": [{
                         "ip-address": "192.0.2.77",
                         "ip-address-type": "ipv4",
@@ -368,6 +387,34 @@ impl ImageArtifactPort for Artifacts {
     }
 }
 
+#[derive(Debug)]
+struct Promoted(bool);
+
+#[async_trait]
+impl fleet_application::lab::ImagePinValidator for Promoted {
+    async fn promoted_version(
+        &self,
+        version_id: &str,
+    ) -> Result<Option<fleet_core::RecipeVersion>, String> {
+        Ok(self.0.then(|| fleet_core::RecipeVersion {
+            id: version_id.to_owned(),
+            recipe_id: "recipe-1".to_owned(),
+            name: "image".to_owned(),
+            content_digest: "sha256:abc".to_owned(),
+            description: String::new(),
+            content: "{}".to_owned(),
+            source: fleet_core::RecipeSource::Clone,
+            node: "pve".to_owned(),
+            storage_pool: "local-lvm".to_owned(),
+            published_at: 0,
+            promoted_at: Some(0),
+            promoted_by: Some("tester".to_owned()),
+            promoted_build_id: Some("build-1".to_owned()),
+            allow_insecure_tls: false,
+        }))
+    }
+}
+
 struct World {
     dir: tempfile::TempDir,
     home: tempfile::TempDir,
@@ -384,6 +431,7 @@ struct World {
     bootstrap_pub: String,
     keys: Arc<SecretBackedMachineKeys>,
     resolver: Arc<SshAuthResolver>,
+    secrets: Arc<fleet_secrets::SecretStore>,
 }
 
 impl World {
@@ -453,6 +501,7 @@ impl World {
                 credentials: Arc::new(Credentials),
                 client: client.clone(),
                 artifacts: Arc::new(Artifacts),
+                images: Arc::new(Promoted(true)),
                 persistent: Arc::new(PersistentGuestRepository::new(pool.clone())),
                 machines,
                 guest_links: Arc::new(GuestLinkRepository::new(pool.clone())),
@@ -460,7 +509,7 @@ impl World {
                 access,
                 keys: keys.clone(),
                 resolver: resolver.clone(),
-                secrets,
+                secrets: secrets.clone(),
                 product_keys,
                 audit: audit.clone(),
                 work_dir: dir.path().join("ssh"),
@@ -479,6 +528,7 @@ impl World {
         let destroy = Arc::new(
             ProxmoxDestructiveExecutor::new(accounts.clone(), Arc::new(Credentials), client)
                 .with_image_artifacts(Arc::new(Artifacts))
+                .with_audit(Arc::new(AuditSink::new(pool.clone())))
                 .with_persistent(Arc::new(PersistentGuestRepository::new(pool.clone()))),
         );
         let operations = Arc::new(Operations::new(
@@ -501,6 +551,44 @@ impl World {
             bootstrap_pub,
             keys,
             resolver,
+            secrets,
+        }
+    }
+
+    /// The executor's parts over this world, with another image validator.
+    fn parts_with_images(
+        &self,
+        images: Arc<dyn fleet_application::lab::ImagePinValidator>,
+    ) -> MachineCreateParts {
+        let pool = self.pool.clone();
+        let machines: Arc<dyn MachinePort> = Arc::new(MachineRepository::new(pool.clone()));
+        let audit = Arc::new(AuditSink::new(pool.clone()));
+        let secrets = self.secrets.clone();
+        MachineCreateParts {
+            accounts: self.accounts.clone(),
+            credentials: Arc::new(Credentials),
+            client: fleet_provider_proxmox::ProxmoxClient::new(self.pve.clone()),
+            artifacts: Arc::new(Artifacts),
+            images,
+            persistent: Arc::new(PersistentGuestRepository::new(pool.clone())),
+            machines: machines.clone(),
+            guest_links: Arc::new(GuestLinkRepository::new(pool.clone())),
+            endpoint_auths: Arc::new(EndpointAuthRepository::new(pool.clone())),
+            access: Arc::new(
+                MachineAccess::new(
+                    machines,
+                    Arc::new(EndpointAuthRepository::new(pool)),
+                    audit.clone(),
+                )
+                .with_keys(self.keys.clone()),
+            ),
+            keys: self.keys.clone(),
+            resolver: self.resolver.clone(),
+            secrets: secrets.clone(),
+            product_keys: Arc::new(SecretBackedProductKeys::new(secrets)),
+            audit,
+            work_dir: self.dir.path().join("ssh"),
+            limiter: ExecutionLimiter::new(4),
         }
     }
 
@@ -530,22 +618,27 @@ impl World {
         payload: &Value,
     ) -> Operation {
         let payload = payload.to_string();
-        let operation = self
-            .operations
-            .create(
-                &fleet_auth::LanAllowAllAuthorizer,
-                &lan().id,
-                &NewOperation {
-                    kind: kind.to_owned(),
-                    idempotency_key: None,
-                    deadline_at: None,
-                    correlation_id: None,
-                    review_token: Some(review_token_for(kind, &payload)),
-                    payload_json: Some(payload),
-                },
-            )
-            .await
-            .unwrap();
+        let new = NewOperation {
+            kind: kind.to_owned(),
+            idempotency_key: None,
+            deadline_at: None,
+            correlation_id: None,
+            review_token: Some(review_token_for(kind, &payload)),
+            payload_json: Some(payload),
+        };
+        let operation = if kind == "machine.create" {
+            // Only the dedicated route may queue it (see the generic-route
+            // test below).
+            self.operations
+                .create_machine_create(&fleet_auth::LanAllowAllAuthorizer, &lan().id, &new)
+                .await
+                .unwrap()
+        } else {
+            self.operations
+                .create(&fleet_auth::LanAllowAllAuthorizer, &lan().id, &new)
+                .await
+                .unwrap()
+        };
         self.operations
             .claim_only_execute(executor, &operation.id, "worker")
             .await
@@ -745,6 +838,9 @@ async fn a_persistent_vm_is_created_registered_and_rekeyed_in_order() {
 async fn a_failed_install_leaves_the_image_key_working_and_nothing_removed() {
     if is_root() {
         // Root can create the user, so the injected failure would not occur.
+        eprintln!(
+            "SKIPPED a_failed_install_leaves_the_image_key_working_and_nothing_removed: running as root, where the failure injection (a login user that needs root to create) cannot fail"
+        );
         return;
     }
     let world = World::new().await;
@@ -960,17 +1056,10 @@ async fn destroying_a_persistent_vm_is_a_separate_confirmed_act_that_lifts_prote
     assert_eq!(error_of(&plain)["reason"], "persistent_guest");
     assert_eq!(world.pve.calls().len(), calls);
 
-    // Confirmed, but still protected: Proxmox refuses the delete, the guest
-    // and its marker stay.
-    let protected = world
-        .run(
-            world.destroy.as_ref(),
-            "proxmox.guest.destroy",
-            &destroy(json!({ "purge": false, "confirmPersistent": true })),
-        )
-        .await;
-    assert_eq!(protected.state, "failed");
-    assert!(world.pve.guest(vmid as u32).is_some());
+    assert_eq!(
+        world.pve.guest(vmid as u32).unwrap().config["protection"],
+        1
+    );
     let markers = PersistentGuestRepository::new(world.pool.clone());
     assert!(
         markers
@@ -980,21 +1069,8 @@ async fn destroying_a_persistent_vm_is_a_separate_confirmed_act_that_lifts_prote
             .is_some()
     );
 
-    // Lift protection (a reviewed config action), then the confirmed destroy.
-    let lifted = world
-        .run(
-            world.config.as_ref(),
-            "proxmox.guest.config",
-            &json!({
-                "accountId": world.account_id,
-                "node": "pve",
-                "vmid": vmid,
-                "timeoutSeconds": 300,
-                "params": { "protection": false },
-            }),
-        )
-        .await;
-    assert_eq!(lifted.state, "succeeded", "{:?}", error_of(&lifted));
+    // The confirmed destroy lifts the protection itself, audited, then
+    // deletes: no separate config step is needed.
     let destroyed = world
         .run(
             world.destroy.as_ref(),
@@ -1004,6 +1080,13 @@ async fn destroying_a_persistent_vm_is_a_separate_confirmed_act_that_lifts_prote
         .await;
     assert_eq!(destroyed.state, "succeeded", "{:?}", error_of(&destroyed));
     assert!(world.pve.guest(vmid as u32).is_none());
+    let lifted: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM audit_events WHERE metadata_json LIKE '%persistent_protection_lifted%'",
+    )
+    .fetch_one(&world.pool)
+    .await
+    .unwrap();
+    assert!(lifted >= 1);
     // The marker goes with the guest, so the VMID and name are free again.
     assert!(
         markers
@@ -1048,6 +1131,7 @@ async fn lab_never_selects_a_persistent_guest_whatever_its_name() {
             node: "pve".to_owned(),
             image_version_id: "ver-1".to_owned(),
             machine_id: None,
+            cloned: true,
             state: PersistentState::Ready,
             step: None,
             operation_id: None,
@@ -1089,4 +1173,580 @@ async fn lab_never_selects_a_persistent_guest_whatever_its_name() {
     if let Err(other) = pools.observe(&world.account_id, 7200, "baseline").await {
         assert!(!other.contains("persistent"), "{other}");
     }
+}
+
+fn marker(
+    account: &str,
+    vmid: u32,
+    name: &str,
+    cloned: bool,
+) -> fleet_application::persistent::PersistentGuest {
+    fleet_application::persistent::PersistentGuest {
+        account_id: account.to_owned(),
+        vmid,
+        name: name.to_owned(),
+        node: "pve".to_owned(),
+        image_version_id: "ver-1".to_owned(),
+        machine_id: None,
+        cloned,
+        state: PersistentState::Creating,
+        step: None,
+        operation_id: None,
+        created_at: 1,
+        updated_at: 1,
+    }
+}
+
+fn plain_guest(name: &str) -> Guest {
+    Guest {
+        name: name.to_owned(),
+        template: false,
+        running: false,
+        config: serde_json::Map::new(),
+        locked_reads: 0,
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_failed_clone_with_nothing_at_the_vmid_leaves_no_marker() {
+    let world = World::new().await;
+    world.pve.fail_next_clones(1);
+    let failed = world.create(&world.spec("persist-9")).await;
+    assert_eq!(failed.state, "failed");
+    assert_eq!(error_of(&failed)["step"], "clone");
+    let markers = PersistentGuestRepository::new(world.pool.clone());
+    assert!(
+        markers.list().await.unwrap().is_empty(),
+        "a stale marker was left"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_stale_marker_shields_no_other_guest_but_a_completed_clone_always_does() {
+    use fleet_application::lab_pool::PoolGuestPort as _;
+    use fleet_controller::lab_pool::ProxmoxPoolGuests;
+    use fleet_controller::lab_sweeper::LabGuestInventory as _;
+
+    let world = World::new().await;
+    {
+        let mut state = world.pve.state.lock().unwrap();
+        // 7300: a stale marker (clone never completed) over an unrelated
+        // Lab guest; 7301: a completed clone, renamed by hand.
+        state.guests.insert(7300, plain_guest("fm-lab-real-lease"));
+        state.guests.insert(7301, plain_guest("fm-lab-renamed"));
+    }
+    let markers = Arc::new(PersistentGuestRepository::new(world.pool.clone()));
+    markers
+        .reserve(&marker(&world.account_id, 7300, "build-box", false))
+        .await
+        .unwrap();
+    markers
+        .reserve(&marker(&world.account_id, 7301, "build-box-2", true))
+        .await
+        .unwrap();
+    let client = fleet_provider_proxmox::ProxmoxClient::new(world.pve.clone());
+
+    // The sweeper still sees the Lab guest under the stale marker, and not
+    // the completed clone.
+    let inventory = fleet_controller::lab_sweeper::ProxmoxLabGuests::new(
+        world.accounts.clone(),
+        Arc::new(Credentials),
+        client.clone(),
+    )
+    .with_persistent(markers.clone());
+    let vmids: Vec<u32> = inventory
+        .lab_guests()
+        .await
+        .iter()
+        .map(|g| g.vmid)
+        .collect();
+    assert_eq!(vmids, vec![7300]);
+
+    let pools = ProxmoxPoolGuests::new(
+        world.accounts.clone(),
+        Arc::new(Credentials),
+        client,
+        Arc::new(Artifacts),
+    )
+    .with_persistent(markers.clone());
+    if let Err(error) = pools.observe(&world.account_id, 7300, "baseline").await {
+        assert!(!error.contains("persistent"), "{error}");
+    }
+    assert!(
+        pools
+            .observe(&world.account_id, 7301, "baseline")
+            .await
+            .unwrap_err()
+            .contains("persistent")
+    );
+
+    // The destroy executor honours only the guarding marker: the stale one
+    // does not ask for the confirmation, the completed one does.
+    let destroy = |vmid: u32| {
+        json!({
+            "accountId": world.account_id, "node": "pve", "vmid": vmid,
+            "timeoutSeconds": 300, "params": { "purge": false },
+        })
+    };
+    let stale = world
+        .run(
+            world.destroy.as_ref(),
+            "proxmox.guest.destroy",
+            &destroy(7300),
+        )
+        .await;
+    assert_ne!(error_of(&stale)["reason"], "persistent_guest");
+    let guarded = world
+        .run(
+            world.destroy.as_ref(),
+            "proxmox.guest.destroy",
+            &destroy(7301),
+        )
+        .await;
+    assert_eq!(error_of(&guarded)["reason"], "persistent_guest");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_abandon_is_reviewed_audited_and_refuses_a_created_machine() {
+    use fleet_application::persistent::PersistentMachines;
+
+    let world = World::new().await;
+    let markers = Arc::new(PersistentGuestRepository::new(world.pool.clone()));
+    markers
+        .reserve(&marker(&world.account_id, 7400, "never-made", false))
+        .await
+        .unwrap();
+    markers
+        .reserve(&marker(&world.account_id, 7401, "made", true))
+        .await
+        .unwrap();
+    let access = PersistentMachines::new(
+        Arc::new(Promoted(true)),
+        Arc::new(AuditSink::new(world.pool.clone())),
+    )
+    .with_markers(markers.clone());
+    let allow = fleet_auth::LanAllowAllAuthorizer;
+
+    // A token for another VMID does not abandon.
+    let (_, other) = PersistentMachines::abandon_payload(&world.account_id, 7401);
+    assert!(
+        access
+            .abandon(&allow, &lan(), &world.account_id, 7400, &other)
+            .await
+            .is_err()
+    );
+    assert!(
+        markers
+            .get(&world.account_id, 7400)
+            .await
+            .unwrap()
+            .is_some()
+    );
+    // A created machine is destroyed, not abandoned, even with its token.
+    assert!(
+        access
+            .abandon(&allow, &lan(), &world.account_id, 7401, &other)
+            .await
+            .is_err()
+    );
+    assert!(
+        markers
+            .get(&world.account_id, 7401)
+            .await
+            .unwrap()
+            .is_some()
+    );
+
+    let (_, token) = PersistentMachines::abandon_payload(&world.account_id, 7400);
+    access
+        .abandon(&allow, &lan(), &world.account_id, 7400, &token)
+        .await
+        .unwrap();
+    assert!(
+        markers
+            .get(&world.account_id, 7400)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    let audited: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM audit_events WHERE metadata_json LIKE '%persistent_marker_abandoned%'",
+    )
+    .fetch_one(&world.pool)
+    .await
+    .unwrap();
+    assert_eq!(audited, 1);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn machine_create_is_refused_on_the_generic_route_and_needs_a_promoted_pinned_image() {
+    let world = World::new().await;
+    let payload = world.spec("persist-10").to_string();
+    let new = |token: String| NewOperation {
+        kind: "machine.create".to_owned(),
+        idempotency_key: None,
+        deadline_at: None,
+        correlation_id: None,
+        review_token: Some(token),
+        payload_json: Some(payload.clone()),
+    };
+    let generic = world
+        .operations
+        .create(
+            &fleet_auth::LanAllowAllAuthorizer,
+            &lan().id,
+            &new(review_token_for("machine.create", &payload)),
+        )
+        .await;
+    assert!(
+        generic
+            .unwrap_err()
+            .to_string()
+            .contains("machine create route")
+    );
+    // The dedicated route still demands the review token.
+    let unreviewed = world
+        .operations
+        .create_machine_create(
+            &fleet_auth::LanAllowAllAuthorizer,
+            &lan().id,
+            &new("0".repeat(64)),
+        )
+        .await;
+    assert!(unreviewed.is_err());
+
+    // The executor re-checks promotion: a version demoted since the review
+    // does not clone.
+    let demoted = Arc::new(MachineCreateExecutor::new(
+        world.parts_with_images(Arc::new(Promoted(false))),
+    ));
+    let operation = world
+        .run(
+            demoted.as_ref(),
+            "machine.create",
+            &world.spec("persist-10"),
+        )
+        .await;
+    assert_eq!(operation.state, "failed");
+    assert_eq!(error_of(&operation)["reason"], "image_not_promoted");
+    assert!(world.pve.calls().is_empty());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_finished_machine_is_not_adopted_and_a_rerun_must_use_the_same_image() {
+    let world = World::new().await;
+    let spec = world.spec("persist-11");
+    let created = world.create(&spec).await;
+    assert_eq!(created.state, "succeeded", "{:?}", error_of(&created));
+    let again = world.create(&spec).await;
+    assert_eq!(again.state, "failed");
+    assert_eq!(error_of(&again)["reason"], "conflict");
+
+    // An unfinished creation resumes only with the image it started from.
+    world.pve.fail_next_starts(1);
+    let mut second = world.spec("persist-12");
+    let failed = world.create(&second).await;
+    assert_eq!(failed.state, "failed");
+    second["imageVersionId"] = json!("ver-2");
+    let mismatched = world.create(&second).await;
+    assert_eq!(mismatched.state, "failed");
+    assert_eq!(error_of(&mismatched)["reason"], "conflict");
+    assert!(
+        error_of(&mismatched)["detail"]
+            .as_str()
+            .unwrap()
+            .contains("ver-1")
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_address_that_is_another_machines_endpoint_or_not_this_vms_nic_is_refused() {
+    let world = World::new().await;
+    // Another machine already owns 127.0.0.1:<port>.
+    MachineRepository::new(world.pool.clone())
+        .register(&fleet_application::machine::RegisterMachine {
+            name: "squatter".to_owned(),
+            description: String::new(),
+            endpoints: vec![fleet_application::machine::NewEndpoint {
+                kind: fleet_core::EndpointKind::Ssh,
+                reference: format!("root@127.0.0.1:{}", world.sshd.port),
+            }],
+            tags: vec![],
+            groups: vec![],
+        })
+        .await
+        .unwrap();
+    let operation = world.create(&world.spec("persist-13")).await;
+    assert_eq!(operation.state, "failed");
+    assert_eq!(error_of(&operation)["reason"], "address_in_use");
+    assert!(
+        error_of(&operation)["detail"]
+            .as_str()
+            .unwrap()
+            .contains("squatter")
+    );
+
+    // An agent that reports no interface with the VM's MAC is not trusted.
+    let world = World::new().await;
+    world.pve.set_agent_mac("de:ad:be:ef:00:99");
+    let operation = world.create(&world.spec("persist-14")).await;
+    assert_eq!(operation.state, "failed");
+    assert_eq!(error_of(&operation)["reason"], "address_mismatch");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_failure_after_the_switch_resumes_without_a_second_key() {
+    let world = World::new().await;
+    // The removal writes a temporary file next to authorized_keys: a
+    // directory in its place makes the removal fail after the switch.
+    let blocker = world
+        .home
+        .path()
+        .join(".ssh")
+        .join("authorized_keys.fleet-new");
+    std::fs::create_dir_all(&blocker).unwrap();
+    let spec = world.spec("persist-15");
+    let failed = world.create(&spec).await;
+    assert_eq!(failed.state, "failed");
+    let error = error_of(&failed);
+    assert_eq!(error["reason"], "revoke_failed");
+    let machine_id = error["machineId"].as_str().unwrap().to_owned();
+    // Switched already, both keys still accepted.
+    let machine = MachineRepository::new(world.pool.clone())
+        .get(&machine_id)
+        .await
+        .unwrap();
+    let auth = EndpointAuthRepository::new(world.pool.clone())
+        .get(&machine.endpoints[0].id)
+        .await
+        .unwrap();
+    assert!(
+        matches!(auth, Some(EndpointAuth::Secret { ref credential }) if *credential != world.bootstrap_ref)
+    );
+    assert_eq!(world.authorized_keys().len(), 2);
+
+    // The blocker goes; the same command resumes without the image key.
+    std::fs::remove_dir(&blocker).unwrap();
+    let resumed = world.create(&spec).await;
+    assert_eq!(resumed.state, "succeeded", "{:?}", error_of(&resumed));
+    assert_eq!(result_of(&resumed)["bootstrapKeyRemoved"], true);
+    assert_eq!(world.authorized_keys().len(), 1);
+    // One generated key for the machine, no pile-up.
+    assert_eq!(
+        world
+            .keys
+            .list_for_machine(&machine_id)
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn deleting_a_machine_deletes_its_bound_keys() {
+    let world = World::new().await;
+    let created = world.create(&world.spec("persist-16")).await;
+    assert_eq!(created.state, "succeeded", "{:?}", error_of(&created));
+    let machine_id = result_of(&created)["machineId"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let bound = world.keys.list_for_machine(&machine_id).await.unwrap();
+    assert_eq!(bound.len(), 1);
+    let machines = fleet_application::machine::Machines::new(
+        Arc::new(MachineRepository::new(world.pool.clone())),
+        Arc::new(AuditSink::new(world.pool.clone())),
+    )
+    .with_key_revocation(world.keys.clone());
+    machines
+        .delete(&fleet_auth::LanAllowAllAuthorizer, &lan(), &machine_id)
+        .await
+        .unwrap();
+    assert!(
+        world
+            .keys
+            .list_for_machine(&machine_id)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    // The shared bootstrap key is not bound to the machine and stays.
+    assert!(
+        world
+            .keys
+            .resolve(&world.bootstrap_ref, "")
+            .await
+            .unwrap()
+            .is_some()
+    );
+}
+
+const PRODUCT_KEY: &str = "AAAAA-BBBBB-CCCCC-DDDDD-EEEEE";
+
+/// Runs inside a child process whose `ssh` is a recording fake that answers
+/// every Windows session with the result lines the real scripts print.
+async fn windows_with_the_product_key(root: &std::path::Path, license: &str) {
+    use fleet_application::persistent::ProductKeyPort as _;
+    let world = World::new().await;
+    let product_key = SecretBackedProductKeys::new(world.secrets.clone())
+        .create(PRODUCT_KEY)
+        .await
+        .unwrap();
+    let mut spec = world.spec("win-box");
+    spec["guestOs"] = json!("windows");
+    spec["bootstrap"]["user"] = json!("fleetadmin");
+    spec["windows"] = json!({
+        "adminPassword": "store",
+        "activation": { "type": "productKey", "secret": product_key },
+    });
+    let operation = world.create(&spec).await;
+    let expect_activated = license == "1";
+    assert_eq!(
+        operation.state,
+        if expect_activated {
+            "succeeded"
+        } else {
+            "failed"
+        },
+        "{:?}",
+        error_of(&operation)
+    );
+    if !expect_activated {
+        assert_eq!(error_of(&operation)["step"], "activation");
+    }
+
+    // The key is in no operation record and no audit event, and neither is
+    // the administrator password the guest printed.
+    let stored = world.stored_text().await;
+    assert!(!stored.contains(PRODUCT_KEY), "the product key was stored");
+    assert!(
+        !stored.contains("FLEETPASSWORD0123456789"),
+        "a password leaked"
+    );
+    assert!(!stored.contains("PRIVATE KEY"));
+
+    // It reached the guest on stdin only, in exactly one session, and not in
+    // any argument list or environment.
+    use base64::Engine as _;
+    let log = root.join("log");
+    let args = std::fs::read_to_string(log.join("args")).unwrap();
+    let env = std::fs::read_to_string(log.join("env")).unwrap();
+    assert!(!args.contains(PRODUCT_KEY) && !env.contains(PRODUCT_KEY));
+    let sessions = std::fs::read_to_string(log.join("stdin")).unwrap();
+    let with_key = sessions
+        .lines()
+        .filter_map(|line| base64::engine::general_purpose::STANDARD.decode(line).ok())
+        .filter(|script| String::from_utf8_lossy(script).contains(PRODUCT_KEY))
+        .count();
+    assert_eq!(
+        with_key, 1,
+        "the key must be in exactly one session's script"
+    );
+    assert!(!sessions.contains(PRODUCT_KEY));
+    // The activation outcome is a machine fact either way.
+    let fact: Option<String> = sqlx::query_scalar(
+        "SELECT value FROM machine_capabilities WHERE namespace = 'windows' AND name = 'activation'",
+    )
+    .fetch_optional(&world.pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        fact.as_deref(),
+        Some(if expect_activated {
+            "licensed"
+        } else {
+            "notification"
+        })
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_product_key_reaches_the_guest_on_stdin_only_and_no_record_holds_it() {
+    use std::os::unix::fs::PermissionsExt as _;
+    if let Ok(root) = std::env::var("FLEET_PRODUCT_KEY_CHILD") {
+        let license = std::env::var("FLEET_FAKE_LICENSE").unwrap();
+        windows_with_the_product_key(std::path::Path::new(&root), &license).await;
+        return;
+    }
+    // The parent prepares the fake `ssh` and re-runs this test in a child
+    // whose PATH starts with it (the environment of a running process
+    // cannot be changed safely), once for a successful activation and once
+    // for a failed one.
+    for license in ["1", "5"] {
+        let root = tempfile::tempdir().unwrap();
+        let bin = root.path().join("bin");
+        let log = root.path().join("log");
+        std::fs::create_dir_all(&bin).unwrap();
+        std::fs::create_dir_all(&log).unwrap();
+        let fake = bin.join("ssh");
+        std::fs::write(
+            &fake,
+            format!(
+                "#!/bin/sh\nprintf '%s\\n' \"$@\" >> {log}/args\nenv >> {log}/env\ncat >> {log}/stdin\nprintf 'FLEET_RENAMED=0\\nFLEET_AUTHORIZED_KEYS=x\\nFLEET_LOGIN_OK\\nFLEET_ROTATED=1\\nFLEET_PASSWORD=FLEETPASSWORD0123456789\\nFLEET_ATO=ok\\nFLEET_LICENSE_STATUS={license}\\nFLEET_XPR=x\\n'\n",
+                log = log.display(),
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let path = format!(
+            "{}:{}",
+            bin.display(),
+            std::env::var("PATH").unwrap_or_default()
+        );
+        let status = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "the_product_key_reaches_the_guest_on_stdin_only_and_no_record_holds_it",
+                "--nocapture",
+            ])
+            .env("PATH", path)
+            .env("FLEET_PRODUCT_KEY_CHILD", root.path())
+            .env("FLEET_FAKE_LICENSE", license)
+            .status()
+            .unwrap();
+        assert!(
+            status.success(),
+            "the child run failed for license {license}"
+        );
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_repository_credential_is_not_a_persistent_machines_ssh_key() {
+    use fleet_application::persistent::{CredentialChoice, PersistentMachines};
+    let world = World::new().await;
+    let key_text =
+        std::fs::read_to_string(world.sshd.keys_dir.path().join("user_ed25519")).unwrap();
+    let git = world
+        .secrets
+        .create(
+            "git/some-repo",
+            fleet_secrets::SecretValue::new(key_text.trim().as_bytes().to_vec()),
+        )
+        .await
+        .unwrap();
+    let access = PersistentMachines::new(
+        Arc::new(Promoted(true)),
+        Arc::new(AuditSink::new(world.pool.clone())),
+    )
+    .with_keys(world.keys.clone());
+    let mut spec: fleet_application::persistent::CreateMachineSpec =
+        serde_json::from_value(world.spec("persist-17")).unwrap();
+    spec.credential = CredentialChoice::Reference {
+        credential: git.id.clone(),
+    };
+    let refused = access
+        .prepare(&fleet_auth::LanAllowAllAuthorizer, &lan(), &spec)
+        .await
+        .unwrap_err();
+    assert!(refused.to_string().contains("repository"), "{refused}");
+    // A key stored as a machine key is accepted.
+    spec.credential = CredentialChoice::Reference {
+        credential: world.bootstrap_ref.clone(),
+    };
+    access
+        .prepare(&fleet_auth::LanAllowAllAuthorizer, &lan(), &spec)
+        .await
+        .unwrap();
 }

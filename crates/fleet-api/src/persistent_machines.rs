@@ -195,7 +195,7 @@ pub async fn create_machine(
         });
     let operation = state
         .operations
-        .create(
+        .create_machine_create(
             state.authorizer.as_ref(),
             &principal.id,
             &fleet_application::operation::NewOperation {
@@ -288,4 +288,154 @@ pub async fn store_machine_product_key(
         StatusCode::CREATED,
         Json(Resource::new(StoredProductKeyDto { secret_ref })),
     ))
+}
+
+/// What abandoning a marker will do, and the token that binds it.
+#[derive(Clone, Debug, Serialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct AbandonReviewDto {
+    /// The token the abandon call must present.
+    pub review_token: String,
+    /// The Proxmox account.
+    pub account_id: String,
+    /// The VMID whose marker will be removed.
+    pub vmid: u32,
+    /// The machine name the marker records.
+    pub name: String,
+}
+
+/// Reviews abandoning a persistent marker whose creation never completed
+/// (a failed clone, or a guest removed by hand). A marker of a created
+/// machine is refused: destroy that machine instead.
+///
+/// # Errors
+///
+/// Returns the public error envelope on refusal, an unknown marker, or a
+/// marker of a created machine.
+#[utoipa::path(
+    post,
+    path = "/machines/persistent/{accountId}/{vmid}/abandon/review",
+    tag = "machines",
+    operation_id = "reviewAbandonPersistentMarker",
+    params(
+        ("accountId" = String, Path, description = "The Proxmox account."),
+        ("vmid" = u32, Path, description = "The guest's VMID.")
+    ),
+    responses(
+        (status = 200, description = "The review record; present its token to the abandon call.", body = Resource<AbandonReviewDto>),
+        (status = 403, description = "The caller may not provision machines.", body = crate::error::ApiError),
+        (status = 404, description = "The marker does not exist.", body = crate::error::ApiError),
+        (status = 409, description = "The marker belongs to a created machine.", body = crate::error::ApiError),
+        (status = 503, description = "Persistent machine creation is not wired.", body = crate::error::ApiError),
+    )
+)]
+pub async fn review_abandon_marker(
+    State(state): State<Arc<crate::operations::ApiState>>,
+    principal: Option<Extension<crate::ActingPrincipal>>,
+    Extension(correlation_id): Extension<CorrelationId>,
+    axum::extract::Path((account_id, vmid)): axum::extract::Path<(String, u32)>,
+) -> Result<Json<Resource<AbandonReviewDto>>, ApiErrorResponse> {
+    let persistent = persistent_or_error(&state, correlation_id)?;
+    let principal = crate::operations::principal_or_error(principal, correlation_id)?;
+    fleet_application::authz::authorize(
+        state.authorizer.as_ref(),
+        fleet_application::authz::AccessRequest {
+            principal_id: &principal.id,
+            action: fleet_application::authz::Permission::MachineProvision,
+            resource: None,
+        },
+    )
+    .map_err(|decision| crate::machines::denied_error(decision, correlation_id))?;
+    let marker = persistent
+        .marker(&account_id, vmid)
+        .await
+        .map_err(|error| map_lab_error(&error, correlation_id))?
+        .ok_or_else(|| {
+            map_lab_error(
+                &fleet_application::lab::LabUseCaseError::NotFound {
+                    what: format!("a persistent marker for {account_id}/{vmid}"),
+                },
+                correlation_id,
+            )
+        })?;
+    if marker.cloned || marker.state == fleet_application::persistent::PersistentState::Ready {
+        return Err(map_lab_error(
+            &fleet_application::lab::LabUseCaseError::Conflict {
+                detail: format!(
+                    "{} is a created machine, not an abandoned creation; destroy it with the reviewed destroy",
+                    marker.name
+                ),
+            },
+            correlation_id,
+        ));
+    }
+    let (_, token) = PersistentMachines::abandon_payload(&account_id, vmid);
+    Ok(Json(Resource::new(AbandonReviewDto {
+        review_token: token,
+        account_id,
+        vmid,
+        name: marker.name,
+    })))
+}
+
+/// The body of the abandon call.
+#[derive(Clone, Debug, Deserialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct AbandonMarkerRequest {
+    /// The token from the review call.
+    pub review_token: String,
+}
+
+/// Abandons a reviewed marker: it is removed, with an audit event, and its
+/// VMID and name are free again.
+///
+/// # Errors
+///
+/// Returns the public error envelope on refusal, a review token that does
+/// not match, or an unknown marker.
+#[utoipa::path(
+    post,
+    path = "/machines/persistent/{accountId}/{vmid}/abandon",
+    tag = "machines",
+    operation_id = "abandonPersistentMarker",
+    params(
+        ("accountId" = String, Path, description = "The Proxmox account."),
+        ("vmid" = u32, Path, description = "The guest's VMID.")
+    ),
+    request_body = AbandonMarkerRequest,
+    responses(
+        (status = 204, description = "The marker was removed."),
+        (status = 400, description = "The review token does not match.", body = crate::error::ApiError),
+        (status = 403, description = "The caller may not provision machines.", body = crate::error::ApiError),
+        (status = 404, description = "The marker does not exist.", body = crate::error::ApiError),
+        (status = 409, description = "The marker belongs to a created machine.", body = crate::error::ApiError),
+        (status = 503, description = "Persistent machine creation is not wired.", body = crate::error::ApiError),
+    )
+)]
+pub async fn abandon_marker(
+    State(state): State<Arc<crate::operations::ApiState>>,
+    principal: Option<Extension<crate::ActingPrincipal>>,
+    Extension(correlation_id): Extension<CorrelationId>,
+    axum::extract::Path((account_id, vmid)): axum::extract::Path<(String, u32)>,
+    request: Result<Json<AbandonMarkerRequest>, axum::extract::rejection::JsonRejection>,
+) -> Result<StatusCode, ApiErrorResponse> {
+    let persistent = persistent_or_error(&state, correlation_id)?;
+    let principal = crate::operations::principal_or_error(principal, correlation_id)?;
+    let Json(request) = request.map_err(|_| {
+        crate::machines::invalid_request(
+            "the request body must be valid JSON with a reviewToken",
+            correlation_id,
+        )
+    })?;
+    persistent
+        .abandon(
+            state.authorizer.as_ref(),
+            &principal,
+            &account_id,
+            vmid,
+            &request.review_token,
+        )
+        .await
+        .map_err(|error| map_lab_error(&error, correlation_id))?;
+    Ok(StatusCode::NO_CONTENT)
 }

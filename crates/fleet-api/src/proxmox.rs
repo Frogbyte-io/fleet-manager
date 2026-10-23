@@ -1220,6 +1220,51 @@ fn destructive_permission(action: &str) -> fleet_application::authz::Permission 
     }
 }
 
+/// Destroying a created persistent machine needs the reviewed
+/// `confirmPersistent` parameter. It is checked when the review and the run
+/// are made, so the operator learns at once, not when the worker fails the
+/// operation (the executor still checks, against the live guest).
+async fn require_persistent_confirmation(
+    state: &crate::operations::ApiState,
+    action: &str,
+    account_id: &str,
+    vmid: u32,
+    params: &serde_json::Value,
+    correlation_id: CorrelationId,
+) -> Result<(), ApiErrorResponse> {
+    if action != "destroy" {
+        return Ok(());
+    }
+    let Some(persistent) = state
+        .lab
+        .as_ref()
+        .and_then(|lab| lab.machine_access())
+        .and_then(|access| access.persistent())
+    else {
+        return Ok(());
+    };
+    let marker = persistent
+        .marker(account_id, vmid)
+        .await
+        .map_err(|error| crate::lab::map_lab_error(&error, correlation_id))?;
+    if let Some(marker) = marker
+        && marker.cloned
+        && params
+            .get("confirmPersistent")
+            .and_then(serde_json::Value::as_bool)
+            != Some(true)
+    {
+        return Err(crate::machines::invalid_request(
+            &format!(
+                "VMID {vmid} is the persistent machine {}; destroying it needs the confirmPersistent parameter",
+                marker.name
+            ),
+            correlation_id,
+        ));
+    }
+    Ok(())
+}
+
 /// Validates one action's required parameters: a malformed review is a
 /// client error, not a durable failure.
 fn validate_destructive_params(action: &str, params: &serde_json::Value) -> Result<(), String> {
@@ -1376,6 +1421,15 @@ pub async fn review_proxmox_operation(
     if let Err(detail) = validate_destructive_params(&action, &request.params) {
         return Err(crate::machines::invalid_request(&detail, correlation_id));
     }
+    require_persistent_confirmation(
+        &state,
+        &action,
+        &account_id,
+        vmid,
+        &request.params,
+        correlation_id,
+    )
+    .await?;
     if let Err(decision) = fleet_application::authz::authorize(
         state.authorizer.as_ref(),
         fleet_application::authz::AccessRequest {
@@ -1510,6 +1564,15 @@ pub async fn start_reviewed_proxmox_operation(
             correlation_id,
         ));
     }
+    require_persistent_confirmation(
+        &state,
+        &action,
+        &account_id,
+        vmid,
+        &request.params,
+        correlation_id,
+    )
+    .await?;
     // The payload is byte-identical to the reviewed one (the timeout is
     // fixed at review time), so the application's token comparison binds
     // what runs to what was reviewed.

@@ -95,6 +95,14 @@ pub enum MachineAccessAction {
     ProductKeyStore,
     /// `machines create ...`: a permanent, Fleet-managed VM (#489).
     Create(Box<crate::persistent::CreateArgs>),
+    /// `machines abandon --account <id> --vmid <n>`: drop the marker of a
+    /// creation that never completed (#489).
+    Abandon {
+        /// The Proxmox account.
+        account: String,
+        /// The VMID.
+        vmid: u32,
+    },
     /// `machines endpoint-auth get <machine> <endpoint>`.
     EndpointAuthGet {
         /// The machine.
@@ -199,6 +207,7 @@ pub(crate) fn parse(verb: &str, rest: &[&str], output: &mut Output) -> Result<Co
             }
             _ => return Err(CliError { message: usage() }),
         },
+        "abandon" => crate::persistent::parse_abandon(rest, output)?,
         "create" => {
             MachineAccessAction::Create(Box::new(crate::persistent::parse_create(rest, output)?))
         }
@@ -520,6 +529,7 @@ fn target_body(target: &Target) -> Result<serde_json::Map<String, Value>, CliErr
 
 /// The controller request of one subcommand: the primary request, for the
 /// commands that stream (`put`, `file-get`) the one that starts them.
+#[allow(clippy::too_many_lines)]
 pub(crate) fn request(action: &MachineAccessAction) -> Result<RequestShape, CliError> {
     Ok(match action {
         MachineAccessAction::SshKeyStore { .. } => (
@@ -534,6 +544,12 @@ pub(crate) fn request(action: &MachineAccessAction) -> Result<RequestShape, CliE
             "/api/v1/machine-product-keys".to_owned(),
             Vec::new(),
             // The key is read from stdin when the command runs, never here.
+            None,
+        ),
+        MachineAccessAction::Abandon { account, vmid } => (
+            reqwest::Method::POST,
+            format!("/api/v1/machines/persistent/{account}/{vmid}/abandon/review"),
+            Vec::new(),
             None,
         ),
         MachineAccessAction::Create(args) => (
@@ -708,6 +724,10 @@ pub(crate) fn run(
                 correlation_id,
             )?;
             Ok((rendered(&body["data"]), 0))
+        }
+        MachineAccessAction::Abandon { account, vmid } => {
+            let payload = crate::persistent::run_abandon(invocation, account, *vmid)?;
+            Ok((rendered(&payload), 0))
         }
         MachineAccessAction::Create(args) => {
             let (payload, exit) = crate::persistent::run_create(invocation, args)?;

@@ -11,6 +11,7 @@ CREATE TABLE persistent_guests (
     node             TEXT NOT NULL CHECK (length(node) BETWEEN 1 AND 128),
     image_version_id TEXT NOT NULL,
     machine_id       TEXT,
+    cloned           INTEGER NOT NULL DEFAULT 0 CHECK (cloned IN (0, 1)),
     state            TEXT NOT NULL CHECK (state IN ('creating', 'ready')),
     step             TEXT,
     operation_id     TEXT,

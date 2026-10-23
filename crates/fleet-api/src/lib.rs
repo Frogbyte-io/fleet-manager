@@ -561,6 +561,8 @@ pub fn api(state: Arc<operations::ApiState>) -> (Router, utoipa::openapi::OpenAp
                 .routes(routes!(persistent_machines::review_machine_create))
                 .routes(routes!(persistent_machines::create_machine))
                 .routes(routes!(persistent_machines::store_machine_product_key))
+                .routes(routes!(persistent_machines::review_abandon_marker))
+                .routes(routes!(persistent_machines::abandon_marker))
                 .routes(routes!(machine_access::collect_machine_files))
                 .routes(routes!(
                     machine_access::put_machine_file,

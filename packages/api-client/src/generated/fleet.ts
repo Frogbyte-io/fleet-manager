@@ -3,6 +3,31 @@
  * Do not edit: run `pnpm --filter @frogbyte-io/fleet-api-client generate`.
  */
 /**
+ * The body of the abandon call.
+ */
+export interface AbandonMarkerRequest {
+  /** The token from the review call. */
+  reviewToken: string;
+}
+
+/**
+ * What abandoning a marker will do, and the token that binds it.
+ */
+export interface AbandonReviewDto {
+  /** The Proxmox account. */
+  accountId: string;
+  /** The machine name the marker records. */
+  name: string;
+  /** The token the abandon call must present. */
+  reviewToken: string;
+  /**
+     * The VMID whose marker will be removed.
+     * @minimum 0
+     */
+  vmid: number;
+}
+
+/**
  * One Coolify account's observation state.
  */
 export interface AccountCoverageDto {
@@ -6118,6 +6143,34 @@ export interface RegistryTypeList {
 export interface ReleaseLeaseRequest {
   /** Whether to keep the VM out of automatic cleanup (elevated). */
   keep?: boolean;
+}
+
+/**
+ * What abandoning a marker will do, and the token that binds it.
+ */
+export type ResourceAbandonReviewDtoData = {
+  /** The Proxmox account. */
+  accountId: string;
+  /** The machine name the marker records. */
+  name: string;
+  /** The token the abandon call must present. */
+  reviewToken: string;
+  /**
+     * The VMID whose marker will be removed.
+     * @minimum 0
+     */
+  vmid: number;
+};
+
+/**
+ * A single resource.
+ *
+ * The payload is nested under `data` so that later top-level fields are an
+ * additive change rather than a breaking one.
+ */
+export interface ResourceAbandonReviewDto {
+  /** What abandoning a marker will do, and the token that binds it. */
+  data: ResourceAbandonReviewDtoData;
 }
 
 /**
@@ -16405,6 +16458,163 @@ export const testOnboardingDraft = async (draftId: string, options?: RequestInit
 
   const data: testOnboardingDraftResponse['data'] = body ? JSON.parse(body) : {}
   return { data, status: res.status, headers: res.headers } as testOnboardingDraftResponse
+}
+
+
+
+export type abandonPersistentMarkerResponse204 = {
+  data: void
+  status: 204
+}
+
+export type abandonPersistentMarkerResponse400 = {
+  data: ApiError
+  status: 400
+}
+
+export type abandonPersistentMarkerResponse403 = {
+  data: ApiError
+  status: 403
+}
+
+export type abandonPersistentMarkerResponse404 = {
+  data: ApiError
+  status: 404
+}
+
+export type abandonPersistentMarkerResponse409 = {
+  data: ApiError
+  status: 409
+}
+
+export type abandonPersistentMarkerResponse503 = {
+  data: ApiError
+  status: 503
+}
+
+export type abandonPersistentMarkerResponseSuccess = (abandonPersistentMarkerResponse204) & {
+  headers: Headers;
+};
+export type abandonPersistentMarkerResponseError = (abandonPersistentMarkerResponse400 | abandonPersistentMarkerResponse403 | abandonPersistentMarkerResponse404 | abandonPersistentMarkerResponse409 | abandonPersistentMarkerResponse503) & {
+  headers: Headers;
+};
+
+export type abandonPersistentMarkerResponse = (abandonPersistentMarkerResponseSuccess | abandonPersistentMarkerResponseError)
+
+export const getAbandonPersistentMarkerUrl = (accountId: string,
+    vmid: number,) => {
+
+
+
+
+  return `/api/v1/machines/persistent/${accountId}/${vmid}/abandon`
+}
+
+/**
+ * # Errors
+ *
+ * Returns the public error envelope on refusal, a review token that does
+ * not match, or an unknown marker.
+ * @summary Abandons a reviewed marker: it is removed, with an audit event, and its
+VMID and name are free again.
+ */
+export const abandonPersistentMarker = async (accountId: string,
+    vmid: number,
+    abandonMarkerRequest: AbandonMarkerRequest, options?: RequestInit): Promise<abandonPersistentMarkerResponse> => {
+
+    const getHeaders = (h?: NonNullable<RequestInit['headers']>): Record<string, string | readonly string[]> => {
+    if (!h) return {};
+    if (h instanceof Headers) return Object.fromEntries(h.entries());
+    if (Array.isArray(h)) return Object.fromEntries(h);
+    return h;
+  };
+const res = await fetch(getAbandonPersistentMarkerUrl(accountId,vmid),
+  {
+    ...options,
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...getHeaders(options?.headers) },
+    body: JSON.stringify(abandonMarkerRequest)
+  }
+)
+
+
+  const body = [204, 205, 304].includes(res.status) ? null : await res.text();
+
+  const data: abandonPersistentMarkerResponse['data'] = body ? JSON.parse(body) : undefined
+  return { data, status: res.status, headers: res.headers } as abandonPersistentMarkerResponse
+}
+
+
+
+export type reviewAbandonPersistentMarkerResponse200 = {
+  data: ResourceAbandonReviewDto
+  status: 200
+}
+
+export type reviewAbandonPersistentMarkerResponse403 = {
+  data: ApiError
+  status: 403
+}
+
+export type reviewAbandonPersistentMarkerResponse404 = {
+  data: ApiError
+  status: 404
+}
+
+export type reviewAbandonPersistentMarkerResponse409 = {
+  data: ApiError
+  status: 409
+}
+
+export type reviewAbandonPersistentMarkerResponse503 = {
+  data: ApiError
+  status: 503
+}
+
+export type reviewAbandonPersistentMarkerResponseSuccess = (reviewAbandonPersistentMarkerResponse200) & {
+  headers: Headers;
+};
+export type reviewAbandonPersistentMarkerResponseError = (reviewAbandonPersistentMarkerResponse403 | reviewAbandonPersistentMarkerResponse404 | reviewAbandonPersistentMarkerResponse409 | reviewAbandonPersistentMarkerResponse503) & {
+  headers: Headers;
+};
+
+export type reviewAbandonPersistentMarkerResponse = (reviewAbandonPersistentMarkerResponseSuccess | reviewAbandonPersistentMarkerResponseError)
+
+export const getReviewAbandonPersistentMarkerUrl = (accountId: string,
+    vmid: number,) => {
+
+
+
+
+  return `/api/v1/machines/persistent/${accountId}/${vmid}/abandon/review`
+}
+
+/**
+ * # Errors
+ *
+ * Returns the public error envelope on refusal, an unknown marker, or a
+ * marker of a created machine.
+ * @summary Reviews abandoning a persistent marker whose creation never completed
+(a failed clone, or a guest removed by hand). A marker of a created
+machine is refused: destroy that machine instead.
+ */
+export const reviewAbandonPersistentMarker = async (accountId: string,
+    vmid: number, options?: RequestInit): Promise<reviewAbandonPersistentMarkerResponse> => {
+
+  const res = await fetch(getReviewAbandonPersistentMarkerUrl(accountId,vmid),
+  {
+    ...options,
+    method: 'POST'
+
+
+  }
+)
+
+
+  const body = [204, 205, 304].includes(res.status) ? null : await res.text();
+
+  const data: reviewAbandonPersistentMarkerResponse['data'] = body ? JSON.parse(body) : {}
+  return { data, status: res.status, headers: res.headers } as reviewAbandonPersistentMarkerResponse
 }
 
 

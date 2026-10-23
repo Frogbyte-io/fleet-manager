@@ -482,6 +482,7 @@ pub struct MachineCreateExecutor {
     pve: Pve,
     links: Option<Arc<dyn fleet_application::proxmox::tasks::ProxmoxTaskLinkPort>>,
     artifacts: Arc<dyn ImageArtifactPort>,
+    images: Arc<dyn fleet_application::lab::ImagePinValidator>,
     persistent: Arc<dyn PersistentGuestPort>,
     machines: Arc<dyn MachinePort>,
     guest_links: Arc<dyn GuestLinkPort>,
@@ -509,6 +510,9 @@ pub struct MachineCreateParts {
     pub client: ProxmoxClient,
     /// Image artifacts (the template of a promoted version).
     pub artifacts: Arc<dyn ImageArtifactPort>,
+    /// The promoted-version check: the executor re-verifies promotion, the
+    /// API's check at review time may be stale by now.
+    pub images: Arc<dyn fleet_application::lab::ImagePinValidator>,
     /// The persistent marker store.
     pub persistent: Arc<dyn PersistentGuestPort>,
     /// Machines.
@@ -552,6 +556,7 @@ impl MachineCreateExecutor {
             },
             links: None,
             artifacts: parts.artifacts,
+            images: parts.images,
             persistent: parts.persistent,
             machines: parts.machines,
             guest_links: parts.guest_links,
@@ -618,6 +623,14 @@ struct Run<'a> {
 }
 
 const STEPS: i64 = 11;
+
+/// The MAC address of a `net0` property string (`virtio=AA:BB:...,bridge=...`),
+/// lower-case and colon-separated, the way the guest agent reports it.
+fn net_mac(net0: &str) -> Option<String> {
+    let first = net0.split(',').next()?;
+    let (_, mac) = first.split_once('=')?;
+    fleet_provider_proxmox::normalize_mac(mac)
+}
 
 impl Run<'_> {
     async fn progress(&self, index: i64, text: &str) {
@@ -724,6 +737,27 @@ impl Run<'_> {
     async fn reserve(&mut self) -> Step<(u32, String)> {
         let step = "reserve";
         let spec = &self.spec;
+        // Promotion is re-checked here, and the version must carry the build
+        // its promotion pinned: this kind never falls back to the newest
+        // succeeded build of a version.
+        let version = self
+            .exec
+            .images
+            .promoted_version(&spec.image_version_id)
+            .await
+            .map_err(|detail| failure(step, "image_unreadable", detail))?
+            .filter(|version| version.promoted_build_id.is_some())
+            .ok_or_else(|| {
+                failure(
+                    step,
+                    "image_not_promoted",
+                    format!(
+                        "the image version {} is not promoted with a pinned build",
+                        spec.image_version_id
+                    ),
+                )
+            })?;
+        drop(version);
         let Some(template_vmid) = self
             .exec
             .artifacts
@@ -777,6 +811,28 @@ impl Run<'_> {
             .map_err(|detail| failure(step, "marker_failed", detail))?
             .into_iter()
             .find(|guest| guest.account_id == spec.account_id && guest.name == spec.name);
+        if let Some(found) = &existing {
+            if found.state == PersistentState::Ready {
+                return Err(failure(
+                    step,
+                    "conflict",
+                    format!(
+                        "{} is already a created machine (VMID {}); a re-run only resumes an unfinished creation",
+                        spec.name, found.vmid
+                    ),
+                ));
+            }
+            if found.image_version_id != spec.image_version_id {
+                return Err(failure(
+                    step,
+                    "conflict",
+                    format!(
+                        "the unfinished creation of {} used image version {}, not {}",
+                        spec.name, found.image_version_id, spec.image_version_id
+                    ),
+                ));
+            }
+        }
         let vmid = match (&existing, spec.vmid) {
             (Some(found), requested) => {
                 if requested.is_some_and(|vmid| vmid != found.vmid) {
@@ -841,6 +897,7 @@ impl Run<'_> {
                 node: target_node.clone(),
                 image_version_id: spec.image_version_id.clone(),
                 machine_id: None,
+                cloned: false,
                 state: PersistentState::Creating,
                 step: Some(step.to_owned()),
                 operation_id: Some(self.operation.id.clone()),
@@ -875,10 +932,10 @@ impl Run<'_> {
             if let Some(node) = &found.node {
                 self.node.clone_from(node);
             }
-            return Ok(());
+            return self.mark_cloned().await;
         }
         let target = (self.node != template_node).then_some(self.node.as_str());
-        let upid = self
+        let started = self
             .exec
             .pve
             .client
@@ -892,8 +949,68 @@ impl Run<'_> {
                 self.spec.storage.as_deref(),
             )
             .await
-            .map_err(|error| failure(step, "clone_failed", error.to_string()))?;
-        self.wait_task(step, &upid).await
+            .map_err(|error| failure(step, "clone_failed", error.to_string()));
+        let outcome = match started {
+            Ok(upid) => self.wait_task(step, &upid).await,
+            Err(failure) => Err(failure),
+        };
+        match outcome {
+            Ok(()) => self.mark_cloned().await,
+            Err(failure) => {
+                // A clone that failed with nothing at the VMID must not leave
+                // a marker that would shield the next guest to take it.
+                self.release_marker_if_vacant().await;
+                Err(failure)
+            }
+        }
+    }
+
+    /// Records that the clone completed: from here the marker guards the
+    /// VMID whatever the guest is called.
+    async fn mark_cloned(&mut self) -> Step<()> {
+        if let Some(marker) = self.marker.as_mut()
+            && !marker.cloned
+        {
+            marker.cloned = true;
+            marker.step = Some("clone".to_owned());
+            self.exec
+                .persistent
+                .update(marker)
+                .await
+                .map_err(|detail| failure("clone", "marker_failed", detail))?;
+        }
+        Ok(())
+    }
+
+    /// Removes this creation's marker when the cluster shows nothing at its
+    /// VMID and the clone never completed. Best effort: a marker that stays
+    /// is harmless (it guards only a guest with its name) and can be
+    /// abandoned explicitly.
+    async fn release_marker_if_vacant(&mut self) {
+        let Some(marker) = self.marker.as_ref().filter(|marker| !marker.cloned) else {
+            return;
+        };
+        let vacant = self
+            .exec
+            .pve
+            .client
+            .list_guest_resources(self.request.clone())
+            .await
+            .is_ok_and(|resources| {
+                !resources
+                    .iter()
+                    .any(|resource| resource.vmid == Some(marker.vmid))
+            });
+        if vacant
+            && self
+                .exec
+                .persistent
+                .remove(&marker.account_id, marker.vmid)
+                .await
+                .is_ok()
+        {
+            self.marker = None;
+        }
     }
 
     // Step 3: wait for the clone's lock, then grow the disk and write the
@@ -1084,6 +1201,20 @@ impl Run<'_> {
     // Step 5: the agent's address.
     async fn address(&mut self) -> Step<()> {
         let step = "address";
+        // The MAC address Proxmox gave the guest's first NIC: the address
+        // must come from the interface that carries it, so a stale agent
+        // answer or another guest's address can never become this machine's
+        // endpoint.
+        let mac = self
+            .exec
+            .pve
+            .client
+            .qemu_settings(self.request.clone(), &self.node, self.vmid)
+            .await
+            .map_err(|error| failure(step, "config_unreadable", error.to_string()))?
+            .net0
+            .as_deref()
+            .and_then(net_mac);
         loop {
             self.checkpoint(step).await?;
             let agent = self
@@ -1092,12 +1223,29 @@ impl Run<'_> {
                 .client
                 .guest_agent_network(self.request.clone(), &self.node, self.vmid)
                 .await;
+            if let Some(mac) = &mac
+                && agent.online
+                && !agent.interfaces.is_empty()
+                && !agent
+                    .interfaces
+                    .iter()
+                    .any(|interface| interface.mac.as_deref() == Some(mac.as_str()))
+            {
+                return Err(failure(
+                    step,
+                    "address_mismatch",
+                    "the guest agent reports no interface with the MAC address Proxmox gave this VM; it may be answering for another guest",
+                ));
+            }
             let ip = agent
                 .online
                 .then(|| {
                     agent
                         .interfaces
                         .iter()
+                        .filter(|interface| {
+                            mac.is_none() || interface.mac.as_deref() == mac.as_deref()
+                        })
                         .flat_map(|interface| &interface.addresses)
                         .filter_map(|address| address.parse::<std::net::Ipv4Addr>().ok())
                         .find(|ip| {
@@ -1177,14 +1325,17 @@ impl Run<'_> {
         if result.exit_code != Some(0) {
             // The guest's own stderr, scrubbed and bounded; it carries no
             // secret because no script prints one.
+            // The activation script holds the product key, so nothing the
+            // guest printed is repeated for that step.
+            let stderr = if step == "activation" {
+                String::new()
+            } else {
+                result.stderr.chars().take(300).collect::<String>()
+            };
             return Err(failure(
                 step,
                 "guest_failed",
-                format!(
-                    "the guest command exited {:?}: {}",
-                    result.exit_code,
-                    result.stderr.chars().take(300).collect::<String>()
-                ),
+                format!("the guest command exited {:?}: {stderr}", result.exit_code),
             ));
         }
         Ok(result.stdout)
@@ -1199,6 +1350,7 @@ impl Run<'_> {
             self.spec.endpoint_user(),
             self.spec.bootstrap.port
         );
+        self.refuse_registered_address(&host).await?;
         let machines = Machines::new(self.exec.machines.clone(), self.exec.audit.clone());
         let machine = if let Some(id) = &self.machine_id {
             self.exec
@@ -1256,6 +1408,54 @@ impl Run<'_> {
         self.machine_id = Some(machine.id.clone());
         self.endpoint_id = Some(endpoint.id.clone());
         Ok(())
+    }
+
+    /// Refuses a guest address that is already another machine's SSH
+    /// endpoint: registering it would put two machines on one host.
+    async fn refuse_registered_address(&self, host: &str) -> Step<()> {
+        let step = "machine";
+        let port = self.spec.bootstrap.port;
+        let mut cursor = None;
+        loop {
+            let page = self
+                .exec
+                .machines
+                .list(
+                    &fleet_application::machine::MachineFilter {
+                        cursor: cursor.clone(),
+                        ..fleet_application::machine::MachineFilter::default()
+                    },
+                    200,
+                )
+                .await
+                .map_err(|error| failure(step, "machine_failed", error.to_string()))?;
+            for machine in &page {
+                if self.machine_id.as_deref() == Some(machine.id.as_str()) {
+                    continue;
+                }
+                if machine.endpoints.iter().any(|endpoint| {
+                    endpoint.kind == EndpointKind::Ssh
+                        && endpoint
+                            .reference
+                            .rsplit_once('@')
+                            .map_or(endpoint.reference.as_str(), |(_, rest)| rest)
+                            == format!("{host}:{port}")
+                }) {
+                    return Err(failure(
+                        step,
+                        "address_in_use",
+                        format!(
+                            "{host}:{port} is already an endpoint of the machine {}; this guest's address is not unique",
+                            machine.name
+                        ),
+                    ));
+                }
+            }
+            if page.len() < 200 {
+                return Ok(());
+            }
+            cursor = page.last().map(|machine| machine.id.clone());
+        }
     }
 
     // Step 7: reachability and the host key.
@@ -1395,8 +1595,17 @@ impl Run<'_> {
     // Step 9 (Windows): the computer name, through a fixed post-boot step.
     async fn windows_name(&mut self) -> Step<()> {
         let step = "windows_name";
-        let auth = self.bootstrap_auth(step).await?;
-        let spec = self.connection(self.spec.bootstrap_user(), auth);
+        // A re-run after the credential switch must not need the image key,
+        // which is gone: use the Fleet-held key when the endpoint already
+        // has it.
+        let (user, auth) = match self.switched_key().await? {
+            Some((_, auth)) => (self.spec.endpoint_user().to_owned(), auth),
+            None => (
+                self.spec.bootstrap_user().to_owned(),
+                self.bootstrap_auth(step).await?,
+            ),
+        };
+        let spec = self.connection(&user, auth);
         let out = self
             .ssh(
                 step,
@@ -1410,17 +1619,91 @@ impl Run<'_> {
             let _ = self
                 .ssh(step, spec, guest::windows_restart_script(), SESSION)
                 .await;
-            // Wait for the guest to go down and come back with the same host key.
-            tokio::time::sleep(
-                self.exec
-                    .poll
-                    .max(Duration::from_secs(10))
-                    .min(self.remaining()),
-            )
-            .await;
+            self.wait_for_restart().await?;
             self.host_key().await?;
         }
         Ok(())
+    }
+
+    /// Waits until SSH stops answering (the guest went down) and fails if it
+    /// never does within two minutes: the rename only takes effect after the
+    /// restart, so carrying on while the old session is still up would
+    /// continue on a guest that never restarted. Coming back up is
+    /// [`Self::host_key`]'s wait.
+    async fn wait_for_restart(&self) -> Step<()> {
+        let step = "windows_name";
+        let host = self.host.clone().unwrap_or_default();
+        let port = self.spec.bootstrap.port;
+        let give_up = Instant::now() + Duration::from_secs(120);
+        loop {
+            let provider = self.exec.provider.clone();
+            let probe_host = host.clone();
+            let up = tokio::task::spawn_blocking(move || {
+                provider
+                    .probe_host_key(&probe_host, port, Duration::from_secs(3))
+                    .is_ok()
+            })
+            .await
+            .map_err(|error| failure(step, "ssh_failed", error.to_string()))?;
+            if !up {
+                return Ok(());
+            }
+            if Instant::now() >= give_up || self.remaining().is_zero() {
+                return Err(failure(
+                    step,
+                    "restart_failed",
+                    "the guest still answers SSH two minutes after the restart was requested; the new computer name is not in effect",
+                ));
+            }
+            self.sleep().await;
+        }
+    }
+
+    /// The Fleet-held key the endpoint already defaults to, when a login
+    /// with it works: the proof that the credential switch of an earlier run
+    /// completed. It is never the bootstrap credential.
+    async fn switched_key(&self) -> Step<Option<(String, SshAuth)>> {
+        let step = "credential";
+        let machine_id = self.machine_id.clone().unwrap_or_default();
+        let endpoint = self.endpoint_id.clone().unwrap_or_default();
+        let Some(EndpointAuth::Secret { credential }) = self
+            .exec
+            .endpoint_auths
+            .get(&endpoint)
+            .await
+            .map_err(|detail| failure(step, "credential_failed", detail))?
+        else {
+            return Ok(None);
+        };
+        if matches!(
+            &self.spec.bootstrap.auth,
+            EndpointAuth::Secret { credential: bootstrap } if *bootstrap == credential
+        ) {
+            return Ok(None);
+        }
+        let Ok(auth) = self
+            .exec
+            .resolver
+            .resolve(
+                &EndpointAuth::Secret {
+                    credential: credential.clone(),
+                },
+                &machine_id,
+            )
+            .await
+        else {
+            return Ok(None);
+        };
+        let works = self
+            .ssh(
+                step,
+                self.connection(self.spec.endpoint_user(), auth.clone()),
+                "echo FLEET_LOGIN_OK\n".to_owned(),
+                SESSION,
+            )
+            .await
+            .is_ok();
+        Ok(works.then_some((credential, auth)))
     }
 
     /// The public key line the machine will accept, and the stored private
@@ -1428,29 +1711,28 @@ impl Run<'_> {
     async fn key_material(&mut self) -> Step<(String, Option<String>)> {
         let step = "credential";
         let machine_id = self.machine_id.clone().unwrap_or_default();
-        // A re-run after the key was generated and stored reuses it: the
-        // endpoint's recorded auth is the proof it was.
-        let endpoint = self.endpoint_id.clone().unwrap_or_default();
-        let recorded = self
-            .exec
-            .endpoint_auths
-            .get(&endpoint)
-            .await
-            .map_err(|detail| failure(step, "credential_failed", detail))?;
-        if matches!(self.spec.credential, CredentialChoice::Generate)
-            && let Some(EndpointAuth::Secret { credential }) = recorded
-            && let Some(text) = self
-                .exec
-                .keys
-                .resolve(&credential, &machine_id)
-                .await
-                .map_err(|detail| failure(step, "credential_failed", detail))?
-        {
-            let public = self.public_of(&text).await?;
-            return Ok((public, Some(credential)));
-        }
         match self.spec.credential.clone() {
             CredentialChoice::Generate => {
+                // A re-run reuses the key an earlier run of this machine
+                // generated (before or after the switch), so keys never pile
+                // up in the store.
+                if let Some(existing) = self
+                    .exec
+                    .keys
+                    .list_for_machine(&machine_id)
+                    .await
+                    .map_err(|detail| failure(step, "credential_failed", detail))?
+                    .into_iter()
+                    .next()
+                    && let Some(text) = self
+                        .exec
+                        .keys
+                        .resolve(&existing, &machine_id)
+                        .await
+                        .map_err(|detail| failure(step, "credential_failed", detail))?
+                {
+                    return Ok((self.public_of(&text).await?, Some(existing)));
+                }
                 let provider = self.exec.provider.clone();
                 let comment = format!("fleet-{}", self.spec.name);
                 let generated =
@@ -1465,6 +1747,19 @@ impl Run<'_> {
                 Ok((generated.public, Some(reference)))
             }
             CredentialChoice::Reference { credential } => {
+                if !self
+                    .exec
+                    .keys
+                    .is_machine_key(&credential)
+                    .await
+                    .map_err(|detail| failure(step, "credential_failed", detail))?
+                {
+                    return Err(failure(
+                        step,
+                        "credential_failed",
+                        "a repository (git/) credential cannot be a persistent machine's SSH key",
+                    ));
+                }
                 let text = self
                     .exec
                     .keys
@@ -1504,70 +1799,86 @@ impl Run<'_> {
             .map_err(|error| failure(step, "credential_failed", error.to_string()))
     }
 
-    // Step 10: install, verify, switch, remove, verify.
+    // Step 10: install, verify, switch, remove, verify. A re-run after the
+    // switch skips the install and the first verification (the Fleet-held
+    // key already works) and repeats the removal, which is idempotent.
+    #[allow(clippy::too_many_lines)]
     async fn rotate_credentials(&mut self) -> Step<()> {
         let step = "credential";
-        let (public, reference) = self.key_material().await?;
         let machine_id = self.machine_id.clone().unwrap_or_default();
         let endpoint = self.endpoint_id.clone().unwrap_or_default();
         let bootstrap_user = self.spec.bootstrap_user().to_owned();
         let login_user = self.spec.endpoint_user().to_owned();
         let target = (login_user != bootstrap_user).then_some(login_user.as_str());
         let windows = self.spec.guest_os == GuestOs::Windows;
+        let (public, reference) = self.key_material().await?;
+        let switched = self.switched_key().await?;
         let bootstrap = self.bootstrap_auth(step).await?;
-        // 1. Install while the bootstrap credential still works.
-        let install = if windows {
-            guest::windows_install_key_script(target, &public, false)
+        let resumed = switched.is_some();
+        let mut stored = None;
+        if let Some((credential, auth)) = switched {
+            self.credential = Some(credential);
+            stored = Some(auth);
+        }
+        let stored = if let Some(stored) = stored {
+            stored
         } else {
-            guest::linux_install_key_script(target, &public)
-        };
-        self.ssh(
-            step,
-            self.connection(&bootstrap_user, bootstrap.clone()),
-            install,
-            SESSION,
-        )
-        .await
-        .map_err(|f| failure(step, "install_failed", f.detail))?;
-        let Some(reference) = reference else {
-            // An operator-held key: Fleet cannot log in with it, so it cannot
-            // verify it, and it keeps the credential it has. Nothing is removed.
-            self.record_default_auth(&machine_id, &endpoint, self.spec.bootstrap.auth.clone())
-                .await?;
-            self.bootstrap_key_removed = false;
-            return Ok(());
-        };
-        // 2. Verify a login with the new key before anything is removed.
-        let auth = EndpointAuth::Secret {
-            credential: reference.clone(),
-        };
-        let stored = self
-            .exec
-            .resolver
-            .resolve(&auth, &machine_id)
-            .await
-            .map_err(|detail| failure(step, "verify_failed", detail))?;
-        self.ssh(
-            step,
-            self.connection(&login_user, stored.clone()),
-            "echo FLEET_LOGIN_OK\n".to_owned(),
-            SESSION,
-        )
-        .await
-        .map_err(|f| {
-            failure(
+            // 1. Install while the bootstrap credential still works.
+            let install = if windows {
+                guest::windows_install_key_script(target, &public, false)
+            } else {
+                guest::linux_install_key_script(target, &public)
+            };
+            self.ssh(
                 step,
-                "verify_failed",
-                format!(
-                    "a login with the new key failed, so nothing was removed and the bootstrap credential still works: {}",
-                    f.detail
-                ),
+                self.connection(&bootstrap_user, bootstrap.clone()),
+                install,
+                SESSION,
             )
-        })?;
-        // 3. Switch the endpoint to the proven key.
-        self.record_default_auth(&machine_id, &endpoint, auth)
-            .await?;
-        self.credential = Some(reference);
+            .await
+            .map_err(|f| failure(step, "install_failed", f.detail))?;
+            let Some(reference) = reference else {
+                // An operator-held key: Fleet cannot log in with it, so it
+                // cannot verify it, and it keeps the credential it has.
+                // Nothing is removed.
+                self.record_default_auth(&machine_id, &endpoint, self.spec.bootstrap.auth.clone())
+                    .await?;
+                self.bootstrap_key_removed = false;
+                return Ok(());
+            };
+            // 2. Verify a login with the new key before anything is removed.
+            let auth = EndpointAuth::Secret {
+                credential: reference.clone(),
+            };
+            let stored = self
+                .exec
+                .resolver
+                .resolve(&auth, &machine_id)
+                .await
+                .map_err(|detail| failure(step, "verify_failed", detail))?;
+            self.ssh(
+                step,
+                self.connection(&login_user, stored.clone()),
+                "echo FLEET_LOGIN_OK\n".to_owned(),
+                SESSION,
+            )
+            .await
+            .map_err(|f| {
+                failure(
+                    step,
+                    "verify_failed",
+                    format!(
+                        "a login with the new key failed, so nothing was removed and the bootstrap credential still works: {}",
+                        f.detail
+                    ),
+                )
+            })?;
+            // 3. Switch the endpoint to the proven key.
+            self.record_default_auth(&machine_id, &endpoint, auth)
+                .await?;
+            self.credential = Some(reference);
+            stored
+        };
         // 4. Remove the image's shared key, over the new key.
         let replace = if windows {
             guest::windows_install_key_script(None, &public, true)
@@ -1584,16 +1895,22 @@ impl Run<'_> {
         .map_err(|f| failure(step, "revoke_failed", f.detail))?;
         // A login user other than the image's leaves the image user's own
         // file behind: empty it over the bootstrap session, which still
-        // works because the new key is proven.
+        // works because the new key is proven. After a resume the image key
+        // may already be gone, which is the goal, not a failure.
         if target.is_some() && !windows {
-            self.ssh(
-                step,
-                self.connection(&bootstrap_user, bootstrap),
-                "set -eu\n: > \"${HOME:?}/.ssh/authorized_keys\"\n".to_owned(),
-                SESSION,
-            )
-            .await
-            .map_err(|f| failure(step, "revoke_failed", f.detail))?;
+            let cleared = self
+                .ssh(
+                    step,
+                    self.connection(&bootstrap_user, bootstrap),
+                    "set -eu\n: > \"${HOME:?}/.ssh/authorized_keys\"\n".to_owned(),
+                    SESSION,
+                )
+                .await;
+            if let Err(f) = cleared
+                && !resumed
+            {
+                return Err(failure(step, "revoke_failed", f.detail));
+            }
         }
         // 5. Verify again: the removal must not have cost the new key.
         self.ssh(
@@ -1678,6 +1995,23 @@ impl Run<'_> {
             ));
         }
         if !print {
+            let machine_id = self.machine_id.clone().unwrap_or_default();
+            self.exec
+                .audit
+                .record_intent(
+                    &audit_intent(
+                        Permission::MachineUpdate,
+                        &machine_id,
+                        &self.operation.id,
+                        &[
+                            ("event", "machine_admin_password_rotated"),
+                            ("stored", "false"),
+                        ],
+                    )
+                    .map_err(|detail| failure(step, "store_failed", detail))?,
+                )
+                .await
+                .map_err(|detail| failure(step, "store_failed", detail))?;
             return Ok(None);
         }
         let password = guest::parse_password(&out).ok_or_else(|| {
@@ -1687,13 +2021,41 @@ impl Run<'_> {
                 "the guest rotated the password but printed none to store",
             )
         })?;
-        let name = format!("{ADMIN_PASSWORD_PREFIX}{}", uuid::Uuid::now_v7());
+        let machine_id = self.machine_id.clone().unwrap_or_default();
+        let prefix = format!("{ADMIN_PASSWORD_PREFIX}{machine_id}/");
+        let name = format!("{prefix}{}", uuid::Uuid::now_v7());
         let record = self
             .exec
             .secrets
             .create(&name, SecretValue::new(password.into_bytes()))
             .await
             .map_err(|error| failure(step, "store_failed", error.to_string()))?;
+        // The guest now holds this password: an earlier one (a re-run) is stale.
+        if let Ok(records) = self.exec.secrets.list().await {
+            for old in records
+                .iter()
+                .filter(|old| old.name.starts_with(&prefix) && old.id != record.id)
+            {
+                let _ = self.exec.secrets.delete(&old.id).await;
+            }
+        }
+        self.exec
+            .audit
+            .record_intent(
+                &audit_intent(
+                    Permission::MachineUpdate,
+                    &machine_id,
+                    &self.operation.id,
+                    &[
+                        ("event", "machine_admin_password_rotated"),
+                        ("credentialRef", record.id.as_str()),
+                        ("stored", "true"),
+                    ],
+                )
+                .map_err(|detail| failure(step, "store_failed", detail))?,
+            )
+            .await
+            .map_err(|detail| failure(step, "store_failed", detail))?;
         Ok(Some(record.id))
     }
 

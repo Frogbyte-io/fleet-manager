@@ -119,7 +119,7 @@ pub fn windows_install_key_script(
          if ($replace) {{ $lines = @($key) }} elseif ($lines -notcontains $key) {{ $lines += $key }}\n\
          Set-Content -Path $file -Value $lines -Encoding Ascii\n\
          if ($isAdmin) {{\n\
-         \x20 & icacls.exe $file /inheritance:r /grant 'SYSTEM:F' /grant 'Administrators:F' | Out-Null\n\
+         \x20 & icacls.exe $file /inheritance:r /grant '*S-1-5-18:F' /grant '*S-1-5-32-544:F' | Out-Null\n\
          \x20 if ($LASTEXITCODE -ne 0) {{ throw 'icacls failed' }}\n\
          }}\n\
          Write-Output \"FLEET_AUTHORIZED_KEYS=$file\"\n",
@@ -188,8 +188,13 @@ pub enum ActivationMethod<'a> {
 
 /// The Windows script that activates the guest and reads the result back.
 ///
-/// With a product key, `slmgr /ipk` runs with every output stream
-/// discarded, because it echoes the key. The script then runs `/ato`, reads
+/// With a product key, the key goes to the licensing service's
+/// `InstallProductKey` method through CIM, so no child process ever has it in
+/// its argument list (`slmgr /ipk <key>` would, and echoes it besides); only
+/// the HRESULT of a failure is printed. The key is still part of the script
+/// text, which Windows PowerShell script-block logging, when enabled by
+/// policy on the guest, records: see `docs/operations/persistent-machines.md`.
+/// The script then runs `/ato`, reads
 /// `SoftwareLicensingProduct.LicenseStatus` and the `/xpr` result, and always
 /// exits 0: a failed activation is a result for the controller to report,
 /// not a script failure.
@@ -198,7 +203,10 @@ pub fn windows_activation_script(method: &ActivationMethod<'_>) -> String {
     let prepare = match method {
         ActivationMethod::ProductKey(key) => format!(
             "$k = {key}\n\
-             & cscript.exe //nologo $slmgr /ipk $k *> $null\n\
+             try {{\n\
+             \x20 $svc = Get-CimInstance -ClassName SoftwareLicensingService\n\
+             \x20 Invoke-CimMethod -InputObject $svc -MethodName InstallProductKey -Arguments @{{ ProductKey = $k }} -ErrorAction Stop | Out-Null\n\
+             }} catch {{ Write-Output ('FLEET_IPK_ERROR=0x{{0:X8}}' -f $_.Exception.HResult) }}\n\
              $k = $null\n",
             key = ps_quote(key.trim()),
         ),
@@ -229,7 +237,8 @@ pub struct ActivationReport {
     pub license_status: Option<u32>,
     /// The `/xpr` line, bounded and scrubbed of anything but plain text.
     pub xpr: Option<String>,
-    /// The Microsoft error code (`0xC004F074`) found in the `/ato` output.
+    /// The Microsoft error code (`0xC004F074`) of a failed key install or
+    /// activation.
     pub error_code: Option<String>,
 }
 
@@ -290,7 +299,10 @@ pub fn parse_activation(stdout: &str) -> ActivationReport {
             .take(160)
             .collect::<String>()
     });
-    let error_code = result_line(stdout, "FLEET_ATO").and_then(find_error_code);
+    // A failed key install names its HRESULT; otherwise the `/ato` text may.
+    let error_code = result_line(stdout, "FLEET_IPK_ERROR")
+        .and_then(find_error_code)
+        .or_else(|| result_line(stdout, "FLEET_ATO").and_then(find_error_code));
     ActivationReport {
         license_status,
         xpr,
@@ -346,7 +358,10 @@ mod tests {
             "AAAAA-BBBBB-CCCCC-DDDDD-EEEEE",
         ));
         assert!(script.contains("$k = 'AAAAA-BBBBB-CCCCC-DDDDD-EEEEE'"));
-        assert!(script.contains("/ipk $k *> $null"));
+        // The key is passed to the service's own method, never to a child
+        // process.
+        assert!(script.contains("InstallProductKey -Arguments @{ ProductKey = $k }"));
+        assert!(!script.contains("/ipk"));
         // The key appears once, in the assignment, and is cleared at once.
         assert_eq!(script.matches("AAAAA-BBBBB").count(), 1);
         assert!(script.contains("$k = $null"));
@@ -373,7 +388,7 @@ mod tests {
         let script = windows_install_key_script(None, "ssh-ed25519 AAAA c", false);
         assert!(script.contains("administrators_authorized_keys"));
         assert!(script.contains(
-            "icacls.exe $file /inheritance:r /grant 'SYSTEM:F' /grant 'Administrators:F'"
+            "icacls.exe $file /inheritance:r /grant '*S-1-5-18:F' /grant '*S-1-5-32-544:F'"
         ));
         assert!(script.contains("$replace = $false"));
         assert!(
