@@ -300,7 +300,10 @@ pub fn broker_settings_from_env() -> Result<fleet_application::broker::BrokerSet
 
 /// The provider actions this controller offers through the broker. Providers
 /// register their actions here.
-fn compose_action_registry() -> Arc<fleet_application::broker::ActionRegistry> {
+fn compose_action_registry(
+    persistent_bounds: fleet_application::persistent_request::PersistentBounds,
+    requests: Option<Arc<dyn fleet_application::broker::ActionRequestPort>>,
+) -> Arc<fleet_application::broker::ActionRegistry> {
     let mut registry = fleet_application::broker::ActionRegistry::new();
     // FM-1042: `dns.record.upsert` and `dns.record.delete`, risk class
     // `approve`.
@@ -329,14 +332,38 @@ fn compose_action_registry() -> Arc<fleet_application::broker::ActionRegistry> {
             .register(action)
             .expect("the site-template action ids are valid and unique");
     }
+    // #496: an agent asks for a persistent machine; `approve`, unless the
+    // operator configured bounds.
+    for action in
+        fleet_application::persistent_request::persistent_actions(persistent_bounds, requests)
+    {
+        registry
+            .register(action)
+            .expect("the persistent machine action id is valid and unique");
+    }
     Arc::new(registry)
+}
+
+/// The auto-approval bounds for persistent machine requests, from
+/// `FLEET_PERSISTENT_AUTO_POLICY`.
+///
+/// # Errors
+///
+/// Fails on a malformed value, so startup stops instead of dropping a bound.
+pub fn persistent_bounds_from_env()
+-> Result<fleet_application::persistent_request::PersistentBounds, String> {
+    fleet_application::persistent_request::PersistentBounds::from_env_value(
+        std::env::var(fleet_application::persistent_request::POLICY_VAR)
+            .ok()
+            .as_deref(),
+    )
 }
 
 /// The operation kinds provider actions own. Every `Operations` instance (the
 /// API's and the worker's) declares them so none accepts them off the broker.
 #[must_use]
 pub fn brokered_operation_kinds() -> std::collections::BTreeSet<String> {
-    compose_action_registry().operation_kinds()
+    compose_action_registry(Default::default(), None).operation_kinds()
 }
 
 /// Builds the API state over an opened store, or a state whose backends
@@ -404,13 +431,19 @@ fn api_state(
             fleet_storage_sqlite::AuditLedger::new(&pool),
         ));
         // The kinds provider actions own run only through the broker.
-        let action_registry = compose_action_registry();
+        let request_store: Arc<dyn fleet_application::broker::ActionRequestPort> = Arc::new(
+            fleet_storage_sqlite::ActionRequestRepository::new(pool.clone()),
+        );
+        let action_registry = compose_action_registry(
+            // `main` refuses to start on a malformed value; test
+            // composition falls back to no bounds (a person approves).
+            persistent_bounds_from_env().unwrap_or_default(),
+            Some(request_store.clone()),
+        );
         let operations =
             std::sync::Arc::new(operations.with_brokered_kinds(action_registry.operation_kinds()));
         let requests = fleet_application::broker::Broker::new(
-            std::sync::Arc::new(fleet_storage_sqlite::ActionRequestRepository::new(
-                pool.clone(),
-            )),
+            request_store,
             action_registry,
             operations.clone(),
             // `main` refuses to start on a malformed setting, so the

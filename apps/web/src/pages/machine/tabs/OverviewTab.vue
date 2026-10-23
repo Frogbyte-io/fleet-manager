@@ -5,7 +5,7 @@ import { RouterLink } from 'vue-router'
 import type { MachineDto } from '@frogbyte-io/fleet-api-client'
 
 import { osLine, relativeTime, resourcesLine, type GuestItem, type MachineItem } from '../../fleet/inventory'
-import { absoluteTime, statusCounts } from '../facts'
+import { absoluteTime, machineOwnership, statusCounts } from '../facts'
 
 const props = defineProps<{
   machine: MachineDto
@@ -14,6 +14,7 @@ const props = defineProps<{
 }>()
 
 const counts = computed(() => statusCounts(props.machine.capabilities))
+const ownership = computed(() => machineOwnership(props.machine.capabilities))
 </script>
 
 <template>
@@ -82,6 +83,39 @@ const counts = computed(() => statusCounts(props.machine.capabilities))
         <dd class="font-mono text-fc-ink">
           {{ machine.groups.join(', ') || '—' }}
         </dd>
+        <template v-if="ownership">
+          <dt class="text-fc-faint">
+            Owner
+          </dt>
+          <dd
+            class="break-all font-mono text-fc-ink"
+            data-testid="machine-owner"
+          >
+            {{ ownership.owner }}
+          </dd>
+          <dt class="text-fc-faint">
+            Purpose
+          </dt>
+          <dd
+            class="font-mono text-fc-ink"
+            data-testid="machine-purpose"
+          >
+            {{ ownership.purpose ?? '—' }}
+          </dd>
+          <template v-if="ownership.request">
+            <dt class="text-fc-faint">
+              Request
+            </dt>
+            <dd class="break-all font-mono text-fc-ink">
+              <RouterLink
+                :to="{ path: '/requests', query: { request: ownership.request } }"
+                class="text-fc-info hover:text-fc-ink"
+              >
+                {{ ownership.request }}
+              </RouterLink>
+            </dd>
+          </template>
+        </template>
         <dt class="text-fc-faint">
           Registered
         </dt>

@@ -213,6 +213,33 @@ pub trait ActionRequestPort: fmt::Debug + Send + Sync {
         limit: u32,
     ) -> Result<Vec<ActionRequest>, String>;
 
+    /// How many requests of one action a requester has in the given states
+    /// (a quota's input). The default counts the newest page of requests;
+    /// a store should override it with an exact count.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the store errors.
+    async fn count_for(
+        &self,
+        requester: &str,
+        action_id: &str,
+        states: &[ActionRequestState],
+        except_request: Option<&str>,
+    ) -> Result<u32, String> {
+        let all = self.list(None, MAX_LIST_LIMIT).await?;
+        let count = all
+            .iter()
+            .filter(|request| {
+                request.requester == requester
+                    && request.action_id == action_id
+                    && states.contains(&request.state)
+                    && except_request != Some(request.id.as_str())
+            })
+            .count();
+        Ok(u32::try_from(count).unwrap_or(u32::MAX))
+    }
+
     /// Applies a transition only when the stored state is still
     /// `update.from` (and, when asked, the deadline is still ahead), and
     /// appends its audit event in the same transaction. Answers the updated
@@ -271,6 +298,51 @@ pub trait ProviderAction: fmt::Debug + Send + Sync {
     ///
     /// Returns a caller-safe message when the operation cannot be built.
     fn operation(&self, request: &ActionRequest) -> Result<NewOperation, String>;
+
+    /// The bounds within which this action may be approved by policy
+    /// (#496), when it has any. The default is none: the class alone decides.
+    fn auto_guard(&self) -> Option<&dyn AutoGuard> {
+        None
+    }
+
+    /// A permission the approving human must hold in addition to
+    /// `action.approve`, checked when the approval is made and again when
+    /// the operation starts. The default is none.
+    fn approver_permission(&self) -> Option<Permission> {
+        None
+    }
+}
+
+/// How a request sits against the bounds an operator configured for auto
+/// approval.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Bounds {
+    /// No bounds are configured: the action's class decides.
+    Unconfigured,
+    /// Bounds are configured and the request is inside them.
+    Within,
+    /// Bounds are configured and the request is outside them, or cannot be
+    /// shown to be inside.
+    Outside,
+}
+
+/// Operator-configured bounds for auto approval of one action. Without any
+/// configured bounds an action keeps its declared class.
+#[async_trait]
+pub trait AutoGuard: fmt::Debug + Send + Sync {
+    /// Where a request falls. `except_request` is a request not to count
+    /// against a quota (the request being re-checked at execution).
+    ///
+    /// # Errors
+    ///
+    /// Fails when the facts the bounds need cannot be read; the request is
+    /// then not auto-approved.
+    async fn assess(
+        &self,
+        requester: &str,
+        parameters: &serde_json::Value,
+        except_request: Option<&str>,
+    ) -> Result<Bounds, String>;
 }
 
 /// The provider actions the controller offers, by id.
@@ -420,6 +492,12 @@ impl BrokerSettings {
             .unwrap_or_else(|| action.risk_class())
     }
 
+    /// Whether the operator named this action in the policy variable.
+    #[must_use]
+    pub fn has_override(&self, action_id: &str) -> bool {
+        self.overrides.contains_key(action_id)
+    }
+
     /// The request lifetime in milliseconds.
     #[must_use]
     pub const fn request_ttl_millis(&self) -> i64 {
@@ -541,6 +619,18 @@ impl ActionRequestPort for PublishingPort {
 
     async fn get(&self, id: &str) -> Result<Option<ActionRequest>, String> {
         self.inner.get(id).await
+    }
+
+    async fn count_for(
+        &self,
+        requester: &str,
+        action_id: &str,
+        states: &[ActionRequestState],
+        except_request: Option<&str>,
+    ) -> Result<u32, String> {
+        self.inner
+            .count_for(requester, action_id, states, except_request)
+            .await
     }
 
     async fn list(
@@ -680,7 +770,9 @@ impl Broker {
                 .await;
         }
 
-        let risk_class = self.settings.effective_risk(action.as_ref());
+        let risk_class = self
+            .classify(action.as_ref(), principal_id, &parameters, None)
+            .await?;
         let (state, decided_by, decided_at) = match risk_class {
             RiskClass::Auto => (
                 ActionRequestState::Approved,
@@ -771,6 +863,119 @@ impl Broker {
             return self.start(authorizer, request, now).await;
         }
         Ok(request)
+    }
+
+    /// The class a request runs under now: the operator override, else the
+    /// declared class, narrowed or widened by the action's configured
+    /// bounds. Bounds only ever move between `approve` and `auto`: a request
+    /// outside them never auto-runs, and one inside them auto-runs only when
+    /// the operator opted in by configuring bounds and did not pin the
+    /// class. `deny` is never changed.
+    async fn classify(
+        &self,
+        action: &dyn ProviderAction,
+        requester: &str,
+        parameters: &serde_json::Value,
+        except_request: Option<&str>,
+    ) -> Result<RiskClass, BrokerError> {
+        let base = self.settings.effective_risk(action);
+        let Some(guard) = action.auto_guard() else {
+            return Ok(base);
+        };
+        if base == RiskClass::Deny {
+            return Ok(base);
+        }
+        let bounds = guard
+            .assess(requester, parameters, except_request)
+            .await
+            .map_err(backend("action policy"))?;
+        Ok(match bounds {
+            Bounds::Within if !self.settings.has_override(action.id()) => RiskClass::Auto,
+            Bounds::Outside if base == RiskClass::Auto => RiskClass::Approve,
+            // Unconfigured, or a class the operator pinned.
+            Bounds::Unconfigured | Bounds::Within | Bounds::Outside => base,
+        })
+    }
+
+    /// What must still hold when an approved request is about to run (#496):
+    /// the policy has not turned to `deny`; a request policy approved is
+    /// still auto-approvable and its requester may still ask; a request a
+    /// person approved still has an approver who may approve it. Answers the
+    /// reason it no longer holds. Actions without bounds or an approver
+    /// permission are checked against `deny` only, as before.
+    async fn recheck(
+        &self,
+        authorizer: &dyn Authorizer,
+        action: &dyn ProviderAction,
+        request: &ActionRequest,
+    ) -> Result<Option<String>, BrokerError> {
+        if self.settings.effective_risk(action) == RiskClass::Deny {
+            return Ok(Some("policy now denies this action".to_owned()));
+        }
+        let guarded = action.auto_guard().is_some() || action.approver_permission().is_some();
+        if !guarded {
+            return Ok(None);
+        }
+        if request.decided_by.as_deref() == Some(POLICY_AUTO) {
+            if authorize(
+                authorizer,
+                AccessRequest {
+                    principal_id: &request.requester,
+                    action: Permission::ActionRequest,
+                    resource: Some(&request.action_id),
+                },
+            )
+            .is_err()
+            {
+                return Ok(Some(
+                    "the requester may no longer ask for this action".to_owned(),
+                ));
+            }
+            let class = self
+                .classify(
+                    action,
+                    &request.requester,
+                    &request.parameters,
+                    Some(&request.id),
+                )
+                .await?;
+            if class != RiskClass::Auto {
+                return Ok(Some(
+                    "policy no longer approves this request without a person".to_owned(),
+                ));
+            }
+        } else if let Some(decider) = request.decided_by.as_deref() {
+            if authorize(
+                authorizer,
+                AccessRequest {
+                    principal_id: decider,
+                    action: Permission::ActionApprove,
+                    resource: Some(&request.action_id),
+                },
+            )
+            .is_err()
+            {
+                return Ok(Some(
+                    "the approver may no longer approve this action".to_owned(),
+                ));
+            }
+            if let Some(permission) = action.approver_permission()
+                && authorize(
+                    authorizer,
+                    AccessRequest {
+                        principal_id: decider,
+                        action: permission,
+                        resource: None,
+                    },
+                )
+                .is_err()
+            {
+                return Ok(Some(format!(
+                    "the approver no longer holds {permission}, which this action needs"
+                )));
+            }
+        }
+        Ok(None)
     }
 
     /// The answer to a retried creation: the request already made, when the
@@ -939,6 +1144,20 @@ impl Broker {
                 .ok_or_else(|| BrokerError::Invalid {
                     detail: "the action is no longer offered by this controller".to_owned(),
                 })?;
+        // An action may need more of its approver than `action.approve`;
+        // an approver without it is refused and the request stays pending
+        // for one who has it.
+        if let Some(permission) = current.approver_permission() {
+            authorize(
+                authorizer,
+                AccessRequest {
+                    principal_id,
+                    action: permission,
+                    resource: None,
+                },
+            )
+            .map_err(BrokerError::Denied)?;
+        }
         if self.settings.effective_risk(current.as_ref()) == RiskClass::Deny {
             let update = TransitionUpdate {
                 from: ActionRequestState::Pending,
@@ -1135,6 +1354,10 @@ impl Broker {
                 .fail(&request, "the action is no longer offered", now)
                 .await;
         };
+        match self.recheck(authorizer, action.as_ref(), &request).await? {
+            None => {}
+            Some(reason) => return self.fail(&request, &reason, now).await,
+        }
         let mut new = match action.operation(&request) {
             Ok(new) => new,
             Err(detail) => {

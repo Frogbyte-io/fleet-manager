@@ -78,6 +78,7 @@ Compose project name. Never share it between two controller instances.
    | `FLEET_REGISTRY_EXPIRY_WINDOW_DAYS` | Domain expiry warning window; default `30`. |
    | `FLEET_ACTION_REQUEST_TTL_SECONDS` | How long an action request waits for approval; default `86400`. |
    | `FLEET_ACTION_POLICY` | Risk-class overrides, `action.id=auto\|approve\|deny,...`; default none. |
+   | `FLEET_PERSISTENT_AUTO_POLICY` | JSON bounds inside which agent requests for a persistent VM are approved by policy (see `docs/operations/persistent-machines.md`); default none, so a person approves every one. |
 
    SSH Fleet Git remotes verify host keys against `/var/lib/fleet/.ssh/known_hosts`
    on the data volume (the controller user's home). Pin the Git host's keys there

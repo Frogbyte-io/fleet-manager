@@ -834,6 +834,49 @@ async fn a_persistent_vm_is_created_registered_and_rekeyed_in_order() {
     drop(world.resolver.clone());
 }
 
+/// #496: a machine created from a brokered request records who asked and why
+/// (the same executor, one extra fact write); a direct create records nothing.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_requested_machine_records_its_owner_and_purpose_and_a_direct_one_does_not() {
+    let world = World::new().await;
+    let mut spec = world.spec("requested-1");
+    spec["requestedBy"] = json!({
+        "principal": "credential:ci:cred-1",
+        "purpose": "nightly build host",
+        "requestId": "req-1",
+    });
+    let operation = world.create(&spec).await;
+    assert_eq!(operation.state, "succeeded", "{:?}", error_of(&operation));
+    assert_eq!(result_of(&operation)["requestId"], "req-1");
+    for (name, expected) in [
+        ("owner", "credential:ci:cred-1"),
+        ("purpose", "nightly build host"),
+        ("request", "req-1"),
+    ] {
+        let value: Option<String> = sqlx::query_scalar(
+            "SELECT value FROM machine_capabilities WHERE namespace = 'fleet' AND name = ?1",
+        )
+        .bind(name)
+        .fetch_optional(&world.pool)
+        .await
+        .unwrap();
+        assert_eq!(value.as_deref(), Some(expected), "{name}");
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_direct_machine_records_no_owner_facts() {
+    let world = World::new().await;
+    let operation = world.create(&world.spec("direct-1")).await;
+    assert_eq!(operation.state, "succeeded", "{:?}", error_of(&operation));
+    let count: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM machine_capabilities WHERE namespace = 'fleet'")
+            .fetch_one(&world.pool)
+            .await
+            .unwrap();
+    assert_eq!(count, 0);
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn a_failed_install_leaves_the_image_key_working_and_nothing_removed() {
     if is_root() {

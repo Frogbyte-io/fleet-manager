@@ -1395,7 +1395,10 @@ impl Operations {
                 },
             )
             .map_err(OperationUseCaseError::Denied)?;
-            if self.brokered_kinds.contains(&new.kind) {
+            // A kind with a dedicated route of its own (`machine.create`,
+            // #489) is also offered through the broker (#496): only the
+            // generic surface refuses it.
+            if route == CreateRoute::Generic && self.brokered_kinds.contains(&new.kind) {
                 return Err(OperationUseCaseError::Invalid {
                     detail: "this kind is run through an action request; POST /requests instead"
                         .to_owned(),
@@ -1666,7 +1669,7 @@ impl Operations {
             // auth, an SSH key, a product key) that the generic surface must
             // never be able to queue. The review token still binds the exact
             // payload, and the catalog entry still applies.
-            if route != CreateRoute::Dedicated {
+            if route == CreateRoute::Generic {
                 return Err(OperationUseCaseError::Invalid {
                     detail: "machine.create runs through the machine create route".to_owned(),
                 });
@@ -1683,15 +1686,21 @@ impl Operations {
                     });
                 }
             }
-            authorize(
-                authorizer,
-                AccessRequest {
-                    principal_id,
-                    action: Permission::MachineProvision,
-                    resource: None,
-                },
-            )
-            .map_err(OperationUseCaseError::Denied)?;
+            // The brokered route (#496) is authorized by the broker: policy
+            // for an auto request, or an approver the broker has checked
+            // holds `machines.provision`, now and again at execution. The
+            // requesting agent never holds it.
+            if route == CreateRoute::Dedicated {
+                authorize(
+                    authorizer,
+                    AccessRequest {
+                        principal_id,
+                        action: Permission::MachineProvision,
+                        resource: None,
+                    },
+                )
+                .map_err(OperationUseCaseError::Denied)?;
+            }
         } else if new.kind == "lab.provision" {
             if route != CreateRoute::Dedicated {
                 return Err(OperationUseCaseError::Invalid {

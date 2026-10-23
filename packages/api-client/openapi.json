@@ -5641,6 +5641,78 @@
         }
       }
     },
+    "/api/v1/machines/create/request": {
+      "post": {
+        "tags": [
+          "machines"
+        ],
+        "summary": "Asks for a persistent machine instead of creating it: the same spec the\ndirect create takes, checked the same way, filed as an action request for\na person to approve (the default), or approved by policy when the\noperator configured bounds and the spec is inside them. The machine is\ncreated by the same executor once approved, and records the requesting\nprincipal and the purpose. The answer is the action request: follow it at\n`/requests/{id}` and its operation at `/operations/{id}`. A caller needs\n`action.request`, not `machines.provision`.",
+        "description": "# Errors\n\nReturns the public error envelope on refusal, an invalid spec, a missing\npurpose, an image that is not promoted, or a broker refusal.",
+        "operationId": "requestMachineCreate",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/MachineCreateRequestBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "description": "The action request was recorded; its state shows what policy did.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Resource_ActionRequestDto"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The spec or purpose is invalid, the image version is not promoted, or a reference names nothing.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The caller may not request actions, or policy denies this one.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The idempotency key was already used for a different request.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Persistent machine creation or the broker is not wired.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/machines/create/review": {
       "post": {
         "tags": [
@@ -18049,6 +18121,31 @@
           "spec": {
             "type": "object",
             "description": "The spec, identical to the reviewed one."
+          }
+        }
+      },
+      "MachineCreateRequestBody": {
+        "type": "object",
+        "description": "The body of `POST /machines/create/request`.",
+        "required": [
+          "spec",
+          "purpose"
+        ],
+        "properties": {
+          "idempotencyKey": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "A key (1 to 128 printable ASCII characters) making a retry return the\nrequest already made."
+          },
+          "purpose": {
+            "type": "string",
+            "description": "Why the machine is needed (at most 1000 characters). Recorded on the\nmachine as its purpose, next to the requesting principal."
+          },
+          "spec": {
+            "type": "object",
+            "description": "The machine to create: the same spec `POST /machines/create` takes,\nreferences and public keys only. It must not carry `requestedBy`."
           }
         }
       },

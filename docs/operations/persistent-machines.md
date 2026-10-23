@@ -53,6 +53,44 @@ Activation is optional; unactivated is a valid state.
 - KMS: `--activate-kms <host[:port]>` (`slmgr /skms`).
 - A failed activation (no internet, key in use, wrong edition) fails only that step, with Microsoft's error code; the VM stays created and registered. A retail key activates one machine at a time: to move it, deactivate the old machine first (`slmgr /upk`).
 
+## Agents ask; people approve (#496)
+
+A restricted agent credential cannot create a persistent VM: `machines.provision` is refused to delegated credentials, so the direct create and its review answer 403. Such a caller asks instead:
+
+```
+fleetctl machines create --request --purpose "nightly build host" --account <a> --image-version <v> --name build-box --cores 4 --memory 8192 --disk 40 --wait-approval=15m
+```
+
+`POST /api/v1/machines/create/request` (`requestMachineCreate`) takes the same `spec` and a `purpose`, runs the same checks as the review (rules, promoted image, references), and files an action request for `proxmox.machine.create` (needs `action.request`, not `machines.provision`). The parameters are the spec's references and public keys only, with the credential-shaped key names (`credential`, `secret`, `publicKey`, `adminPassword`) renamed so the broker's credential check passes honestly; an activation key is only ever a `machines/product-key/` id. The request is `approve` class: it waits for a person (`fleetctl requests approve <id>`, or the Approvals page), and the answer says whether policy or a person decided.
+
+On approval the broker builds the same `machine.create` operation and review token a direct create builds, with one addition: the spec is stamped with the requesting principal, the purpose (the request's reason) and the request id. #489's executor then runs unchanged, and when it registers the machine it records the stamp as the machine facts `fleet/owner`, `fleet/purpose` and `fleet/request`. These are record keeping rather than observations, so the console reads them whatever their age; the machine page shows them under Summary. A direct create records none, and a direct call that carries the stamp is refused.
+
+### Authorization is checked again when it runs
+
+- The approver needs `action.approve` and `machines.provision`. An approver without the second is refused when approving and the request stays pending for one who has it.
+- When the operation starts, the broker checks again: an approval by a person needs that person to still hold both; an approval by policy needs the requester to still hold `action.request` and the request to still be inside the bounds. A request that fails the check ends `failed` with the reason and creates nothing.
+- A policy that turned to `deny` ends a pending request `denied` when someone approves it, as for any action.
+- A rejection or an expiry creates nothing.
+
+### Policy bounds
+
+By default every request waits for a person. An operator can allow small requests without one with `FLEET_PERSISTENT_AUTO_POLICY`, a JSON object (a malformed value stops startup):
+
+```
+FLEET_PERSISTENT_AUTO_POLICY='{"maxCores":4,"maxMemoryMib":8192,"maxDiskGib":64,"imageVersions":["<version-id>"],"nodes":["pve1"],"storages":["local-lvm"],"maxPerPrincipal":2}'
+```
+
+Every field is optional; with none set nothing is auto-approved. When any is set, a request inside **all** set bounds is approved by policy and starts at once; anything else waits for a person.
+
+- A limit the request leaves to the image's default (no `--cores`, `--memory`, `--disk`, `--node` or `--storage`) cannot be shown to be inside it, so it needs a person.
+- A guest created with `--no-protection` is never auto-approved.
+- `maxPerPrincipal` counts the principal's requests for this action that are pending, approved, running or succeeded. A machine destroyed later still counts: the quota guards against a runaway agent, it is not an inventory.
+- `FLEET_ACTION_POLICY=proxmox.machine.create=deny` refuses every request outright; `=approve` keeps everything for a person whatever the bounds; `=auto` still honours the bounds (an out-of-bounds request waits).
+
+### Audit
+
+The request, the decision (the approver, or `policy:auto`), the start of the operation (with its id) and the outcome are the broker's linked events, keyed by the request id. The machine's `fleet/request` fact and the operation result's `requestId` carry that id forward, so the creation can be traced back to the request, the requester and the approver.
+
 ## Lab never selects it
 
 The persistent marker (not the name) keeps the guest out of the Lab sweeper's inventory, Lab pools and Lab cleanup. Persistent names may not start with `fm-lab-`.

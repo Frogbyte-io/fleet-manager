@@ -27,7 +27,9 @@ text.
 5. **Never put secrets in arguments.** Commands that need a secret read it from
    stdin; everything you pass on the command line may end up in shell history.
 6. **Lab environments are disposable and time-limited.** Destroy them when you
-   are done; extend them only as long as you need.
+   are done; extend them only as long as you need. A Lab lease is the default
+   way to get a machine; request a permanent one only when you must (see
+   Creating a permanent VM).
 
 ## Controller and health
 
@@ -104,6 +106,46 @@ is only needed when the machine has more than one SSH endpoint.
   if `sudo` needs a password, tell the user.
 
 ### Creating a permanent VM
+
+**Default to a Lab lease.** When you need a machine to run, build or test
+something, take a disposable Lab environment (see Lab environments): it has a
+time limit and the controller removes it. Ask for a permanent VM only when the
+work genuinely needs one that outlives you (a build host, a long-running
+service, a machine the user will keep using), and only when the user asked for
+it or agreed. A permanent VM takes capacity indefinitely and is never cleaned
+up.
+
+If you are an agent with a restricted credential you cannot create one
+directly (`machines create` is refused with `denied`). Request it instead and
+say why; a person approves it, and the controller creates it:
+
+```bash
+fleetctl --output json machines create --request --purpose "nightly build host for project X" --account <account-id> --image-version <version-id> --name build-box --cores 4 --memory 8192 --disk 40 --wait-approval=15m
+fleetctl --output json requests get <request-id> --wait=15m
+```
+
+- `--purpose` is required: say what the machine is for in a sentence. It is
+  recorded on the machine with you as its owner, and the approver reads it.
+  State the cores, memory and disk you need; a request that leaves them to the
+  image default may need a person even where small ones are approved
+  automatically.
+- Without a wait the command files the request and returns it (`state`
+  `pending`, an `id`). With `--wait-approval[=<duration>]` (1s to 1h, default
+  5m) it stays for the answer, which is `{outcome, request, result}`: exit 0
+  is `executed` (`result` names `machineId`, `endpointId`, `vmid`, `address`),
+  2 is `still_pending`, 1 is anything else. The creation itself takes minutes
+  after the approval; the wait covers it. Waiting is bounded: do not loop.
+- A request that policy approves starts at once (`state` `executing`); you
+  cannot tell in advance, so always pass the wait or read `requests get`.
+- Handle the outcomes as in Brokered actions below. In particular on `denied`
+  never re-file or file a variant: report it and use a Lab lease or ask the
+  user. Do not approve your own request. A Windows
+  activation key goes in by reference id only; never put a secret in the request (`--activate-key <ref>`,
+  stored beforehand by the user with `machines product-key store`).
+- You never destroy a permanent VM; that stays the user's decision.
+
+With an operator credential (`machines.provision`) the direct form creates it
+without a request:
 
 ```bash
 fleetctl --output json machines create --account <account-id> --image-version <version-id> --name build-box --cores 4 --memory 8192

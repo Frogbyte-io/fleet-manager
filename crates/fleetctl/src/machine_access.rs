@@ -552,6 +552,12 @@ pub(crate) fn request(action: &MachineAccessAction) -> Result<RequestShape, CliE
             Vec::new(),
             None,
         ),
+        MachineAccessAction::Create(args) if args.request => (
+            reqwest::Method::POST,
+            "/api/v1/machines/create/request".to_owned(),
+            Vec::new(),
+            Some(json!({ "spec": args.spec(), "purpose": args.purpose })),
+        ),
         MachineAccessAction::Create(args) => (
             reqwest::Method::POST,
             "/api/v1/machines/create/review".to_owned(),

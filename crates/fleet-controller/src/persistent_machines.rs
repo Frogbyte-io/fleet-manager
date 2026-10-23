@@ -2229,6 +2229,45 @@ impl Run<'_> {
         Ok(guest::parse_activation(&out))
     }
 
+    /// Records who asked for the machine and why (#496), as machine facts the
+    /// console and `fleetctl machines show` read. A direct create carries no
+    /// stamp and records nothing. Recording is an upsert, so a resumed run is
+    /// harmless, and a failure is reported but does not fail a machine that
+    /// exists.
+    async fn record_owner(&self) {
+        let (Some(machine_id), Some(by)) = (&self.machine_id, &self.spec.requested_by) else {
+            return;
+        };
+        let now = Timestamp::from_unix_millis(fleet_core::SystemClock::now_unix_millis());
+        let facts: Vec<CapabilityFact> = [
+            ("owner", &by.principal),
+            ("purpose", &by.purpose),
+            ("request", &by.request_id),
+        ]
+        .into_iter()
+        .map(|(name, value)| CapabilityFact {
+            namespace: "fleet".to_owned(),
+            name: name.to_owned(),
+            value: Some(value.clone()),
+            status: CapabilityStatus::Known,
+            observed_at: now,
+            source: "machine.create/1".to_owned(),
+        })
+        .collect();
+        let machines = Machines::new(self.exec.machines.clone(), self.exec.audit.clone());
+        if let Err(error) = machines
+            .record_capabilities(
+                &fleet_auth::LanAllowAllAuthorizer,
+                &lan(),
+                machine_id,
+                &facts,
+            )
+            .await
+        {
+            eprintln!("machine.create: the owner facts were not recorded: {error}");
+        }
+    }
+
     async fn record_activation(&self, report: &guest::ActivationReport) {
         let Some(machine_id) = &self.machine_id else {
             return;
@@ -2338,6 +2377,7 @@ impl Run<'_> {
         self.address().await?;
         self.progress(5, "registering the machine").await;
         self.register().await?;
+        self.record_owner().await;
         self.checkpoint("machine").await?;
         self.progress(6, "waiting for SSH and recording the host key")
             .await;
@@ -2426,6 +2466,9 @@ impl Run<'_> {
             "protection": self.spec.protection,
             "state": "ready",
         });
+        if let (Some(by), Some(map)) = (&self.spec.requested_by, result.as_object_mut()) {
+            map.insert("requestId".to_owned(), by.request_id.clone().into());
+        }
         if let Some(map) = result.as_object_mut() {
             map.extend(notes.clone());
         }

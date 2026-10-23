@@ -3299,6 +3299,34 @@ export interface MachineCreateRequest {
 }
 
 /**
+ * The machine to create: the same spec `POST /machines/create` takes,
+ * references and public keys only. It must not carry `requestedBy`.
+ */
+export type MachineCreateRequestBodySpec = { [key: string]: unknown };
+
+/**
+ * The body of `POST /machines/create/request`.
+ */
+export interface MachineCreateRequestBody {
+  /**
+     * A key (1 to 128 printable ASCII characters) making a retry return the
+     * request already made.
+     * @nullable
+     */
+  idempotencyKey?: string | null;
+  /**
+     * Why the machine is needed (at most 1000 characters). Recorded on the
+     * machine as its purpose, next to the requesting principal.
+     */
+  purpose: string;
+  /**
+     * The machine to create: the same spec `POST /machines/create` takes,
+     * references and public keys only. It must not carry `requestedBy`.
+     */
+  spec: MachineCreateRequestBodySpec;
+}
+
+/**
  * The spec as it will run, with every default filled in.
  */
 export type MachineCreateReviewDtoSpec = { [key: string]: unknown };
@@ -15885,6 +15913,88 @@ const res = await fetch(getCreateMachineUrl(),
 
   const data: createMachineResponse['data'] = body ? JSON.parse(body) : {}
   return { data, status: res.status, headers: res.headers } as createMachineResponse
+}
+
+
+
+export type requestMachineCreateResponse201 = {
+  data: ResourceActionRequestDto
+  status: 201
+}
+
+export type requestMachineCreateResponse400 = {
+  data: ApiError
+  status: 400
+}
+
+export type requestMachineCreateResponse403 = {
+  data: ApiError
+  status: 403
+}
+
+export type requestMachineCreateResponse409 = {
+  data: ApiError
+  status: 409
+}
+
+export type requestMachineCreateResponse503 = {
+  data: ApiError
+  status: 503
+}
+
+export type requestMachineCreateResponseSuccess = (requestMachineCreateResponse201) & {
+  headers: Headers;
+};
+export type requestMachineCreateResponseError = (requestMachineCreateResponse400 | requestMachineCreateResponse403 | requestMachineCreateResponse409 | requestMachineCreateResponse503) & {
+  headers: Headers;
+};
+
+export type requestMachineCreateResponse = (requestMachineCreateResponseSuccess | requestMachineCreateResponseError)
+
+export const getRequestMachineCreateUrl = () => {
+
+
+
+
+  return `/api/v1/machines/create/request`
+}
+
+/**
+ * # Errors
+ *
+ * Returns the public error envelope on refusal, an invalid spec, a missing
+ * purpose, an image that is not promoted, or a broker refusal.
+ * @summary Asks for a persistent machine instead of creating it: the same spec the
+direct create takes, checked the same way, filed as an action request for
+a person to approve (the default), or approved by policy when the
+operator configured bounds and the spec is inside them. The machine is
+created by the same executor once approved, and records the requesting
+principal and the purpose. The answer is the action request: follow it at
+`/requests/{id}` and its operation at `/operations/{id}`. A caller needs
+`action.request`, not `machines.provision`.
+ */
+export const requestMachineCreate = async (machineCreateRequestBody: MachineCreateRequestBody, options?: RequestInit): Promise<requestMachineCreateResponse> => {
+
+    const getHeaders = (h?: NonNullable<RequestInit['headers']>): Record<string, string | readonly string[]> => {
+    if (!h) return {};
+    if (h instanceof Headers) return Object.fromEntries(h.entries());
+    if (Array.isArray(h)) return Object.fromEntries(h);
+    return h;
+  };
+const res = await fetch(getRequestMachineCreateUrl(),
+  {
+    ...options,
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...getHeaders(options?.headers) },
+    body: JSON.stringify(machineCreateRequestBody)
+  }
+)
+
+
+  const body = [204, 205, 304].includes(res.status) ? null : await res.text();
+
+  const data: requestMachineCreateResponse['data'] = body ? JSON.parse(body) : {}
+  return { data, status: res.status, headers: res.headers } as requestMachineCreateResponse
 }
 
 

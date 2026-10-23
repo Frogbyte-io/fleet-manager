@@ -66,6 +66,10 @@ fn run_serve(mut config: fleet_config::ControllerConfig) -> ExitCode {
         eprintln!("fleet-controller: refusing to start: {error}");
         return ExitCode::FAILURE;
     }
+    if let Err(error) = fleet_controller::persistent_bounds_from_env() {
+        eprintln!("fleet-controller: refusing to start: {error}");
+        return ExitCode::FAILURE;
+    }
     // Likewise the Registry enricher: a typo must not silently change how
     // often public RDAP servers are queried.
     let enrich_settings = match fleet_controller::registry_enrich::enrich_settings_from_env() {

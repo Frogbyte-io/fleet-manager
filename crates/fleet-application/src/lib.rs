@@ -31,6 +31,7 @@ pub mod observed_assembly;
 pub mod onboarding;
 pub mod operation;
 pub mod persistent;
+pub mod persistent_request;
 pub mod planner;
 pub mod planning;
 pub mod project;

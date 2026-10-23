@@ -173,6 +173,20 @@ fn default_trust() -> HostKeyTrust {
     HostKeyTrust::Tofu
 }
 
+/// Who asked for a machine through the action broker (#496), stamped by the
+/// broker's action when it builds the operation. A direct create never
+/// carries it: the review refuses a spec that does.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct RequestedBy {
+    /// The requesting principal.
+    pub principal: String,
+    /// Why the machine is needed (the request's reason).
+    pub purpose: String,
+    /// The action request that asked for it.
+    pub request_id: String,
+}
+
 /// Everything a `machine.create` needs. The wire shape of the review and
 /// create calls and of the operation payload.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -241,6 +255,10 @@ pub struct CreateMachineSpec {
     /// The operation deadline, in seconds.
     #[serde(default = "default_timeout")]
     pub timeout_seconds: u64,
+    /// Who asked for it through the action broker; absent for a direct
+    /// create. Set only by the broker's action, never by a caller.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub requested_by: Option<RequestedBy>,
 }
 
 fn identifier(value: &str, what: &str, max: usize) -> Result<(), String> {
@@ -397,6 +415,7 @@ impl CreateMachineSpec {
     /// # Errors
     ///
     /// Answers the first rule the spec breaks, naming the field.
+    #[allow(clippy::too_many_lines)]
     pub fn validate(&self) -> Result<(), String> {
         identifier(&self.account_id, "account id", 128)?;
         identifier(&self.image_version_id, "image version id", 128)?;
@@ -490,6 +509,19 @@ impl CreateMachineSpec {
             return Err(format!(
                 "the timeout must be between 60 and {MAX_TIMEOUT_SECONDS} seconds"
             ));
+        }
+        if let Some(by) = &self.requested_by
+            && (by.principal.is_empty()
+                || by.principal.len() > 256
+                || by.purpose.trim().is_empty()
+                || by.purpose.chars().count() > 1_000
+                || by.request_id.is_empty()
+                || by.request_id.len() > 96
+                || [&by.principal, &by.purpose, &by.request_id]
+                    .iter()
+                    .any(|text| text.chars().any(char::is_control)))
+        {
+            return Err("the requestedBy stamp is malformed".to_owned());
         }
         Ok(())
     }
@@ -1023,6 +1055,25 @@ impl PersistentMachines {
             },
         )
         .map_err(LabUseCaseError::Denied)?;
+        if spec.requested_by.is_some() {
+            return Err(invalid(
+                "requestedBy is set by the action broker; a direct create cannot carry it"
+                    .to_owned(),
+            ));
+        }
+        self.check_spec(spec).await
+    }
+
+    /// The checks of a create that need no permission of the caller: every
+    /// rule, the promoted image, and the references. The request path runs
+    /// them at request time with `action.request` as the permission; the
+    /// executor re-verifies at run time.
+    ///
+    /// # Errors
+    ///
+    /// Fails on a broken rule, an image version that is not promoted, or a
+    /// credential or product-key reference that does not exist.
+    pub async fn check_spec(&self, spec: &CreateMachineSpec) -> Result<Prepared, LabUseCaseError> {
         spec.validate()
             .map_err(|detail| LabUseCaseError::Invalid { detail })?;
         let version = self

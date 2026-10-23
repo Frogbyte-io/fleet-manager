@@ -9,9 +9,20 @@
 //! public key), and a Windows product key is read from stdin by
 //! `product-key store`, which prints only the reference to use with
 //! `--activate-key`.
+//!
+//! With `--request --purpose <why>` the command does not create anything: it
+//! files an action request for a persistent machine (#496), for a caller
+//! that may ask but not provision. A person approves it (or policy bounds
+//! the operator configured do), and the same executor then creates the
+//! machine, recording the requester and the purpose. `--wait-approval[=<d>]`
+//! waits through the shared request waiter and prints the outcome and the
+//! operation's result.
+
+use std::time::Duration;
 
 use serde_json::{Map, Value, json};
 
+use crate::requests::parse_wait_approval;
 use crate::{CliError, Output, usage};
 
 /// The arguments of `machines create`.
@@ -41,6 +52,13 @@ pub struct CreateArgs {
     pub no_wait: bool,
     /// A key making a retry return the operation already queued.
     pub idempotency_key: Option<String>,
+    /// File an action request instead of creating (`--request`).
+    pub request: bool,
+    /// Why the machine is needed (`--purpose`); required with `--request`.
+    pub purpose: Option<String>,
+    /// How long to wait for the decision and the creation
+    /// (`--wait-approval`); only with `--request`.
+    pub wait: Option<Duration>,
 }
 
 fn number(name: &str, raw: &str) -> Result<u64, CliError> {
@@ -55,6 +73,10 @@ pub(crate) fn parse_create(rest: &[&str], output: &mut Output) -> Result<CreateA
     let mut args = CreateArgs::default();
     let mut iter = rest.iter().copied();
     while let Some(flag) = iter.next() {
+        if let Some(duration) = parse_wait_approval("--wait-approval", flag)? {
+            args.wait = Some(duration);
+            continue;
+        }
         let mut value = |name: &str| {
             iter.next()
                 .filter(|candidate| !candidate.starts_with("--"))
@@ -75,6 +97,8 @@ pub(crate) fn parse_create(rest: &[&str], output: &mut Output) -> Result<CreateA
                     }
                 };
             }
+            "--request" => args.request = true,
+            "--purpose" => args.purpose = Some(value("purpose")?),
             "--account" => args.account = Some(value("account")?),
             "--image-version" => args.image_version = Some(value("image-version")?),
             "--name" => args.name = Some(value("name")?),
@@ -229,6 +253,29 @@ pub(crate) fn parse_create(rest: &[&str], output: &mut Output) -> Result<CreateA
             });
         }
     }
+    if args.request {
+        if args
+            .purpose
+            .as_deref()
+            .is_none_or(|purpose| purpose.trim().is_empty())
+        {
+            return Err(CliError {
+                message: "machines create --request needs --purpose <why the machine is needed>"
+                    .to_owned(),
+            });
+        }
+        if args.review_only || args.no_wait {
+            return Err(CliError {
+                message:
+                    "--request files a request; it cannot be combined with --review-only or --no-wait (use --wait-approval to wait)"
+                        .to_owned(),
+            });
+        }
+    } else if args.purpose.is_some() || args.wait.is_some() {
+        return Err(CliError {
+            message: "--purpose and --wait-approval belong to --request".to_owned(),
+        });
+    }
     Ok(args)
 }
 
@@ -350,6 +397,25 @@ pub(crate) fn run_create(
     args: &CreateArgs,
 ) -> Result<(Value, u8), CliError> {
     let client = crate::http_client()?;
+    if args.request {
+        let mut body = json!({
+            "spec": args.spec(),
+            "purpose": args.purpose,
+        });
+        if let Some(key) = &args.idempotency_key {
+            body["idempotencyKey"] = json!(key);
+        }
+        let created = crate::send(
+            &client,
+            invocation,
+            reqwest::Method::POST,
+            "/api/v1/machines/create/request",
+            &[],
+            Some(&body),
+            uuid::Uuid::now_v7().to_string(),
+        )?;
+        return crate::requests::finish_filed_request(&client, invocation, &created, args.wait);
+    }
     let reviewed = crate::send(
         &client,
         invocation,

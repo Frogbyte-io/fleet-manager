@@ -206,6 +206,25 @@ describe('MachinePage', () => {
     expect(wrapper.find('[data-testid="open-vscode"]').attributes('href')).toBe('vscode://vscode-remote/ssh-remote+build.lan/')
   })
 
+  it('overview shows who asked for the machine and why, even when the fact has aged', async () => {
+    const owned = machine()
+    owned.capabilities.push(
+      { namespace: 'fleet', name: 'owner', value: 'credential:ci:cred-1', status: 'stale', observedAt: NOW - 86_400_000 * 30, source: 'machine.create/1' },
+      { namespace: 'fleet', name: 'purpose', value: 'nightly build host', status: 'stale', observedAt: NOW - 86_400_000 * 30, source: 'machine.create/1' },
+      { namespace: 'fleet', name: 'request', value: 'req-1', status: 'stale', observedAt: NOW - 86_400_000 * 30, source: 'machine.create/1' },
+    )
+    api.getMachine.mockResolvedValue(ok({ data: owned }))
+    const { wrapper } = await mountAt('/fleet/machines/m1')
+    expect(wrapper.find('[data-testid="machine-owner"]').text()).toBe('credential:ci:cred-1')
+    expect(wrapper.find('[data-testid="machine-purpose"]').text()).toBe('nightly build host')
+    expect(wrapper.find('a[href*="request=req-1"]').exists()).toBe(true)
+  })
+
+  it('overview shows no owner rows for a machine that was not requested', async () => {
+    const { wrapper } = await mountAt('/fleet/machines/m1')
+    expect(wrapper.find('[data-testid="machine-owner"]').exists()).toBe(false)
+  })
+
   it('shows a not-found state for an unknown machine', async () => {
     api.getMachine.mockResolvedValue({ status: 404, data: { code: 'not_found', message: 'no such machine' }, headers: new Headers() })
     const { wrapper } = await mountAt('/fleet/machines/missing')

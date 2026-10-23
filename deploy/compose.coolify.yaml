@@ -53,6 +53,7 @@ services:
       # overrides (`action.id=auto|approve|deny,...`); empty keeps defaults.
       FLEET_ACTION_REQUEST_TTL_SECONDS: ${FLEET_ACTION_REQUEST_TTL_SECONDS:-}
       FLEET_ACTION_POLICY: ${FLEET_ACTION_POLICY:-}
+      FLEET_PERSISTENT_AUTO_POLICY: ${FLEET_PERSISTENT_AUTO_POLICY:-}
     volumes:
       - fleet-data:/var/lib/fleet
     secrets:
