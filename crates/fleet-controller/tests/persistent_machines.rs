@@ -70,6 +70,8 @@ struct Guest {
 struct HostState {
     /// Polls of a running guest that still holds install media.
     install_polls: BTreeMap<u32, u32>,
+    /// The first power read of an installer says stopped (a lagging view).
+    stale_first_stopped: bool,
     guests: BTreeMap<u32, Guest>,
     calls: Vec<String>,
     bodies: Vec<(String, Value)>,
@@ -175,26 +177,6 @@ impl FakePve {
                 ok(json!({ "release": "9.2", "version": "9.2.2", "repoid": "b9984c6d90a4bd80" }))
             }
             ("GET", ["cluster", "resources"]) => {
-                let installing: Vec<u32> = state
-                    .guests
-                    .iter()
-                    .filter(|(_, guest)| {
-                        guest.running
-                            && guest.config.values().any(|value| {
-                                value
-                                    .as_str()
-                                    .is_some_and(|text| text.contains("media=cdrom"))
-                            })
-                    })
-                    .map(|(vmid, _)| *vmid)
-                    .collect();
-                for vmid in installing {
-                    let polls = state.install_polls.entry(vmid).or_insert(0);
-                    *polls += 1;
-                    if *polls >= 2 {
-                        state.guests.get_mut(&vmid).unwrap().running = false;
-                    }
-                }
                 let entries: Vec<Value> = state
                     .guests
                     .iter()
@@ -279,6 +261,35 @@ impl FakePve {
                     "UPID:{node}:0000AAAA:00000001:65000000:qmclone:{source}:root@pam:"
                 )))
             }
+            ("GET", ["nodes", _, "qemu", vmid, "status", "current"]) => {
+                let vmid: u32 = vmid.parse().unwrap();
+                let stale = state.stale_first_stopped;
+                let Some(guest) = state.guests.get(&vmid) else {
+                    return (500, json!({ "data": null }));
+                };
+                let installing = guest.running
+                    && guest.config.values().any(|value| {
+                        value.as_str().is_some_and(|text| {
+                            text.contains("media=cdrom") && !text.starts_with("none")
+                        })
+                    });
+                let mut running = guest.running;
+                if installing {
+                    // The installer: running for two reads, then it powers
+                    // the guest off. With `stale`, the very first read still
+                    // says stopped, as a lagging listing would.
+                    let polls = state.install_polls.entry(vmid).or_insert(0);
+                    *polls += 1;
+                    let polls = *polls;
+                    if stale && polls == 1 {
+                        running = false;
+                    } else if polls >= 3 {
+                        running = false;
+                        state.guests.get_mut(&vmid).unwrap().running = false;
+                    }
+                }
+                ok(json!({ "status": if running { "running" } else { "stopped" } }))
+            }
             ("GET", ["nodes", _, "tasks", _, "status"]) => {
                 ok(json!({ "status": "stopped", "exitstatus": "OK" }))
             }
@@ -309,7 +320,34 @@ impl FakePve {
                     return (500, json!({ "data": null }));
                 }
                 state.digest += 1;
-                let guest = state.guests.get_mut(&vmid.parse::<u32>().unwrap()).unwrap();
+                let id = vmid.parse::<u32>().unwrap();
+                let protected = state.guests[&id].config.get("protection") == Some(&json!(1));
+                if protected
+                    && body["delete"]
+                        .as_str()
+                        .unwrap_or_default()
+                        .split(',')
+                        .any(|key| {
+                            key.starts_with("ide")
+                                || key.starts_with("scsi")
+                                || key.starts_with("sata")
+                        })
+                {
+                    return (
+                        500,
+                        json!({ "data": null, "message": "can't remove drive - protection mode enabled" }),
+                    );
+                }
+                if body.get("boot").is_some() {
+                    let polls = state.install_polls.get(&id).copied().unwrap_or(0);
+                    state.calls.push(format!("eject polls={polls}"));
+                }
+                let guest = state.guests.get_mut(&id).unwrap();
+                for key in ["ide2", "ide3"] {
+                    if let Some(value) = body.get(key) {
+                        guest.config.insert(key.to_owned(), value.clone());
+                    }
+                }
                 for key in [
                     "tags",
                     "description",
@@ -2312,16 +2350,7 @@ async fn destroying_a_registered_vm_never_lifts_its_protection() {
 #[tokio::test(flavor = "multi_thread")]
 async fn an_iso_install_creates_the_guest_waits_for_the_installer_and_detaches_the_media() {
     let world = World::new().await;
-    let mut spec = world.spec("iso-box");
-    let object = spec.as_object_mut().unwrap();
-    object.remove("imageVersionId");
-    object.insert(
-        "install".to_owned(),
-        json!({ "iso": "local:iso/ubuntu.iso", "answerIso": "local:iso/seed.iso" }),
-    );
-    object.insert("node".to_owned(), json!("pve"));
-    object.insert("storage".to_owned(), json!("local-lvm"));
-    object.insert("diskGib".to_owned(), json!(32));
+    let spec = install_spec(&world, "iso-box");
     let operation = world.create(&spec).await;
     assert_eq!(operation.state, "succeeded", "{:?}", operation.error_json);
 
@@ -2349,9 +2378,127 @@ async fn an_iso_install_creates_the_guest_waits_for_the_installer_and_detaches_t
     assert_eq!(marker.state, PersistentState::Ready);
     let guest = world.pve.guest(marker.vmid).unwrap();
     assert!(guest.running, "the installed disk is booted");
-    assert!(!guest.config.contains_key("ide2") && !guest.config.contains_key("ide3"));
+    // Ejected, not deleted: the guest is protected, and PVE refuses a drive
+    // removal then.
+    assert_eq!(guest.config["ide2"], "none,media=cdrom");
+    assert_eq!(guest.config["ide3"], "none,media=cdrom");
     assert_eq!(guest.config["boot"], "order=scsi0");
     // The same metadata as a cloned machine: persistent label, no fixture tag.
     assert_eq!(guest.config["tags"], "ci;fleet-persistent");
     assert_eq!(guest.config["protection"], 1);
+}
+
+fn install_spec(world: &World, name: &str) -> Value {
+    let mut spec = world.spec(name);
+    let object = spec.as_object_mut().unwrap();
+    object.remove("imageVersionId");
+    object.insert(
+        "install".to_owned(),
+        json!({ "iso": "local:iso/ubuntu.iso", "answerIso": "local:iso/seed.iso" }),
+    );
+    object.insert("node".to_owned(), json!("pve"));
+    object.insert("storage".to_owned(), json!("local-lvm"));
+    object.insert("diskGib".to_owned(), json!(32));
+    spec
+}
+
+/// A guest as an interrupted install leaves it: stopped, protected, with the
+/// installer and answer media still attached.
+fn installed_guest(name: &str, with_media: bool) -> Guest {
+    let mut guest = plain_guest(name);
+    for (key, value) in [
+        ("name", json!(name)),
+        ("protection", json!(1)),
+        ("boot", json!("order=ide2;scsi0")),
+        ("net0", json!("virtio=AA:BB:CC:DD:EE:01,bridge=vmbr0")),
+        ("scsi0", json!("local-lvm:vm-7100-disk-0,size=32G")),
+    ] {
+        guest.config.insert(key.to_owned(), value);
+    }
+    if with_media {
+        guest
+            .config
+            .insert("ide2".to_owned(), json!("local:iso/ubuntu.iso,media=cdrom"));
+        guest
+            .config
+            .insert("ide3".to_owned(), json!("local:iso/seed.iso,media=cdrom"));
+    }
+    guest
+}
+
+async fn install_marker(world: &World, vmid: u32, name: &str, step: &str) {
+    let mut marker = marker(&world.account_id, vmid, name, true);
+    marker.image_version_id = "install:local:iso/ubuntu.iso".to_owned();
+    marker.step = Some(step.to_owned());
+    PersistentGuestRepository::new(world.pool.clone())
+        .reserve(&marker)
+        .await
+        .unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_stale_first_stopped_read_is_not_the_end_of_the_install() {
+    let world = World::new().await;
+    world.pve.state.lock().unwrap().stale_first_stopped = true;
+    let operation = world.create(&install_spec(&world, "iso-stale")).await;
+    assert_eq!(operation.state, "succeeded", "{:?}", operation.error_json);
+    let calls = world.pve.calls();
+    // The eject waited for the installer to run and then stop: at least the
+    // stale read, a running read and the stopping read.
+    let eject = calls.iter().find(|call| call.starts_with("eject")).unwrap();
+    let polls: u32 = eject.trim_start_matches("eject polls=").parse().unwrap();
+    assert!(polls >= 3, "{calls:?}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_rerun_after_the_installer_stopped_ejects_without_installing_again() {
+    let world = World::new().await;
+    world
+        .pve
+        .state
+        .lock()
+        .unwrap()
+        .guests
+        .insert(7100, installed_guest("iso-resume", true));
+    install_marker(&world, 7100, "iso-resume", "installing").await;
+    let operation = world.create(&install_spec(&world, "iso-resume")).await;
+    assert_eq!(operation.state, "succeeded", "{:?}", operation.error_json);
+    let calls = world.pve.calls();
+    let eject = calls
+        .iter()
+        .position(|call| call.starts_with("eject"))
+        .unwrap();
+    // Nothing was started before the media went: no second install.
+    assert!(
+        calls[..eject].iter().all(|call| !call.starts_with("start")),
+        "{calls:?}"
+    );
+    assert_eq!(
+        world.pve.guest(7100).unwrap().config["ide2"],
+        "none,media=cdrom"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_guest_without_media_that_fleet_never_installed_is_not_adopted() {
+    let world = World::new().await;
+    world
+        .pve
+        .state
+        .lock()
+        .unwrap()
+        .guests
+        .insert(7100, installed_guest("iso-bare", false));
+    install_marker(&world, 7100, "iso-bare", "config").await;
+    let operation = world.create(&install_spec(&world, "iso-bare")).await;
+    assert_eq!(operation.state, "failed");
+    assert_eq!(error_of(&operation)["reason"], "media_missing");
+    assert!(
+        !world
+            .pve
+            .calls()
+            .iter()
+            .any(|call| call.starts_with("start")),
+        "an unverified guest must not be started"
+    );
 }

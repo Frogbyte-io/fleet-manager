@@ -1869,7 +1869,7 @@ pub fn requested_intent(
     let mut pairs = vec![
         ("event", "machine_provision_requested"),
         ("accountId", spec.account_id.as_str()),
-        ("imageVersionId", source.as_str()),
+        ("source", source.as_str()),
         ("name", spec.name.as_str()),
         ("guestOs", spec.guest_os.id()),
         ("credential", credential),

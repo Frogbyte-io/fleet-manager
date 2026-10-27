@@ -359,6 +359,15 @@ impl PveQemuCreate {
     }
 }
 
+/// The body that ejects the given drives and boots from the disk.
+fn eject_body(keys: &[String]) -> serde_json::Value {
+    let mut body = serde_json::json!({ "boot": "order=scsi0" });
+    for key in keys {
+        body[key] = serde_json::json!("none,media=cdrom");
+    }
+    body
+}
+
 /// The CD-ROM keys (`ide0` to `ide3`, `sata0` to `sata5`) of a guest config
 /// that still hold media.
 fn cdrom_keys(config: &serde_json::Value) -> Vec<String> {
@@ -428,13 +437,15 @@ impl ProxmoxClient {
         Ok(cdrom_keys(&config))
     }
 
-    /// Detaches CD-ROM media and boots from the disk only
-    /// (`PUT /nodes/{node}/qemu/{vmid}/config` with `delete` and `boot`).
+    /// Ejects CD-ROM media and boots from the disk only
+    /// (`PUT /nodes/{node}/qemu/{vmid}/config`). Each drive is set to an
+    /// empty CD-ROM (`none,media=cdrom`) rather than deleted: Proxmox refuses
+    /// to remove a drive from a protected guest, but accepts an eject.
     ///
     /// # Errors
     ///
     /// Fails with [`PveApiError`].
-    pub async fn qemu_remove_media(
+    pub async fn qemu_eject_media(
         &self,
         request: PveHttpRequest,
         node: &str,
@@ -445,10 +456,42 @@ impl ProxmoxClient {
             request,
             PveHttpMethod::Put,
             &format!("/api2/json/nodes/{}/qemu/{vmid}/config", urlencode(node)),
-            &serde_json::json!({ "delete": keys.join(","), "boot": "order=scsi0" }),
+            &eject_body(keys),
         )
         .await
         .map(|_| ())
+    }
+
+    /// The guest's power state right now (`GET
+    /// /nodes/{node}/qemu/{vmid}/status/current`: `running`, `stopped`, ...).
+    /// Unlike `/cluster/resources`, which lags by about ten seconds, this
+    /// reads the process.
+    ///
+    /// # Errors
+    ///
+    /// Fails with [`PveApiError`].
+    pub async fn qemu_power_state(
+        &self,
+        request: PveHttpRequest,
+        node: &str,
+        vmid: u32,
+    ) -> Result<String, PveApiError> {
+        let data = self
+            .call(PveHttpRequest {
+                path: format!(
+                    "/api2/json/nodes/{}/qemu/{vmid}/status/current",
+                    urlencode(node)
+                ),
+                method: PveHttpMethod::Get,
+                ..request
+            })
+            .await?;
+        data.get("status")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_owned)
+            .ok_or_else(|| PveApiError::InvalidPayload {
+                detail: "the status answer carries no status".to_owned(),
+            })
     }
 }
 
@@ -546,5 +589,14 @@ mod tests {
             "sata1": "local:iso/b.iso,media=cdrom",
         });
         assert_eq!(cdrom_keys(&config), vec!["ide2", "sata1"]);
+    }
+
+    #[test]
+    fn ejecting_empties_the_drives_and_never_deletes_them() {
+        let body = eject_body(&["ide2".to_owned(), "ide3".to_owned()]);
+        assert_eq!(body["ide2"], "none,media=cdrom");
+        assert_eq!(body["ide3"], "none,media=cdrom");
+        assert_eq!(body["boot"], "order=scsi0");
+        assert!(body.get("delete").is_none());
     }
 }

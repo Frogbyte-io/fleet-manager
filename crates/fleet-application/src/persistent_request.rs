@@ -515,6 +515,32 @@ mod tests {
     }
 
     #[test]
+    fn an_iso_install_is_never_admitted_by_bounds() {
+        let bounds = PersistentBounds {
+            max_cores: Some(8),
+            max_memory_mib: Some(16384),
+            max_disk_gib: Some(200),
+            ..PersistentBounds::default()
+        };
+        let image = serde_json::json!({
+            "cores": 2, "memoryMib": 4096, "diskGib": 40, "node": "pve1", "storage": "local-lvm",
+        });
+        assert!(
+            bounds.admits(&spec(&image)),
+            "the same size from an image is inside"
+        );
+        let mut install = image.clone();
+        install["install"] = serde_json::json!({"iso": "local:iso/u.iso"});
+        let mut install_spec = spec(&install);
+        install_spec.image_version_id = String::new();
+        assert!(install_spec.install.is_some());
+        assert!(
+            !bounds.admits(&install_spec),
+            "an answer file runs as root and needs a person"
+        );
+    }
+
+    #[test]
     fn bounds_admit_only_what_they_can_show_is_inside() {
         let bounds = PersistentBounds {
             max_cores: Some(4),

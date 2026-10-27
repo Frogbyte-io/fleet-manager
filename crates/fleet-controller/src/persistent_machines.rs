@@ -800,6 +800,9 @@ struct Run<'a> {
     request: fleet_provider_proxmox::PveHttpRequest,
     deadline: Instant,
     marker: Option<PersistentGuest>,
+    /// The step an earlier run of this creation reached (the marker's step
+    /// when this run adopted it); later checkpoints overwrite the marker's.
+    prior_step: Option<String>,
     node: String,
     vmid: u32,
     machine_id: Option<String>,
@@ -815,6 +818,15 @@ const STEPS: i64 = 11;
 
 /// The MAC address of a `net0` property string (`virtio=AA:BB:...,bridge=...`),
 /// lower-case and colon-separated, the way the guest agent reports it.
+/// Whether a marker step is at or past the Fleet-side eject of the install
+/// media.
+fn passed_install(step: &str) -> bool {
+    matches!(
+        step,
+        "install" | "start" | "machine" | "link" | "credential" | "ready"
+    )
+}
+
 fn net_mac(net0: &str) -> Option<String> {
     let first = net0.split(',').next()?;
     let (_, mac) = first.split_once('=')?;
@@ -1126,6 +1138,7 @@ impl Run<'_> {
             })
             .await
             .map_err(|detail| failure(step, "conflict", detail))?;
+        self.prior_step = existing.as_ref().and_then(|found| found.step.clone());
         self.machine_id.clone_from(&marker.machine_id);
         self.marker = Some(marker);
         self.vmid = vmid;
@@ -1253,11 +1266,18 @@ impl Run<'_> {
 
     // Step 4 of an ISO install: run the installer to its end, then boot the
     // installed disk. The answer file must power the guest off when it is
-    // done; the installer and answer media are detached after that, so the
-    // guest never boots them again. Safe to repeat: a guest without media
-    // has finished installing.
+    // done. The end is seen only as running and then stopped by this run (or
+    // by the earlier run that started it, recorded as the marker step
+    // `installing`): a guest that was never seen running is not finished. The
+    // media is then ejected (never deleted: Proxmox refuses a drive removal on
+    // a protected guest), and the marker step `install` records that Fleet
+    // did it. Safe to repeat: a run that finds the guest stopped with the
+    // media still attached, after the installer started, ejects without
+    // installing again.
     async fn install(&mut self) -> Step<()> {
         let step = "install";
+        let earlier = self.prior_step.clone();
+        let started_before = earlier.as_deref() == Some("installing");
         let media = self
             .exec
             .pve
@@ -1266,46 +1286,50 @@ impl Run<'_> {
             .await
             .map_err(|error| failure(step, "config_unreadable", error.to_string()))?;
         if media.is_empty() {
-            return Ok(());
+            // Fleet's own earlier run ejected it: carry on. Anything else
+            // means the install never ran here, and a guest nobody installed
+            // must not be adopted as an installed one.
+            return if earlier.as_deref().is_some_and(passed_install) {
+                Ok(())
+            } else {
+                Err(failure(
+                    step,
+                    "media_missing",
+                    "the guest has no install media attached and Fleet never ran its install; it is not adopted. Destroy it and create the machine again",
+                ))
+            };
         }
-        self.start().await?;
-        loop {
-            self.checkpoint(step).await?;
-            let resources = self
-                .exec
-                .pve
-                .client
-                .list_guest_resources(self.request.clone())
-                .await
-                .map_err(|error| failure(step, "resources", error.to_string()))?;
-            let status = resources
-                .iter()
-                .find(|resource| resource.vmid == Some(self.vmid))
-                .and_then(|resource| resource.status.clone());
-            match status.as_deref() {
-                Some("stopped") => break,
-                Some(_) => {}
-                None => {
-                    return Err(failure(
-                        step,
-                        "guest_missing",
-                        "the guest disappeared while it installed",
-                    ));
-                }
-            }
+        let first = self.power_state(step).await?;
+        let mut seen_running = first == "running";
+        let mut finished = started_before && first == "stopped";
+        if !seen_running && !finished {
+            self.start().await?;
+        }
+        while !finished {
+            // The deadline is checked first so a run that ran out of time
+            // says so, instead of reporting a generic expiry.
             if self.remaining().is_zero() {
                 return Err(failure(
                     step,
                     "install_timeout",
-                    "the installer did not power the guest off before the deadline; the guest is left as it is (its answer file must power off when the install ends)",
+                    "the installer did not power the guest off before the deadline; the guest is left as it is (its answer file must power off when the install ends, and a long install needs a longer --timeout)",
                 ));
             }
-            self.sleep().await;
+            self.checkpoint("installing").await?;
+            let state = self.power_state(step).await?;
+            match state.as_str() {
+                "running" => seen_running = true,
+                "stopped" if seen_running => finished = true,
+                _ => {}
+            }
+            if !finished {
+                self.sleep().await;
+            }
         }
         self.exec
             .pve
             .client
-            .qemu_remove_media(self.request.clone(), &self.node, self.vmid, &media)
+            .qemu_eject_media(self.request.clone(), &self.node, self.vmid, &media)
             .await
             .map_err(|error| failure(step, "media_not_removed", error.to_string()))?;
         let left = self
@@ -1529,18 +1553,29 @@ impl Run<'_> {
     }
 
     // Step 4: start.
+    /// The guest's power state, read from the process (never from the
+    /// lagging resources list).
+    async fn power_state(&self, step: &'static str) -> Step<String> {
+        self.exec
+            .pve
+            .client
+            .qemu_power_state(self.request.clone(), &self.node, self.vmid)
+            .await
+            .map_err(|error| failure(step, "status_unreadable", error.to_string()))
+    }
+
     async fn start(&self) -> Step<()> {
         let step = "start";
-        let resources = self
+        // `/cluster/resources` lags by seconds: a guest that is running can
+        // still be listed as stopped. The status endpoint reads the process.
+        let state = self
             .exec
             .pve
             .client
-            .list_guest_resources(self.request.clone())
+            .qemu_power_state(self.request.clone(), &self.node, self.vmid)
             .await
-            .map_err(|error| failure(step, "resources", error.to_string()))?;
-        if resources.iter().any(|resource| {
-            resource.vmid == Some(self.vmid) && resource.status.as_deref() == Some("running")
-        }) {
+            .map_err(|error| failure(step, "status_unreadable", error.to_string()))?;
+        if state == "running" {
             return Ok(());
         }
         let upid = self
@@ -2620,6 +2655,7 @@ impl MachineCreateExecutor {
             spec,
             request,
             marker: None,
+            prior_step: None,
             node: String::new(),
             vmid: 0,
             machine_id: None,
