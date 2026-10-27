@@ -25,7 +25,7 @@
 mod guest_config;
 mod tasks;
 
-pub use guest_config::{PveQemuSettings, PveQemuWrite, with_bridge};
+pub use guest_config::{PveQemuCreate, PveQemuSettings, PveQemuWrite, with_bridge};
 
 pub use tasks::{
     MAX_TASKS_PER_NODE, PveTaskHistory, PveTaskOutcome, PveTaskQuery, PveTaskSource, PveTaskSummary,

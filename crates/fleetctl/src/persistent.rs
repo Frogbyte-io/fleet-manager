@@ -27,11 +27,20 @@ use crate::{CliError, Output, usage};
 
 /// The arguments of `machines create`.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
+#[allow(clippy::struct_excessive_bools)]
 pub struct CreateArgs {
     /// The Proxmox account.
     pub account: Option<String>,
     /// The promoted image version.
     pub image_version: Option<String>,
+    /// The installer ISO volume id (`--iso`), instead of an image version.
+    pub iso: Option<String>,
+    /// The answer ISO volume id (`--answer-iso`).
+    pub answer_iso: Option<String>,
+    /// Boot with UEFI (`--efi`).
+    pub efi: bool,
+    /// Add a virtual TPM (`--tpm`).
+    pub tpm: bool,
     /// The VM and machine name.
     pub name: Option<String>,
     /// The spec fields that map one to one.
@@ -101,6 +110,10 @@ pub(crate) fn parse_create(rest: &[&str], output: &mut Output) -> Result<CreateA
             "--purpose" => args.purpose = Some(value("purpose")?),
             "--account" => args.account = Some(value("account")?),
             "--image-version" => args.image_version = Some(value("image-version")?),
+            "--iso" => args.iso = Some(value("iso")?),
+            "--answer-iso" => args.answer_iso = Some(value("answer-iso")?),
+            "--efi" => args.efi = true,
+            "--tpm" => args.tpm = true,
             "--name" => args.name = Some(value("name")?),
             "--vmid" => args
                 .fields
@@ -242,11 +255,17 @@ pub(crate) fn parse_create(rest: &[&str], output: &mut Output) -> Result<CreateA
             }
         }
     }
-    for (value, flag) in [
-        (&args.account, "--account"),
-        (&args.image_version, "--image-version"),
-        (&args.name, "--name"),
-    ] {
+    if args.image_version.is_some() == args.iso.is_some() {
+        return Err(CliError {
+            message: "machines create needs exactly one of --image-version and --iso".to_owned(),
+        });
+    }
+    if args.iso.is_none() && (args.answer_iso.is_some() || args.efi || args.tpm) {
+        return Err(CliError {
+            message: "--answer-iso, --efi and --tpm belong to --iso".to_owned(),
+        });
+    }
+    for (value, flag) in [(&args.account, "--account"), (&args.name, "--name")] {
         if value.is_none() {
             return Err(CliError {
                 message: format!("machines create needs {flag}"),
@@ -285,7 +304,15 @@ impl CreateArgs {
     pub fn spec(&self) -> Value {
         let mut spec = Map::new();
         spec.insert("accountId".to_owned(), json!(self.account));
-        spec.insert("imageVersionId".to_owned(), json!(self.image_version));
+        if let Some(iso) = &self.iso {
+            let mut install = json!({ "iso": iso, "efi": self.efi, "tpm": self.tpm });
+            if let Some(answer) = &self.answer_iso {
+                install["answerIso"] = json!(answer);
+            }
+            spec.insert("install".to_owned(), install);
+        } else {
+            spec.insert("imageVersionId".to_owned(), json!(self.image_version));
+        }
         spec.insert("name".to_owned(), json!(self.name));
         for (key, value) in &self.fields {
             spec.insert(key.clone(), value.clone());
@@ -683,6 +710,55 @@ mod tests {
 
     fn parse(rest: &[&str]) -> Result<CreateArgs, CliError> {
         parse_create(rest, &mut Output::Json)
+    }
+
+    #[test]
+    fn an_iso_builds_an_install_spec_and_excludes_an_image_version() {
+        let args = parse(&[
+            "--account",
+            "a",
+            "--iso",
+            "local:iso/u.iso",
+            "--answer-iso",
+            "local:iso/seed.iso",
+            "--efi",
+            "--name",
+            "n",
+            "--node",
+            "pve",
+        ])
+        .unwrap();
+        let spec = args.spec();
+        assert_eq!(spec["install"]["iso"], "local:iso/u.iso");
+        assert_eq!(spec["install"]["answerIso"], "local:iso/seed.iso");
+        assert_eq!(spec["install"]["efi"], true);
+        assert!(spec.get("imageVersionId").is_none());
+        assert!(parse(&["--account", "a", "--name", "n"]).is_err());
+        assert!(
+            parse(&[
+                "--account",
+                "a",
+                "--name",
+                "n",
+                "--iso",
+                "x",
+                "--image-version",
+                "v"
+            ])
+            .is_err()
+        );
+        assert!(
+            parse(&[
+                "--account",
+                "a",
+                "--name",
+                "n",
+                "--image-version",
+                "v",
+                "--efi"
+            ])
+            .is_err()
+        );
     }
 
     #[test]

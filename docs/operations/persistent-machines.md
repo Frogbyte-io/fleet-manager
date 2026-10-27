@@ -125,6 +125,28 @@ The command shows the review and asks for confirmation (`--yes` skips it; withou
 
 The console's Create persistent machine dialog is the same review and create as `fleetctl machines create`.
 
+## Create from an ISO with an unattended install (Linux)
+
+When there is no promoted image, `machines create` can install a Linux guest from an ISO that is already on Proxmox storage:
+
+```
+fleetctl machines create --account <a> --iso local:iso/ubuntu-24.04-live-server-amd64.iso \
+  --answer-iso local:iso/ci-seed.iso --node pve1 --storage local-lvm --disk 40 --name ci-linux \
+  --bootstrap-user ci --bootstrap-auth identity-file --bootstrap-identity /path/to/key [--efi] [--tpm]
+```
+
+`--iso` replaces `--image-version`; `--node`, `--storage` and `--disk` are required (there is no template to take them from). The ISOs are named by Proxmox volume id (`storage:iso/file.iso`). **Fleet does not build or carry the answer file**: no password, key or product key travels in an operation payload, audit event or log. You prepare the answer media and upload it to ISO storage yourself.
+
+The operation: reserves the VMID and writes the persistent marker; creates the VM (virtio-SCSI disk of `--disk` GiB, `net0` on `--bridge` or `vmbr0`, guest agent on, the installer as CD-ROM `ide2` and the answer ISO as `ide3`, boot order installer then disk, optional OVMF/EFI disk and TPM v2.0); applies the same reviewed hardware and metadata settings as an image clone (tags, description, `onboot`, protection); starts the guest and **waits for it to power off**; detaches the install media, sets the boot order to the disk, and boots the installed system. From there it is the same as a clone: guest agent address, registration, host key trust, link, key rotation. The first login is the `--bootstrap-*` credential, which your answer file must have installed. A re-run adopts the guest and continues (a guest with no media left is treated as installed).
+
+Requirements on the answer file:
+
+- It must **power the guest off when the install ends** (Ubuntu autoinstall: `shutdown: poweroff`; Debian preseed: `d-i debian-installer/exit/poweroff boolean true`). Fleet detects the end of the install by the VM stopping; an installer that reboots would boot the ISO again. If it never stops, the operation fails with `install_timeout` and the guest is left as it is.
+- It must install the QEMU guest agent and an SSH server, and the bootstrap key or password.
+- The guest must start the install without a keypress. Ubuntu live-server asks for confirmation before it applies an autoinstall unless `autoinstall` is on the kernel command line, which Fleet cannot add; use an installer image that is already set up for this (for example one remastered with `autoinstall` in its boot entry, or a Debian preseeded ISO). This is the reason an answer-file generator is separate work.
+
+Secrets: an answer file that sets a password holds it on the ISO storage. Use a key, or a throwaway password you rotate afterwards, and keep the ISO storage restricted. An ISO install is never approved by the agent policy bounds: it always waits for a person, because the answer file is code that runs as root on the new VM. Windows is not supported here: `guestOs windows` is refused with a pointer to the generalized base image; autounattend delivery is follow-up work.
+
 ## Not in this release
 
-Creating from an ISO with an unattended install (#542, next), LXC, cluster placement and HA.
+Fleet-generated answer media (a NoCloud seed builder), Windows autounattend installs, LXC, cluster placement and HA.

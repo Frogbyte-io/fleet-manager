@@ -68,6 +68,8 @@ struct Guest {
 
 #[derive(Debug, Default)]
 struct HostState {
+    /// Polls of a running guest that still holds install media.
+    install_polls: BTreeMap<u32, u32>,
     guests: BTreeMap<u32, Guest>,
     calls: Vec<String>,
     bodies: Vec<(String, Value)>,
@@ -173,6 +175,26 @@ impl FakePve {
                 ok(json!({ "release": "9.2", "version": "9.2.2", "repoid": "b9984c6d90a4bd80" }))
             }
             ("GET", ["cluster", "resources"]) => {
+                let installing: Vec<u32> = state
+                    .guests
+                    .iter()
+                    .filter(|(_, guest)| {
+                        guest.running
+                            && guest.config.values().any(|value| {
+                                value
+                                    .as_str()
+                                    .is_some_and(|text| text.contains("media=cdrom"))
+                            })
+                    })
+                    .map(|(vmid, _)| *vmid)
+                    .collect();
+                for vmid in installing {
+                    let polls = state.install_polls.entry(vmid).or_insert(0);
+                    *polls += 1;
+                    if *polls >= 2 {
+                        state.guests.get_mut(&vmid).unwrap().running = false;
+                    }
+                }
                 let entries: Vec<Value> = state
                     .guests
                     .iter()
@@ -193,6 +215,44 @@ impl FakePve {
             ("GET", ["cluster", "nextid"]) => {
                 let next = (7100..).find(|id| !state.guests.contains_key(id)).unwrap();
                 ok(json!(next.to_string()))
+            }
+            ("POST", ["nodes", node, "qemu"]) => {
+                state.calls.push("create".to_owned());
+                let body = body.unwrap_or_default();
+                state.bodies.push(("create".to_owned(), body.clone()));
+                let vmid = body["vmid"].as_u64().unwrap() as u32;
+                let mut config = serde_json::Map::new();
+                for key in ["name", "cores", "memory", "ide2", "ide3", "boot", "agent"] {
+                    if let Some(value) = body.get(key) {
+                        config.insert(key.to_owned(), value.clone());
+                    }
+                }
+                let bridge = body["net0"]
+                    .as_str()
+                    .and_then(|net| net.split("bridge=").nth(1))
+                    .unwrap_or("vmbr0")
+                    .to_owned();
+                config.insert(
+                    "net0".to_owned(),
+                    json!(format!("virtio=AA:BB:CC:DD:EE:01,bridge={bridge}")),
+                );
+                config.insert(
+                    "scsi0".to_owned(),
+                    json!(format!("local-lvm:vm-{vmid}-disk-0,size=32G")),
+                );
+                state.guests.insert(
+                    vmid,
+                    Guest {
+                        name: body["name"].as_str().unwrap().to_owned(),
+                        template: false,
+                        running: false,
+                        config,
+                        locked_reads: 0,
+                    },
+                );
+                ok(json!(format!(
+                    "UPID:{node}:0000AAAB:00000001:65000000:qmcreate:{vmid}:root@pam:"
+                )))
             }
             ("POST", ["nodes", node, "qemu", source, "clone"]) => {
                 state.calls.push(format!("clone {source}"));
@@ -243,7 +303,9 @@ impl FakePve {
                 let body = body.unwrap_or_default();
                 state.calls.push(format!("config {vmid}"));
                 state.bodies.push(("config".to_owned(), body.clone()));
-                if body["digest"] != json!(format!("d{}", state.digest)) {
+                if body.get("digest").is_some()
+                    && body["digest"] != json!(format!("d{}", state.digest))
+                {
                     return (500, json!({ "data": null }));
                 }
                 state.digest += 1;
@@ -256,6 +318,7 @@ impl FakePve {
                     "cores",
                     "memory",
                     "net0",
+                    "boot",
                 ] {
                     if let Some(value) = body.get(key) {
                         guest.config.insert(key.to_owned(), value.clone());
@@ -2244,4 +2307,51 @@ async fn destroying_a_registered_vm_never_lifts_its_protection() {
         .run(world.destroy.as_ref(), "proxmox.guest.destroy", &destroy)
         .await;
     assert_eq!(done.state, "succeeded", "{:?}", done.error_json);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_iso_install_creates_the_guest_waits_for_the_installer_and_detaches_the_media() {
+    let world = World::new().await;
+    let mut spec = world.spec("iso-box");
+    let object = spec.as_object_mut().unwrap();
+    object.remove("imageVersionId");
+    object.insert(
+        "install".to_owned(),
+        json!({ "iso": "local:iso/ubuntu.iso", "answerIso": "local:iso/seed.iso" }),
+    );
+    object.insert("node".to_owned(), json!("pve"));
+    object.insert("storage".to_owned(), json!("local-lvm"));
+    object.insert("diskGib".to_owned(), json!(32));
+    let operation = world.create(&spec).await;
+    assert_eq!(operation.state, "succeeded", "{:?}", operation.error_json);
+
+    let calls = world.pve.calls();
+    assert!(
+        !calls.iter().any(|call| call.starts_with("clone")),
+        "{calls:?}"
+    );
+    let created = calls.iter().position(|call| call == "create").unwrap();
+    let started = calls
+        .iter()
+        .position(|call| call.starts_with("start"))
+        .unwrap();
+    assert!(created < started, "{calls:?}");
+    let body = world.pve.body_of("create").unwrap();
+    assert_eq!(body["ide2"], "local:iso/ubuntu.iso,media=cdrom");
+    assert_eq!(body["ide3"], "local:iso/seed.iso,media=cdrom");
+    assert_eq!(body["boot"], "order=ide2;scsi0");
+    assert!(!body.to_string().contains("password"));
+
+    let markers = PersistentGuestRepository::new(world.pool.clone());
+    let marker = markers.list().await.unwrap().remove(0);
+    assert_eq!(marker.image_version_id, "install:local:iso/ubuntu.iso");
+    assert!(marker.cloned);
+    assert_eq!(marker.state, PersistentState::Ready);
+    let guest = world.pve.guest(marker.vmid).unwrap();
+    assert!(guest.running, "the installed disk is booted");
+    assert!(!guest.config.contains_key("ide2") && !guest.config.contains_key("ide3"));
+    assert_eq!(guest.config["boot"], "order=scsi0");
+    // The same metadata as a cloned machine: persistent label, no fixture tag.
+    assert_eq!(guest.config["tags"], "ci;fleet-persistent");
+    assert_eq!(guest.config["protection"], 1);
 }

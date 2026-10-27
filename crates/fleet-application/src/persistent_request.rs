@@ -192,6 +192,8 @@ impl PersistentBounds {
             && (spec.login_user.is_none() || self.allow_login_user)
             && spec.tags.iter().all(|tag| self.allowed_tags.contains(tag));
         plain
+            // An ISO install runs an answer file only a person has read.
+            && spec.install.is_none()
             && spec.protection
             // No bridge means the template's; an explicit one needs a list.
             && spec
