@@ -2199,14 +2199,25 @@ impl fleet_application::lab::LabReadinessPort for ProvisionReadiness {
             let provider = fleet_provider_ssh::SshProvider::new(staging.clone())
                 .map_err(|_| "SSH provider unavailable")?;
             let result = provider
-                .probe_host_key(&host, port, remaining.min(Duration::from_secs(5)))
+                .probe_host_keys(&host, port, remaining.min(Duration::from_secs(5)))
                 .map_err(|_| "SSH host key unavailable");
             let _ = std::fs::remove_dir_all(staging);
             result
         })
         .await
         .map_err(|_| "SSH trust worker failed")?;
-        let Ok(observation) = observed else {
+        let Ok(observations) = observed else {
+            return Ok(false);
+        };
+        // Match the stored or pinned fingerprint against every offered key
+        // type, not only the preferred one.
+        let pinned = (content.ssh_trust_mode == "pinned")
+            .then_some(content.ssh_fingerprint.as_deref())
+            .flatten();
+        let Some(observation) =
+            fleet_provider_ssh::choose_observation(&[pinned, expected.as_deref()], &observations)
+                .cloned()
+        else {
             return Ok(false);
         };
         if expected

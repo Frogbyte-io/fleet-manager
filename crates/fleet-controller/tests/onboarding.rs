@@ -29,6 +29,8 @@ struct TestSshd {
     dir: tempfile::TempDir,
     host_key: std::path::PathBuf,
     user_key: std::path::PathBuf,
+    extra_host_keys: Vec<std::path::PathBuf>,
+    primary_enabled: bool,
 }
 
 impl Drop for TestSshd {
@@ -39,6 +41,11 @@ impl Drop for TestSshd {
 
 impl TestSshd {
     fn start() -> Self {
+        Self::start_with_extra_keys(&[])
+    }
+
+    /// Also offers one host key of each given type (`rsa`, `ecdsa`).
+    fn start_with_extra_keys(types: &[&str]) -> Self {
         let dir = tempfile::tempdir().unwrap();
         let host_key = dir.path().join("host_ed25519");
         let user_key = dir.path().join("user_ed25519");
@@ -53,7 +60,19 @@ impl TestSshd {
             dir,
             host_key,
             user_key,
+            extra_host_keys: Vec::new(),
+            primary_enabled: true,
         };
+        for kind in types {
+            let path = sshd.dir.path().join(format!("host_{kind}"));
+            let generated = Command::new("ssh-keygen")
+                .args(["-t", kind, "-N", "", "-q", "-f"])
+                .arg(&path)
+                .output()
+                .unwrap();
+            assert!(generated.status.success());
+            sshd.extra_host_keys.push(path);
+        }
         sshd.launch();
         sshd
     }
@@ -80,13 +99,23 @@ impl TestSshd {
 
     fn launch(&mut self) {
         let dir_display = self.dir.path().display().to_string();
+        let extra: String = self
+            .extra_host_keys
+            .iter()
+            .map(|path| format!("HostKey {}\n", path.display()))
+            .collect();
+        let primary = if self.primary_enabled {
+            format!("HostKey {}\n", self.host_key.display())
+        } else {
+            String::new()
+        };
         let sshd_config = self.dir.path().join("sshd_config");
         std::fs::write(
             &sshd_config,
             format!(
                 "Port {}\n\
                  ListenAddress 127.0.0.1\n\
-                 HostKey {}\n\
+                 {primary}{extra}\
                  AuthorizedKeysFile {}/authorized_keys\n\
                  PasswordAuthentication no\n\
                  KbdInteractiveAuthentication no\n\
@@ -94,18 +123,16 @@ impl TestSshd {
                  StrictModes no\n\
                  PidFile {}/sshd.pid\n\
                  Subsystem sftp internal-sftp\n",
-                self.port,
-                self.host_key.display(),
-                dir_display,
-                dir_display
+                self.port, dir_display, dir_display
             ),
         )
         .unwrap();
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt as _;
-            std::fs::set_permissions(&self.host_key, std::fs::Permissions::from_mode(0o600))
-                .unwrap();
+            for key in std::iter::once(&self.host_key).chain(&self.extra_host_keys) {
+                std::fs::set_permissions(key, std::fs::Permissions::from_mode(0o600)).unwrap();
+            }
             std::fs::create_dir_all("/run/sshd").ok();
         }
         let child = Command::new("/usr/sbin/sshd")
@@ -732,4 +759,65 @@ async fn cancel_deletes_the_draft_and_unpins_only_unregistered_hosts() {
     // The shared host's pin survived; the lone host never pinned anything,
     // so the file is unchanged either way.
     assert_eq!(harness.known_hosts(), pinned);
+}
+
+#[tokio::test]
+async fn a_repeated_test_after_confirmation_keeps_it_and_reports_the_connection() {
+    let harness = harness().await;
+    let sshd = TestSshd::start();
+    let draft_id = create_draft(&harness, &sshd).await;
+
+    let first = run_test(&harness, &draft_id).await;
+    let first: Value = serde_json::from_str(first["resultJson"].as_str().unwrap()).unwrap();
+    let fingerprint = first["fingerprint"].as_str().unwrap().to_owned();
+    let (status, _) = harness
+        .post_json(
+            &format!("/api/v1/machines/onboarding/drafts/{draft_id}/confirm-host-key"),
+            Some(json!({"fingerprint": fingerprint})),
+        )
+        .await;
+    assert_eq!(status, axum::http::StatusCode::OK);
+
+    for _ in 0..2 {
+        let test = run_test(&harness, &draft_id).await;
+        assert_eq!(test["state"], "succeeded", "{test}");
+        let result: Value = serde_json::from_str(test["resultJson"].as_str().unwrap()).unwrap();
+        assert_eq!(result["hostKeyStage"], "confirmed", "{result}");
+        assert_eq!(result["fingerprint"], fingerprint);
+        assert_eq!(result["connectAttempted"], true);
+        assert_eq!(result["connected"], true, "{result}");
+    }
+}
+
+#[tokio::test]
+async fn a_confirmed_non_preferred_key_type_survives_a_repeated_test() {
+    let harness = harness().await;
+    // The host first offers only RSA, which is what gets confirmed.
+    let mut sshd = TestSshd::start_with_extra_keys(&["rsa"]);
+    sshd.stop();
+    sshd.primary_enabled = false;
+    sshd.launch();
+    let draft_id = create_draft(&harness, &sshd).await;
+    let first = run_test(&harness, &draft_id).await;
+    let first: Value = serde_json::from_str(first["resultJson"].as_str().unwrap()).unwrap();
+    let fingerprint = first["fingerprint"].as_str().unwrap().to_owned();
+    let (status, _) = harness
+        .post_json(
+            &format!("/api/v1/machines/onboarding/drafts/{draft_id}/confirm-host-key"),
+            Some(json!({"fingerprint": fingerprint})),
+        )
+        .await;
+    assert_eq!(status, axum::http::StatusCode::OK);
+
+    // The host now also offers ED25519, which ranks first.
+    sshd.stop();
+    sshd.primary_enabled = true;
+    sshd.launch();
+    for _ in 0..2 {
+        let test = run_test(&harness, &draft_id).await;
+        let result: Value = serde_json::from_str(test["resultJson"].as_str().unwrap()).unwrap();
+        assert_eq!(result["hostKeyStage"], "confirmed", "{result}");
+        assert_eq!(result["fingerprint"], fingerprint);
+        assert_eq!(result["connected"], true, "{result}");
+    }
 }

@@ -42,6 +42,11 @@ fn free_port() -> u16 {
 /// current user, authenticating via the agent or an unencrypted key we also
 /// generate here.
 fn start_sshd() -> TestSshd {
+    start_sshd_with_host_keys(&["ed25519"])
+}
+
+/// Like [`start_sshd`], offering one host key of each given type.
+fn start_sshd_with_host_keys(types: &[&str]) -> TestSshd {
     let _guard = STARTUP_LOCK
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -49,10 +54,19 @@ fn start_sshd() -> TestSshd {
     let host_key = dir.path().join("host_ed25519");
     let user_key = dir.path().join("user_ed25519");
 
-    for key in [&host_key, &user_key] {
+    let mut key_jobs: Vec<(std::path::PathBuf, &str)> = vec![(user_key.clone(), "ed25519")];
+    for kind in types {
+        let path = if *kind == "ed25519" {
+            host_key.clone()
+        } else {
+            dir.path().join(format!("host_{kind}"))
+        };
+        key_jobs.push((path, kind));
+    }
+    for (key, kind) in &key_jobs {
         let generated = Command::new("ssh-keygen")
             .arg("-t")
-            .arg("ed25519")
+            .arg(kind)
             .arg("-N")
             .arg("")
             .arg("-q")
@@ -72,7 +86,13 @@ fn start_sshd() -> TestSshd {
     let authz = dir.path().join("authorized_keys");
     std::fs::write(&authz, public).unwrap();
 
-    let host_key_display = host_key.display().to_string();
+    let host_key_lines = key_jobs
+        .iter()
+        .skip(1)
+        .map(|(path, _)| format!("HostKey {}", path.display()))
+        .collect::<Vec<_>>()
+        .join("\n")
+        + "\n";
     let authz_display = authz.display().to_string();
     let port = free_port();
     let sshd_config = dir.path().join("sshd_config");
@@ -81,7 +101,7 @@ fn start_sshd() -> TestSshd {
         format!(
             "Port {port}\n\
              ListenAddress 127.0.0.1\n\
-             HostKey {host_key_display}\n\
+             {host_key_lines}\
              AuthorizedKeysFile {authz_display}\n\
              PasswordAuthentication no\n\
              KbdInteractiveAuthentication no\n\
@@ -98,7 +118,9 @@ fn start_sshd() -> TestSshd {
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt as _;
-        std::fs::set_permissions(&host_key, std::fs::Permissions::from_mode(0o600)).unwrap();
+        for (path, _) in &key_jobs {
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        }
         std::fs::create_dir_all("/run/sshd").ok();
     }
 
@@ -328,4 +350,58 @@ fn a_missing_host_key_is_reported_not_invented() {
         ),
         "{error}"
     );
+}
+
+#[test]
+fn a_host_offering_several_key_types_gives_a_stable_fingerprint() {
+    let sshd = start_sshd_with_host_keys(&["rsa", "ecdsa", "ed25519"]);
+    let (_dir, provider) = provider();
+
+    let all = provider
+        .probe_host_keys(sshd.host, sshd.port, Duration::from_secs(10))
+        .unwrap();
+    let types: Vec<&str> = all.iter().map(|key| key.key_type.as_str()).collect();
+    assert_eq!(types, ["ED25519", "ECDSA", "RSA"]);
+    for _ in 0..3 {
+        let again = provider
+            .probe_host_key(sshd.host, sshd.port, Duration::from_secs(10))
+            .unwrap();
+        assert_eq!(again.fingerprint, all[0].fingerprint);
+    }
+
+    // Confirmed on one type, a probe that lists the others first still
+    // matches; only a fingerprint no offered key carries is a change.
+    let confirmed = all[2].fingerprint.clone();
+    assert!(matches!(
+        provider.decide_any(Some(&confirmed), &all),
+        TrustDecision::Known { observation } if observation.fingerprint == confirmed
+    ));
+    assert!(matches!(
+        provider.decide_any(Some("SHA256:entirely-different"), &all),
+        TrustDecision::Changed { .. }
+    ));
+    assert!(matches!(
+        provider.decide_any(None, &all),
+        TrustDecision::New { observation } if observation.key_type == "ED25519"
+    ));
+}
+
+#[test]
+fn pinning_refuses_a_key_line_that_is_not_the_confirmed_fingerprint() {
+    let sshd = start_sshd_with_host_keys(&["rsa", "ed25519"]);
+    let (_dir, provider) = provider();
+    let all = provider
+        .probe_host_keys(sshd.host, sshd.port, Duration::from_secs(10))
+        .unwrap();
+    let mut forged = all[0].clone();
+    forged.fingerprint = all[1].fingerprint.clone();
+    assert!(provider.pin(&forged).is_err());
+    provider.pin(&all[1]).unwrap();
+
+    // A pin on the less preferred key still selects that key.
+    let chosen =
+        fleet_provider_ssh::choose_observation(&[Some(&all[1].fingerprint)], &all).unwrap();
+    assert_eq!(chosen.key_type, all[1].key_type);
+    let none = fleet_provider_ssh::choose_observation(&[Some("SHA256:other")], &all).unwrap();
+    assert_eq!(none.key_type, all[0].key_type);
 }

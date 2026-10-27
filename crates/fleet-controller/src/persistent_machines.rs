@@ -1552,17 +1552,17 @@ impl Run<'_> {
         let step = "host_key";
         let host = self.host.clone().unwrap_or_default();
         let port = self.spec.bootstrap.port;
-        let observation = loop {
+        let observations = loop {
             self.checkpoint(step).await?;
             let provider = self.exec.provider.clone();
             let probe_host = host.clone();
             let probe = tokio::task::spawn_blocking(move || {
-                provider.probe_host_key(&probe_host, port, Duration::from_secs(5))
+                provider.probe_host_keys(&probe_host, port, Duration::from_secs(5))
             })
             .await
             .map_err(|error| failure(step, "ssh_failed", error.to_string()))?;
             match probe {
-                Ok(observation) => break observation,
+                Ok(observations) => break observations,
                 Err(_) if !self.remaining().is_zero() => self.sleep().await,
                 Err(error) => {
                     return Err(failure(
@@ -1580,6 +1580,18 @@ impl Run<'_> {
             .verified_fingerprint(&endpoint)
             .await
             .map_err(|error| failure(step, "trust_failed", error.to_string()))?;
+        // A guest offers several key types; match the pinned or confirmed
+        // fingerprint against any of them, never only the preferred one.
+        let pinned = match &self.spec.host_key {
+            HostKeyTrust::Pinned { fingerprint } => Some(fingerprint.as_str()),
+            _ => None,
+        };
+        let observation =
+            fleet_provider_ssh::choose_observation(&[pinned, known.as_deref()], &observations)
+                .cloned()
+                .ok_or_else(|| {
+                    failure(step, "never_ready", "SSH presented no host key".to_owned())
+                })?;
         if let HostKeyTrust::Pinned { fingerprint } = &self.spec.host_key
             && *fingerprint != observation.fingerprint
         {

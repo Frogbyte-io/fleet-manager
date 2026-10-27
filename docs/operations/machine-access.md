@@ -44,7 +44,7 @@ Delete the endpoint's default (`machines endpoint-auth clear`) to stop callers t
 
 ## Known limits
 
-- The `machines onboard test` connection check, run again after the host key is confirmed, reported `connected: false` for a Windows machine in the live check (its probe runs `true`, which PowerShell does not have), and the draft then needed a new test and confirm. Confirm the host key, then add the machine without repeating that probe. The onboarding probe may also observe a different host key type on each run (RSA, ECDSA, ED25519): confirm the fingerprint it shows, and start a new draft if it reports a changed key.
+- `machines onboard test` may be repeated after the host key is confirmed: the probe lists every key type the host offers in a fixed order (ED25519, ECDSA, RSA), a confirmed fingerprint matches any of them, and the connection check runs `exit 0`, which POSIX shells, PowerShell and cmd all accept. Only a fingerprint that none of the offered keys carries reports a changed key and needs a new confirmation.
 - Passphrase-protected keys are refused; the session is non-interactive. Key files need Unix modes, so the controller must run on Linux (or another Unix).
 - On Windows (PowerShell 5.1) an argv argument containing a double quote may be split or merged differently than given; use `--script` for such arguments.
 - One command at a time per request: port forwarding and fan-out across machines are not served. An interactive shell is [a separate feature](machine-terminal.md).
