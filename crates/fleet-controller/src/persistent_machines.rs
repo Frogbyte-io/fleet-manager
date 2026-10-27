@@ -800,6 +800,9 @@ struct Run<'a> {
     request: fleet_provider_proxmox::PveHttpRequest,
     deadline: Instant,
     marker: Option<PersistentGuest>,
+    /// The step an earlier run of this creation reached (the marker's step
+    /// when this run adopted it); later checkpoints overwrite the marker's.
+    prior_step: Option<String>,
     node: String,
     vmid: u32,
     machine_id: Option<String>,
@@ -812,6 +815,31 @@ struct Run<'a> {
 }
 
 const STEPS: i64 = 11;
+
+/// The order creation steps are reached in. The marker's step never moves
+/// back along it: a re-run passes through the early steps again, and must not
+/// forget how far an earlier run got.
+fn step_rank(step: &str) -> Option<u8> {
+    Some(match step {
+        "reserve" => 0,
+        "create" | "clone" => 1,
+        "config" => 2,
+        "installing" => 3,
+        "install" => 4,
+        "start" => 5,
+        "machine" => 6,
+        "link" => 7,
+        "credential" => 8,
+        "ready" => 9,
+        _ => return None,
+    })
+}
+
+/// Whether a marker step is at or past the Fleet-side eject of the install
+/// media.
+fn passed_install(step: &str) -> bool {
+    step_rank(step).is_some_and(|rank| rank >= 4)
+}
 
 /// The MAC address of a `net0` property string (`virtio=AA:BB:...,bridge=...`),
 /// lower-case and colon-separated, the way the guest agent reports it.
@@ -849,8 +877,22 @@ impl Run<'_> {
                 "the operation deadline expired",
             ));
         }
+        self.record_step(step).await
+    }
+
+    /// Writes the marker's step, never moving it back along the creation
+    /// order, with the node, machine and operation.
+    async fn record_step(&mut self, step: &'static str) -> Step<()> {
         if let Some(marker) = self.marker.as_mut() {
-            marker.step = Some(step.to_owned());
+            let behind = marker
+                .step
+                .as_deref()
+                .and_then(step_rank)
+                .zip(step_rank(step))
+                .is_some_and(|(current, new)| current > new);
+            if !behind {
+                marker.step = Some(step.to_owned());
+            }
             marker.node.clone_from(&self.node);
             marker.machine_id.clone_from(&self.machine_id);
             marker.operation_id = Some(self.operation.id.clone());
@@ -926,43 +968,6 @@ impl Run<'_> {
     async fn reserve(&mut self) -> Step<(u32, String)> {
         let step = "reserve";
         let spec = &self.spec;
-        // Promotion is re-checked here, and the version must carry the build
-        // its promotion pinned: this kind never falls back to the newest
-        // succeeded build of a version.
-        let version = self
-            .exec
-            .images
-            .promoted_version(&spec.image_version_id)
-            .await
-            .map_err(|detail| failure(step, "image_unreadable", detail))?
-            .filter(|version| version.promoted_build_id.is_some())
-            .ok_or_else(|| {
-                failure(
-                    step,
-                    "image_not_promoted",
-                    format!(
-                        "the image version {} is not promoted with a pinned build",
-                        spec.image_version_id
-                    ),
-                )
-            })?;
-        drop(version);
-        let Some(template_vmid) = self
-            .exec
-            .artifacts
-            .template_vmid(&spec.image_version_id)
-            .await
-            .map_err(|detail| failure(step, "artifact_unreadable", detail))?
-        else {
-            return Err(failure(
-                step,
-                "artifact_missing",
-                format!(
-                    "the image version {} has no recorded build artifact",
-                    spec.image_version_id
-                ),
-            ));
-        };
         let resources = self
             .exec
             .pve
@@ -970,7 +975,48 @@ impl Run<'_> {
             .list_guest_resources(self.request.clone())
             .await
             .map_err(|error| failure(step, "resources", error.to_string()))?;
-        let template = resources
+        let (template_vmid, template_node) = if spec.install.is_some() {
+            // An ISO install has no template: the node is the spec's.
+            (0, spec.node.clone().unwrap_or_default())
+        } else {
+            // Promotion is re-checked here, and the version must carry the build
+            // its promotion pinned: this kind never falls back to the newest
+            // succeeded build of a version.
+            let version = self
+                .exec
+                .images
+                .promoted_version(&spec.image_version_id)
+                .await
+                .map_err(|detail| failure(step, "image_unreadable", detail))?
+                .filter(|version| version.promoted_build_id.is_some())
+                .ok_or_else(|| {
+                    failure(
+                        step,
+                        "image_not_promoted",
+                        format!(
+                            "the image version {} is not promoted with a pinned build",
+                            spec.image_version_id
+                        ),
+                    )
+                })?;
+            drop(version);
+            let Some(template_vmid) = self
+                .exec
+                .artifacts
+                .template_vmid(&spec.image_version_id)
+                .await
+                .map_err(|detail| failure(step, "artifact_unreadable", detail))?
+            else {
+                return Err(failure(
+                    step,
+                    "artifact_missing",
+                    format!(
+                        "the image version {} has no recorded build artifact",
+                        spec.image_version_id
+                    ),
+                ));
+            };
+            let template = resources
             .iter()
             .find(|resource| resource.vmid == Some(template_vmid))
             .filter(|resource| resource.kind == "qemu-template")
@@ -983,13 +1029,15 @@ impl Run<'_> {
                     ),
                 )
             })?;
-        let template_node = template.node.clone().ok_or_else(|| {
-            failure(
-                step,
-                "template_missing",
-                "the cluster reports no node for the template",
-            )
-        })?;
+            let template_node = template.node.clone().ok_or_else(|| {
+                failure(
+                    step,
+                    "template_missing",
+                    "the cluster reports no node for the template",
+                )
+            })?;
+            (template_vmid, template_node)
+        };
         // A re-run adopts its own marker by name; otherwise the VMID is the
         // requested one or the next free one.
         let existing = self
@@ -1011,13 +1059,15 @@ impl Run<'_> {
                     ),
                 ));
             }
-            if found.image_version_id != spec.image_version_id {
+            if found.image_version_id != spec.source_id() {
                 return Err(failure(
                     step,
                     "conflict",
                     format!(
-                        "the unfinished creation of {} used image version {}, not {}",
-                        spec.name, found.image_version_id, spec.image_version_id
+                        "the unfinished creation of {} used source {}, not {}",
+                        spec.name,
+                        found.image_version_id,
+                        spec.source_id()
                     ),
                 ));
             }
@@ -1107,7 +1157,7 @@ impl Run<'_> {
                 vmid,
                 name: spec.name.clone(),
                 node: target_node.clone(),
-                image_version_id: spec.image_version_id.clone(),
+                image_version_id: spec.source_id(),
                 machine_id: None,
                 cloned: false,
                 state: PersistentState::Creating,
@@ -1118,6 +1168,7 @@ impl Run<'_> {
             })
             .await
             .map_err(|detail| failure(step, "conflict", detail))?;
+        self.prior_step = existing.as_ref().and_then(|found| found.step.clone());
         self.machine_id.clone_from(&marker.machine_id);
         self.marker = Some(marker);
         self.vmid = vmid;
@@ -1176,6 +1227,169 @@ impl Run<'_> {
                 Err(failure)
             }
         }
+    }
+
+    // Step 2 of an ISO install: create the guest with the installer and the
+    // answer media attached, unless this guest already exists.
+    async fn create_install_guest(&mut self) -> Step<()> {
+        let step = "create";
+        let Some(install) = self.spec.install.clone() else {
+            return Err(failure(
+                step,
+                "invalid",
+                "this creation has no install source",
+            ));
+        };
+        let resources = self
+            .exec
+            .pve
+            .client
+            .list_guest_resources(self.request.clone())
+            .await
+            .map_err(|error| failure(step, "resources", error.to_string()))?;
+        if let Some(found) = resources
+            .iter()
+            .find(|resource| resource.vmid == Some(self.vmid))
+        {
+            // Adopted: the reserve step proved it is this guest.
+            if let Some(node) = &found.node {
+                self.node.clone_from(node);
+            }
+            return self.mark_cloned().await;
+        }
+        let create = fleet_provider_proxmox::PveQemuCreate {
+            vmid: self.vmid,
+            name: self.spec.name.clone(),
+            cores: self.spec.cores.unwrap_or(2),
+            memory_mib: self.spec.memory_mib.unwrap_or(4_096),
+            storage: self.spec.storage.clone().unwrap_or_default(),
+            disk_gib: self.spec.disk_gib.unwrap_or(32),
+            bridge: self
+                .spec
+                .bridge
+                .clone()
+                .unwrap_or_else(|| "vmbr0".to_owned()),
+            iso: install.iso,
+            answer_iso: install.answer_iso,
+            efi: install.efi,
+            tpm: install.tpm,
+        };
+        let started = self
+            .exec
+            .pve
+            .client
+            .qemu_create(self.request.clone(), &self.node, &create)
+            .await
+            .map_err(|error| failure(step, "create_failed", error.to_string()));
+        let outcome = match started {
+            Ok(upid) => self.wait_task(step, &upid).await,
+            Err(failure) => Err(failure),
+        };
+        match outcome {
+            Ok(()) => self.mark_cloned().await,
+            Err(failure) => {
+                self.release_marker_if_vacant().await;
+                Err(failure)
+            }
+        }
+    }
+
+    /// Step 4 of an ISO install: run the installer to its end, then boot the
+    /// installed disk. The answer file must power the guest off when it is
+    /// done. The end is seen only as running and then stopped by this run (or
+    /// by an earlier run that started it, recorded as the marker step
+    /// `installing`): a guest that was never seen running is not finished. The
+    /// media is then ejected (never deleted: Proxmox refuses a drive removal on
+    /// a protected guest) and the marker step `install` is written at once.
+    /// Safe to repeat: stopped with media still attached after the installer
+    /// started ejects without installing again, and the state an eject leaves
+    /// (empty drive, boot order `scsi0`) proves Fleet ejected, whatever step
+    /// the marker holds.
+    async fn install(&mut self) -> Step<()> {
+        let step = "install";
+        let earlier = self.prior_step.clone();
+        let started_before = earlier
+            .as_deref()
+            .and_then(step_rank)
+            .is_some_and(|rank| rank >= 3);
+        let state = self
+            .exec
+            .pve
+            .client
+            .qemu_install_state(self.request.clone(), &self.node, self.vmid)
+            .await
+            .map_err(|error| failure(step, "config_unreadable", error.to_string()))?;
+        if state.attached.is_empty() {
+            // Fleet's own eject, seen in the config or in the marker: carry
+            // on. Anything else means the install never ran here, and a
+            // guest nobody installed must not be adopted as an installed one.
+            return if state.ejected || earlier.as_deref().is_some_and(passed_install) {
+                self.record_step("install").await
+            } else {
+                Err(failure(
+                    step,
+                    "media_missing",
+                    "the guest has no install media attached and Fleet never ran its install; it is not adopted. Destroy it and create the machine again",
+                ))
+            };
+        }
+        let media = state.attached;
+        let first = self.power_state(step).await?;
+        let mut seen_running = first == "running";
+        let mut finished = started_before && first == "stopped";
+        if !seen_running && !finished {
+            self.start().await?;
+        }
+        if !finished {
+            // Durable once the installer is running. Written after a start
+            // that succeeded, not before: a start that failed must not look
+            // like an install that ran.
+            self.record_step("installing").await?;
+        }
+        while !finished {
+            // The deadline is checked first so a run that ran out of time
+            // says so, instead of reporting a generic expiry.
+            if self.remaining().is_zero() {
+                return Err(failure(
+                    step,
+                    "install_timeout",
+                    "the installer did not power the guest off before the deadline; the guest is left as it is (its answer file must power off when the install ends, and a long install needs a longer --timeout)",
+                ));
+            }
+            self.checkpoint("installing").await?;
+            let state = self.power_state(step).await?;
+            match state.as_str() {
+                "running" => seen_running = true,
+                "stopped" if seen_running => finished = true,
+                _ => {}
+            }
+            if !finished {
+                self.sleep().await;
+            }
+        }
+        self.exec
+            .pve
+            .client
+            .qemu_eject_media(self.request.clone(), &self.node, self.vmid, &media)
+            .await
+            .map_err(|error| failure(step, "media_not_removed", error.to_string()))?;
+        let left = self
+            .exec
+            .pve
+            .client
+            .qemu_install_state(self.request.clone(), &self.node, self.vmid)
+            .await
+            .map_err(|error| failure(step, "config_unreadable", error.to_string()))?;
+        if !left.attached.is_empty() {
+            return Err(failure(
+                step,
+                "media_not_removed",
+                "PVE accepted the change but the install media is still attached",
+            ));
+        }
+        // Durable at once: a deadline or a cancel at the next checkpoint must
+        // not lose the fact that the media is gone.
+        self.record_step("install").await
     }
 
     /// Records that the clone completed: from here the marker guards the
@@ -1382,18 +1596,29 @@ impl Run<'_> {
     }
 
     // Step 4: start.
+    /// The guest's power state, read from the process (never from the
+    /// lagging resources list).
+    async fn power_state(&self, step: &'static str) -> Step<String> {
+        self.exec
+            .pve
+            .client
+            .qemu_power_state(self.request.clone(), &self.node, self.vmid)
+            .await
+            .map_err(|error| failure(step, "status_unreadable", error.to_string()))
+    }
+
     async fn start(&self) -> Step<()> {
         let step = "start";
-        let resources = self
+        // `/cluster/resources` lags by seconds: a guest that is running can
+        // still be listed as stopped. The status endpoint reads the process.
+        let state = self
             .exec
             .pve
             .client
-            .list_guest_resources(self.request.clone())
+            .qemu_power_state(self.request.clone(), &self.node, self.vmid)
             .await
-            .map_err(|error| failure(step, "resources", error.to_string()))?;
-        if resources.iter().any(|resource| {
-            resource.vmid == Some(self.vmid) && resource.status.as_deref() == Some("running")
-        }) {
+            .map_err(|error| failure(step, "status_unreadable", error.to_string()))?;
+        if state == "running" {
             return Ok(());
         }
         let upid = self
@@ -2473,6 +2698,7 @@ impl MachineCreateExecutor {
             spec,
             request,
             marker: None,
+            prior_step: None,
             node: String::new(),
             vmid: 0,
             machine_id: None,
@@ -2521,12 +2747,25 @@ impl Run<'_> {
         self.progress(0, "reserving the guest").await;
         let (template_vmid, template_node) = self.reserve().await?;
         self.checkpoint("reserve").await?;
-        self.progress(1, "cloning the image template").await;
-        self.clone_guest(template_vmid, &template_node).await?;
-        self.checkpoint("clone").await?;
+        let installing = self.spec.install.is_some();
+        if installing {
+            self.progress(1, "creating the guest with the installer attached")
+                .await;
+            self.create_install_guest().await?;
+            self.checkpoint("create").await?;
+        } else {
+            self.progress(1, "cloning the image template").await;
+            self.clone_guest(template_vmid, &template_node).await?;
+            self.checkpoint("clone").await?;
+        }
         self.progress(2, "applying hardware and metadata").await;
         self.configure().await?;
         self.checkpoint("config").await?;
+        if installing {
+            self.progress(3, "running the unattended install").await;
+            self.install().await?;
+            self.checkpoint("install").await?;
+        }
         self.progress(3, "starting the guest").await;
         self.start().await?;
         self.checkpoint("start").await?;

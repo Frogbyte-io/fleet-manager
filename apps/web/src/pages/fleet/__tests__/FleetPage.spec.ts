@@ -554,16 +554,19 @@ describe('FleetPage', () => {
       data: [
         { accountId: 'a1', vmid: 7250, name: 'win-runner', node: 'pve', imageVersionId: 'registered', machineId: 'm1', cloned: true, state: 'ready', step: 'registered', operationId: null, createdAt: NOW, updatedAt: NOW },
         { accountId: 'a1', vmid: 7151, name: 'build-box', node: 'pve', imageVersionId: 'ver-1', machineId: null, cloned: false, state: 'creating', step: 'clone', operationId: 'op1', createdAt: NOW, updatedAt: NOW },
+        { accountId: 'a1', vmid: 7152, name: 'iso-box', node: 'pve', imageVersionId: 'install:local:iso/u.iso', machineId: null, cloned: true, state: 'creating', step: 'installing', operationId: 'op2', createdAt: NOW, updatedAt: NOW },
       ],
     }))
     const wrapper = await mountPage()
     await flushPromises()
     await flushPromises()
     const cards = wrapper.findAll('[data-testid="persistent-guest"]')
-    expect(cards).toHaveLength(2)
+    expect(cards).toHaveLength(3)
     expect(cards[0].text()).toContain('win-runner')
     expect(cards[0].text()).toContain('registered')
     expect(cards[1].text()).toContain('Stopped at clone')
+    expect(cards[1].text()).toContain('from image')
+    expect(cards[2].text()).toContain('from ISO')
   })
 
   it('reviews a persistent machine spec before it creates it', async () => {

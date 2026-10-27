@@ -18,7 +18,9 @@ const guests = useQuery({
 })
 
 function sourceOf(guest: PersistentGuestDto): string {
-  return guest.imageVersionId === 'registered' ? 'registered' : 'from image'
+  if (guest.imageVersionId === 'registered')
+    return 'registered'
+  return guest.imageVersionId.startsWith('install:') ? 'from ISO' : 'from image'
 }
 </script>
 

@@ -192,6 +192,8 @@ impl PersistentBounds {
             && (spec.login_user.is_none() || self.allow_login_user)
             && spec.tags.iter().all(|tag| self.allowed_tags.contains(tag));
         plain
+            // An ISO install runs an answer file only a person has read.
+            && spec.install.is_none()
             && spec.protection
             // No bridge means the template's; an explicit one needs a list.
             && spec
@@ -510,6 +512,32 @@ mod tests {
         let parameters = to_parameters(&key);
         assert!(!crate::broker::credential_like(&parameters), "{parameters}");
         assert_eq!(from_parameters(&parameters).unwrap(), key);
+    }
+
+    #[test]
+    fn an_iso_install_is_never_admitted_by_bounds() {
+        let bounds = PersistentBounds {
+            max_cores: Some(8),
+            max_memory_mib: Some(16384),
+            max_disk_gib: Some(200),
+            ..PersistentBounds::default()
+        };
+        let image = serde_json::json!({
+            "cores": 2, "memoryMib": 4096, "diskGib": 40, "node": "pve1", "storage": "local-lvm",
+        });
+        assert!(
+            bounds.admits(&spec(&image)),
+            "the same size from an image is inside"
+        );
+        let mut install = image.clone();
+        install["install"] = serde_json::json!({"iso": "local:iso/u.iso"});
+        let mut install_spec = spec(&install);
+        install_spec.image_version_id = String::new();
+        assert!(install_spec.install.is_some());
+        assert!(
+            !bounds.admits(&install_spec),
+            "an answer file runs as root and needs a person"
+        );
     }
 
     #[test]

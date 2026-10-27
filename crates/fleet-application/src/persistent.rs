@@ -195,6 +195,55 @@ pub struct RequestedBy {
     pub approved_by: Option<String>,
 }
 
+/// An unattended install from an ISO (#542). The ISO and the answer media are
+/// existing volumes on Proxmox storage, named by volume id; Fleet carries
+/// no answer-file content, so no password or product key travels in a
+/// payload.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct InstallSource {
+    /// The installer ISO, e.g. `local:iso/ubuntu-24.04-live-server-amd64.iso`.
+    pub iso: String,
+    /// A second ISO holding the answer file, e.g. a `NoCloud` seed (volume
+    /// label `cidata`, `user-data` and `meta-data`). It is attached as a
+    /// second CD-ROM and removed with the installer once the install ends.
+    #[serde(default)]
+    pub answer_iso: Option<String>,
+    /// Boot with OVMF (UEFI) and an EFI disk.
+    #[serde(default)]
+    pub efi: bool,
+    /// Add a v2.0 virtual TPM (needs a storage; implies nothing else).
+    #[serde(default)]
+    pub tpm: bool,
+}
+
+/// Whether a value is a Proxmox ISO volume id (`storage:iso/name.iso`).
+///
+/// # Errors
+///
+/// Answers which rule the volume id broke.
+pub fn validate_iso_volume(volume: &str, what: &str) -> Result<(), String> {
+    let ok = volume.len() <= 200
+        && volume.split_once(":iso/").is_some_and(|(storage, file)| {
+            !storage.is_empty()
+                && storage
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
+                && file.to_ascii_lowercase().ends_with(".iso")
+                && file.len() > 4
+                && file
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.' | '+'))
+        });
+    if ok {
+        Ok(())
+    } else {
+        Err(format!(
+            "the {what} must be a Proxmox ISO volume id such as local:iso/name.iso"
+        ))
+    }
+}
+
 /// Everything a `machine.create` needs. The wire shape of the review and
 /// create calls and of the operation payload.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -202,8 +251,14 @@ pub struct RequestedBy {
 pub struct CreateMachineSpec {
     /// The Proxmox account that holds the template and receives the guest.
     pub account_id: String,
-    /// The promoted image version to clone.
+    /// The promoted image version to clone. Empty (absent) when the guest is
+    /// installed from an ISO (`install`); exactly one of the two is given.
+    #[serde(default)]
     pub image_version_id: String,
+    /// Install from an ISO with an unattended answer file instead of cloning
+    /// an image (Linux only for now).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub install: Option<InstallSource>,
     /// The VM and machine name.
     pub name: String,
     /// The target VMID; the next free one when absent.
@@ -435,7 +490,35 @@ impl CreateMachineSpec {
     #[allow(clippy::too_many_lines)]
     pub fn validate(&self) -> Result<(), String> {
         identifier(&self.account_id, "account id", 128)?;
-        identifier(&self.image_version_id, "image version id", 128)?;
+        match &self.install {
+            None => identifier(&self.image_version_id, "image version id", 128)?,
+            Some(install) => {
+                if !self.image_version_id.is_empty() {
+                    return Err(
+                        "give either an imageVersionId or an install source, not both".to_owned(),
+                    );
+                }
+                validate_iso_volume(&install.iso, "installer ISO")?;
+                if let Some(answer) = &install.answer_iso {
+                    validate_iso_volume(answer, "answer ISO")?;
+                    if *answer == install.iso {
+                        return Err("the answer ISO must differ from the installer ISO".to_owned());
+                    }
+                }
+                if self.guest_os != GuestOs::Linux {
+                    return Err(
+                        "installing from an ISO supports Linux guests only; Windows comes from the generalized base image (the autounattend path is follow-up work)"
+                            .to_owned(),
+                    );
+                }
+                if self.node.is_none() || self.storage.is_none() || self.disk_gib.is_none() {
+                    return Err(
+                        "an install needs node, storage and diskGib: there is no template to take them from"
+                            .to_owned(),
+                    );
+                }
+            }
+        }
         validate_name(&self.name, self.guest_os)?;
         if let Some(vmid) = self.vmid
             && !(100..=999_999_999).contains(&vmid)
@@ -541,6 +624,16 @@ impl CreateMachineSpec {
             return Err("the requestedBy stamp is malformed".to_owned());
         }
         Ok(())
+    }
+
+    /// What the guest comes from, as recorded on its marker: the image
+    /// version, or `install:<iso volume>`.
+    #[must_use]
+    pub fn source_id(&self) -> String {
+        match &self.install {
+            Some(install) => format!("install:{}", install.iso),
+            None => self.image_version_id.clone(),
+        }
     }
 
     /// The user Fleet logs in with before it installs its key.
@@ -1628,16 +1721,18 @@ impl PersistentMachines {
     pub async fn check_spec(&self, spec: &CreateMachineSpec) -> Result<Prepared, LabUseCaseError> {
         spec.validate()
             .map_err(|detail| LabUseCaseError::Invalid { detail })?;
-        let version = self
-            .images
-            .promoted_version(&spec.image_version_id)
-            .await
-            .map_err(backend)?;
-        if version.is_none_or(|version| version.promoted_build_id.is_none()) {
-            return Err(invalid(format!(
-                "the image version {} does not exist or is not promoted with a pinned build",
-                spec.image_version_id
-            )));
+        if spec.install.is_none() {
+            let version = self
+                .images
+                .promoted_version(&spec.image_version_id)
+                .await
+                .map_err(backend)?;
+            if version.is_none_or(|version| version.promoted_build_id.is_none()) {
+                return Err(invalid(format!(
+                    "the image version {} does not exist or is not promoted with a pinned build",
+                    spec.image_version_id
+                )));
+            }
         }
         if let CredentialChoice::Reference { credential } = &spec.credential {
             let keys = self
@@ -1759,6 +1854,7 @@ pub fn requested_intent(
     operation_id: &str,
     spec: &CreateMachineSpec,
 ) -> Result<crate::audit::AuditIntent, crate::audit::MetadataError> {
+    let source = spec.source_id();
     let mut metadata = crate::audit::AuditMetadata::default();
     let credential = match &spec.credential {
         CredentialChoice::Generate => "generate",
@@ -1773,7 +1869,7 @@ pub fn requested_intent(
     let mut pairs = vec![
         ("event", "machine_provision_requested"),
         ("accountId", spec.account_id.as_str()),
-        ("imageVersionId", spec.image_version_id.as_str()),
+        ("source", source.as_str()),
         ("name", spec.name.as_str()),
         ("guestOs", spec.guest_os.id()),
         ("credential", credential),
@@ -2033,5 +2129,68 @@ mod tests {
         assert!(registered.guards(Some("reg")));
         assert!(!registered.guards(Some("renamed")));
         assert!(!registered.guards(None));
+    }
+
+    fn install_spec() -> CreateMachineSpec {
+        serde_json::from_value(serde_json::json!({
+            "accountId": "acct-1",
+            "name": "ci-linux",
+            "node": "pve",
+            "storage": "local-lvm",
+            "diskGib": 32,
+            "install": { "iso": "local:iso/ubuntu.iso", "answerIso": "local:iso/seed.iso" },
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn an_install_spec_needs_its_placement_and_excludes_an_image() {
+        let spec = install_spec();
+        spec.validate().unwrap();
+        assert_eq!(spec.source_id(), "install:local:iso/ubuntu.iso");
+
+        let mut both = install_spec();
+        both.image_version_id = "ver-1".to_owned();
+        assert!(both.validate().unwrap_err().contains("not both"));
+
+        for strip in ["node", "storage", "diskGib"] {
+            let mut value = serde_json::to_value(install_spec()).unwrap();
+            value.as_object_mut().unwrap().remove(strip);
+            let spec: CreateMachineSpec = serde_json::from_value(value).unwrap();
+            assert!(
+                spec.validate().unwrap_err().contains("needs node"),
+                "{strip}"
+            );
+        }
+
+        let mut windows = install_spec();
+        windows.guest_os = GuestOs::Windows;
+        assert!(
+            windows
+                .validate()
+                .unwrap_err()
+                .contains("Linux guests only")
+        );
+
+        let mut same = install_spec();
+        same.install.as_mut().unwrap().answer_iso = Some("local:iso/ubuntu.iso".to_owned());
+        assert!(same.validate().is_err());
+    }
+
+    #[test]
+    fn iso_volume_ids_are_storage_iso_file() {
+        for good in ["local:iso/a.iso", "nfs-1:iso/Ubuntu-24.04.iso"] {
+            validate_iso_volume(good, "iso").unwrap();
+        }
+        for bad in [
+            "a.iso",
+            "local:vztmpl/a.iso",
+            "local:iso/a.img",
+            "local:iso/../a.iso",
+            "local:iso/a b.iso",
+            "local:iso/.iso",
+        ] {
+            assert!(validate_iso_volume(bad, "iso").is_err(), "{bad}");
+        }
     }
 }
