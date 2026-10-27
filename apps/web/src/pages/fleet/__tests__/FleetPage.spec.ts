@@ -561,7 +561,7 @@ describe('FleetPage', () => {
     await flushPromises()
     const cards = wrapper.findAll('[data-testid="persistent-guest"]')
     expect(cards).toHaveLength(2)
-    expect(cards[0].text()).toContain('win-gh-runner')
+    expect(cards[0].text()).toContain('win-runner')
     expect(cards[0].text()).toContain('registered')
     expect(cards[1].text()).toContain('Stopped at clone')
   })
