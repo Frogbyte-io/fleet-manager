@@ -680,7 +680,10 @@ fn armor_prefix_len(line: &str) -> Option<usize> {
 /// (the prefix stays). A short plain word is prose, except as the line right
 /// before the fence after a full one.
 fn armor_start(text: &str, floor: usize, fence: usize) -> usize {
-    let start = armor_start_lines(text, floor, fence);
+    // The walk with the per-line prefix fallback, and without it: the walks
+    // accept different lines around prose, so the key starts at the earlier.
+    let start = armor_start_lines(text, floor, fence, true)
+        .min(armor_start_lines(text, floor, fence, false));
     // Only the log prefix of the fence's own line, and no key line before it:
     // nothing to mask but the fence.
     let own_line = !text[start..fence].contains('\n') && !text[start..fence].contains("\\n");
@@ -690,7 +693,29 @@ fn armor_start(text: &str, floor: usize, fence: usize) -> usize {
     start
 }
 
-fn armor_start_lines(text: &str, floor: usize, fence: usize) -> usize {
+/// Where the line whose content begins at `content` starts when it carries a
+/// log prefix that differs from the fence's own (`web-2  | `, a timestamp
+/// and `app[1]: `): the text before `content` ends with the delimiter of the
+/// fence's prefix and a line break lies within the first bytes before it.
+/// Mirrors the fallback of [`skip_line_prefix`]; the look-back is bounded.
+fn varying_prefix_start(text: &str, floor: usize, content: usize, prefix: &str) -> Option<usize> {
+    let delimiter = prefix
+        .chars()
+        .next_back()
+        .filter(|c| matches!(c, '|' | ':' | ']' | '>'))?;
+    let head = &text[..content];
+    let head = head.trim_end_matches([' ', '\t']);
+    if !head.ends_with(delimiter) || head.len() <= floor {
+        return None;
+    }
+    let lowest = head.len().saturating_sub(PREFIX_MAX + 16).max(floor);
+    (lowest..head.len()).rev().find_map(|at| {
+        let len = line_break_len(text, at)?;
+        (at + len <= head.len()).then_some(at + len)
+    })
+}
+
+fn armor_start_lines(text: &str, floor: usize, fence: usize, varying: bool) -> usize {
     let bytes = text.as_bytes();
     // Every line of the key carries the log prefix of the fence's line.
     let prefix =
@@ -758,6 +783,11 @@ fn armor_start_lines(text: &str, floor: usize, fence: usize) -> usize {
             && text[..line_start].ends_with(prefix)
         {
             line_start -= prefix.len();
+        } else if varying
+            && let Some(prefix) = prefix
+            && let Some(varying) = varying_prefix_start(text, floor, line_start, prefix)
+        {
+            line_start = varying;
         }
         let at_line_start = line_start == floor
             || (1..=4).any(|len| {
@@ -3764,6 +3794,8 @@ mod tests {
             "web-1  | -----BEGIN PRIVATE KEY-----\nweb-1  |\n\n\n",
             "web-1  | AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\n\n",
             "web-1  | -----END PRIVATE KEY-----\n",
+            // #540: a different prefix on each body line of an END-only key.
+            "2024-01-01T00:00:01Z web-2 | AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\n2024-01-01T00:00:02Z web-1 | -----END PRIVATE KEY-----\n",
             "\\u001b\\u001b[0m[0m",
             "\\e[pa ",
             "\u{1b}[pa ",
@@ -4182,6 +4214,34 @@ mod tests {
             let stored = scrub_failure_detail(input);
             assert_eq!(scrub_failure_detail(&stored), stored, "stored: {input:?}");
         }
+    }
+
+    /// #540: an END-only key whose body lines carry a different prefix each.
+    #[test]
+    fn end_only_pem_bodies_behind_varying_prefixes_are_masked() {
+        let one = "MIIfake1234567890abcdefghijklmnopqrstuvwxyz0123";
+        let two = "Zm9vYmFyZmFrZWtleTEyMzQ1Njc4OTBhYmNkZWZnaGlqa2xt";
+        let three = "QUJDREVGR0hJSktMTU5PUFFSU1RVVldYWVowMTIzNDU2Nzg5";
+        assert_scrubbed(&[
+            (
+                format!(
+                    "2024-01-01T00:00:01Z app[1]: {one}\n2024-01-01T00:00:02Z app[1]: {two}\n2024-01-01T00:00:03Z app[1]: {three}\n2024-01-01T00:00:04Z app[1]: -----END PRIVATE KEY-----\n2024-01-01T00:00:05Z app[1]: after"
+                ),
+                "2024-01-01T00:00:01Z app[1]: ***\n2024-01-01T00:00:05Z app[1]: after",
+            ),
+            (
+                format!(
+                    "web-2  | {one}\nweb-1  | {two}\nweb-2  | {three}\nweb-1  | -----END PRIVATE KEY-----\nweb-1  | after"
+                ),
+                "web-2  | ***\nweb-1  | after",
+            ),
+            // Found by comparing against the walk without the fallback: prose
+            // between key lines must not unmask what that walk masked.
+            (
+                "[4] FAKEkeyline0000000000000000000000001\r\n[7] listening on port 8080\r\n[3] -----END PRIVATE KEY-----\r\n[1] FAKEkeyline0000000000000000000000002\r\n[9] short\r\n[9] -----END PRIVATE KEY-----".to_owned(),
+                "[4] FAKEkeyline0000000000000000000000001\r\n[7] listening on port 8080\r\n[3] ***\r\n***",
+            ),
+        ]);
     }
 
     /// Item 1 of #450: a key behind a per-line log prefix, blank lines after
