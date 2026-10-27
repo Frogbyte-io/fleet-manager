@@ -778,6 +778,7 @@ fn armor_start_lines(text: &str, floor: usize, fence: usize, varying: bool) -> u
         while line_start > floor && is_blank_byte(bytes[line_start - 1]) {
             line_start -= 1;
         }
+        let mut via_varying = false;
         if let Some(prefix) = prefix
             && line_start >= floor + prefix.len()
             && text[..line_start].ends_with(prefix)
@@ -788,6 +789,7 @@ fn armor_start_lines(text: &str, floor: usize, fence: usize, varying: bool) -> u
             && let Some(varying) = varying_prefix_start(text, floor, line_start, prefix)
         {
             line_start = varying;
+            via_varying = true;
         }
         let at_line_start = line_start == floor
             || (1..=4).any(|len| {
@@ -803,6 +805,11 @@ fn armor_start_lines(text: &str, floor: usize, fence: usize, varying: bool) -> u
                 && run_start > floor
                 && is_blank_byte(bytes[run_start - 1]);
             return if prefixed { run_start } else { fallback };
+        }
+        // A short line behind a prefix of its own (`port: 8080`) is prose
+        // unless it is the line right before the fence.
+        if via_varying && !first && run.len() < KEY_RUN_MIN {
+            return fallback;
         }
         if is_key_run(run) {
             if run.len() >= FULL_LINE_MIN {
@@ -4240,6 +4247,17 @@ mod tests {
             (
                 "[4] FAKEkeyline0000000000000000000000001\r\n[7] listening on port 8080\r\n[3] -----END PRIVATE KEY-----\r\n[1] FAKEkeyline0000000000000000000000002\r\n[9] short\r\n[9] -----END PRIVATE KEY-----".to_owned(),
                 "[4] FAKEkeyline0000000000000000000000001\r\n[7] listening on port 8080\r\n[3] ***\r\n***",
+            ),
+            // A short line with a prefix of its own is not part of the key.
+            (
+                format!("web-2  | port: 8080\nweb-1  | replicas: 3\nweb-2  | {three}\nweb-1  | -----END PRIVATE KEY-----\nweb-1  | after"),
+                "web-2  | port: 8080\nweb-1  | replicas: 3\n***\nweb-1  | after",
+            ),
+            // The walk without the fallback masks from the `[1]` run here; the
+            // one with it stops at the short line: the earlier start wins.
+            (
+                "2024-01-01T00:00:08Z web-1 | request id=abc123 ok\n2024-01-01T00:00:05Z web-1 | FAKEkey000000000000002\n  done\n2024-01-01T00:00:01Z web-1 | -----END RSA PRIVATE KEY-----\nlast".to_owned(),
+                "2024-01-01T00:00:08Z web-1 | request id=abc123 ok\n2024-01-01T00:00:05Z web-1 | ***\nlast",
             ),
         ]);
     }
