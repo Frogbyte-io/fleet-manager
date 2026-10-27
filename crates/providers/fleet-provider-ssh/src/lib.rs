@@ -187,6 +187,7 @@ impl SshProvider {
     }
 
     /// Probes a host's key: `ssh-keyscan` fetches, `ssh-keygen` fingerprints.
+    /// Returns the most preferred key (see [`Self::probe_host_keys`]).
     ///
     /// # Errors
     ///
@@ -197,10 +198,29 @@ impl SshProvider {
         port: u16,
         timeout: Duration,
     ) -> Result<HostKeyObservation, SshProviderError> {
+        let mut all = self.probe_host_keys(host, port, timeout)?;
+        Ok(all.remove(0))
+    }
+
+    /// Probes every key type the host offers (`ed25519`, `ecdsa`, `rsa`),
+    /// ordered by the fixed preference ED25519, ECDSA, RSA. `ssh-keyscan`
+    /// prints keys in whatever order the host answers, so taking the first
+    /// line made the observed type vary between runs. The result is never
+    /// empty.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the tools fail, time out, or the host presents nothing.
+    pub fn probe_host_keys(
+        &self,
+        host: &str,
+        port: u16,
+        timeout: Duration,
+    ) -> Result<Vec<HostKeyObservation>, SshProviderError> {
         let mut command = Command::new("ssh-keyscan");
         command
             .arg("-t")
-            .arg("ed25519,rsa")
+            .arg("ed25519,ecdsa,rsa")
             .arg("-p")
             .arg(port.to_string())
             .arg("-T")
@@ -211,18 +231,29 @@ impl SshProvider {
             detail: format!("cannot start: {error}"),
         })?;
         let stdout = String::from_utf8_lossy(&raw.stdout);
-        let line = stdout
+        let lines: Vec<String> = stdout
             .lines()
-            .find(|line| !line.starts_with('#') && !line.trim().is_empty())
-            .ok_or_else(|| SshProviderError::NoHostKey {
+            .filter(|line| !line.starts_with('#') && !line.trim().is_empty())
+            .map(str::to_owned)
+            .collect();
+        if lines.is_empty() {
+            return Err(SshProviderError::NoHostKey {
                 detail: "ssh-keyscan returned no key within the timeout".to_owned(),
-            })?
-            .to_owned();
+            });
+        }
 
-        // Fingerprint the key through ssh-keygen so the fingerprint format is
-        // the one operators see everywhere else.
+        // Fingerprint the keys through ssh-keygen so the fingerprint format is
+        // the one operators see everywhere else. It prints one summary per
+        // input line, in order.
         let key_file = self.work_dir.join("probe.tmp");
-        std::fs::write(&key_file, &line).map_err(|error| SshProviderError::Setup {
+        std::fs::write(
+            &key_file,
+            lines.join(
+                "
+",
+            ),
+        )
+        .map_err(|error| SshProviderError::Setup {
             detail: format!("cannot stage the probe: {error}"),
         })?;
         let fingerprinted = Command::new("ssh-keygen")
@@ -241,14 +272,46 @@ impl SshProvider {
             });
         }
         let summary = String::from_utf8_lossy(&fingerprinted.stdout);
-        let parsed = parse_keygen_summary(&summary).ok_or_else(|| SshProviderError::NoHostKey {
-            detail: "ssh-keygen produced an unreadable summary".to_owned(),
-        })?;
-        Ok(HostKeyObservation {
-            key_type: parsed.0,
-            fingerprint: parsed.1,
-            raw_line: line,
-        })
+        let mut observations = Vec::new();
+        for (line, summary_line) in lines.iter().zip(summary.lines()) {
+            let parsed =
+                parse_keygen_summary(summary_line).ok_or_else(|| SshProviderError::NoHostKey {
+                    detail: "ssh-keygen produced an unreadable summary".to_owned(),
+                })?;
+            observations.push(HostKeyObservation {
+                key_type: parsed.0,
+                fingerprint: parsed.1,
+                raw_line: line.clone(),
+            });
+        }
+        observations.sort_by_key(|observation| key_type_rank(&observation.key_type));
+        Ok(observations)
+    }
+
+    /// Decides over every key the host offers: when any observed key matches
+    /// the confirmed fingerprint the endpoint is `Known` (with that key), so
+    /// a host that answers with a different key type on another run is not
+    /// reported as changed. Only when none match is it `Changed`; with no
+    /// confirmed fingerprint the most preferred key is `New`.
+    ///
+    /// # Panics
+    ///
+    /// Panics when `observations` is empty; the probe never returns that.
+    #[must_use]
+    pub fn decide_any(
+        &self,
+        expected: Option<&str>,
+        observations: &[HostKeyObservation],
+    ) -> TrustDecision {
+        let matched = expected.and_then(|expected| {
+            observations
+                .iter()
+                .find(|observation| observation.fingerprint == expected)
+        });
+        let chosen = matched
+            .or_else(|| observations.first())
+            .expect("a probe yields at least one key");
+        self.decide(expected, chosen)
     }
 
     /// Decides what an observed key means for an endpoint with the given
@@ -322,7 +385,8 @@ impl SshProvider {
     }
 
     /// Runs a bounded, non-interactive connection test against the endpoint.
-    /// The remote command is `true`: nothing is executed beyond OpenSSH's own
+    /// The remote command is `exit 0`, understood by POSIX shells, PowerShell and
+    /// cmd alike (`true` does not exist on Windows): nothing is executed beyond OpenSSH's own
     /// session setup.
     ///
     /// # Errors
@@ -360,7 +424,7 @@ impl SshProvider {
             }
         }
         add_ssh_destination(&mut command, endpoint);
-        command.arg("true");
+        command.arg("exit 0");
 
         let output = command.output().map_err(|error| SshProviderError::Tool {
             tool: "ssh",
@@ -442,6 +506,16 @@ pub(crate) fn add_ssh_destination(command: &mut Command, endpoint: &SshConnectio
     command
         .arg("--")
         .arg(format!("{}@{}", endpoint.user, endpoint.host));
+}
+
+/// The fixed preference between host key types: ED25519, ECDSA, RSA.
+fn key_type_rank(key_type: &str) -> u8 {
+    match key_type.to_ascii_uppercase().as_str() {
+        "ED25519" => 0,
+        "ECDSA" => 1,
+        "RSA" => 2,
+        _ => 3,
+    }
 }
 
 pub(crate) fn add_ssh_keyscan_host(command: &mut Command, host: &str) {

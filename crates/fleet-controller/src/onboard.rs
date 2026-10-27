@@ -133,7 +133,7 @@ impl OnboardingExecutor {
         let provider = self.provider.clone();
         let (host, port) = (draft.endpoint.host.clone(), draft.endpoint.port);
         let probed = tokio::task::spawn_blocking(move || {
-            provider.probe_host_key(&host, port, PROBE_TIMEOUT)
+            provider.probe_host_keys(&host, port, PROBE_TIMEOUT)
         })
         .await
         .unwrap_or_else(|join_error| {
@@ -142,8 +142,8 @@ impl OnboardingExecutor {
                 detail: format!("the probe thread failed: {join_error}"),
             })
         });
-        let observation = match probed {
-            Ok(observation) => observation,
+        let probed = match probed {
+            Ok(observations) => observations,
             Err(error) => {
                 return fail_operation(
                     operations,
@@ -160,7 +160,12 @@ impl OnboardingExecutor {
         // else means Changed — and Changed blocks until re-confirmed.
         let decision = self
             .provider
-            .decide(draft.confirmed_fingerprint.as_deref(), &observation);
+            .decide_any(draft.confirmed_fingerprint.as_deref(), &probed);
+        let observation = match &decision {
+            fleet_provider_ssh::TrustDecision::New { observation }
+            | fleet_provider_ssh::TrustDecision::Known { observation }
+            | fleet_provider_ssh::TrustDecision::Changed { observation, .. } => observation.clone(),
+        };
         draft.host_key = Some(OnboardHostKey {
             key_type: observation.key_type.clone(),
             fingerprint: observation.fingerprint.clone(),

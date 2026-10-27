@@ -733,3 +733,31 @@ async fn cancel_deletes_the_draft_and_unpins_only_unregistered_hosts() {
     // so the file is unchanged either way.
     assert_eq!(harness.known_hosts(), pinned);
 }
+
+#[tokio::test]
+async fn a_repeated_test_after_confirmation_keeps_it_and_reports_the_connection() {
+    let harness = harness().await;
+    let sshd = TestSshd::start();
+    let draft_id = create_draft(&harness, &sshd).await;
+
+    let first = run_test(&harness, &draft_id).await;
+    let first: Value = serde_json::from_str(first["resultJson"].as_str().unwrap()).unwrap();
+    let fingerprint = first["fingerprint"].as_str().unwrap().to_owned();
+    let (status, _) = harness
+        .post_json(
+            &format!("/api/v1/machines/onboarding/drafts/{draft_id}/confirm-host-key"),
+            Some(json!({"fingerprint": fingerprint})),
+        )
+        .await;
+    assert_eq!(status, axum::http::StatusCode::OK);
+
+    for _ in 0..2 {
+        let test = run_test(&harness, &draft_id).await;
+        assert_eq!(test["state"], "succeeded", "{test}");
+        let result: Value = serde_json::from_str(test["resultJson"].as_str().unwrap()).unwrap();
+        assert_eq!(result["hostKeyStage"], "confirmed", "{result}");
+        assert_eq!(result["fingerprint"], fingerprint);
+        assert_eq!(result["connectAttempted"], true);
+        assert_eq!(result["connected"], true, "{result}");
+    }
+}
