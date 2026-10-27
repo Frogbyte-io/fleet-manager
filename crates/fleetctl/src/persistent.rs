@@ -390,6 +390,120 @@ pub(crate) fn run_abandon(
     )
 }
 
+/// Parses `machines persistent list` and `machines persistent register
+/// --account <id> --vmid <n> [--machine <id>]`.
+pub(crate) fn parse_persistent(
+    rest: &[&str],
+    output: &mut Output,
+) -> Result<crate::machine_access::MachineAccessAction, CliError> {
+    let Some((verb, flags)) = rest.split_first() else {
+        return Err(CliError {
+            message: format!("machines persistent needs list or register\n\n{}", usage()),
+        });
+    };
+    let (mut account, mut vmid, mut machine) = (None, None, None);
+    let mut iter = flags.iter().copied();
+    while let Some(flag) = iter.next() {
+        let mut value = |name: &str| {
+            iter.next().map(str::to_owned).ok_or_else(|| CliError {
+                message: format!("--{name} requires a value"),
+            })
+        };
+        match (*verb, flag) {
+            (_, "--output") => {
+                *output = match value("output")?.as_str() {
+                    "json" => Output::Json,
+                    _ => Output::Text,
+                };
+            }
+            ("register", "--account") => account = Some(value("account")?),
+            ("register", "--vmid") => vmid = Some(number("vmid", &value("vmid")?)?),
+            ("register", "--machine") => machine = Some(value("machine")?),
+            (_, other) => {
+                return Err(CliError {
+                    message: format!("unknown flag {other:?}; see the usage below\n\n{}", usage()),
+                });
+            }
+        }
+    }
+    match *verb {
+        "list" => Ok(crate::machine_access::MachineAccessAction::PersistentList),
+        "register" => match (account, vmid.and_then(|vmid| u32::try_from(vmid).ok())) {
+            (Some(account), Some(vmid)) => Ok(
+                crate::machine_access::MachineAccessAction::PersistentRegister {
+                    account,
+                    vmid,
+                    machine,
+                },
+            ),
+            _ => Err(CliError {
+                message: "machines persistent register needs --account and --vmid".to_owned(),
+            }),
+        },
+        other => Err(CliError {
+            message: format!(
+                "unknown machines persistent command {other:?}\n\n{}",
+                usage()
+            ),
+        }),
+    }
+}
+
+/// Lists the persistent guests.
+pub(crate) fn run_persistent_list(invocation: &crate::Invocation) -> Result<Value, CliError> {
+    let client = crate::http_client()?;
+    let body = crate::send(
+        &client,
+        invocation,
+        reqwest::Method::GET,
+        "/api/v1/machines/persistent",
+        &[],
+        None,
+        uuid::Uuid::now_v7().to_string(),
+    )?;
+    Ok(json!({ "items": body["data"] }))
+}
+
+/// Reviews and runs the registration of an existing VM as persistent.
+pub(crate) fn run_persistent_register(
+    invocation: &crate::Invocation,
+    account: &str,
+    vmid: u32,
+    machine: Option<&str>,
+) -> Result<Value, CliError> {
+    let client = crate::http_client()?;
+    let base = format!("/api/v1/machines/persistent/{account}/{vmid}/register");
+    let mut body = json!({});
+    if let Some(machine) = machine {
+        body["machineId"] = json!(machine);
+    }
+    let reviewed = crate::send(
+        &client,
+        invocation,
+        reqwest::Method::POST,
+        &format!("{base}/review"),
+        &[],
+        Some(&body),
+        uuid::Uuid::now_v7().to_string(),
+    )?;
+    let token = reviewed["data"]["reviewToken"]
+        .as_str()
+        .ok_or_else(|| CliError {
+            message: "the review did not answer with a token".to_owned(),
+        })?;
+    body["reviewToken"] = json!(token);
+    let registered = crate::send(
+        &client,
+        invocation,
+        reqwest::Method::POST,
+        &base,
+        &[],
+        Some(&body),
+        uuid::Uuid::now_v7().to_string(),
+    )?;
+    Ok(registered["data"].clone())
+}
+
 /// Reviews, creates and (unless `--no-wait`) waits. Answers the payload and
 /// the exit code.
 pub(crate) fn run_create(

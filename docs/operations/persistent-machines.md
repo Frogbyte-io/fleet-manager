@@ -111,6 +111,18 @@ fleetctl proxmox destroy <account> <node> <vmid> --confirm-persistent --wait
 
 Then delete the machine record with `fleetctl machines` if it should go too.
 
+## List and register
+
+`fleetctl machines persistent list` (API `GET /machines/persistent`, and the Persistent machines section of the console Fleet page) shows every guest Fleet keeps: created by Fleet or registered.
+
+An existing VM becomes persistent without being recreated:
+
+```
+fleetctl machines persistent register --account <a> --vmid <n> [--machine <machine-id>]
+```
+
+The command reviews, then registers. The guest is looked at live: it must be a QEMU VM and not a template, a promoted image artifact, a Lab clone (`fm-lab-` name) or a Lab pool member, and must not be marked already. `--machine` names an existing Fleet machine for the marker (a guest link is still `machines link-guest`). Registration writes only the marker (audited as `persistent_guest_registered`): protection, tags and the SSH key are unchanged; set them with `proxmox config` and rotate credentials separately. The console's Create persistent machine dialog is the same review and create as `fleetctl machines create`.
+
 ## Not in this release
 
-Creating from an ISO with an unattended install, LXC, cluster placement and HA, the console dialog, and listing persistent guests are separate work.
+Creating from an ISO with an unattended install (#542, next), LXC, cluster placement and HA.

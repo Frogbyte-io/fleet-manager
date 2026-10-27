@@ -220,6 +220,102 @@ impl fleet_application::persistent::AbandonGuard for ProxmoxAbandonGuard {
     }
 }
 
+/// The live checks of registering an existing VM as persistent: it must
+/// exist as a QEMU VM that is not a template, a promoted image artifact, a
+/// Lab clone or a Lab pool member.
+#[derive(Debug)]
+pub struct ProxmoxRegisterGuard {
+    pve: Pve,
+    artifacts: Arc<dyn ImageArtifactPort>,
+    pool_members: Option<Arc<dyn PoolMemberLookup>>,
+}
+
+impl ProxmoxRegisterGuard {
+    /// Composes the guard.
+    #[must_use]
+    pub fn new(
+        accounts: Arc<dyn ProxmoxAccountPort>,
+        credentials: Arc<dyn ProxmoxCredentialStore>,
+        client: ProxmoxClient,
+        artifacts: Arc<dyn ImageArtifactPort>,
+    ) -> Self {
+        Self {
+            pve: Pve {
+                accounts,
+                credentials,
+                client,
+            },
+            artifacts,
+            pool_members: None,
+        }
+    }
+
+    /// Refuses guests that are Lab pool members.
+    #[must_use]
+    pub fn with_pool_members(mut self, lookup: Arc<dyn PoolMemberLookup>) -> Self {
+        self.pool_members = Some(lookup);
+        self
+    }
+}
+
+#[async_trait]
+impl fleet_application::persistent::RegisterGuard for ProxmoxRegisterGuard {
+    async fn inspect(
+        &self,
+        account_id: &str,
+        vmid: u32,
+    ) -> Result<fleet_application::persistent::GuestCheck, String> {
+        use fleet_application::persistent::{GuestCheck, LiveGuest};
+        let request = self.pve.bound(account_id).await?;
+        let resources = self
+            .pve
+            .client
+            .list_guest_resources(request)
+            .await
+            .map_err(|error| format!("the resource listing failed: {error}"))?;
+        let Some(resource) = resources.iter().find(|resource| {
+            resource.vmid == Some(vmid)
+                && matches!(resource.kind.as_str(), "qemu" | "qemu-template" | "lxc")
+        }) else {
+            return Ok(GuestCheck::Refused(format!(
+                "no guest with VMID {vmid} exists on this account"
+            )));
+        };
+        let refuse = |reason: String| Ok(GuestCheck::Refused(reason));
+        if resource.kind == "lxc" {
+            return refuse("only QEMU VMs can be registered as persistent".to_owned());
+        }
+        if resource.kind == "qemu-template" {
+            return refuse("a template is never a persistent machine".to_owned());
+        }
+        let promoted = self
+            .artifacts
+            .promoted_template_vmids()
+            .await
+            .map_err(|detail| format!("the image artifacts are unreadable: {detail}"))?;
+        if promoted.contains(&vmid) {
+            return refuse("a promoted image artifact is never a persistent machine".to_owned());
+        }
+        let name = resource.name.clone().unwrap_or_default();
+        if name.is_empty() {
+            return refuse("the guest has no name".to_owned());
+        }
+        if let Some(pools) = &self.pool_members
+            && let Some(pool) = pools
+                .pool_of(account_id, vmid)
+                .await
+                .map_err(|_| "the Lab pool membership could not be read".to_owned())?
+        {
+            return refuse(format!("the guest is a member of Lab pool {pool}"));
+        }
+        let node = resource
+            .node
+            .clone()
+            .ok_or_else(|| "the guest has no current node".to_owned())?;
+        Ok(GuestCheck::Eligible(LiveGuest { name, node }))
+    }
+}
+
 /// The ports and clients both executors share.
 #[derive(Debug, Clone)]
 struct Pve {

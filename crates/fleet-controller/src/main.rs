@@ -349,6 +349,32 @@ fn run_serve(mut config: fleet_config::ControllerConfig) -> ExitCode {
                     .with_keys(keys.clone())
                     .with_product_keys(product_keys.clone())
                     .with_markers(persistent_guests.clone())
+                    .with_machines(std::sync::Arc::new(
+                        fleet_storage_sqlite::MachineRepository::new(store.pool().clone()),
+                    ))
+                    .with_register_guard(std::sync::Arc::new(
+                        fleet_controller::persistent_machines::ProxmoxRegisterGuard::new(
+                            std::sync::Arc::new(fleet_storage_sqlite::ProxmoxAccountRepository::new(
+                                store.pool().clone(),
+                            )),
+                            std::sync::Arc::new(
+                                fleet_controller::proxmox_store::SecretBackedProxmoxCredentials::new(
+                                    secrets.clone(),
+                                ),
+                            ),
+                            fleet_provider_proxmox::ProxmoxClient::new(std::sync::Arc::new(
+                                fleet_provider_proxmox::ReqwestPveTransport::new(),
+                            )),
+                            std::sync::Arc::new(fleet_storage_sqlite::RecipeRepository::new(
+                                store.pool().clone(),
+                            )),
+                        )
+                        .with_pool_members(std::sync::Arc::new(
+                            fleet_application::operation::PoolMembership(std::sync::Arc::new(
+                                fleet_storage_sqlite::LabPoolRepository::new(store.pool().clone()),
+                            )),
+                        )),
+                    ))
                     .with_abandon_guard(std::sync::Arc::new(
                         fleet_controller::persistent_machines::ProxmoxAbandonGuard::new(
                             std::sync::Arc::new(fleet_storage_sqlite::OperationRepository::new(

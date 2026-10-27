@@ -103,6 +103,18 @@ pub enum MachineAccessAction {
         /// The VMID.
         vmid: u32,
     },
+    /// `machines persistent list`: the persistent guests (#542).
+    PersistentList,
+    /// `machines persistent register --account <id> --vmid <n>
+    /// [--machine <id>]`: keep an existing VM as persistent (#542).
+    PersistentRegister {
+        /// The Proxmox account.
+        account: String,
+        /// The VMID.
+        vmid: u32,
+        /// An existing machine to link to the marker.
+        machine: Option<String>,
+    },
     /// `machines endpoint-auth get <machine> <endpoint>`.
     EndpointAuthGet {
         /// The machine.
@@ -214,6 +226,7 @@ pub(crate) fn parse(verb: &str, rest: &[&str], output: &mut Output) -> Result<Co
             _ => return Err(CliError { message: usage() }),
         },
         "abandon" => crate::persistent::parse_abandon(rest, output)?,
+        "persistent" => crate::persistent::parse_persistent(rest, output)?,
         "create" => {
             MachineAccessAction::Create(Box::new(crate::persistent::parse_create(rest, output)?))
         }
@@ -572,6 +585,18 @@ pub(crate) fn request(action: &MachineAccessAction) -> Result<RequestShape, CliE
             // The key is read from stdin when the command runs, never here.
             None,
         ),
+        MachineAccessAction::PersistentList => (
+            reqwest::Method::GET,
+            "/api/v1/machines/persistent".to_owned(),
+            Vec::new(),
+            None,
+        ),
+        MachineAccessAction::PersistentRegister { account, vmid, .. } => (
+            reqwest::Method::POST,
+            format!("/api/v1/machines/persistent/{account}/{vmid}/register/review"),
+            Vec::new(),
+            None,
+        ),
         MachineAccessAction::Abandon { account, vmid } => (
             reqwest::Method::POST,
             format!("/api/v1/machines/persistent/{account}/{vmid}/abandon/review"),
@@ -771,6 +796,23 @@ pub(crate) fn run(
                 correlation_id,
             )?;
             Ok((rendered(&body["data"]), 0))
+        }
+        MachineAccessAction::PersistentList => {
+            let payload = crate::persistent::run_persistent_list(invocation)?;
+            Ok((rendered(&payload), 0))
+        }
+        MachineAccessAction::PersistentRegister {
+            account,
+            vmid,
+            machine,
+        } => {
+            let payload = crate::persistent::run_persistent_register(
+                invocation,
+                account,
+                *vmid,
+                machine.as_deref(),
+            )?;
+            Ok((rendered(&payload), 0))
         }
         MachineAccessAction::Abandon { account, vmid } => {
             let payload = crate::persistent::run_abandon(invocation, account, *vmid)?;

@@ -50,6 +50,33 @@ impl fleet_application::lab::ImagePinValidator for NoPins {
     }
 }
 
+#[derive(Debug)]
+struct FakeCluster;
+
+#[async_trait::async_trait]
+impl fleet_application::persistent::RegisterGuard for FakeCluster {
+    async fn inspect(
+        &self,
+        _account_id: &str,
+        vmid: u32,
+    ) -> Result<fleet_application::persistent::GuestCheck, String> {
+        use fleet_application::persistent::{GuestCheck, LiveGuest};
+        let live = |name: &str| {
+            GuestCheck::Eligible(LiveGuest {
+                name: name.to_owned(),
+                node: "pve".to_owned(),
+            })
+        };
+        Ok(match vmid {
+            8000 => live("win-gh-runner"),
+            8002 => live("fm-lab-abc"),
+            8003 => live("made"),
+            8001 => GuestCheck::Refused("a template is never a persistent machine".to_owned()),
+            _ => GuestCheck::Refused(format!("no guest with VMID {vmid} exists on this account")),
+        })
+    }
+}
+
 struct Harness {
     _dir: tempfile::TempDir,
     state: Arc<ApiState>,
@@ -96,7 +123,9 @@ impl Harness {
             )
             .with_persistent(Arc::new(
                 PersistentMachines::new(Arc::new(NoPins), Arc::new(AuditSink::new(pool.clone())))
-                    .with_markers(markers),
+                    .with_markers(markers)
+                    .with_machines(Arc::new(MachineRepository::new(pool.clone())))
+                    .with_register_guard(Arc::new(FakeCluster)),
             )),
         );
         let labs = Arc::new(LabRepository::new(pool.clone()));
@@ -122,6 +151,27 @@ impl Harness {
             ..ApiState::for_document()
         });
         Self { _dir: dir, state }
+    }
+
+    async fn get(&self, path: &str) -> (StatusCode, Value) {
+        let request = Request::builder()
+            .method("GET")
+            .uri(format!("{API_BASE_PATH}{path}"))
+            .header(
+                CORRELATION_ID_HEADER,
+                "01900000-0000-7000-8000-000000000000",
+            )
+            .body(Body::empty())
+            .unwrap();
+        let app = router(self.state.clone()).layer(axum::Extension(fleet_api::ActingPrincipal {
+            id: fleet_auth::LAN_PRINCIPAL_ID.to_owned(),
+        }));
+        let response = app.oneshot(request).await.unwrap();
+        let status = response.status();
+        let bytes = axum::body::to_bytes(response.into_body(), 1 << 20)
+            .await
+            .unwrap();
+        (status, serde_json::from_slice(&bytes).unwrap_or_default())
     }
 
     async fn call(&self, path: &str, body: Value) -> (StatusCode, Value) {
@@ -226,4 +276,71 @@ async fn an_abandon_is_reviewed_and_refused_for_a_created_machine() {
         )
         .await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn persistent_guests_are_listed() {
+    let harness = Harness::new(Arc::new(fleet_auth::LanAllowAllAuthorizer)).await;
+    let (status, body) = harness.get("/machines/persistent").await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["data"].as_array().unwrap().len(), 2);
+    let denied = Harness::new(Arc::new(Deny(Permission::MachineRead))).await;
+    let (status, _) = denied.get("/machines/persistent").await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+}
+
+#[tokio::test]
+async fn an_existing_vm_is_registered_after_a_review_and_is_audited() {
+    let harness = Harness::new(Arc::new(fleet_auth::LanAllowAllAuthorizer)).await;
+    let base = "/machines/persistent/acct/8000/register";
+    let (status, body) = harness.call(&format!("{base}/review"), json!({})).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["data"]["name"], "win-gh-runner");
+    let token = body["data"]["reviewToken"].as_str().unwrap().to_owned();
+    // A token reviewed without the machine does not register with one.
+    let (status, _) = harness
+        .call(base, json!({ "reviewToken": token, "machineId": "m-1" }))
+        .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    let (status, body) = harness.call(base, json!({ "reviewToken": token })).await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    assert_eq!(body["data"]["cloned"], true);
+    assert_eq!(body["data"]["state"], "ready");
+    assert_eq!(body["data"]["imageVersionId"], "registered");
+    // Already marked now.
+    let (status, _) = harness.call(&format!("{base}/review"), json!({})).await;
+    assert_eq!(status, StatusCode::CONFLICT);
+    let (_, listed) = harness.get("/machines/persistent").await;
+    assert_eq!(listed["data"].as_array().unwrap().len(), 3);
+}
+
+#[tokio::test]
+async fn a_template_a_lab_clone_a_marked_name_or_an_unknown_machine_is_refused() {
+    let harness = Harness::new(Arc::new(fleet_auth::LanAllowAllAuthorizer)).await;
+    for (vmid, expect) in [
+        (8001, StatusCode::BAD_REQUEST),
+        (8002, StatusCode::BAD_REQUEST),
+        (8003, StatusCode::CONFLICT),
+        (8999, StatusCode::BAD_REQUEST),
+    ] {
+        let (status, body) = harness
+            .call(
+                &format!("/machines/persistent/acct/{vmid}/register/review"),
+                json!({}),
+            )
+            .await;
+        assert_eq!(status, expect, "{vmid}: {body}");
+    }
+    let (status, _) = harness
+        .call(
+            "/machines/persistent/acct/8000/register/review",
+            json!({ "machineId": "no-such-machine" }),
+        )
+        .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    let denied = Harness::new(Arc::new(Deny(Permission::MachineProvision))).await;
+    let (status, _) = denied
+        .call("/machines/persistent/acct/8000/register/review", json!({}))
+        .await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
 }

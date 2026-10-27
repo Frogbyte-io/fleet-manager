@@ -23,4 +23,8 @@ Fleet makes guests only as Lab leases (cloned, then destroyed or reverted) and a
 
 - The catalog gains two entries; delegated Lab credentials are refused both.
 - The persistent controller must own the data: its database and master key are the machine's record, so temporary controllers are unsuitable (see `docs/operations/persistent-machines.md`).
-- Machines created before the marker existed are not protected from Lab by it; registering them is a later issue.
+- Machines created before the marker existed are not protected from Lab by it until they are registered (amendment 8 below).
+
+## Amendment (#542)
+
+8. **Registering an existing VM.** A VM that exists before Fleet keeps it (such as `win-gh-runner`) becomes persistent through a reviewed, audited registration, not a clone: `POST /machines/persistent/{account}/{vmid}/register/review` and `/register` (dedicated routes; the review token binds account, VMID and the optional machine id; `machines.provision`). A live guard requires a QEMU VM that is not a template, promoted image artifact, Lab clone (`fm-lab-` name) or Lab pool member, with no marker of its own VMID or name; a named machine must exist and not belong to another marker. The marker is written `cloned = true`, state `ready`, source `registered`, so Lab honours it at once. Nothing on the guest changes; protection, tags and credentials stay the operator's to change with `proxmox.guest.config` and key rotation. Listing is `GET /machines/persistent` (`machine.read`).

@@ -5273,6 +5273,51 @@ export interface PageSkillsSnapshotDto {
 }
 
 /**
+ * One persistent guest marker.
+ */
+export interface PersistentGuestDto {
+  /** The Proxmox account. */
+  accountId: string;
+  /** Whether the clone completed (always true for a registered VM). */
+  cloned: boolean;
+  /** Creation time (epoch milliseconds). */
+  createdAt: number;
+  /**
+     * The image version it was cloned from, or `registered` for a VM that
+     * existed before Fleet kept it.
+     */
+  imageVersionId: string;
+  /**
+     * The Fleet machine it is linked to, once there is one.
+     * @nullable
+     */
+  machineId?: string | null;
+  /** The VM name. */
+  name: string;
+  /** The node the guest was created or found on. */
+  node: string;
+  /**
+     * The operation that created it, when Fleet created it.
+     * @nullable
+     */
+  operationId?: string | null;
+  /** `creating` or `ready`. */
+  state: string;
+  /**
+     * The step the creation last completed or failed at.
+     * @nullable
+     */
+  step?: string | null;
+  /** Last update (epoch milliseconds). */
+  updatedAt: number;
+  /**
+     * The guest's VMID.
+     * @minimum 0
+     */
+  vmid: number;
+}
+
+/**
  * One planned action.
  */
 export interface PlanActionDto {
@@ -5930,6 +5975,46 @@ export interface RecordCheckoutsRequest {
   checkouts: DiscoveredCheckoutDto[];
   /** The machine the checkouts were observed on. */
   machineId: string;
+}
+
+/**
+ * The body of the register review and register calls.
+ */
+export interface RegisterGuestRequest {
+  /**
+     * An existing Fleet machine to link to the guest's marker.
+     * @nullable
+     */
+  machineId?: string | null;
+  /**
+     * The token from the review call (required by the register call only).
+     * @nullable
+     */
+  reviewToken?: string | null;
+}
+
+/**
+ * What registering an existing VM will record, and the token that binds it.
+ */
+export interface RegisterReviewDto {
+  /** The Proxmox account. */
+  accountId: string;
+  /**
+     * The machine that will be linked, when one was named.
+     * @nullable
+     */
+  machineId?: string | null;
+  /** The guest's live name. */
+  name: string;
+  /** The guest's live node. */
+  node: string;
+  /** The token the register call must present. */
+  reviewToken: string;
+  /**
+     * The guest's VMID.
+     * @minimum 0
+     */
+  vmid: number;
 }
 
 /**
@@ -7827,6 +7912,62 @@ export interface ResourceOperationDto {
 }
 
 /**
+ * One persistent guest marker.
+ */
+export type ResourcePersistentGuestDtoData = {
+  /** The Proxmox account. */
+  accountId: string;
+  /** Whether the clone completed (always true for a registered VM). */
+  cloned: boolean;
+  /** Creation time (epoch milliseconds). */
+  createdAt: number;
+  /**
+     * The image version it was cloned from, or `registered` for a VM that
+     * existed before Fleet kept it.
+     */
+  imageVersionId: string;
+  /**
+     * The Fleet machine it is linked to, once there is one.
+     * @nullable
+     */
+  machineId?: string | null;
+  /** The VM name. */
+  name: string;
+  /** The node the guest was created or found on. */
+  node: string;
+  /**
+     * The operation that created it, when Fleet created it.
+     * @nullable
+     */
+  operationId?: string | null;
+  /** `creating` or `ready`. */
+  state: string;
+  /**
+     * The step the creation last completed or failed at.
+     * @nullable
+     */
+  step?: string | null;
+  /** Last update (epoch milliseconds). */
+  updatedAt: number;
+  /**
+     * The guest's VMID.
+     * @minimum 0
+     */
+  vmid: number;
+};
+
+/**
+ * A single resource.
+ *
+ * The payload is nested under `data` so that later top-level fields are an
+ * additive change rather than a breaking one.
+ */
+export interface ResourcePersistentGuestDto {
+  /** One persistent guest marker. */
+  data: ResourcePersistentGuestDtoData;
+}
+
+/**
  * A controller-computed plan.
  */
 export type ResourcePlanDtoData = {
@@ -8275,6 +8416,41 @@ export type ResourceRecipeVersionDtoData = {
 export interface ResourceRecipeVersionDto {
   /** One published recipe version. */
   data: ResourceRecipeVersionDtoData;
+}
+
+/**
+ * What registering an existing VM will record, and the token that binds it.
+ */
+export type ResourceRegisterReviewDtoData = {
+  /** The Proxmox account. */
+  accountId: string;
+  /**
+     * The machine that will be linked, when one was named.
+     * @nullable
+     */
+  machineId?: string | null;
+  /** The guest's live name. */
+  name: string;
+  /** The guest's live node. */
+  node: string;
+  /** The token the register call must present. */
+  reviewToken: string;
+  /**
+     * The guest's VMID.
+     * @minimum 0
+     */
+  vmid: number;
+};
+
+/**
+ * A single resource.
+ *
+ * The payload is nested under `data` so that later top-level fields are an
+ * additive change rather than a breaking one.
+ */
+export interface ResourceRegisterReviewDto {
+  /** What registering an existing VM will record, and the token that binds it. */
+  data: ResourceRegisterReviewDtoData;
 }
 
 /**
@@ -8910,6 +9086,61 @@ export type ResourceTerminalSessionDtoData = {
 export interface ResourceTerminalSessionDto {
   /** A created terminal session. The token is shown here once. */
   data: ResourceTerminalSessionDtoData;
+}
+
+/**
+ * One persistent guest marker.
+ */
+export type ResourceVecPersistentGuestDtoDataItem = {
+  /** The Proxmox account. */
+  accountId: string;
+  /** Whether the clone completed (always true for a registered VM). */
+  cloned: boolean;
+  /** Creation time (epoch milliseconds). */
+  createdAt: number;
+  /**
+     * The image version it was cloned from, or `registered` for a VM that
+     * existed before Fleet kept it.
+     */
+  imageVersionId: string;
+  /**
+     * The Fleet machine it is linked to, once there is one.
+     * @nullable
+     */
+  machineId?: string | null;
+  /** The VM name. */
+  name: string;
+  /** The node the guest was created or found on. */
+  node: string;
+  /**
+     * The operation that created it, when Fleet created it.
+     * @nullable
+     */
+  operationId?: string | null;
+  /** `creating` or `ready`. */
+  state: string;
+  /**
+     * The step the creation last completed or failed at.
+     * @nullable
+     */
+  step?: string | null;
+  /** Last update (epoch milliseconds). */
+  updatedAt: number;
+  /**
+     * The guest's VMID.
+     * @minimum 0
+     */
+  vmid: number;
+};
+
+/**
+ * A single resource.
+ *
+ * The payload is nested under `data` so that later top-level fields are an
+ * additive change rather than a breaking one.
+ */
+export interface ResourceVecPersistentGuestDto {
+  data: ResourceVecPersistentGuestDtoDataItem[];
 }
 
 /**
@@ -16694,6 +16925,66 @@ export const testOnboardingDraft = async (draftId: string, options?: RequestInit
 
 
 
+export type listPersistentGuestsResponse200 = {
+  data: ResourceVecPersistentGuestDto
+  status: 200
+}
+
+export type listPersistentGuestsResponse403 = {
+  data: ApiError
+  status: 403
+}
+
+export type listPersistentGuestsResponse503 = {
+  data: ApiError
+  status: 503
+}
+
+export type listPersistentGuestsResponseSuccess = (listPersistentGuestsResponse200) & {
+  headers: Headers;
+};
+export type listPersistentGuestsResponseError = (listPersistentGuestsResponse403 | listPersistentGuestsResponse503) & {
+  headers: Headers;
+};
+
+export type listPersistentGuestsResponse = (listPersistentGuestsResponseSuccess | listPersistentGuestsResponseError)
+
+export const getListPersistentGuestsUrl = () => {
+
+
+
+
+  return `/api/v1/machines/persistent`
+}
+
+/**
+ * # Errors
+ *
+ * Returns the public error envelope on refusal or when the marker store
+ * cannot be read.
+ * @summary Lists the persistent guests Fleet keeps (created by Fleet or registered),
+newest first.
+ */
+export const listPersistentGuests = async ( options?: RequestInit): Promise<listPersistentGuestsResponse> => {
+
+  const res = await fetch(getListPersistentGuestsUrl(),
+  {
+    ...options,
+    method: 'GET'
+
+
+  }
+)
+
+
+  const body = [204, 205, 304].includes(res.status) ? null : await res.text();
+
+  const data: listPersistentGuestsResponse['data'] = body ? JSON.parse(body) : {}
+  return { data, status: res.status, headers: res.headers } as listPersistentGuestsResponse
+}
+
+
+
 export type abandonPersistentMarkerResponse204 = {
   data: void
   status: 204
@@ -16847,6 +17138,166 @@ export const reviewAbandonPersistentMarker = async (accountId: string,
 
   const data: reviewAbandonPersistentMarkerResponse['data'] = body ? JSON.parse(body) : {}
   return { data, status: res.status, headers: res.headers } as reviewAbandonPersistentMarkerResponse
+}
+
+
+
+export type registerPersistentGuestResponse201 = {
+  data: ResourcePersistentGuestDto
+  status: 201
+}
+
+export type registerPersistentGuestResponse400 = {
+  data: ApiError
+  status: 400
+}
+
+export type registerPersistentGuestResponse403 = {
+  data: ApiError
+  status: 403
+}
+
+export type registerPersistentGuestResponse409 = {
+  data: ApiError
+  status: 409
+}
+
+export type registerPersistentGuestResponse503 = {
+  data: ApiError
+  status: 503
+}
+
+export type registerPersistentGuestResponseSuccess = (registerPersistentGuestResponse201) & {
+  headers: Headers;
+};
+export type registerPersistentGuestResponseError = (registerPersistentGuestResponse400 | registerPersistentGuestResponse403 | registerPersistentGuestResponse409 | registerPersistentGuestResponse503) & {
+  headers: Headers;
+};
+
+export type registerPersistentGuestResponse = (registerPersistentGuestResponseSuccess | registerPersistentGuestResponseError)
+
+export const getRegisterPersistentGuestUrl = (accountId: string,
+    vmid: number,) => {
+
+
+
+
+  return `/api/v1/machines/persistent/${accountId}/${vmid}/register`
+}
+
+/**
+ * # Errors
+ *
+ * Returns the public error envelope on refusal, a review token that does
+ * not match, or a guest that is no longer eligible.
+ * @summary Registers a reviewed existing VM as persistent: a marker is written (clone
+complete, state ready) so Lab never selects the guest, optionally naming
+its Fleet machine. Nothing on the guest changes. Audited.
+ */
+export const registerPersistentGuest = async (accountId: string,
+    vmid: number,
+    registerGuestRequest: RegisterGuestRequest, options?: RequestInit): Promise<registerPersistentGuestResponse> => {
+
+    const getHeaders = (h?: NonNullable<RequestInit['headers']>): Record<string, string | readonly string[]> => {
+    if (!h) return {};
+    if (h instanceof Headers) return Object.fromEntries(h.entries());
+    if (Array.isArray(h)) return Object.fromEntries(h);
+    return h;
+  };
+const res = await fetch(getRegisterPersistentGuestUrl(accountId,vmid),
+  {
+    ...options,
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...getHeaders(options?.headers) },
+    body: JSON.stringify(registerGuestRequest)
+  }
+)
+
+
+  const body = [204, 205, 304].includes(res.status) ? null : await res.text();
+
+  const data: registerPersistentGuestResponse['data'] = body ? JSON.parse(body) : {}
+  return { data, status: res.status, headers: res.headers } as registerPersistentGuestResponse
+}
+
+
+
+export type reviewRegisterPersistentGuestResponse200 = {
+  data: ResourceRegisterReviewDto
+  status: 200
+}
+
+export type reviewRegisterPersistentGuestResponse400 = {
+  data: ApiError
+  status: 400
+}
+
+export type reviewRegisterPersistentGuestResponse403 = {
+  data: ApiError
+  status: 403
+}
+
+export type reviewRegisterPersistentGuestResponse409 = {
+  data: ApiError
+  status: 409
+}
+
+export type reviewRegisterPersistentGuestResponse503 = {
+  data: ApiError
+  status: 503
+}
+
+export type reviewRegisterPersistentGuestResponseSuccess = (reviewRegisterPersistentGuestResponse200) & {
+  headers: Headers;
+};
+export type reviewRegisterPersistentGuestResponseError = (reviewRegisterPersistentGuestResponse400 | reviewRegisterPersistentGuestResponse403 | reviewRegisterPersistentGuestResponse409 | reviewRegisterPersistentGuestResponse503) & {
+  headers: Headers;
+};
+
+export type reviewRegisterPersistentGuestResponse = (reviewRegisterPersistentGuestResponseSuccess | reviewRegisterPersistentGuestResponseError)
+
+export const getReviewRegisterPersistentGuestUrl = (accountId: string,
+    vmid: number,) => {
+
+
+
+
+  return `/api/v1/machines/persistent/${accountId}/${vmid}/register/review`
+}
+
+/**
+ * # Errors
+ *
+ * Returns the public error envelope on refusal or an ineligible guest.
+ * @summary Reviews registering an existing VM as persistent: the guest is looked at
+live (it must exist as a QEMU VM and not be a template, a promoted image
+artifact, a Lab clone or a Lab pool member, and must not be marked
+already) and the answer names what will be recorded. Nothing is written.
+ */
+export const reviewRegisterPersistentGuest = async (accountId: string,
+    vmid: number,
+    registerGuestRequest: RegisterGuestRequest, options?: RequestInit): Promise<reviewRegisterPersistentGuestResponse> => {
+
+    const getHeaders = (h?: NonNullable<RequestInit['headers']>): Record<string, string | readonly string[]> => {
+    if (!h) return {};
+    if (h instanceof Headers) return Object.fromEntries(h.entries());
+    if (Array.isArray(h)) return Object.fromEntries(h);
+    return h;
+  };
+const res = await fetch(getReviewRegisterPersistentGuestUrl(accountId,vmid),
+  {
+    ...options,
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...getHeaders(options?.headers) },
+    body: JSON.stringify(registerGuestRequest)
+  }
+)
+
+
+  const body = [204, 205, 304].includes(res.status) ? null : await res.text();
+
+  const data: reviewRegisterPersistentGuestResponse['data'] = body ? JSON.parse(body) : {}
+  return { data, status: res.status, headers: res.headers } as reviewRegisterPersistentGuestResponse
 }
 
 
