@@ -242,19 +242,37 @@ impl SshProvider {
             });
         }
 
-        // Fingerprint the keys through ssh-keygen so the fingerprint format is
-        // the one operators see everywhere else. It prints one summary per
-        // input line, in order.
-        let key_file = self.work_dir.join("probe.tmp");
-        std::fs::write(
-            &key_file,
-            lines.join(
-                "
-",
-            ),
-        )
-        .map_err(|error| SshProviderError::Setup {
-            detail: format!("cannot stage the probe: {error}"),
+        let fingerprints = self.fingerprint_lines(&lines)?;
+        let mut observations = Vec::with_capacity(lines.len());
+        for (line, (key_type, fingerprint)) in lines.iter().zip(fingerprints) {
+            observations.push(HostKeyObservation {
+                key_type,
+                fingerprint,
+                raw_line: line.clone(),
+            });
+        }
+        observations.sort_by_key(|observation| key_type_rank(&observation.key_type));
+        Ok(observations)
+    }
+
+    /// Fingerprints `known_hosts` lines through `ssh-keygen`, so the format is
+    /// the one operators see everywhere else. Fails unless `ssh-keygen`
+    /// summarizes exactly one key per line: a silent mismatch would pair a
+    /// fingerprint with the wrong key line.
+    fn fingerprint_lines(
+        &self,
+        lines: &[String],
+    ) -> Result<Vec<(String, String)>, SshProviderError> {
+        static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let key_file = self.work_dir.join(format!(
+            "probe.{}.{}.tmp",
+            std::process::id(),
+            NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        ));
+        std::fs::write(&key_file, format!("{}\n", lines.join("\n"))).map_err(|error| {
+            SshProviderError::Setup {
+                detail: format!("cannot stage the probe: {error}"),
+            }
         })?;
         let fingerprinted = Command::new("ssh-keygen")
             .arg("-lf")
@@ -272,20 +290,25 @@ impl SshProvider {
             });
         }
         let summary = String::from_utf8_lossy(&fingerprinted.stdout);
-        let mut observations = Vec::new();
-        for (line, summary_line) in lines.iter().zip(summary.lines()) {
-            let parsed =
-                parse_keygen_summary(summary_line).ok_or_else(|| SshProviderError::NoHostKey {
+        let parsed: Vec<(String, String)> = summary
+            .lines()
+            .filter(|line| !line.trim().is_empty())
+            .map(|line| {
+                parse_keygen_summary(line).ok_or_else(|| SshProviderError::NoHostKey {
                     detail: "ssh-keygen produced an unreadable summary".to_owned(),
-                })?;
-            observations.push(HostKeyObservation {
-                key_type: parsed.0,
-                fingerprint: parsed.1,
-                raw_line: line.clone(),
+                })
+            })
+            .collect::<Result<_, _>>()?;
+        if parsed.len() != lines.len() {
+            return Err(SshProviderError::NoHostKey {
+                detail: format!(
+                    "ssh-keygen summarized {} keys for {} key lines",
+                    parsed.len(),
+                    lines.len()
+                ),
             });
         }
-        observations.sort_by_key(|observation| key_type_rank(&observation.key_type));
-        Ok(observations)
+        Ok(parsed)
     }
 
     /// Decides over every key the host offers: when any observed key matches
@@ -303,14 +326,8 @@ impl SshProvider {
         expected: Option<&str>,
         observations: &[HostKeyObservation],
     ) -> TrustDecision {
-        let matched = expected.and_then(|expected| {
-            observations
-                .iter()
-                .find(|observation| observation.fingerprint == expected)
-        });
-        let chosen = matched
-            .or_else(|| observations.first())
-            .expect("a probe yields at least one key");
+        let chosen =
+            choose_observation(&[expected], observations).expect("a probe yields at least one key");
         self.decide(expected, chosen)
     }
 
@@ -346,6 +363,15 @@ impl SshProvider {
     /// Fails when the file cannot be written.
     pub fn pin(&self, observation: &HostKeyObservation) -> Result<(), SshProviderError> {
         use std::io::Write as _;
+        // What is stored must be the key whose fingerprint was confirmed.
+        let actual = self.fingerprint_lines(std::slice::from_ref(&observation.raw_line))?;
+        if actual.first().map(|(_, fingerprint)| fingerprint.as_str())
+            != Some(observation.fingerprint.as_str())
+        {
+            return Err(SshProviderError::Setup {
+                detail: "the key line does not match the confirmed fingerprint".to_owned(),
+            });
+        }
         let mut file = std::fs::OpenOptions::new()
             .create(true)
             .append(true)
@@ -424,7 +450,7 @@ impl SshProvider {
             }
         }
         add_ssh_destination(&mut command, endpoint);
-        command.arg("exit 0");
+        add_connect_test_command(&mut command);
 
         let output = command.output().map_err(|error| SshProviderError::Tool {
             tool: "ssh",
@@ -508,6 +534,28 @@ pub(crate) fn add_ssh_destination(command: &mut Command, endpoint: &SshConnectio
         .arg(format!("{}@{}", endpoint.user, endpoint.host));
 }
 
+/// Picks the observation whose fingerprint matches the first wanted
+/// fingerprint that any observation carries, else the most preferred one
+/// (so a mismatch is reported against the preferred key). `None` only for an
+/// empty slice. Callers that compare a probe against a stored or pinned
+/// fingerprint use this, so a host pinned on RSA still matches when ED25519
+/// is preferred.
+#[must_use]
+pub fn choose_observation<'a>(
+    wanted: &[Option<&str>],
+    observations: &'a [HostKeyObservation],
+) -> Option<&'a HostKeyObservation> {
+    wanted
+        .iter()
+        .flatten()
+        .find_map(|wanted| {
+            observations
+                .iter()
+                .find(|observation| observation.fingerprint == *wanted)
+        })
+        .or_else(|| observations.first())
+}
+
 /// The fixed preference between host key types: ED25519, ECDSA, RSA.
 fn key_type_rank(key_type: &str) -> u8 {
     match key_type.to_ascii_uppercase().as_str() {
@@ -516,6 +564,12 @@ fn key_type_rank(key_type: &str) -> u8 {
         "RSA" => 2,
         _ => 3,
     }
+}
+
+/// The remote command of the connection test: `exit 0` is understood by
+/// POSIX shells, PowerShell and cmd alike.
+pub(crate) fn add_connect_test_command(command: &mut Command) {
+    command.arg("exit 0");
 }
 
 pub(crate) fn add_ssh_keyscan_host(command: &mut Command, host: &str) {
@@ -650,10 +704,18 @@ fn scrub_window(text: &str) -> &str {
 #[cfg(test)]
 mod tests {
     use super::{
-        SshAuth, SshConnectionSpec, SshProvider, add_ssh_destination, add_ssh_keyscan_host,
-        redact_failure,
+        SshAuth, SshConnectionSpec, SshProvider, add_connect_test_command, add_ssh_destination,
+        add_ssh_keyscan_host, redact_failure,
     };
     use std::process::Command;
+
+    #[test]
+    fn the_connection_test_runs_exit_zero_last() {
+        let mut command = Command::new("ssh");
+        command.arg("host");
+        add_connect_test_command(&mut command);
+        assert_eq!(command.get_args().last().unwrap(), "exit 0");
+    }
 
     #[test]
     fn failure_detail_redacts_credentials() {

@@ -385,3 +385,23 @@ fn a_host_offering_several_key_types_gives_a_stable_fingerprint() {
         TrustDecision::New { observation } if observation.key_type == "ED25519"
     ));
 }
+
+#[test]
+fn pinning_refuses_a_key_line_that_is_not_the_confirmed_fingerprint() {
+    let sshd = start_sshd_with_host_keys(&["rsa", "ed25519"]);
+    let (_dir, provider) = provider();
+    let all = provider
+        .probe_host_keys(sshd.host, sshd.port, Duration::from_secs(10))
+        .unwrap();
+    let mut forged = all[0].clone();
+    forged.fingerprint = all[1].fingerprint.clone();
+    assert!(provider.pin(&forged).is_err());
+    provider.pin(&all[1]).unwrap();
+
+    // A pin on the less preferred key still selects that key.
+    let chosen =
+        fleet_provider_ssh::choose_observation(&[Some(&all[1].fingerprint)], &all).unwrap();
+    assert_eq!(chosen.key_type, all[1].key_type);
+    let none = fleet_provider_ssh::choose_observation(&[Some("SHA256:other")], &all).unwrap();
+    assert_eq!(none.key_type, all[0].key_type);
+}
