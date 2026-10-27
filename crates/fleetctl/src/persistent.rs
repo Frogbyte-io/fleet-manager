@@ -390,6 +390,220 @@ pub(crate) fn run_abandon(
     )
 }
 
+/// Parses `machines persistent list` and `machines persistent register
+/// --account <id> --vmid <n> [--machine <id>]`.
+pub(crate) fn parse_persistent(
+    rest: &[&str],
+    output: &mut Output,
+) -> Result<crate::machine_access::MachineAccessAction, CliError> {
+    let Some((verb, flags)) = rest.split_first() else {
+        return Err(CliError {
+            message: format!(
+                "machines persistent needs list, register or unregister\n\n{}",
+                usage()
+            ),
+        });
+    };
+    let (mut account, mut vmid, mut machine, mut yes) = (None, None, None, false);
+    let mut iter = flags.iter().copied();
+    while let Some(flag) = iter.next() {
+        let mut value = |name: &str| {
+            iter.next().map(str::to_owned).ok_or_else(|| CliError {
+                message: format!("--{name} requires a value"),
+            })
+        };
+        match (*verb, flag) {
+            (_, "--output") => {
+                *output = match value("output")?.as_str() {
+                    "json" => Output::Json,
+                    _ => Output::Text,
+                };
+            }
+            ("register" | "unregister", "--account") => account = Some(value("account")?),
+            ("register" | "unregister", "--vmid") => vmid = Some(number("vmid", &value("vmid")?)?),
+            ("register", "--machine") => machine = Some(value("machine")?),
+            ("register" | "unregister", "--yes") => yes = true,
+            (_, other) => {
+                return Err(CliError {
+                    message: format!("unknown flag {other:?}; see the usage below\n\n{}", usage()),
+                });
+            }
+        }
+    }
+    match *verb {
+        "list" => Ok(crate::machine_access::MachineAccessAction::PersistentList),
+        "register" => match (account, vmid.and_then(|vmid| u32::try_from(vmid).ok())) {
+            (Some(account), Some(vmid)) => Ok(
+                crate::machine_access::MachineAccessAction::PersistentRegister {
+                    account,
+                    vmid,
+                    machine,
+                    yes,
+                },
+            ),
+            _ => Err(CliError {
+                message: "machines persistent register needs --account and --vmid".to_owned(),
+            }),
+        },
+        "unregister" => match (account, vmid.and_then(|vmid| u32::try_from(vmid).ok())) {
+            (Some(account), Some(vmid)) => Ok(
+                crate::machine_access::MachineAccessAction::PersistentUnregister {
+                    account,
+                    vmid,
+                    yes,
+                },
+            ),
+            _ => Err(CliError {
+                message: "machines persistent unregister needs --account and --vmid".to_owned(),
+            }),
+        },
+        other => Err(CliError {
+            message: format!(
+                "unknown machines persistent command {other:?}\n\n{}",
+                usage()
+            ),
+        }),
+    }
+}
+
+/// Lists the persistent guests.
+pub(crate) fn run_persistent_list(invocation: &crate::Invocation) -> Result<Value, CliError> {
+    let client = crate::http_client()?;
+    let body = crate::send(
+        &client,
+        invocation,
+        reqwest::Method::GET,
+        "/api/v1/machines/persistent",
+        &[],
+        None,
+        uuid::Uuid::now_v7().to_string(),
+    )?;
+    Ok(json!({ "items": body["data"] }))
+}
+
+/// Reviews and runs the registration of an existing VM as persistent.
+pub(crate) fn run_persistent_register(
+    invocation: &crate::Invocation,
+    account: &str,
+    vmid: u32,
+    machine: Option<&str>,
+    yes: bool,
+) -> Result<Value, CliError> {
+    let client = crate::http_client()?;
+    let base = format!("/api/v1/machines/persistent/{account}/{vmid}/register");
+    let mut body = json!({});
+    if let Some(machine) = machine {
+        body["machineId"] = json!(machine);
+    }
+    let reviewed = crate::send(
+        &client,
+        invocation,
+        reqwest::Method::POST,
+        &format!("{base}/review"),
+        &[],
+        Some(&body),
+        uuid::Uuid::now_v7().to_string(),
+    )?;
+    let token = reviewed["data"]["reviewToken"]
+        .as_str()
+        .ok_or_else(|| CliError {
+            message: "the review did not answer with a token".to_owned(),
+        })?;
+    confirm(
+        yes,
+        &format!(
+            "Register {} (VMID {vmid} on node {}) as a persistent machine? Lab will never select it.",
+            reviewed["data"]["name"].as_str().unwrap_or("?"),
+            reviewed["data"]["node"].as_str().unwrap_or("?"),
+        ),
+    )?;
+    body["reviewToken"] = json!(token);
+    let registered = crate::send(
+        &client,
+        invocation,
+        reqwest::Method::POST,
+        &base,
+        &[],
+        Some(&body),
+        uuid::Uuid::now_v7().to_string(),
+    )?;
+    Ok(registered["data"].clone())
+}
+
+/// Asks for confirmation on a terminal. `--yes` skips it; without a terminal
+/// and without `--yes` the answer is no.
+fn confirm(yes: bool, question: &str) -> Result<(), CliError> {
+    use std::io::{BufRead as _, IsTerminal as _, Write as _};
+    if yes {
+        return Ok(());
+    }
+    if !std::io::stdin().is_terminal() {
+        return Err(CliError {
+            message: format!("{question}\nNot confirmed: pass --yes to proceed without a terminal"),
+        });
+    }
+    eprint!("{question} [y/N] ");
+    let _ = std::io::stderr().flush();
+    let mut answer = String::new();
+    std::io::stdin()
+        .lock()
+        .read_line(&mut answer)
+        .map_err(|error| CliError {
+            message: format!("the answer could not be read: {error}"),
+        })?;
+    if matches!(answer.trim().to_ascii_lowercase().as_str(), "y" | "yes") {
+        Ok(())
+    } else {
+        Err(CliError {
+            message: "Not confirmed; nothing was changed".to_owned(),
+        })
+    }
+}
+
+/// Reviews and runs unregistering a registered VM.
+pub(crate) fn run_persistent_unregister(
+    invocation: &crate::Invocation,
+    account: &str,
+    vmid: u32,
+    yes: bool,
+) -> Result<Value, CliError> {
+    let client = crate::http_client()?;
+    let base = format!("/api/v1/machines/persistent/{account}/{vmid}/unregister");
+    let reviewed = crate::send(
+        &client,
+        invocation,
+        reqwest::Method::POST,
+        &format!("{base}/review"),
+        &[],
+        None,
+        uuid::Uuid::now_v7().to_string(),
+    )?;
+    let token = reviewed["data"]["reviewToken"]
+        .as_str()
+        .ok_or_else(|| CliError {
+            message: "the review did not answer with a token".to_owned(),
+        })?;
+    confirm(
+        yes,
+        &format!(
+            "Unregister {} (VMID {vmid})? The VM is left as it is; Lab may select it again.",
+            reviewed["data"]["name"].as_str().unwrap_or("?"),
+        ),
+    )?;
+    crate::send(
+        &client,
+        invocation,
+        reqwest::Method::POST,
+        &base,
+        &[],
+        Some(&json!({ "reviewToken": token })),
+        uuid::Uuid::now_v7().to_string(),
+    )?;
+    Ok(
+        json!({ "unregistered": true, "accountId": account, "vmid": vmid, "name": reviewed["data"]["name"] }),
+    )
+}
+
 /// Reviews, creates and (unless `--no-wait`) waits. Answers the payload and
 /// the exit code.
 pub(crate) fn run_create(

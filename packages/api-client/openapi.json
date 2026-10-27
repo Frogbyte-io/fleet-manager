@@ -6211,6 +6211,48 @@
         }
       }
     },
+    "/api/v1/machines/persistent": {
+      "get": {
+        "tags": [
+          "machines"
+        ],
+        "summary": "Lists the persistent guests Fleet keeps (created by Fleet or registered),\nnewest first.",
+        "description": "# Errors\n\nReturns the public error envelope on refusal or when the marker store\ncannot be read.",
+        "operationId": "listPersistentGuests",
+        "responses": {
+          "200": {
+            "description": "The persistent guests.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Resource_Vec_PersistentGuestDto"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The caller may not read machines.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Persistent machines are not wired.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/machines/persistent/{accountId}/{vmid}/abandon": {
       "post": {
         "tags": [
@@ -6381,6 +6423,375 @@
           },
           "503": {
             "description": "Persistent machine creation is not wired.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/machines/persistent/{accountId}/{vmid}/register": {
+      "post": {
+        "tags": [
+          "machines"
+        ],
+        "summary": "Registers a reviewed existing VM as persistent: a marker is written (clone\ncomplete, state ready) so Lab never selects the guest, optionally naming\nits Fleet machine. Nothing on the guest changes. Audited.",
+        "description": "# Errors\n\nReturns the public error envelope on refusal, a review token that does\nnot match, or a guest that is no longer eligible.",
+        "operationId": "registerPersistentGuest",
+        "parameters": [
+          {
+            "name": "accountId",
+            "in": "path",
+            "description": "The Proxmox account.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "vmid",
+            "in": "path",
+            "description": "The guest's VMID.",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "format": "int32",
+              "minimum": 0
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RegisterGuestRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "description": "The guest is now persistent.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Resource_PersistentGuestDto"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The review token does not match, or the guest is not eligible.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The caller may not provision machines.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The guest or machine is already marked or linked.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Persistent machines are not wired.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/machines/persistent/{accountId}/{vmid}/register/review": {
+      "post": {
+        "tags": [
+          "machines"
+        ],
+        "summary": "Reviews registering an existing VM as persistent: the guest is looked at\nlive (it must exist as a QEMU VM and not be a template, a promoted image\nartifact, a Lab clone or a Lab pool member, and must not be marked\nalready) and the answer names what will be recorded. Nothing is written.",
+        "description": "# Errors\n\nReturns the public error envelope on refusal or an ineligible guest.",
+        "operationId": "reviewRegisterPersistentGuest",
+        "parameters": [
+          {
+            "name": "accountId",
+            "in": "path",
+            "description": "The Proxmox account.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "vmid",
+            "in": "path",
+            "description": "The guest's VMID.",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "format": "int32",
+              "minimum": 0
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RegisterGuestRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "The review record; present its token to the register call.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Resource_RegisterReviewDto"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The guest is not eligible, or the machine is unknown.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The caller may not provision machines.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The guest or machine is already marked or linked.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Persistent machines are not wired.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/machines/persistent/{accountId}/{vmid}/unregister": {
+      "post": {
+        "tags": [
+          "machines"
+        ],
+        "summary": "Unregisters a reviewed registered VM: the marker is removed with an audit\nevent. The guest is left as it is.",
+        "description": "# Errors\n\nReturns the public error envelope on refusal, a review token that does\nnot match, an unknown marker, or a marker Fleet created.",
+        "operationId": "unregisterPersistentGuest",
+        "parameters": [
+          {
+            "name": "accountId",
+            "in": "path",
+            "description": "The Proxmox account.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "vmid",
+            "in": "path",
+            "description": "The guest's VMID.",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "format": "int32",
+              "minimum": 0
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UnregisterGuestRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "204": {
+            "description": "The marker was removed."
+          },
+          "400": {
+            "description": "The review token does not match.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The caller may not provision machines.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "The marker does not exist.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The marker belongs to a guest Fleet created.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Persistent machines are not wired.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/machines/persistent/{accountId}/{vmid}/unregister/review": {
+      "post": {
+        "tags": [
+          "machines"
+        ],
+        "summary": "Reviews unregistering a registered VM: the marker goes, the guest is not\ntouched. A marker of a guest Fleet created is refused (destroy it, or\nabandon an unfinished creation).",
+        "description": "# Errors\n\nReturns the public error envelope on refusal, an unknown marker, or a\nmarker Fleet created.",
+        "operationId": "reviewUnregisterPersistentGuest",
+        "parameters": [
+          {
+            "name": "accountId",
+            "in": "path",
+            "description": "The Proxmox account.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "vmid",
+            "in": "path",
+            "description": "The guest's VMID.",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "format": "int32",
+              "minimum": 0
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The review record; present its token to the unregister call.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Resource_UnregisterReviewDto"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The caller may not provision machines.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "The marker does not exist.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The marker belongs to a guest Fleet created.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Persistent machines are not wired.",
             "content": {
               "application/json": {
                 "schema": {
@@ -21781,6 +22192,84 @@
           }
         }
       },
+      "PersistentGuestDto": {
+        "type": "object",
+        "description": "One persistent guest marker.",
+        "required": [
+          "accountId",
+          "vmid",
+          "name",
+          "node",
+          "imageVersionId",
+          "cloned",
+          "state",
+          "createdAt",
+          "updatedAt"
+        ],
+        "properties": {
+          "accountId": {
+            "type": "string",
+            "description": "The Proxmox account."
+          },
+          "cloned": {
+            "type": "boolean",
+            "description": "Whether the clone completed (always true for a registered VM)."
+          },
+          "createdAt": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Creation time (epoch milliseconds)."
+          },
+          "imageVersionId": {
+            "type": "string",
+            "description": "The image version it was cloned from, or `registered` for a VM that\nexisted before Fleet kept it."
+          },
+          "machineId": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The Fleet machine it is linked to, once there is one."
+          },
+          "name": {
+            "type": "string",
+            "description": "The VM name."
+          },
+          "node": {
+            "type": "string",
+            "description": "The node the guest was created or found on."
+          },
+          "operationId": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The operation that created it, when Fleet created it."
+          },
+          "state": {
+            "type": "string",
+            "description": "`creating` or `ready`."
+          },
+          "step": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The step the creation last completed or failed at."
+          },
+          "updatedAt": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Last update (epoch milliseconds)."
+          },
+          "vmid": {
+            "type": "integer",
+            "format": "int32",
+            "description": "The guest's VMID.",
+            "minimum": 0
+          }
+        }
+      },
       "PlanActionDto": {
         "type": "object",
         "description": "One planned action.",
@@ -23170,6 +23659,68 @@
           "machineId": {
             "type": "string",
             "description": "The machine the checkouts were observed on."
+          }
+        }
+      },
+      "RegisterGuestRequest": {
+        "type": "object",
+        "description": "The body of the register review and register calls.",
+        "properties": {
+          "machineId": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "An existing Fleet machine to link to the guest's marker."
+          },
+          "reviewToken": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The token from the review call (required by the register call only)."
+          }
+        }
+      },
+      "RegisterReviewDto": {
+        "type": "object",
+        "description": "What registering an existing VM will record, and the token that binds it.",
+        "required": [
+          "reviewToken",
+          "accountId",
+          "vmid",
+          "name",
+          "node"
+        ],
+        "properties": {
+          "accountId": {
+            "type": "string",
+            "description": "The Proxmox account."
+          },
+          "machineId": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The machine that will be linked, when one was named."
+          },
+          "name": {
+            "type": "string",
+            "description": "The guest's live name."
+          },
+          "node": {
+            "type": "string",
+            "description": "The guest's live node."
+          },
+          "reviewToken": {
+            "type": "string",
+            "description": "The token the register call must present."
+          },
+          "vmid": {
+            "type": "integer",
+            "format": "int32",
+            "description": "The guest's VMID.",
+            "minimum": 0
           }
         }
       },
@@ -26311,6 +26862,93 @@
           }
         }
       },
+      "Resource_PersistentGuestDto": {
+        "type": "object",
+        "description": "A single resource.\n\nThe payload is nested under `data` so that later top-level fields are an\nadditive change rather than a breaking one.",
+        "required": [
+          "data"
+        ],
+        "properties": {
+          "data": {
+            "type": "object",
+            "description": "One persistent guest marker.",
+            "required": [
+              "accountId",
+              "vmid",
+              "name",
+              "node",
+              "imageVersionId",
+              "cloned",
+              "state",
+              "createdAt",
+              "updatedAt"
+            ],
+            "properties": {
+              "accountId": {
+                "type": "string",
+                "description": "The Proxmox account."
+              },
+              "cloned": {
+                "type": "boolean",
+                "description": "Whether the clone completed (always true for a registered VM)."
+              },
+              "createdAt": {
+                "type": "integer",
+                "format": "int64",
+                "description": "Creation time (epoch milliseconds)."
+              },
+              "imageVersionId": {
+                "type": "string",
+                "description": "The image version it was cloned from, or `registered` for a VM that\nexisted before Fleet kept it."
+              },
+              "machineId": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "description": "The Fleet machine it is linked to, once there is one."
+              },
+              "name": {
+                "type": "string",
+                "description": "The VM name."
+              },
+              "node": {
+                "type": "string",
+                "description": "The node the guest was created or found on."
+              },
+              "operationId": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "description": "The operation that created it, when Fleet created it."
+              },
+              "state": {
+                "type": "string",
+                "description": "`creating` or `ready`."
+              },
+              "step": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "description": "The step the creation last completed or failed at."
+              },
+              "updatedAt": {
+                "type": "integer",
+                "format": "int64",
+                "description": "Last update (epoch milliseconds)."
+              },
+              "vmid": {
+                "type": "integer",
+                "format": "int32",
+                "description": "The guest's VMID.",
+                "minimum": 0
+              }
+            }
+          }
+        }
+      },
       "Resource_PlanDto": {
         "type": "object",
         "description": "A single resource.\n\nThe payload is nested under `data` so that later top-level fields are an\nadditive change rather than a breaking one.",
@@ -27021,6 +27659,57 @@
           }
         }
       },
+      "Resource_RegisterReviewDto": {
+        "type": "object",
+        "description": "A single resource.\n\nThe payload is nested under `data` so that later top-level fields are an\nadditive change rather than a breaking one.",
+        "required": [
+          "data"
+        ],
+        "properties": {
+          "data": {
+            "type": "object",
+            "description": "What registering an existing VM will record, and the token that binds it.",
+            "required": [
+              "reviewToken",
+              "accountId",
+              "vmid",
+              "name",
+              "node"
+            ],
+            "properties": {
+              "accountId": {
+                "type": "string",
+                "description": "The Proxmox account."
+              },
+              "machineId": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "description": "The machine that will be linked, when one was named."
+              },
+              "name": {
+                "type": "string",
+                "description": "The guest's live name."
+              },
+              "node": {
+                "type": "string",
+                "description": "The guest's live node."
+              },
+              "reviewToken": {
+                "type": "string",
+                "description": "The token the register call must present."
+              },
+              "vmid": {
+                "type": "integer",
+                "format": "int32",
+                "description": "The guest's VMID.",
+                "minimum": 0
+              }
+            }
+          }
+        }
+      },
       "Resource_RegistrySettingsDto": {
         "type": "object",
         "description": "A single resource.\n\nThe payload is nested under `data` so that later top-level fields are an\nadditive change rather than a breaking one.",
@@ -27440,6 +28129,135 @@
               "token": {
                 "type": "string",
                 "description": "The single-use token that attaches to the terminal WebSocket. It\nexpires at `expiresAt` and is spent by the first attach."
+              }
+            }
+          }
+        }
+      },
+      "Resource_UnregisterReviewDto": {
+        "type": "object",
+        "description": "A single resource.\n\nThe payload is nested under `data` so that later top-level fields are an\nadditive change rather than a breaking one.",
+        "required": [
+          "data"
+        ],
+        "properties": {
+          "data": {
+            "type": "object",
+            "description": "What unregistering a registered VM will do, and the token that binds it.",
+            "required": [
+              "reviewToken",
+              "accountId",
+              "vmid",
+              "name"
+            ],
+            "properties": {
+              "accountId": {
+                "type": "string",
+                "description": "The Proxmox account."
+              },
+              "name": {
+                "type": "string",
+                "description": "The VM name the marker records."
+              },
+              "reviewToken": {
+                "type": "string",
+                "description": "The token the unregister call must present."
+              },
+              "vmid": {
+                "type": "integer",
+                "format": "int32",
+                "description": "The VMID whose marker will be removed.",
+                "minimum": 0
+              }
+            }
+          }
+        }
+      },
+      "Resource_Vec_PersistentGuestDto": {
+        "type": "object",
+        "description": "A single resource.\n\nThe payload is nested under `data` so that later top-level fields are an\nadditive change rather than a breaking one.",
+        "required": [
+          "data"
+        ],
+        "properties": {
+          "data": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "description": "One persistent guest marker.",
+              "required": [
+                "accountId",
+                "vmid",
+                "name",
+                "node",
+                "imageVersionId",
+                "cloned",
+                "state",
+                "createdAt",
+                "updatedAt"
+              ],
+              "properties": {
+                "accountId": {
+                  "type": "string",
+                  "description": "The Proxmox account."
+                },
+                "cloned": {
+                  "type": "boolean",
+                  "description": "Whether the clone completed (always true for a registered VM)."
+                },
+                "createdAt": {
+                  "type": "integer",
+                  "format": "int64",
+                  "description": "Creation time (epoch milliseconds)."
+                },
+                "imageVersionId": {
+                  "type": "string",
+                  "description": "The image version it was cloned from, or `registered` for a VM that\nexisted before Fleet kept it."
+                },
+                "machineId": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "description": "The Fleet machine it is linked to, once there is one."
+                },
+                "name": {
+                  "type": "string",
+                  "description": "The VM name."
+                },
+                "node": {
+                  "type": "string",
+                  "description": "The node the guest was created or found on."
+                },
+                "operationId": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "description": "The operation that created it, when Fleet created it."
+                },
+                "state": {
+                  "type": "string",
+                  "description": "`creating` or `ready`."
+                },
+                "step": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "description": "The step the creation last completed or failed at."
+                },
+                "updatedAt": {
+                  "type": "integer",
+                  "format": "int64",
+                  "description": "Last update (epoch milliseconds)."
+                },
+                "vmid": {
+                  "type": "integer",
+                  "format": "int32",
+                  "description": "The guest's VMID.",
+                  "minimum": 0
+                }
               }
             }
           }
@@ -29926,6 +30744,49 @@
               "null"
             ],
             "description": "The bounded, already-redacted failure detail, when the check failed."
+          }
+        }
+      },
+      "UnregisterGuestRequest": {
+        "type": "object",
+        "description": "The body of the unregister call.",
+        "required": [
+          "reviewToken"
+        ],
+        "properties": {
+          "reviewToken": {
+            "type": "string",
+            "description": "The token from the review call."
+          }
+        }
+      },
+      "UnregisterReviewDto": {
+        "type": "object",
+        "description": "What unregistering a registered VM will do, and the token that binds it.",
+        "required": [
+          "reviewToken",
+          "accountId",
+          "vmid",
+          "name"
+        ],
+        "properties": {
+          "accountId": {
+            "type": "string",
+            "description": "The Proxmox account."
+          },
+          "name": {
+            "type": "string",
+            "description": "The VM name the marker records."
+          },
+          "reviewToken": {
+            "type": "string",
+            "description": "The token the unregister call must present."
+          },
+          "vmid": {
+            "type": "integer",
+            "format": "int32",
+            "description": "The VMID whose marker will be removed.",
+            "minimum": 0
           }
         }
       },

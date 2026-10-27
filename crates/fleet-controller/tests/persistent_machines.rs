@@ -2113,3 +2113,135 @@ async fn a_name_that_already_belongs_to_a_guest_elsewhere_is_refused() {
     );
     assert!(world.pve.calls().is_empty());
 }
+
+#[derive(Debug)]
+struct OnePool(&'static str, u32);
+
+#[async_trait]
+impl fleet_application::operation::PoolMemberLookup for OnePool {
+    async fn pool_of(&self, _account_id: &str, vmid: u32) -> Result<Option<String>, String> {
+        Ok((vmid == self.1).then(|| self.0.to_owned()))
+    }
+}
+
+fn register_guard(
+    world: &World,
+    pools: Option<Arc<dyn fleet_application::operation::PoolMemberLookup>>,
+) -> fleet_controller::persistent_machines::ProxmoxRegisterGuard {
+    let guard = fleet_controller::persistent_machines::ProxmoxRegisterGuard::new(
+        world.accounts.clone(),
+        Arc::new(Credentials),
+        fleet_provider_proxmox::ProxmoxClient::new(world.pve.clone()),
+        Arc::new(Artifacts),
+    );
+    match pools {
+        Some(pools) => guard.with_pool_members(pools),
+        None => guard,
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_register_guard_admits_only_a_plain_guest_and_fails_closed() {
+    use fleet_application::persistent::{GuestCheck, RegisterGuard as _};
+
+    let world = World::new().await;
+    {
+        let mut state = world.pve.state.lock().unwrap();
+        state.guests.insert(7500, plain_guest("win-box"));
+        let mut tagged = plain_guest("tagged-box");
+        tagged
+            .config
+            .insert("tags".to_owned(), json!("fleet-pve-test;ci"));
+        state.guests.insert(7501, tagged);
+        let mut template = plain_guest("a-template");
+        template.template = true;
+        state.guests.insert(7502, template);
+        state.guests.insert(7503, plain_guest("pooled"));
+    }
+    let guard = register_guard(&world, Some(Arc::new(OnePool("pool-1", 7503))));
+    let refused = |check: GuestCheck, needle: &str| match check {
+        GuestCheck::Refused(reason) => assert!(reason.contains(needle), "{reason}"),
+        GuestCheck::Eligible(live) => panic!("{live:?} was admitted, wanted {needle}"),
+    };
+
+    match guard.inspect(&world.account_id, 7500).await.unwrap() {
+        GuestCheck::Eligible(live) => {
+            assert_eq!(live.name, "win-box");
+            assert_eq!(live.node, "pve");
+        }
+        GuestCheck::Refused(reason) => panic!("{reason}"),
+    }
+    refused(
+        guard.inspect(&world.account_id, 7501).await.unwrap(),
+        "reserved tag",
+    );
+    refused(
+        guard.inspect(&world.account_id, 7502).await.unwrap(),
+        "template",
+    );
+    refused(
+        guard.inspect(&world.account_id, 7503).await.unwrap(),
+        "pool-1",
+    );
+    refused(
+        guard
+            .inspect(&world.account_id, TEMPLATE_VMID)
+            .await
+            .unwrap(),
+        "template",
+    );
+    refused(
+        guard.inspect(&world.account_id, 7999).await.unwrap(),
+        "no guest",
+    );
+
+    // Without the pool lookup a pool member cannot be told apart: refused.
+    let unwired = register_guard(&world, None);
+    let error = unwired.inspect(&world.account_id, 7500).await.unwrap_err();
+    assert!(error.contains("not wired"), "{error}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn destroying_a_registered_vm_never_lifts_its_protection() {
+    let world = World::new().await;
+    {
+        let mut state = world.pve.state.lock().unwrap();
+        let mut guest = plain_guest("reg-box");
+        guest.config.insert("protection".to_owned(), json!(1));
+        state.guests.insert(7600, guest);
+    }
+    let markers = Arc::new(PersistentGuestRepository::new(world.pool.clone()));
+    let mut registered = marker(&world.account_id, 7600, "reg-box", true);
+    registered.image_version_id = "registered".to_owned();
+    registered.state = PersistentState::Ready;
+    markers.reserve(&registered).await.unwrap();
+    let destroy = json!({
+        "accountId": world.account_id, "node": "pve", "vmid": 7600,
+        "timeoutSeconds": 300, "params": { "purge": false, "confirmPersistent": true },
+    });
+    let refused = world
+        .run(world.destroy.as_ref(), "proxmox.guest.destroy", &destroy)
+        .await;
+    assert_eq!(error_of(&refused)["reason"], "protection_on");
+    assert!(
+        world.pve.guest(7600).is_some(),
+        "the guest must still exist"
+    );
+    assert_eq!(world.pve.guest(7600).unwrap().config["protection"], 1);
+
+    // The operator lifts it, then the confirmed destroy goes through.
+    world
+        .pve
+        .state
+        .lock()
+        .unwrap()
+        .guests
+        .get_mut(&7600)
+        .unwrap()
+        .config
+        .insert("protection".to_owned(), json!(0));
+    let done = world
+        .run(world.destroy.as_ref(), "proxmox.guest.destroy", &destroy)
+        .await;
+    assert_eq!(done.state, "succeeded", "{:?}", done.error_json);
+}

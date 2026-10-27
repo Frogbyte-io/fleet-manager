@@ -21,6 +21,10 @@ use crate::lab::LabUseCaseError;
 use crate::machine_access::{EndpointAuth, MachineKeyPort};
 use fleet_core::GuestOs;
 
+/// The `image_version_id` of a marker for a VM that existed before Fleet
+/// kept it (registered, not cloned from an image).
+pub const REGISTERED_SOURCE: &str = "registered";
+
 /// The Fleet name prefix Lab owns; a persistent guest never uses it.
 pub const LAB_NAME_PREFIX: &str = "fm-lab-";
 /// The tag every persistent guest carries, so an operator can see in
@@ -343,6 +347,15 @@ pub fn validate_tag(tag: &str) -> Result<(), String> {
         ));
     }
     Ok(())
+}
+
+/// Whether a tag is one fixture or Lab tooling acts on (so a guest carrying
+/// it must not be registered as persistent).
+#[must_use]
+pub fn is_reserved_tag(tag: &str) -> bool {
+    RESERVED_TAG_PREFIXES
+        .iter()
+        .any(|prefix| tag.starts_with(*prefix))
 }
 
 fn validate_tags(tags: &[String]) -> Result<(), String> {
@@ -741,10 +754,23 @@ impl PersistentGuest {
     /// protects nothing.
     #[must_use]
     pub fn guards(&self, live_name: Option<&str>) -> bool {
+        if self.is_registered() {
+            // A registered VM was never cloned by Fleet: it is guarded only
+            // while the guest at the VMID still has the registered name, so
+            // a marker whose VM is gone or renamed expires by itself.
+            return live_name == Some(self.name.as_str());
+        }
         match live_name {
             Some(name) => self.cloned || name == self.name,
             None => self.cloned,
         }
+    }
+
+    /// Whether the marker was written by registering an existing VM, not by
+    /// creating one.
+    #[must_use]
+    pub fn is_registered(&self) -> bool {
+        self.image_version_id == REGISTERED_SOURCE
     }
 }
 
@@ -758,6 +784,48 @@ pub trait AbandonGuard: fmt::Debug + Send + Sync {
     ///
     /// Fails when the world cannot be read; the abandon is refused then.
     async fn blocking_reason(&self, marker: &PersistentGuest) -> Result<Option<String>, String>;
+}
+
+/// What the live world says about a guest that may be registered.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct LiveGuest {
+    /// The guest's name.
+    pub name: String,
+    /// The node it runs on.
+    pub node: String,
+}
+
+/// The answer of [`RegisterGuard::inspect`].
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum GuestCheck {
+    /// A QEMU VM that is not a template, image artifact, Lab clone or pool
+    /// member.
+    Eligible(LiveGuest),
+    /// Why the guest cannot be registered.
+    Refused(String),
+}
+
+/// The live checks of registering an existing VM as persistent: the
+/// controller reads the cluster and Lab's own records.
+#[async_trait]
+pub trait RegisterGuard: fmt::Debug + Send + Sync {
+    /// Looks at the guest at a VMID.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the world cannot be read; the registration is refused then.
+    async fn inspect(&self, account_id: &str, vmid: u32) -> Result<GuestCheck, String>;
+}
+
+/// What a reviewed registration will record.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RegisterReview {
+    /// The token the register call must present.
+    pub review_token: String,
+    /// The live guest's name.
+    pub name: String,
+    /// The live guest's node.
+    pub node: String,
 }
 
 /// The persistent marker store.
@@ -880,6 +948,9 @@ pub struct PersistentMachines {
     product_keys: Option<Arc<dyn ProductKeyPort>>,
     markers: Option<Arc<dyn PersistentGuestPort>>,
     abandon_guard: Option<Arc<dyn AbandonGuard>>,
+    register_guard: Option<Arc<dyn RegisterGuard>>,
+    machines: Option<Arc<dyn crate::machine::MachinePort>>,
+    guest_links: Option<Arc<dyn crate::machine::GuestLinkPort>>,
     audit: Arc<dyn crate::operation::AuditPort>,
 }
 
@@ -907,6 +978,9 @@ impl PersistentMachines {
             product_keys: None,
             markers: None,
             abandon_guard: None,
+            register_guard: None,
+            machines: None,
+            guest_links: None,
             audit,
         }
     }
@@ -956,6 +1030,440 @@ impl PersistentMachines {
             Some(markers) => markers.owner_of_machine(machine_id).await.map_err(backend),
             None => Ok(None),
         }
+    }
+
+    /// Wires the live checks a registration needs: without them a
+    /// registration is refused.
+    #[must_use]
+    pub fn with_register_guard(mut self, guard: Arc<dyn RegisterGuard>) -> Self {
+        self.register_guard = Some(guard);
+        self
+    }
+
+    /// Wires the machine records, so a registration can name its machine.
+    #[must_use]
+    pub fn with_machines(mut self, machines: Arc<dyn crate::machine::MachinePort>) -> Self {
+        self.machines = Some(machines);
+        self
+    }
+
+    /// Wires the guest links, so a registration can refuse a machine whose
+    /// guest link points at another guest.
+    #[must_use]
+    pub fn with_guest_links(mut self, links: Arc<dyn crate::machine::GuestLinkPort>) -> Self {
+        self.guest_links = Some(links);
+        self
+    }
+
+    /// Every persistent marker, newest first.
+    ///
+    /// # Errors
+    ///
+    /// Fails on denial or when the marker store cannot be read.
+    pub async fn list(
+        &self,
+        authorizer: &dyn Authorizer,
+        principal: &ActingPrincipal,
+    ) -> Result<Vec<PersistentGuest>, LabUseCaseError> {
+        authorize(
+            authorizer,
+            AccessRequest {
+                principal_id: &principal.id,
+                action: Permission::MachineRead,
+                resource: None,
+            },
+        )
+        .map_err(LabUseCaseError::Denied)?;
+        match &self.markers {
+            Some(markers) => markers.list().await.map_err(backend),
+            None => Ok(Vec::new()),
+        }
+    }
+
+    /// The review token of registering one existing guest: it binds the call
+    /// to the exact account, VMID and machine that were reviewed.
+    #[must_use]
+    pub fn register_payload(
+        account_id: &str,
+        vmid: u32,
+        machine_id: Option<&str>,
+    ) -> (String, String) {
+        let payload = serde_json::json!({
+            "accountId": account_id,
+            "vmid": vmid,
+            "machineId": machine_id,
+        })
+        .to_string();
+        let token = crate::operation::review_token_for("persistent.register", &payload);
+        (payload, token)
+    }
+
+    /// Everything a registration needs to hold, short of writing it.
+    async fn check_register(
+        &self,
+        account_id: &str,
+        vmid: u32,
+        machine_id: Option<&str>,
+    ) -> Result<LiveGuest, LabUseCaseError> {
+        if account_id.is_empty() || vmid == 0 {
+            return Err(invalid(
+                "an account and a positive VMID are required".to_owned(),
+            ));
+        }
+        let markers = self
+            .markers
+            .as_ref()
+            .ok_or_else(|| backend("no marker store is wired".to_owned()))?;
+        let guard = self
+            .register_guard
+            .as_ref()
+            .ok_or_else(|| backend("no register guard is wired".to_owned()))?;
+        if let Some(marker) = markers.get(account_id, vmid).await.map_err(backend)? {
+            return Err(LabUseCaseError::Conflict {
+                detail: format!("VMID {vmid} is already marked persistent ({})", marker.name),
+            });
+        }
+        let live = match guard.inspect(account_id, vmid).await.map_err(backend)? {
+            GuestCheck::Eligible(live) => live,
+            GuestCheck::Refused(reason) => return Err(invalid(reason)),
+        };
+        if live.name.to_ascii_lowercase().starts_with(LAB_NAME_PREFIX) {
+            return Err(invalid(format!(
+                "a guest named {} is a Lab clone, not a persistent machine",
+                live.name
+            )));
+        }
+        let all = markers.list().await.map_err(backend)?;
+        if let Some(other) = all
+            .iter()
+            .find(|other| other.account_id == account_id && other.name == live.name)
+        {
+            return Err(LabUseCaseError::Conflict {
+                detail: format!(
+                    "the name {} is already a persistent guest (VMID {})",
+                    live.name, other.vmid
+                ),
+            });
+        }
+        if let Some(machine_id) = machine_id {
+            let machines = self
+                .machines
+                .as_ref()
+                .ok_or_else(|| backend("no machine store is wired".to_owned()))?;
+            match machines.get(machine_id).await {
+                Ok(_) => {}
+                Err(crate::operation::PortFailure::NotFound { .. }) => {
+                    return Err(LabUseCaseError::NotFound {
+                        what: format!("machine {machine_id}"),
+                    });
+                }
+                Err(failure) => return Err(backend(failure.to_string())),
+            }
+            let links = self
+                .guest_links
+                .as_ref()
+                .ok_or_else(|| backend("no guest link store is wired".to_owned()))?;
+            if let Some(link) = links
+                .get(machine_id)
+                .await
+                .map_err(|failure| backend(failure.to_string()))?
+                && (link.account_id != account_id || link.vmid != vmid)
+            {
+                return Err(LabUseCaseError::Conflict {
+                    detail: format!(
+                        "machine {machine_id} is linked to {} {}/{}, not to this guest",
+                        link.guest_kind, link.account_id, link.vmid
+                    ),
+                });
+            }
+            if all
+                .iter()
+                .any(|other| other.machine_id.as_deref() == Some(machine_id))
+            {
+                return Err(LabUseCaseError::Conflict {
+                    detail: format!("machine {machine_id} is already linked to a persistent guest"),
+                });
+            }
+        }
+        Ok(live)
+    }
+
+    /// Reviews registering an existing VM as persistent: checks the guest
+    /// live and answers what will be recorded with the token that binds the
+    /// register call to it. Nothing is written.
+    ///
+    /// # Errors
+    ///
+    /// Fails on denial, an ineligible guest, a marked guest, or an unknown
+    /// or already linked machine.
+    pub async fn review_register(
+        &self,
+        authorizer: &dyn Authorizer,
+        principal: &ActingPrincipal,
+        account_id: &str,
+        vmid: u32,
+        machine_id: Option<&str>,
+    ) -> Result<RegisterReview, LabUseCaseError> {
+        authorize(
+            authorizer,
+            AccessRequest {
+                principal_id: &principal.id,
+                action: Permission::MachineProvision,
+                resource: None,
+            },
+        )
+        .map_err(LabUseCaseError::Denied)?;
+        if let Some(machine_id) = machine_id {
+            authorize(
+                authorizer,
+                AccessRequest {
+                    principal_id: &principal.id,
+                    action: Permission::MachineLinkGuest,
+                    resource: Some(machine_id),
+                },
+            )
+            .map_err(LabUseCaseError::Denied)?;
+        }
+        let live = self.check_register(account_id, vmid, machine_id).await?;
+        let (_, review_token) = Self::register_payload(account_id, vmid, machine_id);
+        Ok(RegisterReview {
+            review_token,
+            name: live.name,
+            node: live.node,
+        })
+    }
+
+    /// Registers an existing VM as persistent: after the same checks as the
+    /// review it writes a marker for the guest (clone complete, state ready),
+    /// so Lab sweeps, pools and cleanup never select it, optionally naming
+    /// its Fleet machine. Nothing on the guest changes. The registration is
+    /// audited.
+    ///
+    /// # Errors
+    ///
+    /// Fails on denial, a review token that does not match, an ineligible
+    /// guest, a marked guest, or an unknown or already linked machine.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn register(
+        &self,
+        authorizer: &dyn Authorizer,
+        principal: &ActingPrincipal,
+        account_id: &str,
+        vmid: u32,
+        machine_id: Option<&str>,
+        review_token: &str,
+        correlation_id: Option<&str>,
+    ) -> Result<PersistentGuest, LabUseCaseError> {
+        authorize(
+            authorizer,
+            AccessRequest {
+                principal_id: &principal.id,
+                action: Permission::MachineProvision,
+                resource: None,
+            },
+        )
+        .map_err(LabUseCaseError::Denied)?;
+        let (_, expected) = Self::register_payload(account_id, vmid, machine_id);
+        if expected != review_token {
+            return Err(invalid(
+                "the review token does not match this account, VMID and machine; review the registration first"
+                    .to_owned(),
+            ));
+        }
+        if let Some(machine_id) = machine_id {
+            authorize(
+                authorizer,
+                AccessRequest {
+                    principal_id: &principal.id,
+                    action: Permission::MachineLinkGuest,
+                    resource: Some(machine_id),
+                },
+            )
+            .map_err(LabUseCaseError::Denied)?;
+        }
+        let live = self.check_register(account_id, vmid, machine_id).await?;
+        let markers = self
+            .markers
+            .as_ref()
+            .ok_or_else(|| backend("no marker store is wired".to_owned()))?;
+        let now = fleet_core::SystemClock::now_unix_millis();
+        let guest = PersistentGuest {
+            account_id: account_id.to_owned(),
+            vmid,
+            name: live.name,
+            node: live.node,
+            image_version_id: REGISTERED_SOURCE.to_owned(),
+            machine_id: machine_id.map(str::to_owned),
+            cloned: true,
+            state: PersistentState::Ready,
+            step: Some("registered".to_owned()),
+            operation_id: None,
+            created_at: now,
+            updated_at: now,
+        };
+        let stored = markers
+            .reserve(&guest)
+            .await
+            .map_err(|detail| LabUseCaseError::Conflict { detail })?;
+        // The audit event follows a successful write. A marker that cannot
+        // be audited is removed again: no unaudited registration stays.
+        if let Err(error) = self
+            .audit_marker(
+                principal,
+                "persistent_guest_registered",
+                &stored,
+                correlation_id,
+            )
+            .await
+        {
+            let _ = markers.remove(account_id, vmid).await;
+            return Err(error);
+        }
+        Ok(stored)
+    }
+
+    async fn audit_marker(
+        &self,
+        principal: &ActingPrincipal,
+        event: &str,
+        marker: &PersistentGuest,
+        correlation_id: Option<&str>,
+    ) -> Result<(), LabUseCaseError> {
+        let mut metadata = crate::audit::AuditMetadata::default();
+        for (key, value) in [
+            ("event", event),
+            ("accountId", marker.account_id.as_str()),
+            ("vmid", &marker.vmid.to_string()),
+            ("name", marker.name.as_str()),
+            ("node", marker.node.as_str()),
+            ("machineId", marker.machine_id.as_deref().unwrap_or("none")),
+        ] {
+            metadata
+                .insert(key, value)
+                .map_err(|error| backend(error.to_string()))?;
+        }
+        self.audit
+            .record_intent(&crate::audit::AuditIntent {
+                actor: principal.id.clone(),
+                action: Permission::MachineProvision.id().to_owned(),
+                resource: Some(format!("{}/{}", marker.account_id, marker.vmid)),
+                decision: crate::authz::Decision::allow(),
+                correlation_id: correlation_id.map(str::to_owned),
+                operation_id: None,
+                metadata,
+            })
+            .await
+            .map_err(backend)
+    }
+
+    /// The review token of unregistering one marker.
+    #[must_use]
+    pub fn unregister_payload(account_id: &str, vmid: u32) -> (String, String) {
+        let payload = serde_json::json!({ "accountId": account_id, "vmid": vmid }).to_string();
+        let token = crate::operation::review_token_for("persistent.unregister", &payload);
+        (payload, token)
+    }
+
+    async fn registered_marker(
+        &self,
+        account_id: &str,
+        vmid: u32,
+    ) -> Result<PersistentGuest, LabUseCaseError> {
+        let markers = self
+            .markers
+            .as_ref()
+            .ok_or_else(|| backend("no marker store is wired".to_owned()))?;
+        let marker = markers
+            .get(account_id, vmid)
+            .await
+            .map_err(backend)?
+            .ok_or_else(|| LabUseCaseError::NotFound {
+                what: format!("a persistent marker for {account_id}/{vmid}"),
+            })?;
+        if !marker.is_registered() {
+            return Err(LabUseCaseError::Conflict {
+                detail: format!(
+                    "{} was created by Fleet; destroy it with the reviewed destroy, or abandon an unfinished creation",
+                    marker.name
+                ),
+            });
+        }
+        Ok(marker)
+    }
+
+    /// Reviews unregistering a registered marker (the undo of a
+    /// registration). It needs no live check: the guest is not touched.
+    ///
+    /// # Errors
+    ///
+    /// Fails on denial, an unknown marker, or a marker Fleet created.
+    pub async fn review_unregister(
+        &self,
+        authorizer: &dyn Authorizer,
+        principal: &ActingPrincipal,
+        account_id: &str,
+        vmid: u32,
+    ) -> Result<(PersistentGuest, String), LabUseCaseError> {
+        authorize(
+            authorizer,
+            AccessRequest {
+                principal_id: &principal.id,
+                action: Permission::MachineProvision,
+                resource: None,
+            },
+        )
+        .map_err(LabUseCaseError::Denied)?;
+        let marker = self.registered_marker(account_id, vmid).await?;
+        let (_, token) = Self::unregister_payload(account_id, vmid);
+        Ok((marker, token))
+    }
+
+    /// Removes the marker of a registered VM. The guest is left as it is
+    /// (still protected, still running); Lab may select it again when it
+    /// qualifies. Audited.
+    ///
+    /// # Errors
+    ///
+    /// Fails on denial, a review token that does not match, an unknown
+    /// marker, or a marker Fleet created.
+    pub async fn unregister(
+        &self,
+        authorizer: &dyn Authorizer,
+        principal: &ActingPrincipal,
+        account_id: &str,
+        vmid: u32,
+        review_token: &str,
+        correlation_id: Option<&str>,
+    ) -> Result<(), LabUseCaseError> {
+        authorize(
+            authorizer,
+            AccessRequest {
+                principal_id: &principal.id,
+                action: Permission::MachineProvision,
+                resource: None,
+            },
+        )
+        .map_err(LabUseCaseError::Denied)?;
+        let (_, expected) = Self::unregister_payload(account_id, vmid);
+        if expected != review_token {
+            return Err(invalid(
+                "the review token does not match this account and VMID; review the unregistration first"
+                    .to_owned(),
+            ));
+        }
+        let marker = self.registered_marker(account_id, vmid).await?;
+        self.audit_marker(
+            principal,
+            "persistent_guest_unregistered",
+            &marker,
+            correlation_id,
+        )
+        .await?;
+        let markers = self
+            .markers
+            .as_ref()
+            .ok_or_else(|| backend("no marker store is wired".to_owned()))?;
+        markers.remove(account_id, vmid).await.map_err(backend)
     }
 
     /// The review token of abandoning one marker: it binds the call to the
@@ -1504,5 +2012,26 @@ mod tests {
         validate_product_key("AAAAA-BBBBB-CCCCC-DDDDD-EEEEE").unwrap();
         let error = validate_product_key("not-a-key-HUNTER2").unwrap_err();
         assert!(!error.contains("HUNTER2"));
+    }
+
+    #[test]
+    fn a_registered_marker_guards_only_while_the_name_matches() {
+        let registered = PersistentGuest {
+            account_id: "a".to_owned(),
+            vmid: 7,
+            name: "reg".to_owned(),
+            node: "pve".to_owned(),
+            image_version_id: REGISTERED_SOURCE.to_owned(),
+            machine_id: None,
+            cloned: true,
+            state: PersistentState::Ready,
+            step: None,
+            operation_id: None,
+            created_at: 0,
+            updated_at: 0,
+        };
+        assert!(registered.guards(Some("reg")));
+        assert!(!registered.guards(Some("renamed")));
+        assert!(!registered.guards(None));
     }
 }

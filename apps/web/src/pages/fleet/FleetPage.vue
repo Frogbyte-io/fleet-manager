@@ -12,6 +12,7 @@ import GuestDrawer from './components/GuestDrawer.vue'
 import HostCard from './components/HostCard.vue'
 import MachineCard from './components/MachineCard.vue'
 import MachineDrawer from './components/MachineDrawer.vue'
+import PersistentSection from './components/PersistentSection.vue'
 import FleetTable from './components/FleetTable.vue'
 import TailnetCard from './components/TailnetCard.vue'
 import { useFleetInventory } from './useFleetInventory'
@@ -682,6 +683,8 @@ function sourceBorder(state: string): string {
         />
       </div>
     </template>
+
+    <PersistentSection class="mt-8" />
 
     <MachineDrawer
       v-model:open="drawerOpen"

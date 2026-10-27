@@ -536,6 +536,14 @@ impl ProxmoxDestructiveExecutor {
         if !settings.protection {
             return Ok(false);
         }
+        // A registered VM was protected by its operator, not by Fleet: Fleet
+        // never lifts that protection for the operator.
+        if marker.is_registered() {
+            return Err(format!(
+                "{} is a registered VM with protection on; lift it first (proxmox config with protection=false), then destroy",
+                marker.name
+            ));
+        }
         let digest = settings.digest.ok_or(
             "the guest config carries no digest, so protection is not lifted unconditionally",
         )?;
@@ -727,6 +735,29 @@ impl OperationExecutor for ProxmoxDestructiveExecutor {
                 ),
             )
             .await;
+        }
+        // A registered VM's protection is its operator's: refuse before
+        // anything is stopped, rather than lifting it.
+        if let Some(marker) = &persistent_marker
+            && marker.is_registered()
+        {
+            let settings = self
+                .client
+                .qemu_settings(request.clone(), &payload.node, payload.vmid)
+                .await
+                .map_err(|error| format!("the guest config is unreadable: {error}"))?;
+            if settings.protection {
+                return complete_failure(
+                    operations,
+                    &operation.id,
+                    "protection_on",
+                    &format!(
+                        "{} is a registered VM with protection on; Fleet does not lift it. Run proxmox config with protection=false first, then destroy",
+                        marker.name
+                    ),
+                )
+                .await;
+            }
         }
         let deadline = Duration::from_secs(payload.timeout_seconds.min(MAX_LIFECYCLE_TIMEOUT));
         let kind = operation.kind.as_str();
