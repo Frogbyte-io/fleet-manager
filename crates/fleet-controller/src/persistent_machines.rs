@@ -816,17 +816,33 @@ struct Run<'a> {
 
 const STEPS: i64 = 11;
 
-/// The MAC address of a `net0` property string (`virtio=AA:BB:...,bridge=...`),
-/// lower-case and colon-separated, the way the guest agent reports it.
+/// The order creation steps are reached in. The marker's step never moves
+/// back along it: a re-run passes through the early steps again, and must not
+/// forget how far an earlier run got.
+fn step_rank(step: &str) -> Option<u8> {
+    Some(match step {
+        "reserve" => 0,
+        "create" | "clone" => 1,
+        "config" => 2,
+        "installing" => 3,
+        "install" => 4,
+        "start" => 5,
+        "machine" => 6,
+        "link" => 7,
+        "credential" => 8,
+        "ready" => 9,
+        _ => return None,
+    })
+}
+
 /// Whether a marker step is at or past the Fleet-side eject of the install
 /// media.
 fn passed_install(step: &str) -> bool {
-    matches!(
-        step,
-        "install" | "start" | "machine" | "link" | "credential" | "ready"
-    )
+    step_rank(step).is_some_and(|rank| rank >= 4)
 }
 
+/// The MAC address of a `net0` property string (`virtio=AA:BB:...,bridge=...`),
+/// lower-case and colon-separated, the way the guest agent reports it.
 fn net_mac(net0: &str) -> Option<String> {
     let first = net0.split(',').next()?;
     let (_, mac) = first.split_once('=')?;
@@ -861,8 +877,22 @@ impl Run<'_> {
                 "the operation deadline expired",
             ));
         }
+        self.record_step(step).await
+    }
+
+    /// Writes the marker's step, never moving it back along the creation
+    /// order, with the node, machine and operation.
+    async fn record_step(&mut self, step: &'static str) -> Step<()> {
         if let Some(marker) = self.marker.as_mut() {
-            marker.step = Some(step.to_owned());
+            let behind = marker
+                .step
+                .as_deref()
+                .and_then(step_rank)
+                .zip(step_rank(step))
+                .is_some_and(|(current, new)| current > new);
+            if !behind {
+                marker.step = Some(step.to_owned());
+            }
             marker.node.clone_from(&self.node);
             marker.machine_id.clone_from(&self.machine_id);
             marker.operation_id = Some(self.operation.id.clone());
@@ -1264,33 +1294,37 @@ impl Run<'_> {
         }
     }
 
-    // Step 4 of an ISO install: run the installer to its end, then boot the
-    // installed disk. The answer file must power the guest off when it is
-    // done. The end is seen only as running and then stopped by this run (or
-    // by the earlier run that started it, recorded as the marker step
-    // `installing`): a guest that was never seen running is not finished. The
-    // media is then ejected (never deleted: Proxmox refuses a drive removal on
-    // a protected guest), and the marker step `install` records that Fleet
-    // did it. Safe to repeat: a run that finds the guest stopped with the
-    // media still attached, after the installer started, ejects without
-    // installing again.
+    /// Step 4 of an ISO install: run the installer to its end, then boot the
+    /// installed disk. The answer file must power the guest off when it is
+    /// done. The end is seen only as running and then stopped by this run (or
+    /// by an earlier run that started it, recorded as the marker step
+    /// `installing`): a guest that was never seen running is not finished. The
+    /// media is then ejected (never deleted: Proxmox refuses a drive removal on
+    /// a protected guest) and the marker step `install` is written at once.
+    /// Safe to repeat: stopped with media still attached after the installer
+    /// started ejects without installing again, and the state an eject leaves
+    /// (empty drive, boot order `scsi0`) proves Fleet ejected, whatever step
+    /// the marker holds.
     async fn install(&mut self) -> Step<()> {
         let step = "install";
         let earlier = self.prior_step.clone();
-        let started_before = earlier.as_deref() == Some("installing");
-        let media = self
+        let started_before = earlier
+            .as_deref()
+            .and_then(step_rank)
+            .is_some_and(|rank| rank >= 3);
+        let state = self
             .exec
             .pve
             .client
-            .qemu_cdrom_keys(self.request.clone(), &self.node, self.vmid)
+            .qemu_install_state(self.request.clone(), &self.node, self.vmid)
             .await
             .map_err(|error| failure(step, "config_unreadable", error.to_string()))?;
-        if media.is_empty() {
-            // Fleet's own earlier run ejected it: carry on. Anything else
-            // means the install never ran here, and a guest nobody installed
-            // must not be adopted as an installed one.
-            return if earlier.as_deref().is_some_and(passed_install) {
-                Ok(())
+        if state.attached.is_empty() {
+            // Fleet's own eject, seen in the config or in the marker: carry
+            // on. Anything else means the install never ran here, and a
+            // guest nobody installed must not be adopted as an installed one.
+            return if state.ejected || earlier.as_deref().is_some_and(passed_install) {
+                self.record_step("install").await
             } else {
                 Err(failure(
                     step,
@@ -1299,11 +1333,18 @@ impl Run<'_> {
                 ))
             };
         }
+        let media = state.attached;
         let first = self.power_state(step).await?;
         let mut seen_running = first == "running";
         let mut finished = started_before && first == "stopped";
         if !seen_running && !finished {
             self.start().await?;
+        }
+        if !finished {
+            // Durable once the installer is running. Written after a start
+            // that succeeded, not before: a start that failed must not look
+            // like an install that ran.
+            self.record_step("installing").await?;
         }
         while !finished {
             // The deadline is checked first so a run that ran out of time
@@ -1336,17 +1377,19 @@ impl Run<'_> {
             .exec
             .pve
             .client
-            .qemu_cdrom_keys(self.request.clone(), &self.node, self.vmid)
+            .qemu_install_state(self.request.clone(), &self.node, self.vmid)
             .await
             .map_err(|error| failure(step, "config_unreadable", error.to_string()))?;
-        if !left.is_empty() {
+        if !left.attached.is_empty() {
             return Err(failure(
                 step,
                 "media_not_removed",
                 "PVE accepted the change but the install media is still attached",
             ));
         }
-        Ok(())
+        // Durable at once: a deadline or a cancel at the next checkpoint must
+        // not lose the fact that the media is gone.
+        self.record_step("install").await
     }
 
     /// Records that the clone completed: from here the marker guards the

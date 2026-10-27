@@ -368,6 +368,36 @@ fn eject_body(keys: &[String]) -> serde_json::Value {
     body
 }
 
+/// What a guest config says about install media.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PveInstallState {
+    /// The CD-ROM keys that still hold media.
+    pub attached: Vec<String>,
+    /// Whether the guest shows the state an eject leaves: no media, an
+    /// empty CD-ROM drive (`none,media=cdrom`), and boot order `scsi0`
+    /// only. Fleet's own eject is the only thing that writes this.
+    pub ejected: bool,
+}
+
+fn install_state_of(config: &serde_json::Value) -> PveInstallState {
+    let attached = cdrom_keys(config);
+    let empty_drive = config
+        .as_object()
+        .into_iter()
+        .flatten()
+        .any(|(key, value)| {
+            (key.starts_with("ide") || key.starts_with("sata"))
+                && value
+                    .as_str()
+                    .is_some_and(|text| text.starts_with("none,media=cdrom"))
+        });
+    let disk_only = config.get("boot").and_then(serde_json::Value::as_str) == Some("order=scsi0");
+    PveInstallState {
+        ejected: attached.is_empty() && empty_drive && disk_only,
+        attached,
+    }
+}
+
 /// The CD-ROM keys (`ide0` to `ide3`, `sata0` to `sata5`) of a guest config
 /// that still hold media.
 fn cdrom_keys(config: &serde_json::Value) -> Vec<String> {
@@ -416,17 +446,17 @@ impl ProxmoxClient {
         Upid::parse(raw).map_err(|detail| PveApiError::InvalidPayload { detail })
     }
 
-    /// The config keys of a guest that still hold CD-ROM media.
+    /// The install-media state of a guest's config.
     ///
     /// # Errors
     ///
     /// Fails with [`PveApiError`].
-    pub async fn qemu_cdrom_keys(
+    pub async fn qemu_install_state(
         &self,
         request: PveHttpRequest,
         node: &str,
         vmid: u32,
-    ) -> Result<Vec<String>, PveApiError> {
+    ) -> Result<PveInstallState, PveApiError> {
         let config = self
             .call(PveHttpRequest {
                 path: format!("/api2/json/nodes/{}/qemu/{vmid}/config", urlencode(node)),
@@ -434,7 +464,7 @@ impl ProxmoxClient {
                 ..request
             })
             .await?;
-        Ok(cdrom_keys(&config))
+        Ok(install_state_of(&config))
     }
 
     /// Ejects CD-ROM media and boots from the disk only
@@ -598,5 +628,27 @@ mod tests {
         assert_eq!(body["ide3"], "none,media=cdrom");
         assert_eq!(body["boot"], "order=scsi0");
         assert!(body.get("delete").is_none());
+    }
+
+    #[test]
+    fn the_state_an_eject_leaves_is_recognized() {
+        let ejected = serde_json::json!({
+            "ide2": "none,media=cdrom", "ide3": "none,media=cdrom", "boot": "order=scsi0",
+        });
+        assert!(install_state_of(&ejected).ejected);
+        let attached = serde_json::json!({
+            "ide2": "local:iso/a.iso,media=cdrom", "boot": "order=ide2;scsi0",
+        });
+        let state = install_state_of(&attached);
+        assert!(!state.ejected && state.attached == vec!["ide2"]);
+        // A guest that never had a drive, or that still boots the installer
+        // first, did not have its media ejected by Fleet.
+        assert!(!install_state_of(&serde_json::json!({ "boot": "order=scsi0" })).ejected);
+        assert!(
+            !install_state_of(&serde_json::json!({
+                "ide2": "none,media=cdrom", "boot": "order=ide2;scsi0",
+            }))
+            .ejected
+        );
     }
 }

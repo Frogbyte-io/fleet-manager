@@ -72,6 +72,8 @@ struct HostState {
     install_polls: BTreeMap<u32, u32>,
     /// The first power read of an installer says stopped (a lagging view).
     stale_first_stopped: bool,
+    /// Config writes that still fail (a failing configure step).
+    fail_config_writes: u32,
     guests: BTreeMap<u32, Guest>,
     calls: Vec<String>,
     bodies: Vec<(String, Value)>,
@@ -312,6 +314,10 @@ impl FakePve {
             }
             ("PUT", ["nodes", _, "qemu", vmid, "config"]) => {
                 let body = body.unwrap_or_default();
+                if body.get("digest").is_some() && state.fail_config_writes > 0 {
+                    state.fail_config_writes -= 1;
+                    return (500, json!({ "data": null }));
+                }
                 state.calls.push(format!("config {vmid}"));
                 state.bodies.push(("config".to_owned(), body.clone()));
                 if body.get("digest").is_some()
@@ -2500,5 +2506,91 @@ async fn a_guest_without_media_that_fleet_never_installed_is_not_adopted() {
             .iter()
             .any(|call| call.starts_with("start")),
         "an unverified guest must not be started"
+    );
+}
+
+fn ejected_guest(name: &str) -> Guest {
+    let mut guest = installed_guest(name, false);
+    guest
+        .config
+        .insert("ide2".to_owned(), json!("none,media=cdrom"));
+    guest.config.insert("boot".to_owned(), json!("order=scsi0"));
+    guest
+}
+
+async fn marker_step(world: &World, vmid: u32) -> Option<String> {
+    PersistentGuestRepository::new(world.pool.clone())
+        .get(&world.account_id, vmid)
+        .await
+        .unwrap()
+        .and_then(|marker| marker.step)
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn ejected_media_continues_whatever_step_the_marker_holds() {
+    // Run N ejected the media but the step write was lost (a deadline or
+    // cancel at the next checkpoint), so the marker still says `installing`;
+    // another marker is at `start`. Neither reinstalls, and neither ejects
+    // again.
+    for (vmid, name, step) in [
+        (7100, "iso-after-eject", "installing"),
+        (7101, "iso-later", "start"),
+    ] {
+        let world = World::new().await;
+        world
+            .pve
+            .state
+            .lock()
+            .unwrap()
+            .guests
+            .insert(vmid, ejected_guest(name));
+        install_marker(&world, vmid, name, step).await;
+        let mut spec = install_spec(&world, name);
+        spec["vmid"] = json!(vmid);
+        let operation = world.create(&spec).await;
+        assert_eq!(
+            operation.state, "succeeded",
+            "{step}: {:?}",
+            operation.error_json
+        );
+        let calls = world.pve.calls();
+        assert!(
+            !calls.iter().any(|call| call.starts_with("eject")),
+            "{calls:?}"
+        );
+        assert_eq!(
+            world.pve.guest(vmid).unwrap().config["ide2"],
+            "none,media=cdrom"
+        );
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_failing_configure_never_moves_the_marker_back_before_the_install() {
+    let world = World::new().await;
+    world
+        .pve
+        .state
+        .lock()
+        .unwrap()
+        .guests
+        .insert(7100, ejected_guest("iso-config"));
+    install_marker(&world, 7100, "iso-config", "install").await;
+    world.pve.state.lock().unwrap().fail_config_writes = 1;
+    let failed = world.create(&install_spec(&world, "iso-config")).await;
+    assert_eq!(failed.state, "failed");
+    assert_eq!(error_of(&failed)["step"], "config");
+    // The reserve, create and config checkpoints of the failed run did not
+    // overwrite the install step.
+    assert_eq!(marker_step(&world, 7100).await.as_deref(), Some("install"));
+    let again = world.create(&install_spec(&world, "iso-config")).await;
+    assert_eq!(again.state, "succeeded", "{:?}", again.error_json);
+    assert!(
+        !world
+            .pve
+            .calls()
+            .iter()
+            .any(|call| call.starts_with("eject")),
+        "the install must not run again"
     );
 }
