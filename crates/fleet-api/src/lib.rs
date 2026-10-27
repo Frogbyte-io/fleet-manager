@@ -567,6 +567,8 @@ pub fn api(state: Arc<operations::ApiState>) -> (Router, utoipa::openapi::OpenAp
                 .routes(routes!(persistent_machines::list_persistent_guests))
                 .routes(routes!(persistent_machines::review_register_guest))
                 .routes(routes!(persistent_machines::register_guest))
+                .routes(routes!(persistent_machines::review_unregister_guest))
+                .routes(routes!(persistent_machines::unregister_guest))
                 .routes(routes!(persistent_machines::review_abandon_marker))
                 .routes(routes!(persistent_machines::abandon_marker))
                 .routes(routes!(machine_access::collect_machine_files))

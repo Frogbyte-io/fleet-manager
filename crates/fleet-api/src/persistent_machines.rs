@@ -754,6 +754,7 @@ pub async fn register_guest(
             vmid,
             request.machine_id.as_deref(),
             token,
+            Some(&correlation_id.to_string()),
         )
         .await
         .map_err(|error| map_lab_error(&error, correlation_id))?;
@@ -761,4 +762,126 @@ pub async fn register_guest(
         StatusCode::CREATED,
         Json(Resource::new(PersistentGuestDto::from(guest))),
     ))
+}
+
+/// What unregistering a registered VM will do, and the token that binds it.
+#[derive(Clone, Debug, Serialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct UnregisterReviewDto {
+    /// The token the unregister call must present.
+    pub review_token: String,
+    /// The Proxmox account.
+    pub account_id: String,
+    /// The VMID whose marker will be removed.
+    pub vmid: u32,
+    /// The VM name the marker records.
+    pub name: String,
+}
+
+/// Reviews unregistering a registered VM: the marker goes, the guest is not
+/// touched. A marker of a guest Fleet created is refused (destroy it, or
+/// abandon an unfinished creation).
+///
+/// # Errors
+///
+/// Returns the public error envelope on refusal, an unknown marker, or a
+/// marker Fleet created.
+#[utoipa::path(
+    post,
+    path = "/machines/persistent/{accountId}/{vmid}/unregister/review",
+    tag = "machines",
+    operation_id = "reviewUnregisterPersistentGuest",
+    params(
+        ("accountId" = String, Path, description = "The Proxmox account."),
+        ("vmid" = u32, Path, description = "The guest's VMID.")
+    ),
+    responses(
+        (status = 200, description = "The review record; present its token to the unregister call.", body = Resource<UnregisterReviewDto>),
+        (status = 403, description = "The caller may not provision machines.", body = crate::error::ApiError),
+        (status = 404, description = "The marker does not exist.", body = crate::error::ApiError),
+        (status = 409, description = "The marker belongs to a guest Fleet created.", body = crate::error::ApiError),
+        (status = 503, description = "Persistent machines are not wired.", body = crate::error::ApiError),
+    )
+)]
+pub async fn review_unregister_guest(
+    State(state): State<Arc<crate::operations::ApiState>>,
+    principal: Option<Extension<crate::ActingPrincipal>>,
+    Extension(correlation_id): Extension<CorrelationId>,
+    axum::extract::Path((account_id, vmid)): axum::extract::Path<(String, u32)>,
+) -> Result<Json<Resource<UnregisterReviewDto>>, ApiErrorResponse> {
+    let persistent = persistent_or_error(&state, correlation_id)?;
+    let principal = crate::operations::principal_or_error(principal, correlation_id)?;
+    let (marker, review_token) = persistent
+        .review_unregister(state.authorizer.as_ref(), &principal, &account_id, vmid)
+        .await
+        .map_err(|error| map_lab_error(&error, correlation_id))?;
+    Ok(Json(Resource::new(UnregisterReviewDto {
+        review_token,
+        account_id,
+        vmid,
+        name: marker.name,
+    })))
+}
+
+/// The body of the unregister call.
+#[derive(Clone, Debug, Deserialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct UnregisterGuestRequest {
+    /// The token from the review call.
+    pub review_token: String,
+}
+
+/// Unregisters a reviewed registered VM: the marker is removed with an audit
+/// event. The guest is left as it is.
+///
+/// # Errors
+///
+/// Returns the public error envelope on refusal, a review token that does
+/// not match, an unknown marker, or a marker Fleet created.
+#[utoipa::path(
+    post,
+    path = "/machines/persistent/{accountId}/{vmid}/unregister",
+    tag = "machines",
+    operation_id = "unregisterPersistentGuest",
+    params(
+        ("accountId" = String, Path, description = "The Proxmox account."),
+        ("vmid" = u32, Path, description = "The guest's VMID.")
+    ),
+    request_body = UnregisterGuestRequest,
+    responses(
+        (status = 204, description = "The marker was removed."),
+        (status = 400, description = "The review token does not match.", body = crate::error::ApiError),
+        (status = 403, description = "The caller may not provision machines.", body = crate::error::ApiError),
+        (status = 404, description = "The marker does not exist.", body = crate::error::ApiError),
+        (status = 409, description = "The marker belongs to a guest Fleet created.", body = crate::error::ApiError),
+        (status = 503, description = "Persistent machines are not wired.", body = crate::error::ApiError),
+    )
+)]
+pub async fn unregister_guest(
+    State(state): State<Arc<crate::operations::ApiState>>,
+    principal: Option<Extension<crate::ActingPrincipal>>,
+    Extension(correlation_id): Extension<CorrelationId>,
+    axum::extract::Path((account_id, vmid)): axum::extract::Path<(String, u32)>,
+    request: Result<Json<UnregisterGuestRequest>, axum::extract::rejection::JsonRejection>,
+) -> Result<StatusCode, ApiErrorResponse> {
+    let persistent = persistent_or_error(&state, correlation_id)?;
+    let principal = crate::operations::principal_or_error(principal, correlation_id)?;
+    let Json(request) = request.map_err(|_| {
+        crate::machines::invalid_request(
+            "the request body must be valid JSON with a reviewToken",
+            correlation_id,
+        )
+    })?;
+    persistent
+        .unregister(
+            state.authorizer.as_ref(),
+            &principal,
+            &account_id,
+            vmid,
+            &request.review_token,
+            Some(&correlation_id.to_string()),
+        )
+        .await
+        .map_err(|error| map_lab_error(&error, correlation_id))?;
+    Ok(StatusCode::NO_CONTENT)
 }

@@ -352,6 +352,9 @@ fn run_serve(mut config: fleet_config::ControllerConfig) -> ExitCode {
                     .with_machines(std::sync::Arc::new(
                         fleet_storage_sqlite::MachineRepository::new(store.pool().clone()),
                     ))
+                    .with_guest_links(std::sync::Arc::new(
+                        fleet_storage_sqlite::GuestLinkRepository::new(store.pool().clone()),
+                    ))
                     .with_register_guard(std::sync::Arc::new(
                         fleet_controller::persistent_machines::ProxmoxRegisterGuard::new(
                             std::sync::Arc::new(fleet_storage_sqlite::ProxmoxAccountRepository::new(

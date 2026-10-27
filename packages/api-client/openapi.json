@@ -6622,6 +6622,187 @@
         }
       }
     },
+    "/api/v1/machines/persistent/{accountId}/{vmid}/unregister": {
+      "post": {
+        "tags": [
+          "machines"
+        ],
+        "summary": "Unregisters a reviewed registered VM: the marker is removed with an audit\nevent. The guest is left as it is.",
+        "description": "# Errors\n\nReturns the public error envelope on refusal, a review token that does\nnot match, an unknown marker, or a marker Fleet created.",
+        "operationId": "unregisterPersistentGuest",
+        "parameters": [
+          {
+            "name": "accountId",
+            "in": "path",
+            "description": "The Proxmox account.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "vmid",
+            "in": "path",
+            "description": "The guest's VMID.",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "format": "int32",
+              "minimum": 0
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UnregisterGuestRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "204": {
+            "description": "The marker was removed."
+          },
+          "400": {
+            "description": "The review token does not match.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The caller may not provision machines.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "The marker does not exist.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The marker belongs to a guest Fleet created.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Persistent machines are not wired.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/machines/persistent/{accountId}/{vmid}/unregister/review": {
+      "post": {
+        "tags": [
+          "machines"
+        ],
+        "summary": "Reviews unregistering a registered VM: the marker goes, the guest is not\ntouched. A marker of a guest Fleet created is refused (destroy it, or\nabandon an unfinished creation).",
+        "description": "# Errors\n\nReturns the public error envelope on refusal, an unknown marker, or a\nmarker Fleet created.",
+        "operationId": "reviewUnregisterPersistentGuest",
+        "parameters": [
+          {
+            "name": "accountId",
+            "in": "path",
+            "description": "The Proxmox account.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "vmid",
+            "in": "path",
+            "description": "The guest's VMID.",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "format": "int32",
+              "minimum": 0
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The review record; present its token to the unregister call.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Resource_UnregisterReviewDto"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The caller may not provision machines.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "The marker does not exist.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The marker belongs to a guest Fleet created.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Persistent machines are not wired.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/machines/{machineId}": {
       "get": {
         "tags": [
@@ -27953,6 +28134,45 @@
           }
         }
       },
+      "Resource_UnregisterReviewDto": {
+        "type": "object",
+        "description": "A single resource.\n\nThe payload is nested under `data` so that later top-level fields are an\nadditive change rather than a breaking one.",
+        "required": [
+          "data"
+        ],
+        "properties": {
+          "data": {
+            "type": "object",
+            "description": "What unregistering a registered VM will do, and the token that binds it.",
+            "required": [
+              "reviewToken",
+              "accountId",
+              "vmid",
+              "name"
+            ],
+            "properties": {
+              "accountId": {
+                "type": "string",
+                "description": "The Proxmox account."
+              },
+              "name": {
+                "type": "string",
+                "description": "The VM name the marker records."
+              },
+              "reviewToken": {
+                "type": "string",
+                "description": "The token the unregister call must present."
+              },
+              "vmid": {
+                "type": "integer",
+                "format": "int32",
+                "description": "The VMID whose marker will be removed.",
+                "minimum": 0
+              }
+            }
+          }
+        }
+      },
       "Resource_Vec_PersistentGuestDto": {
         "type": "object",
         "description": "A single resource.\n\nThe payload is nested under `data` so that later top-level fields are an\nadditive change rather than a breaking one.",
@@ -30524,6 +30744,49 @@
               "null"
             ],
             "description": "The bounded, already-redacted failure detail, when the check failed."
+          }
+        }
+      },
+      "UnregisterGuestRequest": {
+        "type": "object",
+        "description": "The body of the unregister call.",
+        "required": [
+          "reviewToken"
+        ],
+        "properties": {
+          "reviewToken": {
+            "type": "string",
+            "description": "The token from the review call."
+          }
+        }
+      },
+      "UnregisterReviewDto": {
+        "type": "object",
+        "description": "What unregistering a registered VM will do, and the token that binds it.",
+        "required": [
+          "reviewToken",
+          "accountId",
+          "vmid",
+          "name"
+        ],
+        "properties": {
+          "accountId": {
+            "type": "string",
+            "description": "The Proxmox account."
+          },
+          "name": {
+            "type": "string",
+            "description": "The VM name the marker records."
+          },
+          "reviewToken": {
+            "type": "string",
+            "description": "The token the unregister call must present."
+          },
+          "vmid": {
+            "type": "integer",
+            "format": "int32",
+            "description": "The VMID whose marker will be removed.",
+            "minimum": 0
           }
         }
       },

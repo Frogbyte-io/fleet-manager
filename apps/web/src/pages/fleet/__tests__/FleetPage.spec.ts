@@ -552,7 +552,7 @@ describe('FleetPage', () => {
 
     listPersistentGuests.mockResolvedValue(ok({
       data: [
-        { accountId: 'a1', vmid: 7150, name: 'win-gh-runner', node: 'pve', imageVersionId: 'registered', machineId: 'm1', cloned: true, state: 'ready', step: 'registered', operationId: null, createdAt: NOW, updatedAt: NOW },
+        { accountId: 'a1', vmid: 7250, name: 'win-runner', node: 'pve', imageVersionId: 'registered', machineId: 'm1', cloned: true, state: 'ready', step: 'registered', operationId: null, createdAt: NOW, updatedAt: NOW },
         { accountId: 'a1', vmid: 7151, name: 'build-box', node: 'pve', imageVersionId: 'ver-1', machineId: null, cloned: false, state: 'creating', step: 'clone', operationId: 'op1', createdAt: NOW, updatedAt: NOW },
       ],
     }))

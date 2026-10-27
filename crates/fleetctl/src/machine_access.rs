@@ -114,6 +114,18 @@ pub enum MachineAccessAction {
         vmid: u32,
         /// An existing machine to link to the marker.
         machine: Option<String>,
+        /// Skip the confirmation.
+        yes: bool,
+    },
+    /// `machines persistent unregister --account <id> --vmid <n> [--yes]`:
+    /// drop the marker of a registered VM (#542).
+    PersistentUnregister {
+        /// The Proxmox account.
+        account: String,
+        /// The VMID.
+        vmid: u32,
+        /// Skip the confirmation.
+        yes: bool,
     },
     /// `machines endpoint-auth get <machine> <endpoint>`.
     EndpointAuthGet {
@@ -591,6 +603,12 @@ pub(crate) fn request(action: &MachineAccessAction) -> Result<RequestShape, CliE
             Vec::new(),
             None,
         ),
+        MachineAccessAction::PersistentUnregister { account, vmid, .. } => (
+            reqwest::Method::POST,
+            format!("/api/v1/machines/persistent/{account}/{vmid}/unregister/review"),
+            Vec::new(),
+            None,
+        ),
         MachineAccessAction::PersistentRegister { account, vmid, .. } => (
             reqwest::Method::POST,
             format!("/api/v1/machines/persistent/{account}/{vmid}/register/review"),
@@ -805,13 +823,20 @@ pub(crate) fn run(
             account,
             vmid,
             machine,
+            yes,
         } => {
             let payload = crate::persistent::run_persistent_register(
                 invocation,
                 account,
                 *vmid,
                 machine.as_deref(),
+                *yes,
             )?;
+            Ok((rendered(&payload), 0))
+        }
+        MachineAccessAction::PersistentUnregister { account, vmid, yes } => {
+            let payload =
+                crate::persistent::run_persistent_unregister(invocation, account, *vmid, *yes)?;
             Ok((rendered(&payload), 0))
         }
         MachineAccessAction::Abandon { account, vmid } => {

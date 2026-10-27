@@ -12,6 +12,7 @@ use axum::http::{Request, StatusCode};
 use fleet_api::{API_BASE_PATH, CORRELATION_ID_HEADER, operations::ApiState, router};
 use fleet_application::authz::{AccessRequest, Authorizer, Decision, Permission, ReasonId};
 use fleet_application::lab::Lab;
+use fleet_application::machine::MachinePort as _;
 use fleet_application::machine_access::MachineAccess;
 use fleet_application::operation::Operations;
 use fleet_application::persistent::{
@@ -53,6 +54,9 @@ impl fleet_application::lab::ImagePinValidator for NoPins {
 #[derive(Debug)]
 struct FakeCluster;
 
+/// Set to rename VMID 8004 after it was reviewed.
+static RENAMED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
 #[async_trait::async_trait]
 impl fleet_application::persistent::RegisterGuard for FakeCluster {
     async fn inspect(
@@ -71,6 +75,9 @@ impl fleet_application::persistent::RegisterGuard for FakeCluster {
             8000 => live("win-gh-runner"),
             8002 => live("fm-lab-abc"),
             8003 => live("made"),
+            8004 if RENAMED.load(std::sync::atomic::Ordering::SeqCst) => live("fm-lab-swapped"),
+            8004 => live("swap-box"),
+            8005 => live("linked-box"),
             8001 => GuestCheck::Refused("a template is never a persistent machine".to_owned()),
             _ => GuestCheck::Refused(format!("no guest with VMID {vmid} exists on this account")),
         })
@@ -79,6 +86,7 @@ impl fleet_application::persistent::RegisterGuard for FakeCluster {
 
 struct Harness {
     _dir: tempfile::TempDir,
+    pool: sqlx::SqlitePool,
     state: Arc<ApiState>,
 }
 
@@ -125,6 +133,9 @@ impl Harness {
                 PersistentMachines::new(Arc::new(NoPins), Arc::new(AuditSink::new(pool.clone())))
                     .with_markers(markers)
                     .with_machines(Arc::new(MachineRepository::new(pool.clone())))
+                    .with_guest_links(Arc::new(fleet_storage_sqlite::GuestLinkRepository::new(
+                        pool.clone(),
+                    )))
                     .with_register_guard(Arc::new(FakeCluster)),
             )),
         );
@@ -150,7 +161,11 @@ impl Harness {
             lab: Some(lab),
             ..ApiState::for_document()
         });
-        Self { _dir: dir, state }
+        Self {
+            _dir: dir,
+            pool,
+            state,
+        }
     }
 
     async fn get(&self, path: &str) -> (StatusCode, Value) {
@@ -312,6 +327,13 @@ async fn an_existing_vm_is_registered_after_a_review_and_is_audited() {
     assert_eq!(status, StatusCode::CONFLICT);
     let (_, listed) = harness.get("/machines/persistent").await;
     assert_eq!(listed["data"].as_array().unwrap().len(), 3);
+    let audited: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM audit_events WHERE metadata_json LIKE '%persistent_guest_registered%' AND metadata_json LIKE '%win-gh-runner%'",
+    )
+    .fetch_one(&harness.pool)
+    .await
+    .unwrap();
+    assert_eq!(audited, 1);
 }
 
 #[tokio::test]
@@ -343,4 +365,149 @@ async fn a_template_a_lab_clone_a_marked_name_or_an_unknown_machine_is_refused()
         .call("/machines/persistent/acct/8000/register/review", json!({}))
         .await;
     assert_eq!(status, StatusCode::FORBIDDEN);
+}
+
+fn plain_machine(name: &str) -> fleet_application::machine::RegisterMachine {
+    fleet_application::machine::RegisterMachine {
+        name: name.to_owned(),
+        description: String::new(),
+        endpoints: vec![fleet_application::machine::NewEndpoint {
+            kind: fleet_core::EndpointKind::Ssh,
+            reference: format!("root@{name}.invalid:22"),
+        }],
+        tags: vec![],
+        groups: vec![],
+    }
+}
+
+#[tokio::test]
+async fn a_register_is_denied_without_the_permission_and_follows_the_reviewed_guest() {
+    let denied = Harness::new(Arc::new(Deny(Permission::MachineProvision))).await;
+    let (status, _) = denied
+        .call(
+            "/machines/persistent/acct/8000/register",
+            json!({ "reviewToken": "0".repeat(64) }),
+        )
+        .await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+
+    // The guest changed between the review and the register: the register
+    // checks the live guest again.
+    let harness = Harness::new(Arc::new(fleet_auth::LanAllowAllAuthorizer)).await;
+    let base = "/machines/persistent/acct/8004/register";
+    let (status, body) = harness.call(&format!("{base}/review"), json!({})).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let token = body["data"]["reviewToken"].as_str().unwrap().to_owned();
+    RENAMED.store(true, std::sync::atomic::Ordering::SeqCst);
+    let (status, _) = harness.call(base, json!({ "reviewToken": token })).await;
+    RENAMED.store(false, std::sync::atomic::Ordering::SeqCst);
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    let (_, listed) = harness.get("/machines/persistent").await;
+    assert_eq!(listed["data"].as_array().unwrap().len(), 2);
+}
+
+#[tokio::test]
+async fn a_machine_is_linked_only_when_it_is_free_and_not_linked_to_another_guest() {
+    let harness = Harness::new(Arc::new(fleet_auth::LanAllowAllAuthorizer)).await;
+    let machines = MachineRepository::new(harness.pool.clone());
+    let free = machines.register(&plain_machine("free-box")).await.unwrap();
+    let taken = machines
+        .register(&plain_machine("taken-box"))
+        .await
+        .unwrap();
+    let elsewhere = machines.register(&plain_machine("else-box")).await.unwrap();
+    let markers = PersistentGuestRepository::new(harness.pool.clone());
+    let mut owner = marker(7900, "other-persistent", true);
+    owner.machine_id = Some(taken.id.clone());
+    markers.reserve(&owner).await.unwrap();
+    use fleet_application::machine::GuestLinkPort as _;
+    use fleet_application::proxmox::ProxmoxAccountPort as _;
+    let account = fleet_storage_sqlite::ProxmoxAccountRepository::new(harness.pool.clone())
+        .create(&fleet_application::proxmox::NewProxmoxAccount {
+            name: "pve".to_owned(),
+            host: "pve-api.example.test".to_owned(),
+            port: None,
+            token_id: "fleet@pve!t".to_owned(),
+        })
+        .await
+        .unwrap();
+    fleet_storage_sqlite::GuestLinkRepository::new(harness.pool.clone())
+        .confirm(
+            &elsewhere.id,
+            &fleet_application::machine::GuestLink {
+                account_id: account.id.clone(),
+                guest_kind: "qemu".to_owned(),
+                node: "pve".to_owned(),
+                vmid: 9999,
+            },
+        )
+        .await
+        .unwrap();
+    let review = |machine: &str| json!({ "machineId": machine });
+    let path = "/machines/persistent/acct/8005/register/review";
+    let (status, _) = harness.call(path, review(&taken.id)).await;
+    assert_eq!(status, StatusCode::CONFLICT);
+    let (status, _) = harness.call(path, review(&elsewhere.id)).await;
+    assert_eq!(status, StatusCode::CONFLICT);
+    let (status, body) = harness.call(path, review(&free.id)).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+
+    // Naming a machine needs the link permission on that machine.
+    let denied = Harness::new(Arc::new(Deny(Permission::MachineLinkGuest))).await;
+    let (status, _) = denied.call(path, json!({ "machineId": "whatever" })).await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    let (status, _) = denied.call(path, json!({})).await;
+    assert_eq!(status, StatusCode::OK);
+}
+
+#[tokio::test]
+async fn an_unregister_is_reviewed_audited_and_only_for_registered_markers() {
+    let harness = Harness::new(Arc::new(fleet_auth::LanAllowAllAuthorizer)).await;
+    let base = "/machines/persistent/acct/8000";
+    let (_, body) = harness
+        .call(&format!("{base}/register/review"), json!({}))
+        .await;
+    let token = body["data"]["reviewToken"].as_str().unwrap().to_owned();
+    let (status, _) = harness
+        .call(&format!("{base}/register"), json!({ "reviewToken": token }))
+        .await;
+    assert_eq!(status, StatusCode::CREATED);
+
+    // A created machine's marker is destroyed, not unregistered.
+    let (status, _) = harness
+        .call(
+            "/machines/persistent/acct/7100/unregister/review",
+            json!(null),
+        )
+        .await;
+    assert_eq!(status, StatusCode::CONFLICT);
+
+    let (status, body) = harness
+        .call(&format!("{base}/unregister/review"), json!(null))
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let token = body["data"]["reviewToken"].as_str().unwrap().to_owned();
+    let (status, _) = harness
+        .call(
+            &format!("{base}/unregister"),
+            json!({ "reviewToken": "0".repeat(64) }),
+        )
+        .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    let (status, _) = harness
+        .call(
+            &format!("{base}/unregister"),
+            json!({ "reviewToken": token }),
+        )
+        .await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    let (_, listed) = harness.get("/machines/persistent").await;
+    assert_eq!(listed["data"].as_array().unwrap().len(), 2);
+    let audited: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM audit_events WHERE metadata_json LIKE '%persistent_guest_unregistered%'",
+    )
+    .fetch_one(&harness.pool)
+    .await
+    .unwrap();
+    assert_eq!(audited, 1);
 }

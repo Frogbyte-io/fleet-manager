@@ -220,6 +220,13 @@ impl fleet_application::persistent::AbandonGuard for ProxmoxAbandonGuard {
     }
 }
 
+fn node_of(resource: &fleet_provider_proxmox::PveResource) -> Result<String, String> {
+    resource
+        .node
+        .clone()
+        .ok_or_else(|| "the guest has no current node".to_owned())
+}
+
 /// The live checks of registering an existing VM as persistent: it must
 /// exist as a QEMU VM that is not a template, a promoted image artifact, a
 /// Lab clone or a Lab pool member.
@@ -270,7 +277,7 @@ impl fleet_application::persistent::RegisterGuard for ProxmoxRegisterGuard {
         let resources = self
             .pve
             .client
-            .list_guest_resources(request)
+            .list_guest_resources(request.clone())
             .await
             .map_err(|error| format!("the resource listing failed: {error}"))?;
         let Some(resource) = resources.iter().find(|resource| {
@@ -300,13 +307,34 @@ impl fleet_application::persistent::RegisterGuard for ProxmoxRegisterGuard {
         if name.is_empty() {
             return refuse("the guest has no name".to_owned());
         }
-        if let Some(pools) = &self.pool_members
-            && let Some(pool) = pools
-                .pool_of(account_id, vmid)
-                .await
-                .map_err(|_| "the Lab pool membership could not be read".to_owned())?
+        // Fail closed: without the pool lookup a pool member cannot be told
+        // from any other guest.
+        let Some(pools) = &self.pool_members else {
+            return Err(
+                "the Lab pool membership is not wired, so a registration is refused".to_owned(),
+            );
+        };
+        if let Some(pool) = pools
+            .pool_of(account_id, vmid)
+            .await
+            .map_err(|_| "the Lab pool membership could not be read".to_owned())?
         {
             return refuse(format!("the guest is a member of Lab pool {pool}"));
+        }
+        let settings = self
+            .pve
+            .client
+            .qemu_settings(request, &node_of(resource)?, vmid)
+            .await
+            .map_err(|error| format!("the guest config is unreadable: {error}"))?;
+        if let Some(tag) = settings
+            .tags
+            .iter()
+            .find(|tag| fleet_application::persistent::is_reserved_tag(tag))
+        {
+            return refuse(format!(
+                "the guest carries the reserved tag {tag}, which fixture and Lab tooling act on; remove it first (proxmox config)"
+            ));
         }
         let node = resource
             .node

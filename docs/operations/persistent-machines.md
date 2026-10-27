@@ -121,7 +121,9 @@ An existing VM becomes persistent without being recreated:
 fleetctl machines persistent register --account <a> --vmid <n> [--machine <machine-id>]
 ```
 
-The command reviews, then registers. The guest is looked at live: it must be a QEMU VM and not a template, a promoted image artifact, a Lab clone (`fm-lab-` name) or a Lab pool member, and must not be marked already. `--machine` names an existing Fleet machine for the marker (a guest link is still `machines link-guest`). Registration writes only the marker (audited as `persistent_guest_registered`): protection, tags and the SSH key are unchanged; set them with `proxmox config` and rotate credentials separately. The console's Create persistent machine dialog is the same review and create as `fleetctl machines create`.
+The command shows the review and asks for confirmation (`--yes` skips it; without a terminal `--yes` is required), then registers. The guest is looked at live: it must be a QEMU VM and not a template, a promoted image artifact, a Lab clone (`fm-lab-` name) or a Lab pool member, must carry no `fleet-pve-test`, `fleet-lab` or `fm-lab` tag (remove it with `proxmox config` first), and must not be marked already. `--machine` names an existing Fleet machine for the marker; it needs the link permission on that machine, and the machine must be free and not linked to another guest (a guest link is still made with `machines link-guest`). Registration writes only the marker (audited as `persistent_guest_registered`): protection, tags and the SSH key are unchanged; set them with `proxmox config` and rotate credentials separately. A registered marker guards the VM only while its name is unchanged, so a VM that is gone or renamed stops being shielded. To undo a registration: `fleetctl machines persistent unregister --account <a> --vmid <n>` (reviewed, audited, the VM is left as it is). Destroying a registered VM never lifts its protection: lift it yourself (`proxmox config`, `protection=false`), then `proxmox destroy --confirm-persistent`.
+
+The console's Create persistent machine dialog is the same review and create as `fleetctl machines create`.
 
 ## Not in this release
 

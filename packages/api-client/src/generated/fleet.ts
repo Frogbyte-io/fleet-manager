@@ -9089,6 +9089,34 @@ export interface ResourceTerminalSessionDto {
 }
 
 /**
+ * What unregistering a registered VM will do, and the token that binds it.
+ */
+export type ResourceUnregisterReviewDtoData = {
+  /** The Proxmox account. */
+  accountId: string;
+  /** The VM name the marker records. */
+  name: string;
+  /** The token the unregister call must present. */
+  reviewToken: string;
+  /**
+     * The VMID whose marker will be removed.
+     * @minimum 0
+     */
+  vmid: number;
+};
+
+/**
+ * A single resource.
+ *
+ * The payload is nested under `data` so that later top-level fields are an
+ * additive change rather than a breaking one.
+ */
+export interface ResourceUnregisterReviewDto {
+  /** What unregistering a registered VM will do, and the token that binds it. */
+  data: ResourceUnregisterReviewDtoData;
+}
+
+/**
  * One persistent guest marker.
  */
 export type ResourceVecPersistentGuestDtoDataItem = {
@@ -10072,6 +10100,31 @@ export interface TerminalSessionDto {
      * expires at `expiresAt` and is spent by the first attach.
      */
   token: string;
+}
+
+/**
+ * The body of the unregister call.
+ */
+export interface UnregisterGuestRequest {
+  /** The token from the review call. */
+  reviewToken: string;
+}
+
+/**
+ * What unregistering a registered VM will do, and the token that binds it.
+ */
+export interface UnregisterReviewDto {
+  /** The Proxmox account. */
+  accountId: string;
+  /** The VM name the marker records. */
+  name: string;
+  /** The token the unregister call must present. */
+  reviewToken: string;
+  /**
+     * The VMID whose marker will be removed.
+     * @minimum 0
+     */
+  vmid: number;
 }
 
 /**
@@ -17298,6 +17351,163 @@ const res = await fetch(getReviewRegisterPersistentGuestUrl(accountId,vmid),
 
   const data: reviewRegisterPersistentGuestResponse['data'] = body ? JSON.parse(body) : {}
   return { data, status: res.status, headers: res.headers } as reviewRegisterPersistentGuestResponse
+}
+
+
+
+export type unregisterPersistentGuestResponse204 = {
+  data: void
+  status: 204
+}
+
+export type unregisterPersistentGuestResponse400 = {
+  data: ApiError
+  status: 400
+}
+
+export type unregisterPersistentGuestResponse403 = {
+  data: ApiError
+  status: 403
+}
+
+export type unregisterPersistentGuestResponse404 = {
+  data: ApiError
+  status: 404
+}
+
+export type unregisterPersistentGuestResponse409 = {
+  data: ApiError
+  status: 409
+}
+
+export type unregisterPersistentGuestResponse503 = {
+  data: ApiError
+  status: 503
+}
+
+export type unregisterPersistentGuestResponseSuccess = (unregisterPersistentGuestResponse204) & {
+  headers: Headers;
+};
+export type unregisterPersistentGuestResponseError = (unregisterPersistentGuestResponse400 | unregisterPersistentGuestResponse403 | unregisterPersistentGuestResponse404 | unregisterPersistentGuestResponse409 | unregisterPersistentGuestResponse503) & {
+  headers: Headers;
+};
+
+export type unregisterPersistentGuestResponse = (unregisterPersistentGuestResponseSuccess | unregisterPersistentGuestResponseError)
+
+export const getUnregisterPersistentGuestUrl = (accountId: string,
+    vmid: number,) => {
+
+
+
+
+  return `/api/v1/machines/persistent/${accountId}/${vmid}/unregister`
+}
+
+/**
+ * # Errors
+ *
+ * Returns the public error envelope on refusal, a review token that does
+ * not match, an unknown marker, or a marker Fleet created.
+ * @summary Unregisters a reviewed registered VM: the marker is removed with an audit
+event. The guest is left as it is.
+ */
+export const unregisterPersistentGuest = async (accountId: string,
+    vmid: number,
+    unregisterGuestRequest: UnregisterGuestRequest, options?: RequestInit): Promise<unregisterPersistentGuestResponse> => {
+
+    const getHeaders = (h?: NonNullable<RequestInit['headers']>): Record<string, string | readonly string[]> => {
+    if (!h) return {};
+    if (h instanceof Headers) return Object.fromEntries(h.entries());
+    if (Array.isArray(h)) return Object.fromEntries(h);
+    return h;
+  };
+const res = await fetch(getUnregisterPersistentGuestUrl(accountId,vmid),
+  {
+    ...options,
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...getHeaders(options?.headers) },
+    body: JSON.stringify(unregisterGuestRequest)
+  }
+)
+
+
+  const body = [204, 205, 304].includes(res.status) ? null : await res.text();
+
+  const data: unregisterPersistentGuestResponse['data'] = body ? JSON.parse(body) : undefined
+  return { data, status: res.status, headers: res.headers } as unregisterPersistentGuestResponse
+}
+
+
+
+export type reviewUnregisterPersistentGuestResponse200 = {
+  data: ResourceUnregisterReviewDto
+  status: 200
+}
+
+export type reviewUnregisterPersistentGuestResponse403 = {
+  data: ApiError
+  status: 403
+}
+
+export type reviewUnregisterPersistentGuestResponse404 = {
+  data: ApiError
+  status: 404
+}
+
+export type reviewUnregisterPersistentGuestResponse409 = {
+  data: ApiError
+  status: 409
+}
+
+export type reviewUnregisterPersistentGuestResponse503 = {
+  data: ApiError
+  status: 503
+}
+
+export type reviewUnregisterPersistentGuestResponseSuccess = (reviewUnregisterPersistentGuestResponse200) & {
+  headers: Headers;
+};
+export type reviewUnregisterPersistentGuestResponseError = (reviewUnregisterPersistentGuestResponse403 | reviewUnregisterPersistentGuestResponse404 | reviewUnregisterPersistentGuestResponse409 | reviewUnregisterPersistentGuestResponse503) & {
+  headers: Headers;
+};
+
+export type reviewUnregisterPersistentGuestResponse = (reviewUnregisterPersistentGuestResponseSuccess | reviewUnregisterPersistentGuestResponseError)
+
+export const getReviewUnregisterPersistentGuestUrl = (accountId: string,
+    vmid: number,) => {
+
+
+
+
+  return `/api/v1/machines/persistent/${accountId}/${vmid}/unregister/review`
+}
+
+/**
+ * # Errors
+ *
+ * Returns the public error envelope on refusal, an unknown marker, or a
+ * marker Fleet created.
+ * @summary Reviews unregistering a registered VM: the marker goes, the guest is not
+touched. A marker of a guest Fleet created is refused (destroy it, or
+abandon an unfinished creation).
+ */
+export const reviewUnregisterPersistentGuest = async (accountId: string,
+    vmid: number, options?: RequestInit): Promise<reviewUnregisterPersistentGuestResponse> => {
+
+  const res = await fetch(getReviewUnregisterPersistentGuestUrl(accountId,vmid),
+  {
+    ...options,
+    method: 'POST'
+
+
+  }
+)
+
+
+  const body = [204, 205, 304].includes(res.status) ? null : await res.text();
+
+  const data: reviewUnregisterPersistentGuestResponse['data'] = body ? JSON.parse(body) : {}
+  return { data, status: res.status, headers: res.headers } as reviewUnregisterPersistentGuestResponse
 }
 
 
