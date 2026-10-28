@@ -598,6 +598,7 @@ Before you create a pool, prepare it:
    - Its VMID must not be a promoted image's template.
    - Take the baseline snapshot on it (`qm snapshot <vmid> baseline`). Every member must carry a snapshot with the same name.
    - Install the controller's SSH key and the QEMU guest agent before the snapshot, as for an image.
+   - **Windows members.** For a `guestOs: windows` template, boot each member past specialize (first logon reached, OpenSSH answering) before you take its baseline snapshot, so a rollback never lands in a half-specialized guest. If the image needs a retail key, enter it in the member only, with one key per member; never put a key in a template, recipe or Fleet. See the [Windows Lab fixture](windows-lab-fixture.md) for the fixture, licensing and activation details.
 3. Grant the account's token `VM.Audit` and `VM.Snapshot.Rollback` (or `VM.Snapshot`) on each member's `/vms/<vmid>`, plus `VM.PowerMgmt` to start it.
 
 Then create, fill, and check the pool:
@@ -751,4 +752,6 @@ Not yet guaranteed:
 
 ## Out of scope
 
-USB, GPU, and other hardware-in-the-loop resources are a separate sub-epic. Windows guests are later work.
+USB, GPU, and other hardware-in-the-loop resources are a separate sub-epic.
+
+Windows guests ([ADR 0015](../adr/0015-windows-lab-guest-transport.md), epic #396) are in scope for readiness, `lab exec` (synchronous, detached and interactive-session), `lab put` and `lab collect`, audio, and pools; see [Windows guests](#windows-guests) and [Pooled guests](#pooled-guests). Still unverified, and tracked in [#555](https://github.com/Frogbyte-io/fleet-manager/issues/555): activation across a snapshot rollback, clone SID uniqueness, and leases on the Cloudbase-Init re-generalized image. [#556](https://github.com/Frogbyte-io/fleet-manager/issues/556) tracks an automated test of the pool flow with a Windows template. ADR 0015 is still Proposed.

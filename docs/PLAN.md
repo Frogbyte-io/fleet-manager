@@ -14,7 +14,7 @@ This section records decisions confirmed during the maintainer's current plan re
 - **One product ladder:** ship Developer Fleet as a complete first release, then build Fleet Lab on the proven controller, machine, project, provider, and operation foundations. Do not run them as competing product tracks.
 - **Initial deployment and trust:** the controller is hosted on Linux and exposed only on a trusted local network. The dashboard has no accounts or login initially; every LAN client can read and mutate. Application-layer authorization and audit remain mandatory, initially using a clearly identified `anonymous-lan-admin` principal so later authentication does not require handler rewrites.
 - **Human usage:** several people may view or operate the same web dashboard, but the product is optimized for one human controller at a time rather than concurrent multi-user collaboration.
-- **Windows scope:** Fleet need not run its controller on Windows. Initial Windows support is Proxmox VM lifecycle plus QEMU Guest Agent health/IP visibility. A Windows `fleetd`, in-guest inventory/exec, local broker, and project readiness are later work after the first Lab release.
+- **Windows scope:** Fleet need not run its controller on Windows. Initial Windows support is Proxmox VM lifecycle plus QEMU Guest Agent health/IP visibility. A Windows `fleetd`, in-guest inventory/exec, local broker, and project readiness are later work after the first Lab release. Update 2026-10-28: Windows Lab guests (readiness, exec, put/collect, audio, pools) have landed via OpenSSH ([operator guide](operations/lab.md#windows-guests)); activation across rollback, clone SID and leases on the re-generalized image remain open ([#555](https://github.com/Frogbyte-io/fleet-manager/issues/555), [#556](https://github.com/Frogbyte-io/fleet-manager/issues/556)); ADR 0015 is still Proposed.
 - **First Lab promise:** request a disposable Linux environment, prepare a project, execute commands, and guarantee TTL-driven cleanup. Rich scheduling, hardware passthrough, Windows guest readiness, and broad artifact workflows follow later.
 - **GitOps sequencing:** full desired-state/Git activation is not a prerequisite for the first Lab release. Lab takes only the minimal versioned bootstrap-profile and Lab-template contracts it needs; the broader M4 product proceeds independently afterward.
 - **Image production:** Fleet creates and maintains Proxmox VM templates through an image-build provider, with Packer as the first external CLI integration. Modern `.pkr.json` is the portable recipe format. Fleet offers a structured editor for supported Proxmox fields plus an advanced raw-JSON editor.
@@ -288,7 +288,7 @@ M6 can start after M2 and the M1 operation/security kernel, but Lab waits for M3
 
 ### M7 — Fleet Lab
 
-Status: complete (2026-10-09 — FM-700–FM-743 closed; the [FM-742 exit-gate evidence](https://github.com/Frogbyte-io/fleet-manager/issues/266) is recorded in [`docs/planning/m7-acceptance.md`](planning/m7-acceptance.md#evidence)). The USB/hardware sub-epic ([#16](https://github.com/Frogbyte-io/fleet-manager/issues/16)) and Windows in-guest support remain later sub-epics.
+Status: complete (2026-10-09 — FM-700–FM-743 closed; the [FM-742 exit-gate evidence](https://github.com/Frogbyte-io/fleet-manager/issues/266) is recorded in [`docs/planning/m7-acceptance.md`](planning/m7-acceptance.md#evidence)). The USB/hardware sub-epic ([#16](https://github.com/Frogbyte-io/fleet-manager/issues/16)) and Windows in-guest support remain later sub-epics. Windows Lab guests have since landed (epic #396, [operator guide](operations/lab.md#windows-guests); remaining: [#555](https://github.com/Frogbyte-io/fleet-manager/issues/555), [#556](https://github.com/Frogbyte-io/fleet-manager/issues/556); ADR 0015 still Proposed).
 
 Outcome: humans and agents can obtain, use, and release disposable Linux development/test environments without leaked VMs.
 
@@ -304,7 +304,7 @@ Operator runbook: [`docs/operations/lab.md`](operations/lab.md).
 - Destroy by default; revert for explicitly pooled guests; keep requires elevated permission and transfers the VM out of automatic cleanup.
 - `fleetctl lab create/status/exec/destroy --output json`, artifacts/log metadata, expiry sweeper, and cleanup reconciliation.
 - Fleet-provided skills that drive the JSON CLI for autonomous agent use; no MCP dependency or separate skill authority.
-- Later sub-epics: Windows in-guest management/readiness, rich artifact workflows, stable physical USB/GPU inventory, IOMMU/host validation, exclusive reservation, attach/detach compensation, and hardware-in-the-loop workflows.
+- Later sub-epics: Windows in-guest management/readiness, rich artifact workflows, stable physical USB/GPU inventory, IOMMU/host validation, exclusive reservation, attach/detach compensation, and hardware-in-the-loop workflows. Update: the Windows Lab guest part has landed (epic #396); see the status note above.
 
 Exit gate: a human or agent can request a disposable Linux environment from a manually promoted image version, prepare a project, execute commands, and release it or allow TTL expiry. Failure-injection tests at every lifecycle transition leave no unowned VM or capacity reservation, and expired leases clean up after controller restart.
 
