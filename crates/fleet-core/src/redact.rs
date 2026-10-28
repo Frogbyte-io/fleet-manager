@@ -533,6 +533,120 @@ fn fence_line_prefix(text: &str, floor: usize, fence: usize) -> Option<&str> {
     (!prefix.trim_matches([' ', '\t']).is_empty()).then_some(prefix)
 }
 
+/// The length of an ISO-8601 timestamp (`2024-01-01T00:00:00.123Z`, a space
+/// for the `T`, an optional fraction and zone) at the start of `bytes`.
+fn timestamp_len(bytes: &[u8]) -> Option<usize> {
+    const SHAPE: &[u8] = b"dddd-dd-ddTdd:dd:dd";
+    if bytes.len() < SHAPE.len() {
+        return None;
+    }
+    let shaped = SHAPE.iter().zip(bytes).all(|(shape, byte)| match shape {
+        b'd' => byte.is_ascii_digit(),
+        b'T' => matches!(byte, b'T' | b' '),
+        other => other == byte,
+    });
+    if !shaped {
+        return None;
+    }
+    let mut len = SHAPE.len();
+    if bytes.get(len) == Some(&b'.') {
+        let digits = bytes[len + 1..]
+            .iter()
+            .take_while(|byte| byte.is_ascii_digit())
+            .count();
+        if digits > 0 {
+            len += 1 + digits;
+        }
+    }
+    match bytes.get(len) {
+        Some(b'Z') => len += 1,
+        Some(b'+' | b'-')
+            if bytes.len() >= len + 6
+                && bytes[len + 1..len + 3].iter().all(u8::is_ascii_digit)
+                && bytes[len + 3] == b':'
+                && bytes[len + 4..len + 6].iter().all(u8::is_ascii_digit) =>
+        {
+            len += 6;
+        }
+        _ => {}
+    }
+    Some(len)
+}
+
+/// The longest timestamp that can sit in a log prefix.
+const TIMESTAMP_MAX: usize = 40;
+
+/// A log prefix with a timestamp in it, split around the timestamp: the
+/// lines of the same stream carry the same head and tail and a timestamp of
+/// their own (`docker compose logs -t`: `web-1  | ` and nothing; kubectl
+/// `--timestamps`: both empty; CRI: ` stdout F` as the tail).
+struct StampedPrefix<'a> {
+    head: &'a str,
+    tail: &'a str,
+}
+
+/// The tails a CRI log line has: the stream and the full or partial flag.
+const CRI_TAILS: [&str; 4] = [" stdout F", " stdout P", " stderr F", " stderr P"];
+
+impl<'a> StampedPrefix<'a> {
+    /// `prefix` (without trailing blanks) split around its first timestamp.
+    fn parse(prefix: &'a str) -> Option<Self> {
+        let bytes = prefix.as_bytes();
+        (0..bytes.len()).find_map(|at| {
+            let len = timestamp_len(&bytes[at..])?;
+            Some(Self {
+                head: &prefix[..at],
+                tail: &prefix[at + len..],
+            })
+        })
+    }
+
+    /// The tails a line of the stream may have.
+    fn tails(&self) -> &[&'a str] {
+        if CRI_TAILS.contains(&self.tail) {
+            &CRI_TAILS
+        } else {
+            std::slice::from_ref(&self.tail)
+        }
+    }
+}
+
+/// The length of the stamped prefix of `prefix` that starts `rest`: the same
+/// head, any timestamp, the same tail.
+fn stamped_prefix_len(rest: &str, prefix: &str) -> Option<usize> {
+    let stamped = StampedPrefix::parse(prefix)?;
+    let after_head = rest.strip_prefix(stamped.head)?;
+    let stamp = timestamp_len(after_head.as_bytes())?;
+    let after_stamp = &after_head[stamp..];
+    stamped
+        .tails()
+        .iter()
+        .find(|tail| after_stamp.starts_with(**tail))
+        .map(|tail| stamped.head.len() + stamp + tail.len())
+}
+
+/// Where a line whose content begins at `content` starts when it carries the
+/// stamped prefix of `prefix` with a timestamp of its own. The look-back is
+/// bounded by [`TIMESTAMP_MAX`].
+fn stamped_prefix_start(text: &str, floor: usize, content: usize, prefix: &str) -> Option<usize> {
+    let stamped = StampedPrefix::parse(prefix)?;
+    stamped.tails().iter().find_map(|tail| {
+        let stamp_end = content.checked_sub(tail.len())?;
+        if stamp_end < floor || !text[..content].ends_with(*tail) {
+            return None;
+        }
+        let lowest = stamp_end
+            .saturating_sub(TIMESTAMP_MAX)
+            .max(floor + stamped.head.len());
+        (lowest..stamp_end).find_map(|at| {
+            (text.is_char_boundary(at)
+                && timestamp_len(&text.as_bytes()[at..stamp_end]) == Some(stamp_end - at)
+                && text[..at].ends_with(stamped.head))
+            .then(|| at - stamped.head.len())
+        })
+    })
+}
+
 /// Where the content of the line starting at `line` begins: past the log
 /// prefix when the line has it (also with its trailing blanks trimmed, as a
 /// blank line has it, or with another value of a changing prefix).
@@ -545,6 +659,9 @@ fn skip_line_prefix(text: &str, line: usize, prefix: Option<&str>) -> usize {
     let trimmed = prefix.trim_end_matches([' ', '\t']);
     if rest.starts_with(trimmed) {
         return line + trimmed.len();
+    }
+    if let Some(len) = stamped_prefix_len(rest, trimmed) {
+        return line + len;
     }
     // A prefix that differs per line (`web-2  | `, a timestamp and
     // `app[1]: `): up to the last delimiter of the fence's own prefix within
@@ -682,8 +799,23 @@ fn armor_prefix_len(line: &str) -> Option<usize> {
 fn armor_start(text: &str, floor: usize, fence: usize) -> usize {
     // The walk with the per-line prefix fallback, and without it: the walks
     // accept different lines around prose, so the key starts at the earlier.
-    let start = armor_start_lines(text, floor, fence, true)
-        .min(armor_start_lines(text, floor, fence, false));
+    // The walks the earlier versions had stay, so nothing masked before can
+    // become unmasked; the stamped and foreign-line walks only add to them.
+    let walk = |varying, stamped, foreign| Walk {
+        varying,
+        stamped,
+        foreign,
+    };
+    let start = [
+        walk(false, false, false),
+        walk(true, false, false),
+        walk(true, true, false),
+        walk(true, true, true),
+    ]
+    .into_iter()
+    .map(|walk| armor_start_lines(text, floor, fence, walk))
+    .min()
+    .unwrap_or(fence);
     // Only the log prefix of the fence's own line, and no key line before it:
     // nothing to mask but the fence.
     let own_line = !text[start..fence].contains('\n') && !text[start..fence].contains("\\n");
@@ -715,7 +847,115 @@ fn varying_prefix_start(text: &str, floor: usize, content: usize, prefix: &str) 
     })
 }
 
-fn armor_start_lines(text: &str, floor: usize, fence: usize, varying: bool) -> usize {
+/// How one walk of [`armor_start_lines`] reads the lines before a fence.
+#[derive(Clone, Copy)]
+struct Walk {
+    /// A line may carry another value of a changing prefix.
+    varying: bool,
+    /// A line may carry the fence's prefix with a timestamp of its own.
+    stamped: bool,
+    /// Lines of another stream between key lines are skipped.
+    foreign: bool,
+}
+
+/// How many lines of another stream may sit between lines of a key.
+const FOREIGN_LINES_MAX: usize = 3;
+
+/// How far back the start of a line is looked for.
+const LINE_LOOKBACK: usize = 256;
+
+/// The line break that ends right before `pos`, as its start.
+fn break_before(text: &str, floor: usize, pos: usize) -> Option<usize> {
+    [4usize, 2, 1]
+        .into_iter()
+        .map(|len| (len, pos.checked_sub(len)))
+        .find_map(|(len, at)| {
+            let at = at.filter(|at| *at >= floor)?;
+            (line_break_len(text, at) == Some(len)).then_some(at)
+        })
+}
+
+/// What stands between the start of the line at `line` and its content when
+/// the line carries `prefix` as the fence's own line does, with a timestamp
+/// of its own when the prefix has one.
+fn own_prefix_len(text: &str, line: usize, prefix: &str, stamped: bool) -> Option<usize> {
+    let rest = &text[line..];
+    if rest.starts_with(prefix) {
+        return Some(prefix.len());
+    }
+    stamped.then(|| stamped_prefix_len(rest, prefix)).flatten()
+}
+
+/// The start of the first of the up to [`FOREIGN_LINES_MAX`] lines before
+/// `start` that are of another stream (they lack the fence's prefix), when a
+/// full line of the key's own stream lies right before them: where a key
+/// continues behind lines another service wrote into it.
+fn foreign_lines_start(
+    text: &str,
+    floor: usize,
+    start: usize,
+    prefix: &str,
+    stamped: bool,
+) -> Option<usize> {
+    let mut at = start;
+    for skipped in 0..=FOREIGN_LINES_MAX {
+        let end = break_before(text, floor, at)?;
+        let lowest = end.saturating_sub(LINE_LOOKBACK).max(floor);
+        let line = (lowest..=end)
+            .rev()
+            .find_map(|pos| break_before(text, floor, pos).map(|_| pos))
+            .or((lowest == floor).then_some(floor))?;
+        let own = own_prefix_len(text, line, prefix, stamped);
+        if let Some(own) = own {
+            let content = skip_blanks(text.as_bytes(), line + own);
+            let run = armor_run_len(text.as_bytes(), content);
+            let tail = skip_blanks(text.as_bytes(), content + run);
+            return (skipped > 0
+                && run >= KEY_RUN_MIN
+                && is_key_run(&text.as_bytes()[content..content + run])
+                && tail == end)
+                .then_some(at);
+        }
+        if text[line..end].trim_matches([' ', '\t']).is_empty() {
+            return None;
+        }
+        at = line;
+    }
+    None
+}
+
+/// Where the line whose content begins at `content` starts, past the log
+/// prefix it carries: the fence's own, a stamped one with a timestamp of its
+/// own, or another value of a changing one (the second value says which was
+/// the last). `content` itself when there is no such prefix.
+fn line_start_behind_prefix(
+    text: &str,
+    floor: usize,
+    content: usize,
+    prefix: &str,
+    walk: Walk,
+) -> (usize, bool) {
+    if content >= floor + prefix.len() && text[..content].ends_with(prefix) {
+        return (content - prefix.len(), false);
+    }
+    if walk.stamped
+        && let Some(start) = stamped_prefix_start(text, floor, content, prefix)
+        && start > floor
+    {
+        return (start, false);
+    }
+    if walk.varying
+        && let Some(start) = varying_prefix_start(text, floor, content, prefix)
+    {
+        return (start, true);
+    }
+    (content, false)
+}
+
+fn armor_start_lines(text: &str, floor: usize, fence: usize, walk: Walk) -> usize {
+    let Walk {
+        stamped, foreign, ..
+    } = walk;
     let bytes = text.as_bytes();
     // Every line of the key carries the log prefix of the fence's line.
     let prefix =
@@ -740,16 +980,15 @@ fn armor_start_lines(text: &str, floor: usize, fence: usize, varying: bool) -> u
     let mut short_from: Option<usize> = None;
     let mut first = true;
     loop {
+        if foreign
+            && let Some(prefix) = prefix
+            && let Some(skipped) = foreign_lines_start(text, floor, start, prefix, stamped)
+        {
+            start = skipped;
+        }
         let fallback = short_from.unwrap_or(start);
         // The line before `start` ends at a break right before it.
-        let Some(break_at) = [4usize, 2, 1]
-            .into_iter()
-            .map(|len| (len, start.checked_sub(len)))
-            .find_map(|(len, at)| {
-                let at = at.filter(|at| *at >= floor)?;
-                (line_break_len(text, at) == Some(len)).then_some(at)
-            })
-        else {
+        let Some(break_at) = break_before(text, floor, start) else {
             // No line break before the fence: it is mid-line, and the blanks
             // before it are not indentation.
             return if first && start != floor {
@@ -779,17 +1018,9 @@ fn armor_start_lines(text: &str, floor: usize, fence: usize, varying: bool) -> u
             line_start -= 1;
         }
         let mut via_varying = false;
-        if let Some(prefix) = prefix
-            && line_start >= floor + prefix.len()
-            && text[..line_start].ends_with(prefix)
-        {
-            line_start -= prefix.len();
-        } else if varying
-            && let Some(prefix) = prefix
-            && let Some(varying) = varying_prefix_start(text, floor, line_start, prefix)
-        {
-            line_start = varying;
-            via_varying = true;
+        if let Some(prefix) = prefix {
+            (line_start, via_varying) =
+                line_start_behind_prefix(text, floor, line_start, prefix, walk);
         }
         let at_line_start = line_start == floor
             || (1..=4).any(|len| {
@@ -3803,6 +4034,11 @@ mod tests {
             "web-1  | -----END PRIVATE KEY-----\n",
             // #540: a different prefix on each body line of an END-only key.
             "2024-01-01T00:00:01Z web-2 | AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\n2024-01-01T00:00:02Z web-1 | -----END PRIVATE KEY-----\n",
+            // #548: timestamps after the separator, and foreign lines
+            // between the key lines of an END-only key.
+            "web-1  | 2024-01-01T00:00:01Z AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\ndb-1   | 2024-01-01T00:00:02Z x\ndb-1   | y\ndb-1   | z\nweb-1  | 2024-01-01T00:00:03Z -----END PRIVATE KEY-----\n",
+            "2024-01-01T00:00:01.000000001Z stdout F AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\n2024-01-01T00:00:02Z stdout F -----END PRIVATE KEY-----\n",
+            "web-1  | AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\ndb-1   | x\nweb-1  | -----END PRIVATE KEY-----\n",
             "\\u001b\\u001b[0m[0m",
             "\\e[pa ",
             "\u{1b}[pa ",
@@ -4257,9 +4493,89 @@ mod tests {
             // one with it stops at the short line: the earlier start wins.
             (
                 "2024-01-01T00:00:08Z web-1 | request id=abc123 ok\n2024-01-01T00:00:05Z web-1 | FAKEkey000000000000002\n  done\n2024-01-01T00:00:01Z web-1 | -----END RSA PRIVATE KEY-----\nlast".to_owned(),
-                "2024-01-01T00:00:08Z web-1 | request id=abc123 ok\n2024-01-01T00:00:05Z web-1 | ***\nlast",
+                "2024-01-01T00:00:08Z web-1 | request id=abc123 ok\n***\nlast",
             ),
         ]);
+    }
+
+    /// #548: the timestamp follows the separator (`docker compose logs -t`,
+    /// `kubectl logs --timestamps`, CRI), and other services write between
+    /// the lines of an END-only key.
+    #[test]
+    fn end_only_pem_bodies_with_stamped_prefixes_and_foreign_lines_are_masked() {
+        let one = "MIIfake1234567890abcdefghijklmnopqrstuvwxyz0123";
+        let two = "Zm9vYmFyZmFrZWtleTEyMzQ1Njc4OTBhYmNkZWZnaGlqa2xt";
+        let three = "QUJDREVGR0hJSktMTU5PUFFSU1RVVldYWVowMTIzNDU2Nzg5";
+        let join = |lines: &[&str]| lines.join("\n");
+        assert_scrubbed(&[
+            (
+                join(&[
+                    &format!("web-1  | 2024-01-01T00:00:01.123456Z {one}"),
+                    &format!("web-1  | 2024-01-01T00:00:02.223456Z {two}"),
+                    &format!("web-1  | 2024-01-01T00:00:03.323456Z {three}"),
+                    "web-1  | 2024-01-01T00:00:04.423456Z -----END PRIVATE KEY-----",
+                    "web-1  | 2024-01-01T00:00:05.523456Z after",
+                ]),
+                "web-1  | 2024-01-01T00:00:01.123456Z ***\nweb-1  | 2024-01-01T00:00:05.523456Z after",
+            ),
+            (
+                join(&[
+                    &format!("2024-01-01T00:00:01Z {one}"),
+                    &format!("2024-01-01T00:00:02Z {two}"),
+                    "2024-01-01T00:00:03Z -----END PRIVATE KEY-----",
+                    "2024-01-01T00:00:04Z after",
+                ]),
+                "2024-01-01T00:00:01Z ***\n2024-01-01T00:00:04Z after",
+            ),
+            (
+                join(&[
+                    &format!("2024-01-01T00:00:01.000000001Z stdout F {one}"),
+                    &format!("2024-01-01T00:00:02.000000001Z stdout P {two}"),
+                    &format!("2024-01-01T00:00:03.000000001Z stdout F {three}"),
+                    "2024-01-01T00:00:04.000000001Z stdout F -----END PRIVATE KEY-----",
+                    "2024-01-01T00:00:05.000000001Z stdout F after",
+                ]),
+                "2024-01-01T00:00:01.000000001Z stdout F ***\n2024-01-01T00:00:05.000000001Z stdout F after",
+            ),
+            // Another service writes between the key lines.
+            (
+                join(&[
+                    &format!("web-1  | {one}"),
+                    "db-1   | LOG: checkpoint starting",
+                    &format!("web-1  | {two}"),
+                    "db-1   | LOG: checkpoint complete",
+                    &format!("web-1  | {three}"),
+                    "web-1  | -----END PRIVATE KEY-----",
+                    "web-1  | after",
+                ]),
+                "***\nweb-1  | after",
+            ),
+            (
+                join(&[
+                    &format!("web-1  | 2024-01-01T00:00:01Z {one}"),
+                    "db-1   | 2024-01-01T00:00:02Z checkpoint starting",
+                    &format!("web-1  | 2024-01-01T00:00:03Z {two}"),
+                    "db-1   | 2024-01-01T00:00:04Z checkpoint complete",
+                    "web-1  | 2024-01-01T00:00:05Z -----END PRIVATE KEY-----",
+                    "web-1  | 2024-01-01T00:00:06Z after",
+                ]),
+                "web-1  | 2024-01-01T00:00:01Z ***\nweb-1  | 2024-01-01T00:00:06Z after",
+            ),
+            // No full key line of the stream before the foreign line: only the
+            // lines of the stream are the key.
+            (
+                join(&[
+                    "db-1   | LOG: checkpoint starting",
+                    &format!("web-1  | {two}"),
+                    "web-1  | -----END PRIVATE KEY-----",
+                    "web-1  | after",
+                ]),
+                "db-1   | LOG: checkpoint starting\n***\nweb-1  | after",
+            ),
+        ]);
+        // Ordinary stamped logs around a lone fence are left alone.
+        let benign = "web-1  | 2024-01-01T00:00:01Z listening on port 8080\nweb-1  | 2024-01-01T00:00:02Z ready\n";
+        assert_eq!(redact_credentials(benign), benign);
     }
 
     /// Item 1 of #450: a key behind a per-line log prefix, blank lines after
