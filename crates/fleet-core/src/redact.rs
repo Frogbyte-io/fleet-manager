@@ -516,7 +516,8 @@ const BLANK_LINES_MAX: usize = 2;
 /// it. `None` when the fence starts its line or only follows indentation, or
 /// the line is too long to tell. `floor` is as far back as the line may start.
 fn fence_line_prefix(text: &str, floor: usize, fence: usize) -> Option<&str> {
-    let mut lo = fence.saturating_sub(PREFIX_MAX).max(floor);
+    // The timestamp of a stamped prefix does not count against the budget.
+    let mut lo = fence.saturating_sub(PREFIX_MAX + TIMESTAMP_MAX).max(floor);
     while !text.is_char_boundary(lo) {
         lo += 1;
     }
@@ -530,7 +531,16 @@ fn fence_line_prefix(text: &str, floor: usize, fence: usize) -> Option<&str> {
             .unwrap_or(0),
     };
     let prefix = &head[line_start..];
-    (!prefix.trim_matches([' ', '\t']).is_empty()).then_some(prefix)
+    let counted = match StampedPrefix::parse(prefix.trim_end_matches([' ', '\t'])) {
+        Some(stamped) => {
+            prefix.len()
+                - (prefix.trim_end_matches([' ', '\t']).len()
+                    - stamped.head.len()
+                    - stamped.tail.len())
+        }
+        None => prefix.len(),
+    };
+    (counted <= PREFIX_MAX && !prefix.trim_matches([' ', '\t']).is_empty()).then_some(prefix)
 }
 
 /// The length of an ISO-8601 timestamp (`2024-01-01T00:00:00.123Z`, a space
@@ -660,9 +670,6 @@ fn skip_line_prefix(text: &str, line: usize, prefix: Option<&str>) -> usize {
     if rest.starts_with(trimmed) {
         return line + trimmed.len();
     }
-    if let Some(len) = stamped_prefix_len(rest, trimmed) {
-        return line + len;
-    }
     // A prefix that differs per line (`web-2  | `, a timestamp and
     // `app[1]: `): up to the last delimiter of the fence's own prefix within
     // the first bytes of the line.
@@ -671,7 +678,7 @@ fn skip_line_prefix(text: &str, line: usize, prefix: Option<&str>) -> usize {
         .next_back()
         .filter(|c| matches!(c, '|' | ':' | ']' | '>'))
     else {
-        return line;
+        return stamped_prefix_len(rest, trimmed).map_or(line, |len| line + len);
     };
     let mut window = (PREFIX_MAX + 16).min(rest.len());
     while !rest.is_char_boundary(window) {
@@ -679,9 +686,13 @@ fn skip_line_prefix(text: &str, line: usize, prefix: Option<&str>) -> usize {
     }
     let window = &rest[..window];
     let window = &window[..window.find('\n').unwrap_or(window.len())];
+    // The delimiter fallback first, as before; the stamped prefix only where
+    // it finds nothing.
     window
         .rfind(delimiter)
-        .map_or(line, |at| line + at + delimiter.len_utf8())
+        .map(|at| line + at + delimiter.len_utf8())
+        .or_else(|| stamped_prefix_len(rest, trimmed).map(|len| line + len))
+        .unwrap_or(line)
 }
 
 /// The end of the armor lines (base64, or `Proc-Type:` / `Version:` style
@@ -858,7 +869,18 @@ struct Walk {
     foreign: bool,
 }
 
-/// How many lines of another stream may sit between lines of a key.
+/// A run that anchors a skip over foreign lines: full length, or with a
+/// letter or digit a hex dump lacks, so bare SHAs and `====` banners do not.
+fn is_anchor_run(run: &[u8]) -> bool {
+    run.iter().any(u8::is_ascii_alphanumeric)
+        && (run.len() >= FULL_LINE_MIN
+            || run
+                .iter()
+                .any(|b| b.is_ascii_alphanumeric() && !b.is_ascii_hexdigit()))
+}
+
+/// How many lines of another stream may sit in one gap between lines of a
+/// key (a short last line before the fence is a key line, not counted).
 const FOREIGN_LINES_MAX: usize = 3;
 
 /// How far back the start of a line is looked for.
@@ -910,9 +932,11 @@ fn foreign_lines_start(
             let content = skip_blanks(text.as_bytes(), line + own);
             let run = armor_run_len(text.as_bytes(), content);
             let tail = skip_blanks(text.as_bytes(), content + run);
+            let anchor = &text.as_bytes()[content..content + run];
             return (skipped > 0
                 && run >= KEY_RUN_MIN
-                && is_key_run(&text.as_bytes()[content..content + run])
+                && is_key_run(anchor)
+                && is_anchor_run(anchor)
                 && tail == end)
                 .then_some(at);
         }
@@ -940,6 +964,8 @@ fn line_start_behind_prefix(
     }
     if walk.stamped
         && let Some(start) = stamped_prefix_start(text, floor, content, prefix)
+        // Not at the start of the text: there the earlier versions mask the
+        // key run only and keep the prefix, and the output stays as it was.
         && start > floor
     {
         return (start, false);
@@ -4186,6 +4212,13 @@ mod tests {
         assert_scales_linearly("distinct labels, one far END", &|size| {
             distinct(size, false) + "-----END K0 PRIVATE KEY-----"
         });
+        // #548: many interleaved key lines of two streams and one END at the
+        // end.
+        assert_scales_linearly("interleaved key lines, one END", &|size| {
+            let unit = "web-1  | 2024-01-01T00:00:01Z AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\ndb-1   | 2024-01-01T00:00:02Z x\n";
+            unit.repeat(size / unit.len() + 1)
+                + "web-1  | 2024-01-01T00:00:03Z -----END PRIVATE KEY-----\n"
+        });
         assert_scales_linearly("distinct END labels", &|size| {
             distinct(size, false).replace("BEGIN", "END")
         });
@@ -4576,6 +4609,48 @@ mod tests {
         // Ordinary stamped logs around a lone fence are left alone.
         let benign = "web-1  | 2024-01-01T00:00:01Z listening on port 8080\nweb-1  | 2024-01-01T00:00:02Z ready\n";
         assert_eq!(redact_credentials(benign), benign);
+    }
+
+    /// Review of #552: the delimiter fallback keeps priority on the BEGIN
+    /// path, long service names and `kubectl --prefix` keep the timestamp out
+    /// of the prefix budget, hex-only lines do not anchor a skip.
+    #[test]
+    fn stamped_prefixes_review_cases() {
+        let one = "MIIfake1234567890abcdefghijklmnopqrstuvwxyz0123";
+        let two = "Zm9vYmFyZmFrZWtleTEyMzQ1Njc4OTBhYmNkZWZnaGlqa2xt";
+        // BEGIN without END: a body line cut by an escaped newline.
+        let begin = format!(
+            "2024-01-01T00:00:01Z web-1  | -----BEGIN PRIVATE KEY-----\r\n2024-01-01T00:00:02Z web-1  | LJxhRtXDDHq \\nweb-1  | {two}\r\n2024-01-01T00:00:03Z web-1  | done"
+        );
+        let out = redact_credentials(&begin);
+        assert!(
+            !out.contains("LJxhRtXDDHq") && !out.contains(two),
+            "{out:?}"
+        );
+        let name = "long-service-name-1";
+        let pad = " ".repeat(2);
+        let end = format!(
+            "{name}{pad}| 2024-01-01T00:00:01.123456789Z {one}\n{name}{pad}| 2024-01-01T00:00:02.123456789Z {two}\n{name}{pad}| 2024-01-01T00:00:03.123456789Z -----END PRIVATE KEY-----\n{name}{pad}| 2024-01-01T00:00:04Z after"
+        );
+        let out = redact_credentials(&end);
+        assert!(!out.contains(two) && out.contains("after"), "{out:?}");
+        let kube = format!(
+            "[pod/web-7d9f8b6c5-x2x4q/container] 2024-01-01T00:00:01Z {one}\n[pod/web-7d9f8b6c5-x2x4q/container] 2024-01-01T00:00:02Z {two}\n[pod/web-7d9f8b6c5-x2x4q/container] 2024-01-01T00:00:03Z -----END PRIVATE KEY-----\n[pod/web-7d9f8b6c5-x2x4q/container] 2024-01-01T00:00:04Z after"
+        );
+        let out = redact_credentials(&kube);
+        assert!(!out.contains(two) && out.contains("after"), "{out:?}");
+        let short_kube = kube.replace("web-7d9f8b6c5-x2x4q/container", "p/c");
+        let out = redact_credentials(&short_kube);
+        assert!(!out.contains(two) && out.contains("after"), "{out:?}");
+        // A hex-only line (a SHA) or a banner does not anchor a skip.
+        let sha = "0123456789abcdef0123456789abcdef";
+        for anchor in [&sha[..20], "===================="] {
+            let text = format!(
+                "web-1  | {anchor}\ndb-1   | LOG: x\nweb-1  | -----END PRIVATE KEY-----\nweb-1  | after"
+            );
+            let out = redact_credentials(&text);
+            assert!(out.contains(anchor), "{out:?}");
+        }
     }
 
     /// Item 1 of #450: a key behind a per-line log prefix, blank lines after
