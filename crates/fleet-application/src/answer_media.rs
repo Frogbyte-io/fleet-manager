@@ -28,6 +28,8 @@ const SECTOR_U32: u32 = 2048;
 const SECTOR_U16: u16 = 2048;
 /// The most files one image holds; the root directory must fit one sector.
 const MAX_FILES: usize = 8;
+/// The longest `CommandLine` Windows Setup accepts in an answer file.
+const MAX_COMMAND_LINE: usize = 1024;
 
 /// One file in the image.
 #[derive(Clone, Copy, Debug)]
@@ -593,7 +595,7 @@ pub fn check_image_name(name: &str) -> Result<(), String> {
 /// drivers disc attached: GPT layout, drivers from the virtio-win disc, a
 /// local administrator, no online account, and on first logon the guest agent,
 /// OpenSSH with the Fleet key, then a power-off (Fleet's end-of-install
-/// signal). No product key is set; activation is a separate post-install step.
+/// signal). No product key element is written; activation is a separate post-install step.
 ///
 /// # Errors
 ///
@@ -629,13 +631,19 @@ pub fn autounattend_xml(answer: &Autounattend<'_>) -> Result<String, String> {
         if (-not $d) { exit 1 }; \
         Start-Process msiexec.exe -Wait -ArgumentList '/i',($d+':\\virtio-win-gt-x64.msi'),'/qn','/norestart'; \
         Start-Process msiexec.exe -Wait -ArgumentList '/i',($d+':\\guest-agent\\qemu-ga-x86_64.msi'),'/qn','/norestart'";
-    let ssh = format!(
-        "Add-WindowsCapability -Online -Name 'OpenSSH.Server~~~~0.0.1.0'; \
-         Set-Service -Name sshd -StartupType Automatic; Start-Service sshd; \
-         $f=Join-Path $env:ProgramData 'ssh\\administrators_authorized_keys'; \
+    let capability = "Add-WindowsCapability -Online -Name 'OpenSSH.Server~~~~0.0.1.0'".to_owned();
+    // Password login off before sshd ever starts: key only.
+    let config = "$d=Join-Path $env:ProgramData 'ssh'; New-Item -ItemType Directory -Force $d | Out-Null; \
+        $c=Join-Path $d 'sshd_config'; \
+        if (-not (Test-Path $c)) { Copy-Item 'C:\\Windows\\System32\\OpenSSH\\sshd_config_default' $c }; \
+        (Get-Content $c) -replace '^#?PasswordAuthentication\\s.*$','PasswordAuthentication no' | Set-Content -Encoding ascii $c"
+        .to_owned();
+    let start = format!(
+        "$f=Join-Path $env:ProgramData 'ssh\\administrators_authorized_keys'; \
          Set-Content -Path $f -Value '{key}' -Encoding ascii; \
          icacls $f /inheritance:r /grant 'SYSTEM:F' /grant 'Administrators:F'; \
-         New-ItemProperty -Path 'HKLM:\\SOFTWARE\\OpenSSH' -Name DefaultShell -Value 'C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe' -PropertyType String -Force",
+         New-ItemProperty -Path 'HKLM:\\SOFTWARE\\OpenSSH' -Name DefaultShell -Value 'C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe' -PropertyType String -Force | Out-Null; \
+         Set-Service -Name sshd -StartupType Automatic; Start-Service sshd",
         key = answer.public_key
     );
     let commands = [
@@ -643,17 +651,23 @@ pub fn autounattend_xml(answer: &Autounattend<'_>) -> Result<String, String> {
             "Install the virtio drivers and the guest agent",
             agent.to_owned(),
         ),
-        ("Install OpenSSH and authorize the Fleet key", ssh),
+        ("Install the OpenSSH server", capability),
+        ("Make SSH key-only", config),
+        ("Authorize the Fleet key and start sshd", start),
     ];
     let mut first_logon = String::new();
     for (index, (description, script)) in commands.iter().enumerate() {
+        let line =
+            format!("powershell.exe -NoProfile -ExecutionPolicy Bypass -Command \"{script}\"");
+        // The limit of one `CommandLine` in an answer file.
+        if line.len() > MAX_COMMAND_LINE {
+            return Err("a first-logon command exceeds the 1024-character limit".to_owned());
+        }
         let _ = write!(
             first_logon,
             "<SynchronousCommand wcm:action=\"add\"><Order>{}</Order><CommandLine>{}</CommandLine><Description>{}</Description></SynchronousCommand>",
             index + 1,
-            xml(&format!(
-                "powershell.exe -NoProfile -ExecutionPolicy Bypass -Command \"{script}\""
-            )),
+            xml(&line),
             xml(description)
         );
     }
@@ -683,7 +697,7 @@ pub fn autounattend_xml(answer: &Autounattend<'_>) -> Result<String, String> {
 <ModifyPartition wcm:action=\"add\"><Order>3</Order><PartitionID>3</PartitionID><Format>NTFS</Format><Label>Windows</Label><Letter>C</Letter></ModifyPartition>\
 </ModifyPartitions></Disk></DiskConfiguration>\n\
 <ImageInstall><OSImage><InstallTo><DiskID>0</DiskID><PartitionID>3</PartitionID></InstallTo><InstallFrom><MetaData wcm:action=\"add\"><Key>/IMAGE/NAME</Key><Value>{image}</Value></MetaData></InstallFrom><WillShowUI>OnError</WillShowUI></OSImage></ImageInstall>\n\
-<UserData><AcceptEula>true</AcceptEula><ProductKey><Key></Key><WillShowUI>OnError</WillShowUI></ProductKey></UserData>\n\
+<UserData><AcceptEula>true</AcceptEula></UserData>\n\
 </component>\n\
 </settings>\n\
 <settings pass=\"specialize\">\n\
@@ -901,6 +915,89 @@ mod tests {
     }
 
     #[test]
+    fn every_first_logon_command_stays_under_the_limit_at_the_longest_names() {
+        let name = "a".repeat(63);
+        let key = format!(
+            "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl fleet-bootstrap-{name}"
+        );
+        let answer = Autounattend {
+            user: "abcdefghijklmnopqrst",
+            password: &"A".repeat(64),
+            public_key: &key,
+            image_name: "Windows 11 Pro",
+        };
+        let text = autounattend_xml(&answer).unwrap();
+        let mut seen = 0;
+        for part in text.split("<CommandLine>").skip(1) {
+            let line = part.split("</CommandLine>").next().unwrap();
+            let line = line
+                .replace("&amp;", "&")
+                .replace("&quot;", "\"")
+                .replace("&apos;", "'");
+            assert!(line.len() <= MAX_COMMAND_LINE, "{} chars", line.len());
+            seen += 1;
+        }
+        assert_eq!(seen, 5);
+        // A key long enough to break the limit is refused, not truncated.
+        let long = format!("ssh-rsa {} c", "A".repeat(900));
+        let mut broken = answer.clone();
+        broken.public_key = &long;
+        assert!(autounattend_xml(&broken).is_err());
+    }
+
+    /// An independent reader (xorriso or isoinfo) must see the same names and
+    /// label. Skipped when neither is installed.
+    #[test]
+    fn an_independent_reader_agrees_when_one_is_installed() {
+        let seed = NoCloudSeed {
+            vmid: 1,
+            hostname: "ok",
+            user: "fleetadmin",
+            public_key: KEY,
+        };
+        let image = nocloud_iso(&seed, 1_700_000_000).unwrap();
+        let path = std::env::temp_dir().join(format!("fleet-seed-{}.iso", std::process::id()));
+        std::fs::write(&path, &image).unwrap();
+        let run = |program: &str, args: &[&str]| {
+            std::process::Command::new(program)
+                .args(args)
+                .arg(&path)
+                .output()
+                .ok()
+                .filter(|out| out.status.success())
+                .map(|out| String::from_utf8_lossy(&out.stdout).into_owned())
+        };
+        let mut checked = false;
+        if let Some(out) = run("isoinfo", &["-J", "-l", "-i"]) {
+            assert!(
+                out.contains("user-data") && out.contains("meta-data"),
+                "{out}"
+            );
+            checked = true;
+        }
+        if let Some(out) = std::process::Command::new("xorriso")
+            .args(["-indev"])
+            .arg(&path)
+            .args(["-find", "-toc"])
+            .output()
+            .ok()
+            .filter(|out| out.status.success())
+            .map(|out| String::from_utf8_lossy(&out.stdout).into_owned())
+        {
+            assert!(
+                out.contains("user-data") && out.contains("meta-data"),
+                "{out}"
+            );
+            assert!(out.to_lowercase().contains("cidata"), "{out}");
+            checked = true;
+        }
+        let _ = std::fs::remove_file(&path);
+        if !checked {
+            eprintln!("SKIPPED: neither isoinfo nor xorriso is installed");
+        }
+    }
+
+    #[test]
     fn hostile_values_never_reach_the_templates() {
         let mut seed = NoCloudSeed {
             vmid: 1,
@@ -938,11 +1035,15 @@ mod tests {
             image_name: "Windows 11 Pro",
         };
         let xml_text = autounattend_xml(&answer).unwrap();
-        assert!(xml_text.contains("<Key></Key>"), "no product key");
+        assert!(!xml_text.contains("ProductKey"), "no product key element");
         assert!(xml_text.contains("<Value>Windows 11 Pro</Value>"));
         assert!(xml_text.contains(KEY));
         assert!(xml_text.contains("shutdown.exe /s"));
         assert!(xml_text.contains("virtio-win*"));
+        // Password login is off before sshd starts.
+        let off = xml_text.find("PasswordAuthentication no").unwrap();
+        let started = xml_text.find("Start-Service sshd").unwrap();
+        assert!(off < started);
         assert_eq!(xml_text.matches(answer.password).count(), 2);
         // Well-formed enough that every opened tag closes: crude balance check.
         assert_eq!(

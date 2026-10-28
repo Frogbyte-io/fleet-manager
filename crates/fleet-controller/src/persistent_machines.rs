@@ -815,6 +815,11 @@ struct Run<'a> {
     /// Whether the generated answer media was deleted from ISO storage
     /// (`None` when this creation generated none).
     answer_deleted: Option<bool>,
+    /// Whether the bootstrap key's secret was deleted (`None` when this
+    /// creation generated none).
+    bootstrap_key_deleted: Option<bool>,
+    /// Non-fatal findings for the result.
+    warnings: Vec<String>,
 }
 
 const STEPS: i64 = 11;
@@ -1263,7 +1268,7 @@ impl Run<'_> {
         let answer_volume = match self.generated_answer(&install).await {
             Ok(volume) => volume,
             Err(failure) => {
-                self.release_marker_if_vacant().await;
+                self.cleanup_failed_install().await;
                 return Err(failure);
             }
         };
@@ -1300,11 +1305,7 @@ impl Run<'_> {
         match outcome {
             Ok(()) => self.mark_cloned().await,
             Err(failure) => {
-                self.release_marker_if_vacant().await;
-                if answer_volume.is_some() {
-                    // The guest was never created, so nothing uses the media.
-                    self.delete_answer_media().await;
-                }
+                self.cleanup_failed_install().await;
                 Err(failure)
             }
         }
@@ -1317,15 +1318,49 @@ impl Run<'_> {
         format!("install-{}-{}", self.vmid, self.spec.account_id)
     }
 
-    /// The generated answer's volume: `<storage of the installer>:iso/<file>`.
-    fn answer_volume(
+    /// The generated answer's volume `(volume id, storage, file)`: on the
+    /// installer ISO's own storage, under a name unique to this install
+    /// (account, VMID, random suffix) that is recorded in the marker before
+    /// anything is uploaded. `create` allows naming one; otherwise only a
+    /// recorded name answers.
+    async fn answer_target(
         &self,
         install: &fleet_application::persistent::InstallSource,
-    ) -> Option<(String, String, String)> {
-        install.answer.as_ref()?;
-        let storage = install.iso.split_once(':')?.0.to_owned();
-        let file = format!("fleet-answer-{}.iso", self.vmid);
-        Some((format!("{storage}:iso/{file}"), storage, file))
+        create: bool,
+    ) -> Step<Option<(String, String, String)>> {
+        let step = "answer_media";
+        if install.answer.is_none() {
+            return Ok(None);
+        }
+        let Some(storage) = install
+            .iso
+            .split_once(':')
+            .map(|(storage, _)| storage.to_owned())
+        else {
+            return Ok(None);
+        };
+        let recorded = self
+            .exec
+            .persistent
+            .answer_media_of(&self.spec.account_id, self.vmid)
+            .await
+            .map_err(|detail| failure(step, "marker_failed", detail))?;
+        let file = match recorded {
+            Some(file) => file,
+            None if create => {
+                let account: String = self.spec.account_id.chars().take(36).collect();
+                let suffix = uuid::Uuid::new_v4().simple().to_string();
+                let file = format!("fleet-answer-{account}-{}-{}.iso", self.vmid, &suffix[..8]);
+                self.exec
+                    .persistent
+                    .record_answer_media(&self.spec.account_id, self.vmid, &file)
+                    .await
+                    .map_err(|detail| failure(step, "marker_failed", detail))?;
+                file
+            }
+            None => return Ok(None),
+        };
+        Ok(Some((format!("{storage}:iso/{file}"), storage, file)))
     }
 
     /// The bootstrap public key of this install: the key an earlier run
@@ -1375,11 +1410,13 @@ impl Run<'_> {
         };
         use fleet_application::persistent::GeneratedAnswer;
         let step = "answer_media";
-        let (Some(answer), Some((volume, storage, file))) =
-            (install.answer.as_ref(), self.answer_volume(install))
-        else {
+        let Some(answer) = install.answer.as_ref() else {
             return Ok(None);
         };
+        let Some((volume, storage, file)) = self.answer_target(install, true).await? else {
+            return Ok(None);
+        };
+        self.sweep_answer_media(&storage).await;
         let public_key = self.bootstrap_public_key().await?;
         let created = i64::try_from(
             std::time::SystemTime::now()
@@ -1417,14 +1454,7 @@ impl Run<'_> {
             }
         }
         .map_err(|detail| failure(step, "invalid", detail))?;
-        let client = &self.exec.pve.client;
-        if client
-            .storage_iso_exists(self.request.clone(), &self.node, &storage, &volume)
-            .await
-            .map_err(|error| failure(step, "upload_failed", error.to_string()))?
-        {
-            self.delete_answer_media().await;
-        }
+        // PVE's upload overwrites a file of the same name.
         let upid = self
             .exec
             .pve
@@ -1436,14 +1466,15 @@ impl Run<'_> {
         Ok(Some(volume))
     }
 
-    /// Deletes the generated answer media from ISO storage, best effort and
-    /// idempotent: absent is fine. Records whether it is gone.
-    async fn delete_answer_media(&mut self) {
+    /// Deletes the generated answer media from ISO storage. Idempotent:
+    /// absent is fine. Records and answers whether it is gone (`true` too
+    /// when this creation generated none).
+    async fn delete_answer_media(&mut self) -> bool {
         let Some(install) = self.spec.install.clone() else {
-            return;
+            return true;
         };
-        let Some((volume, storage, _)) = self.answer_volume(&install) else {
-            return;
+        let Ok(Some((volume, storage, _))) = self.answer_target(&install, false).await else {
+            return install.answer.is_none();
         };
         let client = self.exec.pve.client.clone();
         let present = client
@@ -1464,6 +1495,129 @@ impl Run<'_> {
             Err(_) => false,
         };
         self.answer_deleted = Some(gone);
+        gone
+    }
+
+    /// Deletes the answer media after the install, loudly: a failed delete is
+    /// audited and reported, and for Windows (a throwaway password on the
+    /// media) it fails the run, which a re-run retries.
+    async fn finish_answer_media(&mut self) -> Step<()> {
+        if self.delete_answer_media().await {
+            return Ok(());
+        }
+        let install = self.spec.install.clone();
+        let volume = match install {
+            Some(install) => self
+                .answer_target(&install, false)
+                .await
+                .ok()
+                .flatten()
+                .map(|(volume, _, _)| volume)
+                .unwrap_or_default(),
+            None => String::new(),
+        };
+        let resource = format!("{}/{}", self.spec.account_id, self.vmid);
+        if let Ok(intent) = audit_intent(
+            Permission::MachineUpdate,
+            &resource,
+            &self.operation.id,
+            &[
+                ("event", "answer_media_not_deleted"),
+                ("volume", volume.as_str()),
+            ],
+        ) {
+            let _ = self.exec.audit.record_intent(&intent).await;
+        }
+        if self.spec.guest_os == GuestOs::Windows {
+            return Err(failure(
+                "answer_media",
+                "answer_not_deleted",
+                format!(
+                    "the answer media {volume} could not be deleted and holds a throwaway administrator password; delete it on the ISO storage (Fleet needs Datastore.Allocate there for this) and re-run"
+                ),
+            ));
+        }
+        self.warnings.push(format!(
+            "the answer media {volume} could not be deleted from ISO storage; it holds no secret, delete it by hand"
+        ));
+        Ok(())
+    }
+
+    /// Removes answer media of this account whose creation is finished
+    /// (marker `ready`): a delete that failed or a run that died before it.
+    /// Bounded, audited, and never touches a volume no marker names.
+    async fn sweep_answer_media(&mut self, storage: &str) {
+        const MAX_SWEPT: usize = 10;
+        let Ok(recorded) = self.exec.persistent.answer_media_all().await else {
+            return;
+        };
+        let Ok(volumes) = self
+            .exec
+            .pve
+            .client
+            .storage_iso_volumes(self.request.clone(), &self.node, storage)
+            .await
+        else {
+            return;
+        };
+        let mut swept = 0;
+        for (account, vmid, file, state) in recorded {
+            if swept >= MAX_SWEPT
+                || account != self.spec.account_id
+                || state != PersistentState::Ready
+            {
+                continue;
+            }
+            let volume = format!("{storage}:iso/{file}");
+            if !volumes.contains(&volume) {
+                continue;
+            }
+            let removed = self
+                .exec
+                .pve
+                .client
+                .storage_delete_volume(self.request.clone(), &self.node, storage, &volume)
+                .await
+                .is_ok();
+            swept += 1;
+            if let Ok(intent) = audit_intent(
+                Permission::MachineUpdate,
+                &format!("{account}/{vmid}"),
+                &self.operation.id,
+                &[
+                    ("event", "answer_media_swept"),
+                    ("volume", volume.as_str()),
+                    ("deleted", if removed { "true" } else { "false" }),
+                ],
+            ) {
+                let _ = self.exec.audit.record_intent(&intent).await;
+            }
+        }
+    }
+
+    /// A failed creation: when the VMID is confirmed vacant, delete the answer
+    /// media and the bootstrap key, then release the marker (kept when the
+    /// media could not be deleted, so its name is not lost).
+    async fn cleanup_failed_install(&mut self) {
+        let vacant = self
+            .exec
+            .pve
+            .client
+            .list_guest_resources(self.request.clone())
+            .await
+            .is_ok_and(|resources| {
+                !resources
+                    .iter()
+                    .any(|resource| resource.vmid == Some(self.vmid))
+            });
+        if !vacant {
+            return;
+        }
+        let media_gone = self.delete_answer_media().await;
+        self.delete_bootstrap_key().await;
+        if media_gone {
+            self.release_marker_if_vacant().await;
+        }
     }
 
     /// Step 4 of an ISO install: run the installer to its end, then boot the
@@ -1496,8 +1650,8 @@ impl Run<'_> {
             // on. Anything else means the install never ran here, and a
             // guest nobody installed must not be adopted as an installed one.
             return if state.ejected || earlier.as_deref().is_some_and(passed_install) {
-                self.delete_answer_media().await;
-                self.record_step("install").await
+                self.record_step("install").await?;
+                self.finish_answer_media().await
             } else {
                 Err(failure(
                     step,
@@ -1560,12 +1714,12 @@ impl Run<'_> {
                 "PVE accepted the change but the install media is still attached",
             ));
         }
-        // The generated media (and any throwaway password on it) is no
-        // longer needed: delete it from ISO storage.
-        self.delete_answer_media().await;
         // Durable at once: a deadline or a cancel at the next checkpoint must
         // not lose the fact that the media is gone.
-        self.record_step("install").await
+        self.record_step("install").await?;
+        // The generated media (and any throwaway password on it) is no
+        // longer needed: delete it from ISO storage.
+        self.finish_answer_media().await
     }
 
     /// Records that the clone completed: from here the marker guards the
@@ -2641,7 +2795,7 @@ impl Run<'_> {
 
     /// Deletes the generated install's bootstrap key once the final key is
     /// proven and the bootstrap one is removed from the guest. Best effort.
-    async fn delete_bootstrap_key(&self) {
+    async fn delete_bootstrap_key(&mut self) {
         if !self
             .spec
             .install
@@ -2651,11 +2805,17 @@ impl Run<'_> {
             return;
         }
         let owner = self.install_owner();
+        let mut all = false;
         if let Ok(references) = self.exec.keys.list_for_machine(&owner).await {
+            all = true;
             for reference in references {
-                let _ = self.exec.secrets.delete(&reference).await;
+                match self.exec.secrets.delete(&reference).await {
+                    Ok(()) | Err(SecretError::NotFound { .. }) => {}
+                    Err(_) => all = false,
+                }
             }
         }
+        self.bootstrap_key_deleted = Some(all);
     }
 
     async fn record_default_auth(
@@ -2941,6 +3101,8 @@ impl MachineCreateExecutor {
             credential: None,
             bootstrap_key_removed: false,
             answer_deleted: None,
+            bootstrap_key_deleted: None,
+            warnings: Vec::new(),
         };
         let mut notes = serde_json::Map::new();
         match run.saga(&mut notes).await {
@@ -3099,6 +3261,12 @@ impl Run<'_> {
         });
         if let (Some(deleted), Some(map)) = (self.answer_deleted, result.as_object_mut()) {
             map.insert("answerMediaDeleted".to_owned(), deleted.into());
+        }
+        if let (Some(deleted), Some(map)) = (self.bootstrap_key_deleted, result.as_object_mut()) {
+            map.insert("bootstrapKeyDeleted".to_owned(), deleted.into());
+        }
+        if let (false, Some(map)) = (self.warnings.is_empty(), result.as_object_mut()) {
+            map.insert("warnings".to_owned(), self.warnings.clone().into());
         }
         if let (Some(by), Some(map)) = (&self.spec.requested_by, result.as_object_mut()) {
             map.insert("requestId".to_owned(), by.request_id.clone().into());

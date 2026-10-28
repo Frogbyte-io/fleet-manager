@@ -540,7 +540,7 @@ impl ProxmoxClient {
 
     /// Uploads an ISO to storage (`POST /nodes/{node}/storage/{storage}/upload`
     /// with `content=iso`; needs `Datastore.AllocateTemplate` on the
-    /// storage), with a SHA-256 checksum PVE verifies. Answers the task.
+    /// storage; an existing file of the name is overwritten), with a SHA-256 checksum PVE verifies. Answers the task.
     ///
     /// # Errors
     ///
@@ -581,19 +581,18 @@ impl ProxmoxClient {
         Upid::parse(raw).map_err(|detail| PveApiError::InvalidPayload { detail })
     }
 
-    /// Whether an ISO volume exists on storage (`GET
+    /// The ISO volume ids on storage (`GET
     /// /nodes/{node}/storage/{storage}/content?content=iso`).
     ///
     /// # Errors
     ///
     /// Fails with [`PveApiError`].
-    pub async fn storage_iso_exists(
+    pub async fn storage_iso_volumes(
         &self,
         request: PveHttpRequest,
         node: &str,
         storage: &str,
-        volume: &str,
-    ) -> Result<bool, PveApiError> {
+    ) -> Result<Vec<String>, PveApiError> {
         let data = self
             .call(PveHttpRequest {
                 path: format!(
@@ -605,15 +604,37 @@ impl ProxmoxClient {
                 ..request
             })
             .await?;
-        Ok(data.as_array().is_some_and(|items| {
-            items
-                .iter()
-                .any(|item| item.get("volid").and_then(serde_json::Value::as_str) == Some(volume))
-        }))
+        Ok(data
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|item| item.get("volid").and_then(serde_json::Value::as_str))
+            .map(str::to_owned)
+            .collect())
     }
 
-    /// Deletes a volume (`DELETE /nodes/{node}/storage/{storage}/content/{volume}`).
-    /// Answers the task when PVE runs one.
+    /// Whether an ISO volume exists on storage.
+    ///
+    /// # Errors
+    ///
+    /// Fails with [`PveApiError`].
+    pub async fn storage_iso_exists(
+        &self,
+        request: PveHttpRequest,
+        node: &str,
+        storage: &str,
+        volume: &str,
+    ) -> Result<bool, PveApiError> {
+        Ok(self
+            .storage_iso_volumes(request, node, storage)
+            .await?
+            .iter()
+            .any(|found| found == volume))
+    }
+
+    /// Deletes a volume (`DELETE /nodes/{node}/storage/{storage}/content/{volume}`;
+    /// PVE requires `Datastore.Allocate` on the storage for this, which can delete
+    /// any volume there). Answers the task when PVE runs one.
     ///
     /// # Errors
     ///

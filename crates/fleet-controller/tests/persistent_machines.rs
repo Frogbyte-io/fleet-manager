@@ -88,6 +88,10 @@ struct HostState {
     isos: BTreeMap<String, Vec<u8>>,
     /// Every upload: volume id to bytes, kept after a delete.
     uploads: Vec<(String, Vec<u8>)>,
+    /// Deleting an ISO volume answers 403 (a token without `Datastore.Allocate`).
+    forbid_volume_delete: bool,
+    /// How many guest creations still fail.
+    fail_creates: u32,
     /// Where a seed's public key lands, simulating the installer authorizing
     /// the key it was given.
     authorize_into: Option<std::path::PathBuf>,
@@ -253,6 +257,10 @@ impl FakePve {
             }
             ("POST", ["nodes", node, "qemu"]) => {
                 state.calls.push("create".to_owned());
+                if state.fail_creates > 0 {
+                    state.fail_creates -= 1;
+                    return (500, json!({ "data": null }));
+                }
                 let body = body.unwrap_or_default();
                 state.bodies.push(("create".to_owned(), body.clone()));
                 let vmid = body["vmid"].as_u64().unwrap() as u32;
@@ -372,6 +380,12 @@ impl FakePve {
             ("DELETE", ["nodes", _, "storage", _, "content", volume]) => {
                 let volume = volume.replace("%3A", ":").replace("%2F", "/");
                 state.calls.push(format!("delete-volume {volume}"));
+                if state.forbid_volume_delete {
+                    return (
+                        403,
+                        json!({ "data": null, "message": "Permission check failed (/storage/local, Datastore.Allocate)" }),
+                    );
+                }
                 if state.isos.remove(&volume).is_none() {
                     return (
                         500,
@@ -2532,15 +2546,40 @@ async fn a_generated_seed_is_built_uploaded_attached_and_deleted_with_no_secret_
     let created = calls.iter().position(|call| call == "create").unwrap();
     assert!(uploaded < created, "{calls:?}");
     let body = world.pve.body_of("create").unwrap();
-    assert_eq!(body["ide3"], "local:iso/fleet-answer-7100.iso,media=cdrom");
+    // A unique name: account, VMID, random suffix; recorded in the marker.
+    let attached = body["ide3"].as_str().unwrap().to_owned();
+    let file = attached
+        .strip_prefix("local:iso/")
+        .and_then(|rest| rest.strip_suffix(",media=cdrom"))
+        .unwrap()
+        .to_owned();
+    assert!(
+        file.starts_with(&format!("fleet-answer-{}-7100-", world.account_id)),
+        "{file}"
+    );
+    let recorded = PersistentGuestRepository::new(world.pool.clone())
+        .answer_media_of(&world.account_id, 7100)
+        .await
+        .unwrap();
+    assert_eq!(recorded.as_deref(), Some(file.as_str()));
+    // PVE's upload overwrites, so there is no delete before the upload.
+    assert!(
+        calls
+            .iter()
+            .position(|call| call.starts_with("delete-volume"))
+            .unwrap()
+            > uploaded,
+        "{calls:?}"
+    );
     // Deleted after the install; the guest's drive is ejected, not removed.
     assert!(world.pve.isos().is_empty(), "{:?}", world.pve.isos());
     assert!(
         calls
             .iter()
-            .any(|call| call == "delete-volume local:iso/fleet-answer-7100.iso")
+            .any(|call| call == &format!("delete-volume local:iso/{file}"))
     );
     assert_eq!(result_of(&operation)["answerMediaDeleted"], true);
+    assert_eq!(result_of(&operation)["bootstrapKeyDeleted"], true);
     let marker = PersistentGuestRepository::new(world.pool.clone())
         .list()
         .await
@@ -2555,7 +2594,7 @@ async fn a_generated_seed_is_built_uploaded_attached_and_deleted_with_no_secret_
     let uploads = world.pve.uploads();
     assert_eq!(uploads.len(), 1);
     let (volume, data) = &uploads[0];
-    assert_eq!(volume, "local:iso/fleet-answer-7100.iso");
+    assert!(volume.starts_with("local:iso/fleet-answer-"), "{volume}");
     let text = String::from_utf8_lossy(data);
     assert!(text.contains("autoinstall:") && text.contains("shutdown: poweroff"));
     assert!(text.contains("ssh-ed25519 "));
@@ -2584,31 +2623,150 @@ async fn a_generated_seed_is_built_uploaded_attached_and_deleted_with_no_secret_
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn a_rerun_replaces_a_stale_seed_and_a_missing_one_is_not_an_error() {
+async fn a_finished_creations_leftover_media_is_swept_and_other_volumes_are_not() {
     if is_root() {
-        eprintln!("SKIPPED a_rerun_replaces_a_stale_seed: running as root");
+        eprintln!("SKIPPED the sweep test: running as root");
         return;
     }
     let world = World::new().await;
-    world.pve.state.lock().unwrap().isos.insert(
-        "local:iso/fleet-answer-7100.iso".to_owned(),
-        b"stale".to_vec(),
-    );
-    let spec = generated_spec(&world, "seed-stale");
+    let repo = PersistentGuestRepository::new(world.pool.clone());
+    // A finished creation whose answer media was left behind, one still
+    // being created, and a volume no marker names.
+    for (vmid, name, state, file) in [
+        (
+            7300,
+            "done-box",
+            PersistentState::Ready,
+            "fleet-answer-old-7300-aaaa1111.iso",
+        ),
+        (
+            7301,
+            "busy-box",
+            PersistentState::Creating,
+            "fleet-answer-old-7301-bbbb2222.iso",
+        ),
+    ] {
+        let mut row = marker(&world.account_id, vmid, name, true);
+        row.state = state;
+        repo.reserve(&row).await.unwrap();
+        repo.record_answer_media(&world.account_id, vmid, file)
+            .await
+            .unwrap();
+        world
+            .pve
+            .state
+            .lock()
+            .unwrap()
+            .isos
+            .insert(format!("local:iso/{file}"), b"x".to_vec());
+    }
+    world
+        .pve
+        .state
+        .lock()
+        .unwrap()
+        .isos
+        .insert("local:iso/someone-elses.iso".to_owned(), b"x".to_vec());
+    let spec = generated_spec(&world, "seed-sweep");
     let operation = world.create(&spec).await;
     assert_eq!(operation.state, "succeeded", "{:?}", operation.error_json);
-    let calls = world.pve.calls();
-    let deleted = calls
-        .iter()
-        .position(|call| call.starts_with("delete-volume"))
-        .unwrap();
-    let uploaded = calls.iter().position(|call| call == "upload").unwrap();
-    assert!(deleted < uploaded, "the stale volume goes first: {calls:?}");
-    assert_eq!(world.pve.uploads().len(), 1);
-    assert_eq!(
-        world.pve.uploads()[0].1.len() % 2048,
-        0,
-        "the new seed, not the stale one"
+    let left = world.pve.isos();
+    assert!(!left.iter().any(|v| v.contains("7300")), "{left:?}");
+    assert!(
+        left.contains(&"local:iso/fleet-answer-old-7301-bbbb2222.iso".to_owned()),
+        "{left:?}"
+    );
+    assert!(
+        left.contains(&"local:iso/someone-elses.iso".to_owned()),
+        "{left:?}"
+    );
+    let audited: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM audit_events WHERE metadata_json LIKE '%answer_media_swept%'",
+    )
+    .fetch_one(&world.pool)
+    .await
+    .unwrap();
+    assert_eq!(audited, 1);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_forbidden_media_delete_is_loud_and_fails_a_windows_run() {
+    if is_root() {
+        eprintln!("SKIPPED the forbidden-delete test: running as root");
+        return;
+    }
+    // Linux: the install completes; the leftover (no secret) is a warning,
+    // an audit event and `answerMediaDeleted: false`.
+    let world = World::new().await;
+    world.pve.state.lock().unwrap().forbid_volume_delete = true;
+    let operation = world.create(&generated_spec(&world, "seed-403")).await;
+    assert_eq!(operation.state, "succeeded", "{:?}", operation.error_json);
+    let result = result_of(&operation);
+    assert_eq!(result["answerMediaDeleted"], false);
+    assert!(
+        result["warnings"][0]
+            .as_str()
+            .unwrap()
+            .contains("could not be deleted")
+    );
+    let audited: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM audit_events WHERE metadata_json LIKE '%answer_media_not_deleted%'",
+    )
+    .fetch_one(&world.pool)
+    .await
+    .unwrap();
+    assert_eq!(audited, 1);
+
+    // Windows: the media holds a throwaway password, so the run fails.
+    let world = World::new().await;
+    world.pve.state.lock().unwrap().forbid_volume_delete = true;
+    let mut spec = install_spec(&world, "win-403");
+    spec["guestOs"] = json!("windows");
+    spec["diskGib"] = json!(80);
+    spec["install"] = json!({
+        "iso": "local:iso/win11.iso",
+        "answer": { "type": "autounattend" },
+        "driversIso": "local:iso/virtio-win.iso",
+    });
+    spec["windows"] = json!({ "adminPassword": "discard" });
+    spec["bootstrap"] = json!({ "port": world.sshd.port });
+    let failed = world.create(&spec).await;
+    assert_eq!(failed.state, "failed");
+    let error = error_of(&failed);
+    assert_eq!(error["reason"], "answer_not_deleted", "{error}");
+    // A re-run with the permission restored deletes it and moves on.
+    world.pve.state.lock().unwrap().forbid_volume_delete = false;
+    let _ = world.create(&spec).await;
+    assert!(world.pve.isos().is_empty(), "{:?}", world.pve.isos());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_failed_create_on_a_vacant_vmid_deletes_the_media_and_the_bootstrap_key() {
+    if is_root() {
+        eprintln!("SKIPPED the failed-create test: running as root");
+        return;
+    }
+    let world = World::new().await;
+    world.pve.state.lock().unwrap().fail_creates = 1;
+    let failed = world.create(&generated_spec(&world, "seed-fail")).await;
+    assert_eq!(failed.state, "failed");
+    assert!(world.pve.isos().is_empty(), "{:?}", world.pve.isos());
+    let owner = format!("install-7100-{}", world.account_id);
+    assert!(
+        world
+            .keys
+            .list_for_machine(&owner)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    assert!(
+        PersistentGuestRepository::new(world.pool.clone())
+            .list()
+            .await
+            .unwrap()
+            .is_empty(),
+        "the marker is released"
     );
 }
 
@@ -2634,11 +2792,16 @@ async fn a_windows_install_attaches_the_drivers_with_uefi_and_a_tpm_and_carries_
     assert_eq!(body["tpmstate0"], "local-lvm:1,version=v2.0");
     assert_eq!(body["ide0"], "local:iso/virtio-win.iso,media=cdrom");
     assert_eq!(body["ide2"], "local:iso/win11.iso,media=cdrom");
-    assert_eq!(body["ide3"], "local:iso/fleet-answer-7100.iso,media=cdrom");
+    assert!(
+        body["ide3"]
+            .as_str()
+            .unwrap()
+            .starts_with("local:iso/fleet-answer-")
+    );
     let uploads = world.pve.uploads();
     let (_, data) = &uploads[0];
     let text = String::from_utf8_lossy(data);
-    assert!(text.contains("<unattend") && text.contains("<Key></Key>"));
+    assert!(text.contains("<unattend") && !text.contains("ProductKey"));
     assert!(text.contains("ssh-ed25519 ") && !text.contains("PRIVATE KEY"));
     // Deleted once the installer stopped, whatever happened afterwards.
     assert!(

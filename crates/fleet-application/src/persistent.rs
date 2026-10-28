@@ -1105,6 +1105,35 @@ pub trait PersistentGuestPort: fmt::Debug + Send + Sync {
     ///
     /// Fails when the store cannot be read.
     async fn owner_of_machine(&self, machine_id: &str) -> Result<Option<RequestedBy>, String>;
+
+    /// Records the generated answer ISO's file name for a marker.
+    ///
+    /// # Errors
+    ///
+    /// Fails with a secret-free detail when the store errors or the marker is
+    /// unknown.
+    async fn record_answer_media(
+        &self,
+        account_id: &str,
+        vmid: u32,
+        file: &str,
+    ) -> Result<(), String>;
+
+    /// The generated answer ISO's file name recorded for a marker.
+    ///
+    /// # Errors
+    ///
+    /// Fails with a secret-free detail when the store errors.
+    async fn answer_media_of(&self, account_id: &str, vmid: u32) -> Result<Option<String>, String>;
+
+    /// Every recorded answer ISO: account, VMID, file name and the marker's
+    /// state.
+    ///
+    /// # Errors
+    ///
+    /// Fails with a secret-free detail when the store errors.
+    async fn answer_media_all(&self)
+    -> Result<Vec<(String, u32, String, PersistentState)>, String>;
 }
 
 /// Windows product keys, held as encrypted secret records. The value is
