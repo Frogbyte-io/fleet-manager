@@ -872,11 +872,8 @@ struct Walk {
 /// A run that anchors a skip over foreign lines: full length, or with a
 /// letter or digit a hex dump lacks, so bare SHAs and `====` banners do not.
 fn is_anchor_run(run: &[u8]) -> bool {
-    run.iter().any(u8::is_ascii_alphanumeric)
-        && (run.len() >= FULL_LINE_MIN
-            || run
-                .iter()
-                .any(|b| b.is_ascii_alphanumeric() && !b.is_ascii_hexdigit()))
+    run.iter()
+        .any(|b| b.is_ascii_alphanumeric() && !b.is_ascii_hexdigit())
 }
 
 /// How many lines of another stream may sit in one gap between lines of a
@@ -1142,7 +1139,12 @@ fn mask_private_keys(text: &str) -> String {
                 None
             };
             let end = found.map_or_else(
-                || armor_end(text, marker_end, fence_line_prefix(text, 0, fence)),
+                || {
+                    // Without a prefix too: a prefix recognised only since
+                    // the timestamp stopped counting must not mask less.
+                    armor_end(text, marker_end, fence_line_prefix(text, 0, fence))
+                        .max(armor_end(text, marker_end, None))
+                },
                 |at| marker_end + at + end_marker.len(),
             );
             (fence, end)
@@ -4644,13 +4646,22 @@ mod tests {
         assert!(!out.contains(two) && out.contains("after"), "{out:?}");
         // A hex-only line (a SHA) or a banner does not anchor a skip.
         let sha = "0123456789abcdef0123456789abcdef";
-        for anchor in [&sha[..20], "===================="] {
+        let sha40 = "0123456789abcdef0123456789abcdef01234567";
+        for anchor in [&sha[..20], sha, sha40, "===================="] {
             let text = format!(
                 "web-1  | {anchor}\ndb-1   | LOG: x\nweb-1  | -----END PRIVATE KEY-----\nweb-1  | after"
             );
             let out = redact_credentials(&text);
             assert!(out.contains(anchor), "{out:?}");
         }
+    }
+
+    /// Review of #552: a long stamped prefix on a BEGIN-without-END key.
+    #[test]
+    fn a_long_stamped_prefix_on_a_begin_only_key_masks_the_body() {
+        let text = "2024-01-01T00:00:01.123456789+02:00 postgres-exporter-1    | -----BEGIN RSA PRIVATE KEY-----\nFMI+ekQm+eYxyFt3\\n2024-01-01T00:00:02.123456789+02:00 db-1   | container started";
+        let out = redact_credentials(text);
+        assert!(!out.contains("FMI+ekQm+eYxyFt3"), "{out:?}");
     }
 
     /// Item 1 of #450: a key behind a per-line log prefix, blank lines after
