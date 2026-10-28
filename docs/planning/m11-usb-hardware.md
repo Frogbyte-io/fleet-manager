@@ -19,10 +19,17 @@ From the Proxmox VE documentation ([USB passthrough in the qm chapter](https://p
 - Resource mappings give a device a stable, user-chosen ID that can map to different hardware on different nodes. Creating needs `Mapping.Modify` on `/mapping/<type>/<name>`; using needs `Mapping.Use` on the same path, in addition to normal guest privileges. "You can currently only map one USB device per node per mapping." Each node needs its own `map` entry.
 - USB host passthrough is a QEMU `usb-host` device on the host's USB stack. It does **not** need IOMMU or VT-d, unlike PCI passthrough (stated from general knowledge of the mechanism; the pages read do not discuss it, and FM-S11 confirms it on the integration host, whose IOMMU is off). The epic's "IOMMU validation" therefore becomes "host validation" here: IOMMU matters only for passing a whole USB controller (PCI), which is a non-goal.
 
-Not confirmed from primary sources in this pass (the pages were truncated, or the API viewer needs JavaScript). FM-S11 must settle each on the integration host, on PVE 8.4 and 9.2, before the dependent issues start:
+Confirmed by read-only checks on the integration host (PVE 9.2.2, 2026-10-28; PVE 8.4 still to be checked by FM-S11):
 
-1. The exact `/cluster/mapping/usb` schema (`map` property fields such as `node`, `id`, `path`, `hardware-id`, `description`), whether `Mapping.Audit` is needed to list, and the listing shape.
-2. Whether `GET /nodes/{node}/hardware/usb` exists on both versions and what it returns (bus, port, vendor and product ID, manufacturer, product, serial, speed, usbpath).
+- `pvesh get /cluster/mapping/usb` returns `[{"id":"decker","type":"usb","description":…,"digest":…,"map":["node=pve,id=04d8:e626"]}]`; the per-mapping GET returns the same without `id`. A map entry is `node=<node>,id=<vendor:product>`; PVE also supports `path=<bus-port>` entries, which the plan uses for identical devices (the field list is from the PVE mapping schema; FM-S11 records a path entry on the host).
+- `GET /nodes/<node>/hardware/usb` lists `busnum`, `devnum`, `level`, `port`, `usbpath`, `vendid`, `prodid`, `manufacturer`, `product`, `speed` and `class`. It has **no serial**, so inventory and the pre-attach fingerprint use vendor:product plus `usbpath` and never a serial.
+- VM 200 carries `usb0: mapping=decker,usb3=1`: the `externally_attached` case, on a real guest.
+- The host also has unused devices: two identical "MacBook Air SuperDrive" (05ac:1500, `usbpath` 10 and 7 on bus 1) and a "Verbatim" device on bus 5. The identical pair is a real case for path-based mappings.
+
+Still not confirmed (items 1 and 2 of the earlier list are now settled on 9.2 above). FM-S11 must settle each on the integration host, on PVE 8.4 and 9.2, before the dependent issues start:
+
+1. The 8.4 shapes of `/cluster/mapping/usb` and `/nodes/{node}/hardware/usb`; whether `Mapping.Audit` is needed to list as a non-root token; the exact `path=` entry syntax and how PVE resolves a path entry versus an `id=` entry when several devices match.
+2. Whether `usbpath` is stable across replug and host reboot for the SuperDrive pair (it is the identity of a path-based mapping).
 3. Whether an API token, which cannot be `root@pam`, may write `usbN: host=…` at all. The documentation we read implies raw host devices are root-only; if so, mappings are the only path for Fleet, which the ADR already assumes.
 4. Behaviour of `PUT …/config` with `usbN=mapping=<id>` and `delete=usbN` on a **running** guest (immediate hotplug and unplug, or `pending` until restart), and which privileges it checks (`VM.Config.HWType`, `Mapping.Use`).
 5. What happens when a guest starts with a mapped device absent, or on a node the mapping has no entry for, and whether a second guest can reference a mapping already held (assumed not prevented by PVE, which is why Fleet must).
@@ -31,7 +38,7 @@ Not confirmed from primary sources in this pass (the pages were truncated, or th
 
 ## Decisions (proposed; ADR 0019 records the boundaries)
 
-- **Identity is the PVE resource mapping**, never `host=vendor:product` or `bus-port`. Observed facts are a fingerprint checked immediately before an attach, not the name. The Decker reports serial "test", so serials are not reliably unique.
+- **Identity is the PVE resource mapping**, never `host=vendor:product` or `bus-port`. Observed facts are a fingerprint checked immediately before an attach, not the name. The node inventory exposes no serial at all, so the fingerprint is vendor:product plus `usbpath`. Identical devices on one node get separate path-based mappings (`path=<bus-port>`), one per physical port.
 - **Operators create mappings**; Fleet reads them. No `Mapping.Modify` in the first release.
 - **Reserve first, call second.** One `BEGIN IMMEDIATE` transaction, a partial unique index over live states, and the owner's state authoritative, mirroring `lab_capacity_reservations` (FM-715).
 - **Attach happens during provisioning**, in the existing hardware step after the clone and unprotect and before start, as a digest-conditional config write that does not depend on hotplug. Persistent machines use an explicit reviewed attach and detach that may hotplug (the Decker already hotplugs on VM 200).
@@ -44,7 +51,7 @@ Not confirmed from primary sources in this pass (the pages were truncated, or th
 
 ### Device inventory
 
-`hardware_devices` (SQLite, runtime): Fleet UUID, account, `mapping_id`, `kind = usb`, per-node observed entries (node, vendor:product, serial when present, path, last seen), derived `status`, and an operator note. Rows are created by a refresh that lists `/cluster/mapping/usb` and the nodes' USB inventory, and are never deleted while a reservation exists.
+`hardware_devices` (SQLite, runtime): Fleet UUID, account, `mapping_id`, `kind = usb`, per-node observed entries (node, vendor:product, `usbpath`, manufacturer and product strings, last seen; no serial, the API does not return one), derived `status`, and an operator note. Rows are created by a refresh that lists `/cluster/mapping/usb` and the nodes' USB inventory, and are never deleted while a reservation exists.
 
 | `status` | Meaning |
 |---|---|
@@ -90,7 +97,7 @@ PVE USB mapping `decker` (04d8:e626) is defined on the integration host and curr
 
 - never assumes it can move: development tests use the fake PVE harness (`crates/fleet-controller/tests/support/fake_pve.rs`) and recorded fixtures;
 - treats the manual attachment as the first `externally_attached` case in tests and the runbook;
-- requires the maintainer's go for any live step that touches it (FM-S11 reads only unless told otherwise; FM-1133 attaches). Preferably a second, spare device with its own mapping is provided for live validation, or a window is agreed;
+- requires the maintainer's go for any live step that touches it (FM-S11 reads only unless told otherwise; FM-1133 attaches). The host has spare devices: two identical "MacBook Air SuperDrive" (05ac:1500) and a "Verbatim" device. Live validation uses the SuperDrives (also exercising path-based mappings), with the maintainer's consent to create test mappings (`Mapping.Modify`, done by the maintainer, not by Fleet);
 - needs the maintainer to detach the device from VM 200 (`qm set 200 --delete usb0`) when a live run starts, since Fleet will not steal it.
 
 ## Issues
@@ -149,7 +156,7 @@ Common to all: read `AGENTS.md`, this document and ADR 0019; no secrets in logs,
 
 **FM-1132 — Skill and docs** (glm). Goal: agents and humans discover hardware and request it. Owned: the hardware section of `skills/fleet/**`, the hardware section of `docs/operations/lab.md` (replacing "separate sub-epic"). Acceptance: examples use `fleetctl hardware list`, a template with `hardware`, and the refusal messages. Non-goals: new commands. Tests: skill lint, docs checks.
 
-**FM-1133 — Runbook and live validation** (claude). Goal: the hardware-in-the-loop workflow end to end on real hardware, recorded as evidence, closing #16. Owned: `docs/operations/hardware.md`, `docs/planning/m11-acceptance.md`. Acceptance: the operator creates the mapping, Fleet lists it, a lease attaches it, a test runs, cleanup detaches it, and a failure variant is shown; the manual attachment to VM 200 is first seen as `externally_attached` and then adopted or released by the maintainer; unverified items are listed. Non-goals: anything not on the maintainer's go. Tests: the recorded run, sanitized (no real serials, hostnames or IPs).
+**FM-1133 — Runbook and live validation** (claude). Goal: the hardware-in-the-loop workflow end to end on real hardware, recorded as evidence, closing #16. Owned: `docs/operations/hardware.md`, `docs/planning/m11-acceptance.md`. Live-test devices (proposed): the two SuperDrives on the integration host, each with its own path-based mapping, so the Decker is never touched; a two-lease contention test uses both devices. Acceptance: the operator creates the mapping, Fleet lists it, a lease attaches it, a test runs, cleanup detaches it, and a failure variant is shown; the manual attachment to VM 200 is first seen as `externally_attached` and then adopted or released by the maintainer; unverified items are listed. Non-goals: anything not on the maintainer's go. Tests: the recorded run, sanitized (no real serials, hostnames or IPs).
 
 ## Deferred
 
@@ -162,13 +169,13 @@ Common to all: read `AGENTS.md`, this document and ADR 0019; no secrets in logs,
 ## Open questions for the maintainer
 
 1. **Milestone.** Open M11 for this, or reopen M7 with a sub-milestone? (Proposed: M11, since M7 closed.)
-2. **Live-test hardware.** Can a second device (or any cheap USB stick) get its own PVE mapping for validation, so the Decker stays on VM 200? If not, what window may FM-S11 and FM-1133 use the Decker, and who detaches it first?
+2. **Live-test hardware.** The host has two identical SuperDrives (05ac:1500) and a Verbatim device, so live tests need not touch the Decker. May FM-S11 and FM-1133 create test mappings for them (path-based for the SuperDrives)? Consent is needed because mappings change cluster configuration; the Decker mapping and VM 200 stay as they are.
 3. **Conflict behaviour.** Fail fast with `hardware_busy` in v1, or must queueing ship in the first release (the lab.md text says conflicts queue)?
 4. **Mappings.** Are operator-created mappings with a runbook acceptable, or should Fleet create them (needs `Mapping.Modify`, a larger privilege)?
 5. **Manual attachment.** Should the existing Decker attachment to VM 200 be adopted as a Fleet-held reservation for the Dot X persistent VM, or released from VM 200 when the first lease needs it?
 6. **Token privileges.** Is adding `Mapping.Use` on `/mapping/usb/*` and `VM.Config.HWType` to the documented Fleet token role acceptable?
 7. **Attach timing.** Is attaching before boot enough for hardware-in-the-loop tests, or are mid-run attach and detach (hotplug) required?
-8. **Identical devices.** Is the one-device-per-node-per-mapping limit acceptable (identical devices on one node need separate mappings, so separate ids in templates)?
+8. **Identical devices.** The SuperDrive pair has the same vid:pid on one node, and PVE allows one device per node per mapping, so they need two path-based mappings (separate ids in templates). Is that acceptable, given a path identifies a port, not the device, so swapping the cables swaps identities?
 
 ## Sources
 
