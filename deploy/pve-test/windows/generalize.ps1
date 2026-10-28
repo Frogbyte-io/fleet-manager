@@ -2,14 +2,16 @@
 # registers and starts a one-shot SYSTEM task and returns, because the task stops sshd (which
 # ends this SSH session). The task removes the SSH host keys and the cached install answer
 # files (which hold the install-time password), then runs sysprep; the guest powers off.
-# -RemoveAuthorizedKeys (Fleet image builds, #452): also delete administrators_authorized_keys,
-# which holds Packer's temporary key after a Packer login. It also removes any key baked into
-# that file, so use it only when the clone gets its keys from Cloudbase-Init. Without the
-# switch the file stays, as the fixture flow needs.
+# -RemoveAuthorizedKeys (Fleet image builds, #452): also delete administrators_authorized_keys
+# and every user's ~\.ssh\authorized_keys, which hold Packer's temporary key after a Packer
+# login (Cloudbase-Init wrote it there). It also removes any key baked into those files, so use
+# it only when the clone gets its keys from Cloudbase-Init. Without the switch the files stay,
+# as the fixture flow needs.
 param([switch]$RemoveAuthorizedKeys)
 $ErrorActionPreference = 'Stop'
 $answer = 'C:\Windows\System32\Sysprep\sysprep-unattend.xml'
 if (-not (Test-Path $answer)) { throw "$answer missing (the builder copies it before running this)" }
+New-Item -ItemType Directory -Force -Path 'C:\Windows\Temp\fleet' | Out-Null   # absent on a fresh clone (#535)
 $worker = 'C:\Windows\Temp\fleet\generalize-worker.ps1'
 @'
 $ErrorActionPreference = 'Stop'
@@ -35,7 +37,13 @@ try {
   Get-ChildItem 'C:\ProgramData\ssh' -Filter 'ssh_host_*' -Force | Remove-Item -Force
   if (Test-Path 'C:\Windows\Temp\fleet\remove-authorized-keys') {
     Remove-Item 'C:\ProgramData\ssh\administrators_authorized_keys' -Force -ErrorAction SilentlyContinue
-    Log 'removed administrators_authorized_keys'
+    # Cloudbase-Init's SetUserSSHPublicKeysPlugin keeps the injected key (Packer's) in the
+    # user's own authorized_keys, and Packer's cleanup of it does not work on Windows. The
+    # admin-key script would copy it back on every clone's boot, so it goes too.
+    Get-ChildItem 'C:\Users' -Directory -Force | ForEach-Object {
+      Remove-Item (Join-Path $_.FullName '.ssh\authorized_keys') -Force -ErrorAction SilentlyContinue
+    }
+    Log 'removed administrators_authorized_keys and the users authorized_keys'
   }
   foreach ($f in 'C:\Windows\Panther\unattend.xml', 'C:\Windows\Panther\autounattend.xml',
                  'C:\Windows\Panther\Unattend\unattend.xml', 'C:\Windows\System32\Sysprep\unattend.xml',
