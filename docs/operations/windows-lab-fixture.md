@@ -13,6 +13,7 @@ The tooling is `deploy/pve-test/windows/windows-template`, with the answer files
 | Unattended install, guest agent, OpenSSH, key login, PowerShell default shell | done (2026-10-10); first try, the GVLK was accepted |
 | Sysprep, template 7100, two clones | done after one manual fix (BitLocker, below); clones get new names and host keys. The committed scripts were then verified end to end on a throwaway VM, not on 7100 itself |
 | Fleet recipe, image version, build, promotion, Lab template | image built and promoted, Lab templates created; **lease not verified** (stream J, #441). The first recipe built an image that did not boot (CPU type); the second boots but is **not generalized** (below) |
+| Cloudbase-Init base, re-generalizing build ([#535](https://github.com/Frogbyte-io/fleet-manager/issues/535)) | done 2026-10-28 on a throwaway base (VMID 930) and image (931), both destroyed afterwards; the [evidence](#cloudbase-init-base-and-a-re-generalizing-build-535) shows two clones with different names and host keys and no Packer key. 7100 and 7110 were not changed |
 | Pool member and activation | not created: the operator does it. The point is [documented](#activating-a-pool-member-with-a-retail-key) |
 
 **Microsoft ISO.** The download page issues a time-limited link through the browser, and Microsoft's own download connector rejects scripted requests for it (`Sentinel marked this request as rejected`). This runbook does not work around that and does not use third-party mirrors. A person opens [the download page](https://www.microsoft.com/en-us/software-download/windows11), picks "Windows 11 (multi-edition ISO for x64 devices)" and the language, and copies the 64-bit download link (valid for 24 hours). Then `FLEET_WIN_ISO_URL=<link> windows-template fetch-iso` downloads it on the host. Never paste the link into Git, an issue, or a log.
@@ -24,6 +25,7 @@ The tooling is `deploy/pve-test/windows/windows-template`, with the answer files
 | Template VMID | `7100`, name `fleet-windows11-base`, tag `fleet-pve-test` (outside the acceptance suite's scratch range 900-919) |
 | Fleet image build VMID | `7110` (set in the recipe), name `fleet-windows11-image`; it is the template of the promoted Fleet image |
 | Test clones | `7120` and up (outside the acceptance suite's scratch range), tag `fleet-pve-test`, destroyed after each check |
+| Cloudbase-Init MSI | Cloudbase-Init `1.1.9` x64 (Apache-2.0), `CloudbaseInitSetup_1_1_9_x64.msi` from the [cloudbase/cloudbase-init release](https://github.com/cloudbase/cloudbase-init/releases/tag/1.1.9) (published 2026-10-12), SHA-256 `ffbf80515a7311ed00800276a6af7aab23b41d7acf13e79ce3d2d56844f638f7` (the release asset's own digest; the builder checks it, and setup-guest checks it again) |
 | virtio-win ISO | `virtio-win-0.1.302` (SHA-256 also pinned in `windows-template`, which refuses a different file), from the [stable direct download](https://fedorapeople.org/groups/virt/virtio-win/direct-downloads/stable-virtio/virtio-win.iso) (Fedora), 877,373,440 bytes, SHA-256 `303f7ae40dad495d6ae474fdc571df58958a4dbc5c37a522d80f9a203867949d`, last modified 2026-08-27 |
 | OpenSSH fallback MSI | Win32-OpenSSH `10.0.0.0p2` `OpenSSH-Win64-v10.0.0.0.msi`, SHA-256 `ddec9c53864280759cf9f74791cefd387100e3946aa849a1c138a4ed1b96b7d9` (the GitHub release's digest; the builder checks it before use). Upstream publishes every Win32-OpenSSH release as a preview, including this one, and it is only the fallback used when `Add-WindowsCapability` fails; the in-box feature is the preferred path |
 | Windows ISO | Windows 11 multi-edition x64, English (United States), build 26300.9457, 9,047,330,816 bytes, SHA-256 `bd4307df32bc8af33b39ccecb1174aeb345386630f89a2b86c7a4e36b55ea650`. It equals Microsoft's published value for "English 64-bit" on the download page (`BD4307DF...5EA650`), checked 2026-10-10 |
@@ -53,7 +55,7 @@ All commands run from the repository root on the dev machine. Each step prints w
 deploy/pve-test/windows/windows-template prepare
 ```
 
-Generates the password and key if missing, downloads virtio-win to the host and prints its SHA-256, downloads the OpenSSH MSI and refuses it unless it matches the pinned hash, renders `autounattend.xml` and builds `fleet-win-cfg.iso` (volume label `FLEETCFG`) on the host with `xorriso`.
+Generates the password and key if missing, downloads virtio-win to the host and prints its SHA-256, downloads the OpenSSH MSI and the Cloudbase-Init MSI and refuses either unless it matches its pinned hash, renders `autounattend.xml`, the Cloudbase-Init configuration and the sysprep answer file, and builds `fleet-win-cfg.iso` (volume label `FLEETCFG`) on the host with `xorriso`.
 
 ### 2. Fetch the Microsoft ISO
 
@@ -99,13 +101,13 @@ If the install stops, open the PVE console. Setup logs are in `C:\Windows\Panthe
 
 ```sh
 deploy/pve-test/windows/windows-template generalize     # sysprep, waits for the guest to power off
-deploy/pve-test/windows/windows-template detach-media   # removes the three CDs and deletes the config ISO
+deploy/pve-test/windows/windows-template detach-media   # removes the three CDs, deletes the config ISO, adds the cloud-init drive
 deploy/pve-test/windows/windows-template template
 ```
 
 `generalize` prints the Ed25519 host key fingerprint, then runs `generalize.ps1` on the guest. The script only registers and starts a one-shot SYSTEM scheduled task and returns, because the task stops `sshd`, which would end the SSH session running it. The task stops `sshd`, deletes `C:\ProgramData\ssh\ssh_host_*` (ADR 0015: sysprep does not touch them), deletes the cached answer files that hold the install password (`C:\Windows\Panther\unattend.xml` and others), and runs `sysprep /generalize /oobe /shutdown /unattend:` with `sysprep-unattend.xml`. That answer file keeps the local administrator (it has no `UserAccounts`, so no password), skips OOBE, and again picks a random computer name. 
 
-Once the guest is off, `detach-media` removes the three CDs and deletes the config ISO, so no clone boots with the install media and the install password does not stay on the host. Then `template` converts the stopped VM with `qm template 7100`.
+Once the guest is off, `detach-media` removes the three CDs and deletes the config ISO, so no clone boots with the install media and the install password does not stay on the host. It also adds the cloud-init drive (`ide2`, `ostype win11`, `citype configdrive2`) that the [Cloudbase-Init](#cloudbase-init-base-and-a-re-generalizing-build-535) key injection needs. Run it **after** `generalize`: on a running guest Proxmox only queues the change as pending, and clones would still start with the install ISOs (the first live attempt for #535 hit this). Then `template` converts the stopped VM with `qm template 7100`.
 
 Verify the clone, twice, with different ids:
 
@@ -144,13 +146,47 @@ Edit `proxmox_url` (and `node`) in a copy of `recipe.example.json` for your host
 2. **The build boots the clone, so the image is not generalized.** The base template is generalized, and the Proxmox builder starts the clone and stops it again. With `communicator: none` that boot runs specialize and OOBE, so the resulting Fleet image is a specialized system. Checked: two clones of 7110 have the **same** computer name (`WIN-DT7LBDAIC18`) and the same SSH host key, where two clones of 7100 do not. Consequences:
    - Clones of the Fleet image (non-pooled Lab leases) share a computer name, machine SID and SSH host key. Each lease still pins its own endpoint with trust on first use, and the guests are disposable and isolated, so the Lab checklist runs, but the ADR 0015 uniqueness requirement is not met for them.
    - **Pool members must be cloned from 7100, not from 7110** ([below](#activating-a-pool-member-with-a-retail-key)). A member cloned from the generalized base gets its own identity at its first boot.
-   - Re-generalizing at the end of the build needs a communicator login, and a recipe may hold no credential or key file. Packer's temporary key is installed through cloud-init, which Windows lacks (Cloudbase-Init in the image would fix that). The decision (#452, [architecture](../architecture/lab.md#windows-images-and-re-generalization-452)) is Cloudbase-Init in the base; the example recipe is `deploy/pve-test/windows/recipe-regeneralize.example.json`. The Cloudbase-Init base and a build with that recipe are **not yet verified**, so the workaround stands.
+   - Re-generalizing at the end of the build needs a communicator login, and a recipe may hold no credential or key file. Packer's temporary key is installed through cloud-init, which Windows lacks (Cloudbase-Init in the image would fix that). The decision (#452, [architecture](../architecture/lab.md#windows-images-and-re-generalization-452)) is Cloudbase-Init in the base; the example recipe is `deploy/pve-test/windows/recipe-regeneralize.example.json`. The Cloudbase-Init base and a build with that recipe are [verified](#cloudbase-init-base-and-a-re-generalizing-build-535) (#535); 7100 and 7110 predate it and stay as built.
 
 The Fleet image built from the working recipe, and its Lab templates, are in [Evidence](#evidence).
 
 ### 6. Shut down
 
 The build VMs are not left running. `status` shows them; templates are stopped by definition. Leave 7100 (and 7110) in place.
+
+## Cloudbase-Init base and a re-generalizing build (#535)
+
+[The decision](../architecture/lab.md#windows-images-and-re-generalization-452) is Cloudbase-Init in the base, so Packer's temporary key pair works on Windows and the build can end with a generalized image. The same `windows-template` steps as above now produce that base (a throwaway one was built on 2026-10-28 with `FLEET_WIN_VMID=930 FLEET_WIN_NAME=fleet-cbi-base FLEET_WIN_MEMORY_MB=4096`; the host had about 9 GB of free RAM):
+
+- `prepare` puts the pinned Cloudbase-Init MSI, `cloudbase-init/cloudbase-init.conf`, `cloudbase-init-unattend.conf`, the key-copy script and the rendered `sysprep-unattend.xml` on the config ISO.
+- `setup-guest.ps1` installs Cloudbase-Init as LocalSystem, installs the two configurations (ConfigDriveService only; `SetUserSSHPublicKeysPlugin` and `LocalScriptsPlugin` in the service; the specialize pass only loads the cloud-init drive and sets a hostname if the metadata has one), installs `10-admin-authorized-keys.ps1` into `LocalScripts`, and bakes `generalize.ps1` to `C:\ProgramData\fleet\` and the answer file to `C:\Windows\System32\Sysprep\sysprep-unattend.xml`.
+- The answer file's specialize pass runs Cloudbase-Init (`cmd /c "...cloudbase-init.exe" --config-file ...unattend.conf & exit 0`: a clone without a cloud-init drive continues instead of failing specialize).
+- The key script runs on every boot after the plugin wrote the injected key to the user's `authorized_keys`: it copies the keys of local administrators to `C:\ProgramData\ssh\administrators_authorized_keys` and sets the ACL with the SIDs `*S-1-5-18` and `*S-1-5-32-544`.
+- `detach-media` adds the cloud-init drive.
+
+`test-clone` on a template with a cloud-init drive injects the fixture key (`qm set --ciuser --sshkeys`) and also prints the authorized key fingerprints and the file's ACL. To build the image, copy `recipe-regeneralize.example.json`, set `proxmox_url`, `node`, `clone_vm_id` (the base) and `vm_id` (and `pool`/`insecure_skip_tls_verify` as your account needs), and run it through Fleet's image pipeline or Packer.
+
+**Findings from the live run** (all fixed in the committed files):
+
+1. **Packer stops the VM before sysprep finishes.** `generalize.ps1` only starts a detached task (sshd has to stop), so the provisioner returned after seconds and the builder powered the guest off in the middle of sysprep; the image then still carried the build clone's identity. The recipe needs `pause_after` (here `6m`, which covered sysprep: the guest was already off when the builder asked it to shut down) and `skip_clean: true` (without it Packer retries deleting its temporary script over the dead connection until `ssh_timeout`, and the build fails after 20 minutes).
+2. **Packer's key stayed in the image.** Packer's own cleanup of the ephemeral key does not work on Windows, and Cloudbase-Init keeps the injected key in `C:\Users\<user>\.ssh\authorized_keys`; the key script then copied it back into `administrators_authorized_keys` on every clone boot. `generalize.ps1 -RemoveAuthorizedKeys` now removes the users' `authorized_keys` too. Found by cloning the image without injecting a key.
+3. **Proxmox's configdrive2 metadata carries no hostname**, so Cloudbase-Init's `SetHostNamePlugin` does nothing and the computer name is the random one from the answer file (`ComputerName *`).
+4. `generalize.ps1` failed on a fresh clone because `C:\Windows\Temp\fleet` did not exist; it creates it now. Files copied from the config ISO kept the read-only attribute, so `generalize` could not copy the answer file over the baked one; `setup-guest.ps1` clears it and the copy uses `-Force`.
+5. Packer re-adds its own cloud-init drive to the finished template (as `ide0`, `citype configdrive2`, `ostype win11`), so the image keeps a drive.
+
+**Evidence (2026-10-28, PVE 9.2 host, Packer 1.16.1 with the proxmox plugin 1.2.4, Windows build 26300.9457).** Base 930 was built from scratch with the scripts as committed (install, setup, generalize, `detach-media`, `template`). Packer built image 931 from it with the example recipe (10 min 34 s; a direct `packer build` with a pool-scoped token, not the Fleet controller):
+
+| Check | Result |
+|---|---|
+| Packer reached the guest with its temporary key | yes, 90 s after boot (key delivered by Cloudbase-Init from the cloud-init drive) |
+| Pre-generalize SSH host key of the base | `SHA256:R6fZI9az40iL...` |
+| Clone 940 | computer name `WIN-S32N6FR9H7O`, host key `SHA256:dXUfrV1j2lf2...` |
+| Clone 941 | computer name `WIN-LO95BF5HIMS`, host key `SHA256:l4ca8hLTKXJo...` |
+| Clone with no key injected | `administrators_authorized_keys` absent and no user `authorized_keys`, so Packer's key is not in the image; computer name `WIN-0ACBRTOHKBM`, host key `SHA256:Ec6nmz+H3uiX...` |
+| Injected key on clones 940 and 941 | exactly the fixture key (`SHA256:KK0ONMF3oz+0...`); file ACL `BUILTIN\Administrators:(F)` and `NT AUTHORITY\SYSTEM:(F)` |
+| MACs | all different |
+
+Names and host keys differ between the two clones, and from the base. Everything created (VMs 930, 931, 940-942, a pool, a user and token for the build, the config ISO) was destroyed afterwards; no pre-existing VM was touched. Not run: the machine SID comparison.
 
 ## Activating a pool member with a retail key
 
@@ -202,7 +238,7 @@ Run on 2026-10-13 against the same temporary controller (a superset of `dev` wit
 | Lease 1 | `lab create ... --wait` ready in 14 s (a clone lease takes about 20 min). `lab exec` as `fleetadmin`: TPM ready, wrote `C:\fleet-marker.txt`. `lab destroy` released it in 4 s and the member returned to `available` |
 | Lease 2 | ready on the same VMID; the marker is gone, TPM still ready after the rollback, a fresh boot, and the **same SSH host key** (SHA-256 of `ssh_host_ed25519_key.pub` identical to lease 1) |
 
-Not verified: the machine SID of clones, activation across a rollback (the member is unactivated), a Packer build that re-generalizes the image.
+Not verified: the machine SID of clones, activation across a rollback (the member is unactivated), a Fleet-controller (rather than direct Packer) run of the re-generalizing recipe, and Lab leases on a Cloudbase-Init image.
 
 ## Host changes
 
@@ -212,6 +248,7 @@ Not verified: the machine SID of clones, activation across a rollback (the membe
 | `fleet-win-cfg.iso` (0600) | host ISO storage `local` | deleted by `detach-media` (done) |
 | `windows11-x64-multi.iso` (9 GB) | host ISO storage `local` | `rm` the file; kept for rebuilds |
 | VM 7100 template and 7110 (the Fleet image's template) | `local-lvm`, tag `fleet-pve-test` | `qm destroy <id> --purge 1` |
+| VMs 930 (base), 931 (image), 940-942 (clones), a pool `fm535`, a user `fm535@pve` with a token (#535 live run) | `local-lvm`, tag `fleet-pve-test` | all destroyed on 2026-10-28 |
 | VM 7140 `win-pool-1` (revert-pool member) with snapshot `baseline` | `local-lvm` | `lab pool drain`, `lab pool delete`, then `qm destroy 7140 --purge 1` |
 | Throwaway VM 7199 created to validate the VM definition, then destroyed | | already removed |
 | ACLs | none | the fixture token's `/vms` grant already covers these VMIDs |
@@ -227,3 +264,4 @@ The host's apt repositories, the pre-existing VMs and the pre-existing templates
 - [virtio-win ISO (Fedora)](https://docs.fedoraproject.org/en-US/quick-docs/creating-windows-virtual-machines-using-virtio-drivers/)
 - [Proxmox VE: Windows 11 guest best practices](https://pve.proxmox.com/wiki/Windows_11_guest_best_practices)
 - [PowerShell/Win32-OpenSSH releases](https://github.com/PowerShell/Win32-OpenSSH/releases)
+- [Cloudbase-Init documentation](https://cloudbase-init.readthedocs.io/en/latest/) (tutorial/sysprep, services, plugins) and [releases](https://github.com/cloudbase/cloudbase-init/releases)

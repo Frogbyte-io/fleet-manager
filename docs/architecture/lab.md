@@ -52,11 +52,13 @@ Required base layout, because the recipe gate forbids controller-side file provi
 - Cloudbase-Init, with the admin-key copy script, run in the specialize pass of the sysprep answer file;
 - `deploy/pve-test/windows/generalize.ps1` at `C:\ProgramData\fleet\generalize.ps1`, and the sysprep answer file it expects staged at `C:\Windows\System32\Sysprep\sysprep-unattend.xml` (that answer file must include Cloudbase-Init).
 
-The recipe then runs the baked script (`expect_disconnect: true`, since it ends the session). Before sysprep it deletes the SSH host keys and, with `-RemoveAuthorizedKeys` (which the recipe passes), `administrators_authorized_keys`, which holds Packer's temporary key, so clones carry neither. That also drops any key baked into the file, so the clone's keys must come from Cloudbase-Init.
+The recipe then runs the baked script (`expect_disconnect: true`, since it ends the session). Before sysprep it deletes the SSH host keys and, with `-RemoveAuthorizedKeys` (which the recipe passes), `administrators_authorized_keys` and the users' `authorized_keys`, which hold Packer's temporary key, so clones carry neither. That also drops any key baked into the file, so the clone's keys must come from Cloudbase-Init.
 
 Also required in the recipe, whatever the option: `cpu_type: host` and `os: win11` (the builder defaults to `kvm64` and `other`, and Windows 11 guests then stop at recovery). `deploy/pve-test/windows/recipe-regeneralize.example.json` is the gate-checked example (a unit test runs both Windows example recipes through `recipe_build_refusal`).
 
-Status: the Cloudbase-Init base and a Packer build of this recipe are **not built or verified**. Until they are, pool members and Windows clones come from the generalized base template, as the [fixture runbook](../operations/windows-lab-fixture.md) says.
+The recipe also needs `skip_clean: true` and a `pause_after` (the baked script returns before sysprep finishes, so Packer would otherwise power the guest off in the middle of it, or retry deleting its script over the dead connection), and `-RemoveAuthorizedKeys` removes the users' `authorized_keys` as well, because Cloudbase-Init keeps Packer's key there.
+
+Status: verified live on 2026-10-28 (#535): a base built with these scripts, a Packer build of this recipe, and two clones of the result with different computer names and SSH host keys and without Packer's key. Details and findings are in the [fixture runbook](../operations/windows-lab-fixture.md#cloudbase-init-base-and-a-re-generalizing-build-535). The existing template 7100 and image 7110 predate it; new Windows images should start from a Cloudbase-Init base.
 
 ### Build credentials and TLS trust
 

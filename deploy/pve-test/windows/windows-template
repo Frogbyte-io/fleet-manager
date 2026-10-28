@@ -21,6 +21,7 @@ readonly HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 readonly TAG="fleet-pve-test"
 VMID="${FLEET_WIN_VMID:-7100}"
 VM_NAME="${FLEET_WIN_NAME:-fleet-windows11-base}"
+MEMORY_MB="${FLEET_WIN_MEMORY_MB:-8192}"
 ADMIN_USER="${FLEET_WIN_ADMIN_USER:-fleetadmin}"
 SECRET_DIR="${FLEET_WIN_SECRET_DIR:-$HOME/.config/fleet}"
 PASSWORD_FILE="$SECRET_DIR/pve-test-windows-admin.password"
@@ -40,6 +41,10 @@ KMS_CLIENT_KEY="W269N-WFGWX-YVC9B-4J6C9-T83GX"
 # Win32-OpenSSH 10.0.0.0p2 (PowerShell/Win32-OpenSSH release asset): the offline fallback.
 OPENSSH_MSI_URL="https://github.com/PowerShell/Win32-OpenSSH/releases/download/10.0.0.0p2-Preview/OpenSSH-Win64-v10.0.0.0.msi"
 OPENSSH_MSI_SHA256="ddec9c53864280759cf9f74791cefd387100e3946aa849a1c138a4ed1b96b7d9"
+# Cloudbase-Init 1.1.9 x64 (Apache-2.0), cloudbase/cloudbase-init GitHub release asset (#535).
+# The SHA-256 is the release's own asset digest (GitHub API), confirmed against the download.
+CLOUDBASE_MSI_URL="https://github.com/cloudbase/cloudbase-init/releases/download/1.1.9/CloudbaseInitSetup_1_1_9_x64.msi"
+CLOUDBASE_MSI_SHA256="ffbf80515a7311ed00800276a6af7aab23b41d7acf13e79ce3d2d56844f638f7"
 VIRTIO_ISO_SHA256="303f7ae40dad495d6ae474fdc571df58958a4dbc5c37a522d80f9a203867949d"  # virtio-win-0.1.302
 # Test clones stay outside the acceptance suite's scratch range (900-919).
 SCRATCH_FIRST="${FLEET_WIN_SCRATCH_FIRST:-7120}"
@@ -104,6 +109,15 @@ cmd_prepare() {
   [ "$(sha256sum "$stage/OpenSSH-Win64.msi" | cut -d' ' -f1)" = "$OPENSSH_MSI_SHA256" ] \
     || die "OpenSSH MSI does not match the pinned SHA-256"
   echo "$OPENSSH_MSI_SHA256" >"$stage/OpenSSH-Win64.msi.sha256"
+  curl -fsSL -o "$stage/CloudbaseInit-x64.msi" "$CLOUDBASE_MSI_URL"
+  [ "$(sha256sum "$stage/CloudbaseInit-x64.msi" | cut -d' ' -f1)" = "$CLOUDBASE_MSI_SHA256" ] \
+    || die "Cloudbase-Init MSI does not match the pinned SHA-256"
+  echo "$CLOUDBASE_MSI_SHA256" >"$stage/CloudbaseInit-x64.msi.sha256"
+  local f
+  for f in cloudbase-init.conf cloudbase-init-unattend.conf 10-admin-authorized-keys.ps1; do
+    sed "s/@ADMIN_USER@/$ADMIN_USER/g" "$HERE/cloudbase-init/$f" >"$stage/$f"
+  done
+  sed "s/@ADMIN_USER@/$ADMIN_USER/g" "$HERE/sysprep-unattend.xml" >"$stage/sysprep-unattend.xml"
   cp "$SSH_KEY.pub" "$stage/authorized_keys.pub"
   cp "$HERE/setup-guest.ps1" "$HERE/generalize.ps1" "$stage/"
   ADMIN_USER="$ADMIN_USER" KMS_CLIENT_KEY="$KMS_CLIENT_KEY" PASSWORD_FILE="$PASSWORD_FILE" \
@@ -142,7 +156,7 @@ cmd_create() {
     || die "missing ISO on the host: run prepare, then fetch-iso"
   note "creating VM $VMID ($VM_NAME), tag $TAG"
   H "qm create $VMID --name $VM_NAME --tags $TAG --ostype win11 --machine q35 --bios ovmf \
-      --cpu host --cores 4 --memory 8192 --balloon 0 --scsihw virtio-scsi-single \
+      --cpu host --cores 4 --memory $MEMORY_MB --balloon 0 --scsihw virtio-scsi-single \
       --net0 virtio,bridge=$BRIDGE --agent enabled=1 --vga std \
       --efidisk0 $STORAGE:1,efitype=4m,pre-enrolled-keys=1 \
       --tpmstate0 $STORAGE:1,version=v2.0 \
@@ -175,7 +189,15 @@ cmd_wait_install() {
 
 cmd_detach_media() {
   note "detaching the install media (the config ISO holds the install password: it is also deleted)"
+  # Run it after generalize (the guest is off): on a running VM Proxmox only queues the change
+  # ("pending"), and a clone then still starts with the install ISOs.
+  [ "$(vm_status "$VMID")" = stopped ] || die "VM $VMID is not stopped: run generalize first"
   H "qm set $VMID --delete sata0,sata1,sata2 --boot 'order=scsi0'"
+  # The cloud-init drive Packer's temporary key (and any clone's key) is delivered on. It must
+  # be in the base: a build with cloud_init=false deletes it from the finished template. Windows
+  # needs citype configdrive2 (Cloudbase-Init's ConfigDriveService), not nocloud.
+  note "adding the cloud-init drive (ostype win11, citype configdrive2)"
+  H "qm set $VMID --ide2 $STORAGE:cloudinit --citype configdrive2 && qm config $VMID | grep -E '^(ostype|ide2|citype|sata[0-9]):'"
   H "rm -f '$ISO_DIR/$CFG_ISO'"
 }
 
@@ -193,7 +215,7 @@ cmd_generalize() {
     "$LOCAL_STAGE/sysprep-unattend.xml" "$LOCAL_STAGE/generalize.ps1" "$ADMIN_USER@$ip:C:/Windows/Temp/fleet/"
   # generalize.ps1 only starts a detached SYSTEM task (which stops sshd and runs sysprep),
   # so this call must succeed.
-  G "$ip" 'Copy-Item C:\Windows\Temp\fleet\sysprep-unattend.xml C:\Windows\System32\Sysprep\; powershell -NoProfile -ExecutionPolicy Bypass -File C:\Windows\Temp\fleet\generalize.ps1' 
+  G "$ip" 'Copy-Item -Force C:\Windows\Temp\fleet\sysprep-unattend.xml C:\Windows\System32\Sysprep\; powershell -NoProfile -ExecutionPolicy Bypass -File C:\Windows\Temp\fleet\generalize.ps1' 
   note "waiting for sysprep to shut the guest down (up to 20 min)"
   local i; for ((i = 0; i < 1200; i += 10)); do
     [ "$(vm_status "$VMID")" = stopped ] && { note "stopped"; return 0; }; sleep 10
@@ -212,11 +234,16 @@ cmd_test_clone() { # test-clone [vmid]: clone, boot, and report hostname and hos
   H "qm status $id" >/dev/null 2>&1 && die "VMID $id already exists"
   note "cloning $VMID to $id (full clone)"
   H "qm clone $VMID $id --name fleet-win-test-$id --full 1"
-  H "qm set $id --tags $TAG && qm start $id"
+  H "qm set $id --tags $TAG"
+  if H "qm config $id | grep -Eq '^(ide|sata|scsi)[0-9]+:.*cloudinit'"; then
+    note "cloud-init drive present: injecting the fixture key for $ADMIN_USER"
+    H "umask 077; k=\$(mktemp); cat >\$k; qm set $id --ciuser '$ADMIN_USER' --sshkeys \$k; rm -f \$k" <"$SSH_KEY.pub"
+  fi
+  H "qm start $id"
   local ip; ip="$(wait_ip "$id" 900)" || die "clone $id never reported an address"
   local i; for ((i = 0; i < 600; i += 10)); do G "$ip" hostname >/dev/null 2>&1 && break; sleep 10; done
   note "clone $id: computer name and host key"
-  G "$ip" 'hostname; "shell: " + (Get-ItemProperty HKLM:\SOFTWARE\OpenSSH).DefaultShell; ssh-keygen -lf C:\ProgramData\ssh\ssh_host_ed25519_key.pub'
+  G "$ip" 'hostname; "shell: " + (Get-ItemProperty HKLM:\SOFTWARE\OpenSSH).DefaultShell; ssh-keygen -lf C:\ProgramData\ssh\ssh_host_ed25519_key.pub; "authorized keys:"; ssh-keygen -lf C:\ProgramData\ssh\administrators_authorized_keys; icacls C:\ProgramData\ssh\administrators_authorized_keys'
   echo "scan: $(ssh-keyscan -t ed25519 "$ip" 2>/dev/null | ssh-keygen -lf - )"
   note "destroy it with: windows-template destroy-clone $id"
 }
@@ -249,7 +276,8 @@ Usage: windows-template <command>
   fetch-iso       download the Microsoft ISO on the host from FLEET_WIN_ISO_URL, print its SHA-256
   create          create VM 7100 and start the unattended install
   wait-install    wait for the guest agent, then SSH key login; print the Windows build
-  detach-media    detach all three ISOs and delete the config ISO (holds the install password)
+  detach-media    detach all three ISOs, delete the config ISO (holds the install password) and add the
+                  cloud-init drive (ostype win11, citype configdrive2); run after generalize
   generalize      remove SSH host keys, run sysprep /generalize /oobe /shutdown
   template        convert the stopped VM to a template
   test-clone [id] clone, boot, report computer name and host key (id default 7120)

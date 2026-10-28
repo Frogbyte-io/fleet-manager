@@ -66,6 +66,39 @@ Step 'OpenSSH Server' {
   Restart-Service sshd
 }
 
+Step 'Cloudbase-Init (#535)' {
+  # Cloudbase-Init (Apache-2.0) reads the Proxmox cloud-init drive (configdrive2) in each
+  # clone: the specialize pass of sysprep-unattend.xml sets the computer name, and the
+  # service then writes the injected SSH key, which 10-admin-authorized-keys.ps1 copies to
+  # administrators_authorized_keys. That is how Packer's temporary key reaches a Windows
+  # clone (docs/architecture/lab.md). The MSI and its SHA-256 are on the config ISO; the
+  # builder verified the pinned hash, verify again here.
+  $msi = Join-Path $cfg 'CloudbaseInit-x64.msi'
+  $want = (Get-Content (Join-Path $cfg 'CloudbaseInit-x64.msi.sha256') -Raw).Trim().ToLowerInvariant()
+  if ((Get-FileHash -Algorithm SHA256 $msi).Hash.ToLowerInvariant() -ne $want) { throw 'Cloudbase-Init MSI hash mismatch' }
+  $admin = $env:USERNAME
+  $p = Start-Process msiexec.exe -Wait -PassThru -ArgumentList '/i', "`"$msi`"", '/qn', '/norestart',
+    "USERNAME=$admin", 'RUN_SERVICE_AS_LOCAL_SYSTEM=1', "/l*v `"$state\cloudbase-init-msi.log`""
+  Write-Host "Cloudbase-Init MSI exit code $($p.ExitCode)"
+  if ($p.ExitCode -notin 0, 3010) { throw "Cloudbase-Init MSI failed: $($p.ExitCode)" }
+  $root = 'C:\Program Files\Cloudbase Solutions\Cloudbase-Init'
+  foreach ($c in 'cloudbase-init.conf', 'cloudbase-init-unattend.conf') {
+    Copy-Item (Join-Path $cfg $c) (Join-Path $root "conf\$c") -Force
+  }
+  New-Item -ItemType Directory -Force -Path "$root\LocalScripts" | Out-Null
+  Copy-Item (Join-Path $cfg '10-admin-authorized-keys.ps1') "$root\LocalScripts\" -Force
+  Set-Service cloudbase-init -StartupType Automatic
+  # Baked for the Fleet image build (#452): the recipe may not carry files, so the
+  # re-generalize script and the answer file it expects must already be in the base.
+  Copy-Item (Join-Path $cfg 'generalize.ps1') "$state\generalize.ps1" -Force
+  Copy-Item (Join-Path $cfg 'sysprep-unattend.xml') 'C:\Windows\System32\Sysprep\sysprep-unattend.xml' -Force
+  # Files copied from the ISO keep its read-only attribute, which would stop a later copy
+  # (windows-template generalize) over them.
+  foreach ($f in "$state\generalize.ps1", 'C:\Windows\System32\Sysprep\sysprep-unattend.xml', "$root\LocalScripts\10-admin-authorized-keys.ps1") {
+    Set-ItemProperty -Path $f -Name IsReadOnly -Value $false
+  }
+}
+
 Step 'keep generalize working' {
   # With a TPM, Windows 11 turns on automatic device encryption, and sysprep /generalize
   # refuses to run while BitLocker is on (0x80310039). PreventDeviceEncryption asks Windows
