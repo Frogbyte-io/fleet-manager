@@ -4,6 +4,7 @@
 
 #![warn(missing_docs)]
 
+pub mod answer_media;
 pub mod apply;
 pub mod audit;
 pub mod authz;

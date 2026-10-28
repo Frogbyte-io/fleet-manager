@@ -125,7 +125,7 @@ The command shows the review and asks for confirmation (`--yes` skips it; withou
 
 The console's Create persistent machine dialog is the same review and create as `fleetctl machines create`.
 
-## Create from an ISO with an unattended install (Linux)
+## Create from an ISO with an unattended install
 
 When there is no promoted image, `machines create` can install a Linux guest from an ISO that is already on Proxmox storage:
 
@@ -135,7 +135,7 @@ fleetctl machines create --account <a> --iso local:iso/ubuntu-24.04-live-server-
   --bootstrap-user ci --bootstrap-auth identity-file --bootstrap-identity /path/to/key [--efi] [--tpm]
 ```
 
-`--iso` replaces `--image-version`; `--node`, `--storage` and `--disk` are required (there is no template to take them from). The ISOs are named by Proxmox volume id (`storage:iso/file.iso`). **Fleet does not build or carry the answer file**: no password, key or product key travels in an operation payload, audit event or log. You prepare the answer media and upload it to ISO storage yourself.
+`--iso` replaces `--image-version`; `--node`, `--storage` and `--disk` are required (there is no template to take them from). The ISOs are named by Proxmox volume id (`storage:iso/file.iso`). With `--answer-iso` **you** prepare the answer media and upload it to ISO storage; with `--generate-answer` (below) Fleet builds, uploads and deletes it. Either way no password, key or product key travels in an operation payload, audit event or log.
 
 The operation: reserves the VMID and writes the persistent marker; creates the VM (virtio-SCSI disk of `--disk` GiB, `net0` on `--bridge` or `vmbr0`, guest agent on, the installer as CD-ROM `ide2` and the answer ISO as `ide3`, boot order installer then disk, optional OVMF/EFI disk and TPM v2.0; `--efi` creates the EFI disk with the default Microsoft Secure Boot keys enrolled, which Ubuntu and Debian boot, but a custom kernel or an unsigned installer will not); applies the same reviewed hardware and metadata settings as an image clone (tags, description, `onboot`, protection); starts the guest and **waits for it to power off**; ejects the install media (each CD-ROM becomes empty; it is never deleted, because Proxmox refuses to remove a drive from a protected guest, and protection is on by default), sets the boot order to the disk, and boots the installed system. From there it is the same as a clone: guest agent address, registration, host key trust, link, key rotation. The first login is the `--bootstrap-*` credential, which your answer file must have installed. The end of the install is seen from the VM's live power state (not the cluster listing, which lags by seconds), and only after this run has seen it running and then stopped. A re-run adopts the guest and continues: if the installer had started and the guest is stopped with the media still attached, it ejects without installing again. A guest with no media attached is adopted only when Fleet's own earlier run ejected it; otherwise the run stops with `media_missing`, because a guest nobody installed is not an installed one.
 
@@ -145,10 +145,57 @@ Requirements on the answer file:
 
 Recovery from an installer that powered off early (a failed install): Fleet cannot tell a failed install from a finished one, so it ejects the media and goes on, then fails at the guest agent address or the SSH step. Fix the answer file, destroy the VM (`fleetctl proxmox destroy <account> <node> <vmid> --confirm-persistent`, which lifts the protection Fleet set) and create the machine again.
 - It must install the QEMU guest agent and an SSH server, and the bootstrap key or password.
-- The guest must start the install without a keypress. Ubuntu live-server asks for confirmation before it applies an autoinstall unless `autoinstall` is on the kernel command line, which Fleet cannot add; use an installer image that is already set up for this (for example one remastered with `autoinstall` in its boot entry, or a Debian preseeded ISO). This is the reason an answer-file generator is separate work.
+- The guest must start the install without a keypress. Ubuntu live-server asks for confirmation before it applies an autoinstall unless `autoinstall` is on the kernel command line, which Fleet cannot add; use an installer image that is already set up for this (for example one remastered with `autoinstall` in its boot entry, or a Debian preseeded ISO). Fleet-generated media has the same limit (see below).
 
-Secrets: an answer file that sets a password holds it on the ISO storage. Use a key, or a throwaway password you rotate afterwards, and keep the ISO storage restricted. An ISO install is never approved by the agent policy bounds: it always waits for a person, because the answer file is code that runs as root on the new VM. Windows is not supported here: `guestOs windows` is refused with a pointer to the generalized base image; autounattend delivery is follow-up work.
+Secrets: an answer file that sets a password holds it on the ISO storage. Use a key, or a throwaway password you rotate afterwards, and keep the ISO storage restricted. An ISO install is never approved by the agent policy bounds: it always waits for a person, because the answer file is code that runs as root on the new VM. A Windows install needs `--generate-answer autounattend`; an operator-supplied answer ISO is Linux only.
+
+### Fleet-generated answer media (`--generate-answer`)
+
+```
+# Ubuntu Server (Subiquity autoinstall); the seed creates --bootstrap-user (default fleetadmin), never root
+fleetctl machines create --account <a> --iso local:iso/ubuntu-24.04-live-server-amd64.iso \
+  --generate-answer nocloud --node pve1 --storage local-lvm --disk 40 --name ci-linux --timeout 3600
+
+# Windows 11 (UEFI, TPM, virtio drivers); needs the virtio-win ISO on the same Proxmox
+fleetctl machines create --account <a> --iso local:iso/Win11_en-us_x64.iso \
+  --generate-answer autounattend --drivers-iso local:iso/virtio-win.iso --windows-edition "Windows 11 Pro" \
+  --os windows --node pve1 --storage local-lvm --disk 80 --memory 8192 --cores 4 --name win-ci \
+  --admin-password discard --activate-key <product-key-ref> --timeout 5400
+```
+
+What Fleet does, in order:
+
+1. **Builds the media.** A small ISO 9660 writer with a Joliet extension (pure Rust, in `fleet-application`, no new dependency and no `xorriso` binary) writes a flat image from a reviewed template. Joliet carries the lower-case names `user-data`, `meta-data` and `autounattend.xml`; the primary tree carries the same files under 8.3 names. The Linux seed is labelled `cidata` (`CIDATA` in the primary descriptor, which cloud-init accepts). Every value substituted into a template (machine name, user, public key, edition) is validated against a narrow alphabet and then quoted or escaped, so a hostile value cannot add a directive to a script that runs as root.
+2. **Generates a bootstrap key.** A per-install ed25519 key; the private half is a Fleet secret (`machines/ssh/install-<vmid>-<account>/...`, resolvable only for this install), the public half goes on the media. Fleet logs in with it for the unchanged key-rotation step, installs the final key, removes the bootstrap key from the guest, and **deletes the bootstrap secret**. The spec therefore refuses an operator-held `--public-key` (Fleet could not verify the switch) and a non-default `--bootstrap-auth`.
+3. **Uploads it** to the installer ISO's own storage (`POST /nodes/{node}/storage/{storage}/upload`, `content=iso`, with a SHA-256 checksum PVE verifies) over the same pinned TLS connection as every other call, as `fleet-answer-<account>-<vmid>-<random>.iso` (unique per install, recorded in the persistent marker before the upload; PVE's upload overwrites a file of the same name, so nothing is deleted first), and attaches it as `ide3`.
+4. **Deletes it after the install** (`DELETE /nodes/{node}/storage/{storage}/content/...`), also on a re-run that finds the guest already ejected, and after a failed create **only once the VMID is confirmed vacant** (the bootstrap key's secret goes with it). The result reports `answerMediaDeleted` and `bootstrapKeyDeleted`. A delete that fails is loud: an audit event (`answer_media_not_deleted`) and a result `warnings` entry for Linux (the seed holds no secret), and a **failed run** (`answer_not_deleted`) for Windows, whose media holds the throwaway password; fix the permission or delete the file by hand and re-run, which retries the delete. Each new generated install also sweeps this account's leftover answer media whose marker is `ready` (at most 10 per run, one audit event each, never a volume no marker names). The media is ejected, never the drive deleted, exactly as for an operator-supplied answer.
+
+Token privileges, in addition to the create privileges: `Datastore.AllocateTemplate` on the ISO storage to upload, and **`Datastore.Allocate`** on it to delete (pve-storage requires it for deleting content). `Datastore.Allocate` lets the token delete **any** volume on that storage, so give Fleet a **dedicated ISO storage** for this rather than your main one.
+
+**NoCloud seed (Ubuntu Server autoinstall).** `user-data` is a `#cloud-config` with an `autoinstall` section: direct disk layout, an SSH server with password login off, `qemu-guest-agent`, one sudo user (`NOPASSWD`) with a locked password and the bootstrap key, the hostname, and `shutdown: poweroff`. **It contains no secret at all**: a public key and a locked password. It targets the Ubuntu live-server installer; a Debian preseed or another distribution needs `--answer-iso`.
+
+**Windows autounattend.** **The installer ISO must not ask for a keypress.** A stock Windows ISO booted under OVMF shows `Press any key to boot from CD or DVD...`; with nobody pressing, the firmware falls through to the empty disk (`BdsDxe: No bootable option or device was found`) and the install ends as `install_timeout`. This was confirmed on the integration host with a stock Windows 11 ISO. Use an ISO whose UEFI boot image is the no-prompt one: rebuild the ISO with `efisys_noprompt.bin` (and `cdboot_noprompt.efi` where present) in place of `efisys.bin`, for example with `oscdimg -m -o -u2 -udfver102 -bootdata:2#p0,e,b<dir>\boot\etfsboot.com#pEF,e,b<dir>\efi\microsoft\boot\efisys_noprompt.bin <dir> out.iso`, then upload it and pass it as `--iso`. Fleet does not send keystrokes to get past the prompt. Windows 11 needs UEFI and a TPM, so `--efi` and `--tpm` are implied, the machine type is q35 with `ostype win11` and CPU `x86-64-v2-AES`, and the disk must be at least 64 GiB. The virtio-win ISO is **operator-provided** (Fleet does not carry Red Hat or Microsoft binaries) and is attached as `ide0`; the answer file loads the storage and network drivers from it in Windows PE and installs the guest agent and the virtio guest tools on first logon. A SATA/e1000 fallback without the virtio ISO is not offered: Fleet reaches a guest through the QEMU guest agent, which comes from that ISO, so a guest without it could be installed but never finished. The answer file partitions the disk (GPT: EFI, MSR, Windows), selects the edition by image name, skips the online-account screens, creates one local administrator (`--bootstrap-user`, default `fleetadmin`), and on its first logon installs the drivers and agent, installs the OpenSSH server (this uses Windows Update for the optional feature, so the guest needs internet access during the install), writes the bootstrap key to `administrators_authorized_keys`, and **powers off** (Fleet's end-of-install signal; the SSH server is configured for key-only login before it first starts; Windows Setup reboots several times itself and only the final shutdown counts). Then the usual post-install steps run: computer name, key rotation, **administrator password rotation** (`--admin-password store|discard` is required, because the answer file sets a throwaway password), and activation (#489).
+
+Residual exposure, stated plainly:
+
+- The Windows answer file holds a throwaway administrator password in clear text (`PlainText`; the encoded form Microsoft offers is obfuscation, not encryption) and the AutoLogon copy of it. It is a random value made for this install, it exists on the ISO storage only until Fleet deletes the media after the install (or on a failure before that, until you delete the `fleet-answer-*` file), and Fleet rotates it as soon as the machine is reachable. Windows Setup may leave a copy of the answer file under `C:\Windows\Panther`; Setup scrubs password values there, and the password is rotated anyway.
+- **The product key never enters the ISO.** The answer file has no `ProductKey` element and selects the edition by image name (`/IMAGE/NAME`); activation is the separate #489 step that sends a stored key over SSH stdin.
+- The bootstrap public key is public. Its private half is a Fleet secret until the final key is proven, then deleted.
+- If Fleet is stopped between the upload and the delete, a seed (Linux) or an answer file with a throwaway password (Windows) stays on the ISO storage. A re-run deletes it (the file name is in the marker); otherwise delete the `fleet-answer-*` file yourself.
+- The VM, the answer file and the installer are all code from the ISO storage that runs as administrator or root: keep the storage restricted. An install always waits for a person to approve it.
+
+### Ending detection and the Ubuntu prompt
+
+Power-off remains the end-of-install signal and the only one implemented. An SSH or guest-agent signal was considered and not shipped: a live installer environment also runs an agent (Ubuntu live-server does), so an agent answer cannot tell the installer from the installed system; an SSH login with the bootstrap key would work (only the installed system has it) but needs the guest's address first, which comes from the same agent, and the media would then have to be ejected from a running guest while a reboot is already in flight. Generated media always powers off at the end; for an operator-supplied answer ISO that cannot, the operation fails with `install_timeout`.
+
+Ubuntu live-server asks `Continue with autoinstall? (yes|no)` unless `autoinstall` is on the kernel command line, and Fleet does not edit the command line. The options, in order of preference, none implemented:
+
+1. **A remastered ISO** with `autoinstall` in its GRUB entry (and, for the generated seed, nothing else to change). Reliable and offline; the operator builds and uploads it, then passes it as `--iso`.
+2. **A pre-set installer**: Ubuntu's own `autoinstall`-ready images, or a netboot/PXE path; outside this release.
+3. **Driving the boot menu** with Proxmox `sendkey` or VNC (`e`, edit the line, `F10`). Timing and menu layout differ per release and a wrong keystroke can install nothing or the wrong thing, so Fleet will not do it. Proxmox's `args` option (a `-append` for a direct kernel boot) would be the clean mechanism but is restricted to `root@pam`, which a Fleet token is not.
+
+Debian preseeded installers and Windows (`autounattend.xml` is read from removable media without a prompt once Setup runs; the boot-time keypress above is a separate, firmware-level prompt) do not have this problem.
 
 ## Not in this release
 
-Fleet-generated answer media (a NoCloud seed builder), Windows autounattend installs, LXC, cluster placement and HA.
+An SSH or guest-agent end-of-install signal, a Debian or other-distribution generator, a SATA/e1000 Windows fallback, an automatic Ubuntu autoinstall prompt answer, LXC, cluster placement and HA.

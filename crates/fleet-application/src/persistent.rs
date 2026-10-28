@@ -215,6 +215,47 @@ pub struct InstallSource {
     /// Add a v2.0 virtual TPM (needs a storage; implies nothing else).
     #[serde(default)]
     pub tpm: bool,
+    /// Answer media Fleet builds, uploads to the installer ISO's storage,
+    /// attaches and deletes after the install (#549), instead of an
+    /// operator-prepared `answerIso`. The payload carries options only: no
+    /// file content, key or password.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub answer: Option<GeneratedAnswer>,
+    /// The virtio-win drivers ISO, attached as a CD-ROM for a Windows
+    /// install. Operator-provided (Fleet does not carry Microsoft or Red Hat
+    /// binaries); it also supplies the QEMU guest agent Fleet needs.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub drivers_iso: Option<String>,
+}
+
+/// The answer media Fleet generates.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", tag = "type", deny_unknown_fields)]
+pub enum GeneratedAnswer {
+    /// A `NoCloud` seed (`cidata`: `user-data`, `meta-data`) for an Ubuntu
+    /// Server autoinstall: key-only login, no password.
+    Nocloud,
+    /// An `autounattend.xml` for Windows 11 on UEFI with a TPM.
+    #[serde(rename_all = "camelCase")]
+    Autounattend {
+        /// The edition's image name; `Windows 11 Pro` when absent.
+        #[serde(default)]
+        edition: Option<String>,
+    },
+}
+
+impl InstallSource {
+    /// Whether the guest boots with OVMF: asked for, or a Windows answer.
+    #[must_use]
+    pub fn uses_efi(&self) -> bool {
+        self.efi || matches!(self.answer, Some(GeneratedAnswer::Autounattend { .. }))
+    }
+
+    /// Whether the guest gets a vTPM: asked for, or a Windows answer.
+    #[must_use]
+    pub fn uses_tpm(&self) -> bool {
+        self.tpm || matches!(self.answer, Some(GeneratedAnswer::Autounattend { .. }))
+    }
 }
 
 /// Whether a value is a Proxmox ISO volume id (`storage:iso/name.iso`).
@@ -482,6 +523,94 @@ pub fn validate_public_key(key: &str) -> Result<(), String> {
 }
 
 impl CreateMachineSpec {
+    /// The rules of an install's answer media and guest OS.
+    fn validate_install_answer(&self, install: &InstallSource) -> Result<(), String> {
+        if install.answer.is_some() && install.answer_iso.is_some() {
+            return Err(
+                "give either answer (Fleet builds the media) or answerIso, not both".to_owned(),
+            );
+        }
+        match (&install.answer, self.guest_os) {
+            (None, GuestOs::Linux) => {
+                if install.drivers_iso.is_some() {
+                    return Err("driversIso belongs to a Windows install".to_owned());
+                }
+                return Ok(());
+            }
+            (None, GuestOs::Windows) => {
+                return Err(
+                    "a Windows install needs answer {type: autounattend}; or clone the generalized base image"
+                        .to_owned(),
+                );
+            }
+            (Some(GeneratedAnswer::Nocloud), GuestOs::Windows) => {
+                return Err("a NoCloud seed is for a Linux guest".to_owned());
+            }
+            (Some(GeneratedAnswer::Autounattend { .. }), GuestOs::Linux) => {
+                return Err("autounattend is for a Windows guest".to_owned());
+            }
+            _ => {}
+        }
+        // Both generated kinds: Fleet's own bootstrap key is the way in.
+        if !matches!(self.bootstrap.auth, EndpointAuth::Agent) {
+            return Err(
+                "generated answer media installs a Fleet-generated bootstrap key; leave bootstrap.auth at its default"
+                    .to_owned(),
+            );
+        }
+        if matches!(self.credential, CredentialChoice::PublicKey { .. }) {
+            return Err(
+                "generated answer media needs Fleet to hold the final key: use credential generate or a stored reference, not an operator-held public key"
+                    .to_owned(),
+            );
+        }
+        crate::answer_media::check_hostname(&self.name)?;
+        match &install.answer {
+            Some(GeneratedAnswer::Nocloud) => {
+                if self.bootstrap_user() == "root" {
+                    return Err(
+                        "the generated seed creates a regular sudo user: set bootstrap.user (not root)"
+                            .to_owned(),
+                    );
+                }
+                if install.drivers_iso.is_some() {
+                    return Err("driversIso belongs to a Windows install".to_owned());
+                }
+            }
+            Some(GeneratedAnswer::Autounattend { edition }) => {
+                let Some(drivers) = &install.drivers_iso else {
+                    return Err(
+                        "a Windows install needs driversIso (the virtio-win ISO): it carries the disk and network drivers and the guest agent Fleet reaches the guest through"
+                            .to_owned(),
+                    );
+                };
+                validate_iso_volume(drivers, "drivers ISO")?;
+                if *drivers == install.iso {
+                    return Err("the drivers ISO must differ from the installer ISO".to_owned());
+                }
+                if let Some(edition) = edition {
+                    crate::answer_media::check_image_name(edition)?;
+                }
+                if self.disk_gib.is_some_and(|gib| gib < 64) {
+                    return Err("Windows 11 needs a disk of at least 64 GiB".to_owned());
+                }
+                let policy = self
+                    .windows
+                    .as_ref()
+                    .map(|options| options.admin_password)
+                    .unwrap_or_default();
+                if policy == AdminPasswordPolicy::None {
+                    return Err(
+                        "the answer file sets a throwaway administrator password: set windows.adminPassword to store or discard so Fleet rotates it"
+                            .to_owned(),
+                    );
+                }
+            }
+            None => {}
+        }
+        Ok(())
+    }
+
     /// Checks every rule that needs no I/O.
     ///
     /// # Errors
@@ -505,12 +634,7 @@ impl CreateMachineSpec {
                         return Err("the answer ISO must differ from the installer ISO".to_owned());
                     }
                 }
-                if self.guest_os != GuestOs::Linux {
-                    return Err(
-                        "installing from an ISO supports Linux guests only; Windows comes from the generalized base image (the autounattend path is follow-up work)"
-                            .to_owned(),
-                    );
-                }
+                self.validate_install_answer(install)?;
                 if self.node.is_none() || self.storage.is_none() || self.disk_gib.is_none() {
                     return Err(
                         "an install needs node, storage and diskGib: there is no template to take them from"
@@ -981,6 +1105,42 @@ pub trait PersistentGuestPort: fmt::Debug + Send + Sync {
     ///
     /// Fails when the store cannot be read.
     async fn owner_of_machine(&self, machine_id: &str) -> Result<Option<RequestedBy>, String>;
+
+    /// Records the generated answer ISO's file name for a marker.
+    ///
+    /// # Errors
+    ///
+    /// Fails with a secret-free detail when the store errors or the marker is
+    /// unknown.
+    async fn record_answer_media(
+        &self,
+        account_id: &str,
+        vmid: u32,
+        file: &str,
+    ) -> Result<(), String>;
+
+    /// Forgets the recorded answer ISO of a marker (its volume is deleted).
+    ///
+    /// # Errors
+    ///
+    /// Fails with a secret-free detail when the store errors.
+    async fn clear_answer_media(&self, account_id: &str, vmid: u32) -> Result<(), String>;
+
+    /// The generated answer ISO's file name recorded for a marker.
+    ///
+    /// # Errors
+    ///
+    /// Fails with a secret-free detail when the store errors.
+    async fn answer_media_of(&self, account_id: &str, vmid: u32) -> Result<Option<String>, String>;
+
+    /// Every recorded answer ISO: account, VMID, file name and the marker's
+    /// state.
+    ///
+    /// # Errors
+    ///
+    /// Fails with a secret-free detail when the store errors.
+    async fn answer_media_all(&self)
+    -> Result<Vec<(String, u32, String, PersistentState)>, String>;
 }
 
 /// Windows product keys, held as encrypted secret records. The value is
@@ -2165,16 +2325,115 @@ mod tests {
 
         let mut windows = install_spec();
         windows.guest_os = GuestOs::Windows;
-        assert!(
-            windows
-                .validate()
-                .unwrap_err()
-                .contains("Linux guests only")
-        );
+        assert!(windows.validate().unwrap_err().contains("needs answer"));
 
         let mut same = install_spec();
         same.install.as_mut().unwrap().answer_iso = Some("local:iso/ubuntu.iso".to_owned());
         assert!(same.validate().is_err());
+    }
+
+    fn generated(kind: &serde_json::Value) -> CreateMachineSpec {
+        serde_json::from_value(serde_json::json!({
+            "accountId": "acct-1",
+            "name": "ci-linux",
+            "node": "pve",
+            "storage": "local-lvm",
+            "diskGib": 32,
+            "install": { "iso": "local:iso/ubuntu.iso", "answer": kind },
+            "bootstrap": { "user": "fleetadmin" },
+        }))
+        .unwrap()
+    }
+
+    fn windows_generated() -> CreateMachineSpec {
+        serde_json::from_value(serde_json::json!({
+            "accountId": "acct-1",
+            "name": "win-ci",
+            "node": "pve",
+            "storage": "local-lvm",
+            "diskGib": 80,
+            "guestOs": "windows",
+            "install": {
+                "iso": "local:iso/win11.iso",
+                "answer": { "type": "autounattend" },
+                "driversIso": "local:iso/virtio-win.iso",
+            },
+            "windows": { "adminPassword": "discard" },
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn a_generated_nocloud_answer_needs_a_regular_user_and_fleets_own_key() {
+        let spec = generated(&serde_json::json!({ "type": "nocloud" }));
+        spec.validate().unwrap();
+        // The payload names the kind only: no content, key or password.
+        let payload = spec.to_payload().unwrap();
+        assert!(payload.contains(r#""answer":{"type":"nocloud"}"#));
+        assert!(payload.contains(r#""answerIso":null"#));
+
+        let mut root = generated(&serde_json::json!({ "type": "nocloud" }));
+        root.bootstrap.user = None;
+        assert!(root.validate().unwrap_err().contains("not root"));
+
+        let mut both = generated(&serde_json::json!({ "type": "nocloud" }));
+        both.install.as_mut().unwrap().answer_iso = Some("local:iso/seed.iso".to_owned());
+        assert!(both.validate().unwrap_err().contains("not both"));
+
+        let mut held = generated(&serde_json::json!({ "type": "nocloud" }));
+        held.credential = CredentialChoice::PublicKey {
+            public_key: "ssh-ed25519 AAAA x".to_owned(),
+        };
+        assert!(held.validate().unwrap_err().contains("operator-held"));
+
+        let mut name = generated(&serde_json::json!({ "type": "nocloud" }));
+        name.name = "ci_linux".to_owned();
+        assert!(name.validate().is_err());
+
+        let mut drivers = generated(&serde_json::json!({ "type": "nocloud" }));
+        drivers.install.as_mut().unwrap().drivers_iso = Some("local:iso/v.iso".to_owned());
+        assert!(drivers.validate().is_err());
+
+        let mut wrong = generated(&serde_json::json!({ "type": "autounattend" }));
+        assert!(wrong.validate().unwrap_err().contains("Windows guest"));
+        wrong.guest_os = GuestOs::Windows;
+        assert!(wrong.validate().is_err());
+    }
+
+    #[test]
+    fn a_windows_install_needs_drivers_a_big_disk_and_a_rotated_password() {
+        let spec = windows_generated();
+        spec.validate().unwrap();
+        let install = spec.install.as_ref().unwrap();
+        assert!(
+            install.uses_efi() && install.uses_tpm(),
+            "Windows 11 defaults"
+        );
+
+        let mut none = windows_generated();
+        none.install.as_mut().unwrap().drivers_iso = None;
+        assert!(none.validate().unwrap_err().contains("driversIso"));
+
+        let mut small = windows_generated();
+        small.disk_gib = Some(40);
+        assert!(small.validate().unwrap_err().contains("64 GiB"));
+
+        let mut kept = windows_generated();
+        kept.windows = None;
+        assert!(kept.validate().unwrap_err().contains("adminPassword"));
+
+        let mut edition = windows_generated();
+        edition.install.as_mut().unwrap().answer = Some(GeneratedAnswer::Autounattend {
+            edition: Some("Pro</Value>".to_owned()),
+        });
+        assert!(edition.validate().is_err());
+
+        let mut same = windows_generated();
+        same.install.as_mut().unwrap().drivers_iso = Some("local:iso/win11.iso".to_owned());
+        assert!(same.validate().is_err());
+
+        // Linux without generated media keeps the explicit choice.
+        assert!(!install_spec().install.unwrap().uses_efi());
     }
 
     #[test]

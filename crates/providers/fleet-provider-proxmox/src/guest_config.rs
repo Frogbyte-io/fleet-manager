@@ -321,6 +321,10 @@ pub struct PveQemuCreate {
     pub efi: bool,
     /// A v2.0 virtual TPM.
     pub tpm: bool,
+    /// The virtio-win drivers ISO, attached as CD-ROM `ide0` (Windows).
+    pub drivers_iso: Option<String>,
+    /// A Windows 11 guest: `ostype win11` and a CPU model Windows 11 accepts.
+    pub windows: bool,
 }
 
 impl PveQemuCreate {
@@ -334,7 +338,7 @@ impl PveQemuCreate {
             "name": self.name,
             "cores": self.cores,
             "memory": self.memory_mib,
-            "ostype": "l26",
+            "ostype": if self.windows { "win11" } else { "l26" },
             "agent": "enabled=1",
             "scsihw": "virtio-scsi-single",
             "scsi0": format!("{}:{}", self.storage, self.disk_gib),
@@ -343,6 +347,12 @@ impl PveQemuCreate {
             "boot": "order=ide2;scsi0",
             "start": 0,
         });
+        if self.windows {
+            body["cpu"] = serde_json::json!("x86-64-v2-AES");
+        }
+        if let Some(drivers) = &self.drivers_iso {
+            body["ide0"] = serde_json::json!(format!("{drivers},media=cdrom"));
+        }
         if let Some(answer) = &self.answer_iso {
             body["ide3"] = serde_json::json!(format!("{answer},media=cdrom"));
         }
@@ -357,6 +367,42 @@ impl PveQemuCreate {
         }
         body
     }
+}
+
+/// The `multipart/form-data` body of an ISO upload and its `Content-Type`.
+/// The boundary is chosen so the data never contains it.
+fn upload_body(filename: &str, data: &[u8], sha256_hex: &str) -> (String, Vec<u8>) {
+    let mut boundary = "fleet-boundary-0".to_owned();
+    let mut counter = 0;
+    while data
+        .windows(boundary.len())
+        .any(|window| window == boundary.as_bytes())
+    {
+        counter += 1;
+        boundary = format!("fleet-boundary-{counter}");
+    }
+    let mut body = Vec::new();
+    for (name, value) in [
+        ("content", "iso"),
+        ("checksum-algorithm", "sha256"),
+        ("checksum", sha256_hex),
+    ] {
+        body.extend_from_slice(
+            format!(
+                "--{boundary}\r\nContent-Disposition: form-data; name=\"{name}\"\r\n\r\n{value}\r\n"
+            )
+            .as_bytes(),
+        );
+    }
+    body.extend_from_slice(
+        format!(
+            "--{boundary}\r\nContent-Disposition: form-data; name=\"filename\"; filename=\"{filename}\"\r\nContent-Type: application/octet-stream\r\n\r\n"
+        )
+        .as_bytes(),
+    );
+    body.extend_from_slice(data);
+    body.extend_from_slice(format!("\r\n--{boundary}--\r\n").as_bytes());
+    (format!("multipart/form-data; boundary={boundary}"), body)
 }
 
 /// The body that ejects the given drives and boots from the disk.
@@ -492,6 +538,131 @@ impl ProxmoxClient {
         .map(|_| ())
     }
 
+    /// Uploads an ISO to storage (`POST /nodes/{node}/storage/{storage}/upload`
+    /// with `content=iso`; needs `Datastore.AllocateTemplate` on the
+    /// storage; an existing file of the name is overwritten), with a SHA-256 checksum PVE verifies. Answers the task.
+    ///
+    /// # Errors
+    ///
+    /// Fails with [`PveApiError`], or when the transport cannot upload.
+    pub async fn storage_upload_iso(
+        &self,
+        request: PveHttpRequest,
+        node: &str,
+        storage: &str,
+        filename: &str,
+        data: &[u8],
+    ) -> Result<Upid, PveApiError> {
+        use sha2::{Digest as _, Sha256};
+        use std::fmt::Write as _;
+        let mut digest = String::new();
+        for byte in Sha256::digest(data) {
+            let _ = write!(digest, "{byte:02x}");
+        }
+        let (content_type, body) = upload_body(filename, data, &digest);
+        let mut request = request;
+        request.path = format!(
+            "/api2/json/nodes/{}/storage/{}/upload",
+            urlencode(node),
+            urlencode(storage)
+        );
+        request.method = PveHttpMethod::Post;
+        let response = self
+            .transport
+            .execute_upload(request, content_type, body)
+            .await
+            .map_err(PveApiError::Transport)?;
+        let data = Self::status_to_result(&response)?;
+        let Some(raw) = data.as_str() else {
+            return Err(PveApiError::InvalidPayload {
+                detail: "the upload answer carries no UPID string".to_owned(),
+            });
+        };
+        Upid::parse(raw).map_err(|detail| PveApiError::InvalidPayload { detail })
+    }
+
+    /// The ISO volume ids on storage (`GET
+    /// /nodes/{node}/storage/{storage}/content?content=iso`).
+    ///
+    /// # Errors
+    ///
+    /// Fails with [`PveApiError`].
+    pub async fn storage_iso_volumes(
+        &self,
+        request: PveHttpRequest,
+        node: &str,
+        storage: &str,
+    ) -> Result<Vec<String>, PveApiError> {
+        let data = self
+            .call(PveHttpRequest {
+                path: format!(
+                    "/api2/json/nodes/{}/storage/{}/content?content=iso",
+                    urlencode(node),
+                    urlencode(storage)
+                ),
+                method: PveHttpMethod::Get,
+                ..request
+            })
+            .await?;
+        Ok(data
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|item| item.get("volid").and_then(serde_json::Value::as_str))
+            .map(str::to_owned)
+            .collect())
+    }
+
+    /// Whether an ISO volume exists on storage.
+    ///
+    /// # Errors
+    ///
+    /// Fails with [`PveApiError`].
+    pub async fn storage_iso_exists(
+        &self,
+        request: PveHttpRequest,
+        node: &str,
+        storage: &str,
+        volume: &str,
+    ) -> Result<bool, PveApiError> {
+        Ok(self
+            .storage_iso_volumes(request, node, storage)
+            .await?
+            .iter()
+            .any(|found| found == volume))
+    }
+
+    /// Deletes a volume (`DELETE /nodes/{node}/storage/{storage}/content/{volume}`;
+    /// PVE requires `Datastore.Allocate` on the storage for this, which can delete
+    /// any volume there). Answers the task when PVE runs one.
+    ///
+    /// # Errors
+    ///
+    /// Fails with [`PveApiError`].
+    pub async fn storage_delete_volume(
+        &self,
+        request: PveHttpRequest,
+        node: &str,
+        storage: &str,
+        volume: &str,
+    ) -> Result<Option<Upid>, PveApiError> {
+        let mut request = request;
+        request.path = format!(
+            "/api2/json/nodes/{}/storage/{}/content/{}",
+            urlencode(node),
+            urlencode(storage),
+            urlencode(volume)
+        );
+        request.method = PveHttpMethod::Delete;
+        let response = self
+            .transport
+            .execute(request)
+            .await
+            .map_err(PveApiError::Transport)?;
+        let data = Self::status_to_result(&response)?;
+        Ok(data.as_str().and_then(|raw| Upid::parse(raw).ok()))
+    }
+
     /// The guest's power state right now (`GET
     /// /nodes/{node}/qemu/{vmid}/status/current`: `running`, `stopped`, ...).
     /// Unlike `/cluster/resources`, which lags by about ten seconds, this
@@ -593,8 +764,12 @@ mod tests {
             answer_iso: Some("local:iso/seed.iso".to_owned()),
             efi: false,
             tpm: false,
+            drivers_iso: None,
+            windows: false,
         };
         let body = create.body();
+        assert_eq!(body["ostype"], "l26");
+        assert!(body.get("ide0").is_none() && body.get("cpu").is_none());
         assert_eq!(body["ide2"], "local:iso/ubuntu.iso,media=cdrom");
         assert_eq!(body["ide3"], "local:iso/seed.iso,media=cdrom");
         assert_eq!(body["boot"], "order=ide2;scsi0");
@@ -608,6 +783,27 @@ mod tests {
         assert_eq!(body["bios"], "ovmf");
         assert_eq!(body["tpmstate0"], "local-lvm:1,version=v2.0");
         assert!(body.get("ide3").is_none());
+        create.windows = true;
+        create.drivers_iso = Some("local:iso/virtio-win.iso".to_owned());
+        let body = create.body();
+        assert_eq!(body["ostype"], "win11");
+        assert_eq!(body["ide0"], "local:iso/virtio-win.iso,media=cdrom");
+        assert_eq!(body["cpu"], "x86-64-v2-AES");
+    }
+
+    #[test]
+    fn an_upload_body_is_multipart_with_a_boundary_the_data_cannot_contain() {
+        let (content_type, body) = upload_body("fleet.iso", b"--fleet-boundary-0 data", "ab12");
+        let boundary = content_type
+            .strip_prefix("multipart/form-data; boundary=")
+            .unwrap();
+        assert_ne!(boundary, "fleet-boundary-0");
+        let text = String::from_utf8_lossy(&body);
+        assert!(text.contains("name=\"content\"\r\n\r\niso\r\n"));
+        assert!(text.contains("name=\"checksum-algorithm\"\r\n\r\nsha256"));
+        assert!(text.contains("name=\"checksum\"\r\n\r\nab12"));
+        assert!(text.contains("name=\"filename\"; filename=\"fleet.iso\""));
+        assert!(text.ends_with(&format!("--{boundary}--\r\n")));
     }
 
     #[test]

@@ -37,6 +37,12 @@ pub struct CreateArgs {
     pub iso: Option<String>,
     /// The answer ISO volume id (`--answer-iso`).
     pub answer_iso: Option<String>,
+    /// Fleet-built answer media (`--generate-answer nocloud|autounattend`).
+    pub generate_answer: Option<String>,
+    /// The virtio-win drivers ISO volume id (`--drivers-iso`).
+    pub drivers_iso: Option<String>,
+    /// The Windows image name (`--windows-edition`).
+    pub windows_edition: Option<String>,
     /// Boot with UEFI (`--efi`).
     pub efi: bool,
     /// Add a virtual TPM (`--tpm`).
@@ -112,6 +118,17 @@ pub(crate) fn parse_create(rest: &[&str], output: &mut Output) -> Result<CreateA
             "--image-version" => args.image_version = Some(value("image-version")?),
             "--iso" => args.iso = Some(value("iso")?),
             "--answer-iso" => args.answer_iso = Some(value("answer-iso")?),
+            "--generate-answer" => {
+                let kind = value("generate-answer")?;
+                if !matches!(kind.as_str(), "nocloud" | "autounattend") {
+                    return Err(CliError {
+                        message: "--generate-answer must be nocloud or autounattend".to_owned(),
+                    });
+                }
+                args.generate_answer = Some(kind);
+            }
+            "--drivers-iso" => args.drivers_iso = Some(value("drivers-iso")?),
+            "--windows-edition" => args.windows_edition = Some(value("windows-edition")?),
             "--efi" => args.efi = true,
             "--tpm" => args.tpm = true,
             "--name" => args.name = Some(value("name")?),
@@ -260,10 +277,33 @@ pub(crate) fn parse_create(rest: &[&str], output: &mut Output) -> Result<CreateA
             message: "machines create needs exactly one of --image-version and --iso".to_owned(),
         });
     }
-    if args.iso.is_none() && (args.answer_iso.is_some() || args.efi || args.tpm) {
+    if args.iso.is_none()
+        && (args.answer_iso.is_some()
+            || args.efi
+            || args.tpm
+            || args.generate_answer.is_some()
+            || args.drivers_iso.is_some())
+    {
         return Err(CliError {
-            message: "--answer-iso, --efi and --tpm belong to --iso".to_owned(),
+            message:
+                "--answer-iso, --generate-answer, --drivers-iso, --efi and --tpm belong to --iso"
+                    .to_owned(),
         });
+    }
+    if args.windows_edition.is_some() && args.generate_answer.as_deref() != Some("autounattend") {
+        return Err(CliError {
+            message: "--windows-edition belongs to --generate-answer autounattend".to_owned(),
+        });
+    }
+    if args.generate_answer.is_some() && args.answer_iso.is_some() {
+        return Err(CliError {
+            message: "give --generate-answer or --answer-iso, not both".to_owned(),
+        });
+    }
+    if args.generate_answer.as_deref() == Some("nocloud") && !args.bootstrap.contains_key("user") {
+        // The generated seed creates a regular sudo user, never root.
+        args.bootstrap
+            .insert("user".to_owned(), json!("fleetadmin"));
     }
     for (value, flag) in [(&args.account, "--account"), (&args.name, "--name")] {
         if value.is_none() {
@@ -308,6 +348,19 @@ impl CreateArgs {
             let mut install = json!({ "iso": iso, "efi": self.efi, "tpm": self.tpm });
             if let Some(answer) = &self.answer_iso {
                 install["answerIso"] = json!(answer);
+            }
+            match self.generate_answer.as_deref() {
+                Some("nocloud") => install["answer"] = json!({ "type": "nocloud" }),
+                Some(_) => {
+                    install["answer"] = json!({ "type": "autounattend" });
+                    if let Some(edition) = &self.windows_edition {
+                        install["answer"]["edition"] = json!(edition);
+                    }
+                }
+                None => {}
+            }
+            if let Some(drivers) = &self.drivers_iso {
+                install["driversIso"] = json!(drivers);
             }
             spec.insert("install".to_owned(), install);
         } else {
@@ -756,6 +809,70 @@ mod tests {
                 "--image-version",
                 "v",
                 "--efi"
+            ])
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn generated_answers_set_the_install_and_default_the_linux_user() {
+        let args = parse(&[
+            "--account",
+            "a",
+            "--iso",
+            "local:iso/u.iso",
+            "--generate-answer",
+            "nocloud",
+            "--name",
+            "n",
+        ])
+        .unwrap();
+        let spec = args.spec();
+        assert_eq!(spec["install"]["answer"]["type"], "nocloud");
+        assert_eq!(spec["bootstrap"]["user"], "fleetadmin");
+        let args = parse(&[
+            "--account",
+            "a",
+            "--iso",
+            "local:iso/w.iso",
+            "--generate-answer",
+            "autounattend",
+            "--drivers-iso",
+            "local:iso/v.iso",
+            "--windows-edition",
+            "Windows 11 Pro",
+            "--name",
+            "n",
+        ])
+        .unwrap();
+        let spec = args.spec();
+        assert_eq!(spec["install"]["answer"]["edition"], "Windows 11 Pro");
+        assert_eq!(spec["install"]["driversIso"], "local:iso/v.iso");
+        assert!(spec.get("bootstrap").is_none());
+        for bad in [
+            vec!["--generate-answer", "preseed"],
+            vec![
+                "--generate-answer",
+                "nocloud",
+                "--answer-iso",
+                "local:iso/s.iso",
+            ],
+            vec!["--windows-edition", "x"],
+        ] {
+            let mut rest = vec!["--account", "a", "--iso", "local:iso/u.iso", "--name", "n"];
+            rest.extend(bad);
+            assert!(parse(&rest).is_err());
+        }
+        assert!(
+            parse(&[
+                "--account",
+                "a",
+                "--image-version",
+                "v",
+                "--name",
+                "n",
+                "--drivers-iso",
+                "x"
             ])
             .is_err()
         );
