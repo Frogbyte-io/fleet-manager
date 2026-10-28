@@ -89,6 +89,7 @@ Packer's Proxmox plugin calls the PVE API itself, and Fleet's privilege table (F
 | Create the VM (`proxmox-iso`) | `POST /nodes/{node}/qemu` | `VM.Allocate`, `Datastore.AllocateSpace`, `SDN.Use`, and the `VM.Config.*` privileges for the fields the recipe sets (`VM.Config.Disk`, `.CPU`, `.Memory`, `.Network`, `.CDROM`, `.HWType`, `.Options`) |
 | Set the configuration | `POST` or `PUT /nodes/{node}/qemu/{vmid}/config` | the `VM.Config.*` privileges above, `SDN.Use` on `/sdn/zones/{zone}/{bridge}` for the NIC's bridge, and `VM.Config.Cloudinit` when the recipe sets cloud-init fields |
 | Fetch or attach an ISO | `POST /nodes/{node}/storage/{storage}/download-url` or `/upload` | `Datastore.AllocateTemplate` on the ISO storage |
+| Upload or delete a generated answer ISO (`machines create --generate-answer`) | `POST /nodes/{node}/storage/{storage}/upload`, `DELETE …/storage/{storage}/content/{volume}` | `Datastore.AllocateTemplate` on the installer ISO's storage |
 | Start, stop, shut down | `POST …/status/start`, `…/stop`, `…/shutdown` | `VM.PowerMgmt` |
 | Type the boot command | `POST …/sendkey`, `…/vncproxy` | `VM.Console` |
 | Read the guest address | `GET …/agent/network-get-interfaces` | `VM.Monitor` on 8.x; `VM.GuestAgent.Audit` on 9.x |

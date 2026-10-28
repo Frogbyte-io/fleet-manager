@@ -812,6 +812,9 @@ struct Run<'a> {
     /// The credential the machine ends up using, when Fleet holds it.
     credential: Option<String>,
     bootstrap_key_removed: bool,
+    /// Whether the generated answer media was deleted from ISO storage
+    /// (`None` when this creation generated none).
+    answer_deleted: Option<bool>,
 }
 
 const STEPS: i64 = 11;
@@ -1257,6 +1260,13 @@ impl Run<'_> {
             }
             return self.mark_cloned().await;
         }
+        let answer_volume = match self.generated_answer(&install).await {
+            Ok(volume) => volume,
+            Err(failure) => {
+                self.release_marker_if_vacant().await;
+                return Err(failure);
+            }
+        };
         let create = fleet_provider_proxmox::PveQemuCreate {
             vmid: self.vmid,
             name: self.spec.name.clone(),
@@ -1269,10 +1279,12 @@ impl Run<'_> {
                 .bridge
                 .clone()
                 .unwrap_or_else(|| "vmbr0".to_owned()),
+            answer_iso: answer_volume.clone().or_else(|| install.answer_iso.clone()),
+            efi: install.uses_efi(),
+            tpm: install.uses_tpm(),
+            drivers_iso: install.drivers_iso.clone(),
+            windows: self.spec.guest_os == GuestOs::Windows,
             iso: install.iso,
-            answer_iso: install.answer_iso,
-            efi: install.efi,
-            tpm: install.tpm,
         };
         let started = self
             .exec
@@ -1289,9 +1301,169 @@ impl Run<'_> {
             Ok(()) => self.mark_cloned().await,
             Err(failure) => {
                 self.release_marker_if_vacant().await;
+                if answer_volume.is_some() {
+                    // The guest was never created, so nothing uses the media.
+                    self.delete_answer_media().await;
+                }
                 Err(failure)
             }
         }
+    }
+
+    /// The owner token of the install's bootstrap key: the secret store binds
+    /// a key to an owner, and the machine does not exist yet, so the guest
+    /// (account and VMID) is the owner until the final key replaces it.
+    fn install_owner(&self) -> String {
+        format!("install-{}-{}", self.vmid, self.spec.account_id)
+    }
+
+    /// The generated answer's volume: `<storage of the installer>:iso/<file>`.
+    fn answer_volume(
+        &self,
+        install: &fleet_application::persistent::InstallSource,
+    ) -> Option<(String, String, String)> {
+        install.answer.as_ref()?;
+        let storage = install.iso.split_once(':')?.0.to_owned();
+        let file = format!("fleet-answer-{}.iso", self.vmid);
+        Some((format!("{storage}:iso/{file}"), storage, file))
+    }
+
+    /// The bootstrap public key of this install: the key an earlier run
+    /// stored, or a new Fleet-generated ed25519 key (private half stored as a
+    /// secret bound to the install; only the public half goes on the media).
+    async fn bootstrap_public_key(&self) -> Step<String> {
+        let step = "answer_media";
+        let owner = self.install_owner();
+        if let Some(existing) = self
+            .exec
+            .keys
+            .list_for_machine(&owner)
+            .await
+            .map_err(|detail| failure(step, "credential_failed", detail))?
+            .into_iter()
+            .next()
+            && let Some(text) = self
+                .exec
+                .keys
+                .resolve(&existing, &owner)
+                .await
+                .map_err(|detail| failure(step, "credential_failed", detail))?
+        {
+            return self.public_of(&text).await;
+        }
+        let provider = self.exec.provider.clone();
+        let comment = format!("fleet-bootstrap-{}", self.spec.name);
+        let generated = tokio::task::spawn_blocking(move || provider.generate_ed25519(&comment))
+            .await
+            .map_err(|error| failure(step, "keygen_failed", error.to_string()))?
+            .map_err(|error| failure(step, "keygen_failed", error.to_string()))?;
+        self.store_key(&owner, &generated.private)
+            .await
+            .map_err(|detail| failure(step, "credential_failed", detail))?;
+        Ok(generated.public)
+    }
+
+    /// Builds the answer media Fleet generates, uploads it to the installer's
+    /// storage and answers its volume id (`None` when the spec has no
+    /// generated answer). A stale volume of the same name is replaced.
+    async fn generated_answer(
+        &mut self,
+        install: &fleet_application::persistent::InstallSource,
+    ) -> Step<Option<String>> {
+        use fleet_application::answer_media::{
+            Autounattend, NoCloudSeed, autounattend_iso, nocloud_iso,
+        };
+        use fleet_application::persistent::GeneratedAnswer;
+        let step = "answer_media";
+        let (Some(answer), Some((volume, storage, file))) =
+            (install.answer.as_ref(), self.answer_volume(install))
+        else {
+            return Ok(None);
+        };
+        let public_key = self.bootstrap_public_key().await?;
+        let created = i64::try_from(
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |elapsed| elapsed.as_secs()),
+        )
+        .unwrap_or(0);
+        let user = self.spec.bootstrap_user().to_owned();
+        let image = match answer {
+            GeneratedAnswer::Nocloud => nocloud_iso(
+                &NoCloudSeed {
+                    vmid: self.vmid,
+                    hostname: &self.spec.name,
+                    user: &user,
+                    public_key: &public_key,
+                },
+                created,
+            ),
+            GeneratedAnswer::Autounattend { edition } => {
+                // A throwaway password: it is on this media only and Fleet
+                // rotates it right after the install.
+                let password = format!(
+                    "Fl{}!9",
+                    uuid::Uuid::new_v4().simple().to_string().to_uppercase()
+                );
+                autounattend_iso(
+                    &Autounattend {
+                        user: &user,
+                        password: &password,
+                        public_key: &public_key,
+                        image_name: edition.as_deref().unwrap_or("Windows 11 Pro"),
+                    },
+                    created,
+                )
+            }
+        }
+        .map_err(|detail| failure(step, "invalid", detail))?;
+        let client = &self.exec.pve.client;
+        if client
+            .storage_iso_exists(self.request.clone(), &self.node, &storage, &volume)
+            .await
+            .map_err(|error| failure(step, "upload_failed", error.to_string()))?
+        {
+            self.delete_answer_media().await;
+        }
+        let upid = self
+            .exec
+            .pve
+            .client
+            .storage_upload_iso(self.request.clone(), &self.node, &storage, &file, &image)
+            .await
+            .map_err(|error| failure(step, "upload_failed", error.to_string()))?;
+        self.wait_task(step, &upid).await?;
+        Ok(Some(volume))
+    }
+
+    /// Deletes the generated answer media from ISO storage, best effort and
+    /// idempotent: absent is fine. Records whether it is gone.
+    async fn delete_answer_media(&mut self) {
+        let Some(install) = self.spec.install.clone() else {
+            return;
+        };
+        let Some((volume, storage, _)) = self.answer_volume(&install) else {
+            return;
+        };
+        let client = self.exec.pve.client.clone();
+        let present = client
+            .storage_iso_exists(self.request.clone(), &self.node, &storage, &volume)
+            .await;
+        let gone = match present {
+            Ok(false) => true,
+            Ok(true) => {
+                match client
+                    .storage_delete_volume(self.request.clone(), &self.node, &storage, &volume)
+                    .await
+                {
+                    Ok(Some(upid)) => self.wait_task("answer_media", &upid).await.is_ok(),
+                    Ok(None) => true,
+                    Err(_) => false,
+                }
+            }
+            Err(_) => false,
+        };
+        self.answer_deleted = Some(gone);
     }
 
     /// Step 4 of an ISO install: run the installer to its end, then boot the
@@ -1324,6 +1496,7 @@ impl Run<'_> {
             // on. Anything else means the install never ran here, and a
             // guest nobody installed must not be adopted as an installed one.
             return if state.ejected || earlier.as_deref().is_some_and(passed_install) {
+                self.delete_answer_media().await;
                 self.record_step("install").await
             } else {
                 Err(failure(
@@ -1387,6 +1560,9 @@ impl Run<'_> {
                 "PVE accepted the change but the install media is still attached",
             ));
         }
+        // The generated media (and any throwaway password on it) is no
+        // longer needed: delete it from ISO storage.
+        self.delete_answer_media().await;
         // Durable at once: a deadline or a cancel at the next checkpoint must
         // not lose the fact that the media is gone.
         self.record_step("install").await
@@ -2032,6 +2208,44 @@ impl Run<'_> {
     }
 
     async fn bootstrap_auth(&self, step: &'static str) -> Step<SshAuth> {
+        if self
+            .spec
+            .install
+            .as_ref()
+            .is_some_and(|install| install.answer.is_some())
+        {
+            // The key Fleet put on the generated media. Once the final key has
+            // replaced it the record is gone and nothing needs it: a re-run
+            // that already switched never uses this value.
+            let owner = self.install_owner();
+            let existing = self
+                .exec
+                .keys
+                .list_for_machine(&owner)
+                .await
+                .map_err(|detail| failure(step, "bootstrap_auth", detail))?
+                .into_iter()
+                .next();
+            let Some(reference) = existing else {
+                return Ok(SshAuth::Agent);
+            };
+            let text = self
+                .exec
+                .keys
+                .resolve(&reference, &owner)
+                .await
+                .map_err(|detail| failure(step, "bootstrap_auth", detail))?
+                .ok_or_else(|| {
+                    failure(
+                        step,
+                        "bootstrap_auth",
+                        "the install's bootstrap key no longer resolves",
+                    )
+                })?;
+            let key = PrivateKey::parse(&text)
+                .map_err(|detail| failure(step, "bootstrap_auth", detail))?;
+            return Ok(SshAuth::StoredKey { key });
+        }
         self.exec
             .resolver
             .resolve(
@@ -2425,6 +2639,25 @@ impl Run<'_> {
         Ok(())
     }
 
+    /// Deletes the generated install's bootstrap key once the final key is
+    /// proven and the bootstrap one is removed from the guest. Best effort.
+    async fn delete_bootstrap_key(&self) {
+        if !self
+            .spec
+            .install
+            .as_ref()
+            .is_some_and(|install| install.answer.is_some())
+        {
+            return;
+        }
+        let owner = self.install_owner();
+        if let Ok(references) = self.exec.keys.list_for_machine(&owner).await {
+            for reference in references {
+                let _ = self.exec.secrets.delete(&reference).await;
+            }
+        }
+    }
+
     async fn record_default_auth(
         &self,
         machine_id: &str,
@@ -2707,6 +2940,7 @@ impl MachineCreateExecutor {
             fingerprint: None,
             credential: None,
             bootstrap_key_removed: false,
+            answer_deleted: None,
         };
         let mut notes = serde_json::Map::new();
         match run.saga(&mut notes).await {
@@ -2790,6 +3024,7 @@ impl Run<'_> {
             .await;
         self.rotate_credentials().await?;
         self.checkpoint("credential").await?;
+        self.delete_bootstrap_key().await;
         let mut activation_failure = None;
         if windows {
             self.progress(10, "finishing the Windows setup").await;
@@ -2862,6 +3097,9 @@ impl Run<'_> {
             "protection": self.spec.protection,
             "state": "ready",
         });
+        if let (Some(deleted), Some(map)) = (self.answer_deleted, result.as_object_mut()) {
+            map.insert("answerMediaDeleted".to_owned(), deleted.into());
+        }
         if let (Some(by), Some(map)) = (&self.spec.requested_by, result.as_object_mut()) {
             map.insert("requestId".to_owned(), by.request_id.clone().into());
         }

@@ -227,6 +227,25 @@ pub trait PveTransport: fmt::Debug + Send + Sync {
         body: Vec<u8>,
     ) -> Result<PveHttpResponse, PveTransportError>;
 
+    /// Executes one `multipart/form-data` upload (`POST` with the given
+    /// `Content-Type`, which carries the boundary).
+    ///
+    /// # Errors
+    ///
+    /// Fails with [`PveTransportError`]. The default (fixture transports)
+    /// cannot upload.
+    async fn execute_upload(
+        &self,
+        request: PveHttpRequest,
+        content_type: String,
+        body: Vec<u8>,
+    ) -> Result<PveHttpResponse, PveTransportError> {
+        let _ = (request, content_type, body);
+        Err(PveTransportError::Connect {
+            detail: "this transport cannot upload".to_owned(),
+        })
+    }
+
     /// Captures the host's leaf certificate without sending any request:
     /// the observe-only policy refuses the handshake after capture, and no
     /// `Authorization` header exists on this path at all (#284). The
@@ -445,7 +464,18 @@ impl PveTransport for ReqwestPveTransport {
         request: PveHttpRequest,
         body: Vec<u8>,
     ) -> Result<PveHttpResponse, PveTransportError> {
-        self.execute_inner(request, Some(body)).await
+        self.execute_inner(request, Some(("application/json".to_owned(), body)))
+            .await
+    }
+
+    async fn execute_upload(
+        &self,
+        request: PveHttpRequest,
+        content_type: String,
+        body: Vec<u8>,
+    ) -> Result<PveHttpResponse, PveTransportError> {
+        self.execute_inner(request, Some((content_type, body)))
+            .await
     }
 
     async fn execute(&self, request: PveHttpRequest) -> Result<PveHttpResponse, PveTransportError> {
@@ -641,7 +671,7 @@ impl ReqwestPveTransport {
     async fn execute_inner(
         &self,
         request: PveHttpRequest,
-        body: Option<Vec<u8>>,
+        body: Option<(String, Vec<u8>)>,
     ) -> Result<PveHttpResponse, PveTransportError> {
         let policy = match &request.pinned_fingerprint {
             Some(pinned) => TlsPolicy::Pin(normalize_fingerprint(pinned)),
@@ -669,8 +699,8 @@ impl ReqwestPveTransport {
             ),
         );
         let request_builder = match body {
-            Some(bytes) => request_builder
-                .header("Content-Type", "application/json")
+            Some((content_type, bytes)) => request_builder
+                .header("Content-Type", content_type)
                 .body(bytes),
             None => request_builder,
         };
