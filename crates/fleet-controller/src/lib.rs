@@ -30,9 +30,13 @@ pub mod lab_detach_store;
 pub mod lab_pool;
 pub mod lab_put_store;
 pub mod lab_sweeper;
+pub mod machine_access;
+pub mod machine_terminal;
 pub mod mise;
 pub mod node_crypto;
 pub mod onboard;
+pub mod persistent_machines;
+pub mod proxmox_console;
 pub mod proxmox_exec;
 pub mod proxmox_store;
 pub mod proxmox_tasks_store;
@@ -297,7 +301,10 @@ pub fn broker_settings_from_env() -> Result<fleet_application::broker::BrokerSet
 
 /// The provider actions this controller offers through the broker. Providers
 /// register their actions here.
-fn compose_action_registry() -> Arc<fleet_application::broker::ActionRegistry> {
+fn compose_action_registry(
+    persistent_bounds: fleet_application::persistent_request::PersistentBounds,
+    requests: Option<Arc<dyn fleet_application::broker::ActionRequestPort>>,
+) -> Arc<fleet_application::broker::ActionRegistry> {
     let mut registry = fleet_application::broker::ActionRegistry::new();
     // FM-1042: `dns.record.upsert` and `dns.record.delete`, risk class
     // `approve`.
@@ -326,14 +333,38 @@ fn compose_action_registry() -> Arc<fleet_application::broker::ActionRegistry> {
             .register(action)
             .expect("the site-template action ids are valid and unique");
     }
+    // #496: an agent asks for a persistent machine; `approve`, unless the
+    // operator configured bounds.
+    for action in
+        fleet_application::persistent_request::persistent_actions(persistent_bounds, requests)
+    {
+        registry
+            .register(action)
+            .expect("the persistent machine action id is valid and unique");
+    }
     Arc::new(registry)
+}
+
+/// The auto-approval bounds for persistent machine requests, from
+/// `FLEET_PERSISTENT_AUTO_POLICY`.
+///
+/// # Errors
+///
+/// Fails on a malformed value, so startup stops instead of dropping a bound.
+pub fn persistent_bounds_from_env()
+-> Result<fleet_application::persistent_request::PersistentBounds, String> {
+    fleet_application::persistent_request::PersistentBounds::from_env_value(
+        std::env::var(fleet_application::persistent_request::POLICY_VAR)
+            .ok()
+            .as_deref(),
+    )
 }
 
 /// The operation kinds provider actions own. Every `Operations` instance (the
 /// API's and the worker's) declares them so none accepts them off the broker.
 #[must_use]
 pub fn brokered_operation_kinds() -> std::collections::BTreeSet<String> {
-    compose_action_registry().operation_kinds()
+    compose_action_registry(Default::default(), None).operation_kinds()
 }
 
 /// Builds the API state over an opened store, or a state whose backends
@@ -401,13 +432,19 @@ fn api_state(
             fleet_storage_sqlite::AuditLedger::new(&pool),
         ));
         // The kinds provider actions own run only through the broker.
-        let action_registry = compose_action_registry();
+        let request_store: Arc<dyn fleet_application::broker::ActionRequestPort> = Arc::new(
+            fleet_storage_sqlite::ActionRequestRepository::new(pool.clone()),
+        );
+        let action_registry = compose_action_registry(
+            // `main` refuses to start on a malformed value; test
+            // composition falls back to no bounds (a person approves).
+            persistent_bounds_from_env().unwrap_or_default(),
+            Some(request_store.clone()),
+        );
         let operations =
             std::sync::Arc::new(operations.with_brokered_kinds(action_registry.operation_kinds()));
         let requests = fleet_application::broker::Broker::new(
-            std::sync::Arc::new(fleet_storage_sqlite::ActionRequestRepository::new(
-                pool.clone(),
-            )),
+            request_store,
             action_registry,
             operations.clone(),
             // `main` refuses to start on a malformed setting, so the
@@ -682,6 +719,8 @@ fn build_router_for_caller(
         events,
     ));
     let credentials = api_state.credentials.clone();
+    let console_authorizer = api_state.authorizer.clone();
+    let terminal_authorizer = api_state.authorizer.clone();
     let external_accounts = services.and_then(|services| services.external_accounts.clone());
     let dns = services.and_then(|services| services.dns.clone());
     let coolify_discovery = services.and_then(|services| services.coolify_discovery.clone());
@@ -743,6 +782,24 @@ fn build_router_for_caller(
             "/downloads",
             artifacts::artifacts_router(artifacts_dir.clone()),
         );
+    }
+    if let Some(proxmox) = proxmox {
+        // The Proxmox VM screen relay (FM-495): one WebSocket route that
+        // authenticates with the single-use console session token.
+        router = router.merge(proxmox_console::console_router(
+            proxmox.clone(),
+            console_authorizer,
+        ));
+    }
+    if let Some(access) = lab.and_then(|lab| lab.machine_access()) {
+        // The interactive machine terminal relay (#494): one WebSocket
+        // route that authenticates with the single-use session token.
+        if access.terminals().is_some() {
+            router = router.merge(machine_terminal::terminal_router(
+                access.clone(),
+                terminal_authorizer,
+            ));
+        }
     }
     if let Some(services) = services {
         // The machine-facing node surface: versioned with the node protocol,
@@ -1047,6 +1104,26 @@ pub async fn serve_on_with_events(
 ) -> io::Result<()> {
     eprintln!("{}", fleet_auth::TrustMode::TrustedLan.warning());
     eprintln!("fleet-controller listening on {}", listener.local_addr()?);
+    // Attached machine terminals close cleanly (and audit their end) before
+    // the server drains: upgraded sockets are not tracked by the drain.
+    let shutdown = machine_terminal::drain_on_shutdown(lab.as_ref(), shutdown);
+    // Attached Proxmox consoles close cleanly (and audit their end) before
+    // the server drains: upgraded sockets are not tracked by the drain.
+    let shutdown = {
+        let console = proxmox.clone();
+        async move {
+            shutdown.await;
+            if let Some(console) = console {
+                console.console_shutdown();
+                for _ in 0..30 {
+                    if console.console_active_count() == 0 {
+                        break;
+                    }
+                    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                }
+            }
+        }
+    };
     let tailscale_listener = match settings.tailscale_serve_listen {
         Some(address) => {
             let listener = tokio::net::TcpListener::bind(address).await?;

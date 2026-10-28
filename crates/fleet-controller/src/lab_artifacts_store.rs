@@ -424,6 +424,40 @@ pub trait GuestFiles: std::fmt::Debug + Send + Sync {
         sink: StagingFile,
     ) -> (Result<FetchOutcome, String>, StagingFile);
 
+    /// [`GuestFiles::fetch`] authenticating with `auth` (#493): a machine's
+    /// endpoint credential, where a Lab guest uses the controller's agent
+    /// (`None`). The default serves only `None` and refuses an authenticated
+    /// copy it cannot honour; the SSH implementation overrides it.
+    #[allow(clippy::too_many_arguments)]
+    async fn fetch_with_auth(
+        &self,
+        machine_id: &str,
+        endpoint_id: &str,
+        auth: Option<&fleet_application::machine_access::EndpointAuth>,
+        guest_os: fleet_core::GuestOs,
+        path: &str,
+        max_bytes: u64,
+        deadline: Duration,
+        sink: StagingFile,
+    ) -> (Result<FetchOutcome, String>, StagingFile) {
+        if auth.is_some() {
+            return (
+                Err("this guest cannot authenticate with a stored credential".to_owned()),
+                sink,
+            );
+        }
+        self.fetch(
+            machine_id,
+            endpoint_id,
+            guest_os,
+            path,
+            max_bytes,
+            deadline,
+            sink,
+        )
+        .await
+    }
+
     /// Copies `source` into the guest file `request.path`, verifying its
     /// SHA-256 inside the guest, bounded by `deadline` (#393).
     async fn put(
@@ -435,6 +469,24 @@ pub trait GuestFiles: std::fmt::Debug + Send + Sync {
         _source: std::fs::File,
     ) -> Result<fleet_provider_ssh::PutOutcome, String> {
         Err("guest file puts are unavailable".to_owned())
+    }
+
+    /// [`GuestFiles::put`] authenticating with `auth` (#493); see
+    /// [`GuestFiles::fetch_with_auth`].
+    async fn put_with_auth(
+        &self,
+        machine_id: &str,
+        endpoint_id: &str,
+        auth: Option<&fleet_application::machine_access::EndpointAuth>,
+        request: GuestPut,
+        deadline: Duration,
+        source: std::fs::File,
+    ) -> Result<fleet_provider_ssh::PutOutcome, String> {
+        if auth.is_some() {
+            return Err("this guest cannot authenticate with a stored credential".to_owned());
+        }
+        self.put(machine_id, endpoint_id, request, deadline, source)
+            .await
     }
 }
 
@@ -454,12 +506,15 @@ pub struct GuestPut {
 }
 
 /// [`GuestFiles`] over the controller's OpenSSH trust store: the endpoint's
-/// host key must already be verified (the same gate as machine exec).
+/// host key must already be verified (the same gate as machine exec). A Lab
+/// guest authenticates with the controller's agent (`auth` is `None`); a
+/// machine passes its auth, whose stored key is resolved just in time.
 #[derive(Debug)]
 pub struct SshGuestFiles {
     machines: Arc<dyn fleet_application::machine::MachinePort>,
     provider: fleet_provider_ssh::SshProvider,
     limiter: Arc<fleet_provider_ssh::ExecutionLimiter>,
+    resolver: Option<Arc<crate::machine_access::SshAuthResolver>>,
 }
 
 impl SshGuestFiles {
@@ -478,7 +533,30 @@ impl SshGuestFiles {
             provider: fleet_provider_ssh::SshProvider::new(work_dir)
                 .map_err(|error| error.to_string())?,
             limiter,
+            resolver: None,
         })
+    }
+
+    /// Lets copies authenticate with a stored key (machine put and collect).
+    #[must_use]
+    pub fn with_resolver(mut self, resolver: Arc<crate::machine_access::SshAuthResolver>) -> Self {
+        self.resolver = Some(resolver);
+        self
+    }
+
+    async fn ssh_auth(
+        &self,
+        machine_id: &str,
+        auth: Option<&fleet_application::machine_access::EndpointAuth>,
+    ) -> Result<fleet_provider_ssh::SshAuth, String> {
+        match (auth, &self.resolver) {
+            (None, _) => Ok(fleet_provider_ssh::SshAuth::Agent),
+            (Some(auth), Some(resolver)) => resolver.resolve(auth, machine_id).await,
+            (Some(fleet_application::machine_access::EndpointAuth::Agent), None) => {
+                Ok(fleet_provider_ssh::SshAuth::Agent)
+            }
+            (Some(_), None) => Err("stored-key authentication is not configured".to_owned()),
+        }
     }
 }
 
@@ -492,13 +570,53 @@ impl GuestFiles for SshGuestFiles {
         path: &str,
         max_bytes: u64,
         deadline: Duration,
+        sink: StagingFile,
+    ) -> (Result<FetchOutcome, String>, StagingFile) {
+        self.fetch_with_auth(
+            machine_id,
+            endpoint_id,
+            None,
+            guest_os,
+            path,
+            max_bytes,
+            deadline,
+            sink,
+        )
+        .await
+    }
+
+    async fn put(
+        &self,
+        machine_id: &str,
+        endpoint_id: &str,
+        request: GuestPut,
+        deadline: Duration,
+        source: std::fs::File,
+    ) -> Result<fleet_provider_ssh::PutOutcome, String> {
+        self.put_with_auth(machine_id, endpoint_id, None, request, deadline, source)
+            .await
+    }
+
+    async fn fetch_with_auth(
+        &self,
+        machine_id: &str,
+        endpoint_id: &str,
+        auth: Option<&fleet_application::machine_access::EndpointAuth>,
+        guest_os: fleet_core::GuestOs,
+        path: &str,
+        max_bytes: u64,
+        deadline: Duration,
         mut sink: StagingFile,
     ) -> (Result<FetchOutcome, String>, StagingFile) {
+        let ssh_auth = match self.ssh_auth(machine_id, auth).await {
+            Ok(ssh_auth) => ssh_auth,
+            Err(error) => return (Err(error), sink),
+        };
         let spec = match crate::exec::resolve_ssh_endpoint(
             self.machines.as_ref(),
             machine_id,
             endpoint_id,
-            fleet_provider_ssh::SshAuth::Agent,
+            ssh_auth,
         )
         .await
         {
@@ -539,19 +657,21 @@ impl GuestFiles for SshGuestFiles {
         }
     }
 
-    async fn put(
+    async fn put_with_auth(
         &self,
         machine_id: &str,
         endpoint_id: &str,
+        auth: Option<&fleet_application::machine_access::EndpointAuth>,
         request: GuestPut,
         deadline: Duration,
         mut source: std::fs::File,
     ) -> Result<fleet_provider_ssh::PutOutcome, String> {
+        let ssh_auth = self.ssh_auth(machine_id, auth).await?;
         let (mut spec, _, _) = crate::exec::resolve_ssh_endpoint(
             self.machines.as_ref(),
             machine_id,
             endpoint_id,
-            fleet_provider_ssh::SshAuth::Agent,
+            ssh_auth,
         )
         .await?;
         spec.guest_os = request.guest_os;
@@ -620,6 +740,34 @@ impl GuestFiles for UnavailableGuestFiles {
             "guest file copies are unavailable: {}",
             self.reason
         ))
+    }
+}
+
+/// Maps a guest fetch's outcome to the stable failure reason, or `None`
+/// when the file was copied. `who` names the source in the controller log
+/// only. Shared by `lab.collect` and `machine.collect`.
+pub(crate) fn fetch_failure(
+    outcome: &Result<FetchOutcome, String>,
+    who: &str,
+) -> Option<&'static str> {
+    match outcome {
+        Ok(FetchOutcome::Fetched { .. }) => None,
+        Ok(FetchOutcome::Missing) => Some("missing"),
+        Ok(FetchOutcome::NotAFile) => Some("not_a_file"),
+        Ok(FetchOutcome::Unreadable) => Some("unreadable"),
+        Ok(FetchOutcome::TooLarge) => Some("too_large"),
+        Ok(FetchOutcome::DeadlineKilled) => Some("deadline_exceeded"),
+        Ok(FetchOutcome::Failed { .. }) => Some("copy_failed"),
+        Ok(FetchOutcome::SinkFailed { detail }) => {
+            eprintln!("lab artifacts: storing a file copied from {who} failed: {detail}");
+            Some("store_failed")
+        }
+        Err(error) => {
+            // The transport's error can carry node or tool text.
+            let error = fleet_core::scrub_failure_detail(&error.to_string());
+            eprintln!("lab artifacts: copying from {who} failed: {error}");
+            Some("transfer_failed")
+        }
     }
 }
 
@@ -865,27 +1013,7 @@ impl LabArtifactDispatch {
                 staging,
             )
             .await;
-        let reason = match outcome {
-            Ok(FetchOutcome::Fetched { .. }) => None,
-            Ok(FetchOutcome::Missing) => Some("missing"),
-            Ok(FetchOutcome::NotAFile) => Some("not_a_file"),
-            Ok(FetchOutcome::Unreadable) => Some("unreadable"),
-            Ok(FetchOutcome::TooLarge) => Some("too_large"),
-            Ok(FetchOutcome::DeadlineKilled) => Some("deadline_exceeded"),
-            Ok(FetchOutcome::Failed { .. }) => Some("copy_failed"),
-            Ok(FetchOutcome::SinkFailed { detail }) => {
-                eprintln!(
-                    "lab artifacts: storing a file copied from lease {lease_id} failed: {detail}"
-                );
-                Some("store_failed")
-            }
-            Err(error) => {
-                // The transport's error can carry node or tool text.
-                let error = fleet_core::scrub_failure_detail(&error.to_string());
-                eprintln!("lab artifacts: copying from lease {lease_id} failed: {error}");
-                Some("transfer_failed")
-            }
-        };
+        let reason = fetch_failure(&outcome, &format!("lease {lease_id}"));
         if let Some(reason) = reason {
             // Dropping the staging handle removes the partial copy.
             drop(staging);

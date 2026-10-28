@@ -3,6 +3,31 @@
  * Do not edit: run `pnpm --filter @frogbyte-io/fleet-api-client generate`.
  */
 /**
+ * The body of the abandon call.
+ */
+export interface AbandonMarkerRequest {
+  /** The token from the review call. */
+  reviewToken: string;
+}
+
+/**
+ * What abandoning a marker will do, and the token that binds it.
+ */
+export interface AbandonReviewDto {
+  /** The Proxmox account. */
+  accountId: string;
+  /** The machine name the marker records. */
+  name: string;
+  /** The token the abandon call must present. */
+  reviewToken: string;
+  /**
+     * The VMID whose marker will be removed.
+     * @minimum 0
+     */
+  vmid: number;
+}
+
+/**
  * One Coolify account's observation state.
  */
 export interface AccountCoverageDto {
@@ -201,6 +226,18 @@ export interface InventoryObservationDto {
 }
 
 /**
+ * Who asked for a persistent machine, and why.
+ */
+export interface MachineOwnershipDto {
+  /** The requesting principal. */
+  owner: string;
+  /** Why the machine was requested. */
+  purpose: string;
+  /** The action request that asked for it. */
+  requestId: string;
+}
+
+/**
  * One explicitly confirmed Proxmox guest association.
  */
 export interface GuestLinkDto {
@@ -252,6 +289,7 @@ export interface MachineDto {
   machineStatus: string;
   /** The mutable, unique label. */
   name: string;
+  ownership?: null | MachineOwnershipDto;
   runsOn?: null | GuestLinkDto;
   /** Tags. */
   tags: string[];
@@ -1008,6 +1046,52 @@ export interface ConfirmProxmoxFingerprintRequest {
 }
 
 /**
+ * A created console session. The token is shown here once.
+ */
+export interface ConsoleSessionDto {
+  /** The account. */
+  accountId: string;
+  /**
+     * The console page in the web app, relative to the controller's
+     * origin, with the token in the fragment. A human can open it.
+     */
+  consolePath: string;
+  /** When an unattached token stops being valid (epoch millis). */
+  expiresAt: number;
+  /**
+     * Close after this many seconds without browser input.
+     * @minimum 0
+     */
+  idleTimeoutSeconds: number;
+  /**
+     * Close after this many seconds regardless.
+     * @minimum 0
+     */
+  maxDurationSeconds: number;
+  /** The node. */
+  node: string;
+  /** The session's identity, as it appears in audit events. */
+  sessionId: string;
+  /** The WebSocket path, relative to the controller's origin. */
+  socketPath: string;
+  /**
+     * The WebSocket subprotocols to offer: `binary`, then the token
+     * subprotocol.
+     */
+  subprotocols: string[];
+  /**
+     * The single-use token that attaches to the console WebSocket. It
+     * expires at `expiresAt` and is spent by the first attach.
+     */
+  token: string;
+  /**
+     * The guest's VMID.
+     * @minimum 0
+     */
+  vmid: number;
+}
+
+/**
  * A deployed application.
  */
 export interface CoolifyApplicationDto {
@@ -1434,6 +1518,19 @@ export interface CreateActionRequest {
 }
 
 /**
+ * The guest to open.
+ */
+export interface CreateConsoleSessionRequest {
+  /** The node the guest runs on. */
+  node: string;
+  /**
+     * The QEMU guest's VMID.
+     * @minimum 0
+     */
+  vmid: number;
+}
+
+/**
  * Which change.
  */
 export type DnsChangeKind = typeof DnsChangeKind[keyof typeof DnsChangeKind];
@@ -1690,6 +1787,46 @@ export interface CreateProxmoxAccountRequest {
   tokenId: string;
   /** The API token secret (write-only). */
   tokenSecret: string;
+}
+
+/**
+ * How an SSH endpoint authenticates. A stored key is named by reference and
+ * is never returned.
+ */
+export type EndpointAuthDto = {
+  type: 'agent';
+} | {
+  /** The identity file's path. */
+  path: string;
+  type: 'identityFile';
+} | {
+  /** The reference returned when the key was stored. */
+  credential: string;
+  type: 'secret';
+};
+
+/**
+ * The body of `POST /machines/{machineId}/terminal-sessions`.
+ */
+export interface CreateTerminalSessionRequest {
+  auth?: null | EndpointAuthDto;
+  /**
+     * The terminal's initial width in columns (1-1000; default 80).
+     * @minimum 0
+     * @nullable
+     */
+  cols?: number | null;
+  /**
+     * The SSH endpoint; absent means the machine's only SSH endpoint.
+     * @nullable
+     */
+  endpointId?: string | null;
+  /**
+     * The terminal's initial height in rows (1-1000; default 24).
+     * @minimum 0
+     * @nullable
+     */
+  rows?: number | null;
 }
 
 /**
@@ -2336,6 +2473,13 @@ export interface DriftCountsDto {
      * @minimum 0
      */
   unsupported: number;
+}
+
+/**
+ * An endpoint's recorded default auth.
+ */
+export interface EndpointAuthStateDto {
+  auth?: null | EndpointAuthDto;
 }
 
 /**
@@ -3153,6 +3297,88 @@ export interface LinkGuestRequest {
 }
 
 /**
+ * The body of `POST /machines/{machineId}/collect`.
+ */
+export interface MachineCollectRequest {
+  auth?: null | EndpointAuthDto;
+  /**
+     * The SSH endpoint; absent means the machine's only SSH endpoint.
+     * @nullable
+     */
+  endpointId?: string | null;
+  /**
+     * The guest's OS, `linux` (default) or `windows`.
+     * @nullable
+     */
+  guestOs?: string | null;
+  /**
+     * 1 to 16 distinct absolute guest paths of regular files, each at most
+     * 1024 bytes, without `.`, `..` or empty components or control
+     * characters (a Windows guest takes drive-absolute paths). Each file
+     * must fit the controller's artifact size cap.
+     */
+  paths: string[];
+}
+
+/**
+ * The spec, identical to the reviewed one.
+ */
+export type MachineCreateRequestSpec = { [key: string]: unknown };
+
+/**
+ * The body of `POST /machines/create`.
+ */
+export interface MachineCreateRequest {
+  /** The token from the review call. */
+  reviewToken: string;
+  /** The spec, identical to the reviewed one. */
+  spec: MachineCreateRequestSpec;
+}
+
+/**
+ * The machine to create: the same spec `POST /machines/create` takes,
+ * references and public keys only. It must not carry `requestedBy`.
+ */
+export type MachineCreateRequestBodySpec = { [key: string]: unknown };
+
+/**
+ * The body of `POST /machines/create/request`.
+ */
+export interface MachineCreateRequestBody {
+  /**
+     * A key (1 to 128 printable ASCII characters) making a retry return the
+     * request already made.
+     * @nullable
+     */
+  idempotencyKey?: string | null;
+  /**
+     * Why the machine is needed (at most 1000 characters). Recorded on the
+     * machine as its purpose, next to the requesting principal.
+     */
+  purpose: string;
+  /**
+     * The machine to create: the same spec `POST /machines/create` takes,
+     * references and public keys only. It must not carry `requestedBy`.
+     */
+  spec: MachineCreateRequestBodySpec;
+}
+
+/**
+ * The spec as it will run, with every default filled in.
+ */
+export type MachineCreateReviewDtoSpec = { [key: string]: unknown };
+
+/**
+ * What a reviewed create will run, and the token that binds it.
+ */
+export interface MachineCreateReviewDto {
+  /** The token the create call must present. */
+  reviewToken: string;
+  /** The spec as it will run, with every default filled in. */
+  spec: MachineCreateReviewDtoSpec;
+}
+
+/**
  * The desired revision a plan was computed against.
  */
 export interface PlanRevisionDto {
@@ -3188,6 +3414,71 @@ export interface MachineDriftDto {
      * or `unavailable` (drift could not be computed for this machine).
      */
   status: string;
+}
+
+/**
+ * The body of `POST /machines/{machineId}/exec`.
+ */
+export interface MachineExecRequest {
+  auth?: null | EndpointAuthDto;
+  /**
+     * A program and its arguments, passed to the guest as data (no shell
+     * parses them). Exactly one of `command` and `script` is required.
+     * @nullable
+     */
+  command?: string[] | null;
+  /**
+     * The SSH endpoint; absent means the machine's only SSH endpoint.
+     * @nullable
+     */
+  endpointId?: string | null;
+  /**
+     * The guest's OS, `linux` (default) or `windows`.
+     * @nullable
+     */
+  guestOs?: string | null;
+  /**
+     * Script text for the guest's shell (bash, or PowerShell on Windows),
+     * sent untouched.
+     * @nullable
+     */
+  script?: string | null;
+  /**
+     * The deadline in seconds (1-900; default 60).
+     * @minimum 0
+     * @nullable
+     */
+  timeoutSeconds?: number | null;
+}
+
+/**
+ * One file collected from a machine.
+ */
+export interface MachineFileDto {
+  /** When it was stored (epoch milliseconds). */
+  createdAt: number;
+  /** The file record's identity. */
+  id: string;
+  /** The machine it came from. */
+  machineId: string;
+  /**
+     * The `machine.collect` operation that produced it.
+     * @nullable
+     */
+  operationId?: string | null;
+  /** The principal that asked for the collection. */
+  owner: string;
+  /** The guest path it was collected from. */
+  path: string;
+  /** When the retention pass deletes it (epoch milliseconds). */
+  retainUntil: number;
+  /** The lowercase hex sha256 of the bytes. */
+  sha256: string;
+  /**
+     * The size in bytes.
+     * @minimum 0
+     */
+  sizeBytes: number;
 }
 
 /**
@@ -4389,6 +4680,7 @@ export type PageMachineDtoItemsItem = {
   machineStatus: string;
   /** The mutable, unique label. */
   name: string;
+  ownership?: null | MachineOwnershipDto;
   runsOn?: null | GuestLinkDto;
   /** Tags. */
   tags: string[];
@@ -4405,6 +4697,49 @@ export type PageMachineDtoItemsItem = {
 export interface PageMachineDto {
   /** The items on this page, in the endpoint's documented order. */
   items: PageMachineDtoItemsItem[];
+  /** Where this page sits in the result set. */
+  page: PageInfo;
+}
+
+/**
+ * One file collected from a machine.
+ */
+export type PageMachineFileDtoItemsItem = {
+  /** When it was stored (epoch milliseconds). */
+  createdAt: number;
+  /** The file record's identity. */
+  id: string;
+  /** The machine it came from. */
+  machineId: string;
+  /**
+     * The `machine.collect` operation that produced it.
+     * @nullable
+     */
+  operationId?: string | null;
+  /** The principal that asked for the collection. */
+  owner: string;
+  /** The guest path it was collected from. */
+  path: string;
+  /** When the retention pass deletes it (epoch milliseconds). */
+  retainUntil: number;
+  /** The lowercase hex sha256 of the bytes. */
+  sha256: string;
+  /**
+     * The size in bytes.
+     * @minimum 0
+     */
+  sizeBytes: number;
+};
+
+/**
+ * A page of resources.
+ *
+ * The concrete schema for a list endpoint appears when that endpoint does;
+ * [`PageInfo`] is the part of the shape that is fixed for every one of them.
+ */
+export interface PageMachineFileDto {
+  /** The items on this page, in the endpoint's documented order. */
+  items: PageMachineFileDtoItemsItem[];
   /** Where this page sits in the result set. */
   page: PageInfo;
 }
@@ -4938,6 +5273,51 @@ export interface PageSkillsSnapshotDto {
 }
 
 /**
+ * One persistent guest marker.
+ */
+export interface PersistentGuestDto {
+  /** The Proxmox account. */
+  accountId: string;
+  /** Whether the clone completed (always true for a registered VM). */
+  cloned: boolean;
+  /** Creation time (epoch milliseconds). */
+  createdAt: number;
+  /**
+     * The image version it was cloned from, or `registered` for a VM that
+     * existed before Fleet kept it.
+     */
+  imageVersionId: string;
+  /**
+     * The Fleet machine it is linked to, once there is one.
+     * @nullable
+     */
+  machineId?: string | null;
+  /** The VM name. */
+  name: string;
+  /** The node the guest was created or found on. */
+  node: string;
+  /**
+     * The operation that created it, when Fleet created it.
+     * @nullable
+     */
+  operationId?: string | null;
+  /** `creating` or `ready`. */
+  state: string;
+  /**
+     * The step the creation last completed or failed at.
+     * @nullable
+     */
+  step?: string | null;
+  /** Last update (epoch milliseconds). */
+  updatedAt: number;
+  /**
+     * The guest's VMID.
+     * @minimum 0
+     */
+  vmid: number;
+}
+
+/**
  * One planned action.
  */
 export interface PlanActionDto {
@@ -5276,6 +5656,7 @@ export const ProxmoxPrivilegeTierDto = {
   operate: 'operate',
   destructive: 'destructive',
   lab: 'lab',
+  console: 'console',
 } as const;
 
 /**
@@ -5322,7 +5703,7 @@ export interface ProxmoxPrivilegesDto {
      * @nullable
      */
   rulesMajor?: number | null;
-  /** The four tiers: discover, operate, destructive, lab. */
+  /** The five tiers: discover, operate, destructive, lab, console. */
   tiers: ProxmoxTierPrivilegesDto[];
   /**
      * Why every tier is unknown: the permissions read was refused (403),
@@ -5594,6 +5975,46 @@ export interface RecordCheckoutsRequest {
   checkouts: DiscoveredCheckoutDto[];
   /** The machine the checkouts were observed on. */
   machineId: string;
+}
+
+/**
+ * The body of the register review and register calls.
+ */
+export interface RegisterGuestRequest {
+  /**
+     * An existing Fleet machine to link to the guest's marker.
+     * @nullable
+     */
+  machineId?: string | null;
+  /**
+     * The token from the review call (required by the register call only).
+     * @nullable
+     */
+  reviewToken?: string | null;
+}
+
+/**
+ * What registering an existing VM will record, and the token that binds it.
+ */
+export interface RegisterReviewDto {
+  /** The Proxmox account. */
+  accountId: string;
+  /**
+     * The machine that will be linked, when one was named.
+     * @nullable
+     */
+  machineId?: string | null;
+  /** The guest's live name. */
+  name: string;
+  /** The guest's live node. */
+  node: string;
+  /** The token the register call must present. */
+  reviewToken: string;
+  /**
+     * The guest's VMID.
+     * @minimum 0
+     */
+  vmid: number;
 }
 
 /**
@@ -5876,6 +6297,34 @@ export interface ReleaseLeaseRequest {
 }
 
 /**
+ * What abandoning a marker will do, and the token that binds it.
+ */
+export type ResourceAbandonReviewDtoData = {
+  /** The Proxmox account. */
+  accountId: string;
+  /** The machine name the marker records. */
+  name: string;
+  /** The token the abandon call must present. */
+  reviewToken: string;
+  /**
+     * The VMID whose marker will be removed.
+     * @minimum 0
+     */
+  vmid: number;
+};
+
+/**
+ * A single resource.
+ *
+ * The payload is nested under `data` so that later top-level fields are an
+ * additive change rather than a breaking one.
+ */
+export interface ResourceAbandonReviewDto {
+  /** What abandoning a marker will do, and the token that binds it. */
+  data: ResourceAbandonReviewDtoData;
+}
+
+/**
  * The structured, secret-free parameters.
  */
 export type ResourceActionRequestDtoDataParameters = { [key: string]: unknown };
@@ -6154,6 +6603,63 @@ export interface ResourceCloudflareDnsRecordsDto {
 }
 
 /**
+ * A created console session. The token is shown here once.
+ */
+export type ResourceConsoleSessionDtoData = {
+  /** The account. */
+  accountId: string;
+  /**
+     * The console page in the web app, relative to the controller's
+     * origin, with the token in the fragment. A human can open it.
+     */
+  consolePath: string;
+  /** When an unattached token stops being valid (epoch millis). */
+  expiresAt: number;
+  /**
+     * Close after this many seconds without browser input.
+     * @minimum 0
+     */
+  idleTimeoutSeconds: number;
+  /**
+     * Close after this many seconds regardless.
+     * @minimum 0
+     */
+  maxDurationSeconds: number;
+  /** The node. */
+  node: string;
+  /** The session's identity, as it appears in audit events. */
+  sessionId: string;
+  /** The WebSocket path, relative to the controller's origin. */
+  socketPath: string;
+  /**
+     * The WebSocket subprotocols to offer: `binary`, then the token
+     * subprotocol.
+     */
+  subprotocols: string[];
+  /**
+     * The single-use token that attaches to the console WebSocket. It
+     * expires at `expiresAt` and is spent by the first attach.
+     */
+  token: string;
+  /**
+     * The guest's VMID.
+     * @minimum 0
+     */
+  vmid: number;
+};
+
+/**
+ * A single resource.
+ *
+ * The payload is nested under `data` so that later top-level fields are an
+ * additive change rather than a breaking one.
+ */
+export interface ResourceConsoleSessionDto {
+  /** A created console session. The token is shown here once. */
+  data: ResourceConsoleSessionDtoData;
+}
+
+/**
  * The stamped, stale-aware Coolify snapshot of one account.
  */
 export type ResourceCoolifyObservationDtoData = {
@@ -6422,6 +6928,24 @@ export type ResourceDnsZonesDtoData = {
 export interface ResourceDnsZonesDto {
   /** The zones of every Cloudflare account. */
   data: ResourceDnsZonesDtoData;
+}
+
+/**
+ * An endpoint's recorded default auth.
+ */
+export type ResourceEndpointAuthStateDtoData = {
+  auth?: null | EndpointAuthDto;
+};
+
+/**
+ * A single resource.
+ *
+ * The payload is nested under `data` so that later top-level fields are an
+ * additive change rather than a breaking one.
+ */
+export interface ResourceEndpointAuthStateDto {
+  /** An endpoint's recorded default auth. */
+  data: ResourceEndpointAuthStateDtoData;
 }
 
 /**
@@ -6971,6 +7495,32 @@ export interface ResourceLeaseDto {
 }
 
 /**
+ * The spec as it will run, with every default filled in.
+ */
+export type ResourceMachineCreateReviewDtoDataSpec = { [key: string]: unknown };
+
+/**
+ * What a reviewed create will run, and the token that binds it.
+ */
+export type ResourceMachineCreateReviewDtoData = {
+  /** The token the create call must present. */
+  reviewToken: string;
+  /** The spec as it will run, with every default filled in. */
+  spec: ResourceMachineCreateReviewDtoDataSpec;
+};
+
+/**
+ * A single resource.
+ *
+ * The payload is nested under `data` so that later top-level fields are an
+ * additive change rather than a breaking one.
+ */
+export interface ResourceMachineCreateReviewDto {
+  /** What a reviewed create will run, and the token that binds it. */
+  data: ResourceMachineCreateReviewDtoData;
+}
+
+/**
  * One machine's drift against the active desired revision.
  */
 export type ResourceMachineDriftDtoData = {
@@ -7044,6 +7594,7 @@ export type ResourceMachineDtoData = {
   machineStatus: string;
   /** The mutable, unique label. */
   name: string;
+  ownership?: null | MachineOwnershipDto;
   runsOn?: null | GuestLinkDto;
   /** Tags. */
   tags: string[];
@@ -7060,6 +7611,47 @@ export type ResourceMachineDtoData = {
 export interface ResourceMachineDto {
   /** A machine, as the list and detail endpoints display it. */
   data: ResourceMachineDtoData;
+}
+
+/**
+ * One file collected from a machine.
+ */
+export type ResourceMachineFileDtoData = {
+  /** When it was stored (epoch milliseconds). */
+  createdAt: number;
+  /** The file record's identity. */
+  id: string;
+  /** The machine it came from. */
+  machineId: string;
+  /**
+     * The `machine.collect` operation that produced it.
+     * @nullable
+     */
+  operationId?: string | null;
+  /** The principal that asked for the collection. */
+  owner: string;
+  /** The guest path it was collected from. */
+  path: string;
+  /** When the retention pass deletes it (epoch milliseconds). */
+  retainUntil: number;
+  /** The lowercase hex sha256 of the bytes. */
+  sha256: string;
+  /**
+     * The size in bytes.
+     * @minimum 0
+     */
+  sizeBytes: number;
+};
+
+/**
+ * A single resource.
+ *
+ * The payload is nested under `data` so that later top-level fields are an
+ * additive change rather than a breaking one.
+ */
+export interface ResourceMachineFileDto {
+  /** One file collected from a machine. */
+  data: ResourceMachineFileDtoData;
 }
 
 /**
@@ -7320,6 +7912,62 @@ export interface ResourceOperationDto {
 }
 
 /**
+ * One persistent guest marker.
+ */
+export type ResourcePersistentGuestDtoData = {
+  /** The Proxmox account. */
+  accountId: string;
+  /** Whether the clone completed (always true for a registered VM). */
+  cloned: boolean;
+  /** Creation time (epoch milliseconds). */
+  createdAt: number;
+  /**
+     * The image version it was cloned from, or `registered` for a VM that
+     * existed before Fleet kept it.
+     */
+  imageVersionId: string;
+  /**
+     * The Fleet machine it is linked to, once there is one.
+     * @nullable
+     */
+  machineId?: string | null;
+  /** The VM name. */
+  name: string;
+  /** The node the guest was created or found on. */
+  node: string;
+  /**
+     * The operation that created it, when Fleet created it.
+     * @nullable
+     */
+  operationId?: string | null;
+  /** `creating` or `ready`. */
+  state: string;
+  /**
+     * The step the creation last completed or failed at.
+     * @nullable
+     */
+  step?: string | null;
+  /** Last update (epoch milliseconds). */
+  updatedAt: number;
+  /**
+     * The guest's VMID.
+     * @minimum 0
+     */
+  vmid: number;
+};
+
+/**
+ * A single resource.
+ *
+ * The payload is nested under `data` so that later top-level fields are an
+ * additive change rather than a breaking one.
+ */
+export interface ResourcePersistentGuestDto {
+  /** One persistent guest marker. */
+  data: ResourcePersistentGuestDtoData;
+}
+
+/**
  * A controller-computed plan.
  */
 export type ResourcePlanDtoData = {
@@ -7575,7 +8223,7 @@ export type ResourceProxmoxPrivilegesDtoData = {
      * @nullable
      */
   rulesMajor?: number | null;
-  /** The four tiers: discover, operate, destructive, lab. */
+  /** The five tiers: discover, operate, destructive, lab, console. */
   tiers: ProxmoxTierPrivilegesDto[];
   /**
      * Why every tier is unknown: the permissions read was refused (403),
@@ -7768,6 +8416,41 @@ export type ResourceRecipeVersionDtoData = {
 export interface ResourceRecipeVersionDto {
   /** One published recipe version. */
   data: ResourceRecipeVersionDtoData;
+}
+
+/**
+ * What registering an existing VM will record, and the token that binds it.
+ */
+export type ResourceRegisterReviewDtoData = {
+  /** The Proxmox account. */
+  accountId: string;
+  /**
+     * The machine that will be linked, when one was named.
+     * @nullable
+     */
+  machineId?: string | null;
+  /** The guest's live name. */
+  name: string;
+  /** The guest's live node. */
+  node: string;
+  /** The token the register call must present. */
+  reviewToken: string;
+  /**
+     * The guest's VMID.
+     * @minimum 0
+     */
+  vmid: number;
+};
+
+/**
+ * A single resource.
+ *
+ * The payload is nested under `data` so that later top-level fields are an
+ * additive change rather than a breaking one.
+ */
+export interface ResourceRegisterReviewDto {
+  /** What registering an existing VM will record, and the token that binds it. */
+  data: ResourceRegisterReviewDtoData;
 }
 
 /**
@@ -8291,6 +8974,44 @@ export interface ResourceStoredCredentialDto {
 }
 
 /**
+ * The reference of a stored product key.
+ */
+export type ResourceStoredProductKeyDtoData = {
+  /** The reference to use as `secret` in a product-key activation. */
+  secretRef: string;
+};
+
+/**
+ * A single resource.
+ *
+ * The payload is nested under `data` so that later top-level fields are an
+ * additive change rather than a breaking one.
+ */
+export interface ResourceStoredProductKeyDto {
+  /** The reference of a stored product key. */
+  data: ResourceStoredProductKeyDtoData;
+}
+
+/**
+ * The reference of a stored SSH key.
+ */
+export type ResourceStoredSshKeyDtoData = {
+  /** The reference to use as `credential` in a `secret` endpoint auth. */
+  credentialRef: string;
+};
+
+/**
+ * A single resource.
+ *
+ * The payload is nested under `data` so that later top-level fields are an
+ * additive change rather than a breaking one.
+ */
+export interface ResourceStoredSshKeyDto {
+  /** The reference of a stored SSH key. */
+  data: ResourceStoredSshKeyDtoData;
+}
+
+/**
  * The integration's status: configured or not, the client id, and the
  * fixed read-only scope.
  */
@@ -8318,6 +9039,163 @@ export interface ResourceTailnetStatusDto {
      * fixed read-only scope.
      */
   data: ResourceTailnetStatusDtoData;
+}
+
+/**
+ * A created terminal session. The token is shown here once.
+ */
+export type ResourceTerminalSessionDtoData = {
+  /** The SSH endpoint the shell uses. */
+  endpointId: string;
+  /** When an unattached token stops being valid (epoch millis). */
+  expiresAt: number;
+  /**
+     * Close after this many seconds without input from the caller.
+     * @minimum 0
+     */
+  idleTimeoutSeconds: number;
+  /** The machine. */
+  machineId: string;
+  /**
+     * Close after this many seconds regardless.
+     * @minimum 0
+     */
+  maxDurationSeconds: number;
+  /** The session's identity, as it appears in audit events. */
+  sessionId: string;
+  /** The WebSocket path, relative to the controller's origin. */
+  socketPath: string;
+  /**
+     * The WebSocket subprotocols to offer: `fleet-terminal`, then the token
+     * subprotocol.
+     */
+  subprotocols: string[];
+  /**
+     * The single-use token that attaches to the terminal WebSocket. It
+     * expires at `expiresAt` and is spent by the first attach.
+     */
+  token: string;
+};
+
+/**
+ * A single resource.
+ *
+ * The payload is nested under `data` so that later top-level fields are an
+ * additive change rather than a breaking one.
+ */
+export interface ResourceTerminalSessionDto {
+  /** A created terminal session. The token is shown here once. */
+  data: ResourceTerminalSessionDtoData;
+}
+
+/**
+ * What unregistering a registered VM will do, and the token that binds it.
+ */
+export type ResourceUnregisterReviewDtoData = {
+  /** The Proxmox account. */
+  accountId: string;
+  /** The VM name the marker records. */
+  name: string;
+  /** The token the unregister call must present. */
+  reviewToken: string;
+  /**
+     * The VMID whose marker will be removed.
+     * @minimum 0
+     */
+  vmid: number;
+};
+
+/**
+ * A single resource.
+ *
+ * The payload is nested under `data` so that later top-level fields are an
+ * additive change rather than a breaking one.
+ */
+export interface ResourceUnregisterReviewDto {
+  /** What unregistering a registered VM will do, and the token that binds it. */
+  data: ResourceUnregisterReviewDtoData;
+}
+
+/**
+ * One persistent guest marker.
+ */
+export type ResourceVecPersistentGuestDtoDataItem = {
+  /** The Proxmox account. */
+  accountId: string;
+  /** Whether the clone completed (always true for a registered VM). */
+  cloned: boolean;
+  /** Creation time (epoch milliseconds). */
+  createdAt: number;
+  /**
+     * The image version it was cloned from, or `registered` for a VM that
+     * existed before Fleet kept it.
+     */
+  imageVersionId: string;
+  /**
+     * The Fleet machine it is linked to, once there is one.
+     * @nullable
+     */
+  machineId?: string | null;
+  /** The VM name. */
+  name: string;
+  /** The node the guest was created or found on. */
+  node: string;
+  /**
+     * The operation that created it, when Fleet created it.
+     * @nullable
+     */
+  operationId?: string | null;
+  /** `creating` or `ready`. */
+  state: string;
+  /**
+     * The step the creation last completed or failed at.
+     * @nullable
+     */
+  step?: string | null;
+  /** Last update (epoch milliseconds). */
+  updatedAt: number;
+  /**
+     * The guest's VMID.
+     * @minimum 0
+     */
+  vmid: number;
+};
+
+/**
+ * A single resource.
+ *
+ * The payload is nested under `data` so that later top-level fields are an
+ * additive change rather than a breaking one.
+ */
+export interface ResourceVecPersistentGuestDto {
+  data: ResourceVecPersistentGuestDtoDataItem[];
+}
+
+/**
+ * The machine to create: account, promoted image version, name, optional
+ * placement and hardware, tags, description, `onboot`, `protection`
+ * (default on), the guest OS, the bootstrap login, the host-key trust,
+ * the SSH credential choice (`generate`, `reference` or `publicKey`),
+ * an optional login user, the Windows options (administrator password
+ * policy and activation) and the deadline. It holds references and
+ * public keys only, never a secret value.
+ */
+export type ReviewMachineCreateRequestSpec = { [key: string]: unknown };
+
+/**
+ * The body of `POST /machines/create/review`.
+ */
+export interface ReviewMachineCreateRequest {
+  /**
+     * The machine to create: account, promoted image version, name, optional
+     * placement and hardware, tags, description, `onboot`, `protection`
+     * (default on), the guest OS, the bootstrap login, the host-key trust,
+     * the SSH credential choice (`generate`, `reference` or `publicKey`),
+     * an optional login user, the Windows options (administrator password
+     * policy and activation) and the deadline. It holds references and
+     * public keys only, never a secret value.
+     */
+  spec: ReviewMachineCreateRequestSpec;
 }
 
 /**
@@ -8681,6 +9559,14 @@ export interface ServicesPage {
   items: RunningServiceDto[];
   /** Where this page sits in the result set. */
   page: PageInfo;
+}
+
+/**
+ * The body of `PUT /machines/{machineId}/endpoints/{endpointId}/auth`.
+ */
+export interface SetEndpointAuthRequest {
+  /** The default auth to record. */
+  auth: EndpointAuthDto;
 }
 
 /**
@@ -9093,10 +9979,52 @@ export interface StoreCredentialRequest {
 }
 
 /**
+ * The body of `POST /machine-product-keys`.
+ */
+export interface StoreProductKeyRequest {
+  /** The Windows product key (five groups of five letters and digits). */
+  productKey: string;
+}
+
+/**
+ * The body of `POST /machine-ssh-keys`.
+ */
+export interface StoreSshKeyRequest {
+  /**
+     * Binds the key to one machine: it then resolves for that machine only.
+     * Absent, the key is unbound and usable on any machine by a caller who
+     * may change that machine's credentials.
+     * @nullable
+     */
+  machineId?: string | null;
+  /**
+     * An unencrypted PEM or OpenSSH private key. It is stored in the
+     * encrypted secret store and never returned or recorded.
+     */
+  privateKey: string;
+}
+
+/**
  * The reference of a stored Git credential.
  */
 export interface StoredCredentialDto {
   /** The opaque reference to pass as `credentialRef`. */
+  credentialRef: string;
+}
+
+/**
+ * The reference of a stored product key.
+ */
+export interface StoredProductKeyDto {
+  /** The reference to use as `secret` in a product-key activation. */
+  secretRef: string;
+}
+
+/**
+ * The reference of a stored SSH key.
+ */
+export interface StoredSshKeyDto {
+  /** The reference to use as `credential` in a `secret` endpoint auth. */
   credentialRef: string;
 }
 
@@ -9136,6 +10064,67 @@ export interface TailnetStatusDto {
   configured: boolean;
   /** The scope the integration requests: always `devices:core:read`. */
   scope: string;
+}
+
+/**
+ * A created terminal session. The token is shown here once.
+ */
+export interface TerminalSessionDto {
+  /** The SSH endpoint the shell uses. */
+  endpointId: string;
+  /** When an unattached token stops being valid (epoch millis). */
+  expiresAt: number;
+  /**
+     * Close after this many seconds without input from the caller.
+     * @minimum 0
+     */
+  idleTimeoutSeconds: number;
+  /** The machine. */
+  machineId: string;
+  /**
+     * Close after this many seconds regardless.
+     * @minimum 0
+     */
+  maxDurationSeconds: number;
+  /** The session's identity, as it appears in audit events. */
+  sessionId: string;
+  /** The WebSocket path, relative to the controller's origin. */
+  socketPath: string;
+  /**
+     * The WebSocket subprotocols to offer: `fleet-terminal`, then the token
+     * subprotocol.
+     */
+  subprotocols: string[];
+  /**
+     * The single-use token that attaches to the terminal WebSocket. It
+     * expires at `expiresAt` and is spent by the first attach.
+     */
+  token: string;
+}
+
+/**
+ * The body of the unregister call.
+ */
+export interface UnregisterGuestRequest {
+  /** The token from the review call. */
+  reviewToken: string;
+}
+
+/**
+ * What unregistering a registered VM will do, and the token that binds it.
+ */
+export interface UnregisterReviewDto {
+  /** The Proxmox account. */
+  accountId: string;
+  /** The VM name the marker records. */
+  name: string;
+  /** The token the unregister call must present. */
+  reviewToken: string;
+  /**
+     * The VMID whose marker will be removed.
+     * @minimum 0
+     */
+  vmid: number;
 }
 
 /**
@@ -9436,6 +10425,45 @@ export type ListOnboardingDraftsParams = {
  * @minimum 0
  */
 limit?: number;
+};
+
+export type ListMachineFilesParams = {
+/**
+ * The page size (1-200; default 50).
+ * @minimum 0
+ */
+limit?: number;
+};
+
+export type PutMachineFileParams = {
+/**
+ * The absolute guest path of the file to create.
+ */
+path: string;
+/**
+ * Replace an existing regular file at the path (default false).
+ */
+overwrite?: boolean;
+/**
+ * The SSH endpoint; absent means the machine's only SSH endpoint.
+ */
+endpointId?: string;
+/**
+ * `linux` (default) or `windows`.
+ */
+guestOs?: string;
+/**
+ * An explicit auth kind: `agent`, `identityFile` or `secret`.
+ */
+authType?: string;
+/**
+ * The secret reference, for `authType=secret`.
+ */
+credential?: string;
+/**
+ * The identity file path, for `authType=identityFile`.
+ */
+identityPath?: string;
 };
 
 export type ListOperationsParams = {
@@ -14863,6 +15891,298 @@ export const startLabProvision = async (versionId: string, options?: RequestInit
 
 
 
+export type getMachineFileResponse200 = {
+  data: ResourceMachineFileDto
+  status: 200
+}
+
+export type getMachineFileResponse403 = {
+  data: ApiError
+  status: 403
+}
+
+export type getMachineFileResponse404 = {
+  data: ApiError
+  status: 404
+}
+
+export type getMachineFileResponse500 = {
+  data: ApiError
+  status: 500
+}
+
+export type getMachineFileResponse503 = {
+  data: ApiError
+  status: 503
+}
+
+export type getMachineFileResponseSuccess = (getMachineFileResponse200) & {
+  headers: Headers;
+};
+export type getMachineFileResponseError = (getMachineFileResponse403 | getMachineFileResponse404 | getMachineFileResponse500 | getMachineFileResponse503) & {
+  headers: Headers;
+};
+
+export type getMachineFileResponse = (getMachineFileResponseSuccess | getMachineFileResponseError)
+
+export const getGetMachineFileUrl = (fileId: string,) => {
+
+
+
+
+  return `/api/v1/machine-files/${fileId}`
+}
+
+/**
+ * # Errors
+ *
+ * Returns the public error envelope on refusal or an unknown file.
+ * @summary Reads one collected file's metadata.
+ */
+export const getMachineFile = async (fileId: string, options?: RequestInit): Promise<getMachineFileResponse> => {
+
+  const res = await fetch(getGetMachineFileUrl(fileId),
+  {
+    ...options,
+    method: 'GET'
+
+
+  }
+)
+
+
+  const body = [204, 205, 304].includes(res.status) ? null : await res.text();
+
+  const data: getMachineFileResponse['data'] = body ? JSON.parse(body) : {}
+  return { data, status: res.status, headers: res.headers } as getMachineFileResponse
+}
+
+
+
+export type downloadMachineFileResponse200 = {
+  data: Blob
+  status: 200
+}
+
+export type downloadMachineFileResponse403 = {
+  data: ApiError
+  status: 403
+}
+
+export type downloadMachineFileResponse404 = {
+  data: ApiError
+  status: 404
+}
+
+export type downloadMachineFileResponse409 = {
+  data: ApiError
+  status: 409
+}
+
+export type downloadMachineFileResponse500 = {
+  data: ApiError
+  status: 500
+}
+
+export type downloadMachineFileResponse503 = {
+  data: ApiError
+  status: 503
+}
+
+export type downloadMachineFileResponseSuccess = (downloadMachineFileResponse200) & {
+  headers: Headers;
+};
+export type downloadMachineFileResponseError = (downloadMachineFileResponse403 | downloadMachineFileResponse404 | downloadMachineFileResponse409 | downloadMachineFileResponse500 | downloadMachineFileResponse503) & {
+  headers: Headers;
+};
+
+export type downloadMachineFileResponse = (downloadMachineFileResponseSuccess | downloadMachineFileResponseError)
+
+export const getDownloadMachineFileUrl = (fileId: string,) => {
+
+
+
+
+  return `/api/v1/machine-files/${fileId}/content`
+}
+
+/**
+ * # Errors
+ *
+ * Returns the public error envelope on refusal, an unknown file, or bytes
+ * that are missing or corrupt.
+ * @summary Streams one collected file's bytes. The controller re-hashes them first
+and refuses (409) bytes that no longer match the recorded size and
+sha256; the response carries the digest as `Repr-Digest` and `ETag`.
+ */
+export const downloadMachineFile = async (fileId: string, options?: RequestInit): Promise<downloadMachineFileResponse> => {
+
+  const res = await fetch(getDownloadMachineFileUrl(fileId),
+  {
+    ...options,
+    method: 'GET'
+
+
+  }
+)
+
+
+  const body = [204, 205, 304].includes(res.status) ? null : await res.blob();
+  const data: downloadMachineFileResponse['data'] = body as downloadMachineFileResponse['data']
+  return { data, status: res.status, headers: res.headers } as downloadMachineFileResponse
+}
+
+
+
+export type storeMachineProductKeyResponse201 = {
+  data: ResourceStoredProductKeyDto
+  status: 201
+}
+
+export type storeMachineProductKeyResponse400 = {
+  data: ApiError
+  status: 400
+}
+
+export type storeMachineProductKeyResponse403 = {
+  data: ApiError
+  status: 403
+}
+
+export type storeMachineProductKeyResponse503 = {
+  data: ApiError
+  status: 503
+}
+
+export type storeMachineProductKeyResponseSuccess = (storeMachineProductKeyResponse201) & {
+  headers: Headers;
+};
+export type storeMachineProductKeyResponseError = (storeMachineProductKeyResponse400 | storeMachineProductKeyResponse403 | storeMachineProductKeyResponse503) & {
+  headers: Headers;
+};
+
+export type storeMachineProductKeyResponse = (storeMachineProductKeyResponseSuccess | storeMachineProductKeyResponseError)
+
+export const getStoreMachineProductKeyUrl = () => {
+
+
+
+
+  return `/api/v1/machine-product-keys`
+}
+
+/**
+ * # Errors
+ *
+ * Returns the public error envelope on refusal, a value that is not a
+ * product key, or when no secret store is configured.
+ * @summary Stores a Windows product key as an encrypted secret and returns its
+reference. The key is readable only by the create executor and is never
+returned, logged, or recorded in an audit event.
+ */
+export const storeMachineProductKey = async (storeProductKeyRequest: StoreProductKeyRequest, options?: RequestInit): Promise<storeMachineProductKeyResponse> => {
+
+    const getHeaders = (h?: NonNullable<RequestInit['headers']>): Record<string, string | readonly string[]> => {
+    if (!h) return {};
+    if (h instanceof Headers) return Object.fromEntries(h.entries());
+    if (Array.isArray(h)) return Object.fromEntries(h);
+    return h;
+  };
+const res = await fetch(getStoreMachineProductKeyUrl(),
+  {
+    ...options,
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...getHeaders(options?.headers) },
+    body: JSON.stringify(storeProductKeyRequest)
+  }
+)
+
+
+  const body = [204, 205, 304].includes(res.status) ? null : await res.text();
+
+  const data: storeMachineProductKeyResponse['data'] = body ? JSON.parse(body) : {}
+  return { data, status: res.status, headers: res.headers } as storeMachineProductKeyResponse
+}
+
+
+
+export type storeMachineSshKeyResponse201 = {
+  data: ResourceStoredSshKeyDto
+  status: 201
+}
+
+export type storeMachineSshKeyResponse400 = {
+  data: ApiError
+  status: 400
+}
+
+export type storeMachineSshKeyResponse403 = {
+  data: ApiError
+  status: 403
+}
+
+export type storeMachineSshKeyResponse500 = {
+  data: ApiError
+  status: 500
+}
+
+export type storeMachineSshKeyResponse503 = {
+  data: ApiError
+  status: 503
+}
+
+export type storeMachineSshKeyResponseSuccess = (storeMachineSshKeyResponse201) & {
+  headers: Headers;
+};
+export type storeMachineSshKeyResponseError = (storeMachineSshKeyResponse400 | storeMachineSshKeyResponse403 | storeMachineSshKeyResponse500 | storeMachineSshKeyResponse503) & {
+  headers: Headers;
+};
+
+export type storeMachineSshKeyResponse = (storeMachineSshKeyResponseSuccess | storeMachineSshKeyResponseError)
+
+export const getStoreMachineSshKeyUrl = () => {
+
+
+
+
+  return `/api/v1/machine-ssh-keys`
+}
+
+/**
+ * # Errors
+ *
+ * Returns the public error envelope on refusal, a value that is not a
+ * usable unencrypted private key, or when no secret store is configured.
+ * @summary Stores an SSH private key for stored-key authentication and returns its
+reference. The key is never returned, logged, or recorded in an audit
+event.
+ */
+export const storeMachineSshKey = async (storeSshKeyRequest: StoreSshKeyRequest, options?: RequestInit): Promise<storeMachineSshKeyResponse> => {
+
+    const getHeaders = (h?: NonNullable<RequestInit['headers']>): Record<string, string | readonly string[]> => {
+    if (!h) return {};
+    if (h instanceof Headers) return Object.fromEntries(h.entries());
+    if (Array.isArray(h)) return Object.fromEntries(h);
+    return h;
+  };
+const res = await fetch(getStoreMachineSshKeyUrl(),
+  {
+    ...options,
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...getHeaders(options?.headers) },
+    body: JSON.stringify(storeSshKeyRequest)
+  }
+)
+
+
+  const body = [204, 205, 304].includes(res.status) ? null : await res.text();
+
+  const data: storeMachineSshKeyResponse['data'] = body ? JSON.parse(body) : {}
+  return { data, status: res.status, headers: res.headers } as storeMachineSshKeyResponse
+}
+
+
+
 export type listMachinesResponse200 = {
   data: PageMachineDto
   status: 200
@@ -14924,6 +16244,235 @@ export const listMachines = async (params?: ListMachinesParams, options?: Reques
 
   const data: listMachinesResponse['data'] = body ? JSON.parse(body) : {}
   return { data, status: res.status, headers: res.headers } as listMachinesResponse
+}
+
+
+
+export type createMachineResponse202 = {
+  data: ResourceOperationDto
+  status: 202
+}
+
+export type createMachineResponse400 = {
+  data: ApiError
+  status: 400
+}
+
+export type createMachineResponse403 = {
+  data: ApiError
+  status: 403
+}
+
+export type createMachineResponse503 = {
+  data: ApiError
+  status: 503
+}
+
+export type createMachineResponseSuccess = (createMachineResponse202) & {
+  headers: Headers;
+};
+export type createMachineResponseError = (createMachineResponse400 | createMachineResponse403 | createMachineResponse503) & {
+  headers: Headers;
+};
+
+export type createMachineResponse = (createMachineResponseSuccess | createMachineResponseError)
+
+export const getCreateMachineUrl = () => {
+
+
+
+
+  return `/api/v1/machines/create`
+}
+
+/**
+ * # Errors
+ *
+ * Returns the public error envelope on refusal, an invalid spec, or a
+ * review token that does not match the spec.
+ * @summary Creates a permanent VM as a durable `machine.create` operation. The
+operation clones the promoted image, applies the reviewed settings,
+starts the guest, waits for its address and SSH host key, registers and
+links the machine, installs the chosen SSH key and removes the image's
+shared key, and optionally finishes the Windows setup. Its result names
+the machine and endpoint, never a key.
+ */
+export const createMachine = async (machineCreateRequest: MachineCreateRequest, options?: RequestInit): Promise<createMachineResponse> => {
+
+    const getHeaders = (h?: NonNullable<RequestInit['headers']>): Record<string, string | readonly string[]> => {
+    if (!h) return {};
+    if (h instanceof Headers) return Object.fromEntries(h.entries());
+    if (Array.isArray(h)) return Object.fromEntries(h);
+    return h;
+  };
+const res = await fetch(getCreateMachineUrl(),
+  {
+    ...options,
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...getHeaders(options?.headers) },
+    body: JSON.stringify(machineCreateRequest)
+  }
+)
+
+
+  const body = [204, 205, 304].includes(res.status) ? null : await res.text();
+
+  const data: createMachineResponse['data'] = body ? JSON.parse(body) : {}
+  return { data, status: res.status, headers: res.headers } as createMachineResponse
+}
+
+
+
+export type requestMachineCreateResponse201 = {
+  data: ResourceActionRequestDto
+  status: 201
+}
+
+export type requestMachineCreateResponse400 = {
+  data: ApiError
+  status: 400
+}
+
+export type requestMachineCreateResponse403 = {
+  data: ApiError
+  status: 403
+}
+
+export type requestMachineCreateResponse409 = {
+  data: ApiError
+  status: 409
+}
+
+export type requestMachineCreateResponse503 = {
+  data: ApiError
+  status: 503
+}
+
+export type requestMachineCreateResponseSuccess = (requestMachineCreateResponse201) & {
+  headers: Headers;
+};
+export type requestMachineCreateResponseError = (requestMachineCreateResponse400 | requestMachineCreateResponse403 | requestMachineCreateResponse409 | requestMachineCreateResponse503) & {
+  headers: Headers;
+};
+
+export type requestMachineCreateResponse = (requestMachineCreateResponseSuccess | requestMachineCreateResponseError)
+
+export const getRequestMachineCreateUrl = () => {
+
+
+
+
+  return `/api/v1/machines/create/request`
+}
+
+/**
+ * # Errors
+ *
+ * Returns the public error envelope on refusal, an invalid spec, a missing
+ * purpose, an image that is not promoted, or a broker refusal.
+ * @summary Asks for a persistent machine instead of creating it: the same spec the
+direct create takes, checked the same way, filed as an action request for
+a person to approve (the default), or approved by policy when the
+operator configured bounds and the spec is inside them. The machine is
+created by the same executor once approved, and records the requesting
+principal and the purpose. The answer is the action request: follow it at
+`/requests/{id}` and its operation at `/operations/{id}`. A caller needs
+`action.request`, not `machines.provision`.
+ */
+export const requestMachineCreate = async (machineCreateRequestBody: MachineCreateRequestBody, options?: RequestInit): Promise<requestMachineCreateResponse> => {
+
+    const getHeaders = (h?: NonNullable<RequestInit['headers']>): Record<string, string | readonly string[]> => {
+    if (!h) return {};
+    if (h instanceof Headers) return Object.fromEntries(h.entries());
+    if (Array.isArray(h)) return Object.fromEntries(h);
+    return h;
+  };
+const res = await fetch(getRequestMachineCreateUrl(),
+  {
+    ...options,
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...getHeaders(options?.headers) },
+    body: JSON.stringify(machineCreateRequestBody)
+  }
+)
+
+
+  const body = [204, 205, 304].includes(res.status) ? null : await res.text();
+
+  const data: requestMachineCreateResponse['data'] = body ? JSON.parse(body) : {}
+  return { data, status: res.status, headers: res.headers } as requestMachineCreateResponse
+}
+
+
+
+export type reviewMachineCreateResponse200 = {
+  data: ResourceMachineCreateReviewDto
+  status: 200
+}
+
+export type reviewMachineCreateResponse400 = {
+  data: ApiError
+  status: 400
+}
+
+export type reviewMachineCreateResponse403 = {
+  data: ApiError
+  status: 403
+}
+
+export type reviewMachineCreateResponse503 = {
+  data: ApiError
+  status: 503
+}
+
+export type reviewMachineCreateResponseSuccess = (reviewMachineCreateResponse200) & {
+  headers: Headers;
+};
+export type reviewMachineCreateResponseError = (reviewMachineCreateResponse400 | reviewMachineCreateResponse403 | reviewMachineCreateResponse503) & {
+  headers: Headers;
+};
+
+export type reviewMachineCreateResponse = (reviewMachineCreateResponseSuccess | reviewMachineCreateResponseError)
+
+export const getReviewMachineCreateUrl = () => {
+
+
+
+
+  return `/api/v1/machines/create/review`
+}
+
+/**
+ * # Errors
+ *
+ * Returns the public error envelope on refusal or an invalid spec.
+ * @summary Reviews a persistent machine creation: validates the spec, checks that
+the image version is promoted and that the credential references exist,
+and returns the spec as it will run with the review token. Nothing is
+created.
+ */
+export const reviewMachineCreate = async (reviewMachineCreateRequest: ReviewMachineCreateRequest, options?: RequestInit): Promise<reviewMachineCreateResponse> => {
+
+    const getHeaders = (h?: NonNullable<RequestInit['headers']>): Record<string, string | readonly string[]> => {
+    if (!h) return {};
+    if (h instanceof Headers) return Object.fromEntries(h.entries());
+    if (Array.isArray(h)) return Object.fromEntries(h);
+    return h;
+  };
+const res = await fetch(getReviewMachineCreateUrl(),
+  {
+    ...options,
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...getHeaders(options?.headers) },
+    body: JSON.stringify(reviewMachineCreateRequest)
+  }
+)
+
+
+  const body = [204, 205, 304].includes(res.status) ? null : await res.text();
+
+  const data: reviewMachineCreateResponse['data'] = body ? JSON.parse(body) : {}
+  return { data, status: res.status, headers: res.headers } as reviewMachineCreateResponse
 }
 
 
@@ -15429,6 +16978,540 @@ export const testOnboardingDraft = async (draftId: string, options?: RequestInit
 
 
 
+export type listPersistentGuestsResponse200 = {
+  data: ResourceVecPersistentGuestDto
+  status: 200
+}
+
+export type listPersistentGuestsResponse403 = {
+  data: ApiError
+  status: 403
+}
+
+export type listPersistentGuestsResponse503 = {
+  data: ApiError
+  status: 503
+}
+
+export type listPersistentGuestsResponseSuccess = (listPersistentGuestsResponse200) & {
+  headers: Headers;
+};
+export type listPersistentGuestsResponseError = (listPersistentGuestsResponse403 | listPersistentGuestsResponse503) & {
+  headers: Headers;
+};
+
+export type listPersistentGuestsResponse = (listPersistentGuestsResponseSuccess | listPersistentGuestsResponseError)
+
+export const getListPersistentGuestsUrl = () => {
+
+
+
+
+  return `/api/v1/machines/persistent`
+}
+
+/**
+ * # Errors
+ *
+ * Returns the public error envelope on refusal or when the marker store
+ * cannot be read.
+ * @summary Lists the persistent guests Fleet keeps (created by Fleet or registered),
+newest first.
+ */
+export const listPersistentGuests = async ( options?: RequestInit): Promise<listPersistentGuestsResponse> => {
+
+  const res = await fetch(getListPersistentGuestsUrl(),
+  {
+    ...options,
+    method: 'GET'
+
+
+  }
+)
+
+
+  const body = [204, 205, 304].includes(res.status) ? null : await res.text();
+
+  const data: listPersistentGuestsResponse['data'] = body ? JSON.parse(body) : {}
+  return { data, status: res.status, headers: res.headers } as listPersistentGuestsResponse
+}
+
+
+
+export type abandonPersistentMarkerResponse204 = {
+  data: void
+  status: 204
+}
+
+export type abandonPersistentMarkerResponse400 = {
+  data: ApiError
+  status: 400
+}
+
+export type abandonPersistentMarkerResponse403 = {
+  data: ApiError
+  status: 403
+}
+
+export type abandonPersistentMarkerResponse404 = {
+  data: ApiError
+  status: 404
+}
+
+export type abandonPersistentMarkerResponse409 = {
+  data: ApiError
+  status: 409
+}
+
+export type abandonPersistentMarkerResponse503 = {
+  data: ApiError
+  status: 503
+}
+
+export type abandonPersistentMarkerResponseSuccess = (abandonPersistentMarkerResponse204) & {
+  headers: Headers;
+};
+export type abandonPersistentMarkerResponseError = (abandonPersistentMarkerResponse400 | abandonPersistentMarkerResponse403 | abandonPersistentMarkerResponse404 | abandonPersistentMarkerResponse409 | abandonPersistentMarkerResponse503) & {
+  headers: Headers;
+};
+
+export type abandonPersistentMarkerResponse = (abandonPersistentMarkerResponseSuccess | abandonPersistentMarkerResponseError)
+
+export const getAbandonPersistentMarkerUrl = (accountId: string,
+    vmid: number,) => {
+
+
+
+
+  return `/api/v1/machines/persistent/${accountId}/${vmid}/abandon`
+}
+
+/**
+ * # Errors
+ *
+ * Returns the public error envelope on refusal, a review token that does
+ * not match, or an unknown marker.
+ * @summary Abandons a reviewed marker: it is removed, with an audit event, and its
+VMID and name are free again.
+ */
+export const abandonPersistentMarker = async (accountId: string,
+    vmid: number,
+    abandonMarkerRequest: AbandonMarkerRequest, options?: RequestInit): Promise<abandonPersistentMarkerResponse> => {
+
+    const getHeaders = (h?: NonNullable<RequestInit['headers']>): Record<string, string | readonly string[]> => {
+    if (!h) return {};
+    if (h instanceof Headers) return Object.fromEntries(h.entries());
+    if (Array.isArray(h)) return Object.fromEntries(h);
+    return h;
+  };
+const res = await fetch(getAbandonPersistentMarkerUrl(accountId,vmid),
+  {
+    ...options,
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...getHeaders(options?.headers) },
+    body: JSON.stringify(abandonMarkerRequest)
+  }
+)
+
+
+  const body = [204, 205, 304].includes(res.status) ? null : await res.text();
+
+  const data: abandonPersistentMarkerResponse['data'] = body ? JSON.parse(body) : undefined
+  return { data, status: res.status, headers: res.headers } as abandonPersistentMarkerResponse
+}
+
+
+
+export type reviewAbandonPersistentMarkerResponse200 = {
+  data: ResourceAbandonReviewDto
+  status: 200
+}
+
+export type reviewAbandonPersistentMarkerResponse403 = {
+  data: ApiError
+  status: 403
+}
+
+export type reviewAbandonPersistentMarkerResponse404 = {
+  data: ApiError
+  status: 404
+}
+
+export type reviewAbandonPersistentMarkerResponse409 = {
+  data: ApiError
+  status: 409
+}
+
+export type reviewAbandonPersistentMarkerResponse503 = {
+  data: ApiError
+  status: 503
+}
+
+export type reviewAbandonPersistentMarkerResponseSuccess = (reviewAbandonPersistentMarkerResponse200) & {
+  headers: Headers;
+};
+export type reviewAbandonPersistentMarkerResponseError = (reviewAbandonPersistentMarkerResponse403 | reviewAbandonPersistentMarkerResponse404 | reviewAbandonPersistentMarkerResponse409 | reviewAbandonPersistentMarkerResponse503) & {
+  headers: Headers;
+};
+
+export type reviewAbandonPersistentMarkerResponse = (reviewAbandonPersistentMarkerResponseSuccess | reviewAbandonPersistentMarkerResponseError)
+
+export const getReviewAbandonPersistentMarkerUrl = (accountId: string,
+    vmid: number,) => {
+
+
+
+
+  return `/api/v1/machines/persistent/${accountId}/${vmid}/abandon/review`
+}
+
+/**
+ * # Errors
+ *
+ * Returns the public error envelope on refusal, an unknown marker, or a
+ * marker of a created machine.
+ * @summary Reviews abandoning a persistent marker whose creation never completed
+(a failed clone, or a guest removed by hand). A marker of a created
+machine is refused: destroy that machine instead.
+ */
+export const reviewAbandonPersistentMarker = async (accountId: string,
+    vmid: number, options?: RequestInit): Promise<reviewAbandonPersistentMarkerResponse> => {
+
+  const res = await fetch(getReviewAbandonPersistentMarkerUrl(accountId,vmid),
+  {
+    ...options,
+    method: 'POST'
+
+
+  }
+)
+
+
+  const body = [204, 205, 304].includes(res.status) ? null : await res.text();
+
+  const data: reviewAbandonPersistentMarkerResponse['data'] = body ? JSON.parse(body) : {}
+  return { data, status: res.status, headers: res.headers } as reviewAbandonPersistentMarkerResponse
+}
+
+
+
+export type registerPersistentGuestResponse201 = {
+  data: ResourcePersistentGuestDto
+  status: 201
+}
+
+export type registerPersistentGuestResponse400 = {
+  data: ApiError
+  status: 400
+}
+
+export type registerPersistentGuestResponse403 = {
+  data: ApiError
+  status: 403
+}
+
+export type registerPersistentGuestResponse409 = {
+  data: ApiError
+  status: 409
+}
+
+export type registerPersistentGuestResponse503 = {
+  data: ApiError
+  status: 503
+}
+
+export type registerPersistentGuestResponseSuccess = (registerPersistentGuestResponse201) & {
+  headers: Headers;
+};
+export type registerPersistentGuestResponseError = (registerPersistentGuestResponse400 | registerPersistentGuestResponse403 | registerPersistentGuestResponse409 | registerPersistentGuestResponse503) & {
+  headers: Headers;
+};
+
+export type registerPersistentGuestResponse = (registerPersistentGuestResponseSuccess | registerPersistentGuestResponseError)
+
+export const getRegisterPersistentGuestUrl = (accountId: string,
+    vmid: number,) => {
+
+
+
+
+  return `/api/v1/machines/persistent/${accountId}/${vmid}/register`
+}
+
+/**
+ * # Errors
+ *
+ * Returns the public error envelope on refusal, a review token that does
+ * not match, or a guest that is no longer eligible.
+ * @summary Registers a reviewed existing VM as persistent: a marker is written (clone
+complete, state ready) so Lab never selects the guest, optionally naming
+its Fleet machine. Nothing on the guest changes. Audited.
+ */
+export const registerPersistentGuest = async (accountId: string,
+    vmid: number,
+    registerGuestRequest: RegisterGuestRequest, options?: RequestInit): Promise<registerPersistentGuestResponse> => {
+
+    const getHeaders = (h?: NonNullable<RequestInit['headers']>): Record<string, string | readonly string[]> => {
+    if (!h) return {};
+    if (h instanceof Headers) return Object.fromEntries(h.entries());
+    if (Array.isArray(h)) return Object.fromEntries(h);
+    return h;
+  };
+const res = await fetch(getRegisterPersistentGuestUrl(accountId,vmid),
+  {
+    ...options,
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...getHeaders(options?.headers) },
+    body: JSON.stringify(registerGuestRequest)
+  }
+)
+
+
+  const body = [204, 205, 304].includes(res.status) ? null : await res.text();
+
+  const data: registerPersistentGuestResponse['data'] = body ? JSON.parse(body) : {}
+  return { data, status: res.status, headers: res.headers } as registerPersistentGuestResponse
+}
+
+
+
+export type reviewRegisterPersistentGuestResponse200 = {
+  data: ResourceRegisterReviewDto
+  status: 200
+}
+
+export type reviewRegisterPersistentGuestResponse400 = {
+  data: ApiError
+  status: 400
+}
+
+export type reviewRegisterPersistentGuestResponse403 = {
+  data: ApiError
+  status: 403
+}
+
+export type reviewRegisterPersistentGuestResponse409 = {
+  data: ApiError
+  status: 409
+}
+
+export type reviewRegisterPersistentGuestResponse503 = {
+  data: ApiError
+  status: 503
+}
+
+export type reviewRegisterPersistentGuestResponseSuccess = (reviewRegisterPersistentGuestResponse200) & {
+  headers: Headers;
+};
+export type reviewRegisterPersistentGuestResponseError = (reviewRegisterPersistentGuestResponse400 | reviewRegisterPersistentGuestResponse403 | reviewRegisterPersistentGuestResponse409 | reviewRegisterPersistentGuestResponse503) & {
+  headers: Headers;
+};
+
+export type reviewRegisterPersistentGuestResponse = (reviewRegisterPersistentGuestResponseSuccess | reviewRegisterPersistentGuestResponseError)
+
+export const getReviewRegisterPersistentGuestUrl = (accountId: string,
+    vmid: number,) => {
+
+
+
+
+  return `/api/v1/machines/persistent/${accountId}/${vmid}/register/review`
+}
+
+/**
+ * # Errors
+ *
+ * Returns the public error envelope on refusal or an ineligible guest.
+ * @summary Reviews registering an existing VM as persistent: the guest is looked at
+live (it must exist as a QEMU VM and not be a template, a promoted image
+artifact, a Lab clone or a Lab pool member, and must not be marked
+already) and the answer names what will be recorded. Nothing is written.
+ */
+export const reviewRegisterPersistentGuest = async (accountId: string,
+    vmid: number,
+    registerGuestRequest: RegisterGuestRequest, options?: RequestInit): Promise<reviewRegisterPersistentGuestResponse> => {
+
+    const getHeaders = (h?: NonNullable<RequestInit['headers']>): Record<string, string | readonly string[]> => {
+    if (!h) return {};
+    if (h instanceof Headers) return Object.fromEntries(h.entries());
+    if (Array.isArray(h)) return Object.fromEntries(h);
+    return h;
+  };
+const res = await fetch(getReviewRegisterPersistentGuestUrl(accountId,vmid),
+  {
+    ...options,
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...getHeaders(options?.headers) },
+    body: JSON.stringify(registerGuestRequest)
+  }
+)
+
+
+  const body = [204, 205, 304].includes(res.status) ? null : await res.text();
+
+  const data: reviewRegisterPersistentGuestResponse['data'] = body ? JSON.parse(body) : {}
+  return { data, status: res.status, headers: res.headers } as reviewRegisterPersistentGuestResponse
+}
+
+
+
+export type unregisterPersistentGuestResponse204 = {
+  data: void
+  status: 204
+}
+
+export type unregisterPersistentGuestResponse400 = {
+  data: ApiError
+  status: 400
+}
+
+export type unregisterPersistentGuestResponse403 = {
+  data: ApiError
+  status: 403
+}
+
+export type unregisterPersistentGuestResponse404 = {
+  data: ApiError
+  status: 404
+}
+
+export type unregisterPersistentGuestResponse409 = {
+  data: ApiError
+  status: 409
+}
+
+export type unregisterPersistentGuestResponse503 = {
+  data: ApiError
+  status: 503
+}
+
+export type unregisterPersistentGuestResponseSuccess = (unregisterPersistentGuestResponse204) & {
+  headers: Headers;
+};
+export type unregisterPersistentGuestResponseError = (unregisterPersistentGuestResponse400 | unregisterPersistentGuestResponse403 | unregisterPersistentGuestResponse404 | unregisterPersistentGuestResponse409 | unregisterPersistentGuestResponse503) & {
+  headers: Headers;
+};
+
+export type unregisterPersistentGuestResponse = (unregisterPersistentGuestResponseSuccess | unregisterPersistentGuestResponseError)
+
+export const getUnregisterPersistentGuestUrl = (accountId: string,
+    vmid: number,) => {
+
+
+
+
+  return `/api/v1/machines/persistent/${accountId}/${vmid}/unregister`
+}
+
+/**
+ * # Errors
+ *
+ * Returns the public error envelope on refusal, a review token that does
+ * not match, an unknown marker, or a marker Fleet created.
+ * @summary Unregisters a reviewed registered VM: the marker is removed with an audit
+event. The guest is left as it is.
+ */
+export const unregisterPersistentGuest = async (accountId: string,
+    vmid: number,
+    unregisterGuestRequest: UnregisterGuestRequest, options?: RequestInit): Promise<unregisterPersistentGuestResponse> => {
+
+    const getHeaders = (h?: NonNullable<RequestInit['headers']>): Record<string, string | readonly string[]> => {
+    if (!h) return {};
+    if (h instanceof Headers) return Object.fromEntries(h.entries());
+    if (Array.isArray(h)) return Object.fromEntries(h);
+    return h;
+  };
+const res = await fetch(getUnregisterPersistentGuestUrl(accountId,vmid),
+  {
+    ...options,
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...getHeaders(options?.headers) },
+    body: JSON.stringify(unregisterGuestRequest)
+  }
+)
+
+
+  const body = [204, 205, 304].includes(res.status) ? null : await res.text();
+
+  const data: unregisterPersistentGuestResponse['data'] = body ? JSON.parse(body) : undefined
+  return { data, status: res.status, headers: res.headers } as unregisterPersistentGuestResponse
+}
+
+
+
+export type reviewUnregisterPersistentGuestResponse200 = {
+  data: ResourceUnregisterReviewDto
+  status: 200
+}
+
+export type reviewUnregisterPersistentGuestResponse403 = {
+  data: ApiError
+  status: 403
+}
+
+export type reviewUnregisterPersistentGuestResponse404 = {
+  data: ApiError
+  status: 404
+}
+
+export type reviewUnregisterPersistentGuestResponse409 = {
+  data: ApiError
+  status: 409
+}
+
+export type reviewUnregisterPersistentGuestResponse503 = {
+  data: ApiError
+  status: 503
+}
+
+export type reviewUnregisterPersistentGuestResponseSuccess = (reviewUnregisterPersistentGuestResponse200) & {
+  headers: Headers;
+};
+export type reviewUnregisterPersistentGuestResponseError = (reviewUnregisterPersistentGuestResponse403 | reviewUnregisterPersistentGuestResponse404 | reviewUnregisterPersistentGuestResponse409 | reviewUnregisterPersistentGuestResponse503) & {
+  headers: Headers;
+};
+
+export type reviewUnregisterPersistentGuestResponse = (reviewUnregisterPersistentGuestResponseSuccess | reviewUnregisterPersistentGuestResponseError)
+
+export const getReviewUnregisterPersistentGuestUrl = (accountId: string,
+    vmid: number,) => {
+
+
+
+
+  return `/api/v1/machines/persistent/${accountId}/${vmid}/unregister/review`
+}
+
+/**
+ * # Errors
+ *
+ * Returns the public error envelope on refusal, an unknown marker, or a
+ * marker Fleet created.
+ * @summary Reviews unregistering a registered VM: the marker goes, the guest is not
+touched. A marker of a guest Fleet created is refused (destroy it, or
+abandon an unfinished creation).
+ */
+export const reviewUnregisterPersistentGuest = async (accountId: string,
+    vmid: number, options?: RequestInit): Promise<reviewUnregisterPersistentGuestResponse> => {
+
+  const res = await fetch(getReviewUnregisterPersistentGuestUrl(accountId,vmid),
+  {
+    ...options,
+    method: 'POST'
+
+
+  }
+)
+
+
+  const body = [204, 205, 304].includes(res.status) ? null : await res.text();
+
+  const data: reviewUnregisterPersistentGuestResponse['data'] = body ? JSON.parse(body) : {}
+  return { data, status: res.status, headers: res.headers } as reviewUnregisterPersistentGuestResponse
+}
+
+
+
 export type getMachineResponse200 = {
   data: ResourceMachineDto
   status: 200
@@ -15557,6 +17640,90 @@ const res = await fetch(getStartApplyWorkflowUrl(machineId),
 
 
 
+export type collectMachineFilesResponse202 = {
+  data: ResourceOperationDto
+  status: 202
+}
+
+export type collectMachineFilesResponse400 = {
+  data: ApiError
+  status: 400
+}
+
+export type collectMachineFilesResponse403 = {
+  data: ApiError
+  status: 403
+}
+
+export type collectMachineFilesResponse404 = {
+  data: ApiError
+  status: 404
+}
+
+export type collectMachineFilesResponse500 = {
+  data: ApiError
+  status: 500
+}
+
+export type collectMachineFilesResponse503 = {
+  data: ApiError
+  status: 503
+}
+
+export type collectMachineFilesResponseSuccess = (collectMachineFilesResponse202) & {
+  headers: Headers;
+};
+export type collectMachineFilesResponseError = (collectMachineFilesResponse400 | collectMachineFilesResponse403 | collectMachineFilesResponse404 | collectMachineFilesResponse500 | collectMachineFilesResponse503) & {
+  headers: Headers;
+};
+
+export type collectMachineFilesResponse = (collectMachineFilesResponseSuccess | collectMachineFilesResponseError)
+
+export const getCollectMachineFilesUrl = (machineId: string,) => {
+
+
+
+
+  return `/api/v1/machines/${machineId}/collect`
+}
+
+/**
+ * # Errors
+ *
+ * Returns the public error envelope on refusal, an unknown machine or
+ * endpoint, no usable auth, or invalid paths.
+ * @summary Copies declared files off a machine into the controller's artifact store
+as a `machine.collect` operation. A path that cannot be copied fails the
+operation (the files that were copied stay stored); the result lists the
+stored files.
+ */
+export const collectMachineFiles = async (machineId: string,
+    machineCollectRequest: MachineCollectRequest, options?: RequestInit): Promise<collectMachineFilesResponse> => {
+
+    const getHeaders = (h?: NonNullable<RequestInit['headers']>): Record<string, string | readonly string[]> => {
+    if (!h) return {};
+    if (h instanceof Headers) return Object.fromEntries(h.entries());
+    if (Array.isArray(h)) return Object.fromEntries(h);
+    return h;
+  };
+const res = await fetch(getCollectMachineFilesUrl(machineId),
+  {
+    ...options,
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...getHeaders(options?.headers) },
+    body: JSON.stringify(machineCollectRequest)
+  }
+)
+
+
+  const body = [204, 205, 304].includes(res.status) ? null : await res.text();
+
+  const data: collectMachineFilesResponse['data'] = body ? JSON.parse(body) : {}
+  return { data, status: res.status, headers: res.headers } as collectMachineFilesResponse
+}
+
+
+
 export type getMachineDriftResponse200 = {
   data: ResourceMachineDriftDto
   status: 200
@@ -15617,6 +17784,509 @@ export const getMachineDrift = async (machineId: string, options?: RequestInit):
 
   const data: getMachineDriftResponse['data'] = body ? JSON.parse(body) : {}
   return { data, status: res.status, headers: res.headers } as getMachineDriftResponse
+}
+
+
+
+export type getMachineEndpointAuthResponse200 = {
+  data: ResourceEndpointAuthStateDto
+  status: 200
+}
+
+export type getMachineEndpointAuthResponse400 = {
+  data: ApiError
+  status: 400
+}
+
+export type getMachineEndpointAuthResponse403 = {
+  data: ApiError
+  status: 403
+}
+
+export type getMachineEndpointAuthResponse404 = {
+  data: ApiError
+  status: 404
+}
+
+export type getMachineEndpointAuthResponse500 = {
+  data: ApiError
+  status: 500
+}
+
+export type getMachineEndpointAuthResponse503 = {
+  data: ApiError
+  status: 503
+}
+
+export type getMachineEndpointAuthResponseSuccess = (getMachineEndpointAuthResponse200) & {
+  headers: Headers;
+};
+export type getMachineEndpointAuthResponseError = (getMachineEndpointAuthResponse400 | getMachineEndpointAuthResponse403 | getMachineEndpointAuthResponse404 | getMachineEndpointAuthResponse500 | getMachineEndpointAuthResponse503) & {
+  headers: Headers;
+};
+
+export type getMachineEndpointAuthResponse = (getMachineEndpointAuthResponseSuccess | getMachineEndpointAuthResponseError)
+
+export const getGetMachineEndpointAuthUrl = (machineId: string,
+    endpointId: string,) => {
+
+
+
+
+  return `/api/v1/machines/${machineId}/endpoints/${endpointId}/auth`
+}
+
+/**
+ * # Errors
+ *
+ * Returns the public error envelope on refusal, an unknown machine, or an
+ * endpoint that is not one of the machine's SSH endpoints.
+ * @summary Reads an SSH endpoint's default auth.
+ */
+export const getMachineEndpointAuth = async (machineId: string,
+    endpointId: string, options?: RequestInit): Promise<getMachineEndpointAuthResponse> => {
+
+  const res = await fetch(getGetMachineEndpointAuthUrl(machineId,endpointId),
+  {
+    ...options,
+    method: 'GET'
+
+
+  }
+)
+
+
+  const body = [204, 205, 304].includes(res.status) ? null : await res.text();
+
+  const data: getMachineEndpointAuthResponse['data'] = body ? JSON.parse(body) : {}
+  return { data, status: res.status, headers: res.headers } as getMachineEndpointAuthResponse
+}
+
+
+
+export type setMachineEndpointAuthResponse200 = {
+  data: ResourceEndpointAuthStateDto
+  status: 200
+}
+
+export type setMachineEndpointAuthResponse400 = {
+  data: ApiError
+  status: 400
+}
+
+export type setMachineEndpointAuthResponse403 = {
+  data: ApiError
+  status: 403
+}
+
+export type setMachineEndpointAuthResponse404 = {
+  data: ApiError
+  status: 404
+}
+
+export type setMachineEndpointAuthResponse500 = {
+  data: ApiError
+  status: 500
+}
+
+export type setMachineEndpointAuthResponse503 = {
+  data: ApiError
+  status: 503
+}
+
+export type setMachineEndpointAuthResponseSuccess = (setMachineEndpointAuthResponse200) & {
+  headers: Headers;
+};
+export type setMachineEndpointAuthResponseError = (setMachineEndpointAuthResponse400 | setMachineEndpointAuthResponse403 | setMachineEndpointAuthResponse404 | setMachineEndpointAuthResponse500 | setMachineEndpointAuthResponse503) & {
+  headers: Headers;
+};
+
+export type setMachineEndpointAuthResponse = (setMachineEndpointAuthResponseSuccess | setMachineEndpointAuthResponseError)
+
+export const getSetMachineEndpointAuthUrl = (machineId: string,
+    endpointId: string,) => {
+
+
+
+
+  return `/api/v1/machines/${machineId}/endpoints/${endpointId}/auth`
+}
+
+/**
+ * # Errors
+ *
+ * Returns the public error envelope on refusal, an unknown machine or
+ * endpoint, a malformed reference, or a secret that does not exist.
+ * @summary Records an SSH endpoint's default auth, so callers need not repeat it. A
+`secret` reference must name a stored SSH key.
+ */
+export const setMachineEndpointAuth = async (machineId: string,
+    endpointId: string,
+    setEndpointAuthRequest: SetEndpointAuthRequest, options?: RequestInit): Promise<setMachineEndpointAuthResponse> => {
+
+    const getHeaders = (h?: NonNullable<RequestInit['headers']>): Record<string, string | readonly string[]> => {
+    if (!h) return {};
+    if (h instanceof Headers) return Object.fromEntries(h.entries());
+    if (Array.isArray(h)) return Object.fromEntries(h);
+    return h;
+  };
+const res = await fetch(getSetMachineEndpointAuthUrl(machineId,endpointId),
+  {
+    ...options,
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json', ...getHeaders(options?.headers) },
+    body: JSON.stringify(setEndpointAuthRequest)
+  }
+)
+
+
+  const body = [204, 205, 304].includes(res.status) ? null : await res.text();
+
+  const data: setMachineEndpointAuthResponse['data'] = body ? JSON.parse(body) : {}
+  return { data, status: res.status, headers: res.headers } as setMachineEndpointAuthResponse
+}
+
+
+
+export type clearMachineEndpointAuthResponse200 = {
+  data: ResourceEndpointAuthStateDto
+  status: 200
+}
+
+export type clearMachineEndpointAuthResponse400 = {
+  data: ApiError
+  status: 400
+}
+
+export type clearMachineEndpointAuthResponse403 = {
+  data: ApiError
+  status: 403
+}
+
+export type clearMachineEndpointAuthResponse404 = {
+  data: ApiError
+  status: 404
+}
+
+export type clearMachineEndpointAuthResponse500 = {
+  data: ApiError
+  status: 500
+}
+
+export type clearMachineEndpointAuthResponse503 = {
+  data: ApiError
+  status: 503
+}
+
+export type clearMachineEndpointAuthResponseSuccess = (clearMachineEndpointAuthResponse200) & {
+  headers: Headers;
+};
+export type clearMachineEndpointAuthResponseError = (clearMachineEndpointAuthResponse400 | clearMachineEndpointAuthResponse403 | clearMachineEndpointAuthResponse404 | clearMachineEndpointAuthResponse500 | clearMachineEndpointAuthResponse503) & {
+  headers: Headers;
+};
+
+export type clearMachineEndpointAuthResponse = (clearMachineEndpointAuthResponseSuccess | clearMachineEndpointAuthResponseError)
+
+export const getClearMachineEndpointAuthUrl = (machineId: string,
+    endpointId: string,) => {
+
+
+
+
+  return `/api/v1/machines/${machineId}/endpoints/${endpointId}/auth`
+}
+
+/**
+ * # Errors
+ *
+ * Returns the public error envelope on refusal or an unknown machine or
+ * endpoint.
+ * @summary Clears an SSH endpoint's default auth.
+ */
+export const clearMachineEndpointAuth = async (machineId: string,
+    endpointId: string, options?: RequestInit): Promise<clearMachineEndpointAuthResponse> => {
+
+  const res = await fetch(getClearMachineEndpointAuthUrl(machineId,endpointId),
+  {
+    ...options,
+    method: 'DELETE'
+
+
+  }
+)
+
+
+  const body = [204, 205, 304].includes(res.status) ? null : await res.text();
+
+  const data: clearMachineEndpointAuthResponse['data'] = body ? JSON.parse(body) : {}
+  return { data, status: res.status, headers: res.headers } as clearMachineEndpointAuthResponse
+}
+
+
+
+export type execMachineResponse202 = {
+  data: ResourceOperationDto
+  status: 202
+}
+
+export type execMachineResponse400 = {
+  data: ApiError
+  status: 400
+}
+
+export type execMachineResponse403 = {
+  data: ApiError
+  status: 403
+}
+
+export type execMachineResponse404 = {
+  data: ApiError
+  status: 404
+}
+
+export type execMachineResponse500 = {
+  data: ApiError
+  status: 500
+}
+
+export type execMachineResponse503 = {
+  data: ApiError
+  status: 503
+}
+
+export type execMachineResponseSuccess = (execMachineResponse202) & {
+  headers: Headers;
+};
+export type execMachineResponseError = (execMachineResponse400 | execMachineResponse403 | execMachineResponse404 | execMachineResponse500 | execMachineResponse503) & {
+  headers: Headers;
+};
+
+export type execMachineResponse = (execMachineResponseSuccess | execMachineResponseError)
+
+export const getExecMachineUrl = (machineId: string,) => {
+
+
+
+
+  return `/api/v1/machines/${machineId}/exec`
+}
+
+/**
+ * # Errors
+ *
+ * Returns the public error envelope on refusal, an unknown machine or
+ * endpoint, an endpoint whose host key was never confirmed, no usable auth,
+ * or an invalid command.
+ * @summary Runs a bounded command on a machine over its SSH endpoint, with the
+endpoint's stored credential, as a `machine.exec` operation. The result
+carries the exit code, scrubbed and bounded stdout and stderr, and
+truncation flags. The audit event records the command's SHA-256, never
+the command.
+ */
+export const execMachine = async (machineId: string,
+    machineExecRequest: MachineExecRequest, options?: RequestInit): Promise<execMachineResponse> => {
+
+    const getHeaders = (h?: NonNullable<RequestInit['headers']>): Record<string, string | readonly string[]> => {
+    if (!h) return {};
+    if (h instanceof Headers) return Object.fromEntries(h.entries());
+    if (Array.isArray(h)) return Object.fromEntries(h);
+    return h;
+  };
+const res = await fetch(getExecMachineUrl(machineId),
+  {
+    ...options,
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...getHeaders(options?.headers) },
+    body: JSON.stringify(machineExecRequest)
+  }
+)
+
+
+  const body = [204, 205, 304].includes(res.status) ? null : await res.text();
+
+  const data: execMachineResponse['data'] = body ? JSON.parse(body) : {}
+  return { data, status: res.status, headers: res.headers } as execMachineResponse
+}
+
+
+
+export type listMachineFilesResponse200 = {
+  data: PageMachineFileDto
+  status: 200
+}
+
+export type listMachineFilesResponse400 = {
+  data: ApiError
+  status: 400
+}
+
+export type listMachineFilesResponse403 = {
+  data: ApiError
+  status: 403
+}
+
+export type listMachineFilesResponse500 = {
+  data: ApiError
+  status: 500
+}
+
+export type listMachineFilesResponse503 = {
+  data: ApiError
+  status: 503
+}
+
+export type listMachineFilesResponseSuccess = (listMachineFilesResponse200) & {
+  headers: Headers;
+};
+export type listMachineFilesResponseError = (listMachineFilesResponse400 | listMachineFilesResponse403 | listMachineFilesResponse500 | listMachineFilesResponse503) & {
+  headers: Headers;
+};
+
+export type listMachineFilesResponse = (listMachineFilesResponseSuccess | listMachineFilesResponseError)
+
+export const getListMachineFilesUrl = (machineId: string,
+    params?: ListMachineFilesParams,) => {
+  const normalizedParams = new URLSearchParams();
+
+  Object.entries(params || {}).forEach(([key, value]) => {
+
+    if (value !== undefined) {
+      normalizedParams.append(key, value === null ? 'null' : String(value))
+    }
+  });
+
+  const stringifiedParams = normalizedParams.toString();
+
+  return stringifiedParams.length > 0 ? `/api/v1/machines/${machineId}/files?${stringifiedParams}` : `/api/v1/machines/${machineId}/files`
+}
+
+/**
+ * # Errors
+ *
+ * Returns the public error envelope on refusal or backend failure.
+ * @summary Lists the files collected from a machine, newest first.
+ */
+export const listMachineFiles = async (machineId: string,
+    params?: ListMachineFilesParams, options?: RequestInit): Promise<listMachineFilesResponse> => {
+
+  const res = await fetch(getListMachineFilesUrl(machineId,params),
+  {
+    ...options,
+    method: 'GET'
+
+
+  }
+)
+
+
+  const body = [204, 205, 304].includes(res.status) ? null : await res.text();
+
+  const data: listMachineFilesResponse['data'] = body ? JSON.parse(body) : {}
+  return { data, status: res.status, headers: res.headers } as listMachineFilesResponse
+}
+
+
+
+export type putMachineFileResponse202 = {
+  data: ResourceOperationDto
+  status: 202
+}
+
+export type putMachineFileResponse400 = {
+  data: ApiError
+  status: 400
+}
+
+export type putMachineFileResponse403 = {
+  data: ApiError
+  status: 403
+}
+
+export type putMachineFileResponse404 = {
+  data: ApiError
+  status: 404
+}
+
+export type putMachineFileResponse408 = {
+  data: ApiError
+  status: 408
+}
+
+export type putMachineFileResponse413 = {
+  data: ApiError
+  status: 413
+}
+
+export type putMachineFileResponse500 = {
+  data: ApiError
+  status: 500
+}
+
+export type putMachineFileResponse503 = {
+  data: ApiError
+  status: 503
+}
+
+export type putMachineFileResponseSuccess = (putMachineFileResponse202) & {
+  headers: Headers;
+};
+export type putMachineFileResponseError = (putMachineFileResponse400 | putMachineFileResponse403 | putMachineFileResponse404 | putMachineFileResponse408 | putMachineFileResponse413 | putMachineFileResponse500 | putMachineFileResponse503) & {
+  headers: Headers;
+};
+
+export type putMachineFileResponse = (putMachineFileResponseSuccess | putMachineFileResponseError)
+
+export const getPutMachineFileUrl = (machineId: string,
+    params: PutMachineFileParams,) => {
+  const normalizedParams = new URLSearchParams();
+
+  Object.entries(params || {}).forEach(([key, value]) => {
+
+    if (value !== undefined) {
+      normalizedParams.append(key, value === null ? 'null' : String(value))
+    }
+  });
+
+  const stringifiedParams = normalizedParams.toString();
+
+  return stringifiedParams.length > 0 ? `/api/v1/machines/${machineId}/files?${stringifiedParams}` : `/api/v1/machines/${machineId}/files`
+}
+
+/**
+ * # Errors
+ *
+ * Returns the public error envelope on refusal, an unknown machine or
+ * endpoint, no usable auth, an invalid path, or an upload over the cap.
+ * @summary Copies one file onto a machine as a `machine.put` operation. The body is
+the raw file. It is streamed into controller staging (the cap is enforced
+while streaming) and sent over the endpoint's stored credential; the
+controller verifies the SHA-256 inside the guest and moves the file into
+place only after it matches, so a failed put leaves nothing at the path.
+ */
+export const putMachineFile = async (machineId: string,
+    putMachineFileBody: Blob,
+    params: PutMachineFileParams, options?: RequestInit): Promise<putMachineFileResponse> => {
+
+    const getHeaders = (h?: NonNullable<RequestInit['headers']>): Record<string, string | readonly string[]> => {
+    if (!h) return {};
+    if (h instanceof Headers) return Object.fromEntries(h.entries());
+    if (Array.isArray(h)) return Object.fromEntries(h);
+    return h;
+  };
+const res = await fetch(getPutMachineFileUrl(machineId,params),
+  {
+    ...options,
+    method: 'POST',
+    headers: { 'Content-Type': 'application/octet-stream', ...getHeaders(options?.headers) },
+    body: putMachineFileBody
+  }
+)
+
+
+  const body = [204, 205, 304].includes(res.status) ? null : await res.text();
+
+  const data: putMachineFileResponse['data'] = body ? JSON.parse(body) : {}
+  return { data, status: res.status, headers: res.headers } as putMachineFileResponse
 }
 
 
@@ -16427,6 +19097,93 @@ const res = await fetch(getStartSkillsOperationUrl(machineId),
 
   const data: startSkillsOperationResponse['data'] = body ? JSON.parse(body) : {}
   return { data, status: res.status, headers: res.headers } as startSkillsOperationResponse
+}
+
+
+
+export type createMachineTerminalSessionResponse201 = {
+  data: ResourceTerminalSessionDto
+  status: 201
+}
+
+export type createMachineTerminalSessionResponse400 = {
+  data: ApiError
+  status: 400
+}
+
+export type createMachineTerminalSessionResponse403 = {
+  data: ApiError
+  status: 403
+}
+
+export type createMachineTerminalSessionResponse404 = {
+  data: ApiError
+  status: 404
+}
+
+export type createMachineTerminalSessionResponse500 = {
+  data: ApiError
+  status: 500
+}
+
+export type createMachineTerminalSessionResponse503 = {
+  data: ApiError
+  status: 503
+}
+
+export type createMachineTerminalSessionResponseSuccess = (createMachineTerminalSessionResponse201) & {
+  headers: Headers;
+};
+export type createMachineTerminalSessionResponseError = (createMachineTerminalSessionResponse400 | createMachineTerminalSessionResponse403 | createMachineTerminalSessionResponse404 | createMachineTerminalSessionResponse500 | createMachineTerminalSessionResponse503) & {
+  headers: Headers;
+};
+
+export type createMachineTerminalSessionResponse = (createMachineTerminalSessionResponseSuccess | createMachineTerminalSessionResponseError)
+
+export const getCreateMachineTerminalSessionUrl = (machineId: string,) => {
+
+
+
+
+  return `/api/v1/machines/${machineId}/terminal-sessions`
+}
+
+/**
+ * # Errors
+ *
+ * Returns the public error envelope on refusal, an unknown machine or
+ * endpoint, an endpoint whose host key was never confirmed, no usable auth,
+ * the session cap, or an unwired terminal relay.
+ * @summary Creates an interactive terminal session on a machine. The session token
+is single use and short-lived; the caller attaches to the terminal
+WebSocket with it. Every session is authorized (`machines.terminal`,
+separate from `machines.exec`), audited at its start and end, and bounded
+by an idle timeout and a maximum duration. Nothing typed or shown is
+recorded.
+ */
+export const createMachineTerminalSession = async (machineId: string,
+    createTerminalSessionRequest: CreateTerminalSessionRequest, options?: RequestInit): Promise<createMachineTerminalSessionResponse> => {
+
+    const getHeaders = (h?: NonNullable<RequestInit['headers']>): Record<string, string | readonly string[]> => {
+    if (!h) return {};
+    if (h instanceof Headers) return Object.fromEntries(h.entries());
+    if (Array.isArray(h)) return Object.fromEntries(h);
+    return h;
+  };
+const res = await fetch(getCreateMachineTerminalSessionUrl(machineId),
+  {
+    ...options,
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...getHeaders(options?.headers) },
+    body: JSON.stringify(createTerminalSessionRequest)
+  }
+)
+
+
+  const body = [204, 205, 304].includes(res.status) ? null : await res.text();
+
+  const data: createMachineTerminalSessionResponse['data'] = body ? JSON.parse(body) : {}
+  return { data, status: res.status, headers: res.headers } as createMachineTerminalSessionResponse
 }
 
 
@@ -17507,6 +20264,88 @@ const res = await fetch(getConfirmProxmoxFingerprintUrl(accountId),
 
   const data: confirmProxmoxFingerprintResponse['data'] = body ? JSON.parse(body) : {}
   return { data, status: res.status, headers: res.headers } as confirmProxmoxFingerprintResponse
+}
+
+
+
+export type createProxmoxConsoleSessionResponse201 = {
+  data: ResourceConsoleSessionDto
+  status: 201
+}
+
+export type createProxmoxConsoleSessionResponse400 = {
+  data: ApiError
+  status: 400
+}
+
+export type createProxmoxConsoleSessionResponse403 = {
+  data: ApiError
+  status: 403
+}
+
+export type createProxmoxConsoleSessionResponse404 = {
+  data: ApiError
+  status: 404
+}
+
+export type createProxmoxConsoleSessionResponse409 = {
+  data: ApiError
+  status: 409
+}
+
+export type createProxmoxConsoleSessionResponse502 = {
+  data: ApiError
+  status: 502
+}
+
+export type createProxmoxConsoleSessionResponseSuccess = (createProxmoxConsoleSessionResponse201) & {
+  headers: Headers;
+};
+export type createProxmoxConsoleSessionResponseError = (createProxmoxConsoleSessionResponse400 | createProxmoxConsoleSessionResponse403 | createProxmoxConsoleSessionResponse404 | createProxmoxConsoleSessionResponse409 | createProxmoxConsoleSessionResponse502) & {
+  headers: Headers;
+};
+
+export type createProxmoxConsoleSessionResponse = (createProxmoxConsoleSessionResponseSuccess | createProxmoxConsoleSessionResponseError)
+
+export const getCreateProxmoxConsoleSessionUrl = (accountId: string,) => {
+
+
+
+
+  return `/api/v1/proxmox/accounts/${accountId}/console-sessions`
+}
+
+/**
+ * # Errors
+ *
+ * Returns the public error envelope on refusal, an unknown or unconfirmed
+ * account, a token that lacks `VM.Console` (the refusal names the
+ * privilege), the session cap, or an unwired console relay.
+ * @summary Creates a console session for one Proxmox guest.
+ */
+export const createProxmoxConsoleSession = async (accountId: string,
+    createConsoleSessionRequest: CreateConsoleSessionRequest, options?: RequestInit): Promise<createProxmoxConsoleSessionResponse> => {
+
+    const getHeaders = (h?: NonNullable<RequestInit['headers']>): Record<string, string | readonly string[]> => {
+    if (!h) return {};
+    if (h instanceof Headers) return Object.fromEntries(h.entries());
+    if (Array.isArray(h)) return Object.fromEntries(h);
+    return h;
+  };
+const res = await fetch(getCreateProxmoxConsoleSessionUrl(accountId),
+  {
+    ...options,
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...getHeaders(options?.headers) },
+    body: JSON.stringify(createConsoleSessionRequest)
+  }
+)
+
+
+  const body = [204, 205, 304].includes(res.status) ? null : await res.text();
+
+  const data: createProxmoxConsoleSessionResponse['data'] = body ? JSON.parse(body) : {}
+  return { data, status: res.status, headers: res.headers } as createProxmoxConsoleSessionResponse
 }
 
 

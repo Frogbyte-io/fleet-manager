@@ -107,7 +107,7 @@ pub async fn browser_mutation_guard(request: Request, next: Next) -> Response {
 /// Whether an `Origin` value and a `Host` value name the same authority.
 /// Scheme-insensitive on purpose: a LAN controller is reached as
 /// `http://host:port` by browsers but the `Host` header carries no scheme.
-fn same_origin(origin: &str, host: Option<&str>) -> bool {
+pub(crate) fn same_origin(origin: &str, host: Option<&str>) -> bool {
     let Some(host) = host else {
         return false;
     };

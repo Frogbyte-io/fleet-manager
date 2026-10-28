@@ -133,6 +133,17 @@ impl OperationPort for OperationRepository {
         }
     }
 
+    async fn find_by_idempotency(&self, key: &str) -> Result<Option<Operation>, PortFailure> {
+        let row = sqlx::query("SELECT * FROM operations WHERE idempotency_key = ?1")
+            .bind(key)
+            .fetch_optional(&self.pool)
+            .await
+            .map_err(|error| PortFailure::Backend {
+                detail: format!("operation lookup failed: {error}"),
+            })?;
+        Ok(row.map(|row| row_to_operation(&row)))
+    }
+
     async fn get(&self, id: &str) -> Result<Operation, PortFailure> {
         let row = sqlx::query("SELECT * FROM operations WHERE id = ?1")
             .bind(id)

@@ -130,6 +130,15 @@ fn the_named_refusals_of_the_issue_are_refused() {
         (Permission::ProjectsGitWrite, Some("machine-1")),
         (Permission::ApplyExecute, Some("machine-1")),
         (Permission::MachineDelete, Some("machine-1")),
+        // brokered machine access (#493, ADR 0017): never a Lab credential
+        (Permission::MachineExec, Some("machine-1")),
+        (Permission::MachinePut, Some("machine-1")),
+        (Permission::MachineCollect, Some("machine-1")),
+        // the interactive terminal (#494): privileged, never delegated
+        (Permission::MachineTerminal, Some("machine-1")),
+        // persistent VM creation and guest config (#489): never a Lab credential
+        (Permission::MachineProvision, None),
+        (Permission::ProxmoxGuestConfig, None),
         // secrets
         (Permission::SecretRead, Some("secret-1")),
         (Permission::SecretWrite, None),
@@ -145,6 +154,7 @@ fn the_named_refusals_of_the_issue_are_refused() {
         (Permission::ProxmoxConfig, None),
         (Permission::ProxmoxOperate, None),
         (Permission::ProxmoxDestructive, None),
+        (Permission::ProxmoxConsole, None),
         (Permission::ExternalAccountRead, None),
         (Permission::ExternalAccountConfig, None),
         (Permission::DnsRead, None),

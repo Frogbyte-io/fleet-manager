@@ -1612,6 +1612,53 @@ async fn a_promoted_artifact_vmid_is_never_reserved() {
 }
 
 #[tokio::test]
+async fn a_vmid_held_by_a_persistent_marker_is_never_reserved() {
+    use fleet_application::persistent::{
+        PersistentGuest, PersistentGuestPort as _, PersistentState,
+    };
+    let harness = Harness::new().await;
+    let (lease_id, record) = harness.record().await;
+    // A failed or hand-removed persistent creation left its marker on a
+    // VMID the cluster shows as free, so nextid offers it again.
+    const HELD: u32 = 9_150;
+    let markers = Arc::new(fleet_storage_sqlite::PersistentGuestRepository::new(
+        harness.pool.clone(),
+    ));
+    markers
+        .reserve(&PersistentGuest {
+            account_id: harness.account_id.clone(),
+            vmid: HELD,
+            name: "build-box".to_owned(),
+            node: "pve-b".to_owned(),
+            image_version_id: "ver".to_owned(),
+            machine_id: None,
+            cloned: false,
+            state: PersistentState::Creating,
+            step: None,
+            operation_id: None,
+            created_at: 1,
+            updated_at: 1,
+        })
+        .await
+        .unwrap();
+    let pve = Pve::scripted(Vec::new(), CLONE_UPID, HELD);
+    let executor = harness
+        .executor(&pve, Some(TEMPLATE_VMID))
+        .with_persistent(markers);
+
+    let (state, error, stored) = harness
+        .run_executor(&pve, executor, &lease_id, &record.id)
+        .await;
+
+    assert_eq!(state, "failed");
+    let (reason, detail) = error.unwrap();
+    assert_eq!(reason, "conflict");
+    assert!(detail.contains("persistent machine marker"), "{detail}");
+    assert!(pve.clones().is_empty());
+    assert_eq!(stored.vmid, None);
+}
+
+#[tokio::test]
 async fn a_record_that_names_the_template_is_never_started() {
     let harness = Harness::new().await;
     let (lease_id, record) = harness.record().await;

@@ -73,10 +73,12 @@ Compose project name. Never share it between two controller instances.
    | Variable | Effect |
    |---|---|
    | `FLEET_DESIRED_FETCH_INTERVAL_SECONDS` | Periodic fetch of the Fleet Git source; `0` (default) is off, otherwise at least `30`. Needed for pushed Registry edits to appear without a manual fetch. |
+   | `FLEET_CONSOLE_IDLE_SECONDS` | How long a Proxmox VM screen may go without keyboard, pointer, or paste input before the controller closes it (FM-495); default `600`, accepted range `30` to `3600`. Watching without input counts as idle; an invalid value is ignored with a startup warning. |
    | `FLEET_REGISTRY_ENRICH_INTERVAL_SECONDS` | Domain RDAP/DNS sweep; default daily, `0` off, otherwise at least `900`. |
    | `FLEET_REGISTRY_EXPIRY_WINDOW_DAYS` | Domain expiry warning window; default `30`. |
    | `FLEET_ACTION_REQUEST_TTL_SECONDS` | How long an action request waits for approval; default `86400`. |
    | `FLEET_ACTION_POLICY` | Risk-class overrides, `action.id=auto\|approve\|deny,...`; default none. |
+   | `FLEET_PERSISTENT_AUTO_POLICY` | JSON bounds inside which agent requests for a persistent VM are approved by policy (see `docs/operations/persistent-machines.md`); default none, so a person approves every one. |
 
    SSH Fleet Git remotes verify host keys against `/var/lib/fleet/.ssh/known_hosts`
    on the data volume (the controller user's home). Pin the Git host's keys there
@@ -186,6 +188,14 @@ and verify readiness, stored records, secret-backed operations, and node
 reconnection. Do not attach a backup copy to a second active controller with
 the same enrolled nodes. Test recovery periodically; Coolify deployment
 rollback does not roll back SQLite migrations or the data volume.
+
+## Persistent machines
+
+This deployment is the reference controller for permanent, Fleet-managed VMs
+([operator guide](../docs/operations/persistent-machines.md)). Its database and
+master key are the machine records and the SSH keys Fleet generated for them, so
+the backup and recovery steps above apply before and after creating machines.
+A temporary controller (trusted LAN in `/tmp`) is unsuitable for them.
 
 ## Sources
 

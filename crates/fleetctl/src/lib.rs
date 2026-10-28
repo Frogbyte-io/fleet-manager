@@ -14,6 +14,9 @@ use std::fmt;
 
 pub mod accounts;
 pub mod dns;
+pub mod machine_access;
+pub mod machine_terminal;
+pub mod persistent;
 mod proxmox_tasks;
 pub mod registry;
 pub mod requests;
@@ -30,6 +33,7 @@ type RequestShape = (
 
 use serde_json::Value;
 
+mod proxmox_console;
 mod proxmox_privileges;
 
 /// The controller's system route, which `status --url` calls directly.
@@ -673,6 +677,8 @@ pub enum Command {
     Requests(requests::RequestsAction),
     /// DNS zones, records, and brokered record changes: `dns ...` (FM-1042).
     Dns(dns::DnsAction),
+    /// Agent SSH access to machines with Fleet-held keys: `machines exec|put|collect|files|file-get|endpoint-auth|ssh-key` (#493).
+    MachineAccess(machine_access::MachineAccessAction),
     /// List the configured Proxmox accounts.
     ProxmoxAccounts,
     /// Create a Proxmox account. The token secret is read from standard
@@ -714,6 +720,16 @@ pub enum Command {
     ProxmoxNodes {
         /// The account's identity.
         account_id: String,
+    },
+    /// Open a console session for one guest and print the browser URL
+    /// (FM-495).
+    ProxmoxConsole {
+        /// The account's identity.
+        account_id: String,
+        /// The node the guest runs on.
+        node: String,
+        /// The guest's VMID.
+        vmid: u32,
     },
     /// Report which Fleet capability tiers the account's token can perform.
     ProxmoxPrivileges {
@@ -1373,6 +1389,13 @@ pub fn parse(args: &[String]) -> Result<Invocation, CliError> {
         ["machines", "unlink-guest", id] => Command::MachinesUnlinkGuest {
             id: (*id).to_owned(),
         },
+        [
+            "machines",
+            verb @ ("exec" | "put" | "collect" | "terminal" | "files" | "file-get"
+            | "endpoint-auth" | "ssh-key" | "create" | "product-key" | "abandon"
+            | "persistent"),
+            rest @ ..,
+        ] => machine_access::parse(verb, rest, &mut output)?,
         ["machines", "onboard", verb, rest @ ..] => parse_onboard_command(verb, rest)?,
         ["skills", verb, machine_id, rest @ ..] => parse_skills_command(verb, machine_id, rest)?,
         ["frogenv", action, machine_id, rest @ ..] => {
@@ -1395,6 +1418,7 @@ pub fn parse(args: &[String]) -> Result<Invocation, CliError> {
         ["services", rest @ ..] => services::parse(rest, &mut output)?,
         ["proxmox", "tasks", rest @ ..] => proxmox_tasks::parse(rest, &mut output)?,
         ["proxmox", "privileges", rest @ ..] => proxmox_privileges::parse(rest, &mut output)?,
+        ["proxmox", "console", rest @ ..] => proxmox_console::parse(rest, &mut output)?,
         ["proxmox", verb, rest @ ..] => parse_proxmox_command(verb, rest)?,
         ["images", verb, rest @ ..] => parse_images_command(verb, rest)?,
         ["lab", verb, rest @ ..] => parse_lab_command(verb, rest)?,
@@ -3144,7 +3168,7 @@ fn parse_proxmox_command(verb: &str, rest: &[&str]) -> Result<Command, CliError>
         },
         "destroy" => {
             let [account_id, node, vmid, flags @ ..] = rest else {
-                return Err(CliError { message: "Usage: fleetctl proxmox destroy <account> <node> <vmid> [--purge] [--wait] [--timeout <s>]".to_owned() });
+                return Err(CliError { message: "Usage: fleetctl proxmox destroy <account> <node> <vmid> [--purge] [--confirm-persistent] [--wait] [--timeout <s>]".to_owned() });
             };
             let vmid = vmid
                 .parse::<u32>()
@@ -3155,12 +3179,14 @@ fn parse_proxmox_command(verb: &str, rest: &[&str]) -> Result<Command, CliError>
                 })?;
             let mut wait = false;
             let mut purge = false;
+            let mut confirm_persistent = false;
             let mut timeout = None;
             let mut flags = flags.iter().copied();
             while let Some(flag) = flags.next() {
                 match flag {
                     "--wait" => wait = true,
                     "--purge" => purge = true,
+                    "--confirm-persistent" => confirm_persistent = true,
                     "--timeout" => {
                         timeout = Some(
                             flags
@@ -3183,13 +3209,17 @@ fn parse_proxmox_command(verb: &str, rest: &[&str]) -> Result<Command, CliError>
                 account_id: (*account_id).to_owned(),
                 node: (*node).to_owned(),
                 vmid,
-                params: Some(serde_json::json!({"purge": purge}).to_string()),
+                params: Some(if confirm_persistent {
+                    serde_json::json!({"purge": purge, "confirmPersistent": true}).to_string()
+                } else {
+                    serde_json::json!({"purge": purge}).to_string()
+                }),
                 wait,
                 timeout,
             })
         }
         "snapshot" | "snapshot-revert" | "snapshot-delete" | "clone" | "template"
-        | "task-cancel" => {
+        | "task-cancel" | "config" => {
             let mut account_id = None;
             let mut node = None;
             let mut vmid = None;
@@ -3544,7 +3574,7 @@ fn reject_flag_as_id(words: &[&str]) -> Result<(), CliError> {
 
 fn usage() -> String {
     format!(
-        "Usage: fleetctl [--url <controller>] [--socket <path>] [--output json|text] <command>\n\nCommands:\n  status\n  system\n  events [--output json|text]\n  operations list [--limit <n>]\n  operations get <id>\n  operations cancel <id>\n  audit list [--actor <id>] [--action <id>] [--resource <id>] [--outcome <id>] [--from <epoch-ms>] [--to <epoch-ms>] [--cursor <seq>] [--limit <n>] [--output json|text]\n  machines list [--tag <tag>] [--group <group>] [--capability <ns:name>] [--status <state>] [--cursor <id>] [--limit <n>]\n  machines get <id>\n  machines link-guest <id> --account <account-id> --kind qemu|lxc --vmid <vmid>\n  machines unlink-guest <id>\n  machines onboard create --user <user> --host <host> [--port <n>] [--name <name>] [--description <text>] [--tag <tag>]... [--group <group>]... --auth agent|identity-file [--identity <path>]\n  machines onboard list [--limit <n>]\n  machines onboard get <draft-id>\n  machines onboard test <draft-id> [--wait] [--timeout <seconds>]\n  machines onboard discover <draft-id> [--wait] [--timeout <seconds>]\n  machines onboard confirm <draft-id> --fingerprint <SHA256:...>\n  machines onboard add <draft-id>\n  machines onboard cancel <draft-id>\n  projects list [--remote-prefix <p>] [--name-substring <s>] [--limit <n>]\n  projects get <id>\n  projects create --remote <url> --name <name> [--description <text>]\n  projects update <id> --name <name> [--description <text>]\n  projects delete <id>\n  projects discover <id> <machine-id> --endpoint <endpoint-id> --auth agent|identity-file [--identity <path>] [--wait] [--timeout <s>]\n  projects record <id> <machine-id> (the discovery result is read from stdin)\n  projects ready <id> <machine-id> --root <path> [--dry-run] --endpoint <endpoint-id> --auth agent|identity-file [--identity <path>] [--wait] [--timeout <s>]\n  projects clone <id> <machine-id> --root <path> [--branch <name>] --endpoint <endpoint-id> --auth agent|identity-file [--identity <path>] [--wait] [--timeout <s>]\n  projects pull <id> <machine-id> --root <path> --endpoint <endpoint-id> --auth agent|identity-file [--identity <path>] [--wait] [--timeout <s>]\n  projects status <id> <machine-id> --root <path> --endpoint <endpoint-id> --auth agent|identity-file [--identity <path>] [--wait] [--timeout <s>]\n  projects write-config <id> <machine-id> --root <path> --file <name> --endpoint <endpoint-id> --auth agent|identity-file [--identity <path>] [--wait] [--timeout <s>] (contents from stdin)\n  skills list <machine-id>\n  skills matrix\n  plan <machine-id>\n  apply-plan <machine-id> --plan-id <id> [--approve <order>:<kind>]... --endpoint <endpoint-id> --auth agent|identity-file [--identity <path>] [--wait] [--timeout <s>]\n  desired status\n  desired source [set <remote> [--credential <ref>]]\n  desired source credential (the Git token or private key is read from stdin; prints the reference)\n  desired history\n  desired settings [set [--auto-activate true|false] [--change-mode direct|pull-request]]\n  desired fetch <commit-sha> [--wait] [--timeout <s>]\n  desired activate|rollback <commit-sha> <content-digest> [--wait] [--timeout <s>]\n  desired resources [--kind <kind>] [--cursor <id>] [--limit <n>]\n{registry_usage}\n  skills catalog list|get <id>|create --content-json <json>|update <id> --content-json <json>|publish <id>|versions <id>|plan --request-json <json>|rollout --request-json <json>\n  skills probe <machine-id> --endpoint <endpoint-id> --auth agent|identity-file [--identity <path>] [--skills-root <path>] [--artifact-url <url> --artifact-sha256 <digest>] [--wait] [--timeout <s>]\n  skills deploy <machine-id> --skill <id> --agent <id>... --endpoint <endpoint-id> --auth agent|identity-file [--identity <path>] [--skills-root <path>] [--dry-run] [--wait] [--timeout <s>]\n  skills undeploy <machine-id> --skill <id> --agent <id>... --endpoint <endpoint-id> --auth agent|identity-file [--identity <path>] [--skills-root <path>] [--dry-run] [--wait] [--timeout <s>]\n  skills install <machine-id> --reference <ref> [--local|--git] [--name <name>] [--sync|--sync-preset <ref>] --endpoint <endpoint-id> --auth agent|identity-file [--wait] [--timeout <s>]\n  skills update|check <machine-id> [--reference <ref>] --endpoint <endpoint-id> --auth agent|identity-file [--wait] [--timeout <s>] (omitting --reference means --all)\n  skills remove <machine-id> --reference <ref>|--reference-batch <ref>... --yes [--dry-run] --endpoint <endpoint-id> --auth agent|identity-file [--wait] [--timeout <s>]\n  skills adopt <machine-id> --path <path> [--path-batch <path>]... [--source-url <url>] [--git-subpath <path>] [--dry-run] --endpoint <endpoint-id> --auth agent|identity-file\n  skills set-source <machine-id> --reference <ref> --source-url <url> [--path <subpath>] [--branch <branch>] [--force] --endpoint <endpoint-id> --auth agent|identity-file\n  skills preset-create <machine-id> --reference <name> [--description <text>] [--icon <id>] --endpoint <endpoint-id> --auth agent|identity-file\n  skills preset-update <machine-id> --reference <preset> (--name <name>|--description <text>|--icon <id>) --endpoint <endpoint-id> --auth agent|identity-file\n  skills preset-delete <machine-id> --reference <preset> --yes [--dry-run] --endpoint <endpoint-id> --auth agent|identity-file\n  skills preset-add-skill|preset-remove-skill <machine-id> --reference <preset> --path <skill> --endpoint <endpoint-id> --auth agent|identity-file\n  skills preset-deploy|preset-undeploy <machine-id> --reference <preset> [--agent <id>]... [--dry-run] --endpoint <endpoint-id> --auth agent|identity-file\n  frogenv status|setup|login|request|sync <machine-id> --endpoint <endpoint-id> --auth agent|identity-file [--identity <path>] [--wait] [--timeout <s>]\n  frogenv run <machine-id> --root <path> --endpoint <endpoint-id> --auth agent|identity-file [--identity <path>] [--wait] [--timeout <s>] -- <command> [args...]\n  mise inventory|status <machine-id> --endpoint <endpoint-id> --auth agent|identity-file [--identity <path>] [--wait] [--timeout <s>]\n  mise install <machine-id> --tool <name> --version <pin> --endpoint <endpoint-id> --auth agent|identity-file [--identity <path>] [--wait] [--timeout <s>]\n  mise exec <machine-id> --root <path> --endpoint <endpoint-id> --auth agent|identity-file [--wait] [--timeout <s>] -- <command> [args...]\n  apply <machine-id> --plan-id <id> --endpoint <endpoint-id> --auth agent|identity-file [--identity <path>] [--wait] [--timeout <s>] (the plan JSON is read from stdin)\n  tailnet status\n  tailnet configure --client-id <id> (the client secret is read from stdin)\n  tailnet clear\n  tailnet devices [--limit <n>]\n  tailnet import <node-id> --user <user> [--port <n>]\n  accounts list [--kind coolify|cloudflare] [--limit <n>] [--cursor <id>] [--output json|text]\n  accounts get <account-id>\n  accounts create --kind coolify|cloudflare --label <label> [--base-url <url>] [--account-id <cloudflare-account-id>] [--notes <text>] (the token is read from stdin)\n  accounts update <account-id> [--label <label>] [--base-url <url>] [--account-id <id>] [--notes <text>] [--rotate-token] (with --rotate-token the new token is read from stdin)\n  accounts delete <account-id>\n  accounts probe <account-id>\n  services list [--source coolify|docker] [--machine <machine-id>] [--query <text>] [--limit <n>] [--cursor <id>] [--output json|text]\n  services get <service-id> [--output json|text]\n  services start|stop|restart|redeploy <service-id> [--reason <text>] [--idempotency-key <key>] [--wait-approval[=<duration>]] (files a brokered Coolify action request; stop is approve, the rest run at once; redeploy is for applications; with --wait-approval the answer is {{outcome, request, result}}, exit 0 executed, 2 still_pending, 1 otherwise)\n  services templates [--output json|text] (the built-in site templates, each pinned by version and digest)\n  services deploy --template <id> --account <account-id> --server <uuid|name> --project <uuid|name> --environment <name> --domain <host> [--repo <https url> --branch <name>] [--name <name>] [--destination <uuid>] [--dns --dns-target <address|host> [--dns-type A|AAAA|CNAME] [--dns-account <id|label>]] [--reason <text>] [--idempotency-key <key>] [--wait-approval[=<duration>]] (files an approve-class request that creates the Coolify resource, sets the domain, and starts the first deployment; Git templates need a public https repository and a branch; after a success it prints the `fleetctl registry set` patch; --dns also files a Cloudflare DNS request for the domain)\n  services logs <service-id> [--deployment <uuid>] [--lines <n>] (a bounded, redacted deployment log tail; needs a Coolify token with read:sensitive and external_account.config)\n  services settings <service-id> [--output json|text] (environment variable names and flags, never values; an application's domains and health check)\n  services env list <service-id> [--output json|text]\n  services env set <service-id> (--stdin|--file <path>) [--key <name>] [--preview] [--buildtime|--no-buildtime] [--runtime|--no-runtime] [--multiline|--no-multiline] [--literal|--no-literal] [--shown-once|--no-shown-once] [--redeploy] [--reason <text>] [--idempotency-key <key>] [--wait-approval[=<duration>]] (values are read from stdin or a file, never from arguments: with --key the whole input is that variable's value, otherwise KEY=VALUE lines; files an approve-class request that shows names and flags only)\n  services env unset <service-id> <name>... [--preview] [--redeploy] [--reason <text>] [--idempotency-key <key>] [--wait-approval[=<duration>]]\n  services domains set <service-id> (<url>...|--clear) [--redeploy] [--reason <text>] [--idempotency-key <key>] [--wait-approval[=<duration>]] (applications only; files a request with a before/after preview)\n  services health set <service-id> [--enabled|--disabled] [--path <p>] [--port <n>] [--host <h>] [--method GET|HEAD|POST|OPTIONS] [--scheme http|https] [--return-code <n>] [--response-text <t>] [--interval <s>] [--timeout <s>] [--retries <n>] [--start-period <s>] [--redeploy] [--reason <text>] [--idempotency-key <key>] [--wait-approval[=<duration>]] (applications only)\n  requests list [--state pending|approved|denied|expired|executing|succeeded|failed] [--limit <n>] [--output json|text]\n  requests get <request-id> [--wait[=<duration>]] [--output json|text] (a wait is 1s to 1h, default 5m; the answer is {{outcome: executed|denied|expired|failed|still_pending, request}}; exit 0 executed, 2 still_pending, 1 otherwise)\n  requests approve <request-id>\n  requests deny <request-id> [--note <text>]\n  dns zones [--account <id|label>] [--output json|text]\n  dns records <fqdn> [--type A|AAAA|CNAME|TXT|MX|...] [--account <id|label>] [--output json|text]\n  dns observations <fqdn> [--output json|text] (the records last read through Cloudflare, without calling it)\n  dns set <fqdn> --type A|AAAA|CNAME|TXT|MX --content <value> [--ttl <1|60..86400>] [--proxied|--no-proxied] [--priority <n>] [--replaces <existing-value>|--add] [--account <id|label>] [--reason <text>] [--idempotency-key <key>] [--wait-approval[=<duration>]] (files an action request with a preview; the default risk class is approve; with --wait-approval the answer is {{outcome, request, result}}, exit 0 executed, 2 still_pending, 1 otherwise)\n  dns delete <fqdn> --type <type> --content <value> [--priority <n>] [--account <id|label>] [--reason <text>] [--idempotency-key <key>] [--wait-approval[=<duration>]]\n  proxmox accounts\n  proxmox create --name <name> --host <host> [--port <n>] --token-id <id> (the token secret is read from stdin)\n  proxmox delete <account-id>\n  proxmox observe <account-id>\n  proxmox confirm <account-id> --fingerprint <SHA256>\n  proxmox discover <account-id>\n  proxmox nodes <account-id>\n  proxmox privileges <account-id> [--output json|text]\n  proxmox guests <account-id>\n  proxmox tasks <account-id> [--node <node>] [--vmid <vmid>] [--status running|ok|error|unknown] [--cursor <upid>] [--limit <n>] [--output json|text]\n  proxmox observe-guest <account-id> <vmid> --machine <machine-id>\n  proxmox start|stop|shutdown|reboot --account <account-id> --node <node> --vmid <vmid> [--wait] [--timeout <s>]\n  proxmox destroy <account> <node> <vmid> [--purge] [--wait] [--timeout <s>]\n  proxmox snapshot|snapshot-revert|snapshot-delete|clone|template|task-cancel --account <account-id> --node <node> --vmid <vmid> [--wait] [--timeout <s>] (the action parameters are read as JSON from stdin)\n  images builds [--version <id>] [--limit <n>] [--cursor <id>]\n  images build-show <id>\n  images recipes\n  images create --name <name> --description <text> --node <node> --storage-pool <pool> --source iso|clone (the recipe content is read as JSON from stdin)\n  images publish <recipe-id> [--allow-insecure-tls]\n  images versions <recipe-id>\n  images secret set <name> (the secret value is read from stdin, minus one trailing newline; writes images/<name>, never echoed)\n  images secret list\n  images secret rm <name>\n  images addresses\n  images address-clear <ipv4>\n  images build <version-id> [--account <account-id>] [--wait] [--timeout <s>]\n  images version <version-id>\n  images promote <version-id>\n  lab templates\n  lab create <template-version-id> --purpose <text> [--project <id>] [--account <id>] [--idempotency-key <key>] [--wait] [--timeout <s>]\n  lab status <lease-id>\n  lab exec <lease-id> [--session service|interactive] [--timeout <s>] [--wait] [--script] -- <command> [args...] (with --script: exactly one word, the script text, sent untouched)\n  lab exec <lease-id> --detach [--session service|interactive] [--timeout <s>] [--idempotency-key <key>] [--script] -- <command> [args...] (with --script: exactly one word)\n  lab exec-status <handle> [--wait] [--timeout <s>]\n  lab destroy <lease-id> [--keep] [--wait] [--timeout <s>]\n  lab cleanup-retry <lease-id> [--wait] [--timeout <s>]\n  lab pool list\n  lab pool show <pool-id>\n  lab pool create --template-version <version-id> --account <account-id> --baseline <snapshot> --size <n>\n  lab pool delete <pool-id>\n  lab pool fill <pool-id> --vmid <vmid>... [--wait] [--timeout <s>]\n  lab pool drain <pool-id> --vmid <vmid>...|--all\n  lab template-create --name <name> --description <text> --image-version <version-id> --cores <n> --memory <mib> --disk <gib> --probe guest_agent|ssh_exec|project_ready --readiness-deadline <s> --ttl <s> --cleanup destroy|revert|keep [--audio ich9-intel-hda|intel-hda|AC97] [--guest-os linux|windows] [--ssh-user <account>] [--interactive-user <local-account>]\n  lab publish <template-id>\n  lab provision <template-version-id>\n  lab provision-lease <lease-id> [--account <account-id>]\n  lab artifacts [--lease <lease-id>] [--project <id>] [--cursor <id>] [--limit <n>]\n  lab collect <lease-id> <absolute-guest-path>... [--wait] [--timeout <s>]\n  lab put <lease-id> <local-path> <absolute-guest-path> [--overwrite] [--wait] [--timeout <s>]\n  lab artifact-get <artifact-id> --out <file>\n  lab provisions\n  lab leases [--project <id>] [--purpose <text>] [--purpose-prefix <text>] [--state <state>[,<state>]]... [--owner <id>]\n  lab lease <template-version-id> --purpose <text> [--project <id>] [--idempotency-key <key>]\n  lab release <lease-id> [--keep]\n  lab extend <lease-id> --seconds <n>\n  lab sweep\n  credentials issue --owner <label> --ttl <seconds> [--template <id>]... [--version <id>]... [--label <text>] (the token is printed once; use it as FLEET_TOKEN)\n  credentials list\n  credentials revoke <credential-id>\n  images version <version-id>\n  images promote <version-id>\n  machines install-node <machine-id> --endpoint <endpoint-id> --auth agent|identity-file [--identity <path>] [--artifact-url <url> --artifact-sha256 <digest>] [--controller-url <url>] [--install-timeout <s>] [--connect-timeout <s>] [--wait] [--timeout <s>]\n\nSet FLEET_TOKEN to a delegated credential token to act as that credential; the token is never printed.\n\n`status` prefers the node's local socket (default {DEFAULT_SOCKET}); `--url` selects the controller endpoint for other commands. `events` uses the selected listener's configured caller resolver; in identity mode, set `--url` to the authenticated Tailscale Serve endpoint. The default controller URL is {DEFAULT_URL}.",
+        "Usage: fleetctl [--url <controller>] [--socket <path>] [--output json|text] <command>\n\nCommands:\n  status\n  system\n  events [--output json|text]\n  operations list [--limit <n>]\n  operations get <id>\n  operations cancel <id>\n  audit list [--actor <id>] [--action <id>] [--resource <id>] [--outcome <id>] [--from <epoch-ms>] [--to <epoch-ms>] [--cursor <seq>] [--limit <n>] [--output json|text]\n  machines list [--tag <tag>] [--group <group>] [--capability <ns:name>] [--status <state>] [--cursor <id>] [--limit <n>]\n  machines get <id>\n  machines link-guest <id> --account <account-id> --kind qemu|lxc --vmid <vmid>\n  machines unlink-guest <id>\n  machines onboard create --user <user> --host <host> [--port <n>] [--name <name>] [--description <text>] [--tag <tag>]... [--group <group>]... --auth agent|identity-file [--identity <path>]\n  machines onboard list [--limit <n>]\n  machines onboard get <draft-id>\n  machines onboard test <draft-id> [--wait] [--timeout <seconds>]\n  machines onboard discover <draft-id> [--wait] [--timeout <seconds>]\n  machines onboard confirm <draft-id> --fingerprint <SHA256:...>\n  machines onboard add <draft-id>\n  machines onboard cancel <draft-id>\n  projects list [--remote-prefix <p>] [--name-substring <s>] [--limit <n>]\n  projects get <id>\n  projects create --remote <url> --name <name> [--description <text>]\n  projects update <id> --name <name> [--description <text>]\n  projects delete <id>\n  projects discover <id> <machine-id> --endpoint <endpoint-id> --auth agent|identity-file [--identity <path>] [--wait] [--timeout <s>]\n  projects record <id> <machine-id> (the discovery result is read from stdin)\n  projects ready <id> <machine-id> --root <path> [--dry-run] --endpoint <endpoint-id> --auth agent|identity-file [--identity <path>] [--wait] [--timeout <s>]\n  projects clone <id> <machine-id> --root <path> [--branch <name>] --endpoint <endpoint-id> --auth agent|identity-file [--identity <path>] [--wait] [--timeout <s>]\n  projects pull <id> <machine-id> --root <path> --endpoint <endpoint-id> --auth agent|identity-file [--identity <path>] [--wait] [--timeout <s>]\n  projects status <id> <machine-id> --root <path> --endpoint <endpoint-id> --auth agent|identity-file [--identity <path>] [--wait] [--timeout <s>]\n  projects write-config <id> <machine-id> --root <path> --file <name> --endpoint <endpoint-id> --auth agent|identity-file [--identity <path>] [--wait] [--timeout <s>] (contents from stdin)\n  skills list <machine-id>\n  skills matrix\n  plan <machine-id>\n  apply-plan <machine-id> --plan-id <id> [--approve <order>:<kind>]... --endpoint <endpoint-id> --auth agent|identity-file [--identity <path>] [--wait] [--timeout <s>]\n  desired status\n  desired source [set <remote> [--credential <ref>]]\n  desired source credential (the Git token or private key is read from stdin; prints the reference)\n  desired history\n  desired settings [set [--auto-activate true|false] [--change-mode direct|pull-request]]\n  desired fetch <commit-sha> [--wait] [--timeout <s>]\n  desired activate|rollback <commit-sha> <content-digest> [--wait] [--timeout <s>]\n  desired resources [--kind <kind>] [--cursor <id>] [--limit <n>]\n{registry_usage}\n  skills catalog list|get <id>|create --content-json <json>|update <id> --content-json <json>|publish <id>|versions <id>|plan --request-json <json>|rollout --request-json <json>\n  skills probe <machine-id> --endpoint <endpoint-id> --auth agent|identity-file [--identity <path>] [--skills-root <path>] [--artifact-url <url> --artifact-sha256 <digest>] [--wait] [--timeout <s>]\n  skills deploy <machine-id> --skill <id> --agent <id>... --endpoint <endpoint-id> --auth agent|identity-file [--identity <path>] [--skills-root <path>] [--dry-run] [--wait] [--timeout <s>]\n  skills undeploy <machine-id> --skill <id> --agent <id>... --endpoint <endpoint-id> --auth agent|identity-file [--identity <path>] [--skills-root <path>] [--dry-run] [--wait] [--timeout <s>]\n  skills install <machine-id> --reference <ref> [--local|--git] [--name <name>] [--sync|--sync-preset <ref>] --endpoint <endpoint-id> --auth agent|identity-file [--wait] [--timeout <s>]\n  skills update|check <machine-id> [--reference <ref>] --endpoint <endpoint-id> --auth agent|identity-file [--wait] [--timeout <s>] (omitting --reference means --all)\n  skills remove <machine-id> --reference <ref>|--reference-batch <ref>... --yes [--dry-run] --endpoint <endpoint-id> --auth agent|identity-file [--wait] [--timeout <s>]\n  skills adopt <machine-id> --path <path> [--path-batch <path>]... [--source-url <url>] [--git-subpath <path>] [--dry-run] --endpoint <endpoint-id> --auth agent|identity-file\n  skills set-source <machine-id> --reference <ref> --source-url <url> [--path <subpath>] [--branch <branch>] [--force] --endpoint <endpoint-id> --auth agent|identity-file\n  skills preset-create <machine-id> --reference <name> [--description <text>] [--icon <id>] --endpoint <endpoint-id> --auth agent|identity-file\n  skills preset-update <machine-id> --reference <preset> (--name <name>|--description <text>|--icon <id>) --endpoint <endpoint-id> --auth agent|identity-file\n  skills preset-delete <machine-id> --reference <preset> --yes [--dry-run] --endpoint <endpoint-id> --auth agent|identity-file\n  skills preset-add-skill|preset-remove-skill <machine-id> --reference <preset> --path <skill> --endpoint <endpoint-id> --auth agent|identity-file\n  skills preset-deploy|preset-undeploy <machine-id> --reference <preset> [--agent <id>]... [--dry-run] --endpoint <endpoint-id> --auth agent|identity-file\n  frogenv status|setup|login|request|sync <machine-id> --endpoint <endpoint-id> --auth agent|identity-file [--identity <path>] [--wait] [--timeout <s>]\n  frogenv run <machine-id> --root <path> --endpoint <endpoint-id> --auth agent|identity-file [--identity <path>] [--wait] [--timeout <s>] -- <command> [args...]\n  mise inventory|status <machine-id> --endpoint <endpoint-id> --auth agent|identity-file [--identity <path>] [--wait] [--timeout <s>]\n  mise install <machine-id> --tool <name> --version <pin> --endpoint <endpoint-id> --auth agent|identity-file [--identity <path>] [--wait] [--timeout <s>]\n  mise exec <machine-id> --root <path> --endpoint <endpoint-id> --auth agent|identity-file [--wait] [--timeout <s>] -- <command> [args...]\n  apply <machine-id> --plan-id <id> --endpoint <endpoint-id> --auth agent|identity-file [--identity <path>] [--wait] [--timeout <s>] (the plan JSON is read from stdin)\n  tailnet status\n  tailnet configure --client-id <id> (the client secret is read from stdin)\n  tailnet clear\n  tailnet devices [--limit <n>]\n  tailnet import <node-id> --user <user> [--port <n>]\n  accounts list [--kind coolify|cloudflare] [--limit <n>] [--cursor <id>] [--output json|text]\n  accounts get <account-id>\n  accounts create --kind coolify|cloudflare --label <label> [--base-url <url>] [--account-id <cloudflare-account-id>] [--notes <text>] (the token is read from stdin)\n  accounts update <account-id> [--label <label>] [--base-url <url>] [--account-id <id>] [--notes <text>] [--rotate-token] (with --rotate-token the new token is read from stdin)\n  accounts delete <account-id>\n  accounts probe <account-id>\n  services list [--source coolify|docker] [--machine <machine-id>] [--query <text>] [--limit <n>] [--cursor <id>] [--output json|text]\n  services get <service-id> [--output json|text]\n  services start|stop|restart|redeploy <service-id> [--reason <text>] [--idempotency-key <key>] [--wait-approval[=<duration>]] (files a brokered Coolify action request; stop is approve, the rest run at once; redeploy is for applications; with --wait-approval the answer is {{outcome, request, result}}, exit 0 executed, 2 still_pending, 1 otherwise)\n  services templates [--output json|text] (the built-in site templates, each pinned by version and digest)\n  services deploy --template <id> --account <account-id> --server <uuid|name> --project <uuid|name> --environment <name> --domain <host> [--repo <https url> --branch <name>] [--name <name>] [--destination <uuid>] [--dns --dns-target <address|host> [--dns-type A|AAAA|CNAME] [--dns-account <id|label>]] [--reason <text>] [--idempotency-key <key>] [--wait-approval[=<duration>]] (files an approve-class request that creates the Coolify resource, sets the domain, and starts the first deployment; Git templates need a public https repository and a branch; after a success it prints the `fleetctl registry set` patch; --dns also files a Cloudflare DNS request for the domain)\n  services logs <service-id> [--deployment <uuid>] [--lines <n>] (a bounded, redacted deployment log tail; needs a Coolify token with read:sensitive and external_account.config)\n  services settings <service-id> [--output json|text] (environment variable names and flags, never values; an application's domains and health check)\n  services env list <service-id> [--output json|text]\n  services env set <service-id> (--stdin|--file <path>) [--key <name>] [--preview] [--buildtime|--no-buildtime] [--runtime|--no-runtime] [--multiline|--no-multiline] [--literal|--no-literal] [--shown-once|--no-shown-once] [--redeploy] [--reason <text>] [--idempotency-key <key>] [--wait-approval[=<duration>]] (values are read from stdin or a file, never from arguments: with --key the whole input is that variable's value, otherwise KEY=VALUE lines; files an approve-class request that shows names and flags only)\n  services env unset <service-id> <name>... [--preview] [--redeploy] [--reason <text>] [--idempotency-key <key>] [--wait-approval[=<duration>]]\n  services domains set <service-id> (<url>...|--clear) [--redeploy] [--reason <text>] [--idempotency-key <key>] [--wait-approval[=<duration>]] (applications only; files a request with a before/after preview)\n  services health set <service-id> [--enabled|--disabled] [--path <p>] [--port <n>] [--host <h>] [--method GET|HEAD|POST|OPTIONS] [--scheme http|https] [--return-code <n>] [--response-text <t>] [--interval <s>] [--timeout <s>] [--retries <n>] [--start-period <s>] [--redeploy] [--reason <text>] [--idempotency-key <key>] [--wait-approval[=<duration>]] (applications only)\n  requests list [--state pending|approved|denied|expired|executing|succeeded|failed] [--limit <n>] [--output json|text]\n  requests get <request-id> [--wait[=<duration>]] [--output json|text] (a wait is 1s to 1h, default 5m; the answer is {{outcome: executed|denied|expired|failed|still_pending, request}}; exit 0 executed, 2 still_pending, 1 otherwise)\n  requests approve <request-id>\n  requests deny <request-id> [--note <text>]\n  dns zones [--account <id|label>] [--output json|text]\n  dns records <fqdn> [--type A|AAAA|CNAME|TXT|MX|...] [--account <id|label>] [--output json|text]\n  dns observations <fqdn> [--output json|text] (the records last read through Cloudflare, without calling it)\n  dns set <fqdn> --type A|AAAA|CNAME|TXT|MX --content <value> [--ttl <1|60..86400>] [--proxied|--no-proxied] [--priority <n>] [--replaces <existing-value>|--add] [--account <id|label>] [--reason <text>] [--idempotency-key <key>] [--wait-approval[=<duration>]] (files an action request with a preview; the default risk class is approve; with --wait-approval the answer is {{outcome, request, result}}, exit 0 executed, 2 still_pending, 1 otherwise)\n  dns delete <fqdn> --type <type> --content <value> [--priority <n>] [--account <id|label>] [--reason <text>] [--idempotency-key <key>] [--wait-approval[=<duration>]]\n  proxmox accounts\n  proxmox create --name <name> --host <host> [--port <n>] --token-id <id> (the token secret is read from stdin)\n  proxmox delete <account-id>\n  proxmox observe <account-id>\n  proxmox confirm <account-id> --fingerprint <SHA256>\n  proxmox discover <account-id>\n  proxmox nodes <account-id>\n  proxmox privileges <account-id> [--output json|text]\n  proxmox console --account <account-id> --node <node> --vmid <vmid> [--output json|text] (opens a console session for a QEMU guest and prints a one-time browser URL for its screen; needs proxmox.console)\n  proxmox guests <account-id>\n  proxmox tasks <account-id> [--node <node>] [--vmid <vmid>] [--status running|ok|error|unknown] [--cursor <upid>] [--limit <n>] [--output json|text]\n  proxmox observe-guest <account-id> <vmid> --machine <machine-id>\n  proxmox start|stop|shutdown|reboot --account <account-id> --node <node> --vmid <vmid> [--wait] [--timeout <s>]\n  proxmox destroy <account> <node> <vmid> [--purge] [--confirm-persistent] [--wait] [--timeout <s>]\n  proxmox snapshot|snapshot-revert|snapshot-delete|clone|template|task-cancel|config --account <account-id> --node <node> --vmid <vmid> [--wait] [--timeout <s>] (the action parameters are read as JSON from stdin)\n  images builds [--version <id>] [--limit <n>] [--cursor <id>]\n  images build-show <id>\n  images recipes\n  images create --name <name> --description <text> --node <node> --storage-pool <pool> --source iso|clone (the recipe content is read as JSON from stdin)\n  images publish <recipe-id> [--allow-insecure-tls]\n  images versions <recipe-id>\n  images secret set <name> (the secret value is read from stdin, minus one trailing newline; writes images/<name>, never echoed)\n  images secret list\n  images secret rm <name>\n  images addresses\n  images address-clear <ipv4>\n  images build <version-id> [--account <account-id>] [--wait] [--timeout <s>]\n  images version <version-id>\n  images promote <version-id>\n  lab templates\n  lab create <template-version-id> --purpose <text> [--project <id>] [--account <id>] [--idempotency-key <key>] [--wait] [--timeout <s>]\n  lab status <lease-id>\n  lab exec <lease-id> [--session service|interactive] [--timeout <s>] [--wait] [--script] -- <command> [args...] (with --script: exactly one word, the script text, sent untouched)\n  lab exec <lease-id> --detach [--session service|interactive] [--timeout <s>] [--idempotency-key <key>] [--script] -- <command> [args...] (with --script: exactly one word)\n  lab exec-status <handle> [--wait] [--timeout <s>]\n  lab destroy <lease-id> [--keep] [--wait] [--timeout <s>]\n  lab cleanup-retry <lease-id> [--wait] [--timeout <s>]\n  lab pool list\n  lab pool show <pool-id>\n  lab pool create --template-version <version-id> --account <account-id> --baseline <snapshot> --size <n>\n  lab pool delete <pool-id>\n  lab pool fill <pool-id> --vmid <vmid>... [--wait] [--timeout <s>]\n  lab pool drain <pool-id> --vmid <vmid>...|--all\n  lab template-create --name <name> --description <text> --image-version <version-id> --cores <n> --memory <mib> --disk <gib> --probe guest_agent|ssh_exec|project_ready --readiness-deadline <s> --ttl <s> --cleanup destroy|revert|keep [--audio ich9-intel-hda|intel-hda|AC97] [--guest-os linux|windows] [--ssh-user <account>] [--interactive-user <local-account>]\n  lab publish <template-id>\n  lab provision <template-version-id>\n  lab provision-lease <lease-id> [--account <account-id>]\n  lab artifacts [--lease <lease-id>] [--project <id>] [--cursor <id>] [--limit <n>]\n  lab collect <lease-id> <absolute-guest-path>... [--wait] [--timeout <s>]\n  lab put <lease-id> <local-path> <absolute-guest-path> [--overwrite] [--wait] [--timeout <s>]\n  lab artifact-get <artifact-id> --out <file>\n  lab provisions\n  lab leases [--project <id>] [--purpose <text>] [--purpose-prefix <text>] [--state <state>[,<state>]]... [--owner <id>]\n  lab lease <template-version-id> --purpose <text> [--project <id>] [--idempotency-key <key>]\n  lab release <lease-id> [--keep]\n  lab extend <lease-id> --seconds <n>\n  lab sweep\n  credentials issue --owner <label> --ttl <seconds> [--template <id>]... [--version <id>]... [--label <text>] (the token is printed once; use it as FLEET_TOKEN)\n  credentials list\n  credentials revoke <credential-id>\n  images version <version-id>\n  images promote <version-id>\n  machines exec <machine-id> [--endpoint <endpoint-id>] [--auth agent|identity-file|secret [--identity <path>] [--credential <ref>]] [--os linux|windows] [--timeout <s>] [--idempotency-key <key>] [--no-wait] [--script] -- <command> [args...] (runs on the machine through the controller with the endpoint's stored credential; waits and exits with the command's exit code; with --script: exactly one word, the script text, sent untouched)\n  machines put <machine-id> <local-path> <absolute-guest-path> [--overwrite] [--endpoint <endpoint-id>] [--auth ...] [--os linux|windows] [--no-wait] [--timeout <s>]\n  machines collect <machine-id> <absolute-guest-path>... [--endpoint <endpoint-id>] [--auth ...] [--os linux|windows] [--no-wait] [--timeout <s>]\n  machines terminal <machine-id> [--endpoint <endpoint-id>] [--auth agent|identity-file|secret [--identity <path>] [--credential <ref>]] (an interactive shell on the machine in this terminal, through the controller with the endpoint's stored credential; needs machines.terminal; the shell's exit status is the exit code)\n  machines files <machine-id> [--limit <n>]\n  machines file-get <file-id> --out <file>\n  machines endpoint-auth get|clear <machine-id> <endpoint-id>\n  machines endpoint-auth set <machine-id> <endpoint-id> --auth agent|identity-file|secret [--identity <path>] [--credential <ref>]\n  machines ssh-key store (the SSH private key is read from stdin; prints the reference to use as --credential)\n  machines product-key store (the Windows product key is read from stdin; prints the reference to use as --activate-key)\n  machines persistent list (the persistent guests Fleet keeps: created by Fleet or registered)\n  machines persistent register --account <account-id> --vmid <n> [--machine <machine-id>] [--yes] (shows the review and asks for confirmation unless --yes; keeps an existing VM as persistent: reviewed, audited, changes nothing on the guest; Lab never selects it; the VM must not be a template, an image artifact, a Lab clone or a pool member, and must carry no fixture or Lab tag)\n  machines persistent unregister --account <account-id> --vmid <n> [--yes] (drops the marker of a registered VM; the VM is left as it is)\n  machines abandon --account <account-id> --vmid <n> (drops the persistent marker of a creation that never completed; a created machine is destroyed instead)\n  machines create --account <account-id> (--image-version <version-id> | --iso <storage:iso/file.iso> [--answer-iso <storage:iso/file.iso>] [--efi] [--tpm]) --name <name> [--vmid <n>] [--node <node>] [--storage <storage>] [--cores <n>] [--memory <mib>] [--disk <gib>] [--bridge <bridge>] [--audio <device>] [--tag <tag>]... [--description <text>] [--no-onboot] [--no-protection] [--os linux|windows] [--bootstrap-user <user>] [--bootstrap-port <n>] [--bootstrap-auth agent|identity-file|secret [--bootstrap-identity <path>] [--bootstrap-credential <ref>]] [--pin-fingerprint <SHA256:...>] [--credential generate|<ref> | --public-key <line>] [--login-user <user>] [--admin-password none|store|discard] [--activate-key <product-key-ref> | --activate-kms <host>] [--timeout <s>] [--review-only] [--no-wait] [--idempotency-key <key>] [--request --purpose <why> [--wait-approval[=<duration>]]] (a permanent, Fleet-managed VM from a promoted image (clones it) or from an ISO with an unattended install (Linux; needs --node, --storage and --disk; the answer media must power the guest off when it is done; creates it with the media attached, waits for the install, detaches the media), applies the reviewed settings, starts it, registers and links the machine, gives it its own SSH key and removes the image's key; waits and prints the result; with --request a caller that may ask but not provision files an action request instead, a person approves it (or operator-set bounds do), the same executor then creates the machine and records you as its owner and the purpose; with --wait-approval the answer is {{outcome, request, result}}, exit 0 executed, 2 still_pending, 1 otherwise)\n  machines install-node <machine-id> --endpoint <endpoint-id> --auth agent|identity-file [--identity <path>] [--artifact-url <url> --artifact-sha256 <digest>] [--controller-url <url>] [--install-timeout <s>] [--connect-timeout <s>] [--wait] [--timeout <s>]\n\nSet FLEET_TOKEN to a delegated credential token to act as that credential; the token is never printed.\n\n`status` prefers the node's local socket (default {DEFAULT_SOCKET}); `--url` selects the controller endpoint for other commands. `events` uses the selected listener's configured caller resolver; in identity mode, set `--url` to the authenticated Tailscale Serve endpoint. The default controller URL is {DEFAULT_URL}.",
         registry_usage = registry::usage_block()
     )
 }
@@ -3832,7 +3862,9 @@ pub fn run(invocation: &Invocation) -> Result<String, CliError> {
 }
 
 /// [`run`], with the process exit code the result implies: `lab exec
-/// --wait` mirrors the remote command's exit code, and `lab create --wait`
+/// --wait` mirrors the remote command's exit code (a guest-side refusal, such
+/// as an interactive session that is not logged on, has no command exit code
+/// and exits 1; its `refusalCode` is in the JSON, #490), and `lab create --wait`
 /// and `lab destroy --wait` fail when the lease did not reach the state
 /// they waited for, as does `lab cleanup-retry --wait` when its attempt did
 /// not release the lease, and `lab collect --wait` fails unless every path
@@ -3906,6 +3938,12 @@ pub fn run_with_exit(invocation: &Invocation) -> Result<(String, u8), CliError> 
         return Ok((render(invocation, &body), 0));
     }
 
+    // Agent SSH access to machines (#493): the commands follow their own
+    // operations and stream their own files.
+    if let Command::MachineAccess(action) = &invocation.command {
+        return machine_access::run(invocation, action);
+    }
+
     let correlation_id = uuid::Uuid::now_v7().to_string();
     let client = http_client()?;
 
@@ -3944,6 +3982,11 @@ pub fn run_with_exit(invocation: &Invocation) -> Result<(String, u8), CliError> 
     let body = follow_review(&client, invocation, body)?;
     let body = follow_install_wait(&client, invocation, body)?;
     let body = follow_checkout_wait(&client, invocation, body)?;
+    let body = if matches!(invocation.command, Command::ProxmoxConsole { .. }) {
+        proxmox_console::decorate(&invocation.url, body)
+    } else {
+        body
+    };
     let body = follow_lab(&client, invocation, body, lab_account.as_deref(), keyed)?;
     if let Command::Services(action) = &invocation.command
         && let Some(wait) = action.filing_wait()
@@ -4963,6 +5006,25 @@ mod event_output_tests {
         }
     }
 
+    /// A guest refusal (#490) is a failed operation with no command exit
+    /// code, so `lab exec --wait` exits 1 for it, not with the refusal code
+    /// (before #490 a refusal of 77 exited 77, like a command that exits 77).
+    #[test]
+    fn a_guest_refusal_is_exit_one_for_lab_exec_wait_not_its_code() {
+        let args: Vec<String> = ["lab", "exec", "lease-1", "--wait", "--", "x"]
+            .map(str::to_owned)
+            .into();
+        let exec = parse(&args).unwrap();
+        let refused = serde_json::json!({
+            "reason": "guest_refused", "refusalCode": 77, "detail": "no session"
+        });
+        assert_eq!(lab_exit_code(&exec.command, &refused), 1);
+        assert_eq!(
+            lab_exit_code(&exec.command, &serde_json::json!({"exitCode": 77})),
+            77
+        );
+    }
+
     #[test]
     fn lab_cleanup_retry_posts_the_rearm_route() {
         let args = ["lab", "cleanup-retry", "lease-1"]
@@ -5954,9 +6016,11 @@ fn render(invocation: &Invocation, payload: &Value) -> String {
             Command::Registry(_) => registry::render(payload),
             Command::Requests(_) => requests::render(payload),
             Command::Dns(_) => dns::render(payload),
+            Command::MachineAccess(_) => machine_access::render(payload),
             Command::Services(ref action) => services::render_for(action, payload),
             Command::ProxmoxTasks { .. } => proxmox_tasks::render(payload),
             Command::ProxmoxPrivileges { .. } => proxmox_privileges::render(payload),
+            Command::ProxmoxConsole { .. } => proxmox_console::render(payload),
             Command::LabArtifacts { .. } => render_lab_artifacts(payload),
             Command::CredentialsIssue { .. }
             | Command::CredentialsList
@@ -6970,6 +7034,7 @@ fn request_for(command: &Command) -> Result<RequestShape, CliError> {
         ),
         Command::Requests(action) => requests::request(action),
         Command::Dns(action) => dns::request(action),
+        Command::MachineAccess(action) => machine_access::request(action)?,
         Command::Services(action) => services::request(action)?,
         Command::Accounts(action) => {
             accounts::request(action, || read_stdin_line("the provider API token"))?
@@ -7035,6 +7100,16 @@ fn request_for(command: &Command) -> Result<RequestShape, CliError> {
             proxmox_privileges::path(account_id),
             Vec::new(),
             None,
+        ),
+        Command::ProxmoxConsole {
+            account_id,
+            node,
+            vmid,
+        } => (
+            reqwest::Method::POST,
+            proxmox_console::path(account_id),
+            Vec::new(),
+            Some(proxmox_console::body(node, *vmid)),
         ),
         Command::ProxmoxGuests { account_id } => (
             reqwest::Method::GET,
@@ -8105,12 +8180,31 @@ fn download_artifact(
     artifact_id: &str,
     out: &str,
 ) -> Result<Value, CliError> {
+    download_from(
+        invocation,
+        &format!("/api/v1/lab/artifacts/{artifact_id}"),
+        &format!("/api/v1/lab/artifacts/{artifact_id}/content"),
+        artifact_id,
+        out,
+    )
+}
+
+/// Downloads verified bytes (an artifact or a collected machine file):
+/// reads the metadata at `metadata_path`, streams `content_path`, and writes
+/// `out` only when the size and sha256 match both.
+fn download_from(
+    invocation: &Invocation,
+    metadata_path: &str,
+    content_path: &str,
+    artifact_id: &str,
+    out: &str,
+) -> Result<Value, CliError> {
     let client = http_client()?;
     let metadata = send(
         &client,
         invocation,
         reqwest::Method::GET,
-        &format!("/api/v1/lab/artifacts/{artifact_id}"),
+        metadata_path,
         &[],
         None,
         uuid::Uuid::now_v7().to_string(),
@@ -8136,10 +8230,7 @@ fn download_artifact(
             .map_err(|error| CliError {
                 message: format!("cannot build an HTTP client: {error}"),
             })?
-            .get(format!(
-                "{}/api/v1/lab/artifacts/{artifact_id}/content",
-                invocation.url
-            ))
+            .get(format!("{}{content_path}", invocation.url))
             .header("x-correlation-id", uuid::Uuid::now_v7().to_string()),
     )?
     .send()
@@ -8189,6 +8280,28 @@ fn upload_lab_file(
     overwrite: bool,
     correlation_id: String,
 ) -> Result<Value, CliError> {
+    let mut query = vec![("path", guest_path.to_owned())];
+    if overwrite {
+        query.push(("overwrite", "true".to_owned()));
+    }
+    upload_file(
+        invocation,
+        &format!("/api/v1/lab/leases/{lease_id}/files"),
+        &query,
+        local_path,
+        correlation_id,
+    )
+}
+
+/// Streams one local regular file as the body of `POST {url_path}?{query}`
+/// (a Lab lease or a machine) and answers the queued operation.
+fn upload_file(
+    invocation: &Invocation,
+    url_path: &str,
+    query: &[(&'static str, String)],
+    local_path: &str,
+    correlation_id: String,
+) -> Result<Value, CliError> {
     use sha2::Digest as _;
     use std::io::Seek as _;
     let unreadable = |error: std::io::Error| CliError {
@@ -8227,17 +8340,10 @@ fn upload_lab_file(
         .map_err(|error| CliError {
             message: format!("cannot build an HTTP client: {error}"),
         })?;
-    let mut query = vec![("path", guest_path.to_owned())];
-    if overwrite {
-        query.push(("overwrite", "true".to_owned()));
-    }
     let response = with_credential(
         client
-            .post(format!(
-                "{}/api/v1/lab/leases/{lease_id}/files",
-                invocation.url
-            ))
-            .query(&query)
+            .post(format!("{}{url_path}", invocation.url))
+            .query(query)
             .header("x-correlation-id", correlation_id)
             .header("x-content-sha256", sha256)
             .header("content-type", "application/octet-stream")

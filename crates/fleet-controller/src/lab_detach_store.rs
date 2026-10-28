@@ -343,6 +343,9 @@ impl LabDetachDispatch {
                 // The command is meant to outlive this session and bounds
                 // itself on the guest; the exec watchdog must not kill it.
                 "guestWatchdog": false,
+                // The interactive start's own refusals are not the
+                // command's exit code (#490). The status path stays bare.
+                "guestRefusals": interactive_user.is_some(),
             })
             .to_string(),
         );

@@ -29,15 +29,19 @@ pub mod lab_artifacts;
 pub mod lab_exec_detach;
 pub mod lab_pools;
 pub mod lab_put;
+pub mod machine_access;
+pub mod machine_terminal;
 pub mod machines;
 mod meta;
 pub mod mise;
 pub mod node;
 pub mod onboarding;
 pub mod operations;
+pub mod persistent_machines;
 pub mod plans;
 pub mod projects;
 pub mod proxmox;
+pub mod proxmox_console;
 pub mod proxmox_privileges;
 pub mod proxmox_tasks;
 pub mod ready;
@@ -277,6 +281,8 @@ pub const API_BASE_PATH: &str = "/api/v1";
         images::PublishRecipeRequest,
         proxmox::ProviderAgentDto,
         proxmox::ProviderInterfaceDto,
+        proxmox_console::CreateConsoleSessionRequest,
+        proxmox_console::ConsoleSessionDto,
         proxmox_privileges::ProxmoxPrivilegesDto,
         proxmox_privileges::ProxmoxTierPrivilegesDto,
         proxmox_privileges::ProxmoxPrivilegeCheckDto,
@@ -481,6 +487,7 @@ pub fn api(state: Arc<operations::ApiState>) -> (Router, utoipa::openapi::OpenAp
                 .routes(routes!(proxmox::confirm_proxmox_fingerprint))
                 .routes(routes!(proxmox::discover_proxmox_cluster))
                 .routes(routes!(proxmox_privileges::get_proxmox_privileges))
+                .routes(routes!(proxmox_console::create_proxmox_console_session))
                 .routes(routes!(proxmox::list_proxmox_guests))
                 .routes(routes!(proxmox::observe_proxmox_guest))
                 .routes(routes!(proxmox::start_proxmox_lifecycle))
@@ -545,6 +552,32 @@ pub fn api(state: Arc<operations::ApiState>) -> (Router, utoipa::openapi::OpenAp
                 .routes(routes!(lab::sweep_lab_leases))
                 .routes(routes!(lab_artifacts::collect_lab_artifacts))
                 .routes(routes!(lab_put::put_lab_file))
+                .routes(routes!(machine_access::store_machine_ssh_key))
+                .routes(routes!(
+                    machine_access::get_machine_endpoint_auth,
+                    machine_access::set_machine_endpoint_auth,
+                    machine_access::clear_machine_endpoint_auth
+                ))
+                .routes(routes!(machine_access::exec_machine))
+                .routes(routes!(machine_terminal::create_machine_terminal_session))
+                .routes(routes!(persistent_machines::review_machine_create))
+                .routes(routes!(persistent_machines::create_machine))
+                .routes(routes!(persistent_machines::request_machine_create))
+                .routes(routes!(persistent_machines::store_machine_product_key))
+                .routes(routes!(persistent_machines::list_persistent_guests))
+                .routes(routes!(persistent_machines::review_register_guest))
+                .routes(routes!(persistent_machines::register_guest))
+                .routes(routes!(persistent_machines::review_unregister_guest))
+                .routes(routes!(persistent_machines::unregister_guest))
+                .routes(routes!(persistent_machines::review_abandon_marker))
+                .routes(routes!(persistent_machines::abandon_marker))
+                .routes(routes!(machine_access::collect_machine_files))
+                .routes(routes!(
+                    machine_access::put_machine_file,
+                    machine_access::list_machine_files
+                ))
+                .routes(routes!(machine_access::get_machine_file))
+                .routes(routes!(machine_access::download_machine_file))
                 .routes(routes!(lab_artifacts::list_lab_artifacts))
                 .routes(routes!(lab_artifacts::get_lab_artifact))
                 .routes(routes!(lab_artifacts::download_lab_artifact))

@@ -21,7 +21,9 @@ import InventoryTab from './tabs/InventoryTab.vue'
 import OperationsTab from './tabs/OperationsTab.vue'
 import OverviewTab from './tabs/OverviewTab.vue'
 import ProjectsTab from './tabs/ProjectsTab.vue'
+import ScreenTab from './tabs/ScreenTab.vue'
 import SkillsTab from './tabs/SkillsTab.vue'
+import TerminalTab from './tabs/TerminalTab.vue'
 import ToolsTab from './tabs/ToolsTab.vue'
 
 // MachineRoute keys this page by id, so the id is fixed per instance.
@@ -60,9 +62,14 @@ const TABS = [
   { value: 'operations', label: 'Operations' },
   { value: 'audit', label: 'Audit' },
   { value: 'guest', label: 'Guest' },
+  { value: 'screen', label: 'Screen' },
+  { value: 'terminal', label: 'Terminal' },
 ] as const
 
-const visibleTabs = computed(() => TABS.filter(t => t.value !== 'guest' || guests.value.length > 0 || route.query.tab === 'guest'))
+const hasSsh = computed(() => (machine.value?.endpoints ?? []).some(endpoint => endpoint.kind === 'ssh'))
+const visibleTabs = computed(() => TABS.filter(t => t.value === 'terminal'
+  ? hasSsh.value || route.query.tab === 'terminal'
+  : (t.value !== 'guest' && t.value !== 'screen') || guests.value.length > 0 || route.query.tab === t.value))
 
 const tab = computed({
   get: () => {
@@ -243,6 +250,18 @@ async function copySsh() {
               :machine-id="machine.id"
               :loading="proxmoxLoading"
               :problems="proxmoxSources.filter(s => s.state !== 'ok' && s.state !== 'loading')"
+            />
+          </TabsContent>
+          <TabsContent value="screen">
+            <ScreenTab
+              :guests="guests"
+              :loading="proxmoxLoading"
+            />
+          </TabsContent>
+          <TabsContent value="terminal">
+            <TerminalTab
+              :machine-id="machine.id"
+              :has-ssh="hasSsh"
             />
           </TabsContent>
         </div>

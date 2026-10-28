@@ -66,6 +66,11 @@ export const routes: RouteRecordRaw[] = [
     meta: { title: 'Proxmox', group: 'Infrastructure' },
   },
   {
+    path: '/proxmox/console',
+    component: () => import('./pages/proxmox/console/ConsolePage.vue'),
+    meta: { title: 'Guest screen', group: 'Infrastructure' },
+  },
+  {
     path: '/services',
     component: () => import('./pages/services/ServicesPage.vue'),
     meta: { title: 'Services', group: 'Infrastructure' },

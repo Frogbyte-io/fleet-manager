@@ -206,6 +206,29 @@ describe('MachinePage', () => {
     expect(wrapper.find('[data-testid="open-vscode"]').attributes('href')).toBe('vscode://vscode-remote/ssh-remote+build.lan/')
   })
 
+  it('overview shows who asked for the machine and why', async () => {
+    const owned = machine()
+    owned.ownership = { owner: 'credential:ci:cred-1', purpose: 'nightly build host', requestId: 'req-1' }
+    api.getMachine.mockResolvedValue(ok({ data: owned }))
+    const { wrapper } = await mountAt('/fleet/machines/m1')
+    expect(wrapper.find('[data-testid="machine-owner"]').text()).toBe('credential:ci:cred-1')
+    expect(wrapper.find('[data-testid="machine-purpose"]').text()).toBe('nightly build host')
+    expect(wrapper.find('a[href*="request=req-1"]').exists()).toBe(true)
+  })
+
+  it('a reported fleet fact is not shown as ownership', async () => {
+    const forged = machine()
+    forged.capabilities.push({ namespace: 'fleet', name: 'owner', value: 'someone', status: 'known', observedAt: NOW, source: 'fleetd/1' })
+    api.getMachine.mockResolvedValue(ok({ data: forged }))
+    const { wrapper } = await mountAt('/fleet/machines/m1')
+    expect(wrapper.find('[data-testid="machine-owner"]').exists()).toBe(false)
+  })
+
+  it('overview shows no owner rows for a machine that was not requested', async () => {
+    const { wrapper } = await mountAt('/fleet/machines/m1')
+    expect(wrapper.find('[data-testid="machine-owner"]').exists()).toBe(false)
+  })
+
   it('shows a not-found state for an unknown machine', async () => {
     api.getMachine.mockResolvedValue({ status: 404, data: { code: 'not_found', message: 'no such machine' }, headers: new Headers() })
     const { wrapper } = await mountAt('/fleet/machines/missing')

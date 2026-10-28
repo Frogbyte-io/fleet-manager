@@ -15,10 +15,15 @@ serde = { version = "1.0.229", features = ["derive"] }
 serde-saphyr = { version = "1.1.0", default-features = false, features = ["deserialize"] }
 serde_json = "1.0.151"
 sha2 = "0.10"
+tungstenite = { version = "0.28.0", default-features = false, features = ["handshake", "rustls-tls-webpki-roots"] }
 uuid = { version = "1.26.0", features = ["v7"] }
 yaml_serde = "0.10"
 yamlpatch = "1.31.1"
 yamlpath = "1.31.1"
+
+[target.'cfg(unix)'.dependencies]
+rustix = { version = "1.1.5", default-features = false, features = ["std", "stdio", "termios"] }
+signal-hook = "0.3.18"
 
 [lints]
 workspace = true
@@ -32,6 +37,7 @@ fleet-auth = { path = "../fleet-auth" }
 fleet-controller = { path = "../fleet-controller" }
 fleet-core = { path = "../fleet-core" }
 fleet-provider-ssh = { path = "../providers/fleet-provider-ssh" }
+fleet-secrets = { path = "../fleet-secrets" }
 fleet-storage-sqlite = { path = "../fleet-storage-sqlite" }
 sqlx = { version = "0.9.0", features = ["sqlite", "runtime-tokio"] }
 tempfile = "3.27.0"

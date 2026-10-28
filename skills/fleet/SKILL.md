@@ -27,7 +27,9 @@ text.
 5. **Never put secrets in arguments.** Commands that need a secret read it from
    stdin; everything you pass on the command line may end up in shell history.
 6. **Lab environments are disposable and time-limited.** Destroy them when you
-   are done; extend them only as long as you need.
+   are done; extend them only as long as you need. A Lab lease is the default
+   way to get a machine; request a permanent one only when you must (see
+   Creating a permanent VM).
 
 ## Controller and health
 
@@ -53,6 +55,116 @@ fleetctl --output json machines get <machine-id>
 `machineStatus` is `connected`, `stale`, `offline`, or `agentless`. Use the
 machine `id` (not its name) in every other command. A machine's `endpoints`
 list the SSH endpoint ids that SSH-driven commands take as `--endpoint`.
+
+### Working on a machine
+
+```bash
+fleetctl --output json machines exec <machine-id> -- uname -a
+fleetctl --output json machines exec <machine-id> --timeout 300 -- cargo test --workspace
+fleetctl --output json machines exec <machine-id> --script -- "cd /srv/app && ./deploy.sh | tail -n 20"
+fleetctl --output json machines exec <machine-id> --os windows --script -- "Get-Service sshd"
+fleetctl --output json machines put <machine-id> ./build/app.tar.gz /opt/app/app.tar.gz --overwrite
+fleetctl --output json machines collect <machine-id> /var/log/app/error.log /etc/app/config.yaml
+fleetctl --output json machines files <machine-id>
+fleetctl --output json machines file-get <file-id> --out ./error.log
+```
+
+The controller holds the machine's SSH key and runs every command; you never
+see the key and you never need an SSH client. An endpoint's default credential
+is recorded by whoever set up the machine, so you pass no `--auth`. If a
+command answers "the endpoint has no default auth", ask the user to set one
+(`machines endpoint-auth set`) rather than guessing a credential. `--endpoint`
+is only needed when the machine has more than one SSH endpoint.
+
+- `exec` waits and answers `{state, exitCode, stdout, stderr, truncatedStdout,
+  truncatedStderr}`. **The CLI exits with the command's own exit code**, so
+  branch on it. `255` can also be `ssh` itself failing (a refused login, an
+  unreachable host); read `stderr` and `reason`. A `reason` of `deadline_killed`
+  means the deadline (default 60 s, at most 900 s) passed: the command may
+  still have run, so check before repeating it. Output is cut at 1 MiB per
+  stream, with the matching `truncated*` flag set; send long output to a file
+  and `collect` it. Anything credential-shaped in the output is redacted.
+- Words after `--` are passed to the program as data, with no shell: pipes,
+  `&&` and `$VAR` do nothing. For shell syntax use `--script` with exactly one
+  word, the script text (bash; PowerShell on Windows, with `--os windows`).
+  Empty arguments cannot be passed, and on Windows an argument containing a
+  double quote may be re-split; use `--script` for those.
+- `--os` is `linux` (default) or `windows`. A Windows machine takes
+  drive-absolute paths (`C:\Users\...`) for `put` and `collect`.
+- `put` sends one local file to an absolute path; it fails rather than replace
+  an existing file unless you pass `--overwrite`, and it verifies the SHA-256
+  inside the machine so a failed put leaves nothing behind. `collect` copies up
+  to 16 files (each within the controller's artifact cap) into the controller;
+  `file-get` downloads one and verifies it. Collected files are kept for seven
+  days. A failed `collect` still keeps the files it did copy and lists the
+  `failures` by path.
+- Never type a secret into a command, because the operation records it. Put it
+  in a file with `put`, or ask the user to set it up another way. `exec` is
+  audited by the command's digest, not its text.
+- Do not use `exec` to read the controller's own secrets or to remove your
+  access. There is no interactive terminal and no privilege elevation here;
+  if `sudo` needs a password, tell the user.
+
+### Creating a permanent VM
+
+**Default to a Lab lease.** When you need a machine to run, build or test
+something, take a disposable Lab environment (see Lab environments): it has a
+time limit and the controller removes it. Ask for a permanent VM only when the
+work genuinely needs one that outlives you (a build host, a long-running
+service, a machine the user will keep using), and only when the user asked for
+it or agreed. A permanent VM takes capacity indefinitely and is never cleaned
+up.
+
+If you are an agent with a restricted credential you cannot create one
+directly (`machines create` is refused with `denied`). Request it instead and
+say why; a person approves it, and the controller creates it:
+
+```bash
+fleetctl --output json machines create --request --purpose "nightly build host for project X" --account <account-id> --image-version <version-id> --name build-box --cores 4 --memory 8192 --disk 40 --wait-approval=15m
+fleetctl --output json requests get <request-id> --wait=15m
+```
+
+- `--purpose` is required: say what the machine is for in a sentence. It is
+  recorded on the machine with you as its owner, and the approver reads it.
+  State the cores, memory and disk you need, and leave the placement, tags,
+  login user and credential options at their defaults unless the task needs
+  them: a request that leaves sizes to the image default or sets those options
+  needs a person even where small plain requests are approved automatically.
+- Without a wait the command files the request and returns it (`state`
+  `pending`, an `id`). With `--wait-approval[=<duration>]` (1s to 1h, default
+  5m) it stays for the answer, which is `{outcome, request, result}`: exit 0
+  is `executed` (`result` names `machineId`, `endpointId`, `vmid`, `address`),
+  2 is `still_pending`, 1 is anything else. The creation itself takes minutes
+  after the approval; the wait covers it. `still_pending` also covers a
+  request that was approved and is still being created, so it does not mean
+  nobody decided. Report the request id and stop: do not loop or re-file; the
+  user (or you, once, when asked) can read it with `requests get <request-id>`.
+- A request that policy approves starts at once (`state` `executing`); you
+  cannot tell in advance, so always pass the wait or read `requests get`.
+- Handle the outcomes as in Brokered actions below. In particular on `denied`
+  never re-file or file a variant: report it and use a Lab lease or ask the
+  user. Do not approve your own request. A Windows
+  activation key goes in by reference id only; never put a secret in the request (`--activate-key <ref>`,
+  stored beforehand by the user with `machines product-key store`).
+- You never destroy a permanent VM; that stays the user's decision.
+
+With an operator credential (`machines.provision`) the direct form creates it
+without a request:
+
+```bash
+fleetctl --output json machines create --account <account-id> --image-version <version-id> --name build-box --cores 4 --memory 8192
+fleetctl --output json machines create --account <account-id> --image-version <version-id> --name build-box --review-only
+```
+
+`machines create` makes a long-lived VM Fleet manages and never cleans up: it
+clones a promoted image, applies the settings, starts it, registers and links
+the machine, gives it its own SSH key (held by the controller, never shown) and
+removes the image's shared key. It waits and answers `{state, machineId,
+endpointId, vmid, address, hostKeyFingerprint, bootstrapKeyRemoved}`. It is a
+privileged action: do it only when the user asked for a permanent machine, and
+use `--review-only` first when unsure. A failed creation keeps the VM and names
+the `step` that failed; re-running the same command resumes it. Destroying a
+persistent VM is a separate, confirmed act by the user.
 
 ## Projects
 

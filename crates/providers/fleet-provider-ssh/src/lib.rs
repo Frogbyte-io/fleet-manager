@@ -19,7 +19,8 @@
 //!   against the Fleet known-hosts file, so a key swap at connection time
 //!   still fails closed.
 //!
-//! Authentication supports the agent and identity files only. Password
+//! Authentication supports the agent, identity files and a Fleet-held key
+//! (delivered for one session through a private file, see [`key`]) only. Password
 //! authentication is deliberately unsupported: it needs interactive prompts
 //! or helper binaries, and Fleet's remote execution must run unattended and
 //! non-interactive (see FM-202). This crate never prints or stores key
@@ -38,8 +39,12 @@ pub mod discovery;
 pub mod exec;
 pub mod fetch;
 pub mod inventory;
+pub mod key;
+pub mod persistent;
 pub mod put;
 pub mod shell;
+#[cfg(unix)]
+pub mod terminal;
 
 #[cfg(test)]
 mod pwsh_support;
@@ -54,8 +59,11 @@ pub use exec::{
 };
 pub use fetch::{FetchOutcome, fetch_file};
 pub use inventory::{COLLECTION_DEADLINE, PROBE_SOURCE, collect, parse_probe_output, probe_script};
+pub use key::{GeneratedKey, PrivateKey};
 pub use put::{PutOutcome, PutRequest, put_file};
 pub use shell::GuestShell;
+#[cfg(unix)]
+pub use terminal::{Terminal, TerminalEvent, TerminalSize};
 
 /// One host's key, as observed from the network.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -140,7 +148,7 @@ impl std::error::Error for SshProviderError {}
 /// shares the same directory on purpose: one trust store per controller.
 #[derive(Clone, Debug)]
 pub struct SshProvider {
-    work_dir: PathBuf,
+    pub(crate) work_dir: PathBuf,
 }
 
 impl SshProvider {
@@ -167,7 +175,9 @@ impl SshProvider {
         }
         #[cfg(not(unix))]
         let _ = &work_dir;
-        Ok(Self { work_dir })
+        let provider = Self { work_dir };
+        provider.sweep_keys()?;
+        Ok(provider)
     }
 
     /// The Fleet-owned `known_hosts` file.
@@ -177,6 +187,7 @@ impl SshProvider {
     }
 
     /// Probes a host's key: `ssh-keyscan` fetches, `ssh-keygen` fingerprints.
+    /// Returns the most preferred key (see [`Self::probe_host_keys`]).
     ///
     /// # Errors
     ///
@@ -187,10 +198,29 @@ impl SshProvider {
         port: u16,
         timeout: Duration,
     ) -> Result<HostKeyObservation, SshProviderError> {
+        let mut all = self.probe_host_keys(host, port, timeout)?;
+        Ok(all.remove(0))
+    }
+
+    /// Probes every key type the host offers (`ed25519`, `ecdsa`, `rsa`),
+    /// ordered by the fixed preference ED25519, ECDSA, RSA. `ssh-keyscan`
+    /// prints keys in whatever order the host answers, so taking the first
+    /// line made the observed type vary between runs. The result is never
+    /// empty.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the tools fail, time out, or the host presents nothing.
+    pub fn probe_host_keys(
+        &self,
+        host: &str,
+        port: u16,
+        timeout: Duration,
+    ) -> Result<Vec<HostKeyObservation>, SshProviderError> {
         let mut command = Command::new("ssh-keyscan");
         command
             .arg("-t")
-            .arg("ed25519,rsa")
+            .arg("ed25519,ecdsa,rsa")
             .arg("-p")
             .arg(port.to_string())
             .arg("-T")
@@ -201,19 +231,48 @@ impl SshProvider {
             detail: format!("cannot start: {error}"),
         })?;
         let stdout = String::from_utf8_lossy(&raw.stdout);
-        let line = stdout
+        let lines: Vec<String> = stdout
             .lines()
-            .find(|line| !line.starts_with('#') && !line.trim().is_empty())
-            .ok_or_else(|| SshProviderError::NoHostKey {
+            .filter(|line| !line.starts_with('#') && !line.trim().is_empty())
+            .map(str::to_owned)
+            .collect();
+        if lines.is_empty() {
+            return Err(SshProviderError::NoHostKey {
                 detail: "ssh-keyscan returned no key within the timeout".to_owned(),
-            })?
-            .to_owned();
+            });
+        }
 
-        // Fingerprint the key through ssh-keygen so the fingerprint format is
-        // the one operators see everywhere else.
-        let key_file = self.work_dir.join("probe.tmp");
-        std::fs::write(&key_file, &line).map_err(|error| SshProviderError::Setup {
-            detail: format!("cannot stage the probe: {error}"),
+        let fingerprints = self.fingerprint_lines(&lines)?;
+        let mut observations = Vec::with_capacity(lines.len());
+        for (line, (key_type, fingerprint)) in lines.iter().zip(fingerprints) {
+            observations.push(HostKeyObservation {
+                key_type,
+                fingerprint,
+                raw_line: line.clone(),
+            });
+        }
+        observations.sort_by_key(|observation| key_type_rank(&observation.key_type));
+        Ok(observations)
+    }
+
+    /// Fingerprints `known_hosts` lines through `ssh-keygen`, so the format is
+    /// the one operators see everywhere else. Fails unless `ssh-keygen`
+    /// summarizes exactly one key per line: a silent mismatch would pair a
+    /// fingerprint with the wrong key line.
+    fn fingerprint_lines(
+        &self,
+        lines: &[String],
+    ) -> Result<Vec<(String, String)>, SshProviderError> {
+        static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let key_file = self.work_dir.join(format!(
+            "probe.{}.{}.tmp",
+            std::process::id(),
+            NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        ));
+        std::fs::write(&key_file, format!("{}\n", lines.join("\n"))).map_err(|error| {
+            SshProviderError::Setup {
+                detail: format!("cannot stage the probe: {error}"),
+            }
         })?;
         let fingerprinted = Command::new("ssh-keygen")
             .arg("-lf")
@@ -231,14 +290,45 @@ impl SshProvider {
             });
         }
         let summary = String::from_utf8_lossy(&fingerprinted.stdout);
-        let parsed = parse_keygen_summary(&summary).ok_or_else(|| SshProviderError::NoHostKey {
-            detail: "ssh-keygen produced an unreadable summary".to_owned(),
-        })?;
-        Ok(HostKeyObservation {
-            key_type: parsed.0,
-            fingerprint: parsed.1,
-            raw_line: line,
-        })
+        let parsed: Vec<(String, String)> = summary
+            .lines()
+            .filter(|line| !line.trim().is_empty())
+            .map(|line| {
+                parse_keygen_summary(line).ok_or_else(|| SshProviderError::NoHostKey {
+                    detail: "ssh-keygen produced an unreadable summary".to_owned(),
+                })
+            })
+            .collect::<Result<_, _>>()?;
+        if parsed.len() != lines.len() {
+            return Err(SshProviderError::NoHostKey {
+                detail: format!(
+                    "ssh-keygen summarized {} keys for {} key lines",
+                    parsed.len(),
+                    lines.len()
+                ),
+            });
+        }
+        Ok(parsed)
+    }
+
+    /// Decides over every key the host offers: when any observed key matches
+    /// the confirmed fingerprint the endpoint is `Known` (with that key), so
+    /// a host that answers with a different key type on another run is not
+    /// reported as changed. Only when none match is it `Changed`; with no
+    /// confirmed fingerprint the most preferred key is `New`.
+    ///
+    /// # Panics
+    ///
+    /// Panics when `observations` is empty; the probe never returns that.
+    #[must_use]
+    pub fn decide_any(
+        &self,
+        expected: Option<&str>,
+        observations: &[HostKeyObservation],
+    ) -> TrustDecision {
+        let chosen =
+            choose_observation(&[expected], observations).expect("a probe yields at least one key");
+        self.decide(expected, chosen)
     }
 
     /// Decides what an observed key means for an endpoint with the given
@@ -273,6 +363,15 @@ impl SshProvider {
     /// Fails when the file cannot be written.
     pub fn pin(&self, observation: &HostKeyObservation) -> Result<(), SshProviderError> {
         use std::io::Write as _;
+        // What is stored must be the key whose fingerprint was confirmed.
+        let actual = self.fingerprint_lines(std::slice::from_ref(&observation.raw_line))?;
+        if actual.first().map(|(_, fingerprint)| fingerprint.as_str())
+            != Some(observation.fingerprint.as_str())
+        {
+            return Err(SshProviderError::Setup {
+                detail: "the key line does not match the confirmed fingerprint".to_owned(),
+            });
+        }
         let mut file = std::fs::OpenOptions::new()
             .create(true)
             .append(true)
@@ -312,7 +411,8 @@ impl SshProvider {
     }
 
     /// Runs a bounded, non-interactive connection test against the endpoint.
-    /// The remote command is `true`: nothing is executed beyond OpenSSH's own
+    /// The remote command is `exit 0`, understood by POSIX shells, PowerShell and
+    /// cmd alike (`true` does not exist on Windows): nothing is executed beyond OpenSSH's own
     /// session setup.
     ///
     /// # Errors
@@ -324,6 +424,11 @@ impl SshProvider {
         timeout: Duration,
     ) -> Result<(), SshProviderError> {
         let config_path = self.write_config(&endpoint.auth)?;
+        // Held until the process ends; dropping it removes a stored key's file.
+        let key_file = match &endpoint.auth {
+            SshAuth::StoredKey { key } => Some(self.materialize_key(key)?),
+            _ => None,
+        };
         let mut command = Command::new("ssh");
         command
             .arg("-F")
@@ -335,16 +440,23 @@ impl SshProvider {
         match &endpoint.auth {
             SshAuth::Agent => {}
             SshAuth::IdentityFile { path } => {
+                self.check_identity_file(path)?;
                 command.arg("-i").arg(path);
+            }
+            SshAuth::StoredKey { .. } => {
+                if let Some(file) = &key_file {
+                    command.arg("-i").arg(file.path());
+                }
             }
         }
         add_ssh_destination(&mut command, endpoint);
-        command.arg("true");
+        add_connect_test_command(&mut command);
 
         let output = command.output().map_err(|error| SshProviderError::Tool {
             tool: "ssh",
             detail: format!("cannot start: {error}"),
         })?;
+        drop(key_file);
         if output.status.success() {
             return Ok(());
         }
@@ -371,6 +483,7 @@ impl SshProvider {
         let (name, identity) = match auth {
             SshAuth::Agent => ("config-agent", AGENT_IDENTITY_POLICY),
             SshAuth::IdentityFile { .. } => ("config-identity-file", IDENTITY_FILE_POLICY),
+            SshAuth::StoredKey { .. } => ("config-stored-key", STORED_KEY_POLICY),
         };
         let path = self.work_dir.join(name);
         // The known-hosts path must be absolute: the ssh process runs with
@@ -410,11 +523,53 @@ impl SshProvider {
 const AGENT_IDENTITY_POLICY: &str = "IdentitiesOnly no\n";
 /// Offers only the identity file passed with `-i`.
 const IDENTITY_FILE_POLICY: &str = "IdentitiesOnly yes\n";
+/// A stored key offers only the key file passed with `-i`: no agent (a
+/// controller agent's keys are not the machine's credential) and no
+/// certificate from the user's ssh configuration.
+const STORED_KEY_POLICY: &str = "IdentitiesOnly yes\nIdentityAgent none\nCertificateFile none\n";
 
 pub(crate) fn add_ssh_destination(command: &mut Command, endpoint: &SshConnectionSpec) {
     command
         .arg("--")
         .arg(format!("{}@{}", endpoint.user, endpoint.host));
+}
+
+/// Picks the observation whose fingerprint matches the first wanted
+/// fingerprint that any observation carries, else the most preferred one
+/// (so a mismatch is reported against the preferred key). `None` only for an
+/// empty slice. Callers that compare a probe against a stored or pinned
+/// fingerprint use this, so a host pinned on RSA still matches when ED25519
+/// is preferred.
+#[must_use]
+pub fn choose_observation<'a>(
+    wanted: &[Option<&str>],
+    observations: &'a [HostKeyObservation],
+) -> Option<&'a HostKeyObservation> {
+    wanted
+        .iter()
+        .flatten()
+        .find_map(|wanted| {
+            observations
+                .iter()
+                .find(|observation| observation.fingerprint == *wanted)
+        })
+        .or_else(|| observations.first())
+}
+
+/// The fixed preference between host key types: ED25519, ECDSA, RSA.
+fn key_type_rank(key_type: &str) -> u8 {
+    match key_type.to_ascii_uppercase().as_str() {
+        "ED25519" => 0,
+        "ECDSA" => 1,
+        "RSA" => 2,
+        _ => 3,
+    }
+}
+
+/// The remote command of the connection test: `exit 0` is understood by
+/// POSIX shells, PowerShell and cmd alike.
+pub(crate) fn add_connect_test_command(command: &mut Command) {
+    command.arg("exit 0");
 }
 
 pub(crate) fn add_ssh_keyscan_host(command: &mut Command, host: &str) {
@@ -432,6 +587,14 @@ pub enum SshAuth {
     IdentityFile {
         /// The identity file's path.
         path: String,
+    },
+    /// A private key Fleet holds as a secret (ADR 0017). The provider writes
+    /// it to a private file for the one session and removes it afterwards;
+    /// only this key is offered.
+    StoredKey {
+        /// The key, resolved just in time by the caller. Its `Debug` is
+        /// redacted.
+        key: PrivateKey,
     },
 }
 
@@ -541,10 +704,18 @@ fn scrub_window(text: &str) -> &str {
 #[cfg(test)]
 mod tests {
     use super::{
-        SshAuth, SshConnectionSpec, SshProvider, add_ssh_destination, add_ssh_keyscan_host,
-        redact_failure,
+        SshAuth, SshConnectionSpec, SshProvider, add_connect_test_command, add_ssh_destination,
+        add_ssh_keyscan_host, redact_failure,
     };
     use std::process::Command;
+
+    #[test]
+    fn the_connection_test_runs_exit_zero_last() {
+        let mut command = Command::new("ssh");
+        command.arg("host");
+        add_connect_test_command(&mut command);
+        assert_eq!(command.get_args().last().unwrap(), "exit 0");
+    }
 
     #[test]
     fn failure_detail_redacts_credentials() {

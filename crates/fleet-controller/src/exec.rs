@@ -61,14 +61,38 @@ struct SshExecPayload {
     /// script text on the guest and could kill the watchdog as well.
     #[serde(default = "watchdog_by_default")]
     guest_watchdog: bool,
+    /// Whether the guest script reports its own refusals with the
+    /// `fleet: refusal <code>` stderr marker (#490). Only the interactive
+    /// Windows scripts do; for them a non-zero exit whose stderr ends with
+    /// the marker for that same code is a refusal by the script, not the
+    /// command's exit code, and fails the operation with `guest_refused`.
+    #[serde(default)]
+    guest_refusals: bool,
 }
 
 fn watchdog_by_default() -> bool {
     true
 }
 
+/// The stderr marker line a guest script prints when it refuses to run
+/// (#490): `fleet: refusal <code>`, last, with the code it then exits with.
+const REFUSAL_MARKER: &str = "fleet: refusal ";
+
+/// Whether a finished run was the guest script refusing rather than the
+/// command exiting: a non-zero exit whose last non-empty stderr line is the
+/// marker for that same code. Returns the code and the stderr before the
+/// marker (the script's reason text). A command that prints the marker and
+/// exits with the same code can only fail its own operation this way.
+fn guest_refusal(exit_code: Option<i32>, stderr: &str) -> Option<(i32, String)> {
+    let code = exit_code.filter(|code| *code != 0)?;
+    let trimmed = stderr.trim_end();
+    let (before, last) = trimmed.rsplit_once('\n').unwrap_or(("", trimmed));
+    let marked: i32 = last.trim().strip_prefix(REFUSAL_MARKER)?.parse().ok()?;
+    (marked == code).then(|| (code, before.trim().to_owned()))
+}
+
 /// How the endpoint authenticates.
-#[derive(Debug, serde::Deserialize)]
+#[derive(Clone, Debug, serde::Deserialize)]
 #[serde(rename_all = "camelCase", tag = "type")]
 enum SshExecAuth {
     /// The controller's agent supplies the key.
@@ -77,6 +101,12 @@ enum SshExecAuth {
     IdentityFile {
         /// The identity file's path.
         path: String,
+    },
+    /// A private key Fleet holds as a secret, by reference (ADR 0017). The
+    /// executor resolves it just in time; the payload never carries a key.
+    Secret {
+        /// The secret-record reference.
+        credential: String,
     },
 }
 
@@ -115,6 +145,8 @@ pub struct ScriptExecutor {
     machines: Arc<dyn MachinePort>,
     provider: SshProvider,
     limiter: Arc<ExecutionLimiter>,
+    /// Resolves stored-key auth just in time (ADR 0017).
+    resolver: Option<Arc<crate::machine_access::SshAuthResolver>>,
     /// Retained for the provider's isolated directory lifetime.
     #[allow(dead_code)]
     work_dir: PathBuf,
@@ -155,8 +187,16 @@ impl ScriptExecutor {
             machines,
             provider,
             limiter,
+            resolver: None,
             work_dir,
         }
+    }
+
+    /// Lets `ssh.exec` authenticate with a stored key (ADR 0017).
+    #[must_use]
+    pub fn with_resolver(mut self, resolver: Arc<crate::machine_access::SshAuthResolver>) -> Self {
+        self.resolver = Some(resolver);
+        self
     }
 }
 
@@ -302,15 +342,11 @@ impl ScriptExecutor {
             working_directory: String::new(),
             environment: Vec::new(),
             arguments: Vec::new(),
-            auth: match &payload.auth {
-                SshExecAuth::Agent => SshExecAuth::Agent,
-                SshExecAuth::IdentityFile { path } => {
-                    SshExecAuth::IdentityFile { path: path.clone() }
-                }
-            },
+            auth: payload.auth.clone(),
             timeout_seconds: payload.timeout_seconds,
             guest_os: payload.guest_os,
             guest_watchdog: true,
+            guest_refusals: false,
         })
         .await
     }
@@ -393,6 +429,23 @@ impl ScriptExecutor {
                         .await
                         .map(|_| ())
                         .map_err(|error| error.to_string())
+                } else if let Some((code, detail)) = payload
+                    .guest_refusals
+                    .then(|| guest_refusal(result.exit_code, &result.stderr))
+                    .flatten()
+                {
+                    let (detail, _) = scrub_and_bound(&detail, false);
+                    let error_json = serde_json::json!({
+                        "reason": "guest_refused",
+                        "refusalCode": code,
+                        "detail": detail,
+                    })
+                    .to_string();
+                    operations
+                        .complete(&operation.id, "failed", None, Some(&error_json))
+                        .await
+                        .map(|_| ())
+                        .map_err(|error| error.to_string())
                 } else if result.exit_code == Some(0) {
                     operations
                         .complete(&operation.id, "succeeded", Some(&result_json), None)
@@ -467,9 +520,33 @@ impl ScriptExecutor {
         &self,
         payload: &SshExecPayload,
     ) -> Result<(SshConnectionSpec, String, String), String> {
-        let auth = match &payload.auth {
-            SshExecAuth::Agent => SshAuth::Agent,
-            SshExecAuth::IdentityFile { path } => SshAuth::IdentityFile { path: path.clone() },
+        let wire = match &payload.auth {
+            SshExecAuth::Agent => fleet_application::machine_access::EndpointAuth::Agent,
+            SshExecAuth::IdentityFile { path } => {
+                fleet_application::machine_access::EndpointAuth::IdentityFile { path: path.clone() }
+            }
+            SshExecAuth::Secret { credential } => {
+                fleet_application::machine_access::EndpointAuth::Secret {
+                    credential: credential.clone(),
+                }
+            }
+        };
+        // With a resolver every auth kind goes through it, so an identity
+        // file under the controller's own data is refused and a stored key
+        // resolves only for a machine it is bound to.
+        let auth = match &self.resolver {
+            Some(resolver) => resolver.resolve(&wire, &payload.machine_id).await?,
+            None => match wire {
+                fleet_application::machine_access::EndpointAuth::Agent => SshAuth::Agent,
+                fleet_application::machine_access::EndpointAuth::IdentityFile { path } => {
+                    SshAuth::IdentityFile { path }
+                }
+                fleet_application::machine_access::EndpointAuth::Secret { .. } => {
+                    return Err(
+                        "stored-key authentication is not configured on this controller".to_owned(),
+                    );
+                }
+            },
         };
         let (mut spec, verified, host) = resolve_ssh_endpoint(
             self.machines.as_ref(),
@@ -563,8 +640,41 @@ pub(crate) use fleet_core::{scrub_and_bound_with, scrub_window};
 
 #[cfg(test)]
 mod tests {
-    use super::{redact_collected_facts, scrub_and_bound, transport_failure_json};
+    use super::{guest_refusal, redact_collected_facts, scrub_and_bound, transport_failure_json};
     use fleet_core::RESULT_STRING_BOUND;
+
+    /// A refusal is the marker as the last stderr line with the exit code it
+    /// names; anything else is the command's own exit.
+    #[test]
+    fn a_guest_refusal_is_the_marker_line_with_the_matching_exit_code() {
+        for code in [64, 70, 71, 72, 73, 75, 76, 77, 78, 79] {
+            let stderr = format!("fleet: some reason\nfleet: refusal {code}\n");
+            assert_eq!(
+                guest_refusal(Some(code), &stderr),
+                Some((code, "fleet: some reason".to_owned()))
+            );
+        }
+        assert_eq!(
+            guest_refusal(Some(77), "fleet: refusal 77"),
+            Some((77, String::new()))
+        );
+        // The command's own 77, with or without other output.
+        assert_eq!(guest_refusal(Some(77), ""), None);
+        assert_eq!(guest_refusal(Some(77), "boom\n"), None);
+        // A mismatched code, a success, no exit code and a marker that is
+        // not last are not refusals.
+        assert_eq!(guest_refusal(Some(71), "fleet: refusal 77\n"), None);
+        assert_eq!(guest_refusal(Some(0), "fleet: refusal 0\n"), None);
+        assert_eq!(guest_refusal(None, "fleet: refusal 77\n"), None);
+        assert_eq!(guest_refusal(Some(77), "fleet: refusal 77\nmore\n"), None);
+        assert_eq!(guest_refusal(Some(77), "x fleet: refusal 77\n"), None);
+        assert_eq!(guest_refusal(Some(77), "fleet: refusal 7x\n"), None);
+        // A Windows guest ends its lines with CRLF.
+        assert_eq!(
+            guest_refusal(Some(77), "fleet: no session\r\nfleet: refusal 77\r\n"),
+            Some((77, "fleet: no session".to_owned()))
+        );
+    }
 
     /// The guest-side deadline watchdog (#455) is on unless a payload turns
     /// it off, and only the detached start does.

@@ -1,0 +1,10 @@
+{
+ "data": {
+  "cert": "-----BEGIN CERTIFICATE-----\nSYNTHETIC-FIXTURE-NOT-A-CERTIFICATE\n-----END CERTIFICATE-----\n",
+  "password": "k7Hn2VdR",
+  "port": 5901,
+  "ticket": "PVEVNC:68E00020:SYNTHETICTICKET==::SYNTHETICSIGNATURE==",
+  "upid": "UPID:pve8-n1:000A1B2C:0123ABCD:68E00020:vncproxy:101:fleet@pve!contract:",
+  "user": "fleet@pve!contract"
+ }
+}

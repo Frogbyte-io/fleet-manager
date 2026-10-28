@@ -442,6 +442,8 @@ pub struct ProxmoxDestructiveExecutor {
     links: Option<Arc<dyn ProxmoxTaskLinkPort>>,
     artifacts: Option<Arc<dyn fleet_application::lab::ImageArtifactPort>>,
     pool_members: Option<Arc<dyn fleet_application::operation::PoolMemberLookup>>,
+    persistent: Option<Arc<dyn fleet_application::persistent::PersistentGuestPort>>,
+    audit: Option<Arc<dyn fleet_application::operation::AuditPort>>,
 }
 
 impl ProxmoxDestructiveExecutor {
@@ -459,7 +461,132 @@ impl ProxmoxDestructiveExecutor {
             links: None,
             artifacts: None,
             pool_members: None,
+            persistent: None,
+            audit: None,
         }
+    }
+
+    /// Supplies the persistent marker store (#489). With it, destroying a
+    /// persistent guest needs the reviewed `confirmPersistent` parameter, and
+    /// a destroy that succeeds removes the marker.
+    #[must_use]
+    pub fn with_persistent(
+        mut self,
+        persistent: Arc<dyn fleet_application::persistent::PersistentGuestPort>,
+    ) -> Self {
+        self.persistent = Some(persistent);
+        self
+    }
+
+    /// Supplies the audit sink for the events this executor records itself
+    /// (lifting a persistent guest's protection, #489).
+    #[must_use]
+    pub fn with_audit(mut self, audit: Arc<dyn fleet_application::operation::AuditPort>) -> Self {
+        self.audit = Some(audit);
+        self
+    }
+
+    /// Puts a persistent guest's protection back after a destroy that did
+    /// not delete it. Best effort: the guest may be gone, and a failure here
+    /// must not hide the destroy's own failure.
+    async fn restore_protection(
+        &self,
+        payload: &DestructivePayload,
+        request: &fleet_provider_proxmox::PveHttpRequest,
+    ) {
+        let Ok(settings) = self
+            .client
+            .qemu_settings(request.clone(), &payload.node, payload.vmid)
+            .await
+        else {
+            return;
+        };
+        if let (false, Some(digest)) = (settings.protection, settings.digest) {
+            let _ = self
+                .client
+                .qemu_write_settings(
+                    request.clone(),
+                    &payload.node,
+                    payload.vmid,
+                    &fleet_provider_proxmox::PveQemuWrite {
+                        protection: Some(true),
+                        ..fleet_provider_proxmox::PveQemuWrite::default()
+                    },
+                    &digest,
+                )
+                .await;
+        }
+    }
+
+    /// Clears a confirmed persistent guest's Proxmox protection, with a
+    /// conditional write and an audit event, and answers whether it changed
+    /// anything. A guest that is not protected is left alone.
+    async fn lift_protection(
+        &self,
+        operation: &Operation,
+        payload: &DestructivePayload,
+        marker: &fleet_application::persistent::PersistentGuest,
+        request: &fleet_provider_proxmox::PveHttpRequest,
+    ) -> Result<bool, String> {
+        let settings = self
+            .client
+            .qemu_settings(request.clone(), &payload.node, payload.vmid)
+            .await
+            .map_err(|error| format!("the guest config is unreadable: {error}"))?;
+        if !settings.protection {
+            return Ok(false);
+        }
+        // A registered VM was protected by its operator, not by Fleet: Fleet
+        // never lifts that protection for the operator.
+        if marker.is_registered() {
+            return Err(format!(
+                "{} is a registered VM with protection on; lift it first (proxmox config with protection=false), then destroy",
+                marker.name
+            ));
+        }
+        let digest = settings.digest.ok_or(
+            "the guest config carries no digest, so protection is not lifted unconditionally",
+        )?;
+        if let Some(audit) = &self.audit {
+            let mut metadata = fleet_application::audit::AuditMetadata::default();
+            for (key, value) in [
+                ("event", "persistent_protection_lifted"),
+                ("accountId", payload.account_id.as_str()),
+                ("vmid", &payload.vmid.to_string()),
+                ("name", marker.name.as_str()),
+            ] {
+                metadata
+                    .insert(key, value)
+                    .map_err(|error| error.to_string())?;
+            }
+            audit
+                .record_intent(&fleet_application::audit::AuditIntent {
+                    actor: fleet_auth::LAN_PRINCIPAL_ID.to_owned(),
+                    action: fleet_application::authz::Permission::ProxmoxDestructive
+                        .id()
+                        .to_owned(),
+                    resource: Some(format!("{}/{}", payload.account_id, payload.vmid)),
+                    decision: fleet_application::authz::Decision::allow(),
+                    correlation_id: None,
+                    operation_id: Some(operation.id.clone()),
+                    metadata,
+                })
+                .await?;
+        }
+        self.client
+            .qemu_write_settings(
+                request.clone(),
+                &payload.node,
+                payload.vmid,
+                &fleet_provider_proxmox::PveQemuWrite {
+                    protection: Some(false),
+                    ..fleet_provider_proxmox::PveQemuWrite::default()
+                },
+                &digest,
+            )
+            .await
+            .map(|()| true)
+            .map_err(|error| format!("PVE refused to lift the protection: {error}"))
     }
 
     /// Supplies the Lab pool membership lookup (#368). With it, a destroy or
@@ -564,6 +691,74 @@ impl OperationExecutor for ProxmoxDestructiveExecutor {
         }
         let (account, secret) = self.bound(&payload.account_id).await?;
         let request = self.request(&account, &secret);
+        let persistent_marker = if operation.kind == "proxmox.guest.destroy" {
+            match &self.persistent {
+                Some(store) => match store
+                    .get(&payload.account_id, payload.vmid)
+                    .await
+                    .map_err(|detail| format!("the persistent marker is unreadable: {detail}"))?
+                {
+                    // A marker counts only while it guards the guest now at
+                    // the VMID (its clone completed, or the name matches).
+                    Some(marker) => {
+                        let live = self
+                            .client
+                            .list_guest_resources(request.clone())
+                            .await
+                            .map_err(|error| format!("the resource listing failed: {error}"))?
+                            .into_iter()
+                            .find(|resource| resource.vmid == Some(payload.vmid))
+                            .and_then(|resource| resource.name);
+                        marker.guards(live.as_deref()).then_some(marker)
+                    }
+                    None => None,
+                },
+                None => None,
+            }
+        } else {
+            None
+        };
+        if let Some(marker) = &persistent_marker
+            && payload
+                .params
+                .get("confirmPersistent")
+                .and_then(serde_json::Value::as_bool)
+                != Some(true)
+        {
+            return complete_failure(
+                operations,
+                &operation.id,
+                "persistent_guest",
+                &format!(
+                    "VMID {} is the persistent machine {}; destroying it needs the reviewed confirmPersistent parameter",
+                    payload.vmid, marker.name
+                ),
+            )
+            .await;
+        }
+        // A registered VM's protection is its operator's: refuse before
+        // anything is stopped, rather than lifting it.
+        if let Some(marker) = &persistent_marker
+            && marker.is_registered()
+        {
+            let settings = self
+                .client
+                .qemu_settings(request.clone(), &payload.node, payload.vmid)
+                .await
+                .map_err(|error| format!("the guest config is unreadable: {error}"))?;
+            if settings.protection {
+                return complete_failure(
+                    operations,
+                    &operation.id,
+                    "protection_on",
+                    &format!(
+                        "{} is a registered VM with protection on; Fleet does not lift it. Run proxmox config with protection=false first, then destroy",
+                        marker.name
+                    ),
+                )
+                .await;
+            }
+        }
         let deadline = Duration::from_secs(payload.timeout_seconds.min(MAX_LIFECYCLE_TIMEOUT));
         let kind = operation.kind.as_str();
         let outcome: Result<(), String> = match kind {
@@ -587,21 +782,57 @@ impl OperationExecutor for ProxmoxDestructiveExecutor {
                     .get("purge")
                     .and_then(serde_json::Value::as_bool)
                     .unwrap_or(false);
-                self.run_to_terminal(
-                    operations,
-                    &operation.id,
-                    &payload.account_id,
-                    &request,
-                    &payload.node,
-                    vmid,
-                    remaining,
-                    move |client, request| {
-                        Box::pin(
-                            async move { client.guest_destroy(request, &node, vmid, purge).await },
-                        )
-                    },
-                )
-                .await
+                // The confirmation is the operator's reviewed act of lifting
+                // the protection too. It happens here, after the stop and
+                // every guard, immediately before the delete (Proxmox
+                // refuses to delete a protected guest), so a refusal by a
+                // guard leaves the protection on.
+                let lifted = if let Some(marker) = &persistent_marker {
+                    match self
+                        .lift_protection(operation, &payload, marker, &request)
+                        .await
+                    {
+                        Ok(lifted) => lifted,
+                        Err(detail) => {
+                            return complete_failure(
+                                operations,
+                                &operation.id,
+                                "protection_not_lifted",
+                                &detail,
+                            )
+                            .await;
+                        }
+                    }
+                } else {
+                    false
+                };
+                let result = self
+                    .run_to_terminal(
+                        operations,
+                        &operation.id,
+                        &payload.account_id,
+                        &request,
+                        &payload.node,
+                        vmid,
+                        remaining,
+                        move |client, request| {
+                            Box::pin(async move {
+                                client.guest_destroy(request, &node, vmid, purge).await
+                            })
+                        },
+                    )
+                    .await;
+                // A delete that did not happen must not leave a persistent
+                // machine unprotected.
+                if lifted
+                    && !operations
+                        .get_state(&operation.id)
+                        .await
+                        .is_ok_and(|state| state == "succeeded")
+                {
+                    self.restore_protection(&payload, &request).await;
+                }
+                result
             }
             "proxmox.guest.snapshot" => {
                 let name = payload
@@ -896,6 +1127,16 @@ impl OperationExecutor for ProxmoxDestructiveExecutor {
             other => return Err(format!("not a Proxmox destructive kind: {other}")),
         };
         outcome?;
+        // The guest is gone: so is its marker, so the VMID and name are free.
+        if persistent_marker.is_some()
+            && let Some(store) = &self.persistent
+            && operations
+                .get_state(&operation.id)
+                .await
+                .is_ok_and(|state| state == "succeeded")
+        {
+            let _ = store.remove(&payload.account_id, payload.vmid).await;
+        }
         Ok(())
     }
 }
@@ -1542,6 +1783,10 @@ pub struct ProvisionReadiness {
     operations: Arc<Operations>,
     work_dir: std::path::PathBuf,
     started: Arc<std::sync::Mutex<std::collections::HashSet<String>>>,
+    /// Provision records whose interactive image preconditions already passed
+    /// in this controller, so the retries while the guest waits for its
+    /// session run only the session lookup (#490). A restart just checks again.
+    preconditions_passed: std::sync::Mutex<std::collections::HashSet<String>>,
 }
 
 impl ProvisionReadiness {
@@ -1563,6 +1808,7 @@ impl ProvisionReadiness {
             operations,
             work_dir,
             started: Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
+            preconditions_passed: std::sync::Mutex::new(std::collections::HashSet::new()),
         }
     }
 
@@ -1694,6 +1940,30 @@ impl ProvisionReadiness {
         guest_os: fleet_core::GuestOs,
         remaining: Duration,
     ) -> Result<bool, String> {
+        Ok(self
+            .run_probe_finished(
+                operations, parent_id, record, command, arguments, guest_os, false, remaining,
+            )
+            .await?
+            .state
+            == "succeeded")
+    }
+
+    /// [`Self::run_probe`], returning the finished child so a caller can read
+    /// why it failed. `guest_refusals` asks the executor to tell the guest
+    /// script's own refusals from the command's exit code (#490).
+    #[allow(clippy::too_many_arguments)]
+    async fn run_probe_finished(
+        &self,
+        operations: &Operations,
+        parent_id: &str,
+        record: &fleet_application::lab::ProvisionRecord,
+        command: &str,
+        arguments: &[String],
+        guest_os: fleet_core::GuestOs,
+        guest_refusals: bool,
+        remaining: Duration,
+    ) -> Result<Operation, String> {
         let child = operations.create(&fleet_auth::LanAllowAllAuthorizer, fleet_auth::LAN_PRINCIPAL_ID,
             &fleet_application::operation::NewOperation {
                 kind: "ssh.exec".to_owned(), idempotency_key: None,
@@ -1703,6 +1973,7 @@ impl ProvisionReadiness {
                     "auth": {"type": "agent"}, "script": command,
                     "arguments": arguments,
                     "guestOs": guest_os.id(),
+                    "guestRefusals": guest_refusals,
                     "labParentOperationId": parent_id,
                     "timeoutSeconds": remaining.as_secs().clamp(1, crate::exec::MAX_SCRIPT_TIMEOUT),
                 }).to_string()),
@@ -1714,7 +1985,7 @@ impl ProvisionReadiness {
                 return Err("SSH probe was cancelled".to_owned());
             }
             if !matches!(finished.state.as_str(), "pending" | "running") {
-                return Ok(finished.state == "succeeded");
+                return Ok(finished);
             }
             if tokio::time::Instant::now() >= deadline
                 || operations.cancel_requested(parent_id).await.unwrap_or(true)
@@ -1729,6 +2000,204 @@ impl ProvisionReadiness {
                 return Err("SSH probe deadline expired".to_owned());
             }
             tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    }
+}
+
+/// Whether a failed probe's error is the guest script refusing because the
+/// image does not hold the interactive preconditions (#490).
+fn is_precondition_refusal(error_json: Option<&str>) -> bool {
+    refusal_code(error_json)
+        == Some(i64::from(
+            fleet_provider_ssh::detached::PRECONDITION_REFUSAL,
+        ))
+}
+
+/// The guest refusal code of a failed `ssh.exec` whose script refused (#490).
+fn refusal_code(error_json: Option<&str>) -> Option<i64> {
+    error_json
+        .and_then(|raw| serde_json::from_str::<serde_json::Value>(raw).ok())
+        .filter(|error| error["reason"] == "guest_refused")
+        .and_then(|error| error["refusalCode"].as_i64())
+}
+
+#[cfg(test)]
+mod precondition_refusal_tests {
+    use super::*;
+
+    /// Completes each `ssh.exec` child the readiness probe creates with the
+    /// next scripted outcome and keeps its payload.
+    #[derive(Debug)]
+    struct ScriptedProbe {
+        outcomes: std::sync::Mutex<std::collections::VecDeque<Option<i64>>>,
+        payloads: std::sync::Mutex<Vec<serde_json::Value>>,
+    }
+
+    #[async_trait::async_trait]
+    impl OperationExecutor for ScriptedProbe {
+        async fn execute(
+            &self,
+            operations: &Operations,
+            operation: &Operation,
+        ) -> Result<(), String> {
+            self.payloads
+                .lock()
+                .unwrap()
+                .push(serde_json::from_str(operation.payload_json.as_deref().unwrap()).unwrap());
+            let outcome = self.outcomes.lock().unwrap().pop_front().unwrap();
+            let refused;
+            let (state, result, error) = match outcome {
+                None => ("succeeded", Some("{}"), None),
+                Some(code) => {
+                    refused = serde_json::json!({
+                        "reason": "guest_refused", "refusalCode": code, "detail": "x"
+                    })
+                    .to_string();
+                    ("failed", None, Some(refused.as_str()))
+                }
+            };
+            operations
+                .complete(&operation.id, state, result, error)
+                .await
+                .map(|_| ())
+                .map_err(|error| error.to_string())
+        }
+    }
+
+    async fn probe_with(
+        outcomes: Vec<Option<i64>>,
+    ) -> (
+        ProvisionReadiness,
+        Arc<ScriptedProbe>,
+        Arc<Operations>,
+        tempfile::TempDir,
+        fleet_storage_sqlite::Store,
+    ) {
+        let dir = tempfile::tempdir().unwrap();
+        let store = fleet_storage_sqlite::Store::open(&dir.path().join("fleet.db"))
+            .await
+            .unwrap();
+        let audit = Arc::new(fleet_storage_sqlite::AuditSink::new(store.pool().clone()));
+        let operations = Arc::new(Operations::new(
+            Arc::new(fleet_storage_sqlite::OperationRepository::new(
+                store.pool().clone(),
+            )),
+            audit.clone(),
+        ));
+        let probe = Arc::new(ScriptedProbe {
+            outcomes: std::sync::Mutex::new(outcomes.into()),
+            payloads: std::sync::Mutex::new(Vec::new()),
+        });
+        let readiness = ProvisionReadiness::new(
+            Arc::new(fleet_storage_sqlite::MachineRepository::new(
+                store.pool().clone(),
+            )),
+            Arc::new(fleet_storage_sqlite::ProjectRepository::new(
+                store.pool().clone(),
+            )),
+            audit,
+            probe.clone(),
+            operations.clone(),
+            dir.path().join("ssh"),
+        );
+        (readiness, probe, operations, dir, store)
+    }
+
+    fn record() -> fleet_application::lab::ProvisionRecord {
+        fleet_application::lab::ProvisionRecord {
+            id: "provision-1".to_owned(),
+            template_version_id: "version-1".to_owned(),
+            lease_id: None,
+            state: fleet_core::GuestState::Bootstrapping,
+            node: None,
+            vmid: None,
+            clone_upid: None,
+            guest_ipv4: None,
+            machine_id: Some("machine-1".to_owned()),
+            endpoint_id: Some("endpoint-1".to_owned()),
+            ready_project_operation_id: None,
+            readiness_deadline_at: Some(fleet_core::SystemClock::now_unix_millis() + 60_000),
+            failed_step: None,
+            account_id: None,
+            idempotency_key: None,
+            ready_at: None,
+            created_at: 0,
+            updated_at: 0,
+        }
+    }
+
+    /// The probe asks for refusal mapping; a 77 keeps retrying (the
+    /// preconditions are checked once, then only the session lookup runs); a
+    /// 73 is an error, which the readiness loop turns into the failed step
+    /// `interactive_session`.
+    #[tokio::test]
+    async fn the_session_probe_maps_refusals_and_checks_the_preconditions_once() {
+        use fleet_application::lab::LabReadinessPort as _;
+        let (readiness, probe, operations, _dir, _store) =
+            probe_with(vec![Some(77), Some(77), None, Some(73)]).await;
+        let record = record();
+        let wait = Duration::from_secs(30);
+        let parent = operations
+            .create(
+                &fleet_auth::LanAllowAllAuthorizer,
+                fleet_auth::LAN_PRINCIPAL_ID,
+                &fleet_application::operation::NewOperation {
+                    kind: "noop".to_owned(),
+                    idempotency_key: None,
+                    deadline_at: None,
+                    correlation_id: None,
+                    payload_json: None,
+                    review_token: None,
+                },
+            )
+            .await
+            .unwrap()
+            .id;
+        let try_once = || readiness.interactive_session(&operations, &parent, &record, "qa", wait);
+        assert_eq!(try_once().await, Ok(false));
+        assert_eq!(try_once().await, Ok(false));
+        assert_eq!(try_once().await, Ok(true));
+        let payloads = probe.payloads.lock().unwrap().clone();
+        assert!(
+            payloads
+                .iter()
+                .all(|payload| payload["guestRefusals"] == true)
+        );
+        let has_checks = |index: usize| {
+            payloads[index]["script"]
+                .as_str()
+                .unwrap()
+                .contains("FleetLsa")
+        };
+        assert!(has_checks(0), "the first probe checks the image");
+        assert!(
+            !has_checks(1) && !has_checks(2),
+            "the retries only look for the session"
+        );
+        // The pass is forgotten once the session is up; a 73 fails the step.
+        assert!(readiness.preconditions_passed.lock().unwrap().is_empty());
+        let error = try_once().await.unwrap_err();
+        assert!(error.contains("preconditions"), "{error}");
+        let last = probe.payloads.lock().unwrap().last().cloned().unwrap();
+        assert!(last["script"].as_str().unwrap().contains("FleetLsa"));
+    }
+
+    #[test]
+    fn only_the_guests_precondition_refusal_stops_the_readiness_retry() {
+        assert!(is_precondition_refusal(Some(
+            r#"{"reason":"guest_refused","refusalCode":73,"detail":"x"}"#
+        )));
+        // No session yet (77), a missing account (78), a command exit, a
+        // transport failure and no error at all keep retrying.
+        for error in [
+            Some(r#"{"reason":"guest_refused","refusalCode":77,"detail":"x"}"#),
+            Some(r#"{"reason":"guest_refused","refusalCode":78,"detail":"x"}"#),
+            Some(r#"{"exitCode":73,"stdout":"","stderr":""}"#),
+            Some(r#"{"reason":"connection_failed","detail":"x"}"#),
+            Some("not json"),
+            None,
+        ] {
+            assert!(!is_precondition_refusal(error), "{error:?}");
         }
     }
 }
@@ -1761,14 +2230,25 @@ impl fleet_application::lab::LabReadinessPort for ProvisionReadiness {
             let provider = fleet_provider_ssh::SshProvider::new(staging.clone())
                 .map_err(|_| "SSH provider unavailable")?;
             let result = provider
-                .probe_host_key(&host, port, remaining.min(Duration::from_secs(5)))
+                .probe_host_keys(&host, port, remaining.min(Duration::from_secs(5)))
                 .map_err(|_| "SSH host key unavailable");
             let _ = std::fs::remove_dir_all(staging);
             result
         })
         .await
         .map_err(|_| "SSH trust worker failed")?;
-        let Ok(observation) = observed else {
+        let Ok(observations) = observed else {
+            return Ok(false);
+        };
+        // Match the stored or pinned fingerprint against every offered key
+        // type, not only the preferred one.
+        let pinned = (content.ssh_trust_mode == "pinned")
+            .then_some(content.ssh_fingerprint.as_deref())
+            .flatten();
+        let Some(observation) =
+            fleet_provider_ssh::choose_observation(&[pinned, expected.as_deref()], &observations)
+                .cloned()
+        else {
             return Ok(false);
         };
         if expected
@@ -1837,16 +2317,50 @@ impl fleet_application::lab::LabReadinessPort for ProvisionReadiness {
     ) -> Result<bool, String> {
         fleet_core::validate_interactive_user_name(user)?;
         let metadata = fleet_provider_ssh::detached::session_probe_metadata(user);
-        self.run_probe(
-            operations,
-            parent_id,
-            record,
-            &fleet_provider_ssh::detached::session_probe_script(),
-            &metadata.arguments,
-            fleet_core::GuestOs::Windows,
-            remaining,
-        )
-        .await
+        let checked = self
+            .preconditions_passed
+            .lock()
+            .is_ok_and(|passed| passed.contains(&record.id));
+        let script = if checked {
+            fleet_provider_ssh::detached::session_probe_script_session_only()
+        } else {
+            fleet_provider_ssh::detached::session_probe_script()
+        };
+        let finished = self
+            .run_probe_finished(
+                operations,
+                parent_id,
+                record,
+                &script,
+                &metadata.arguments,
+                fleet_core::GuestOs::Windows,
+                true,
+                remaining,
+            )
+            .await?;
+        if finished.state == "succeeded" {
+            if let Ok(mut passed) = self.preconditions_passed.lock() {
+                passed.remove(&record.id);
+            }
+            return Ok(true);
+        }
+        // The preconditions run before the session lookup, so a refusal of 77
+        // (no session yet) means they passed.
+        if refusal_code(finished.error_json.as_deref()) == Some(77)
+            && let Ok(mut passed) = self.preconditions_passed.lock()
+        {
+            if passed.len() >= 1024 {
+                passed.clear();
+            }
+            passed.insert(record.id.clone());
+        }
+        // An image that does not hold the preconditions never will: fail the
+        // step now instead of retrying to the deadline. Every other refusal
+        // (no session yet, an account still being created) is retried.
+        if is_precondition_refusal(finished.error_json.as_deref()) {
+            return Err("the interactive test image does not hold its preconditions".to_owned());
+        }
+        Ok(false)
     }
 
     async fn create_project(
@@ -2123,6 +2637,8 @@ pub struct ProvisionExecutor {
     /// The bound on one disk resize task (#372).
     hardware_task_timeout: Duration,
     hardware_confirm_timeout: Duration,
+    /// The persistent marker (#489): Lab cleanup never destroys such a guest.
+    persistent: Option<Arc<dyn fleet_application::persistent::PersistentGuestPort>>,
 }
 
 /// The placement and capacity reservation parts (FM-715).
@@ -2208,7 +2724,19 @@ impl ProvisionExecutor {
             pools: None,
             hardware_task_timeout: HARDWARE_TASK_TIMEOUT,
             hardware_confirm_timeout: HARDWARE_CONFIRM_TIMEOUT,
+            persistent: None,
         }
+    }
+
+    /// Supplies the persistent marker store (#489): the Lab cleanup guard
+    /// refuses to destroy a guest that carries it.
+    #[must_use]
+    pub fn with_persistent(
+        mut self,
+        persistent: Arc<dyn fleet_application::persistent::PersistentGuestPort>,
+    ) -> Self {
+        self.persistent = Some(persistent);
+        self
     }
 
     /// Bounds how long a written hardware value may stay unreported by the
@@ -2464,9 +2992,24 @@ impl ProvisionExecutor {
     /// undecided guard is a refusal too.
     pub async fn guard_destroy_target(&self, account_id: &str, vmid: u32) -> Result<(), String> {
         let (account, secret) = self.bound(account_id).await?;
-        self.destroy_guard(pve_request(&account, secret), vmid)
-            .await?
-            .0
+        let request = pve_request(&account, secret);
+        let (decision, resources) = self.destroy_guard(request, vmid).await?;
+        if let Some(persistent) = &self.persistent
+            && let Some(marker) = persistent.get(account_id, vmid).await?
+        {
+            // A marker shields the guest now at the VMID only while its
+            // clone completed or the guest still has the marked name.
+            let live = resources
+                .iter()
+                .find(|resource| resource.vmid == Some(vmid))
+                .and_then(|resource| resource.name.as_deref());
+            if marker.guards(live) {
+                return Err(format!(
+                    "VMID {vmid} is a persistent Fleet machine; Lab cleanup never destroys one"
+                ));
+            }
+        }
+        decision
     }
 
     /// The guard's decision over a fresh resource listing, which it also
@@ -2645,6 +3188,19 @@ impl ProvisionExecutor {
                 .promoted_template_vmids()
                 .await
                 .map_err(|detail| format!("the image artifacts are unreadable: {detail}"))?;
+            // A VMID a persistent marker holds is never a Lab guest's, even
+            // when the cluster shows nothing there (a failed or hand-removed
+            // creation): abandon the marker to release the number.
+            if let Some(persistent) = &self.persistent
+                && persistent.get(account_id, candidate).await?.is_some()
+            {
+                return Ok(Err(Refusal::new(
+                    "conflict",
+                    format!(
+                        "the next free VMID {candidate} is held by a persistent machine marker; abandon the marker (fleetctl machines abandon) or move the next-id range"
+                    ),
+                )));
+            }
             if protected.contains(&candidate) {
                 return Ok(Err(Refusal::new(
                     "conflict",
@@ -4552,6 +5108,9 @@ impl LabDispatch {
                     "script": script,
                     "arguments": metadata.arguments,
                     "guestOs": "windows",
+                    // The script's refusals (64, 70-79) are not the command's
+                    // exit code (#490).
+                    "guestRefusals": true,
                     // The guest bound, the start and the wait margin.
                     "timeoutSeconds": seconds + fleet_application::lab::INTERACTIVE_EXEC_MARGIN_SECONDS,
                 })

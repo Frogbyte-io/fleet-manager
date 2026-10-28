@@ -153,6 +153,10 @@ pub enum Permission {
     /// snapshot delete, clone, template conversion, or remote task
     /// cancellation. A mutation: it changes or destroys guest state.
     ProxmoxDestructive,
+    /// Open a Proxmox guest's screen through the VNC proxy (FM-495). A
+    /// mutation in effect: screen access implies keyboard and pointer
+    /// input in the guest, so it is privileged and never delegated.
+    ProxmoxConsole,
     /// List external provider accounts (Coolify, Cloudflare) and their
     /// last probe results. A read, but a topology-revealing one.
     ExternalAccountRead,
@@ -220,6 +224,34 @@ pub enum Permission {
     /// risky like [`Permission::LabArtifacts`]. A delegated credential reads
     /// its own owner's handles only.
     LabExecRead,
+    /// Run a bounded command on a Fleet machine over its SSH endpoint with
+    /// the endpoint's stored credential (ADR 0017). The most privileged
+    /// machine action: it is arbitrary command execution as the endpoint's
+    /// user. Scoped to the machine; never delegated to Lab credentials.
+    MachineExec,
+    /// Copy one file onto a Fleet machine over its SSH endpoint (ADR 0017).
+    /// A privileged mutation, scoped to the machine.
+    MachinePut,
+    /// Copy files off a Fleet machine over its SSH endpoint and read them
+    /// back (ADR 0017). A privileged read: a collected file can be
+    /// sensitive. Scoped to the machine.
+    MachineCollect,
+    /// Open an interactive shell on a Fleet machine over its SSH endpoint
+    /// (#494). Arbitrary command execution as the endpoint's user with a
+    /// human at the keyboard, so it is privileged like
+    /// [`Permission::MachineExec`] and separate from it: neither implies the
+    /// other, and read access implies neither. Scoped to the machine; checked
+    /// when a session is created and again when its socket attaches; never
+    /// delegated to Lab credentials.
+    MachineTerminal,
+    /// Change one allow-listed setting of a Proxmox guest that is not a Lab
+    /// guest: tags, description, onboot, protection, cores, memory (#489).
+    /// Infrastructure, not a Fleet machine, so it is catalog-level.
+    ProxmoxGuestConfig,
+    /// Create a permanent, Fleet-managed VM from a promoted image and
+    /// register it as a machine (#489). It clones, configures and starts a
+    /// guest and installs credentials on it: privileged, catalog-level.
+    MachineProvision,
     /// List and read Registry types and entries, and their relations
     /// (FM-1012). A read of descriptive, never-secret data: the Registry
     /// holds no credentials, so it is not risky.
@@ -298,6 +330,7 @@ impl Permission {
         Permission::ProxmoxConfig,
         Permission::ProxmoxOperate,
         Permission::ProxmoxDestructive,
+        Permission::ProxmoxConsole,
         Permission::ExternalAccountRead,
         Permission::ExternalAccountConfig,
         Permission::ImagesRead,
@@ -326,6 +359,12 @@ impl Permission {
         Permission::ActionRead,
         Permission::DnsRead,
         Permission::RegistryObserve,
+        Permission::MachineExec,
+        Permission::MachinePut,
+        Permission::MachineTerminal,
+        Permission::MachineCollect,
+        Permission::ProxmoxGuestConfig,
+        Permission::MachineProvision,
     ];
 
     /// The stable action id, as recorded in decisions and audit events.
@@ -376,6 +415,7 @@ impl Permission {
             Permission::ProxmoxConfig => "proxmox.config",
             Permission::ProxmoxOperate => "proxmox.operate",
             Permission::ProxmoxDestructive => "proxmox.destructive",
+            Permission::ProxmoxConsole => "proxmox.console",
             Permission::ExternalAccountRead => "external_account.read",
             Permission::ExternalAccountConfig => "external_account.config",
             Permission::ImagesRead => "images.read",
@@ -404,6 +444,12 @@ impl Permission {
             Permission::ActionRead => "action.read",
             Permission::DnsRead => "dns.read",
             Permission::RegistryObserve => "registry.observe",
+            Permission::MachineExec => "machines.exec",
+            Permission::MachinePut => "machines.put",
+            Permission::MachineTerminal => "machines.terminal",
+            Permission::MachineCollect => "machines.collect",
+            Permission::ProxmoxGuestConfig => "proxmox.guest.config",
+            Permission::MachineProvision => "machines.provision",
         }
     }
 
@@ -463,6 +509,7 @@ impl Permission {
             | Permission::ProxmoxConfig
             | Permission::ProxmoxOperate
             | Permission::ProxmoxDestructive
+            | Permission::ProxmoxConsole
             | Permission::ExternalAccountRead
             | Permission::ExternalAccountConfig
             | Permission::ImagesConfig
@@ -484,6 +531,12 @@ impl Permission {
             | Permission::ActionApprove
             | Permission::DnsRead
             | Permission::ActionDeny
+            | Permission::MachineExec
+            | Permission::MachinePut
+            | Permission::MachineTerminal
+            | Permission::MachineCollect
+            | Permission::ProxmoxGuestConfig
+            | Permission::MachineProvision
             | Permission::RegistryObserve => true,
         }
     }
@@ -514,6 +567,7 @@ impl Permission {
             | Permission::ProxmoxConfig
             | Permission::ProxmoxOperate
             | Permission::ProxmoxDestructive
+            | Permission::ProxmoxConsole
             | Permission::ExternalAccountRead
             | Permission::ExternalAccountConfig
             | Permission::ImagesRead
@@ -528,6 +582,8 @@ impl Permission {
             | Permission::LabArtifactRead
             | Permission::ActionRead
             | Permission::DnsRead
+            | Permission::ProxmoxGuestConfig
+            | Permission::MachineProvision
             | Permission::RegistryObserve => false,
             Permission::MachineReadSensitive
             | Permission::OperationCancel
@@ -565,6 +621,10 @@ impl Permission {
             | Permission::LabExecRead
             | Permission::ActionRequest
             | Permission::ActionApprove
+            | Permission::MachineExec
+            | Permission::MachinePut
+            | Permission::MachineTerminal
+            | Permission::MachineCollect
             | Permission::ActionDeny => true,
         }
     }

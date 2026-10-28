@@ -21,6 +21,9 @@ const discoverProxmoxCluster = vi.fn()
 const listProxmoxGuests = vi.fn()
 const getTailnetStatus = vi.fn()
 const listTailnetDevices = vi.fn()
+const listPersistentGuests = vi.fn()
+const reviewMachineCreate = vi.fn()
+const createMachine = vi.fn()
 
 vi.mock('@frogbyte-io/fleet-api-client', () => ({
   listMachines: (...args: unknown[]) => listMachines(...args),
@@ -29,6 +32,9 @@ vi.mock('@frogbyte-io/fleet-api-client', () => ({
   listProxmoxGuests: (...args: unknown[]) => listProxmoxGuests(...args),
   getTailnetStatus: (...args: unknown[]) => getTailnetStatus(...args),
   listTailnetDevices: (...args: unknown[]) => listTailnetDevices(...args),
+  listPersistentGuests: (...args: unknown[]) => listPersistentGuests(...args),
+  createMachine: (...args: unknown[]) => createMachine(...args),
+  reviewMachineCreate: (...args: unknown[]) => reviewMachineCreate(...args),
 }))
 
 import FleetPage from '../FleetPage.vue'
@@ -206,6 +212,10 @@ beforeEach(() => {
   listProxmoxGuests.mockReset()
   getTailnetStatus.mockReset()
   listTailnetDevices.mockReset()
+  listPersistentGuests.mockReset()
+  reviewMachineCreate.mockReset()
+  createMachine.mockReset()
+  listPersistentGuests.mockResolvedValue(ok({ data: [] }))
   stubHappyPath()
 })
 
@@ -531,5 +541,46 @@ describe('FleetPage', () => {
     await flushPromises()
 
     expect(wrapper.text()).not.toContain('safety cap')
+  })
+
+  it('lists persistent guests and says so when there are none', async () => {
+    const empty = await mountPage()
+    await flushPromises()
+    await flushPromises()
+    expect(empty.get('[data-testid="persistent-empty"]').text()).toContain('No persistent machines yet')
+    empty.unmount()
+
+    listPersistentGuests.mockResolvedValue(ok({
+      data: [
+        { accountId: 'a1', vmid: 7250, name: 'win-runner', node: 'pve', imageVersionId: 'registered', machineId: 'm1', cloned: true, state: 'ready', step: 'registered', operationId: null, createdAt: NOW, updatedAt: NOW },
+        { accountId: 'a1', vmid: 7151, name: 'build-box', node: 'pve', imageVersionId: 'ver-1', machineId: null, cloned: false, state: 'creating', step: 'clone', operationId: 'op1', createdAt: NOW, updatedAt: NOW },
+        { accountId: 'a1', vmid: 7152, name: 'iso-box', node: 'pve', imageVersionId: 'install:local:iso/u.iso', machineId: null, cloned: true, state: 'creating', step: 'installing', operationId: 'op2', createdAt: NOW, updatedAt: NOW },
+      ],
+    }))
+    const wrapper = await mountPage()
+    await flushPromises()
+    await flushPromises()
+    const cards = wrapper.findAll('[data-testid="persistent-guest"]')
+    expect(cards).toHaveLength(3)
+    expect(cards[0].text()).toContain('win-runner')
+    expect(cards[0].text()).toContain('registered')
+    expect(cards[1].text()).toContain('Stopped at clone')
+    expect(cards[1].text()).toContain('from image')
+    expect(cards[2].text()).toContain('from ISO')
+  })
+
+  it('reviews a persistent machine spec before it creates it', async () => {
+    reviewMachineCreate.mockResolvedValue(ok({ data: { reviewToken: 'tok', spec: { name: 'build-box' } } }))
+    createMachine.mockResolvedValue({ status: 202, data: { data: { id: 'op-9', state: 'pending' } }, headers: new Headers() })
+    const wrapper = await mountPage()
+    await flushPromises()
+    await wrapper.get('[data-testid="create-persistent"]').trigger('click')
+    await flushPromises()
+    // The dialog renders in a portal.
+    const body = document.body
+    expect(body.querySelector('[data-testid="create-persistent-dialog"]')).not.toBeNull()
+    const submit = body.querySelector('[data-testid="create-submit"]') as HTMLButtonElement
+    expect(submit.disabled).toBe(true)
+    wrapper.unmount()
   })
 })

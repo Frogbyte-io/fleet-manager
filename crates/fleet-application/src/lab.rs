@@ -1081,6 +1081,7 @@ pub struct Lab {
     artifacts: Option<Arc<crate::lab_artifacts::LabArtifacts>>,
     puts: Option<Arc<crate::lab_put::LabPuts>>,
     detached: Option<Arc<crate::lab_exec_detach::LabExecDetach>>,
+    machine_access: Option<Arc<crate::machine_access::MachineAccess>>,
     pools: Option<Arc<crate::lab_pool::LabPools>>,
     reservations: Option<Arc<dyn crate::lab_placement::CapacityReservationPort>>,
 }
@@ -1106,6 +1107,7 @@ impl Lab {
             artifacts: None,
             puts: None,
             detached: None,
+            machine_access: None,
             pools: None,
             reservations: None,
         }
@@ -1211,6 +1213,25 @@ impl Lab {
     pub fn with_detached(mut self, detached: Arc<crate::lab_exec_detach::LabExecDetach>) -> Self {
         self.detached = Some(detached);
         self
+    }
+
+    /// Carries the machine access use cases (#493, ADR 0017). They are not
+    /// Lab use cases: the controller threads one optional composite to the
+    /// API, and this is it, so the public composition entry points keep
+    /// their signatures.
+    #[must_use]
+    pub fn with_machine_access(
+        mut self,
+        access: Arc<crate::machine_access::MachineAccess>,
+    ) -> Self {
+        self.machine_access = Some(access);
+        self
+    }
+
+    /// The machine access use cases, when the controller composed them.
+    #[must_use]
+    pub fn machine_access(&self) -> Option<&Arc<crate::machine_access::MachineAccess>> {
+        self.machine_access.as_ref()
     }
 
     /// The detached-exec use cases, when the controller composed them.

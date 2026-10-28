@@ -135,6 +135,17 @@ async fn output_credentials_are_scrubbed_from_the_stored_result() {
 }
 
 async fn run_verified_script(script: &str) -> serde_json::Value {
+    let finished = run_verified(script, serde_json::json!({})).await;
+    assert_eq!(finished.state, "succeeded", "{:?}", finished.error_json);
+    serde_json::from_str(&finished.result_json.unwrap()).unwrap()
+}
+
+/// Runs `script` as a verified `ssh.exec` with the `extra` payload fields and
+/// returns the finished operation, whatever its state.
+async fn run_verified(
+    script: &str,
+    extra: serde_json::Value,
+) -> fleet_application::operation::Operation {
     let (dir, operations, executor, pool) = compose().await;
     let sshd = start_sshd();
 
@@ -166,14 +177,17 @@ async fn run_verified_script(script: &str) -> serde_json::Value {
         .unwrap();
 
     let identity_file = format!("{}/user_ed25519", sshd.keys_dir.path().display());
-    let payload_json_string = serde_json::json!({
+    let mut payload = serde_json::json!({
         "machineId": machine.id,
         "endpointId": endpoint_id,
         "script": script,
         "timeoutSeconds": 15,
         "auth": {"type": "identityFile", "path": identity_file}
-    })
-    .to_string();
+    });
+    for (key, value) in extra.as_object().unwrap() {
+        payload[key] = value.clone();
+    }
+    let payload_json_string = payload.to_string();
 
     let operation = operations
         .create(
@@ -199,16 +213,60 @@ async fn run_verified_script(script: &str) -> serde_json::Value {
     assert!(report.claimed);
     assert!(report.completed);
 
-    let finished = operations
+    operations
         .get(
             &fleet_auth::LanAllowAllAuthorizer,
             "anonymous-lan-admin",
             &operation.id,
         )
         .await
-        .unwrap();
-    assert_eq!(finished.state, "succeeded", "{:?}", finished.error_json);
-    serde_json::from_str(&finished.result_json.unwrap()).unwrap()
+        .unwrap()
+}
+
+/// A guest script's own refusals (#490) fail the operation with a reason
+/// instead of reaching the caller as the command's exit code, for every
+/// refusal code; the command's own exit of the same code stays a command exit.
+#[tokio::test]
+async fn a_guest_refusal_is_a_failed_operation_not_a_command_exit_code() {
+    let on = serde_json::json!({"guestRefusals": true});
+    for code in [64, 70, 71, 72, 73, 75, 76, 77, 78, 79] {
+        let script =
+            format!("echo 'fleet: some reason' >&2; echo 'fleet: refusal {code}' >&2; exit {code}");
+        let finished = run_verified(&script, on.clone()).await;
+        assert_eq!(finished.state, "failed", "{code}");
+        assert!(finished.result_json.is_none(), "{code}");
+        let error: serde_json::Value = serde_json::from_str(&finished.error_json.unwrap()).unwrap();
+        assert_eq!(error["reason"], "guest_refused", "{code}");
+        assert_eq!(error["refusalCode"], code);
+        assert_eq!(error["detail"], "fleet: some reason");
+        assert!(error.get("exitCode").is_none(), "{code}: {error}");
+    }
+
+    // The command's own 77 is an ordinary failed exec with its exit code.
+    let finished = run_verified("echo boom >&2; exit 77", on.clone()).await;
+    assert_eq!(finished.state, "failed");
+    let error: serde_json::Value = serde_json::from_str(&finished.error_json.unwrap()).unwrap();
+    assert_eq!(error["exitCode"], 77);
+    assert!(error.get("reason").is_none(), "{error}");
+
+    // A marker for another code, or not on the last line, is output.
+    for script in [
+        "echo 'fleet: refusal 71' >&2; exit 77",
+        "echo 'fleet: refusal 77' >&2; echo more >&2; exit 77",
+    ] {
+        let finished = run_verified(script, on.clone()).await;
+        let error: serde_json::Value = serde_json::from_str(&finished.error_json.unwrap()).unwrap();
+        assert_eq!(error["exitCode"], 77, "{script}");
+    }
+
+    // Without the opt-in (every other exec) the marker means nothing.
+    let finished = run_verified(
+        "echo 'fleet: refusal 77' >&2; exit 77",
+        serde_json::json!({}),
+    )
+    .await;
+    let error: serde_json::Value = serde_json::from_str(&finished.error_json.unwrap()).unwrap();
+    assert_eq!(error["exitCode"], 77);
 }
 
 #[tokio::test]

@@ -5161,6 +5161,310 @@
         }
       }
     },
+    "/api/v1/machine-files/{fileId}": {
+      "get": {
+        "tags": [
+          "machines"
+        ],
+        "summary": "Reads one collected file's metadata.",
+        "description": "# Errors\n\nReturns the public error envelope on refusal or an unknown file.",
+        "operationId": "getMachineFile",
+        "parameters": [
+          {
+            "name": "fileId",
+            "in": "path",
+            "description": "The collected file's identity.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The file's metadata.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Resource_MachineFileDto"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The caller may not collect files from this machine.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "The file does not exist.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "A backend port failed.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Machine access is not wired, or the controller has no artifact store.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/machine-files/{fileId}/content": {
+      "get": {
+        "tags": [
+          "machines"
+        ],
+        "summary": "Streams one collected file's bytes. The controller re-hashes them first\nand refuses (409) bytes that no longer match the recorded size and\nsha256; the response carries the digest as `Repr-Digest` and `ETag`.",
+        "description": "# Errors\n\nReturns the public error envelope on refusal, an unknown file, or bytes\nthat are missing or corrupt.",
+        "operationId": "downloadMachineFile",
+        "parameters": [
+          {
+            "name": "fileId",
+            "in": "path",
+            "description": "The collected file's identity.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The file's verified bytes.",
+            "headers": {
+              "ETag": {
+                "schema": {
+                  "type": "string"
+                },
+                "description": "The bytes' sha256, as `\"sha256:<hex>\"`."
+              },
+              "Repr-Digest": {
+                "schema": {
+                  "type": "string"
+                },
+                "description": "The bytes' sha256, as `sha-256=:<base64>:` (RFC 9530)."
+              }
+            },
+            "content": {
+              "application/octet-stream": {
+                "schema": {
+                  "$ref": "#/components/schemas/ArtifactBytes"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The caller may not collect files from this machine.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "The file does not exist.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The stored bytes are missing or no longer match their digest.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "A backend port failed.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Machine access is not wired, or the controller has no artifact store.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/machine-product-keys": {
+      "post": {
+        "tags": [
+          "machines"
+        ],
+        "summary": "Stores a Windows product key as an encrypted secret and returns its\nreference. The key is readable only by the create executor and is never\nreturned, logged, or recorded in an audit event.",
+        "description": "# Errors\n\nReturns the public error envelope on refusal, a value that is not a\nproduct key, or when no secret store is configured.",
+        "operationId": "storeMachineProductKey",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/StoreProductKeyRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "description": "The key is stored; the reference is the only thing returned.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Resource_StoredProductKeyDto"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The value is not a product key.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The caller may not write secrets.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Persistent machine creation is not wired.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/machine-ssh-keys": {
+      "post": {
+        "tags": [
+          "machines"
+        ],
+        "summary": "Stores an SSH private key for stored-key authentication and returns its\nreference. The key is never returned, logged, or recorded in an audit\nevent.",
+        "description": "# Errors\n\nReturns the public error envelope on refusal, a value that is not a\nusable unencrypted private key, or when no secret store is configured.",
+        "operationId": "storeMachineSshKey",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/StoreSshKeyRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "description": "The key is stored; the reference is the only thing returned.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Resource_StoredSshKeyDto"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The value is not a usable unencrypted private key, or no secret store is configured.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The caller may not write secrets.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "A backend port failed.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Machine access is not wired.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/machines": {
       "get": {
         "tags": [
@@ -5250,6 +5554,216 @@
           },
           "403": {
             "description": "The caller may not read machines.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/machines/create": {
+      "post": {
+        "tags": [
+          "machines"
+        ],
+        "summary": "Creates a permanent VM as a durable `machine.create` operation. The\noperation clones the promoted image, applies the reviewed settings,\nstarts the guest, waits for its address and SSH host key, registers and\nlinks the machine, installs the chosen SSH key and removes the image's\nshared key, and optionally finishes the Windows setup. Its result names\nthe machine and endpoint, never a key.",
+        "description": "# Errors\n\nReturns the public error envelope on refusal, an invalid spec, or a\nreview token that does not match the spec.",
+        "operationId": "createMachine",
+        "parameters": [
+          {
+            "name": "Idempotency-Key",
+            "in": "header",
+            "description": "A caller-chosen key: a retry with the same key returns the operation already queued.",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/MachineCreateRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "202": {
+            "description": "The creation is queued as a `machine.create` operation.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Resource_OperationDto"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The spec is invalid or the review token does not match it.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The caller may not provision machines.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Persistent machine creation is not wired.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/machines/create/request": {
+      "post": {
+        "tags": [
+          "machines"
+        ],
+        "summary": "Asks for a persistent machine instead of creating it: the same spec the\ndirect create takes, checked the same way, filed as an action request for\na person to approve (the default), or approved by policy when the\noperator configured bounds and the spec is inside them. The machine is\ncreated by the same executor once approved, and records the requesting\nprincipal and the purpose. The answer is the action request: follow it at\n`/requests/{id}` and its operation at `/operations/{id}`. A caller needs\n`action.request`, not `machines.provision`.",
+        "description": "# Errors\n\nReturns the public error envelope on refusal, an invalid spec, a missing\npurpose, an image that is not promoted, or a broker refusal.",
+        "operationId": "requestMachineCreate",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/MachineCreateRequestBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "description": "The action request was recorded; its state shows what policy did.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Resource_ActionRequestDto"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The spec or purpose is invalid, the image version is not promoted, or a reference names nothing.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The caller may not request actions, or policy denies this one.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The idempotency key was already used for a different request.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Persistent machine creation or the broker is not wired.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/machines/create/review": {
+      "post": {
+        "tags": [
+          "machines"
+        ],
+        "summary": "Reviews a persistent machine creation: validates the spec, checks that\nthe image version is promoted and that the credential references exist,\nand returns the spec as it will run with the review token. Nothing is\ncreated.",
+        "description": "# Errors\n\nReturns the public error envelope on refusal or an invalid spec.",
+        "operationId": "reviewMachineCreate",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ReviewMachineCreateRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "The review record; present its token to the create call.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Resource_MachineCreateReviewDto"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The spec is invalid, the image version is not promoted, or a reference names nothing.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The caller may not provision machines.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Persistent machine creation is not wired.",
             "content": {
               "application/json": {
                 "schema": {
@@ -5697,6 +6211,598 @@
         }
       }
     },
+    "/api/v1/machines/persistent": {
+      "get": {
+        "tags": [
+          "machines"
+        ],
+        "summary": "Lists the persistent guests Fleet keeps (created by Fleet or registered),\nnewest first.",
+        "description": "# Errors\n\nReturns the public error envelope on refusal or when the marker store\ncannot be read.",
+        "operationId": "listPersistentGuests",
+        "responses": {
+          "200": {
+            "description": "The persistent guests.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Resource_Vec_PersistentGuestDto"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The caller may not read machines.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Persistent machines are not wired.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/machines/persistent/{accountId}/{vmid}/abandon": {
+      "post": {
+        "tags": [
+          "machines"
+        ],
+        "summary": "Abandons a reviewed marker: it is removed, with an audit event, and its\nVMID and name are free again.",
+        "description": "# Errors\n\nReturns the public error envelope on refusal, a review token that does\nnot match, or an unknown marker.",
+        "operationId": "abandonPersistentMarker",
+        "parameters": [
+          {
+            "name": "accountId",
+            "in": "path",
+            "description": "The Proxmox account.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "vmid",
+            "in": "path",
+            "description": "The guest's VMID.",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "format": "int32",
+              "minimum": 0
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AbandonMarkerRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "204": {
+            "description": "The marker was removed."
+          },
+          "400": {
+            "description": "The review token does not match.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The caller may not provision machines.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "The marker does not exist.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The marker belongs to a created machine.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Persistent machine creation is not wired.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/machines/persistent/{accountId}/{vmid}/abandon/review": {
+      "post": {
+        "tags": [
+          "machines"
+        ],
+        "summary": "Reviews abandoning a persistent marker whose creation never completed\n(a failed clone, or a guest removed by hand). A marker of a created\nmachine is refused: destroy that machine instead.",
+        "description": "# Errors\n\nReturns the public error envelope on refusal, an unknown marker, or a\nmarker of a created machine.",
+        "operationId": "reviewAbandonPersistentMarker",
+        "parameters": [
+          {
+            "name": "accountId",
+            "in": "path",
+            "description": "The Proxmox account.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "vmid",
+            "in": "path",
+            "description": "The guest's VMID.",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "format": "int32",
+              "minimum": 0
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The review record; present its token to the abandon call.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Resource_AbandonReviewDto"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The caller may not provision machines.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "The marker does not exist.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The marker belongs to a created machine.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Persistent machine creation is not wired.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/machines/persistent/{accountId}/{vmid}/register": {
+      "post": {
+        "tags": [
+          "machines"
+        ],
+        "summary": "Registers a reviewed existing VM as persistent: a marker is written (clone\ncomplete, state ready) so Lab never selects the guest, optionally naming\nits Fleet machine. Nothing on the guest changes. Audited.",
+        "description": "# Errors\n\nReturns the public error envelope on refusal, a review token that does\nnot match, or a guest that is no longer eligible.",
+        "operationId": "registerPersistentGuest",
+        "parameters": [
+          {
+            "name": "accountId",
+            "in": "path",
+            "description": "The Proxmox account.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "vmid",
+            "in": "path",
+            "description": "The guest's VMID.",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "format": "int32",
+              "minimum": 0
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RegisterGuestRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "description": "The guest is now persistent.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Resource_PersistentGuestDto"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The review token does not match, or the guest is not eligible.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The caller may not provision machines.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The guest or machine is already marked or linked.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Persistent machines are not wired.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/machines/persistent/{accountId}/{vmid}/register/review": {
+      "post": {
+        "tags": [
+          "machines"
+        ],
+        "summary": "Reviews registering an existing VM as persistent: the guest is looked at\nlive (it must exist as a QEMU VM and not be a template, a promoted image\nartifact, a Lab clone or a Lab pool member, and must not be marked\nalready) and the answer names what will be recorded. Nothing is written.",
+        "description": "# Errors\n\nReturns the public error envelope on refusal or an ineligible guest.",
+        "operationId": "reviewRegisterPersistentGuest",
+        "parameters": [
+          {
+            "name": "accountId",
+            "in": "path",
+            "description": "The Proxmox account.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "vmid",
+            "in": "path",
+            "description": "The guest's VMID.",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "format": "int32",
+              "minimum": 0
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RegisterGuestRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "The review record; present its token to the register call.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Resource_RegisterReviewDto"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The guest is not eligible, or the machine is unknown.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The caller may not provision machines.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The guest or machine is already marked or linked.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Persistent machines are not wired.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/machines/persistent/{accountId}/{vmid}/unregister": {
+      "post": {
+        "tags": [
+          "machines"
+        ],
+        "summary": "Unregisters a reviewed registered VM: the marker is removed with an audit\nevent. The guest is left as it is.",
+        "description": "# Errors\n\nReturns the public error envelope on refusal, a review token that does\nnot match, an unknown marker, or a marker Fleet created.",
+        "operationId": "unregisterPersistentGuest",
+        "parameters": [
+          {
+            "name": "accountId",
+            "in": "path",
+            "description": "The Proxmox account.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "vmid",
+            "in": "path",
+            "description": "The guest's VMID.",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "format": "int32",
+              "minimum": 0
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UnregisterGuestRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "204": {
+            "description": "The marker was removed."
+          },
+          "400": {
+            "description": "The review token does not match.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The caller may not provision machines.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "The marker does not exist.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The marker belongs to a guest Fleet created.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Persistent machines are not wired.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/machines/persistent/{accountId}/{vmid}/unregister/review": {
+      "post": {
+        "tags": [
+          "machines"
+        ],
+        "summary": "Reviews unregistering a registered VM: the marker goes, the guest is not\ntouched. A marker of a guest Fleet created is refused (destroy it, or\nabandon an unfinished creation).",
+        "description": "# Errors\n\nReturns the public error envelope on refusal, an unknown marker, or a\nmarker Fleet created.",
+        "operationId": "reviewUnregisterPersistentGuest",
+        "parameters": [
+          {
+            "name": "accountId",
+            "in": "path",
+            "description": "The Proxmox account.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "vmid",
+            "in": "path",
+            "description": "The guest's VMID.",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "format": "int32",
+              "minimum": 0
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The review record; present its token to the unregister call.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Resource_UnregisterReviewDto"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The caller may not provision machines.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "The marker does not exist.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The marker belongs to a guest Fleet created.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Persistent machines are not wired.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/machines/{machineId}": {
       "get": {
         "tags": [
@@ -5823,6 +6929,111 @@
         }
       }
     },
+    "/api/v1/machines/{machineId}/collect": {
+      "post": {
+        "tags": [
+          "machines"
+        ],
+        "summary": "Copies declared files off a machine into the controller's artifact store\nas a `machine.collect` operation. A path that cannot be copied fails the\noperation (the files that were copied stay stored); the result lists the\nstored files.",
+        "description": "# Errors\n\nReturns the public error envelope on refusal, an unknown machine or\nendpoint, no usable auth, or invalid paths.",
+        "operationId": "collectMachineFiles",
+        "parameters": [
+          {
+            "name": "machineId",
+            "in": "path",
+            "description": "The machine's identity.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "Idempotency-Key",
+            "in": "header",
+            "description": "A caller-chosen key: a retry with the same key returns the operation already queued.",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/MachineCollectRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "202": {
+            "description": "The copy is queued as a `machine.collect` operation; its result lists the stored files.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Resource_OperationDto"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The paths or target are invalid, the host key was never confirmed, or the endpoint has no auth.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The caller may not collect files from this machine.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "The machine or endpoint does not exist.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "A backend port failed.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Machine access is not wired, or the controller has no artifact store.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/machines/{machineId}/drift": {
       "get": {
         "tags": [
@@ -5875,6 +7086,681 @@
           },
           "503": {
             "description": "The planning surface is not wired.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/machines/{machineId}/endpoints/{endpointId}/auth": {
+      "get": {
+        "tags": [
+          "machines"
+        ],
+        "summary": "Reads an SSH endpoint's default auth.",
+        "description": "# Errors\n\nReturns the public error envelope on refusal, an unknown machine, or an\nendpoint that is not one of the machine's SSH endpoints.",
+        "operationId": "getMachineEndpointAuth",
+        "parameters": [
+          {
+            "name": "machineId",
+            "in": "path",
+            "description": "The machine's identity.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "endpointId",
+            "in": "path",
+            "description": "The SSH endpoint's identity.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The endpoint's default auth.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Resource_EndpointAuthStateDto"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The endpoint is not an SSH endpoint.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The caller may not read machines.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "The machine or endpoint does not exist.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "A backend port failed.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Machine access is not wired.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "put": {
+        "tags": [
+          "machines"
+        ],
+        "summary": "Records an SSH endpoint's default auth, so callers need not repeat it. A\n`secret` reference must name a stored SSH key.",
+        "description": "# Errors\n\nReturns the public error envelope on refusal, an unknown machine or\nendpoint, a malformed reference, or a secret that does not exist.",
+        "operationId": "setMachineEndpointAuth",
+        "parameters": [
+          {
+            "name": "machineId",
+            "in": "path",
+            "description": "The machine's identity.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "endpointId",
+            "in": "path",
+            "description": "The SSH endpoint's identity.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SetEndpointAuthRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "The recorded default auth.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Resource_EndpointAuthStateDto"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The endpoint is not an SSH endpoint, the reference is malformed, or the secret does not name a stored SSH key.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The caller may not update machines.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "The machine or endpoint does not exist.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "A backend port failed.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Machine access is not wired.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "tags": [
+          "machines"
+        ],
+        "summary": "Clears an SSH endpoint's default auth.",
+        "description": "# Errors\n\nReturns the public error envelope on refusal or an unknown machine or\nendpoint.",
+        "operationId": "clearMachineEndpointAuth",
+        "parameters": [
+          {
+            "name": "machineId",
+            "in": "path",
+            "description": "The machine's identity.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "endpointId",
+            "in": "path",
+            "description": "The SSH endpoint's identity.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The endpoint now has no default auth.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Resource_EndpointAuthStateDto"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The endpoint is not an SSH endpoint.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The caller may not update machines.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "The machine or endpoint does not exist.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "A backend port failed.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Machine access is not wired.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/machines/{machineId}/exec": {
+      "post": {
+        "tags": [
+          "machines"
+        ],
+        "summary": "Runs a bounded command on a machine over its SSH endpoint, with the\nendpoint's stored credential, as a `machine.exec` operation. The result\ncarries the exit code, scrubbed and bounded stdout and stderr, and\ntruncation flags. The audit event records the command's SHA-256, never\nthe command.",
+        "description": "# Errors\n\nReturns the public error envelope on refusal, an unknown machine or\nendpoint, an endpoint whose host key was never confirmed, no usable auth,\nor an invalid command.",
+        "operationId": "execMachine",
+        "parameters": [
+          {
+            "name": "machineId",
+            "in": "path",
+            "description": "The machine's identity.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "Idempotency-Key",
+            "in": "header",
+            "description": "A caller-chosen key: a retry with the same key and command returns the operation already queued.",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/MachineExecRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "202": {
+            "description": "The command is queued as a `machine.exec` operation; its result records the exit code and output.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Resource_OperationDto"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The command, timeout or target is invalid, the host key was never confirmed, or the endpoint has no auth.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The caller may not run commands on this machine.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "The machine or endpoint does not exist.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "A backend port failed.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Machine access is not wired.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/machines/{machineId}/files": {
+      "get": {
+        "tags": [
+          "machines"
+        ],
+        "summary": "Lists the files collected from a machine, newest first.",
+        "description": "# Errors\n\nReturns the public error envelope on refusal or backend failure.",
+        "operationId": "listMachineFiles",
+        "parameters": [
+          {
+            "name": "machineId",
+            "in": "path",
+            "description": "The machine's identity.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "description": "The page size (1-200; default 50).",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int32",
+              "minimum": 0
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The collected files, newest first.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Page_MachineFileDto"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The query parameters are malformed.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The caller may not collect files from this machine.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "A backend port failed.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Machine access is not wired, or the controller has no artifact store.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "machines"
+        ],
+        "summary": "Copies one file onto a machine as a `machine.put` operation. The body is\nthe raw file. It is streamed into controller staging (the cap is enforced\nwhile streaming) and sent over the endpoint's stored credential; the\ncontroller verifies the SHA-256 inside the guest and moves the file into\nplace only after it matches, so a failed put leaves nothing at the path.",
+        "description": "# Errors\n\nReturns the public error envelope on refusal, an unknown machine or\nendpoint, no usable auth, an invalid path, or an upload over the cap.",
+        "operationId": "putMachineFile",
+        "parameters": [
+          {
+            "name": "machineId",
+            "in": "path",
+            "description": "The machine's identity.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "path",
+            "in": "query",
+            "description": "The absolute guest path of the file to create.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "overwrite",
+            "in": "query",
+            "description": "Replace an existing regular file at the path (default false).",
+            "required": false,
+            "schema": {
+              "type": "boolean"
+            }
+          },
+          {
+            "name": "endpointId",
+            "in": "query",
+            "description": "The SSH endpoint; absent means the machine's only SSH endpoint.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "guestOs",
+            "in": "query",
+            "description": "`linux` (default) or `windows`.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "authType",
+            "in": "query",
+            "description": "An explicit auth kind: `agent`, `identityFile` or `secret`.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "credential",
+            "in": "query",
+            "description": "The secret reference, for `authType=secret`.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "identityPath",
+            "in": "query",
+            "description": "The identity file path, for `authType=identityFile`.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "X-Content-SHA256",
+            "in": "header",
+            "description": "The file's lowercase hex SHA-256; the upload is refused when what arrives hashes differently.",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          {
+            "name": "Idempotency-Key",
+            "in": "header",
+            "description": "A caller-chosen key bound to the target and the file's digest.",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          }
+        ],
+        "requestBody": {
+          "description": "The file's raw bytes.",
+          "content": {
+            "application/octet-stream": {
+              "schema": {
+                "type": "array",
+                "items": {
+                  "type": "integer",
+                  "format": "int32",
+                  "minimum": 0
+                }
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "202": {
+            "description": "The copy is queued as a `machine.put` operation; its result records the guest path, size and SHA-256.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Resource_OperationDto"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The path or target is invalid, the host key was never confirmed, the endpoint has no auth, or the declared SHA-256 does not match the body.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The caller may not put files onto this machine.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "The machine or endpoint does not exist.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "408": {
+            "description": "The upload body stalled for a minute.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "The file exceeds the controller's upload cap.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "A backend port failed.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The controller has no upload staging area, or too many uploads are in flight (code `busy`).",
             "content": {
               "application/json": {
                 "schema": {
@@ -6705,6 +8591,99 @@
           },
           "404": {
             "description": "The machine does not exist.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/machines/{machineId}/terminal-sessions": {
+      "post": {
+        "tags": [
+          "machines"
+        ],
+        "summary": "Creates an interactive terminal session on a machine. The session token\nis single use and short-lived; the caller attaches to the terminal\nWebSocket with it. Every session is authorized (`machines.terminal`,\nseparate from `machines.exec`), audited at its start and end, and bounded\nby an idle timeout and a maximum duration. Nothing typed or shown is\nrecorded.",
+        "description": "# Errors\n\nReturns the public error envelope on refusal, an unknown machine or\nendpoint, an endpoint whose host key was never confirmed, no usable auth,\nthe session cap, or an unwired terminal relay.",
+        "operationId": "createMachineTerminalSession",
+        "parameters": [
+          {
+            "name": "machineId",
+            "in": "path",
+            "description": "The machine's identity.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateTerminalSessionRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "description": "The session was created; the token is shown once.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Resource_TerminalSessionDto"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The size or target is invalid, the host key was never confirmed, or the endpoint has no auth.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The caller may not open a terminal on this machine (`machines.terminal`).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "The machine or endpoint does not exist.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "A backend port failed.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The terminal session cap is reached (retry later), or machine access is not wired.",
             "content": {
               "application/json": {
                 "schema": {
@@ -7748,6 +9727,99 @@
         }
       }
     },
+    "/api/v1/proxmox/accounts/{accountId}/console-sessions": {
+      "post": {
+        "tags": [
+          "proxmox"
+        ],
+        "summary": "Creates a console session for one Proxmox guest.",
+        "description": "# Errors\n\nReturns the public error envelope on refusal, an unknown or unconfirmed\naccount, a token that lacks `VM.Console` (the refusal names the\nprivilege), the session cap, or an unwired console relay.",
+        "operationId": "createProxmoxConsoleSession",
+        "parameters": [
+          {
+            "name": "accountId",
+            "in": "path",
+            "description": "The account's identity.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateConsoleSessionRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "description": "The session was created; the token is shown once.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Resource_ConsoleSessionDto"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The node or VMID is malformed.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The caller may not open guest screens (`proxmox.console`).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "The account does not exist.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The account's trust is unconfirmed, its token secret is unavailable, or the console session cap is reached.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "The account's API token lacks `VM.Console` on the guest, or the PVE API failed.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/proxmox/accounts/{accountId}/discovery": {
       "get": {
         "tags": [
@@ -8136,7 +10208,7 @@
           {
             "name": "action",
             "in": "path",
-            "description": "The destructive action: snapshot, snapshot-revert, snapshot-delete, clone, template, destroy, or task-cancel.",
+            "description": "The destructive action: snapshot, snapshot-revert, snapshot-delete, clone, template, destroy, task-cancel, or config (an allow-listed settings change).",
             "required": true,
             "schema": {
               "type": "string"
@@ -11372,6 +13444,49 @@
   },
   "components": {
     "schemas": {
+      "AbandonMarkerRequest": {
+        "type": "object",
+        "description": "The body of the abandon call.",
+        "required": [
+          "reviewToken"
+        ],
+        "properties": {
+          "reviewToken": {
+            "type": "string",
+            "description": "The token from the review call."
+          }
+        }
+      },
+      "AbandonReviewDto": {
+        "type": "object",
+        "description": "What abandoning a marker will do, and the token that binds it.",
+        "required": [
+          "reviewToken",
+          "accountId",
+          "vmid",
+          "name"
+        ],
+        "properties": {
+          "accountId": {
+            "type": "string",
+            "description": "The Proxmox account."
+          },
+          "name": {
+            "type": "string",
+            "description": "The machine name the marker records."
+          },
+          "reviewToken": {
+            "type": "string",
+            "description": "The token the abandon call must present."
+          },
+          "vmid": {
+            "type": "integer",
+            "format": "int32",
+            "description": "The VMID whose marker will be removed.",
+            "minimum": 0
+          }
+        }
+      },
       "AccountCoverageDto": {
         "type": "object",
         "description": "One Coolify account's observation state.",
@@ -12706,6 +14821,79 @@
           }
         }
       },
+      "ConsoleSessionDto": {
+        "type": "object",
+        "description": "A created console session. The token is shown here once.",
+        "required": [
+          "sessionId",
+          "token",
+          "expiresAt",
+          "accountId",
+          "node",
+          "vmid",
+          "socketPath",
+          "subprotocols",
+          "consolePath",
+          "idleTimeoutSeconds",
+          "maxDurationSeconds"
+        ],
+        "properties": {
+          "accountId": {
+            "type": "string",
+            "description": "The account."
+          },
+          "consolePath": {
+            "type": "string",
+            "description": "The console page in the web app, relative to the controller's\norigin, with the token in the fragment. A human can open it."
+          },
+          "expiresAt": {
+            "type": "integer",
+            "format": "int64",
+            "description": "When an unattached token stops being valid (epoch millis)."
+          },
+          "idleTimeoutSeconds": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Close after this many seconds without browser input.",
+            "minimum": 0
+          },
+          "maxDurationSeconds": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Close after this many seconds regardless.",
+            "minimum": 0
+          },
+          "node": {
+            "type": "string",
+            "description": "The node."
+          },
+          "sessionId": {
+            "type": "string",
+            "description": "The session's identity, as it appears in audit events."
+          },
+          "socketPath": {
+            "type": "string",
+            "description": "The WebSocket path, relative to the controller's origin."
+          },
+          "subprotocols": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "The WebSocket subprotocols to offer: `binary`, then the token\nsubprotocol."
+          },
+          "token": {
+            "type": "string",
+            "description": "The single-use token that attaches to the console WebSocket. It\nexpires at `expiresAt` and is spent by the first attach."
+          },
+          "vmid": {
+            "type": "integer",
+            "format": "int32",
+            "description": "The guest's VMID.",
+            "minimum": 0
+          }
+        }
+      },
       "CoolifyApplicationDto": {
         "type": "object",
         "description": "A deployed application.",
@@ -13455,6 +15643,26 @@
           }
         }
       },
+      "CreateConsoleSessionRequest": {
+        "type": "object",
+        "description": "The guest to open.",
+        "required": [
+          "node",
+          "vmid"
+        ],
+        "properties": {
+          "node": {
+            "type": "string",
+            "description": "The node the guest runs on."
+          },
+          "vmid": {
+            "type": "integer",
+            "format": "int32",
+            "description": "The QEMU guest's VMID.",
+            "minimum": 0
+          }
+        }
+      },
       "CreateDnsChangeRequest": {
         "type": "object",
         "description": "A record change to request.",
@@ -13808,6 +16016,48 @@
           "tokenSecret": {
             "type": "string",
             "description": "The API token secret (write-only)."
+          }
+        }
+      },
+      "CreateTerminalSessionRequest": {
+        "type": "object",
+        "description": "The body of `POST /machines/{machineId}/terminal-sessions`.",
+        "properties": {
+          "auth": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/EndpointAuthDto",
+                "description": "An explicit auth, overriding the endpoint's default. Naming one needs\n`machine.update` on the machine."
+              }
+            ]
+          },
+          "cols": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "The terminal's initial width in columns (1-1000; default 80).",
+            "minimum": 0
+          },
+          "endpointId": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The SSH endpoint; absent means the machine's only SSH endpoint."
+          },
+          "rows": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "The terminal's initial height in rows (1-1000; default 24).",
+            "minimum": 0
           }
         }
       },
@@ -14635,6 +16885,83 @@
           "reference": {
             "type": "string",
             "description": "The matching endpoint reference, as the caller may see it."
+          }
+        }
+      },
+      "EndpointAuthDto": {
+        "oneOf": [
+          {
+            "type": "object",
+            "description": "The controller's SSH agent and default key files.",
+            "required": [
+              "type"
+            ],
+            "properties": {
+              "type": {
+                "type": "string",
+                "enum": [
+                  "agent"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "An identity file on the controller, by path.",
+            "required": [
+              "path",
+              "type"
+            ],
+            "properties": {
+              "path": {
+                "type": "string",
+                "description": "The identity file's path."
+              },
+              "type": {
+                "type": "string",
+                "enum": [
+                  "identityFile"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "A private key Fleet holds as an encrypted secret, by reference.",
+            "required": [
+              "credential",
+              "type"
+            ],
+            "properties": {
+              "credential": {
+                "type": "string",
+                "description": "The reference returned when the key was stored."
+              },
+              "type": {
+                "type": "string",
+                "enum": [
+                  "secret"
+                ]
+              }
+            }
+          }
+        ],
+        "description": "How an SSH endpoint authenticates. A stored key is named by reference and\nis never returned."
+      },
+      "EndpointAuthStateDto": {
+        "type": "object",
+        "description": "An endpoint's recorded default auth.",
+        "properties": {
+          "auth": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/EndpointAuthDto",
+                "description": "The default auth, or `null` when none is recorded."
+              }
+            ]
           }
         }
       },
@@ -16284,6 +18611,108 @@
           }
         }
       },
+      "MachineCollectRequest": {
+        "type": "object",
+        "description": "The body of `POST /machines/{machineId}/collect`.",
+        "required": [
+          "paths"
+        ],
+        "properties": {
+          "auth": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/EndpointAuthDto",
+                "description": "An explicit auth, overriding the endpoint's default."
+              }
+            ]
+          },
+          "endpointId": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The SSH endpoint; absent means the machine's only SSH endpoint."
+          },
+          "guestOs": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The guest's OS, `linux` (default) or `windows`."
+          },
+          "paths": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "1 to 16 distinct absolute guest paths of regular files, each at most\n1024 bytes, without `.`, `..` or empty components or control\ncharacters (a Windows guest takes drive-absolute paths). Each file\nmust fit the controller's artifact size cap."
+          }
+        }
+      },
+      "MachineCreateRequest": {
+        "type": "object",
+        "description": "The body of `POST /machines/create`.",
+        "required": [
+          "spec",
+          "reviewToken"
+        ],
+        "properties": {
+          "reviewToken": {
+            "type": "string",
+            "description": "The token from the review call."
+          },
+          "spec": {
+            "type": "object",
+            "description": "The spec, identical to the reviewed one."
+          }
+        }
+      },
+      "MachineCreateRequestBody": {
+        "type": "object",
+        "description": "The body of `POST /machines/create/request`.",
+        "required": [
+          "spec",
+          "purpose"
+        ],
+        "properties": {
+          "idempotencyKey": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "A key (1 to 128 printable ASCII characters) making a retry return the\nrequest already made."
+          },
+          "purpose": {
+            "type": "string",
+            "description": "Why the machine is needed (at most 1000 characters). Recorded on the\nmachine as its purpose, next to the requesting principal."
+          },
+          "spec": {
+            "type": "object",
+            "description": "The machine to create: the same spec `POST /machines/create` takes,\nreferences and public keys only. It must not carry `requestedBy`."
+          }
+        }
+      },
+      "MachineCreateReviewDto": {
+        "type": "object",
+        "description": "What a reviewed create will run, and the token that binds it.",
+        "required": [
+          "reviewToken",
+          "spec"
+        ],
+        "properties": {
+          "reviewToken": {
+            "type": "string",
+            "description": "The token the create call must present."
+          },
+          "spec": {
+            "type": "object",
+            "description": "The spec as it will run, with every default filled in."
+          }
+        }
+      },
       "MachineDriftDto": {
         "type": "object",
         "description": "One machine's drift against the active desired revision.",
@@ -16420,6 +18849,17 @@
             "type": "string",
             "description": "The mutable, unique label."
           },
+          "ownership": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/MachineOwnershipDto",
+                "description": "Who asked for the machine and why, when it was created from an agent's\nrequest (#496). Recorded by the controller, never reported by the\nmachine; absent for a machine an operator created or registered."
+              }
+            ]
+          },
           "runsOn": {
             "oneOf": [
               {
@@ -16442,6 +18882,145 @@
             "type": "integer",
             "format": "int64",
             "description": "Last mutation (epoch milliseconds)."
+          }
+        }
+      },
+      "MachineExecRequest": {
+        "type": "object",
+        "description": "The body of `POST /machines/{machineId}/exec`.",
+        "properties": {
+          "auth": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/EndpointAuthDto",
+                "description": "An explicit auth, overriding the endpoint's default."
+              }
+            ]
+          },
+          "command": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "type": "string"
+            },
+            "description": "A program and its arguments, passed to the guest as data (no shell\nparses them). Exactly one of `command` and `script` is required."
+          },
+          "endpointId": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The SSH endpoint; absent means the machine's only SSH endpoint."
+          },
+          "guestOs": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The guest's OS, `linux` (default) or `windows`."
+          },
+          "script": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Script text for the guest's shell (bash, or PowerShell on Windows),\nsent untouched."
+          },
+          "timeoutSeconds": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "The deadline in seconds (1-900; default 60).",
+            "minimum": 0
+          }
+        }
+      },
+      "MachineFileDto": {
+        "type": "object",
+        "description": "One file collected from a machine.",
+        "required": [
+          "id",
+          "machineId",
+          "owner",
+          "path",
+          "sizeBytes",
+          "sha256",
+          "createdAt",
+          "retainUntil"
+        ],
+        "properties": {
+          "createdAt": {
+            "type": "integer",
+            "format": "int64",
+            "description": "When it was stored (epoch milliseconds)."
+          },
+          "id": {
+            "type": "string",
+            "description": "The file record's identity."
+          },
+          "machineId": {
+            "type": "string",
+            "description": "The machine it came from."
+          },
+          "operationId": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The `machine.collect` operation that produced it."
+          },
+          "owner": {
+            "type": "string",
+            "description": "The principal that asked for the collection."
+          },
+          "path": {
+            "type": "string",
+            "description": "The guest path it was collected from."
+          },
+          "retainUntil": {
+            "type": "integer",
+            "format": "int64",
+            "description": "When the retention pass deletes it (epoch milliseconds)."
+          },
+          "sha256": {
+            "type": "string",
+            "description": "The lowercase hex sha256 of the bytes."
+          },
+          "sizeBytes": {
+            "type": "integer",
+            "format": "int64",
+            "description": "The size in bytes.",
+            "minimum": 0
+          }
+        }
+      },
+      "MachineOwnershipDto": {
+        "type": "object",
+        "description": "Who asked for a persistent machine, and why.",
+        "required": [
+          "owner",
+          "purpose",
+          "requestId"
+        ],
+        "properties": {
+          "owner": {
+            "type": "string",
+            "description": "The requesting principal."
+          },
+          "purpose": {
+            "type": "string",
+            "description": "Why the machine was requested."
+          },
+          "requestId": {
+            "type": "string",
+            "description": "The action request that asked for it."
           }
         }
       },
@@ -18785,6 +21364,17 @@
                   "type": "string",
                   "description": "The mutable, unique label."
                 },
+                "ownership": {
+                  "oneOf": [
+                    {
+                      "type": "null"
+                    },
+                    {
+                      "$ref": "#/components/schemas/MachineOwnershipDto",
+                      "description": "Who asked for the machine and why, when it was created from an agent's\nrequest (#496). Recorded by the controller, never reported by the\nmachine; absent for a machine an operator created or registered."
+                    }
+                  ]
+                },
                 "runsOn": {
                   "oneOf": [
                     {
@@ -18807,6 +21397,83 @@
                   "type": "integer",
                   "format": "int64",
                   "description": "Last mutation (epoch milliseconds)."
+                }
+              }
+            },
+            "description": "The items on this page, in the endpoint's documented order."
+          },
+          "page": {
+            "$ref": "#/components/schemas/PageInfo",
+            "description": "Where this page sits in the result set."
+          }
+        }
+      },
+      "Page_MachineFileDto": {
+        "type": "object",
+        "description": "A page of resources.\n\nThe concrete schema for a list endpoint appears when that endpoint does;\n[`PageInfo`] is the part of the shape that is fixed for every one of them.",
+        "required": [
+          "items",
+          "page"
+        ],
+        "properties": {
+          "items": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "description": "One file collected from a machine.",
+              "required": [
+                "id",
+                "machineId",
+                "owner",
+                "path",
+                "sizeBytes",
+                "sha256",
+                "createdAt",
+                "retainUntil"
+              ],
+              "properties": {
+                "createdAt": {
+                  "type": "integer",
+                  "format": "int64",
+                  "description": "When it was stored (epoch milliseconds)."
+                },
+                "id": {
+                  "type": "string",
+                  "description": "The file record's identity."
+                },
+                "machineId": {
+                  "type": "string",
+                  "description": "The machine it came from."
+                },
+                "operationId": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "description": "The `machine.collect` operation that produced it."
+                },
+                "owner": {
+                  "type": "string",
+                  "description": "The principal that asked for the collection."
+                },
+                "path": {
+                  "type": "string",
+                  "description": "The guest path it was collected from."
+                },
+                "retainUntil": {
+                  "type": "integer",
+                  "format": "int64",
+                  "description": "When the retention pass deletes it (epoch milliseconds)."
+                },
+                "sha256": {
+                  "type": "string",
+                  "description": "The lowercase hex sha256 of the bytes."
+                },
+                "sizeBytes": {
+                  "type": "integer",
+                  "format": "int64",
+                  "description": "The size in bytes.",
+                  "minimum": 0
                 }
               }
             },
@@ -19525,6 +22192,84 @@
           }
         }
       },
+      "PersistentGuestDto": {
+        "type": "object",
+        "description": "One persistent guest marker.",
+        "required": [
+          "accountId",
+          "vmid",
+          "name",
+          "node",
+          "imageVersionId",
+          "cloned",
+          "state",
+          "createdAt",
+          "updatedAt"
+        ],
+        "properties": {
+          "accountId": {
+            "type": "string",
+            "description": "The Proxmox account."
+          },
+          "cloned": {
+            "type": "boolean",
+            "description": "Whether the clone completed (always true for a registered VM)."
+          },
+          "createdAt": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Creation time (epoch milliseconds)."
+          },
+          "imageVersionId": {
+            "type": "string",
+            "description": "The image version it was cloned from, or `registered` for a VM that\nexisted before Fleet kept it."
+          },
+          "machineId": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The Fleet machine it is linked to, once there is one."
+          },
+          "name": {
+            "type": "string",
+            "description": "The VM name."
+          },
+          "node": {
+            "type": "string",
+            "description": "The node the guest was created or found on."
+          },
+          "operationId": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The operation that created it, when Fleet created it."
+          },
+          "state": {
+            "type": "string",
+            "description": "`creating` or `ready`."
+          },
+          "step": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The step the creation last completed or failed at."
+          },
+          "updatedAt": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Last update (epoch milliseconds)."
+          },
+          "vmid": {
+            "type": "integer",
+            "format": "int32",
+            "description": "The guest's VMID.",
+            "minimum": 0
+          }
+        }
+      },
       "PlanActionDto": {
         "type": "object",
         "description": "One planned action.",
@@ -20169,7 +22914,8 @@
           "discover",
           "operate",
           "destructive",
-          "lab"
+          "lab",
+          "console"
         ]
       },
       "ProxmoxPrivilegesDto": {
@@ -20229,7 +22975,7 @@
             "items": {
               "$ref": "#/components/schemas/ProxmoxTierPrivilegesDto"
             },
-            "description": "The four tiers: discover, operate, destructive, lab."
+            "description": "The five tiers: discover, operate, destructive, lab, console."
           },
           "unknownReason": {
             "type": [
@@ -20916,6 +23662,68 @@
           }
         }
       },
+      "RegisterGuestRequest": {
+        "type": "object",
+        "description": "The body of the register review and register calls.",
+        "properties": {
+          "machineId": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "An existing Fleet machine to link to the guest's marker."
+          },
+          "reviewToken": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The token from the review call (required by the register call only)."
+          }
+        }
+      },
+      "RegisterReviewDto": {
+        "type": "object",
+        "description": "What registering an existing VM will record, and the token that binds it.",
+        "required": [
+          "reviewToken",
+          "accountId",
+          "vmid",
+          "name",
+          "node"
+        ],
+        "properties": {
+          "accountId": {
+            "type": "string",
+            "description": "The Proxmox account."
+          },
+          "machineId": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The machine that will be linked, when one was named."
+          },
+          "name": {
+            "type": "string",
+            "description": "The guest's live name."
+          },
+          "node": {
+            "type": "string",
+            "description": "The guest's live node."
+          },
+          "reviewToken": {
+            "type": "string",
+            "description": "The token the register call must present."
+          },
+          "vmid": {
+            "type": "integer",
+            "format": "int32",
+            "description": "The guest's VMID.",
+            "minimum": 0
+          }
+        }
+      },
       "RegistrationSourceDto": {
         "type": "string",
         "description": "Which protocol answered the registration lookup.",
@@ -21458,6 +24266,45 @@
           }
         }
       },
+      "Resource_AbandonReviewDto": {
+        "type": "object",
+        "description": "A single resource.\n\nThe payload is nested under `data` so that later top-level fields are an\nadditive change rather than a breaking one.",
+        "required": [
+          "data"
+        ],
+        "properties": {
+          "data": {
+            "type": "object",
+            "description": "What abandoning a marker will do, and the token that binds it.",
+            "required": [
+              "reviewToken",
+              "accountId",
+              "vmid",
+              "name"
+            ],
+            "properties": {
+              "accountId": {
+                "type": "string",
+                "description": "The Proxmox account."
+              },
+              "name": {
+                "type": "string",
+                "description": "The machine name the marker records."
+              },
+              "reviewToken": {
+                "type": "string",
+                "description": "The token the abandon call must present."
+              },
+              "vmid": {
+                "type": "integer",
+                "format": "int32",
+                "description": "The VMID whose marker will be removed.",
+                "minimum": 0
+              }
+            }
+          }
+        }
+      },
       "Resource_ActionRequestDto": {
         "type": "object",
         "description": "A single resource.\n\nThe payload is nested under `data` so that later top-level fields are an\nadditive change rather than a breaking one.",
@@ -21868,6 +24715,88 @@
               "zone": {
                 "$ref": "#/components/schemas/DnsZoneDto",
                 "description": "The zone the name belongs to."
+              }
+            }
+          }
+        }
+      },
+      "Resource_ConsoleSessionDto": {
+        "type": "object",
+        "description": "A single resource.\n\nThe payload is nested under `data` so that later top-level fields are an\nadditive change rather than a breaking one.",
+        "required": [
+          "data"
+        ],
+        "properties": {
+          "data": {
+            "type": "object",
+            "description": "A created console session. The token is shown here once.",
+            "required": [
+              "sessionId",
+              "token",
+              "expiresAt",
+              "accountId",
+              "node",
+              "vmid",
+              "socketPath",
+              "subprotocols",
+              "consolePath",
+              "idleTimeoutSeconds",
+              "maxDurationSeconds"
+            ],
+            "properties": {
+              "accountId": {
+                "type": "string",
+                "description": "The account."
+              },
+              "consolePath": {
+                "type": "string",
+                "description": "The console page in the web app, relative to the controller's\norigin, with the token in the fragment. A human can open it."
+              },
+              "expiresAt": {
+                "type": "integer",
+                "format": "int64",
+                "description": "When an unattached token stops being valid (epoch millis)."
+              },
+              "idleTimeoutSeconds": {
+                "type": "integer",
+                "format": "int64",
+                "description": "Close after this many seconds without browser input.",
+                "minimum": 0
+              },
+              "maxDurationSeconds": {
+                "type": "integer",
+                "format": "int64",
+                "description": "Close after this many seconds regardless.",
+                "minimum": 0
+              },
+              "node": {
+                "type": "string",
+                "description": "The node."
+              },
+              "sessionId": {
+                "type": "string",
+                "description": "The session's identity, as it appears in audit events."
+              },
+              "socketPath": {
+                "type": "string",
+                "description": "The WebSocket path, relative to the controller's origin."
+              },
+              "subprotocols": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                },
+                "description": "The WebSocket subprotocols to offer: `binary`, then the token\nsubprotocol."
+              },
+              "token": {
+                "type": "string",
+                "description": "The single-use token that attaches to the console WebSocket. It\nexpires at `expiresAt` and is spent by the first attach."
+              },
+              "vmid": {
+                "type": "integer",
+                "format": "int32",
+                "description": "The guest's VMID.",
+                "minimum": 0
               }
             }
           }
@@ -22286,6 +25215,32 @@
                   "$ref": "#/components/schemas/AccountZonesDto"
                 },
                 "description": "One entry per account."
+              }
+            }
+          }
+        }
+      },
+      "Resource_EndpointAuthStateDto": {
+        "type": "object",
+        "description": "A single resource.\n\nThe payload is nested under `data` so that later top-level fields are an\nadditive change rather than a breaking one.",
+        "required": [
+          "data"
+        ],
+        "properties": {
+          "data": {
+            "type": "object",
+            "description": "An endpoint's recorded default auth.",
+            "properties": {
+              "auth": {
+                "oneOf": [
+                  {
+                    "type": "null"
+                  },
+                  {
+                    "$ref": "#/components/schemas/EndpointAuthDto",
+                    "description": "The default auth, or `null` when none is recorded."
+                  }
+                ]
               }
             }
           }
@@ -23185,6 +26140,33 @@
           }
         }
       },
+      "Resource_MachineCreateReviewDto": {
+        "type": "object",
+        "description": "A single resource.\n\nThe payload is nested under `data` so that later top-level fields are an\nadditive change rather than a breaking one.",
+        "required": [
+          "data"
+        ],
+        "properties": {
+          "data": {
+            "type": "object",
+            "description": "What a reviewed create will run, and the token that binds it.",
+            "required": [
+              "reviewToken",
+              "spec"
+            ],
+            "properties": {
+              "reviewToken": {
+                "type": "string",
+                "description": "The token the create call must present."
+              },
+              "spec": {
+                "type": "object",
+                "description": "The spec as it will run, with every default filled in."
+              }
+            }
+          }
+        }
+      },
       "Resource_MachineDriftDto": {
         "type": "object",
         "description": "A single resource.\n\nThe payload is nested under `data` so that later top-level fields are an\nadditive change rather than a breaking one.",
@@ -23337,6 +26319,17 @@
                 "type": "string",
                 "description": "The mutable, unique label."
               },
+              "ownership": {
+                "oneOf": [
+                  {
+                    "type": "null"
+                  },
+                  {
+                    "$ref": "#/components/schemas/MachineOwnershipDto",
+                    "description": "Who asked for the machine and why, when it was created from an agent's\nrequest (#496). Recorded by the controller, never reported by the\nmachine; absent for a machine an operator created or registered."
+                  }
+                ]
+              },
               "runsOn": {
                 "oneOf": [
                   {
@@ -23359,6 +26352,74 @@
                 "type": "integer",
                 "format": "int64",
                 "description": "Last mutation (epoch milliseconds)."
+              }
+            }
+          }
+        }
+      },
+      "Resource_MachineFileDto": {
+        "type": "object",
+        "description": "A single resource.\n\nThe payload is nested under `data` so that later top-level fields are an\nadditive change rather than a breaking one.",
+        "required": [
+          "data"
+        ],
+        "properties": {
+          "data": {
+            "type": "object",
+            "description": "One file collected from a machine.",
+            "required": [
+              "id",
+              "machineId",
+              "owner",
+              "path",
+              "sizeBytes",
+              "sha256",
+              "createdAt",
+              "retainUntil"
+            ],
+            "properties": {
+              "createdAt": {
+                "type": "integer",
+                "format": "int64",
+                "description": "When it was stored (epoch milliseconds)."
+              },
+              "id": {
+                "type": "string",
+                "description": "The file record's identity."
+              },
+              "machineId": {
+                "type": "string",
+                "description": "The machine it came from."
+              },
+              "operationId": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "description": "The `machine.collect` operation that produced it."
+              },
+              "owner": {
+                "type": "string",
+                "description": "The principal that asked for the collection."
+              },
+              "path": {
+                "type": "string",
+                "description": "The guest path it was collected from."
+              },
+              "retainUntil": {
+                "type": "integer",
+                "format": "int64",
+                "description": "When the retention pass deletes it (epoch milliseconds)."
+              },
+              "sha256": {
+                "type": "string",
+                "description": "The lowercase hex sha256 of the bytes."
+              },
+              "sizeBytes": {
+                "type": "integer",
+                "format": "int64",
+                "description": "The size in bytes.",
+                "minimum": 0
               }
             }
           }
@@ -23801,6 +26862,93 @@
           }
         }
       },
+      "Resource_PersistentGuestDto": {
+        "type": "object",
+        "description": "A single resource.\n\nThe payload is nested under `data` so that later top-level fields are an\nadditive change rather than a breaking one.",
+        "required": [
+          "data"
+        ],
+        "properties": {
+          "data": {
+            "type": "object",
+            "description": "One persistent guest marker.",
+            "required": [
+              "accountId",
+              "vmid",
+              "name",
+              "node",
+              "imageVersionId",
+              "cloned",
+              "state",
+              "createdAt",
+              "updatedAt"
+            ],
+            "properties": {
+              "accountId": {
+                "type": "string",
+                "description": "The Proxmox account."
+              },
+              "cloned": {
+                "type": "boolean",
+                "description": "Whether the clone completed (always true for a registered VM)."
+              },
+              "createdAt": {
+                "type": "integer",
+                "format": "int64",
+                "description": "Creation time (epoch milliseconds)."
+              },
+              "imageVersionId": {
+                "type": "string",
+                "description": "The image version it was cloned from, or `registered` for a VM that\nexisted before Fleet kept it."
+              },
+              "machineId": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "description": "The Fleet machine it is linked to, once there is one."
+              },
+              "name": {
+                "type": "string",
+                "description": "The VM name."
+              },
+              "node": {
+                "type": "string",
+                "description": "The node the guest was created or found on."
+              },
+              "operationId": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "description": "The operation that created it, when Fleet created it."
+              },
+              "state": {
+                "type": "string",
+                "description": "`creating` or `ready`."
+              },
+              "step": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "description": "The step the creation last completed or failed at."
+              },
+              "updatedAt": {
+                "type": "integer",
+                "format": "int64",
+                "description": "Last update (epoch milliseconds)."
+              },
+              "vmid": {
+                "type": "integer",
+                "format": "int32",
+                "description": "The guest's VMID.",
+                "minimum": 0
+              }
+            }
+          }
+        }
+      },
       "Resource_PlanDto": {
         "type": "object",
         "description": "A single resource.\n\nThe payload is nested under `data` so that later top-level fields are an\nadditive change rather than a breaking one.",
@@ -24221,7 +27369,7 @@
                 "items": {
                   "$ref": "#/components/schemas/ProxmoxTierPrivilegesDto"
                 },
-                "description": "The four tiers: discover, operate, destructive, lab."
+                "description": "The five tiers: discover, operate, destructive, lab, console."
               },
               "unknownReason": {
                 "type": [
@@ -24511,6 +27659,57 @@
           }
         }
       },
+      "Resource_RegisterReviewDto": {
+        "type": "object",
+        "description": "A single resource.\n\nThe payload is nested under `data` so that later top-level fields are an\nadditive change rather than a breaking one.",
+        "required": [
+          "data"
+        ],
+        "properties": {
+          "data": {
+            "type": "object",
+            "description": "What registering an existing VM will record, and the token that binds it.",
+            "required": [
+              "reviewToken",
+              "accountId",
+              "vmid",
+              "name",
+              "node"
+            ],
+            "properties": {
+              "accountId": {
+                "type": "string",
+                "description": "The Proxmox account."
+              },
+              "machineId": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "description": "The machine that will be linked, when one was named."
+              },
+              "name": {
+                "type": "string",
+                "description": "The guest's live name."
+              },
+              "node": {
+                "type": "string",
+                "description": "The guest's live node."
+              },
+              "reviewToken": {
+                "type": "string",
+                "description": "The token the register call must present."
+              },
+              "vmid": {
+                "type": "integer",
+                "format": "int32",
+                "description": "The guest's VMID.",
+                "minimum": 0
+              }
+            }
+          }
+        }
+      },
       "Resource_RegistrySettingsDto": {
         "type": "object",
         "description": "A single resource.\n\nThe payload is nested under `data` so that later top-level fields are an\nadditive change rather than a breaking one.",
@@ -24787,6 +27986,50 @@
           }
         }
       },
+      "Resource_StoredProductKeyDto": {
+        "type": "object",
+        "description": "A single resource.\n\nThe payload is nested under `data` so that later top-level fields are an\nadditive change rather than a breaking one.",
+        "required": [
+          "data"
+        ],
+        "properties": {
+          "data": {
+            "type": "object",
+            "description": "The reference of a stored product key.",
+            "required": [
+              "secretRef"
+            ],
+            "properties": {
+              "secretRef": {
+                "type": "string",
+                "description": "The reference to use as `secret` in a product-key activation."
+              }
+            }
+          }
+        }
+      },
+      "Resource_StoredSshKeyDto": {
+        "type": "object",
+        "description": "A single resource.\n\nThe payload is nested under `data` so that later top-level fields are an\nadditive change rather than a breaking one.",
+        "required": [
+          "data"
+        ],
+        "properties": {
+          "data": {
+            "type": "object",
+            "description": "The reference of a stored SSH key.",
+            "required": [
+              "credentialRef"
+            ],
+            "properties": {
+              "credentialRef": {
+                "type": "string",
+                "description": "The reference to use as `credential` in a `secret` endpoint auth."
+              }
+            }
+          }
+        }
+      },
       "Resource_TailnetStatusDto": {
         "type": "object",
         "description": "A single resource.\n\nThe payload is nested under `data` so that later top-level fields are an\nadditive change rather than a breaking one.",
@@ -24821,6 +28064,205 @@
           }
         }
       },
+      "Resource_TerminalSessionDto": {
+        "type": "object",
+        "description": "A single resource.\n\nThe payload is nested under `data` so that later top-level fields are an\nadditive change rather than a breaking one.",
+        "required": [
+          "data"
+        ],
+        "properties": {
+          "data": {
+            "type": "object",
+            "description": "A created terminal session. The token is shown here once.",
+            "required": [
+              "sessionId",
+              "token",
+              "expiresAt",
+              "machineId",
+              "endpointId",
+              "socketPath",
+              "subprotocols",
+              "idleTimeoutSeconds",
+              "maxDurationSeconds"
+            ],
+            "properties": {
+              "endpointId": {
+                "type": "string",
+                "description": "The SSH endpoint the shell uses."
+              },
+              "expiresAt": {
+                "type": "integer",
+                "format": "int64",
+                "description": "When an unattached token stops being valid (epoch millis)."
+              },
+              "idleTimeoutSeconds": {
+                "type": "integer",
+                "format": "int64",
+                "description": "Close after this many seconds without input from the caller.",
+                "minimum": 0
+              },
+              "machineId": {
+                "type": "string",
+                "description": "The machine."
+              },
+              "maxDurationSeconds": {
+                "type": "integer",
+                "format": "int64",
+                "description": "Close after this many seconds regardless.",
+                "minimum": 0
+              },
+              "sessionId": {
+                "type": "string",
+                "description": "The session's identity, as it appears in audit events."
+              },
+              "socketPath": {
+                "type": "string",
+                "description": "The WebSocket path, relative to the controller's origin."
+              },
+              "subprotocols": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                },
+                "description": "The WebSocket subprotocols to offer: `fleet-terminal`, then the token\nsubprotocol."
+              },
+              "token": {
+                "type": "string",
+                "description": "The single-use token that attaches to the terminal WebSocket. It\nexpires at `expiresAt` and is spent by the first attach."
+              }
+            }
+          }
+        }
+      },
+      "Resource_UnregisterReviewDto": {
+        "type": "object",
+        "description": "A single resource.\n\nThe payload is nested under `data` so that later top-level fields are an\nadditive change rather than a breaking one.",
+        "required": [
+          "data"
+        ],
+        "properties": {
+          "data": {
+            "type": "object",
+            "description": "What unregistering a registered VM will do, and the token that binds it.",
+            "required": [
+              "reviewToken",
+              "accountId",
+              "vmid",
+              "name"
+            ],
+            "properties": {
+              "accountId": {
+                "type": "string",
+                "description": "The Proxmox account."
+              },
+              "name": {
+                "type": "string",
+                "description": "The VM name the marker records."
+              },
+              "reviewToken": {
+                "type": "string",
+                "description": "The token the unregister call must present."
+              },
+              "vmid": {
+                "type": "integer",
+                "format": "int32",
+                "description": "The VMID whose marker will be removed.",
+                "minimum": 0
+              }
+            }
+          }
+        }
+      },
+      "Resource_Vec_PersistentGuestDto": {
+        "type": "object",
+        "description": "A single resource.\n\nThe payload is nested under `data` so that later top-level fields are an\nadditive change rather than a breaking one.",
+        "required": [
+          "data"
+        ],
+        "properties": {
+          "data": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "description": "One persistent guest marker.",
+              "required": [
+                "accountId",
+                "vmid",
+                "name",
+                "node",
+                "imageVersionId",
+                "cloned",
+                "state",
+                "createdAt",
+                "updatedAt"
+              ],
+              "properties": {
+                "accountId": {
+                  "type": "string",
+                  "description": "The Proxmox account."
+                },
+                "cloned": {
+                  "type": "boolean",
+                  "description": "Whether the clone completed (always true for a registered VM)."
+                },
+                "createdAt": {
+                  "type": "integer",
+                  "format": "int64",
+                  "description": "Creation time (epoch milliseconds)."
+                },
+                "imageVersionId": {
+                  "type": "string",
+                  "description": "The image version it was cloned from, or `registered` for a VM that\nexisted before Fleet kept it."
+                },
+                "machineId": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "description": "The Fleet machine it is linked to, once there is one."
+                },
+                "name": {
+                  "type": "string",
+                  "description": "The VM name."
+                },
+                "node": {
+                  "type": "string",
+                  "description": "The node the guest was created or found on."
+                },
+                "operationId": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "description": "The operation that created it, when Fleet created it."
+                },
+                "state": {
+                  "type": "string",
+                  "description": "`creating` or `ready`."
+                },
+                "step": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "description": "The step the creation last completed or failed at."
+                },
+                "updatedAt": {
+                  "type": "integer",
+                  "format": "int64",
+                  "description": "Last update (epoch milliseconds)."
+                },
+                "vmid": {
+                  "type": "integer",
+                  "format": "int32",
+                  "description": "The guest's VMID.",
+                  "minimum": 0
+                }
+              }
+            }
+          }
+        }
+      },
       "Retry": {
         "type": "string",
         "description": "Whether and how a caller may retry a failed request.",
@@ -24829,6 +28271,19 @@
           "immediate",
           "backoff"
         ]
+      },
+      "ReviewMachineCreateRequest": {
+        "type": "object",
+        "description": "The body of `POST /machines/create/review`.",
+        "required": [
+          "spec"
+        ],
+        "properties": {
+          "spec": {
+            "type": "object",
+            "description": "The machine to create: account, promoted image version, name, optional\nplacement and hardware, tags, description, `onboot`, `protection`\n(default on), the guest OS, the bootstrap login, the host-key trust,\nthe SSH credential choice (`generate`, `reference` or `publicKey`),\nan optional login user, the Windows options (administrator password\npolicy and activation) and the deadline. It holds references and\npublic keys only, never a secret value."
+          }
+        }
       },
       "ReviewProxmoxOperationRequest": {
         "type": "object",
@@ -26031,6 +29486,19 @@
           }
         }
       },
+      "SetEndpointAuthRequest": {
+        "type": "object",
+        "description": "The body of `PUT /machines/{machineId}/endpoints/{endpointId}/auth`.",
+        "required": [
+          "auth"
+        ],
+        "properties": {
+          "auth": {
+            "$ref": "#/components/schemas/EndpointAuthDto",
+            "description": "The default auth to record."
+          }
+        }
+      },
       "SetImageSecretRequest": {
         "type": "object",
         "description": "The set-secret request. The value is write-only: it is never echoed,\nlogged, audited, or readable afterwards.",
@@ -26876,6 +30344,39 @@
         },
         "additionalProperties": false
       },
+      "StoreProductKeyRequest": {
+        "type": "object",
+        "description": "The body of `POST /machine-product-keys`.",
+        "required": [
+          "productKey"
+        ],
+        "properties": {
+          "productKey": {
+            "type": "string",
+            "description": "The Windows product key (five groups of five letters and digits)."
+          }
+        }
+      },
+      "StoreSshKeyRequest": {
+        "type": "object",
+        "description": "The body of `POST /machine-ssh-keys`.",
+        "required": [
+          "privateKey"
+        ],
+        "properties": {
+          "machineId": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Binds the key to one machine: it then resolves for that machine only.\nAbsent, the key is unbound and usable on any machine by a caller who\nmay change that machine's credentials."
+          },
+          "privateKey": {
+            "type": "string",
+            "description": "An unencrypted PEM or OpenSSH private key. It is stored in the\nencrypted secret store and never returned or recorded."
+          }
+        }
+      },
       "StoredCredentialDto": {
         "type": "object",
         "description": "The reference of a stored Git credential.",
@@ -26886,6 +30387,32 @@
           "credentialRef": {
             "type": "string",
             "description": "The opaque reference to pass as `credentialRef`."
+          }
+        }
+      },
+      "StoredProductKeyDto": {
+        "type": "object",
+        "description": "The reference of a stored product key.",
+        "required": [
+          "secretRef"
+        ],
+        "properties": {
+          "secretRef": {
+            "type": "string",
+            "description": "The reference to use as `secret` in a product-key activation."
+          }
+        }
+      },
+      "StoredSshKeyDto": {
+        "type": "object",
+        "description": "The reference of a stored SSH key.",
+        "required": [
+          "credentialRef"
+        ],
+        "properties": {
+          "credentialRef": {
+            "type": "string",
+            "description": "The reference to use as `credential` in a `secret` endpoint auth."
           }
         }
       },
@@ -27128,6 +30655,67 @@
           }
         }
       },
+      "TerminalSessionDto": {
+        "type": "object",
+        "description": "A created terminal session. The token is shown here once.",
+        "required": [
+          "sessionId",
+          "token",
+          "expiresAt",
+          "machineId",
+          "endpointId",
+          "socketPath",
+          "subprotocols",
+          "idleTimeoutSeconds",
+          "maxDurationSeconds"
+        ],
+        "properties": {
+          "endpointId": {
+            "type": "string",
+            "description": "The SSH endpoint the shell uses."
+          },
+          "expiresAt": {
+            "type": "integer",
+            "format": "int64",
+            "description": "When an unattached token stops being valid (epoch millis)."
+          },
+          "idleTimeoutSeconds": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Close after this many seconds without input from the caller.",
+            "minimum": 0
+          },
+          "machineId": {
+            "type": "string",
+            "description": "The machine."
+          },
+          "maxDurationSeconds": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Close after this many seconds regardless.",
+            "minimum": 0
+          },
+          "sessionId": {
+            "type": "string",
+            "description": "The session's identity, as it appears in audit events."
+          },
+          "socketPath": {
+            "type": "string",
+            "description": "The WebSocket path, relative to the controller's origin."
+          },
+          "subprotocols": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "The WebSocket subprotocols to offer: `fleet-terminal`, then the token\nsubprotocol."
+          },
+          "token": {
+            "type": "string",
+            "description": "The single-use token that attaches to the terminal WebSocket. It\nexpires at `expiresAt` and is spent by the first attach."
+          }
+        }
+      },
       "TestOutcomeDto": {
         "type": "object",
         "description": "The outcome of the connect check a test performed, when it ran.",
@@ -27156,6 +30744,49 @@
               "null"
             ],
             "description": "The bounded, already-redacted failure detail, when the check failed."
+          }
+        }
+      },
+      "UnregisterGuestRequest": {
+        "type": "object",
+        "description": "The body of the unregister call.",
+        "required": [
+          "reviewToken"
+        ],
+        "properties": {
+          "reviewToken": {
+            "type": "string",
+            "description": "The token from the review call."
+          }
+        }
+      },
+      "UnregisterReviewDto": {
+        "type": "object",
+        "description": "What unregistering a registered VM will do, and the token that binds it.",
+        "required": [
+          "reviewToken",
+          "accountId",
+          "vmid",
+          "name"
+        ],
+        "properties": {
+          "accountId": {
+            "type": "string",
+            "description": "The Proxmox account."
+          },
+          "name": {
+            "type": "string",
+            "description": "The VM name the marker records."
+          },
+          "reviewToken": {
+            "type": "string",
+            "description": "The token the unregister call must present."
+          },
+          "vmid": {
+            "type": "integer",
+            "format": "int32",
+            "description": "The VMID whose marker will be removed.",
+            "minimum": 0
           }
         }
       },

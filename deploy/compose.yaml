@@ -41,6 +41,9 @@ services:
       # data volume under /var/lib/fleet/lab-artifacts.
       FLEET_LAB_ARTIFACT_RETENTION_SECONDS: ${FLEET_LAB_ARTIFACT_RETENTION_SECONDS:-604800}
       FLEET_LAB_ARTIFACT_MAX_BYTES: ${FLEET_LAB_ARTIFACT_MAX_BYTES:-67108864}
+      # Proxmox VM screen: close a console after this many seconds without
+      # keyboard, pointer, or paste input (FM-495); 30 to 3600.
+      FLEET_CONSOLE_IDLE_SECONDS: ${FLEET_CONSOLE_IDLE_SECONDS:-600}
       # Opt-in proxy for Packer image builds (#339); empty means off. Never put
       # credentials in it: the controller refuses a URL that carries them.
       FLEET_IMAGE_BUILD_PROXY: ${FLEET_IMAGE_BUILD_PROXY:-}

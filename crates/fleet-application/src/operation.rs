@@ -66,7 +66,7 @@ pub const BROKER_IDEMPOTENCY_PREFIX: &str = "action-request:";
 /// machine-scoped shape plus the plan and its approval identities
 /// (FM-402); the source kinds carry the remote/commit payloads and are
 /// catalog-level (FM-403).
-pub const CREATABLE_KINDS: [&str; 70] = [
+pub const CREATABLE_KINDS: [&str; 75] = [
     "noop",
     // Brokered Coolify lifecycle kind (FM-1033): created only through the
     // action broker.
@@ -130,6 +130,9 @@ pub const CREATABLE_KINDS: [&str; 70] = [
     "proxmox.guest.clone",
     "proxmox.guest.template",
     "proxmox.task-cancel",
+    // Reviewed persistent-VM kinds (#489).
+    "proxmox.guest.config",
+    "machine.create",
     "image.build",
     "lab.provision",
     "lab.cleanup",
@@ -137,6 +140,11 @@ pub const CREATABLE_KINDS: [&str; 70] = [
     "lab.exec_detach",
     "lab.collect",
     "lab.put",
+    // Brokered machine access kinds (#493, ADR 0017): created only through
+    // their dedicated machine routes.
+    "machine.exec",
+    "machine.put",
+    "machine.collect",
     "lab.pool.fill",
     // Brokered DNS kinds (FM-1042): created only through the action broker.
     "dns.record.upsert",
@@ -172,6 +180,8 @@ fn catalog_scoped_kind_permission(kind: &str) -> Option<Permission> {
         | "proxmox.guest.clone"
         | "proxmox.guest.template"
         | "proxmox.task-cancel" => Some(Permission::ProxmoxDestructive),
+        "proxmox.guest.config" => Some(Permission::ProxmoxGuestConfig),
+        "machine.create" => Some(Permission::MachineProvision),
         _ => None,
     }
 }
@@ -226,12 +236,51 @@ fn machine_scoped_kind_permission_inner(kind: &str, payload: Option<&str>) -> Op
     }
 }
 
+/// The permission that reads a machine access operation (ADR 0017): its
+/// payload names the command or the files, and its result holds the output.
+fn machine_access_kind_permission(kind: &str) -> Option<Permission> {
+    match kind {
+        "machine.exec" => Some(Permission::MachineExec),
+        "machine.put" => Some(Permission::MachinePut),
+        "machine.collect" => Some(Permission::MachineCollect),
+        _ => None,
+    }
+}
+
+/// Whether the principal may see this operation: any kind but the machine
+/// access kinds, which need that kind's permission on the payload's machine.
+fn machine_operation_readable(
+    authorizer: &dyn Authorizer,
+    principal_id: &str,
+    operation: &Operation,
+) -> bool {
+    let Some(permission) = machine_access_kind_permission(&operation.kind) else {
+        return true;
+    };
+    let machine = operation
+        .payload_json
+        .as_deref()
+        .and_then(|payload| serde_json::from_str::<serde_json::Value>(payload).ok())
+        .and_then(|payload| payload["machineId"].as_str().map(str::to_owned));
+    machine.is_some_and(|machine| {
+        authorize(
+            authorizer,
+            AccessRequest {
+                principal_id,
+                action: permission,
+                resource: Some(&machine),
+            },
+        )
+        .is_ok()
+    })
+}
+
 /// The payload bound for provider inputs.
 pub const MAX_PAYLOAD_JSON: usize = 128 * 1024;
 
 /// The destructive-adjacent kinds: their creation requires a review token
 /// computed over exactly the payload being created.
-pub const DESTRUCTIVE_KINDS: [&str; 7] = [
+pub const DESTRUCTIVE_KINDS: [&str; 9] = [
     "proxmox.guest.snapshot",
     "proxmox.guest.snapshot-revert",
     "proxmox.guest.snapshot-delete",
@@ -239,6 +288,8 @@ pub const DESTRUCTIVE_KINDS: [&str; 7] = [
     "proxmox.guest.clone",
     "proxmox.guest.template",
     "proxmox.task-cancel",
+    "proxmox.guest.config",
+    "machine.create",
 ];
 
 /// The review token for one destructive operation: the SHA-256 of the
@@ -418,6 +469,15 @@ pub trait OperationPort: fmt::Debug + Send + Sync {
     ///
     /// Fails when the id is unknown or the backend errors.
     async fn get(&self, id: &str) -> Result<Operation, PortFailure>;
+    /// The operation holding an idempotency key, when there is one. The
+    /// default knows none; a store overrides it.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the backend errors.
+    async fn find_by_idempotency(&self, _key: &str) -> Result<Option<Operation>, PortFailure> {
+        Ok(None)
+    }
     /// Lists operations, newest first.
     ///
     /// # Errors
@@ -807,7 +867,7 @@ impl Operations {
         };
         if !matches!(
             new.kind.as_str(),
-            "proxmox.guest.destroy" | "proxmox.guest.snapshot-delete"
+            "proxmox.guest.destroy" | "proxmox.guest.snapshot-delete" | "proxmox.guest.config"
         ) {
             return Ok(());
         }
@@ -988,6 +1048,28 @@ impl Operations {
             .await
     }
 
+    /// Creates the `machine.create` operation of a reviewed persistent VM
+    /// request (#489). Generic operation creation refuses the kind.
+    ///
+    /// # Errors
+    ///
+    /// Fails on denial, a missing or wrong review token, or a backend
+    /// failure.
+    pub async fn create_machine_create(
+        &self,
+        authorizer: &dyn Authorizer,
+        principal_id: &str,
+        new: &NewOperation,
+    ) -> Result<Operation, OperationUseCaseError> {
+        if new.kind != "machine.create" {
+            return Err(OperationUseCaseError::Invalid {
+                detail: "this route creates machine.create operations only".to_owned(),
+            });
+        }
+        self.create_inner(authorizer, principal_id, new, CreateRoute::Dedicated)
+            .await
+    }
+
     /// Checks, before a release or sweep changes any lease, that the caller
     /// may also queue the cleanup that change owes: otherwise the lease
     /// would commit to `releasing` with no cleanup queued.
@@ -1113,6 +1195,54 @@ impl Operations {
             Permission::LabPut,
         )
         .await
+    }
+
+    /// Queues a `machine.exec`, `machine.put` or `machine.collect` that
+    /// `MachineAccess` validated (#493), by a caller allowed to use that
+    /// kind's permission on the machine named in the payload.
+    ///
+    /// # Errors
+    ///
+    /// Fails on an unknown kind, a payload that names another machine,
+    /// denial, or a backend failure.
+    pub async fn create_machine_access(
+        &self,
+        authorizer: &dyn Authorizer,
+        principal_id: &str,
+        machine_id: &str,
+        new: &NewOperation,
+    ) -> Result<Operation, OperationUseCaseError> {
+        let permission = match new.kind.as_str() {
+            "machine.exec" => Permission::MachineExec,
+            "machine.put" => Permission::MachinePut,
+            "machine.collect" => Permission::MachineCollect,
+            other => {
+                return Err(OperationUseCaseError::Invalid {
+                    detail: format!("{other} is not a machine access kind"),
+                });
+            }
+        };
+        let linked = new
+            .payload_json
+            .as_deref()
+            .and_then(|payload| serde_json::from_str::<serde_json::Value>(payload).ok())
+            .and_then(|payload| payload["machineId"].as_str().map(str::to_owned));
+        if linked.as_deref() != Some(machine_id) {
+            return Err(OperationUseCaseError::Invalid {
+                detail: format!("the {} payload must match its machine", new.kind),
+            });
+        }
+        authorize(
+            authorizer,
+            AccessRequest {
+                principal_id,
+                action: permission,
+                resource: Some(machine_id),
+            },
+        )
+        .map_err(OperationUseCaseError::Denied)?;
+        self.create_inner(authorizer, principal_id, new, CreateRoute::Dedicated)
+            .await
     }
 
     /// Queues the `lab.cleanup` operation for one releasing lease (the
@@ -1274,7 +1404,10 @@ impl Operations {
                 },
             )
             .map_err(OperationUseCaseError::Denied)?;
-            if self.brokered_kinds.contains(&new.kind) {
+            // A kind with a dedicated route of its own (`machine.create`,
+            // #489) is also offered through the broker (#496): only the
+            // generic surface refuses it.
+            if route == CreateRoute::Generic && self.brokered_kinds.contains(&new.kind) {
                 return Err(OperationUseCaseError::Invalid {
                     detail: "this kind is run through an action request; POST /requests instead"
                         .to_owned(),
@@ -1397,6 +1530,23 @@ impl Operations {
         }
         let rollout_payload = catalog_rollout_payload(new)?;
 
+        // A stored-key auth (ADR 0017) is resolved by the executor with the
+        // controller's key store, so only the machine routes, which authorize
+        // the caller against the machine and audit the request, may queue it.
+        // Without this, anyone who can queue `ssh.exec` could name a stored
+        // key reference and run commands as that key.
+        if route != CreateRoute::Dedicated
+            && new
+                .payload_json
+                .as_deref()
+                .and_then(|payload| serde_json::from_str::<serde_json::Value>(payload).ok())
+                .is_some_and(|payload| payload["auth"]["type"] == "secret")
+        {
+            return Err(OperationUseCaseError::Invalid {
+                detail: "a stored-key auth is accepted only through the machine routes".to_owned(),
+            });
+        }
+
         // The checkout and skills kinds act on a machine through SSH, so
         // their creation carries the machine-scoped authorization the
         // dedicated endpoints enforce: a caller with operation.create but
@@ -1495,6 +1645,17 @@ impl Operations {
                     detail: "lab.put runs through the lease files route".to_owned(),
                 });
             }
+        } else if matches!(
+            new.kind.as_str(),
+            "machine.exec" | "machine.put" | "machine.collect"
+        ) {
+            // Authorized by `create_machine_access` against its machine, and
+            // audited with the command digest by the machine access use case.
+            if route != CreateRoute::Dedicated {
+                return Err(OperationUseCaseError::Invalid {
+                    detail: format!("{} runs through its machine route", new.kind),
+                });
+            }
         } else if new.kind == crate::lab_pool::FILL_KIND {
             // Authorized by `create_lab_pool_fill` against its pool.
             if route != CreateRoute::Dedicated {
@@ -1510,6 +1671,44 @@ impl Operations {
                     detail: "lab.cleanup is queued by releasing a lease, not created directly"
                         .to_owned(),
                 });
+            }
+        } else if new.kind == "machine.create" {
+            // Persistent VM creation (#489) runs through its dedicated route
+            // only: its payload names credential references (the bootstrap
+            // auth, an SSH key, a product key) that the generic surface must
+            // never be able to queue. The review token still binds the exact
+            // payload, and the catalog entry still applies.
+            if route == CreateRoute::Generic {
+                return Err(OperationUseCaseError::Invalid {
+                    detail: "machine.create runs through the machine create route".to_owned(),
+                });
+            }
+            let expected =
+                review_token_for(&new.kind, new.payload_json.as_deref().unwrap_or_default());
+            match new.review_token.as_deref() {
+                Some(presented) if constant_time_eq(presented, &expected) => {}
+                _ => {
+                    return Err(OperationUseCaseError::Invalid {
+                        detail:
+                            "machine.create requires a valid review token; review the machine first"
+                                .to_owned(),
+                    });
+                }
+            }
+            // The brokered route (#496) is authorized by the broker: policy
+            // for an auto request, or an approver the broker has checked
+            // holds `machines.provision`, now and again at execution. The
+            // requesting agent never holds it.
+            if route == CreateRoute::Dedicated {
+                authorize(
+                    authorizer,
+                    AccessRequest {
+                        principal_id,
+                        action: Permission::MachineProvision,
+                        resource: None,
+                    },
+                )
+                .map_err(OperationUseCaseError::Denied)?;
             }
         } else if new.kind == "lab.provision" {
             if route != CreateRoute::Dedicated {
@@ -1687,6 +1886,20 @@ impl Operations {
         Ok(())
     }
 
+    /// The operation holding an idempotency key, when there is one. The
+    /// broker uses it to link an operation it already created before it
+    /// decides whether to create one.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the backend errors.
+    pub async fn find_by_idempotency_key(
+        &self,
+        key: &str,
+    ) -> Result<Option<Operation>, PortFailure> {
+        self.port.find_by_idempotency(key).await
+    }
+
     /// Reads one operation's current state id, when it exists. The
     /// workflow executor polls this between steps.
     ///
@@ -1732,6 +1945,11 @@ impl Operations {
         )
         .map_err(OperationUseCaseError::Denied)?;
         let operation = self.port.get(id).await.map_err(map_port_failure("get"))?;
+        if !machine_operation_readable(authorizer, principal_id, &operation) {
+            return Err(OperationUseCaseError::NotFound {
+                what: format!("operation {id}"),
+            });
+        }
         if crate::authz::is_delegated_principal(principal_id) {
             self.require_own_lab_operation(principal_id, &operation)
                 .await?;
@@ -1803,10 +2021,27 @@ impl Operations {
             },
         )
         .map_err(OperationUseCaseError::Denied)?;
-        self.port
-            .list(limit)
-            .await
-            .map_err(map_port_failure("list"))
+        // Hidden operations must not shorten the page: read further back
+        // until the page is full or the history ends.
+        let wanted = limit as usize;
+        let mut ask = limit;
+        loop {
+            let rows = self
+                .port
+                .list(ask)
+                .await
+                .map_err(map_port_failure("list"))?;
+            let exhausted = rows.len() < ask as usize;
+            let mut visible: Vec<Operation> = rows
+                .into_iter()
+                .filter(|operation| machine_operation_readable(authorizer, principal_id, operation))
+                .collect();
+            if visible.len() >= wanted || exhausted || ask >= 10_000 {
+                visible.truncate(wanted);
+                return Ok(visible);
+            }
+            ask = ask.saturating_mul(4).min(10_000);
+        }
     }
 
     /// Requests cancellation of an operation.

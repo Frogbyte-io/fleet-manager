@@ -14,6 +14,7 @@ const props = defineProps<{
 }>()
 
 const counts = computed(() => statusCounts(props.machine.capabilities))
+const ownership = computed(() => props.machine.ownership ?? null)
 </script>
 
 <template>
@@ -82,6 +83,39 @@ const counts = computed(() => statusCounts(props.machine.capabilities))
         <dd class="font-mono text-fc-ink">
           {{ machine.groups.join(', ') || '—' }}
         </dd>
+        <template v-if="ownership">
+          <dt class="text-fc-faint">
+            Owner
+          </dt>
+          <dd
+            class="break-all font-mono text-fc-ink"
+            data-testid="machine-owner"
+          >
+            {{ ownership.owner }}
+          </dd>
+          <dt class="text-fc-faint">
+            Purpose
+          </dt>
+          <dd
+            class="font-mono text-fc-ink"
+            data-testid="machine-purpose"
+          >
+            {{ ownership.purpose || '—' }}
+          </dd>
+          <template v-if="ownership.requestId">
+            <dt class="text-fc-faint">
+              Request
+            </dt>
+            <dd class="break-all font-mono text-fc-ink">
+              <RouterLink
+                :to="{ path: '/requests', query: { request: ownership.requestId } }"
+                class="text-fc-info hover:text-fc-ink"
+              >
+                {{ ownership.requestId }}
+              </RouterLink>
+            </dd>
+          </template>
+        </template>
         <dt class="text-fc-faint">
           Registered
         </dt>

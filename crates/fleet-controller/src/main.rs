@@ -66,6 +66,10 @@ fn run_serve(mut config: fleet_config::ControllerConfig) -> ExitCode {
         eprintln!("fleet-controller: refusing to start: {error}");
         return ExitCode::FAILURE;
     }
+    if let Err(error) = fleet_controller::persistent_bounds_from_env() {
+        eprintln!("fleet-controller: refusing to start: {error}");
+        return ExitCode::FAILURE;
+    }
     // Likewise the Registry enricher: a typo must not silently change how
     // often public RDAP servers are queried.
     let enrich_settings = match fleet_controller::registry_enrich::enrich_settings_from_env() {
@@ -280,6 +284,174 @@ fn run_serve(mut config: fleet_config::ControllerConfig) -> ExitCode {
                 std::sync::Arc::new(fleet_storage_sqlite::AuditSink::new(store.pool().clone())),
             ))
         });
+        // #493 (ADR 0017): agent SSH access with Fleet-held keys. Stored-key
+        // auth needs the secret store; puts and collects need the artifact
+        // directory. Each part is optional, and the surface says which is
+        // missing instead of failing the controller.
+        let machine_keys = secrets.as_ref().map(|secrets| {
+            std::sync::Arc::new(
+                fleet_controller::machine_access::SecretBackedMachineKeys::new(secrets.clone())
+                    .protecting(
+                        std::iter::once(config.data_dir.join("ssh"))
+                            .chain(config.master_key_file.clone())
+                            .collect(),
+                    ),
+            )
+        });
+        let ssh_auth_resolver = machine_keys.as_ref().map(|keys| {
+            std::sync::Arc::new(fleet_controller::machine_access::SshAuthResolver::new(
+                keys.clone(),
+            ))
+        });
+        // #489: the persistent marker, and the product-key store the
+        // creation executor reads.
+        let persistent_guests: std::sync::Arc<
+            dyn fleet_application::persistent::PersistentGuestPort,
+        > = std::sync::Arc::new(fleet_storage_sqlite::PersistentGuestRepository::new(
+            store.pool().clone(),
+        ));
+        let product_keys = secrets.as_ref().map(|secrets| {
+            std::sync::Arc::new(
+                fleet_controller::persistent_machines::SecretBackedProductKeys::new(
+                    secrets.clone(),
+                ),
+            )
+        });
+        let machine_access = {
+            let mut access = fleet_application::machine_access::MachineAccess::new(
+                std::sync::Arc::new(fleet_storage_sqlite::MachineRepository::new(
+                    store.pool().clone(),
+                )),
+                std::sync::Arc::new(fleet_storage_sqlite::EndpointAuthRepository::new(
+                    store.pool().clone(),
+                )),
+                std::sync::Arc::new(fleet_storage_sqlite::AuditSink::new(store.pool().clone())),
+            );
+            if let Some(keys) = &machine_keys {
+                access = access.with_keys(keys.clone());
+            }
+            if let (Some(keys), Some(product_keys), Some(secrets)) =
+                (&machine_keys, &product_keys, &secrets)
+            {
+                access = access.with_persistent(std::sync::Arc::new(
+                    fleet_application::persistent::PersistentMachines::new(
+                        std::sync::Arc::new(
+                            fleet_controller::proxmox_store::RecipeImagePinValidator::new(
+                                std::sync::Arc::new(fleet_storage_sqlite::RecipeRepository::new(
+                                    store.pool().clone(),
+                                )),
+                            ),
+                        ),
+                        std::sync::Arc::new(fleet_storage_sqlite::AuditSink::new(
+                            store.pool().clone(),
+                        )),
+                    )
+                    .with_keys(keys.clone())
+                    .with_product_keys(product_keys.clone())
+                    .with_markers(persistent_guests.clone())
+                    .with_machines(std::sync::Arc::new(
+                        fleet_storage_sqlite::MachineRepository::new(store.pool().clone()),
+                    ))
+                    .with_guest_links(std::sync::Arc::new(
+                        fleet_storage_sqlite::GuestLinkRepository::new(store.pool().clone()),
+                    ))
+                    .with_register_guard(std::sync::Arc::new(
+                        fleet_controller::persistent_machines::ProxmoxRegisterGuard::new(
+                            std::sync::Arc::new(fleet_storage_sqlite::ProxmoxAccountRepository::new(
+                                store.pool().clone(),
+                            )),
+                            std::sync::Arc::new(
+                                fleet_controller::proxmox_store::SecretBackedProxmoxCredentials::new(
+                                    secrets.clone(),
+                                ),
+                            ),
+                            fleet_provider_proxmox::ProxmoxClient::new(std::sync::Arc::new(
+                                fleet_provider_proxmox::ReqwestPveTransport::new(),
+                            )),
+                            std::sync::Arc::new(fleet_storage_sqlite::RecipeRepository::new(
+                                store.pool().clone(),
+                            )),
+                        )
+                        .with_pool_members(std::sync::Arc::new(
+                            fleet_application::operation::PoolMembership(std::sync::Arc::new(
+                                fleet_storage_sqlite::LabPoolRepository::new(store.pool().clone()),
+                            )),
+                        )),
+                    ))
+                    .with_abandon_guard(std::sync::Arc::new(
+                        fleet_controller::persistent_machines::ProxmoxAbandonGuard::new(
+                            std::sync::Arc::new(fleet_storage_sqlite::OperationRepository::new(
+                                store.pool().clone(),
+                            )),
+                            std::sync::Arc::new(fleet_storage_sqlite::ProxmoxAccountRepository::new(
+                                store.pool().clone(),
+                            )),
+                            std::sync::Arc::new(
+                                fleet_controller::proxmox_store::SecretBackedProxmoxCredentials::new(
+                                    secrets.clone(),
+                                ),
+                            ),
+                            fleet_provider_proxmox::ProxmoxClient::new(std::sync::Arc::new(
+                                fleet_provider_proxmox::ReqwestPveTransport::new(),
+                            )),
+                        ),
+                    )),
+                ));
+            }
+            if let Some(stage) = &lab_put_store {
+                access = access.with_uploads(stage.clone());
+            }
+            if let Some(blobs) = &lab_artifact_store {
+                access = access.with_files(
+                    std::sync::Arc::new(fleet_storage_sqlite::MachineFileRepository::new(
+                        store.pool().clone(),
+                    )),
+                    blobs.clone(),
+                    fleet_application::lab_artifacts::ArtifactPolicy {
+                        retention_seconds: config.lab_artifact_retention_seconds,
+                        max_bytes: config.lab_artifact_max_bytes,
+                    },
+                );
+            }
+            // One lock serializes blob commits and deletes for the Lab
+            // artifacts and the machine files that share the blob store.
+            if let Some(artifacts) = &lab_artifacts {
+                access = access.with_blob_lock(artifacts.blob_lock());
+            }
+            // #494: interactive terminals over SSH, with the same stored
+            // keys. They need the secret store (for the key resolver) and a
+            // Unix controller (PTY and key files).
+            #[cfg(unix)]
+            if let Some(resolver) = &ssh_auth_resolver {
+                match fleet_controller::machine_terminal::terminal_limits_from(|name| {
+                    std::env::var(name).ok()
+                }) {
+                    Err(error) => {
+                        eprintln!("warning: machine terminals unavailable: {error}");
+                    }
+                    Ok(limits) => match fleet_controller::machine_terminal::SshTerminalPort::new(
+                        std::sync::Arc::new(fleet_storage_sqlite::MachineRepository::new(
+                            store.pool().clone(),
+                        )),
+                        resolver.clone(),
+                        config.data_dir.join("ssh"),
+                    ) {
+                        Ok(port) => {
+                            access = access.with_terminals(
+                                fleet_application::machine_terminal::TerminalSessions::new(
+                                    std::sync::Arc::new(port),
+                                    limits,
+                                ),
+                            );
+                        }
+                        Err(error) => {
+                            eprintln!("warning: machine terminals unavailable: {error}");
+                        }
+                    },
+                }
+            }
+            std::sync::Arc::new(access)
+        };
         // The executor routes by kind: node kinds dispatch through the
         // gateway, onboarding kinds work against the draft record, and
         // everything else is SSH work.
@@ -318,11 +490,15 @@ fn run_serve(mut config: fleet_config::ControllerConfig) -> ExitCode {
                     std::sync::Arc::new(fleet_storage_sqlite::MachineRepository::new(
                         store.pool().clone(),
                     ));
-                std::sync::Arc::new(ScriptExecutor::new(
+                let executor = ScriptExecutor::new(
                     machines,
                     config.data_dir.join("ssh"),
                     exec_limiter.clone(),
-                ))
+                );
+                std::sync::Arc::new(match &ssh_auth_resolver {
+                    Some(resolver) => executor.with_resolver(resolver.clone()),
+                    None => executor,
+                })
             };
             let limiter = fleet_provider_ssh::ExecutionLimiter::new(4);
             let onboarding: std::sync::Arc<dyn fleet_application::worker::OperationExecutor> =
@@ -576,6 +752,10 @@ fn run_serve(mut config: fleet_config::ControllerConfig) -> ExitCode {
                                 fleet_storage_sqlite::LabPoolRepository::new(store.pool().clone()),
                             )),
                         ))
+                        .with_persistent(persistent_guests.clone())
+                        .with_audit(std::sync::Arc::new(fleet_storage_sqlite::AuditSink::new(
+                            store.pool().clone(),
+                        )))
                         .with_task_links(task_links),
                     ),
                 ))
@@ -729,6 +909,10 @@ fn run_serve(mut config: fleet_config::ControllerConfig) -> ExitCode {
                             fleet_storage_sqlite::LabPoolRepository::new(store.pool().clone()),
                         )),
                     ))
+                    .with_persistent(persistent_guests.clone())
+                    .with_audit(std::sync::Arc::new(fleet_storage_sqlite::AuditSink::new(
+                        store.pool().clone(),
+                    )))
                     .with_task_links(std::sync::Arc::new(
                         fleet_storage_sqlite::ProxmoxTaskLinkRepository::new(store.pool().clone()),
                     )),
@@ -740,14 +924,17 @@ fn run_serve(mut config: fleet_config::ControllerConfig) -> ExitCode {
                     ));
                 let lab_pool_guests: std::sync::Arc<
                     dyn fleet_application::lab_pool::PoolGuestPort,
-                > = std::sync::Arc::new(fleet_controller::lab_pool::ProxmoxPoolGuests::new(
-                    lab_accounts.clone(),
-                    lab_credentials.clone(),
-                    fleet_provider_proxmox::ProxmoxClient::new(pve_transport.clone()),
-                    std::sync::Arc::new(fleet_storage_sqlite::RecipeRepository::new(
-                        store.pool().clone(),
-                    )),
-                ));
+                > = std::sync::Arc::new(
+                    fleet_controller::lab_pool::ProxmoxPoolGuests::new(
+                        lab_accounts.clone(),
+                        lab_credentials.clone(),
+                        fleet_provider_proxmox::ProxmoxClient::new(pve_transport.clone()),
+                        std::sync::Arc::new(fleet_storage_sqlite::RecipeRepository::new(
+                            store.pool().clone(),
+                        )),
+                    )
+                    .with_persistent(persistent_guests.clone()),
+                );
                 let lab_cleanup = std::sync::Arc::new(
                     fleet_controller::lab_cleanup::LabCleanupExecutor::new(
                         lab_leases.clone(),
@@ -794,6 +981,7 @@ fn run_serve(mut config: fleet_config::ControllerConfig) -> ExitCode {
                                 )),
                                 fleet_provider_proxmox::ProxmoxClient::new(pve_transport.clone()),
                             )
+                            .with_persistent(persistent_guests.clone())
                             .with_readiness(
                                 std::sync::Arc::new(
                                     fleet_controller::proxmox_exec::ProvisionReadiness::new(
@@ -928,6 +1116,141 @@ fn run_serve(mut config: fleet_config::ControllerConfig) -> ExitCode {
                     }
                     None => with_lab,
                 };
+            // #493: `machine.exec`, `machine.put` and `machine.collect` run a
+            // command, or move a file, on a machine over its SSH endpoint
+            // with the endpoint's stored credential.
+            let with_lab: std::sync::Arc<dyn fleet_application::worker::OperationExecutor> = {
+                let files: std::sync::Arc<dyn fleet_controller::lab_artifacts_store::GuestFiles> =
+                    match fleet_controller::lab_artifacts_store::SshGuestFiles::new(
+                        std::sync::Arc::new(fleet_storage_sqlite::MachineRepository::new(
+                            store.pool().clone(),
+                        )),
+                        config.data_dir.join("ssh"),
+                        exec_limiter.clone(),
+                    ) {
+                        Ok(files) => std::sync::Arc::new(match &ssh_auth_resolver {
+                            Some(resolver) => files.with_resolver(resolver.clone()),
+                            None => files,
+                        }),
+                        Err(error) => {
+                            eprintln!("warning: machine file copies unavailable: {error}");
+                            std::sync::Arc::new(
+                                fleet_controller::lab_artifacts_store::UnavailableGuestFiles {
+                                    reason: error,
+                                },
+                            )
+                        }
+                    };
+                std::sync::Arc::new(
+                    fleet_controller::machine_access::MachineAccessDispatch::new(
+                        with_lab,
+                        machine_access.clone(),
+                        lab_put_store.clone(),
+                        lab_artifact_store.clone(),
+                        files,
+                    ),
+                )
+            };
+            // #489: `machine.create` and `proxmox.guest.config`. They need
+            // the secret store (keys, product keys, rotated passwords), so
+            // a controller without one answers the surface as unavailable
+            // and leaves the kinds to the rest of the chain.
+            let with_lab: std::sync::Arc<dyn fleet_application::worker::OperationExecutor> = match (
+                &secrets,
+                &machine_keys,
+                &ssh_auth_resolver,
+                &product_keys,
+            ) {
+                (Some(secrets), Some(keys), Some(resolver), Some(product_keys)) => {
+                    let accounts: std::sync::Arc<
+                        dyn fleet_application::proxmox::ProxmoxAccountPort,
+                    > = std::sync::Arc::new(fleet_storage_sqlite::ProxmoxAccountRepository::new(
+                        store.pool().clone(),
+                    ));
+                    let credentials: std::sync::Arc<
+                        dyn fleet_application::proxmox::ProxmoxCredentialStore,
+                    > = std::sync::Arc::new(
+                        fleet_controller::proxmox_store::SecretBackedProxmoxCredentials::new(
+                            secrets.clone(),
+                        ),
+                    );
+                    let client = fleet_provider_proxmox::ProxmoxClient::new(pve_transport.clone());
+                    let artifacts: std::sync::Arc<dyn fleet_application::lab::ImageArtifactPort> =
+                        std::sync::Arc::new(fleet_storage_sqlite::RecipeRepository::new(
+                            store.pool().clone(),
+                        ));
+                    let audit: std::sync::Arc<dyn fleet_application::operation::AuditPort> =
+                        std::sync::Arc::new(fleet_storage_sqlite::AuditSink::new(
+                            store.pool().clone(),
+                        ));
+                    let task_links: std::sync::Arc<
+                        dyn fleet_application::proxmox::tasks::ProxmoxTaskLinkPort,
+                    > = std::sync::Arc::new(fleet_storage_sqlite::ProxmoxTaskLinkRepository::new(
+                        store.pool().clone(),
+                    ));
+                    let create = fleet_controller::persistent_machines::MachineCreateExecutor::new(
+                        fleet_controller::persistent_machines::MachineCreateParts {
+                            accounts: accounts.clone(),
+                            credentials: credentials.clone(),
+                            client: client.clone(),
+                            artifacts: artifacts.clone(),
+                            images: std::sync::Arc::new(
+                                fleet_controller::proxmox_store::RecipeImagePinValidator::new(
+                                    std::sync::Arc::new(
+                                        fleet_storage_sqlite::RecipeRepository::new(
+                                            store.pool().clone(),
+                                        ),
+                                    ),
+                                ),
+                            ),
+                            persistent: persistent_guests.clone(),
+                            machines: std::sync::Arc::new(
+                                fleet_storage_sqlite::MachineRepository::new(store.pool().clone()),
+                            ),
+                            guest_links: std::sync::Arc::new(
+                                fleet_storage_sqlite::GuestLinkRepository::new(
+                                    store.pool().clone(),
+                                ),
+                            ),
+                            endpoint_auths: std::sync::Arc::new(
+                                fleet_storage_sqlite::EndpointAuthRepository::new(
+                                    store.pool().clone(),
+                                ),
+                            ),
+                            access: machine_access.clone(),
+                            keys: keys.clone(),
+                            resolver: resolver.clone(),
+                            secrets: secrets.clone(),
+                            product_keys: product_keys.clone(),
+                            audit: audit.clone(),
+                            work_dir: config.data_dir.join("ssh"),
+                            limiter: exec_limiter.clone(),
+                        },
+                    )
+                    .with_task_links(task_links);
+                    let config_executor =
+                        fleet_controller::persistent_machines::GuestConfigExecutor::new(
+                            accounts,
+                            credentials,
+                            client,
+                            artifacts,
+                            audit,
+                        )
+                        .with_pool_members(std::sync::Arc::new(
+                            fleet_application::operation::PoolMembership(std::sync::Arc::new(
+                                fleet_storage_sqlite::LabPoolRepository::new(store.pool().clone()),
+                            )),
+                        ));
+                    std::sync::Arc::new(
+                        fleet_controller::persistent_machines::PersistentDispatch::new(
+                            with_lab,
+                            std::sync::Arc::new(create),
+                            std::sync::Arc::new(config_executor),
+                        ),
+                    )
+                }
+                _ => with_lab,
+            };
             // #394: `lab.exec_detach` starts a command that outlives the
             // SSH session; its status is read directly from the guest.
             let with_lab: std::sync::Arc<dyn fleet_application::worker::OperationExecutor> =
@@ -1056,14 +1379,22 @@ fn run_serve(mut config: fleet_config::ControllerConfig) -> ExitCode {
                         ),
                     )),
                     onboarding.clone(),
-                    std::sync::Arc::new(fleet_application::machine::Machines::new(
-                        std::sync::Arc::new(fleet_storage_sqlite::MachineRepository::new(
-                            store.pool().clone(),
-                        )),
-                        std::sync::Arc::new(fleet_storage_sqlite::AuditSink::new(
-                            store.pool().clone(),
-                        )),
-                    )),
+                    std::sync::Arc::new({
+                        let machines = fleet_application::machine::Machines::new(
+                            std::sync::Arc::new(fleet_storage_sqlite::MachineRepository::new(
+                                store.pool().clone(),
+                            )),
+                            std::sync::Arc::new(fleet_storage_sqlite::AuditSink::new(
+                                store.pool().clone(),
+                            )),
+                        );
+                        // A deleted machine takes its bound keys and rotated
+                        // passwords with it (#489).
+                        match &machine_keys {
+                            Some(keys) => machines.with_key_revocation(keys.clone()),
+                            None => machines,
+                        }
+                    }),
                     std::sync::Arc::new(fleet_storage_sqlite::AuditSink::new(store.pool().clone())),
                     Some(events.clone()),
                 ),
@@ -1162,6 +1493,7 @@ fn run_serve(mut config: fleet_config::ControllerConfig) -> ExitCode {
                 std::sync::Arc::new(fleet_storage_sqlite::AuditSink::new(store.pool().clone())),
             ),
         ));
+        let lab = lab.with_machine_access(machine_access.clone());
         let lab = std::sync::Arc::new(match &lab_artifacts {
             Some(artifacts) => lab.with_artifacts(artifacts.clone()),
             None => lab,
@@ -1214,7 +1546,8 @@ fn run_serve(mut config: fleet_config::ControllerConfig) -> ExitCode {
                             ),
                         ),
                         fleet_provider_proxmox::ProxmoxClient::new(pve_transport.clone()),
-                    ),
+                    )
+                    .with_persistent(persistent_guests.clone()),
                 ));
             }
             let interval = std::time::Duration::from_secs(config.lab_sweep_interval_seconds);

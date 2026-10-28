@@ -592,6 +592,7 @@ pub struct Machines {
     port: Arc<dyn MachinePort>,
     audit: Arc<dyn crate::operation::AuditPort>,
     guest_links: Option<Arc<dyn GuestLinkPort>>,
+    keys: Option<Arc<dyn crate::machine_access::MachineKeyPort>>,
 }
 
 impl Machines {
@@ -602,7 +603,19 @@ impl Machines {
             port,
             audit,
             guest_links: None,
+            keys: None,
         }
+    }
+
+    /// Deletes the keys and rotated passwords bound to a machine when the
+    /// machine is deleted (#489), so a deleted machine leaves no credential.
+    #[must_use]
+    pub fn with_key_revocation(
+        mut self,
+        keys: Arc<dyn crate::machine_access::MachineKeyPort>,
+    ) -> Self {
+        self.keys = Some(keys);
+        self
     }
 
     /// Enables the confirmed Proxmox guest association surface.
@@ -1179,6 +1192,18 @@ impl Machines {
             fact.validate()
                 .map_err(|detail| MachineUseCaseError::Invalid { detail })?;
         }
+        // The `fleet` namespace is Fleet's own record keeping: facts in it
+        // are dropped, not recorded, and do not fail the rest of the batch.
+        let facts: Vec<CapabilityFact> = facts
+            .iter()
+            .filter(|fact| {
+                !fact
+                    .namespace
+                    .eq_ignore_ascii_case(fleet_core::RESERVED_FACT_NAMESPACE)
+            })
+            .cloned()
+            .collect();
+        let facts = facts.as_slice();
         if facts.len() > fleet_core::MAX_CAPABILITY_FACTS {
             return Err(MachineUseCaseError::Invalid {
                 detail: format!(
@@ -1309,6 +1334,16 @@ impl Machines {
             .delete(id)
             .await
             .map_err(|failure| map_port("delete", failure))?;
+        // The machine is gone: its bound secrets go with it. A failure here
+        // is reported, because a credential left behind is a finding.
+        if let Some(keys) = &self.keys {
+            keys.revoke_for_machine(id)
+                .await
+                .map_err(|detail| MachineUseCaseError::Backend {
+                    context: "revoke_keys",
+                    detail,
+                })?;
+        }
         self.audit_machine(principal, Permission::MachineDelete, id, None)
             .await?;
         Ok(())

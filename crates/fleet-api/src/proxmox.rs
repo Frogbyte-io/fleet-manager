@@ -1210,6 +1210,61 @@ fn review_token(kind: &str, payload_json: &str) -> String {
     fleet_application::operation::review_token_for(kind, payload_json)
 }
 
+/// The permission a reviewed action needs: the guest config action has its
+/// own catalog entry (#489), every other reviewed action is destructive.
+fn destructive_permission(action: &str) -> fleet_application::authz::Permission {
+    if action == "config" {
+        fleet_application::authz::Permission::ProxmoxGuestConfig
+    } else {
+        fleet_application::authz::Permission::ProxmoxDestructive
+    }
+}
+
+/// Destroying a created persistent machine needs the reviewed
+/// `confirmPersistent` parameter. It is checked when the review and the run
+/// are made, so the operator learns at once, not when the worker fails the
+/// operation (the executor still checks, against the live guest).
+async fn require_persistent_confirmation(
+    state: &crate::operations::ApiState,
+    action: &str,
+    account_id: &str,
+    vmid: u32,
+    params: &serde_json::Value,
+    correlation_id: CorrelationId,
+) -> Result<(), ApiErrorResponse> {
+    if action != "destroy" {
+        return Ok(());
+    }
+    let Some(persistent) = state
+        .lab
+        .as_ref()
+        .and_then(|lab| lab.machine_access())
+        .and_then(|access| access.persistent())
+    else {
+        return Ok(());
+    };
+    let marker = persistent
+        .marker(account_id, vmid)
+        .await
+        .map_err(|error| crate::lab::map_lab_error(&error, correlation_id))?;
+    if let Some(marker) = marker
+        && marker.cloned
+        && params
+            .get("confirmPersistent")
+            .and_then(serde_json::Value::as_bool)
+            != Some(true)
+    {
+        return Err(crate::machines::invalid_request(
+            &format!(
+                "VMID {vmid} is the persistent machine {}; destroying it needs the confirmPersistent parameter",
+                marker.name
+            ),
+            correlation_id,
+        ));
+    }
+    Ok(())
+}
+
 /// Validates one action's required parameters: a malformed review is a
 /// client error, not a durable failure.
 fn validate_destructive_params(action: &str, params: &serde_json::Value) -> Result<(), String> {
@@ -1268,16 +1323,27 @@ fn validate_destructive_params(action: &str, params: &serde_json::Value) -> Resu
                 return Ok(());
             }
             if !params.is_object()
-                || params
-                    .as_object()
-                    .is_some_and(|params| params.keys().any(|key| key != "purge"))
+                || params.as_object().is_some_and(|params| {
+                    params
+                        .keys()
+                        .any(|key| !matches!(key.as_str(), "purge" | "confirmPersistent"))
+                })
             {
-                return Err("destroy parameters must be an object containing only purge".to_owned());
+                return Err(
+                    "destroy parameters must be an object containing only purge and confirmPersistent"
+                        .to_owned(),
+                );
             }
-            if params.get("purge").is_some_and(|value| !value.is_boolean()) {
-                return Err("destroy purge must be a boolean".to_owned());
+            if ["purge", "confirmPersistent"]
+                .iter()
+                .any(|key| params.get(key).is_some_and(|value| !value.is_boolean()))
+            {
+                return Err("destroy purge and confirmPersistent must be booleans".to_owned());
             }
             Ok(())
+        }
+        "config" => {
+            fleet_application::persistent::GuestConfigChange::from_params(params).map(|_| ())
         }
         // `template` carries no parameters.
         _ => Ok(()),
@@ -1298,7 +1364,7 @@ fn validate_destructive_params(action: &str, params: &serde_json::Value) -> Resu
     params(
         ("accountId" = String, Path, description = "The account's identity."),
         ("vmid" = u32, Path, description = "The guest's VMID."),
-        ("action" = String, Path, description = "The destructive action: snapshot, snapshot-revert, snapshot-delete, clone, template, destroy, or task-cancel.")
+        ("action" = String, Path, description = "The destructive action: snapshot, snapshot-revert, snapshot-delete, clone, template, destroy, task-cancel, or config (an allow-listed settings change).")
     ),
     request_body = ReviewProxmoxOperationRequest,
     responses(
@@ -1336,6 +1402,7 @@ pub async fn review_proxmox_operation(
             | "template"
             | "destroy"
             | "task-cancel"
+            | "config"
     ) {
         return Err(crate::machines::invalid_request(
             &format!("unrecognized destructive action {action:?}"),
@@ -1358,12 +1425,21 @@ pub async fn review_proxmox_operation(
         state.authorizer.as_ref(),
         fleet_application::authz::AccessRequest {
             principal_id: &principal.id,
-            action: fleet_application::authz::Permission::ProxmoxDestructive,
+            action: destructive_permission(&action),
             resource: None,
         },
     ) {
         return Err(crate::machines::denied_error(decision, correlation_id));
     }
+    require_persistent_confirmation(
+        &state,
+        &action,
+        &account_id,
+        vmid,
+        &request.params,
+        correlation_id,
+    )
+    .await?;
     // The token binds the exact payload the run will carry, so the
     // reviewed bytes and the executed bytes are the same by construction.
     let kind = if action == "task-cancel" {
@@ -1465,6 +1541,7 @@ pub async fn start_reviewed_proxmox_operation(
             | "template"
             | "destroy"
             | "task-cancel"
+            | "config"
     ) {
         return Err(crate::machines::invalid_request(
             &format!("unrecognized destructive action {action:?}"),
@@ -1475,7 +1552,7 @@ pub async fn start_reviewed_proxmox_operation(
         state.authorizer.as_ref(),
         fleet_application::authz::AccessRequest {
             principal_id: &principal.id,
-            action: fleet_application::authz::Permission::ProxmoxDestructive,
+            action: destructive_permission(&action),
             resource: None,
         },
     ) {
@@ -1487,6 +1564,15 @@ pub async fn start_reviewed_proxmox_operation(
             correlation_id,
         ));
     }
+    require_persistent_confirmation(
+        &state,
+        &action,
+        &account_id,
+        vmid,
+        &request.params,
+        correlation_id,
+    )
+    .await?;
     // The payload is byte-identical to the reviewed one (the timeout is
     // fixed at review time), so the application's token comparison binds
     // what runs to what was reviewed.
