@@ -228,6 +228,18 @@ impl PersistentGuestPort for PersistentGuestRepository {
         Ok(())
     }
 
+    async fn clear_answer_media(&self, account_id: &str, vmid: u32) -> Result<(), String> {
+        sqlx::query(
+            "UPDATE persistent_guests SET answer_media = NULL WHERE account_id = ?1 AND vmid = ?2",
+        )
+        .bind(account_id)
+        .bind(i64::from(vmid))
+        .execute(&self.pool)
+        .await
+        .map(|_| ())
+        .map_err(|error| format!("persistent guest answer media clear failed: {error}"))
+    }
+
     async fn answer_media_of(&self, account_id: &str, vmid: u32) -> Result<Option<String>, String> {
         let row = sqlx::query(
             "SELECT answer_media FROM persistent_guests \

@@ -946,7 +946,10 @@ mod tests {
     }
 
     /// An independent reader (xorriso or isoinfo) must see the same names and
-    /// label. Skipped when neither is installed.
+    /// label. Skipped when neither is installed, unless
+    /// `FLEET_REQUIRE_ISO_READER=1` is set, which turns the skip into a
+    /// failure (set it in CI or wherever a reader is installed, so the check
+    /// cannot silently stop running).
     #[test]
     fn an_independent_reader_agrees_when_one_is_installed() {
         let seed = NoCloudSeed {
@@ -978,7 +981,7 @@ mod tests {
         if let Some(out) = std::process::Command::new("xorriso")
             .args(["-indev"])
             .arg(&path)
-            .args(["-find", "-toc"])
+            .args(["-toc", "-find"])
             .output()
             .ok()
             .filter(|out| out.status.success())
@@ -993,6 +996,10 @@ mod tests {
         }
         let _ = std::fs::remove_file(&path);
         if !checked {
+            assert!(
+                std::env::var("FLEET_REQUIRE_ISO_READER").as_deref() != Ok("1"),
+                "FLEET_REQUIRE_ISO_READER=1 but neither isoinfo nor xorriso is installed"
+            );
             eprintln!("SKIPPED: neither isoinfo nor xorriso is installed");
         }
     }

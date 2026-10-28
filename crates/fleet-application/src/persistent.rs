@@ -1119,6 +1119,13 @@ pub trait PersistentGuestPort: fmt::Debug + Send + Sync {
         file: &str,
     ) -> Result<(), String>;
 
+    /// Forgets the recorded answer ISO of a marker (its volume is deleted).
+    ///
+    /// # Errors
+    ///
+    /// Fails with a secret-free detail when the store errors.
+    async fn clear_answer_media(&self, account_id: &str, vmid: u32) -> Result<(), String>;
+
     /// The generated answer ISO's file name recorded for a marker.
     ///
     /// # Errors

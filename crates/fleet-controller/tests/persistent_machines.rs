@@ -2687,6 +2687,18 @@ async fn a_finished_creations_leftover_media_is_swept_and_other_volumes_are_not(
     .await
     .unwrap();
     assert_eq!(audited, 1);
+    // The swept marker no longer names media; the one still being created does.
+    let repo = PersistentGuestRepository::new(world.pool.clone());
+    assert_eq!(
+        repo.answer_media_of(&world.account_id, 7300).await.unwrap(),
+        None
+    );
+    assert!(
+        repo.answer_media_of(&world.account_id, 7301)
+            .await
+            .unwrap()
+            .is_some()
+    );
 }
 
 #[tokio::test(flavor = "multi_thread")]

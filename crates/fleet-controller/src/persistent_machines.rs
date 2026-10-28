@@ -1572,13 +1572,26 @@ impl Run<'_> {
             if !volumes.contains(&volume) {
                 continue;
             }
-            let removed = self
+            // Deleted only once PVE's task has succeeded.
+            let removed = match self
                 .exec
                 .pve
                 .client
                 .storage_delete_volume(self.request.clone(), &self.node, storage, &volume)
                 .await
-                .is_ok();
+            {
+                Ok(Some(upid)) => self.wait_task("answer_media", &upid).await.is_ok(),
+                Ok(None) => true,
+                Err(_) => false,
+            };
+            if removed {
+                // The scan shrinks and nothing retries this volume.
+                let _ = self
+                    .exec
+                    .persistent
+                    .clear_answer_media(&account, vmid)
+                    .await;
+            }
             swept += 1;
             if let Ok(intent) = audit_intent(
                 Permission::MachineUpdate,
