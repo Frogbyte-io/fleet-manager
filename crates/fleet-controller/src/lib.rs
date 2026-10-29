@@ -29,6 +29,7 @@ pub mod lab_cleanup;
 pub mod lab_detach_store;
 pub mod lab_pool;
 pub mod lab_put_store;
+pub mod lab_ssh_keys;
 pub mod lab_sweeper;
 pub mod machine_access;
 pub mod machine_terminal;

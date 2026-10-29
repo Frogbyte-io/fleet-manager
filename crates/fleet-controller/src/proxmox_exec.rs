@@ -2182,6 +2182,50 @@ mod precondition_refusal_tests {
         assert!(last["script"].as_str().unwrap().contains("FleetLsa"));
     }
 
+    /// #561: the `ssh_exec` probe is a real login. An `ssh.exec` child that
+    /// failed (for example `Permission denied (publickey)`, exit 255) is not
+    /// ready; only a child that succeeded is. So a guest without the key
+    /// never reaches `ready` through this probe, and readiness fails at the
+    /// `ssh_exec` step at its deadline.
+    #[tokio::test]
+    async fn the_ssh_exec_probe_is_ready_only_when_the_login_and_command_succeed() {
+        use fleet_application::lab::LabReadinessPort as _;
+        let (readiness, probe, operations, _dir, _store) = probe_with(vec![Some(255), None]).await;
+        let record = record();
+        let parent = operations
+            .create(
+                &fleet_auth::LanAllowAllAuthorizer,
+                fleet_auth::LAN_PRINCIPAL_ID,
+                &fleet_application::operation::NewOperation {
+                    kind: "noop".to_owned(),
+                    idempotency_key: None,
+                    deadline_at: None,
+                    correlation_id: None,
+                    payload_json: None,
+                    review_token: None,
+                },
+            )
+            .await
+            .unwrap()
+            .id;
+        let wait = Duration::from_secs(30);
+        let try_once = || {
+            readiness.ssh_probe(
+                &operations,
+                &parent,
+                &record,
+                "Get-Service sshd",
+                fleet_core::GuestOs::Windows,
+                wait,
+            )
+        };
+        assert_eq!(try_once().await, Ok(false), "a denied login is not ready");
+        assert_eq!(try_once().await, Ok(true));
+        let payloads = probe.payloads.lock().unwrap().clone();
+        assert_eq!(payloads.len(), 2);
+        assert!(payloads.iter().all(|p| p["auth"]["type"] == "agent"));
+    }
+
     #[test]
     fn only_the_guests_precondition_refusal_stops_the_readiness_retry() {
         assert!(is_precondition_refusal(Some(
@@ -2639,6 +2683,9 @@ pub struct ProvisionExecutor {
     hardware_confirm_timeout: Duration,
     /// The persistent marker (#489): Lab cleanup never destroys such a guest.
     persistent: Option<Arc<dyn fleet_application::persistent::PersistentGuestPort>>,
+    /// The public keys written to a Windows clone's cloud-init drive before
+    /// its first boot (#561). Without a source nothing is written.
+    login_keys: Option<Arc<dyn crate::lab_ssh_keys::LabKeySource>>,
 }
 
 /// The placement and capacity reservation parts (FM-715).
@@ -2680,6 +2727,7 @@ struct HardwareTarget<'a> {
     request: &'a fleet_provider_proxmox::PveHttpRequest,
     account_id: &'a str,
     record_id: &'a str,
+    lease_id: &'a str,
     node: &'a str,
     vmid: u32,
 }
@@ -2725,7 +2773,19 @@ impl ProvisionExecutor {
             hardware_task_timeout: HARDWARE_TASK_TIMEOUT,
             hardware_confirm_timeout: HARDWARE_CONFIRM_TIMEOUT,
             persistent: None,
+            login_keys: None,
         }
+    }
+
+    /// Supplies the source of the SSH public keys Lab installs in a Windows
+    /// clone's cloud-init drive before its first boot (#561). A re-generalized
+    /// Windows image carries no authorized key, so without this a lease that
+    /// is `ready` cannot be logged in to. Linux images carry their key, and a
+    /// pool member's key is in its baseline snapshot, so neither is written.
+    #[must_use]
+    pub fn with_login_keys(mut self, keys: Arc<dyn crate::lab_ssh_keys::LabKeySource>) -> Self {
+        self.login_keys = Some(keys);
+        self
     }
 
     /// Supplies the persistent marker store (#489): the Lab cleanup guard
@@ -2849,6 +2909,16 @@ impl ProvisionExecutor {
         audit: Arc<dyn fleet_application::operation::AuditPort>,
     ) -> Self {
         self.readiness = Some(readiness);
+        self.audit = Some(audit);
+        self
+    }
+
+    /// Supplies only the mutation audit sink (`with_readiness` supplies it
+    /// with the readiness ports). For tests that exercise provisioning steps
+    /// without readiness.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn with_audit(mut self, audit: Arc<dyn fleet_application::operation::AuditPort>) -> Self {
         self.audit = Some(audit);
         self
     }
@@ -3507,6 +3577,157 @@ impl ProvisionExecutor {
                 )));
             }
             tokio::time::sleep(POLL_INTERVAL).await;
+        }
+    }
+
+    /// Step 1d (#561): a Windows clone gets the controller's SSH public keys
+    /// and the template's SSH user in its cloud-init drive before its first
+    /// boot, so Cloudbase-Init authorizes them (the re-generalized image
+    /// carries no key). Only public keys are written. The write is
+    /// conditional on the digest of the config read that checked the guest
+    /// is this provision's clone, repeated only when the keys are missing
+    /// (a resume repeats nothing), and confirmed by reading the config again.
+    /// A controller with no key to install refuses here instead of booting a
+    /// guest nobody can log in to.
+    async fn install_clone_login(
+        &self,
+        operations: &Operations,
+        target: &HardwareTarget<'_>,
+        content: &fleet_core::LabTemplateContent,
+        source: &dyn crate::lab_ssh_keys::LabKeySource,
+    ) -> Result<Result<(), Refusal>, String> {
+        let (node, vmid) = (target.node, target.vmid);
+        let where_ = format!("{node}/qemu/{vmid}");
+        let name = format!("fm-lab-{}", target.record_id);
+        let refuse = |reason: &'static str, detail: String| Ok(Err(Refusal::new(reason, detail)));
+        let wanted = match source.public_keys().await {
+            Ok(keys) => keys,
+            Err(error) => return refuse(error.reason, error.detail),
+        };
+        let mut writes = 0_u32;
+        let mut retried = false;
+        loop {
+            if operations
+                .cancel_requested(target.operation_id)
+                .await
+                .map_err(|error| error.to_string())?
+            {
+                return refuse(
+                    "cancelled",
+                    format!(
+                        "cancelled while installing the SSH key in {where_}; the guest is retained for cleanup"
+                    ),
+                );
+            }
+            let hardware = match self.read_clone_hardware(target).await {
+                Ok(hardware) => hardware,
+                Err(refusal) => return Ok(Err(refusal)),
+            };
+            if hardware.template || hardware.name.as_deref() != Some(name.as_str()) {
+                return refuse(
+                    "conflict",
+                    format!(
+                        "{where_} is not this provision's clone; its cloud-init login is left unchanged"
+                    ),
+                );
+            }
+            if hardware.cloud_init_ssh_keys_oversized {
+                // Its keys cannot be read, so a merge would replace them.
+                return refuse(
+                    "ssh_key_failed",
+                    format!(
+                        "the clone {where_} carries cloud-init SSH keys too large to read, and writing the Lab key would replace them; shorten the image template's sshkeys or set them yourself"
+                    ),
+                );
+            }
+            if !hardware.has_cloud_init_drive {
+                return refuse(
+                    "no_cloud_init_drive",
+                    format!(
+                        "the clone {where_} has no cloud-init drive, so Cloudbase-Init has nowhere to read the SSH login from; add one to the image template (`qm set <vmid> --ide2 <storage>:cloudinit`, ostype win11, citype configdrive2) and rebuild the image"
+                    ),
+                );
+            }
+            // Image keys that carry a comment (or options) are reduced to
+            // `type blob` so they are kept, not dropped.
+            let existing = crate::lab_ssh_keys::normalize_public_keys(
+                &hardware.cloud_init_ssh_keys.join("\n"),
+            );
+            let user_ok = hardware.cloud_init_user.as_deref() == Some(content.ssh_user.as_str());
+            let keys_ok = wanted.iter().all(|key| existing.contains(key));
+            if user_ok && keys_ok {
+                return Ok(Ok(()));
+            }
+            if writes >= 2 {
+                return refuse(
+                    "ssh_key_failed",
+                    format!(
+                        "the clone {where_} does not report the SSH login after it was written; the guest is retained for cleanup"
+                    ),
+                );
+            }
+            let Some(digest) = hardware.digest.as_deref() else {
+                return refuse(
+                    "ssh_key_failed",
+                    format!(
+                        "the config of {where_} carries no digest, so its cloud-init login is not changed unconditionally"
+                    ),
+                );
+            };
+            // Keys the image already carried stay; ours are added.
+            let mut keys = existing;
+            for key in &wanted {
+                if !keys.contains(key) {
+                    keys.push(key.clone());
+                }
+            }
+            match self
+                .client
+                .qemu_set_cloud_init_login(
+                    target.request.clone(),
+                    node,
+                    vmid,
+                    &content.ssh_user,
+                    &keys,
+                    digest,
+                )
+                .await
+            {
+                Ok(()) => {
+                    writes += 1;
+                    if let Some(audit) = &self.audit {
+                        // Counts and names only: never key material.
+                        let _ = audit
+                            .record_intent(&fleet_application::lab_placement::reservation_audit(
+                                fleet_auth::LAN_PRINCIPAL_ID,
+                                target.lease_id,
+                                Some(target.operation_id),
+                                "lab_clone_login_written",
+                                &[
+                                    ("vmid", vmid.to_string()),
+                                    ("user", content.ssh_user.clone()),
+                                    ("keyCount", wanted.len().to_string()),
+                                ],
+                            ))
+                            .await;
+                    }
+                }
+                Err(fleet_provider_proxmox::PveApiError::Http { status, .. })
+                    if (500..600).contains(&status) && !std::mem::replace(&mut retried, true) => {}
+                Err(error) => {
+                    let cause = match &error {
+                        fleet_provider_proxmox::PveApiError::Auth
+                        | fleet_provider_proxmox::PveApiError::Forbidden { .. } => {
+                            format!("the token needs VM.Config.Cloudinit on /vms/{vmid} ({error})")
+                        }
+                        _ => format!("PVE refused it ({error})"),
+                    };
+                    return refuse(
+                        "ssh_key_failed",
+                        format!("the clone {where_} could not take the SSH login: {cause}"),
+                    );
+                }
+            }
         }
     }
 
@@ -4637,6 +4858,7 @@ impl ProvisionExecutor {
                         request: &request,
                         account_id: &account_id,
                         record_id: &record.id,
+                        lease_id: &lease_id,
                         node: &node,
                         vmid,
                     },
@@ -4647,6 +4869,37 @@ impl ProvisionExecutor {
         {
             return self
                 .fail_at(operations, &operation.id, &record.id, "hardware", &refusal)
+                .await;
+        }
+        // Step 1d (#561): a Windows clone's cloud-init drive gets the
+        // controller's SSH public keys before its first boot; the
+        // re-generalized image carries none. A pool member's key is in its
+        // baseline snapshot (the operator's guest), and Linux images carry
+        // theirs.
+        if pooled.is_none()
+            && record.state == fleet_core::GuestState::Provisioning
+            && version.content.guest_os == fleet_core::GuestOs::Windows
+            && let Some(keys) = &self.login_keys
+            && let Err(refusal) = self
+                .install_clone_login(
+                    operations,
+                    &HardwareTarget {
+                        operation_id: &operation.id,
+                        request: &request,
+                        account_id: &account_id,
+                        record_id: &record.id,
+                        lease_id: &lease_id,
+                        node: &node,
+                        vmid,
+                    },
+                    &version.content,
+                    keys.as_ref(),
+                )
+                .await
+                .unwrap_or_else(|detail| Err(Refusal::new("ssh_key_failed", detail)))
+        {
+            return self
+                .fail_at(operations, &operation.id, &record.id, "ssh_key", &refusal)
                 .await;
         }
 

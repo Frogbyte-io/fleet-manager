@@ -717,6 +717,18 @@ pub const PROXMOX_PRIVILEGE_TABLE: &[PrivilegeRequirement] = &[
         note: "When the Lab template declares a virtual audio device and the clone's audio0 differs, the executor sets audio0 in the same config write as cores and memory, on its own new guest (issue #398). qemu-server lists audio0 among the hardware-type options, which need VM.Config.HWType. Opt-in: only templates that declare audio use it, so it never gates the Lab tier; without it a provision of such a template fails at the hardware step naming the privilege. Nothing is written, and the privilege is not used, when the clone already matches or the template declares no audio.",
     },
     PrivilegeRequirement {
+        id: "lab.provision.cloud-init-login",
+        capability: "lab.provision",
+        tier: PrivilegeTier::Lab,
+        endpoint: "PUT /nodes/{node}/qemu/{vmid}/config",
+        majors: BOTH,
+        scope: PrivilegeScope::NewGuest,
+        privileges: &["VM.Config.Cloudinit"],
+        matching: PrivilegeMatch::All,
+        required: false,
+        note: "For a Windows Lab template, the executor writes ciuser and sshkeys (the controller's SSH public keys, never a private key) to the clone's cloud-init drive before its first boot, so Cloudbase-Init authorizes them on the re-generalized image (issue #561). qemu-server checks VM.Config.Cloudinit for those options. Opt-in: only Windows templates use it, so it never gates the Lab tier; without it a provision of such a template fails at the ssh_key step naming the privilege. Nothing is written when the clone already carries the user and keys.",
+    },
+    PrivilegeRequirement {
         id: "lab.provision.hardware-resize",
         capability: "lab.provision",
         tier: PrivilegeTier::Lab,
@@ -1457,6 +1469,27 @@ mod tests {
                     "{major}.x: nothing outside the new guest needs {privilege}"
                 );
             }
+        }
+    }
+
+    #[test]
+    fn the_windows_clone_login_privilege_is_opt_in_and_never_gates_the_lab_tier() {
+        // Issue #561: only Windows templates write the cloud-init login, so
+        // VM.Config.Cloudinit is reported on the new guest, never required.
+        for major in [8, 9] {
+            let row = requirements_for_major(major)
+                .find(|row| row.id == "lab.provision.cloud-init-login")
+                .unwrap();
+            assert_eq!(row.privileges, &["VM.Config.Cloudinit"]);
+            assert!(!row.required);
+            assert_eq!(row.tier, PrivilegeTier::Lab);
+            assert_eq!(row.scope, PrivilegeScope::NewGuest);
+            assert!(
+                requirements_for_major(major)
+                    .filter(|row| row.tier == PrivilegeTier::Lab && row.required)
+                    .all(|row| !row.privileges.contains(&"VM.Config.Cloudinit")),
+                "{major}.x: no required Lab row needs VM.Config.Cloudinit"
+            );
         }
     }
 
