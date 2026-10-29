@@ -248,6 +248,28 @@ cmd_test_clone() { # test-clone [vmid]: clone, boot, and report hostname and hos
   note "destroy it with: windows-template destroy-clone $id"
 }
 
+cmd_pool_member() { # pool-member <id> [source-vmid]: a revert-pool member whose baseline carries the SSH key (#561)
+  local id="${1:?usage: pool-member <vmid> [source-vmid]}" src="${2:-$VMID}"
+  H "qm status $id" >/dev/null 2>&1 && die "VMID $id already exists"
+  H "qm config $src | grep -Eq '^(ide|sata|scsi)[0-9]+:.*cloudinit'" \
+    || die "VM $src has no cloud-init drive, so the key cannot be injected before the first boot"
+  note "cloning $src to $id (full clone; Fleet never creates a pool member)"
+  H "qm clone $src $id --name win-pool-$id --full 1"
+  H "qm set $id --tags $TAG"
+  # The key goes in before the first boot and the baseline is taken after it, so every
+  # revert keeps the login. Lab does not write a key to a pool member: the member is yours.
+  H "umask 077; k=\$(mktemp); cat >\$k; qm set $id --ciuser '$ADMIN_USER' --sshkeys \$k; rm -f \$k" <"$SSH_KEY.pub"
+  H "qm start $id"
+  local ip; ip="$(wait_ip "$id" 900)" || die "member $id never reported an address"
+  local i ok=""; for ((i = 0; i < 600; i += 10)); do G "$ip" hostname >/dev/null 2>&1 && { ok=1; break; }; sleep 10; done
+  [ -n "$ok" ] || die "member $id does not accept the fixture key"
+  G "$ip" 'Get-Service sshd | Select-Object -ExpandProperty Status' || true
+  note "shutting member $id down and taking the baseline snapshot"
+  H "qm shutdown $id --timeout 180 || qm stop $id"
+  H "qm snapshot $id baseline --description 'clean, key injected'"
+  note "member $id is ready for: fleetctl lab pool fill <pool> --vmid $id --wait"
+}
+
 cmd_destroy_clone() {
   local id="${1:?usage: destroy-clone <vmid>}"
   [ "$id" != "$VMID" ] || die "refusing to destroy the template"
@@ -266,6 +288,7 @@ case "${1:-}" in
   generalize) cmd_generalize ;;
   template) cmd_template ;;
   test-clone) shift; cmd_test_clone "$@" ;;
+  pool-member) shift; cmd_pool_member "$@" ;;
   destroy-clone) shift; cmd_destroy_clone "$@" ;;
   status) cmd_status ;;
   *) cat <<'USAGE'
@@ -281,6 +304,8 @@ Usage: windows-template <command>
   generalize      remove SSH host keys, run sysprep /generalize /oobe /shutdown
   template        convert the stopped VM to a template
   test-clone [id] clone, boot, report computer name and host key (id default 7120)
+  pool-member <id> [source]  clone, inject the fixture key before the first boot, boot, shut down and
+                  snapshot 'baseline' (a revert-pool member that keeps its login)
   destroy-clone <id>   destroy a tagged test clone
   status          VM and ISO state on the host
 USAGE

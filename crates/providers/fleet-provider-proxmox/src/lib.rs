@@ -1519,6 +1519,11 @@ pub struct PveQemuHardware {
     pub audio: Option<PveAudio>,
     /// Whether the config has an `audio0` this crate cannot read.
     pub audio_unreadable: bool,
+    /// The cloud-init user (`ciuser`), when the config sets one.
+    pub cloud_init_user: Option<String>,
+    /// The cloud-init public keys (`sshkeys`), percent-decoded, one per
+    /// line. Empty when the config sets none. Public keys only.
+    pub cloud_init_ssh_keys: Vec<String>,
     /// The config digest, for a conditional update.
     pub digest: Option<String>,
 }
@@ -2387,6 +2392,27 @@ pub fn normalize_mac(candidate: &str) -> Option<String> {
     Some(normalized.into_iter().collect())
 }
 
+/// Whether `line` is one OpenSSH public key line without a comment:
+/// `<type> <base64>`, a known key type, bounded, no control characters.
+/// A private key block never matches.
+#[must_use]
+pub fn is_public_key_line(line: &str) -> bool {
+    let mut parts = line.split(' ');
+    let (Some(kind), Some(blob), None) = (parts.next(), parts.next(), parts.next()) else {
+        return false;
+    };
+    let known = matches!(kind, "ssh-ed25519" | "ssh-rsa")
+        || kind.starts_with("ecdsa-sha2-nistp")
+        || kind.starts_with("sk-ssh-ed25519@")
+        || kind.starts_with("sk-ecdsa-sha2-nistp");
+    known
+        && !blob.is_empty()
+        && line.len() <= 4096
+        && blob
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'+' | b'/' | b'='))
+}
+
 fn urlencode(value: &str) -> String {
     use std::fmt::Write as _;
     let mut encoded = String::new();
@@ -2757,6 +2783,64 @@ impl ProxmoxClient {
         if let Some(audio) = audio {
             body["audio0"] = serde_json::json!(audio.to_property());
         }
+        self.call_method_with_body(
+            request,
+            PveHttpMethod::Put,
+            &format!("/api2/json/nodes/{}/qemu/{vmid}/config", urlencode(node)),
+            &body,
+        )
+        .await
+        .map(|_| ())
+    }
+
+    /// Writes a guest's cloud-init login: `ciuser` and `sshkeys`
+    /// (`PUT /nodes/{node}/qemu/{vmid}/config`, synchronous; needs
+    /// `VM.Config.Cloudinit` on `/vms/{vmid}`), so Cloudbase-Init or
+    /// cloud-init installs the keys at the guest's first boot. Only public
+    /// keys are accepted: every entry must be one `type base64` line with
+    /// no whitespace inside. PVE takes `sshkeys` percent-encoded. Always
+    /// conditional on `digest` (from [`Self::qemu_hardware`]).
+    ///
+    /// # Errors
+    ///
+    /// Fails with [`PveApiError`], including PVE's refusal of a locked guest
+    /// or a stale digest, and `InvalidPayload` for no keys, an invalid user,
+    /// or an entry that is not a public key line.
+    pub async fn qemu_set_cloud_init_login(
+        &self,
+        request: PveHttpRequest,
+        node: &str,
+        vmid: u32,
+        user: &str,
+        public_keys: &[String],
+        digest: &str,
+    ) -> Result<(), PveApiError> {
+        let invalid = |detail: &str| PveApiError::InvalidPayload {
+            detail: detail.to_owned(),
+        };
+        if public_keys.is_empty() {
+            return Err(invalid("there is no SSH public key to set"));
+        }
+        if user.is_empty()
+            || user.len() > 64
+            || !user
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'-' | b'.'))
+        {
+            return Err(invalid("the cloud-init user name is not valid"));
+        }
+        let mut lines = Vec::with_capacity(public_keys.len());
+        for key in public_keys {
+            if !is_public_key_line(key) {
+                return Err(invalid("an SSH key entry is not a single public key line"));
+            }
+            lines.push(key.as_str());
+        }
+        let body = serde_json::json!({
+            "ciuser": user,
+            "sshkeys": urlencode(&lines.join("\n")),
+            "digest": digest,
+        });
         self.call_method_with_body(
             request,
             PveHttpMethod::Put,
@@ -3147,8 +3231,43 @@ fn parse_hardware(config: &serde_json::Value) -> Result<PveQemuHardware, String>
         boot_disk,
         audio,
         audio_unreadable,
+        cloud_init_user: bounded_str(config, "ciuser", MAX_ID_CHARS)?,
+        cloud_init_ssh_keys: config
+            .get("sshkeys")
+            .and_then(serde_json::Value::as_str)
+            .map(|encoded| {
+                percent_decode(encoded)
+                    .lines()
+                    .map(str::trim)
+                    .filter(|line| !line.is_empty())
+                    .map(str::to_owned)
+                    .collect()
+            })
+            .unwrap_or_default(),
         digest: bounded_str(config, "digest", 64)?,
     })
+}
+
+/// Decodes `%XX` escapes (PVE stores `sshkeys` percent-encoded). A malformed
+/// escape is kept literally, and invalid UTF-8 is replaced.
+fn percent_decode(value: &str) -> String {
+    let bytes = value.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut index = 0;
+    while index < bytes.len() {
+        if bytes[index] == b'%'
+            && let Some(pair) = bytes.get(index + 1..index + 3)
+            && let Ok(text) = std::str::from_utf8(pair)
+            && let Ok(byte) = u8::from_str_radix(text, 16)
+        {
+            out.push(byte);
+            index += 3;
+        } else {
+            out.push(bytes[index]);
+            index += 1;
+        }
+    }
+    String::from_utf8_lossy(&out).into_owned()
 }
 
 /// Reads a number that PVE may deliver as a JSON number or a string.

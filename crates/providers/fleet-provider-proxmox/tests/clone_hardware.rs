@@ -108,6 +108,8 @@ async fn a_clone_config_reads_as_its_cores_memory_and_boot_disk() {
             boot_disk: Some(boot_disk("scsi0", Some(20 * 1024))),
             audio: None,
             audio_unreadable: false,
+            cloud_init_user: None,
+            cloud_init_ssh_keys: Vec::new(),
             digest: Some("3c1f0a5d9e7b2c4a6f8e0d1c3b5a79e8f6d4c2b0".to_owned()),
         }
     );

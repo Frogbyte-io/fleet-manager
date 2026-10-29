@@ -1020,7 +1020,10 @@ fn run_serve(mut config: fleet_config::ControllerConfig) -> ExitCode {
                                 )),
                                 lab_placement_policy,
                             )
-                            .with_pools(lab_pools),
+                            .with_pools(lab_pools)
+                            .with_login_keys(std::sync::Arc::new(
+                                fleet_controller::lab_ssh_keys::ControllerKeys,
+                            )),
                         ),
                     )
                     .with_cleanup(lab_cleanup, lab_leases, lab_provisions),
