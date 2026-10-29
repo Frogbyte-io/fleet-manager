@@ -14,7 +14,8 @@ The tooling is `deploy/pve-test/windows/windows-template`, with the answer files
 | Sysprep, template 7100, two clones | done after one manual fix (BitLocker, below); clones get new names and host keys. The committed scripts were then verified end to end on a throwaway VM, not on 7100 itself |
 | Fleet recipe, image version, build, promotion, Lab template | image built and promoted, Lab templates created; **lease not verified** (stream J, #441). The first recipe built an image that did not boot (CPU type); the second boots but is **not generalized** (below) |
 | Cloudbase-Init base, re-generalizing build ([#535](https://github.com/Frogbyte-io/fleet-manager/issues/535)) | done 2026-10-28 on a throwaway base (VMID 930) and image (931), both destroyed afterwards; the [evidence](#cloudbase-init-base-and-a-re-generalizing-build-535) shows two clones with different names and host keys and no Packer key. 7100 and 7110 were not changed |
-| Pool member and activation | not created: the operator does it. The point is [documented](#activating-a-pool-member-with-a-retail-key) |
+| Fleet-controller build, Lab leases and revert pool on the Cloudbase-Init image ([#555](https://github.com/Frogbyte-io/fleet-manager/issues/555)) | done 2026-10-29; the [evidence](#fleet-controller-build-and-lab-leases-on-the-cloudbase-init-image-555) shows a Fleet-built image, two leases with different identities, `exec`/`put`/`collect`, and a pool member whose marker is gone after revert with the same host key. **A Lab lease cannot log in to this image on its own** (finding 1 there). Everything was destroyed afterwards |
+| Pool member and activation | the operator does it for a real member; activation across rollback is [deferred](#fleet-controller-build-and-lab-leases-on-the-cloudbase-init-image-555) (no key configured for the fixture). The point is [documented](#activating-a-pool-member-with-a-retail-key) |
 
 **Microsoft ISO.** The download page issues a time-limited link through the browser, and Microsoft's own download connector rejects scripted requests for it (`Sentinel marked this request as rejected`). This runbook does not work around that and does not use third-party mirrors. A person opens [the download page](https://www.microsoft.com/en-us/software-download/windows11), picks "Windows 11 (multi-edition ISO for x64 devices)" and the language, and copies the 64-bit download link (valid for 24 hours). Then `FLEET_WIN_ISO_URL=<link> windows-template fetch-iso` downloads it on the host. Never paste the link into Git, an issue, or a log.
 
@@ -188,6 +189,31 @@ The build VMs are not left running. `status` shows them; templates are stopped b
 
 Names and host keys differ between the two clones, and from the base. Everything created (VMs 930, 931, 940-942, a pool, a user and token for the build, the config ISO) was destroyed afterwards; no pre-existing VM was touched. Not run: the machine SID comparison.
 
+## Fleet-controller build and Lab leases on the Cloudbase-Init image (#555)
+
+Run on 2026-10-29 on the integration host (PVE 9.2, Packer 1.16.1, proxmox plugin 1.2.4, Windows build 26300.9457) with a controller of the issue's branch built in release mode: `fleet-controller serve` on loopback, a temporary data directory and master key, trusted-LAN mode, a dedicated `ssh-agent` holding the fixture key, and the physical-host account for `fleet-test@pve!admin`. It was not the permanent controller. The fixture VMs 7100, 7110, 7140 and every other pre-existing VM were not touched.
+
+1. **Base.** A fresh Cloudbase-Init base (VMID 7160, 4 GiB) built with `windows-template` (`prepare`, `create`, `wait-install`, `generalize`, `detach-media`, `template`), as in [#535](#cloudbase-init-base-and-a-re-generalizing-build-535).
+2. **Image through Fleet.** `recipe-regeneralize.example.json` with only `proxmox_url`, `clone_vm_id` 7160, `vm_id` 7161 and `memory` 4096 changed, then `images create`, `images publish`, `images build --account ... --wait` (no `--allow-insecure-tls`: the confirmed certificate was pinned), `images promote`, and two Lab templates with `--guest-os windows --ssh-user fleetadmin`, one `--cleanup destroy`, one `--cleanup revert`. The build operation succeeded in 604 s (artifact `pve:7161`).
+
+| Check | Result |
+|---|---|
+| Two Lab clones (leases `destroy` template, both `ready`) | computer names differ (`WIN-SMKQSAB7THG`, `WIN-8Q9HLTCTP54`); machine SIDs differ (`S-1-5-21-1481685511-...` and `S-1-5-21-1489606666-...`, the domain part of a local user's SID); SHA-256 of `ssh_host_ed25519_key.pub` differs (`AD2B570F...`, `DA213788...`); MACs differ |
+| `lab exec` | worked on both clones (as `fleetadmin`, PowerShell, `--script`), after the key workaround below |
+| `lab put` | `put` of a 29-byte file to `C:\fm555-payload.txt` succeeded and `lab exec` read the same content back |
+| `lab collect` | collected the same path; the artifact's SHA-256 equals the local file's (`49c44f7d...`) |
+| Revert-pool member | VMID 7170 `qm clone 7161 7170 --full 1`, key injected before its first boot, booted past specialize (name `WIN-9LOCE66B0RV`, `sshd` running), shut down, snapshot `baseline`; `lab pool create --size 1 --baseline baseline` and `lab pool fill --vmid 7170 --wait` succeeded (`available`) |
+| Marker after revert | lease 1 on the pool: `C:\fm555-marker.txt` written (`True`); `lab destroy` released it; lease 2 on the same VMID: marker `False` |
+| Host key across revert | identical in lease 1 and lease 2 (`585C7C8A...`), and equal to the value before the baseline |
+| Activation across rollback | **deferred, not tested.** No product key is configured for the fixture (the setup key is only Microsoft's public KMS client key and does not activate). Follow [the activation steps](#activating-a-pool-member-with-a-retail-key) with a key you own and check `slmgr /xpr` after a lease cycle; the key lives in the baseline snapshot with the TPM state, as the pool member in the #441 run showed for the TPM |
+
+**Findings.**
+
+1. **A Lab lease cannot log in to a re-generalized image without a key injected into its cloud-init drive.** The image deliberately carries no authorized key (`generalize.ps1 -RemoveAuthorizedKeys`). Lab's provisioning clones the image and boots it, and the guest agent answers (the lease is `ready`), but Fleet does not write `sshkeys` or `ciuser` to the clone's cloud-init drive, so Cloudbase-Init has nothing to install. The first `lab exec` failed with SSH exit 255 and `Permission denied (publickey,keyboard-interactive)`. In this run the fixture public key was put into each clone with `qm set <vmid> --ciuser fleetadmin --sshkeys <file>` and the guest rebooted (a second reboot was needed on one clone before Cloudbase-Init's key script had run), and the pool member got it before its first boot, so the key is inside the `baseline` snapshot. That is a manual step outside Fleet, and it does not scale to non-pooled leases. **Follow-up needed:** either let Lab provisioning inject the controller's SSH public key into the clone's cloud-init drive (a product change in the Lab provider, outside this issue's owned paths), or bake a fixture key into the image with the base, which the Packer-key cleanup should then preserve (a recipe and `generalize.ps1` decision).
+2. The revert pool needs no workaround beyond the key, and a lease on it was ready in the same way as in the #441 run.
+
+Everything created was destroyed afterwards: VMs 7160, 7161, 7170, the two clone leases (`fm-lab-*`), the pool, both Lab templates, the temporary controller, its data directory, master key and `ssh-agent`, and the config ISO. Nothing is kept as a template. `qm list` shows the same VMs as before the run.
+
 ## Activating a pool member with a retail key
 
 Read from `crates/fleet-controller/src/lab_pool.rs`, `docs/architecture/lab.md` (Pooled guests) and `docs/operations/lab.md` (Pooled guests):
@@ -238,7 +264,7 @@ Run on 2026-10-13 against the same temporary controller (a superset of `dev` wit
 | Lease 1 | `lab create ... --wait` ready in 14 s (a clone lease takes about 20 min). `lab exec` as `fleetadmin`: TPM ready, wrote `C:\fleet-marker.txt`. `lab destroy` released it in 4 s and the member returned to `available` |
 | Lease 2 | ready on the same VMID; the marker is gone, TPM still ready after the rollback, a fresh boot, and the **same SSH host key** (SHA-256 of `ssh_host_ed25519_key.pub` identical to lease 1) |
 
-Not verified: the machine SID of clones, activation across a rollback (the member is unactivated), a Fleet-controller (rather than direct Packer) run of the re-generalizing recipe, and Lab leases on a Cloudbase-Init image.
+Not verified here (the machine SID, the Fleet-controller build and the Cloudbase-Init leases are now covered by the [#555 run](#fleet-controller-build-and-lab-leases-on-the-cloudbase-init-image-555)): activation across a rollback, because the member is unactivated.
 
 ## Host changes
 
@@ -250,6 +276,7 @@ Not verified: the machine SID of clones, activation across a rollback (the membe
 | VM 7100 template and 7110 (the Fleet image's template) | `local-lvm`, tag `fleet-pve-test` | `qm destroy <id> --purge 1` |
 | VMs 930 (base), 931 (image), 940-942 (clones), a pool `fm535`, a user `fm535@pve` with a token (#535 live run) | `local-lvm`, tag `fleet-pve-test` | all destroyed on 2026-10-28 |
 | VM 7140 `win-pool-1` (revert-pool member) with snapshot `baseline` | `local-lvm` | `lab pool drain`, `lab pool delete`, then `qm destroy 7140 --purge 1` |
+| VMs 7160 (base), 7161 (image), 7170 (pool member), two `fm-lab-*` clones, a pool, two Lab templates, a temporary controller (#555 live run) | `local-lvm`, tag `fleet-pve-test` | all destroyed on 2026-10-29 |
 | Throwaway VM 7199 created to validate the VM definition, then destroyed | | already removed |
 | ACLs | none | the fixture token's `/vms` grant already covers these VMIDs |
 
