@@ -336,6 +336,7 @@ fn validation_creates_the_state_directory() {
         lab_artifact_retention_seconds: fleet_config::DEFAULT_LAB_ARTIFACT_RETENTION_SECONDS,
         lab_artifact_max_bytes: fleet_config::DEFAULT_LAB_ARTIFACT_MAX_BYTES,
         lab_put_max_bytes: fleet_config::DEFAULT_LAB_PUT_MAX_BYTES,
+        lab_login_public_key_file: None,
         tailscale_serve_listen: None,
         lab_placement: fleet_config::LabPlacementConfig::default(),
         image_build_proxy: None,
@@ -363,6 +364,7 @@ fn an_uncreatable_state_directory_fails_validation() {
         lab_artifact_retention_seconds: fleet_config::DEFAULT_LAB_ARTIFACT_RETENTION_SECONDS,
         lab_artifact_max_bytes: fleet_config::DEFAULT_LAB_ARTIFACT_MAX_BYTES,
         lab_put_max_bytes: fleet_config::DEFAULT_LAB_PUT_MAX_BYTES,
+        lab_login_public_key_file: None,
         tailscale_serve_listen: None,
         lab_placement: fleet_config::LabPlacementConfig::default(),
         image_build_proxy: None,
@@ -386,6 +388,7 @@ fn a_missing_master_key_file_fails_validation() {
         lab_artifact_retention_seconds: fleet_config::DEFAULT_LAB_ARTIFACT_RETENTION_SECONDS,
         lab_artifact_max_bytes: fleet_config::DEFAULT_LAB_ARTIFACT_MAX_BYTES,
         lab_put_max_bytes: fleet_config::DEFAULT_LAB_PUT_MAX_BYTES,
+        lab_login_public_key_file: None,
         tailscale_serve_listen: None,
         lab_placement: fleet_config::LabPlacementConfig::default(),
         image_build_proxy: None,
@@ -409,6 +412,7 @@ fn a_directory_as_master_key_path_is_not_a_file() {
         lab_artifact_retention_seconds: fleet_config::DEFAULT_LAB_ARTIFACT_RETENTION_SECONDS,
         lab_artifact_max_bytes: fleet_config::DEFAULT_LAB_ARTIFACT_MAX_BYTES,
         lab_put_max_bytes: fleet_config::DEFAULT_LAB_PUT_MAX_BYTES,
+        lab_login_public_key_file: None,
         tailscale_serve_listen: None,
         lab_placement: fleet_config::LabPlacementConfig::default(),
         image_build_proxy: None,
@@ -438,6 +442,7 @@ fn a_group_or_world_readable_master_key_file_is_unsafe() {
             lab_artifact_retention_seconds: fleet_config::DEFAULT_LAB_ARTIFACT_RETENTION_SECONDS,
             lab_artifact_max_bytes: fleet_config::DEFAULT_LAB_ARTIFACT_MAX_BYTES,
             lab_put_max_bytes: fleet_config::DEFAULT_LAB_PUT_MAX_BYTES,
+            lab_login_public_key_file: None,
             tailscale_serve_listen: None,
             lab_placement: fleet_config::LabPlacementConfig::default(),
             image_build_proxy: None,
@@ -465,6 +470,7 @@ fn a_group_or_world_readable_master_key_file_is_unsafe() {
         lab_artifact_retention_seconds: fleet_config::DEFAULT_LAB_ARTIFACT_RETENTION_SECONDS,
         lab_artifact_max_bytes: fleet_config::DEFAULT_LAB_ARTIFACT_MAX_BYTES,
         lab_put_max_bytes: fleet_config::DEFAULT_LAB_PUT_MAX_BYTES,
+        lab_login_public_key_file: None,
         tailscale_serve_listen: None,
         lab_placement: fleet_config::LabPlacementConfig::default(),
         image_build_proxy: None,
@@ -501,6 +507,7 @@ fn no_diagnostic_surface_contains_secret_material() {
         lab_artifact_retention_seconds: fleet_config::DEFAULT_LAB_ARTIFACT_RETENTION_SECONDS,
         lab_artifact_max_bytes: fleet_config::DEFAULT_LAB_ARTIFACT_MAX_BYTES,
         lab_put_max_bytes: fleet_config::DEFAULT_LAB_PUT_MAX_BYTES,
+        lab_login_public_key_file: None,
         tailscale_serve_listen: None,
         lab_placement: fleet_config::LabPlacementConfig::default(),
         image_build_proxy: None,
@@ -729,6 +736,7 @@ fn validation_refuses_zero_lab_artifact_bounds() {
             lab_artifact_retention_seconds: retention,
             lab_artifact_max_bytes: max_bytes,
             lab_put_max_bytes: fleet_config::DEFAULT_LAB_PUT_MAX_BYTES,
+            lab_login_public_key_file: None,
             tailscale_serve_listen: None,
             lab_placement: fleet_config::LabPlacementConfig::default(),
             image_build_proxy: None,
@@ -1056,4 +1064,46 @@ fn a_bad_or_partial_build_address_pool_fails_loading_without_echoing_values() {
             "{missing}"
         );
     }
+}
+
+#[test]
+fn the_lab_login_public_key_file_layers_file_then_environment_and_empty_is_unset() {
+    let dir = tempfile::tempdir().unwrap();
+    let none_env = env_of(&[]);
+    let file = write_config(dir.path(), VALID_FILE);
+    assert!(
+        fleet_config::load(Some(&file), &none_env)
+            .unwrap()
+            .lab_login_public_key_file
+            .is_none()
+    );
+    let with_key = write_config(
+        dir.path(),
+        &format!("{VALID_FILE}lab_login_public_key_file = \"/etc/fleet/lab.pub\"\n"),
+    );
+    assert_eq!(
+        fleet_config::load(Some(&with_key), &none_env)
+            .unwrap()
+            .lab_login_public_key_file,
+        Some(std::path::PathBuf::from("/etc/fleet/lab.pub"))
+    );
+    let overridden = fleet_config::load(
+        Some(&with_key),
+        &env_of(&[(fleet_config::LAB_LOGIN_PUBLIC_KEY_FILE_VAR, "/run/lab.pub")]),
+    )
+    .unwrap();
+    assert_eq!(
+        overridden.lab_login_public_key_file,
+        Some(std::path::PathBuf::from("/run/lab.pub"))
+    );
+    // A blank environment value is unset: the file's value stays.
+    let blank = fleet_config::load(
+        Some(&with_key),
+        &env_of(&[(fleet_config::LAB_LOGIN_PUBLIC_KEY_FILE_VAR, "  ")]),
+    )
+    .unwrap();
+    assert_eq!(
+        blank.lab_login_public_key_file,
+        Some(std::path::PathBuf::from("/etc/fleet/lab.pub"))
+    );
 }

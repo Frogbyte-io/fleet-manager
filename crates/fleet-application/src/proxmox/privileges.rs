@@ -1473,6 +1473,27 @@ mod tests {
     }
 
     #[test]
+    fn the_windows_clone_login_privilege_is_opt_in_and_never_gates_the_lab_tier() {
+        // Issue #561: only Windows templates write the cloud-init login, so
+        // VM.Config.Cloudinit is reported on the new guest, never required.
+        for major in [8, 9] {
+            let row = requirements_for_major(major)
+                .find(|row| row.id == "lab.provision.cloud-init-login")
+                .unwrap();
+            assert_eq!(row.privileges, &["VM.Config.Cloudinit"]);
+            assert!(!row.required);
+            assert_eq!(row.tier, PrivilegeTier::Lab);
+            assert_eq!(row.scope, PrivilegeScope::NewGuest);
+            assert!(
+                requirements_for_major(major)
+                    .filter(|row| row.tier == PrivilegeTier::Lab && row.required)
+                    .all(|row| !row.privileges.contains(&"VM.Config.Cloudinit")),
+                "{major}.x: no required Lab row needs VM.Config.Cloudinit"
+            );
+        }
+    }
+
+    #[test]
     fn versions_key_the_table_by_major() {
         assert_eq!(rules_major_for("9.2.2"), Some((9, None)));
         assert_eq!(rules_major_for("8.4.1"), Some((8, None)));

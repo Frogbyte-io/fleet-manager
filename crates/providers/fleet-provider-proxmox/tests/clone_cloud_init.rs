@@ -131,3 +131,71 @@ async fn the_config_read_decodes_the_cloud_init_login() {
         ["ssh-ed25519 AAAAkey1", "ssh-rsa AAAAkey2"]
     );
 }
+
+async fn read(config: serde_json::Value) -> PveQemuHardware {
+    ProxmoxClient::new(Transport::new(json!({ "data": config })))
+        .qemu_hardware(request(), "pve9-n1", 9000)
+        .await
+        .unwrap()
+}
+
+#[tokio::test]
+async fn a_cloud_init_drive_is_detected_on_ide_sata_or_scsi_slots() {
+    assert!(
+        read(json!({"ide2": "local-lvm:vm-9000-cloudinit,media=cdrom,size=4M"}))
+            .await
+            .has_cloud_init_drive
+    );
+    assert!(
+        read(json!({"scsi1": "local-lvm:vm-9000-cloudinit,size=4M"}))
+            .await
+            .has_cloud_init_drive
+    );
+    assert!(
+        !read(json!({"ide2": "local:iso/seed.iso,media=cdrom", "scsi0": "local-lvm:vm-9000-disk-0,size=8G"}))
+            .await
+            .has_cloud_init_drive
+    );
+    // A description that mentions it is not a drive.
+    assert!(
+        !read(json!({"description": "x:cloudinit", "scsi0": "local-lvm:vm-9000-disk-0"}))
+            .await
+            .has_cloud_init_drive
+    );
+}
+
+#[tokio::test]
+async fn an_overlong_ciuser_or_oversized_sshkeys_do_not_fail_the_read() {
+    let read = read(json!({
+        "ciuser": "u".repeat(500),
+        "sshkeys": "a".repeat(40_000),
+    }))
+    .await;
+    assert_eq!(read.cloud_init_user, None);
+    assert!(read.cloud_init_ssh_keys.is_empty());
+}
+
+#[test]
+fn only_the_listed_key_types_with_a_clean_blob_are_public_key_lines() {
+    for kind in [
+        "ssh-ed25519",
+        "ssh-rsa",
+        "ecdsa-sha2-nistp256",
+        "ecdsa-sha2-nistp384",
+        "ecdsa-sha2-nistp521",
+        "sk-ssh-ed25519@openssh.com",
+        "sk-ecdsa-sha2-nistp256@openssh.com",
+    ] {
+        assert!(is_public_key_line(&format!("{kind} AAAAB3+/=")), "{kind}");
+    }
+    for line in [
+        "ecdsa-sha2-nistp999 AAAA",
+        "sk-ssh-ed25519@evil AAAA",
+        "ssh-ed25519 AAAA\tB",
+        "ssh-ed25519 AA\u{7}AA",
+        "ssh-ed25519 AAA!",
+        "ssh-ed25519 ",
+    ] {
+        assert!(!is_public_key_line(line), "{line:?}");
+    }
+}

@@ -954,6 +954,14 @@ fn run_serve(mut config: fleet_config::ControllerConfig) -> ExitCode {
                         lab_destructive.clone(),
                     ),
                 );
+                let lab_login_keys = std::sync::Arc::new(
+                    fleet_controller::lab_ssh_keys::ControllerKeys::new(
+                        config.lab_login_public_key_file.clone(),
+                    ),
+                );
+                // Counts and fingerprints only, never the keys; a Windows
+                // clone's login is the set this installs.
+                eprintln!("fleet-controller: {}", lab_login_keys.describe().await);
                 let lab_pool_fill =
                     std::sync::Arc::new(fleet_controller::lab_pool::LabPoolFillExecutor::new(
                         lab_pools.clone(),
@@ -1021,9 +1029,7 @@ fn run_serve(mut config: fleet_config::ControllerConfig) -> ExitCode {
                                 lab_placement_policy,
                             )
                             .with_pools(lab_pools)
-                            .with_login_keys(std::sync::Arc::new(
-                                fleet_controller::lab_ssh_keys::ControllerKeys,
-                            )),
+                            .with_login_keys(lab_login_keys.clone()),
                         ),
                     )
                     .with_cleanup(lab_cleanup, lab_leases, lab_provisions),

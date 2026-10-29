@@ -3601,19 +3601,8 @@ impl ProvisionExecutor {
         let name = format!("fm-lab-{}", target.record_id);
         let refuse = |reason: &'static str, detail: String| Ok(Err(Refusal::new(reason, detail)));
         let wanted = match source.public_keys().await {
-            Ok(keys) if !keys.is_empty() => keys,
-            Ok(_) => {
-                return refuse(
-                    "no_ssh_key",
-                    "the controller has no SSH public key to install in the Windows clone (its ssh-agent holds none and ~/.ssh has no default public key file); load the key Lab authenticates with into the controller's agent, so the clone's cloud-init drive can authorize it".to_owned(),
-                );
-            }
-            Err(detail) => {
-                return refuse(
-                    "no_ssh_key",
-                    format!("the controller's SSH public keys are unreadable: {detail}"),
-                );
-            }
+            Ok(keys) => keys,
+            Err(error) => return refuse(error.reason, error.detail),
         };
         let mut writes = 0_u32;
         let mut retried = false;
@@ -3642,10 +3631,21 @@ impl ProvisionExecutor {
                     ),
                 );
             }
+            if !hardware.has_cloud_init_drive {
+                return refuse(
+                    "no_cloud_init_drive",
+                    format!(
+                        "the clone {where_} has no cloud-init drive, so Cloudbase-Init has nowhere to read the SSH login from; add one to the image template (`qm set <vmid> --ide2 <storage>:cloudinit`, ostype win11, citype configdrive2) and rebuild the image"
+                    ),
+                );
+            }
+            // Image keys that carry a comment (or options) are reduced to
+            // `type blob` so they are kept, not dropped.
+            let existing = crate::lab_ssh_keys::normalize_public_keys(
+                &hardware.cloud_init_ssh_keys.join("\n"),
+            );
             let user_ok = hardware.cloud_init_user.as_deref() == Some(content.ssh_user.as_str());
-            let keys_ok = wanted
-                .iter()
-                .all(|key| hardware.cloud_init_ssh_keys.contains(key));
+            let keys_ok = wanted.iter().all(|key| existing.contains(key));
             if user_ok && keys_ok {
                 return Ok(Ok(()));
             }
@@ -3666,8 +3666,7 @@ impl ProvisionExecutor {
                 );
             };
             // Keys the image already carried stay; ours are added.
-            let mut keys = hardware.cloud_init_ssh_keys.clone();
-            keys.retain(|key| fleet_provider_proxmox::is_public_key_line(key));
+            let mut keys = existing;
             for key in &wanted {
                 if !keys.contains(key) {
                     keys.push(key.clone());

@@ -1490,6 +1490,7 @@ pub struct PveQemuConfigFlags {
 /// The hardware facts of a QEMU guest's config that Lab applies from its
 /// template to a fresh clone (issue #372).
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[allow(clippy::struct_excessive_bools)] // independent config facts, as PVE reports them
 pub struct PveQemuHardware {
     /// The guest's name, bounded.
     pub name: Option<String>,
@@ -1522,8 +1523,12 @@ pub struct PveQemuHardware {
     /// The cloud-init user (`ciuser`), when the config sets one.
     pub cloud_init_user: Option<String>,
     /// The cloud-init public keys (`sshkeys`), percent-decoded, one per
-    /// line. Empty when the config sets none. Public keys only.
+    /// line. Empty when the config sets none or the value is oversized.
+    /// Public keys only.
     pub cloud_init_ssh_keys: Vec<String>,
+    /// Whether the guest has a cloud-init drive (a `…-cloudinit` volume on an
+    /// ide, sata or scsi slot), which Cloudbase-Init reads the login from.
+    pub has_cloud_init_drive: bool,
     /// The config digest, for a conditional update.
     pub digest: Option<String>,
 }
@@ -2401,13 +2406,20 @@ pub fn is_public_key_line(line: &str) -> bool {
     let (Some(kind), Some(blob), None) = (parts.next(), parts.next(), parts.next()) else {
         return false;
     };
-    let known = matches!(kind, "ssh-ed25519" | "ssh-rsa")
-        || kind.starts_with("ecdsa-sha2-nistp")
-        || kind.starts_with("sk-ssh-ed25519@")
-        || kind.starts_with("sk-ecdsa-sha2-nistp");
+    let known = matches!(
+        kind,
+        "ssh-ed25519"
+            | "ssh-rsa"
+            | "ecdsa-sha2-nistp256"
+            | "ecdsa-sha2-nistp384"
+            | "ecdsa-sha2-nistp521"
+            | "sk-ssh-ed25519@openssh.com"
+            | "sk-ecdsa-sha2-nistp256@openssh.com"
+    );
     known
         && !blob.is_empty()
         && line.len() <= 4096
+        && !line.chars().any(char::is_control)
         && blob
             .bytes()
             .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'+' | b'/' | b'='))
@@ -3231,10 +3243,26 @@ fn parse_hardware(config: &serde_json::Value) -> Result<PveQemuHardware, String>
         boot_disk,
         audio,
         audio_unreadable,
-        cloud_init_user: bounded_str(config, "ciuser", MAX_ID_CHARS)?,
+        // An unreadable or over-long `ciuser` is simply not the user Lab
+        // would set; it must not fail the whole hardware read.
+        cloud_init_user: bounded_str(config, "ciuser", MAX_ID_CHARS).ok().flatten(),
+        has_cloud_init_drive: object.iter().any(|(key, value)| {
+            let slot = key.trim_start_matches(|c: char| c.is_ascii_alphabetic());
+            (key.starts_with("ide") || key.starts_with("sata") || key.starts_with("scsi"))
+                && !slot.is_empty()
+                && slot.bytes().all(|b| b.is_ascii_digit())
+                && value.as_str().is_some_and(|text| {
+                    // The volume is `<storage>:vm-<id>-cloudinit` (or a
+                    // `…:cloudinit` file volume); options follow the comma.
+                    text.split(',')
+                        .next()
+                        .is_some_and(|volume| volume.ends_with("cloudinit"))
+                })
+        }),
         cloud_init_ssh_keys: config
             .get("sshkeys")
             .and_then(serde_json::Value::as_str)
+            .filter(|encoded| encoded.len() <= MAX_SSH_KEYS_ENCODED)
             .map(|encoded| {
                 percent_decode(encoded)
                     .lines()
@@ -3247,6 +3275,10 @@ fn parse_hardware(config: &serde_json::Value) -> Result<PveQemuHardware, String>
         digest: bounded_str(config, "digest", 64)?,
     })
 }
+
+/// The most percent-encoded `sshkeys` text read from a config (about 8
+/// maximum-size keys); anything larger is treated as none.
+const MAX_SSH_KEYS_ENCODED: usize = 32 * 1024;
 
 /// Decodes `%XX` escapes (PVE stores `sshkeys` percent-encoded). A malformed
 /// escape is kept literally, and invalid UTF-8 is replaced.

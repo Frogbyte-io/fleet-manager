@@ -55,6 +55,12 @@
 //! positive. `lab put` uploads are capped by `FLEET_LAB_PUT_MAX_BYTES` (TOML
 //! `lab_put_max_bytes`, default 2 GiB).
 //!
+//! `FLEET_LAB_LOGIN_PUBLIC_KEY_FILE` (TOML `lab_login_public_key_file`, unset
+//! by default) names a `.pub` file whose single public key Lab writes to the
+//! cloud-init drive of a Windows clone (#561). Unset, Lab discovers the
+//! controller's ssh-agent and default key files instead. Only a path is kept
+//! here; the controller reads the file when it provisions.
+//!
 //! `FLEET_TAILSCALE_SERVE_LISTEN` is optional. When set, it must be a valid,
 //! nonzero loopback socket address distinct from `FLEET_LISTEN`; invalid
 //! addresses fail configuration loading with [`ConfigError::TailscaleServeListenInvalid`].
@@ -117,6 +123,8 @@ pub const DEFAULT_LAB_ARTIFACT_RETENTION_SECONDS: u64 = 7 * 24 * 60 * 60;
 pub const DEFAULT_LAB_ARTIFACT_MAX_BYTES: u64 = 64 * 1024 * 1024;
 /// The environment variable that caps one file `lab put` uploads (#393).
 pub const LAB_PUT_MAX_BYTES_VAR: &str = "FLEET_LAB_PUT_MAX_BYTES";
+/// The environment variable naming the Lab login public key file (#561).
+pub const LAB_LOGIN_PUBLIC_KEY_FILE_VAR: &str = "FLEET_LAB_LOGIN_PUBLIC_KEY_FILE";
 /// The default cap on one `lab put` upload: 2 GiB, enough for packaged
 /// desktop installers.
 pub const DEFAULT_LAB_PUT_MAX_BYTES: u64 = 2 * 1024 * 1024 * 1024;
@@ -184,6 +192,8 @@ pub struct ControllerConfig {
     pub lab_artifact_max_bytes: u64,
     /// The largest file one `lab put` uploads, in bytes (#393).
     pub lab_put_max_bytes: u64,
+    /// The public key file Lab installs in Windows clones (#561), when set.
+    pub lab_login_public_key_file: Option<PathBuf>,
     /// The Lab placement policy (FM-715).
     pub lab_placement: LabPlacementConfig,
     /// The proxy image builds may use, when the operator opted in (#339).
@@ -357,6 +367,7 @@ struct ConfigFile {
     lab_artifact_retention_seconds: Option<u64>,
     lab_artifact_max_bytes: Option<u64>,
     lab_put_max_bytes: Option<u64>,
+    lab_login_public_key_file: Option<String>,
     image_build_proxy: Option<String>,
     image_build_no_proxy: Option<String>,
     image_build_address_pool: Option<String>,
@@ -611,6 +622,7 @@ pub fn load(
     let mut lab_artifact_retention_seconds: Option<u64> = None;
     let mut lab_artifact_max_bytes: Option<u64> = None;
     let mut lab_put_max_bytes: Option<u64> = None;
+    let mut lab_login_public_key_file: Option<String> = None;
     let mut image_build_proxy: Option<String> = None;
     let mut image_build_no_proxy: Option<String> = None;
     let mut address_pool = AddressPoolSettings::default();
@@ -649,6 +661,7 @@ pub fn load(
         lab_artifact_retention_seconds = file.lab_artifact_retention_seconds;
         lab_artifact_max_bytes = file.lab_artifact_max_bytes;
         lab_put_max_bytes = file.lab_put_max_bytes;
+        lab_login_public_key_file = file.lab_login_public_key_file;
         image_build_proxy = file.image_build_proxy;
         image_build_no_proxy = file.image_build_no_proxy;
         address_pool = AddressPoolSettings {
@@ -665,6 +678,10 @@ pub fn load(
     web_dist = env(WEB_DIST_VAR).or(web_dist);
     data_dir = env(DATA_DIR_VAR).or(data_dir);
     master_key_file = env(MASTER_KEY_FILE_VAR).or(master_key_file);
+    lab_login_public_key_file = env(LAB_LOGIN_PUBLIC_KEY_FILE_VAR)
+        .filter(|value| !value.trim().is_empty())
+        .or(lab_login_public_key_file)
+        .filter(|value| !value.trim().is_empty());
     if let Some(raw) = env(LAB_SWEEP_INTERVAL_VAR) {
         lab_sweep_interval_seconds = Some(
             raw.trim()
@@ -736,6 +753,7 @@ pub fn load(
         lab_artifact_retention_seconds,
         lab_artifact_max_bytes,
         lab_put_max_bytes,
+        lab_login_public_key_file: lab_login_public_key_file.map(PathBuf::from),
         data_dir,
         master_key_file: master_key_file.map(PathBuf::from),
         lab_sweep_interval_seconds: lab_sweep_interval_seconds
@@ -1102,6 +1120,10 @@ impl ControllerConfig {
             ),
             format!("lab_artifact_max_bytes = {}", self.lab_artifact_max_bytes),
             format!("lab_put_max_bytes = {}", self.lab_put_max_bytes),
+            match &self.lab_login_public_key_file {
+                Some(path) => format!("lab_login_public_key_file = {}", path.display()),
+                None => "lab_login_public_key_file = <unset; Lab discovers agent keys>".to_owned(),
+            },
         ];
         if let Some(address) = self.tailscale_serve_listen {
             lines.push(format!("tailscale_serve_listen = {address}"));

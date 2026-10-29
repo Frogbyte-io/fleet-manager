@@ -164,6 +164,8 @@ struct CloneConfig {
     ci_keys: Option<String>,
     /// PVE accepts a cloud-init write but never reports it.
     ci_ignored: bool,
+    /// The clone has a cloud-init drive (`ide2`).
+    ci_drive: bool,
     /// PVE refuses a cloud-init write with this status.
     ci_status: Option<u16>,
 }
@@ -659,6 +661,10 @@ impl Pve {
         }
         if config.protected {
             answer["protection"] = serde_json::json!(1);
+        }
+        if config.ci_drive {
+            answer["ide2"] =
+                serde_json::json!(format!("local-lvm:vm-{vmid}-cloudinit,media=cdrom,size=4M"));
         }
         if let Some(user) = &config.ci_user {
             answer["ciuser"] = serde_json::json!(user);
@@ -4098,6 +4104,11 @@ async fn a_403_on_audio_alone_names_only_the_audio_device_and_its_privilege() {
 
 const LAB_KEY: &str = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAILabLabLabLabLabLabLabLabLabLabLab0000";
 
+/// A scripted host whose clone has a cloud-init drive.
+fn windows_pve() -> Arc<Pve> {
+    Pve::new(Vec::new()).configure(|config| config.ci_drive = true)
+}
+
 fn with_keys(
     harness: &Harness,
     pve: &Arc<Pve>,
@@ -4116,7 +4127,7 @@ fn with_keys(
 async fn a_windows_clone_gets_the_lab_public_key_before_its_first_boot() {
     let harness = Harness::windows("fleetadmin").await;
     let (lease_id, record) = harness.record().await;
-    let pve = Pve::new(Vec::new());
+    let pve = windows_pve();
     let (_, error, stored) = harness
         .run_executor(
             &pve,
@@ -4155,7 +4166,7 @@ async fn a_windows_clone_gets_the_lab_public_key_before_its_first_boot() {
 async fn the_clone_login_is_audited_without_key_material() {
     let harness = Harness::windows("fleetadmin").await;
     let (lease_id, record) = harness.record().await;
-    let pve = Pve::new(Vec::new());
+    let pve = windows_pve();
     let executor = with_keys(&harness, &pve, &[LAB_KEY])
         .with_audit(Arc::new(AuditSink::new(harness.pool.clone())));
     let _ = harness
@@ -4176,7 +4187,7 @@ async fn the_clone_login_is_audited_without_key_material() {
 async fn a_clone_that_already_carries_the_login_is_not_written_again() {
     let harness = Harness::windows("fleetadmin").await;
     let (lease_id, record) = harness.record().await;
-    let pve = Pve::new(Vec::new()).configure(|config| {
+    let pve = windows_pve().configure(|config| {
         config.ci_user = Some("fleetadmin".to_owned());
         config.ci_keys = Some(LAB_KEY.replace(' ', "%20"));
     });
@@ -4197,9 +4208,10 @@ async fn a_key_the_image_carried_stays_and_the_lab_key_is_added() {
     let harness = Harness::windows("fleetadmin").await;
     let (lease_id, record) = harness.record().await;
     let other = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOtherOtherOtherOtherOtherOther000000";
-    let pve = Pve::new(Vec::new()).configure(|config| {
+    let pve = windows_pve().configure(|config| {
         config.ci_user = Some("old".to_owned());
-        config.ci_keys = Some(format!("{}%0A", other.replace(' ', "%20")));
+        // The image's key carries a comment: it must stay, as `type blob`.
+        config.ci_keys = Some(format!("{}%20ops%40host%0A", other.replace(' ', "%20")));
     });
     let _ = harness
         .run_executor(
@@ -4240,7 +4252,7 @@ async fn a_linux_clone_gets_no_cloud_init_login() {
 async fn a_windows_clone_with_no_key_to_install_fails_before_the_start() {
     let harness = Harness::windows("fleetadmin").await;
     let (lease_id, record) = harness.record().await;
-    let pve = Pve::new(Vec::new());
+    let pve = windows_pve();
     let (state, error, stored) = harness
         .run_executor(&pve, with_keys(&harness, &pve, &[]), &lease_id, &record.id)
         .await;
@@ -4260,12 +4272,12 @@ async fn a_refused_or_ignored_login_write_fails_the_provision_at_ssh_key() {
         (
             "forbidden",
             "ssh_key_failed",
-            Pve::new(Vec::new()).configure(|config| config.ci_status = Some(403)),
+            windows_pve().configure(|config| config.ci_status = Some(403)),
         ),
         (
             "ignored",
             "ssh_key_failed",
-            Pve::new(Vec::new()).configure(|config| config.ci_ignored = true),
+            windows_pve().configure(|config| config.ci_ignored = true),
         ),
     ] {
         let (lease_id, record) = harness.record().await;
@@ -4287,4 +4299,60 @@ async fn a_refused_or_ignored_login_write_fails_the_provision_at_ssh_key() {
         assert!(first(&pve, "/status/start").is_none(), "{what}");
         assert_eq!(stored.failed_step.as_deref(), Some("ssh_key"), "{what}");
     }
+}
+
+#[tokio::test]
+async fn a_clone_without_a_cloud_init_drive_fails_at_ssh_key_before_the_start() {
+    let harness = Harness::windows("fleetadmin").await;
+    let (lease_id, record) = harness.record().await;
+    let pve = Pve::new(Vec::new());
+    let (state, error, stored) = harness
+        .run_executor(
+            &pve,
+            with_keys(&harness, &pve, &[LAB_KEY]),
+            &lease_id,
+            &record.id,
+        )
+        .await;
+    assert_eq!(state, "failed");
+    let (reason, detail) = error.unwrap();
+    assert_eq!(reason, "no_cloud_init_drive");
+    assert!(detail.contains("cloud-init drive"), "{detail}");
+    assert!(pve.hardware_writes().is_empty());
+    assert!(first(&pve, "/status/start").is_none());
+    assert_eq!(stored.failed_step.as_deref(), Some("ssh_key"));
+}
+
+/// More keys than Lab will authorize is refused with its reason, not cut.
+#[tokio::test]
+async fn too_many_discovered_keys_fail_at_ssh_key_with_their_reason() {
+    #[derive(Debug)]
+    struct TooMany;
+    #[async_trait::async_trait]
+    impl fleet_controller::lab_ssh_keys::LabKeySource for TooMany {
+        async fn public_keys(
+            &self,
+        ) -> Result<Vec<String>, fleet_controller::lab_ssh_keys::KeySourceError> {
+            Err(fleet_controller::lab_ssh_keys::KeySourceError {
+                reason: "too_many_ssh_keys",
+                detail: "5 SSH public keys were found; set FLEET_LAB_LOGIN_PUBLIC_KEY_FILE"
+                    .to_owned(),
+            })
+        }
+    }
+    let harness = Harness::windows("fleetadmin").await;
+    let (lease_id, record) = harness.record().await;
+    let pve = windows_pve();
+    let executor = harness
+        .executor(&pve, Some(TEMPLATE_VMID))
+        .with_login_keys(Arc::new(TooMany));
+    let (state, error, stored) = harness
+        .run_executor(&pve, executor, &lease_id, &record.id)
+        .await;
+    assert_eq!(state, "failed");
+    let (reason, detail) = error.unwrap();
+    assert_eq!(reason, "too_many_ssh_keys");
+    assert!(detail.contains("FLEET_LAB_LOGIN_PUBLIC_KEY_FILE"));
+    assert!(first(&pve, "/status/start").is_none());
+    assert_eq!(stored.failed_step.as_deref(), Some("ssh_key"));
 }
