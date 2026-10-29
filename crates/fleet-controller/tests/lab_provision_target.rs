@@ -166,6 +166,8 @@ struct CloneConfig {
     ci_ignored: bool,
     /// The clone has a cloud-init drive (`ide2`).
     ci_drive: bool,
+    /// The clone's `sshkeys` is too large to read (the raw encoded text).
+    ci_keys_raw: Option<String>,
     /// PVE refuses a cloud-init write with this status.
     ci_status: Option<u16>,
 }
@@ -671,6 +673,9 @@ impl Pve {
         }
         if let Some(keys) = &config.ci_keys {
             answer["sshkeys"] = serde_json::json!(keys);
+        }
+        if let Some(raw) = &config.ci_keys_raw {
+            answer["sshkeys"] = serde_json::json!(raw);
         }
         if config.no_digest {
             answer.as_object_mut().unwrap().remove("digest");
@@ -4353,6 +4358,29 @@ async fn too_many_discovered_keys_fail_at_ssh_key_with_their_reason() {
     let (reason, detail) = error.unwrap();
     assert_eq!(reason, "too_many_ssh_keys");
     assert!(detail.contains("FLEET_LAB_LOGIN_PUBLIC_KEY_FILE"));
+    assert!(first(&pve, "/status/start").is_none());
+    assert_eq!(stored.failed_step.as_deref(), Some("ssh_key"));
+}
+
+/// Keys too large to read are never replaced by a merge: the provision fails.
+#[tokio::test]
+async fn oversized_image_keys_fail_at_ssh_key_instead_of_being_overwritten() {
+    let harness = Harness::windows("fleetadmin").await;
+    let (lease_id, record) = harness.record().await;
+    let pve = windows_pve().configure(|config| config.ci_keys_raw = Some("a".repeat(40_000)));
+    let (state, error, stored) = harness
+        .run_executor(
+            &pve,
+            with_keys(&harness, &pve, &[LAB_KEY]),
+            &lease_id,
+            &record.id,
+        )
+        .await;
+    assert_eq!(state, "failed");
+    let (reason, detail) = error.unwrap();
+    assert_eq!(reason, "ssh_key_failed");
+    assert!(detail.contains("too large to read"), "{detail}");
+    assert!(pve.hardware_writes().is_empty());
     assert!(first(&pve, "/status/start").is_none());
     assert_eq!(stored.failed_step.as_deref(), Some("ssh_key"));
 }

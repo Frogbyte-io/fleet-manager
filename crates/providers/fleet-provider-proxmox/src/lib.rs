@@ -1529,6 +1529,9 @@ pub struct PveQemuHardware {
     /// Whether the guest has a cloud-init drive (a `…-cloudinit` volume on an
     /// ide, sata or scsi slot), which Cloudbase-Init reads the login from.
     pub has_cloud_init_drive: bool,
+    /// Whether `sshkeys` was too large to read (so `cloud_init_ssh_keys` is
+    /// empty although the guest has keys). A caller must not rewrite it.
+    pub cloud_init_ssh_keys_oversized: bool,
     /// The config digest, for a conditional update.
     pub digest: Option<String>,
 }
@@ -3252,11 +3255,11 @@ fn parse_hardware(config: &serde_json::Value) -> Result<PveQemuHardware, String>
                 && !slot.is_empty()
                 && slot.bytes().all(|b| b.is_ascii_digit())
                 && value.as_str().is_some_and(|text| {
-                    // The volume is `<storage>:vm-<id>-cloudinit` (or a
-                    // `…:cloudinit` file volume); options follow the comma.
-                    text.split(',')
-                        .next()
-                        .is_some_and(|volume| volume.ends_with("cloudinit"))
+                    // The volume is `<storage>:vm-<id>-cloudinit` on block
+                    // storage, or `<storage>:<id>/vm-<id>-cloudinit.qcow2`
+                    // (`.raw`, `.vmdk`) on file storage; options follow the
+                    // comma.
+                    text.split(',').next().is_some_and(is_cloud_init_volume)
                 })
         }),
         cloud_init_ssh_keys: config
@@ -3272,12 +3275,31 @@ fn parse_hardware(config: &serde_json::Value) -> Result<PveQemuHardware, String>
                     .collect()
             })
             .unwrap_or_default(),
+        cloud_init_ssh_keys_oversized: config
+            .get("sshkeys")
+            .and_then(serde_json::Value::as_str)
+            .is_some_and(|encoded| encoded.len() > MAX_SSH_KEYS_ENCODED),
         digest: bounded_str(config, "digest", 64)?,
     })
 }
 
+/// Whether a drive's volume id names a cloud-init disk: the last path
+/// component (after the storage's `:` and any `/`) is `vm-<id>-cloudinit`
+/// with an optional `.qcow2`, `.raw` or `.vmdk` suffix.
+fn is_cloud_init_volume(volume: &str) -> bool {
+    let name = volume.rsplit([':', '/']).next().unwrap_or_default();
+    let stem = [".qcow2", ".raw", ".vmdk"]
+        .iter()
+        .find_map(|suffix| name.strip_suffix(suffix))
+        .unwrap_or(name);
+    stem.strip_prefix("vm-")
+        .and_then(|rest| rest.strip_suffix("-cloudinit"))
+        .is_some_and(|id| !id.is_empty() && id.bytes().all(|b| b.is_ascii_digit()))
+}
+
 /// The most percent-encoded `sshkeys` text read from a config (about 8
-/// maximum-size keys); anything larger is treated as none.
+/// maximum-size keys); anything larger is not read, and the config reports
+/// it as oversized so a caller never overwrites it.
 const MAX_SSH_KEYS_ENCODED: usize = 32 * 1024;
 
 /// Decodes `%XX` escapes (PVE stores `sshkeys` percent-encoded). A malformed

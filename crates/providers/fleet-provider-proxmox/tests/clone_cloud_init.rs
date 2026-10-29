@@ -146,6 +146,27 @@ async fn a_cloud_init_drive_is_detected_on_ide_sata_or_scsi_slots() {
             .await
             .has_cloud_init_drive
     );
+    for volume in [
+        "local:9000/vm-9000-cloudinit.qcow2,media=cdrom",
+        "nfs-store:9000/vm-9000-cloudinit.raw,media=cdrom",
+        "dir:9000/vm-9000-cloudinit.vmdk",
+    ] {
+        assert!(
+            read(json!({ "ide0": volume })).await.has_cloud_init_drive,
+            "{volume}"
+        );
+    }
+    for volume in [
+        "local:9000/vm-9000-disk-0.qcow2",
+        "local:9000/vm-9000-cloudinit.iso",
+        "local:iso/cloudinit",
+        "local:9000/vm--cloudinit.qcow2",
+    ] {
+        assert!(
+            !read(json!({ "ide0": volume })).await.has_cloud_init_drive,
+            "{volume}"
+        );
+    }
     assert!(
         read(json!({"scsi1": "local-lvm:vm-9000-cloudinit,size=4M"}))
             .await
@@ -173,6 +194,7 @@ async fn an_overlong_ciuser_or_oversized_sshkeys_do_not_fail_the_read() {
     .await;
     assert_eq!(read.cloud_init_user, None);
     assert!(read.cloud_init_ssh_keys.is_empty());
+    assert!(read.cloud_init_ssh_keys_oversized);
 }
 
 #[test]

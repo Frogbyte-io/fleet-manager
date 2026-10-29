@@ -3631,6 +3631,15 @@ impl ProvisionExecutor {
                     ),
                 );
             }
+            if hardware.cloud_init_ssh_keys_oversized {
+                // Its keys cannot be read, so a merge would replace them.
+                return refuse(
+                    "ssh_key_failed",
+                    format!(
+                        "the clone {where_} carries cloud-init SSH keys too large to read, and writing the Lab key would replace them; shorten the image template's sshkeys or set them yourself"
+                    ),
+                );
+            }
             if !hardware.has_cloud_init_drive {
                 return refuse(
                     "no_cloud_init_drive",
