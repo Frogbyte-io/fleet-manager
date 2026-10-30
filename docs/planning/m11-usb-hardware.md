@@ -68,7 +68,7 @@ Host capability is evaluated per (account, node) from the token's effective perm
 
 ### Reservation
 
-`lab_hardware_reservations` (a migration after 0066): id, device id, owner kind (`lease` or `machine`), owner id, state, guest account/node/VMID and `usbN` slot once known, timestamps. States: `held` → `attaching` → `attached` → `detaching` → `released`; side states `attach_unknown`, `detach_failed`. A partial unique index on `device_id` where state is not `released` makes a double hold impossible. A lease reservation is released by cleanup; a machine reservation by an explicit detach.
+`hardware_reservations` (migration 0067; owners are leases or machines, so no `lab_` prefix; `held` also covers a detached-but-still-reserved device for mid-run hotplug): id, device id, owner kind (`lease` or `machine`), owner id, state, guest account/node/VMID and `usbN` slot once known, timestamps. States: `held` → `attaching` → `attached` → `detaching` → `released`; side states `attach_unknown`, `detach_failed`. A partial unique index on `device_id` where state is not `released` makes a double hold impossible. A lease reservation is released by cleanup; a machine reservation by an explicit detach.
 
 ### Attach and detach saga
 
