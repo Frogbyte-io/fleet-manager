@@ -367,6 +367,21 @@ Exit gate: an agent finds a domain or service with `fleetctl registry find`, rec
 
 M10 depends on M4 Fleet Git source fetch and activation, and on the M9 console. Registrar or vendor sync, Resend, and key provisioning into Frogenv are not part of it.
 
+### M11 — USB hardware inventory and exclusive allocation
+
+Status: planned (2026-10-30); not started. Detailed plan and issue breakdown: [planning/m11-usb-hardware.md](planning/m11-usb-hardware.md). Boundaries: [ADR 0019](adr/0019-usb-device-allocation.md). Epic: [#16](https://github.com/Frogbyte-io/fleet-manager/issues/16).
+
+Outcome: Lab leases and persistent machines can hold a physical USB device exclusively, attached before boot or hotplugged mid-run, with an honest inventory of what Fleet can and cannot allocate.
+
+- Devices are PVE USB resource mappings that operators create; Fleet reads them and never writes `host=`. Identical devices get path-based mappings.
+- A device is reserved in SQLite before any Proxmox call; attach and detach are sagas with compensation; detach precedes destroy, revert and return to a pool.
+- A busy device fails fast with `hardware_busy`; manually attached devices are `externally_attached` and never taken.
+- USB privileges live in an opt-in token role.
+
+Exit gate: on the integration host, a lease declares a test device, Fleet attaches it, a mid-run detach and re-attach works, cleanup detaches it, a competing lease is refused, and the failure-injection suite shows no device is ever held twice.
+
+M11 depends on M6 and M7 (Lab leases, placement, cleanup) and on persistent machines (ADR 0018). Queueing, device groups, Fleet-created mappings, and PCI passthrough are not part of it.
+
 ### Later — scale, convenience, and additional providers
 
 - Optional native desktop shell that consumes the public API and offers local editor/terminal handoff; no core logic.
@@ -394,13 +409,14 @@ M0 Foundation
        minimal profile/template contracts ----------+
   M1-M4 + M6 + M7 APIs -> M9 Fleet Console v2 + fleet-wide skills
   M4 desired state + M9 console -> M10 Registry + running services + action broker
+  M6 + M7 Lab + persistent machines -> M11 USB hardware allocation
 ```
 
 The critical path is M0 → M1 → M2 → M3 for the complete Developer Fleet release, then M6 plus the Packer/image-version slice of M7 for the first Lab release. Full M4 GitOps and Docker are not Lab prerequisites. Tailscale discovery is optional. Agents use skills and `fleetctl`; MCP is not on the roadmap.
 
 ## Recommended GitHub milestones and epic issues
 
-Use the milestone names M0–M10 above. Each epic should be a tracking issue containing only dependency/status checklists; implementation work remains in narrow linked issues.
+Use the milestone names M0–M11 above. Each epic should be a tracking issue containing only dependency/status checklists; implementation work remains in narrow linked issues.
 
 | Milestone | Recommended epics |
 |---|---|
@@ -415,6 +431,7 @@ Use the milestone names M0–M10 above. Each epic should be a tracking issue con
 | M8 | Optional authenticated deployment; agent/CI identity hardening and delegation; autonomous Lab/CI workflows; policy/audit administration |
 | M9 | Console foundation; fleet inventory console; fleet-wide skills; Lab and images console; settings/Proxmox/projects/audit/access |
 | M10 | Foundations (plan, ADR, provider accounts); Registry; domain and service views; running services (Coolify and Docker); agent action broker |
+| M11 | USB hardware: spike and provider reads; inventory and reservations; Lab attach, hotplug and cleanup; persistent machine attach; console, skill, and live validation |
 
 Issue-ready work for M0–M2 is in [planning/initial-issues.md](planning/initial-issues.md). Use its issue template for later milestones.
 
