@@ -68,7 +68,19 @@ Host capability is evaluated per (account, node) from the token's effective perm
 
 ### Reservation
 
-`lab_hardware_reservations` (a migration after 0066): id, device id, owner kind (`lease` or `machine`), owner id, state, guest account/node/VMID and `usbN` slot once known, timestamps. States: `held` → `attaching` → `attached` → `detaching` → `released`; side states `attach_unknown`, `detach_failed`. A partial unique index on `device_id` where state is not `released` makes a double hold impossible. A lease reservation is released by cleanup; a machine reservation by an explicit detach.
+`hardware_reservations` (migration 0067; owners are leases or machines, so no `lab_` prefix; `held` also covers a detached-but-still-reserved device for mid-run hotplug): id, device id, owner kind (`lease` or `machine`), owner id, state, guest account/node/VMID and `usbN` slot once known, timestamps. States: `held` → `attaching` → `attached` → `detaching` → `released`; side states `attach_unknown`, `detach_failed`. The legal edges are exactly:
+
+| From | To |
+|---|---|
+| `held` | `attaching`; `released` (refused by the store while a `usbN` slot is recorded) |
+| `attaching` | `attached`; `attach_unknown`; `detaching` (compensation); `held` (only after a confirmed no-entry read-back of the guest config, and the store clears the slot) |
+| `attached` | `detaching` |
+| `detaching` | `released`; `held` (mid-run detach, the lease still holds the device; slot cleared); `detach_failed` |
+| `attach_unknown` | `attached` (read-back shows the entry); `detaching` (remove it, confirm, release) |
+| `detach_failed` | `detaching` (retry) |
+| `released` | none (terminal) |
+
+An unknown attach or a failed detach is never resolved to `held` or `released` on a guess. The only other way out of a live state is the elevated **override release** (`hardware.override-release`, ADR 0019 decision 9): a separate store operation, not an edge, that the caller must authorize and audit. A partial unique index on `device_id` where state is not `released` makes a double hold impossible. A lease reservation is released by cleanup; a machine reservation by an explicit detach.
 
 ### Attach and detach saga
 

@@ -16,6 +16,7 @@ pub mod credentials;
 pub mod dns;
 pub mod events;
 pub mod external_accounts;
+pub mod hardware;
 pub mod idempotency;
 pub mod images;
 pub mod lab;

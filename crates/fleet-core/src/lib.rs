@@ -11,6 +11,7 @@ mod build_address;
 mod difference;
 mod error;
 mod external_account;
+mod hardware;
 mod id;
 mod image;
 mod lab;
@@ -42,6 +43,10 @@ pub use external_account::{
     MAX_BASE_URL_LEN, MAX_PROBE_DETAIL_LEN, MAX_TOKEN_SECRET_LEN, ParseProviderKindError,
     ProbeReport, ProbeStatus, base_url_is_loopback, base_url_origin, bound_detail,
     normalize_base_url, validate_label, validate_notes, validate_scope_id,
+};
+pub use hardware::{
+    DeviceNodeEntry, DeviceStatus, GuestTarget, HardwareDevice, HardwareKind, HardwareReservation,
+    HardwareReservationState, ReservationOwnerKind, USB_SLOT_COUNT, UnsupportedReason,
 };
 pub use id::{CorrelationId, IdGenerator, ParseIdError, ResourceId, UuidV7Generator};
 
