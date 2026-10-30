@@ -124,7 +124,6 @@ async fn every_status_round_trips() {
         .unwrap();
     for status in [
         DeviceStatus::Available,
-        DeviceStatus::Reserved,
         DeviceStatus::ExternallyAttached,
         DeviceStatus::Missing,
         DeviceStatus::Quarantined,
@@ -573,4 +572,252 @@ async fn the_migration_applies_on_a_database_with_data() {
     .await
     .unwrap();
     assert_eq!(repo.list_live_reservations().await.unwrap().len(), 1);
+}
+
+async fn held_device() -> (tempfile::TempDir, Store, HardwareRepository) {
+    let (dir, store) = setup().await;
+    let repo = HardwareRepository::new(store.pool().clone());
+    repo.upsert_device(&observation("dev-1", "reader"), NOW)
+        .await
+        .unwrap();
+    repo.insert_reservation(
+        &hold("res-1", "dev-1", ReservationOwnerKind::Lease, "lease-1"),
+        NOW,
+    )
+    .await
+    .unwrap();
+    (dir, store, repo)
+}
+
+#[tokio::test]
+async fn unknown_and_failed_states_cannot_be_resolved_to_held_or_released() {
+    let (_dir, _store, repo) = held_device().await;
+    repo.transition_reservation(
+        "res-1",
+        State::Held,
+        State::Attaching,
+        Some(&target(Some(0))),
+        NOW + 1,
+    )
+    .await
+    .unwrap();
+    repo.transition_reservation(
+        "res-1",
+        State::Attaching,
+        State::AttachUnknown,
+        None,
+        NOW + 2,
+    )
+    .await
+    .unwrap();
+    for to in [State::Held, State::Released] {
+        assert!(
+            matches!(
+                repo.transition_reservation("res-1", State::AttachUnknown, to, None, NOW + 3)
+                    .await,
+                Err(HardwareStoreError::IllegalTransition { .. })
+            ),
+            "attach_unknown -> {to:?} is not an edge"
+        );
+    }
+    repo.transition_reservation(
+        "res-1",
+        State::AttachUnknown,
+        State::Detaching,
+        None,
+        NOW + 4,
+    )
+    .await
+    .unwrap();
+    repo.transition_reservation(
+        "res-1",
+        State::Detaching,
+        State::DetachFailed,
+        None,
+        NOW + 5,
+    )
+    .await
+    .unwrap();
+    for to in [State::Held, State::Released] {
+        assert!(
+            matches!(
+                repo.transition_reservation("res-1", State::DetachFailed, to, None, NOW + 6)
+                    .await,
+                Err(HardwareStoreError::IllegalTransition { .. })
+            ),
+            "detach_failed -> {to:?} is not an edge"
+        );
+    }
+    repo.transition_reservation(
+        "res-1",
+        State::DetachFailed,
+        State::Detaching,
+        None,
+        NOW + 7,
+    )
+    .await
+    .unwrap();
+}
+
+#[tokio::test]
+async fn held_to_released_is_refused_while_a_slot_is_recorded() {
+    let (_dir, _store, repo) = held_device().await;
+    // Compensation `attaching -> held` clears the recorded slot.
+    repo.transition_reservation(
+        "res-1",
+        State::Held,
+        State::Attaching,
+        Some(&target(Some(3))),
+        NOW + 1,
+    )
+    .await
+    .unwrap();
+    let back = repo
+        .transition_reservation("res-1", State::Attaching, State::Held, None, NOW + 2)
+        .await
+        .unwrap();
+    assert_eq!(back.guest.unwrap().usb_slot, None);
+    // A move into held cannot carry a slot in.
+    repo.transition_reservation(
+        "res-1",
+        State::Held,
+        State::Attaching,
+        Some(&target(Some(2))),
+        NOW + 3,
+    )
+    .await
+    .unwrap();
+    assert!(matches!(
+        repo.transition_reservation(
+            "res-1",
+            State::Attaching,
+            State::Held,
+            Some(&target(Some(2))),
+            NOW + 4
+        )
+        .await,
+        Err(HardwareStoreError::Invalid(_))
+    ));
+
+    // A held row created with a slot recorded cannot be released directly.
+    repo.upsert_device(&observation("dev-2", "other"), NOW)
+        .await
+        .unwrap();
+    let mut with_slot = hold("res-2", "dev-2", ReservationOwnerKind::Machine, "machine-1");
+    with_slot.guest = Some(target(Some(1)));
+    repo.insert_reservation(&with_slot, NOW).await.unwrap();
+    assert!(matches!(
+        repo.transition_reservation("res-2", State::Held, State::Released, None, NOW + 5)
+            .await,
+        Err(HardwareStoreError::Invalid(_))
+    ));
+    assert_eq!(
+        repo.reservation("res-2").await.unwrap().unwrap().state,
+        State::Held
+    );
+    // Without a slot it is fine.
+    repo.upsert_device(&observation("dev-3", "third"), NOW)
+        .await
+        .unwrap();
+    repo.insert_reservation(
+        &hold("res-3", "dev-3", ReservationOwnerKind::Lease, "lease-3"),
+        NOW,
+    )
+    .await
+    .unwrap();
+    repo.transition_reservation("res-3", State::Held, State::Released, None, NOW + 6)
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn override_release_frees_a_device_from_any_live_state_once() {
+    let (_dir, _store, repo) = held_device().await;
+    repo.transition_reservation(
+        "res-1",
+        State::Held,
+        State::Attaching,
+        Some(&target(Some(1))),
+        NOW + 1,
+    )
+    .await
+    .unwrap();
+    repo.transition_reservation(
+        "res-1",
+        State::Attaching,
+        State::AttachUnknown,
+        None,
+        NOW + 2,
+    )
+    .await
+    .unwrap();
+    let released = repo
+        .force_release_reservation("res-1", NOW + 3)
+        .await
+        .unwrap();
+    assert_eq!(released.state, State::Released);
+    assert_eq!(released.released_at, Some(NOW + 3));
+    assert_eq!(released.guest.unwrap().usb_slot, None);
+    assert!(
+        repo.live_reservation_for_device("dev-1")
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert!(matches!(
+        repo.force_release_reservation("res-1", NOW + 4).await,
+        Err(HardwareStoreError::IllegalTransition { .. })
+    ));
+    assert_eq!(
+        repo.force_release_reservation("nope", NOW).await,
+        Err(HardwareStoreError::NotFound)
+    );
+    repo.insert_reservation(
+        &hold("res-2", "dev-1", ReservationOwnerKind::Machine, "machine-1"),
+        NOW + 5,
+    )
+    .await
+    .unwrap();
+}
+
+#[tokio::test]
+async fn a_reused_reservation_id_is_invalid_not_a_hold_conflict() {
+    let (_dir, _store, repo) = held_device().await;
+    repo.upsert_device(&observation("dev-2", "other"), NOW)
+        .await
+        .unwrap();
+    // The same id on a free device is a primary-key clash, not a hold.
+    assert!(matches!(
+        repo.insert_reservation(
+            &hold("res-1", "dev-2", ReservationOwnerKind::Lease, "lease-2"),
+            NOW
+        )
+        .await,
+        Err(HardwareStoreError::Invalid(_))
+    ));
+    // A free id on the held device is the real conflict.
+    assert!(matches!(
+        repo.insert_reservation(
+            &hold("res-9", "dev-1", ReservationOwnerKind::Lease, "lease-2"),
+            NOW
+        )
+        .await,
+        Err(HardwareStoreError::Held { .. })
+    ));
+}
+
+#[tokio::test]
+async fn the_reserved_status_is_derived_and_cannot_be_set() {
+    let (_dir, _store, repo) = held_device().await;
+    assert!(matches!(
+        repo.set_device_status("dev-1", DeviceStatus::Reserved, NOW)
+            .await,
+        Err(HardwareStoreError::Invalid(_))
+    ));
+    let mut seen = observation("dev-1", "reader");
+    seen.status = DeviceStatus::Reserved;
+    assert!(matches!(
+        repo.upsert_device(&seen, NOW).await,
+        Err(HardwareStoreError::Invalid(_))
+    ));
 }

@@ -164,9 +164,17 @@ impl HardwareRepository {
         &self,
         id: &str,
     ) -> Result<Option<HardwareReservation>, HardwareStoreError> {
+        let mut conn = self.conn().await?;
+        Self::load_reservation_on(&mut conn, id).await
+    }
+
+    async fn load_reservation_on(
+        conn: &mut sqlx::SqliteConnection,
+        id: &str,
+    ) -> Result<Option<HardwareReservation>, HardwareStoreError> {
         sqlx::query(select_reservations!("WHERE id = ?1"))
             .bind(id)
-            .fetch_optional(&self.pool)
+            .fetch_optional(&mut *conn)
             .await
             .map_err(|error| backend("read hardware reservation", &error))?
             .as_ref()
@@ -210,6 +218,16 @@ impl HardwareRepository {
     }
 }
 
+/// `Reserved` is derived from a live reservation, never set directly.
+fn refuse_reserved(status: DeviceStatus) -> Result<(), HardwareStoreError> {
+    if status == DeviceStatus::Reserved {
+        return Err(HardwareStoreError::Invalid(
+            "the reserved status is derived from a live reservation and cannot be set".to_owned(),
+        ));
+    }
+    Ok(())
+}
+
 #[derive(Clone, Copy)]
 enum LiveScope<'a> {
     All,
@@ -230,6 +248,7 @@ impl HardwareStore for HardwareRepository {
         observation: &DeviceObservation,
         now: i64,
     ) -> Result<HardwareDevice, HardwareStoreError> {
+        refuse_reserved(observation.status)?;
         let mut tx = self
             .pool
             .begin_with("BEGIN IMMEDIATE")
@@ -365,6 +384,7 @@ impl HardwareStore for HardwareRepository {
         status: DeviceStatus,
         now: i64,
     ) -> Result<(), HardwareStoreError> {
+        refuse_reserved(status)?;
         let done = sqlx::query(
             "UPDATE hardware_devices SET status = ?2, unsupported_reason = ?3, updated_at = ?4 \
              WHERE id = ?1",
@@ -417,53 +437,72 @@ impl HardwareStore for HardwareRepository {
             guest.validate().map_err(HardwareStoreError::Invalid)?;
         }
         let guest = reservation.guest.as_ref();
-        let inserted = sqlx::query(
-            "INSERT INTO hardware_reservations \
-             (id, device_id, owner_kind, owner_id, state, guest_account, guest_node, guest_vmid, \
-              usb_slot, created_at, updated_at) \
-             VALUES (?1, ?2, ?3, ?4, 'held', ?5, ?6, ?7, ?8, ?9, ?9)",
-        )
-        .bind(&reservation.id)
-        .bind(&reservation.device_id)
-        .bind(reservation.owner_kind.id())
-        .bind(&reservation.owner_id)
-        .bind(guest.map(|guest| guest.account_id.as_str()))
-        .bind(guest.map(|guest| guest.node.as_str()))
-        .bind(guest.map(|guest| i64::from(guest.vmid)))
-        .bind(guest.and_then(|guest| guest.usb_slot).map(i64::from))
-        .bind(now)
-        .execute(&self.pool)
-        .await;
-        match inserted {
-            Ok(_) => {}
-            Err(error) if is_violation(&error, sqlx::error::ErrorKind::UniqueViolation) => {
-                // The unique index fired: either the live-per-device index or
-                // a repeated reservation id.
-                return match self
-                    .live_reservation_for_device(&reservation.device_id)
-                    .await?
-                {
-                    Some(holder) => Err(HardwareStoreError::Held {
-                        holder: Box::new(holder),
-                    }),
-                    None => Err(HardwareStoreError::Invalid(
-                        "the reservation id is already used".to_owned(),
-                    )),
-                };
+        // Two attempts: a holder that vanished between the unique-index
+        // refusal and the re-read (released concurrently) leaves the device
+        // free, so the insert is retried once rather than reported falsely.
+        for attempt in 0..2 {
+            let inserted = sqlx::query(
+                "INSERT INTO hardware_reservations \
+                 (id, device_id, owner_kind, owner_id, state, guest_account, guest_node, \
+                  guest_vmid, usb_slot, created_at, updated_at) \
+                 VALUES (?1, ?2, ?3, ?4, 'held', ?5, ?6, ?7, ?8, ?9, ?9)",
+            )
+            .bind(&reservation.id)
+            .bind(&reservation.device_id)
+            .bind(reservation.owner_kind.id())
+            .bind(&reservation.owner_id)
+            .bind(guest.map(|guest| guest.account_id.as_str()))
+            .bind(guest.map(|guest| guest.node.as_str()))
+            .bind(guest.map(|guest| i64::from(guest.vmid)))
+            .bind(guest.and_then(|guest| guest.usb_slot).map(i64::from))
+            .bind(now)
+            .execute(&self.pool)
+            .await;
+            match inserted {
+                Ok(_) => {
+                    return self
+                        .load_reservation(&reservation.id)
+                        .await?
+                        .ok_or(HardwareStoreError::NotFound);
+                }
+                Err(error) if is_violation(&error, sqlx::error::ErrorKind::UniqueViolation) => {
+                    // SQLite names the violated column: `hardware_reservations.id`
+                    // for the primary key, `hardware_reservations.device_id`
+                    // for the live-per-device index.
+                    if error.to_string().contains("hardware_reservations.id") {
+                        return Err(HardwareStoreError::Invalid(
+                            "the reservation id is already used".to_owned(),
+                        ));
+                    }
+                    if let Some(holder) = self
+                        .live_reservation_for_device(&reservation.device_id)
+                        .await?
+                    {
+                        return Err(HardwareStoreError::Held {
+                            holder: Box::new(holder),
+                        });
+                    }
+                    if attempt == 1 {
+                        return Err(HardwareStoreError::Backend(
+                            "the device's hold changed repeatedly while reserving; retry"
+                                .to_owned(),
+                        ));
+                    }
+                }
+                Err(error) if is_violation(&error, sqlx::error::ErrorKind::ForeignKeyViolation) => {
+                    return Err(HardwareStoreError::NotFound);
+                }
+                Err(error) if is_violation(&error, sqlx::error::ErrorKind::CheckViolation) => {
+                    return Err(HardwareStoreError::Invalid(format!(
+                        "invalid reservation: {error}"
+                    )));
+                }
+                Err(error) => return Err(backend("insert hardware reservation", &error)),
             }
-            Err(error) if is_violation(&error, sqlx::error::ErrorKind::ForeignKeyViolation) => {
-                return Err(HardwareStoreError::NotFound);
-            }
-            Err(error) if is_violation(&error, sqlx::error::ErrorKind::CheckViolation) => {
-                return Err(HardwareStoreError::Invalid(format!(
-                    "invalid reservation: {error}"
-                )));
-            }
-            Err(error) => return Err(backend("insert hardware reservation", &error)),
         }
-        self.load_reservation(&reservation.id)
-            .await?
-            .ok_or(HardwareStoreError::NotFound)
+        Err(HardwareStoreError::Backend(
+            "the reservation could not be inserted".to_owned(),
+        ))
     }
 
     async fn reservation(
@@ -506,9 +545,21 @@ impl HardwareStore for HardwareRepository {
     ) -> Result<HardwareReservation, HardwareStoreError> {
         if let Some(guest) = guest {
             guest.validate().map_err(HardwareStoreError::Invalid)?;
+            if to == HardwareReservationState::Held && guest.usb_slot.is_some() {
+                return Err(HardwareStoreError::Invalid(
+                    "a held reservation cannot record a usb slot".to_owned(),
+                ));
+            }
         }
-        let current = self
-            .load_reservation(id)
+        // One write transaction: the state check, the slot rules, the
+        // compare-and-set and the returned row cannot interleave with
+        // another writer.
+        let mut tx = self
+            .pool
+            .begin_with("BEGIN IMMEDIATE")
+            .await
+            .map_err(|error| backend("begin hardware transition", &error))?;
+        let current = Self::load_reservation_on(&mut tx, id)
             .await?
             .ok_or(HardwareStoreError::NotFound)?;
         if !from.can_transition_to(to) || current.state != from {
@@ -518,15 +569,23 @@ impl HardwareStore for HardwareRepository {
                 actual: current.state,
             });
         }
-        // Compare-and-set on the state: a concurrent writer that moved the
-        // reservation first makes this update match no row.
+        let slot_recorded = current.guest.as_ref().is_some_and(|g| g.usb_slot.is_some());
+        if from == HardwareReservationState::Held
+            && to == HardwareReservationState::Released
+            && slot_recorded
+        {
+            return Err(HardwareStoreError::Invalid(
+                "a held reservation with a recorded usb slot must go through detaching".to_owned(),
+            ));
+        }
         let released_at = (to == HardwareReservationState::Released).then_some(now);
-        let done = sqlx::query(
+        let clear_slot = to == HardwareReservationState::Held;
+        sqlx::query(
             "UPDATE hardware_reservations SET state = ?3, updated_at = ?4, released_at = ?5, \
              guest_account = CASE WHEN ?6 THEN ?7 ELSE guest_account END, \
              guest_node = CASE WHEN ?6 THEN ?8 ELSE guest_node END, \
              guest_vmid = CASE WHEN ?6 THEN ?9 ELSE guest_vmid END, \
-             usb_slot = CASE WHEN ?6 THEN ?10 ELSE usb_slot END \
+             usb_slot = CASE WHEN ?11 THEN NULL WHEN ?6 THEN ?10 ELSE usb_slot END \
              WHERE id = ?1 AND state = ?2",
         )
         .bind(id)
@@ -539,7 +598,8 @@ impl HardwareStore for HardwareRepository {
         .bind(guest.map(|guest| guest.node.as_str()))
         .bind(guest.map(|guest| i64::from(guest.vmid)))
         .bind(guest.and_then(|guest| guest.usb_slot).map(i64::from))
-        .execute(&self.pool)
+        .bind(clear_slot)
+        .execute(&mut *tx)
         .await
         .map_err(|error| {
             if is_violation(&error, sqlx::error::ErrorKind::CheckViolation) {
@@ -548,17 +608,50 @@ impl HardwareStore for HardwareRepository {
                 backend("move hardware reservation", &error)
             }
         })?;
-        let updated = self
-            .load_reservation(id)
+        let updated = Self::load_reservation_on(&mut tx, id)
             .await?
             .ok_or(HardwareStoreError::NotFound)?;
-        if done.rows_affected() == 0 {
+        tx.commit()
+            .await
+            .map_err(|error| backend("commit hardware transition", &error))?;
+        Ok(updated)
+    }
+
+    async fn force_release_reservation(
+        &self,
+        id: &str,
+        now: i64,
+    ) -> Result<HardwareReservation, HardwareStoreError> {
+        let mut tx = self
+            .pool
+            .begin_with("BEGIN IMMEDIATE")
+            .await
+            .map_err(|error| backend("begin hardware override release", &error))?;
+        let current = Self::load_reservation_on(&mut tx, id)
+            .await?
+            .ok_or(HardwareStoreError::NotFound)?;
+        if !current.state.is_live() {
             return Err(HardwareStoreError::IllegalTransition {
-                from,
-                to,
-                actual: updated.state,
+                from: current.state,
+                to: HardwareReservationState::Released,
+                actual: current.state,
             });
         }
+        sqlx::query(
+            "UPDATE hardware_reservations SET state = 'released', updated_at = ?2, \
+             released_at = ?2, usb_slot = NULL WHERE id = ?1 AND state <> 'released'",
+        )
+        .bind(id)
+        .bind(now)
+        .execute(&mut *tx)
+        .await
+        .map_err(|error| backend("override-release hardware reservation", &error))?;
+        let updated = Self::load_reservation_on(&mut tx, id)
+            .await?
+            .ok_or(HardwareStoreError::NotFound)?;
+        tx.commit()
+            .await
+            .map_err(|error| backend("commit hardware override release", &error))?;
         Ok(updated)
     }
 }

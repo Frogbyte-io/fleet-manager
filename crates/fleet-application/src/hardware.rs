@@ -143,11 +143,15 @@ pub trait HardwareStore: fmt::Debug + Send + Sync {
         account_id: &str,
     ) -> Result<Vec<HardwareDevice>, HardwareStoreError>;
 
-    /// Sets a device's status.
+    /// Sets a device's status. `Reserved` is derived from a live
+    /// reservation (FM-1120 sets it inside its reserve transaction), so it
+    /// is refused here as [`HardwareStoreError::Invalid`], as it is in
+    /// [`Self::upsert_device`].
     ///
     /// # Errors
     ///
-    /// Fails when the device does not exist or the backend errors.
+    /// Fails when the status is `Reserved`, the device does not exist, or
+    /// the backend errors.
     async fn set_device_status(
         &self,
         id: &str,
@@ -170,11 +174,15 @@ pub trait HardwareStore: fmt::Debug + Send + Sync {
     /// Inserts a reservation in the `held` state. Fails with
     /// [`HardwareStoreError::Held`] naming the holder when the device
     /// already has a live reservation; the database's partial unique index
-    /// is the arbiter, not a prior read.
+    /// is the arbiter, not a prior read. This does **not** check the
+    /// device's status (`missing`, `unsupported`, `externally_attached`, ...):
+    /// that is the reserve rule FM-1120 owns.
     ///
     /// # Errors
     ///
     /// Fails when the device does not exist, is held, or the backend errors.
+    /// A reservation id already in use is [`HardwareStoreError::Invalid`],
+    /// never reported as a hold conflict.
     async fn insert_reservation(
         &self,
         reservation: &NewHardwareReservation,
@@ -224,7 +232,15 @@ pub trait HardwareStore: fmt::Debug + Send + Sync {
     /// on the state machine. `guest`, when given, replaces the recorded
     /// guest target (pass the target with `usb_slot: None` to clear the
     /// slot after a detach); `None` keeps it. Moving to `released` stamps
-    /// the release time.
+    /// the release time. The read, the compare-and-set and the returned row
+    /// are one transaction.
+    ///
+    /// Slot rules beyond the state machine: `held -> released` is refused
+    /// while a `usbN` slot is recorded (go through `detaching`), and every
+    /// move into `held` clears the slot. `attaching -> held` must only be
+    /// requested after a confirmed no-entry read-back of the guest config;
+    /// otherwise route through `detaching`. A move into `held` that carries
+    /// a slot is refused.
     ///
     /// # Errors
     ///
@@ -236,6 +252,23 @@ pub trait HardwareStore: fmt::Debug + Send + Sync {
         from: HardwareReservationState,
         to: HardwareReservationState,
         guest: Option<&GuestTarget>,
+        now: i64,
+    ) -> Result<HardwareReservation, HardwareStoreError>;
+
+    /// The elevated override release (ADR 0019 decision 9): moves a live
+    /// reservation in any state to `released` without the detach path, for
+    /// an operator who has confirmed the device is free (or accepts it is
+    /// not). It is deliberately not a state-machine edge. The caller must
+    /// authorize (`hardware.override-release`) and audit it; this method
+    /// does neither. A reservation that is already released is refused.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the reservation does not exist, is already released, or
+    /// the backend errors.
+    async fn force_release_reservation(
+        &self,
+        id: &str,
         now: i64,
     ) -> Result<HardwareReservation, HardwareStoreError>;
 }

@@ -306,10 +306,15 @@ impl HardwareReservationState {
 
     /// The states a reservation may move to from this one.
     ///
-    /// A device is only released through `detaching`, straight from `held`
-    /// (nothing was ever written), or from `detach_failed` once a read-back
-    /// proves the guest no longer references it. An attach that did not
-    /// finish is never released on a guess.
+    /// A device is only released through `detaching`, or straight from
+    /// `held` when no `usbN` slot was ever recorded (the store enforces the
+    /// slot condition). `attaching -> held` requires a confirmed no-entry
+    /// read-back of the guest config; without one, go through `detaching`.
+    /// `attach_unknown` resolves only to `attached` (the read-back shows the
+    /// entry) or `detaching` (remove it, confirm, release), and
+    /// `detach_failed` only retries `detaching`: neither is ever resolved on
+    /// a guess. The elevated override release is deliberately not an edge;
+    /// it is a separate, audited operation on the store.
     #[must_use]
     pub const fn successors(self) -> &'static [Self] {
         match self {
@@ -320,10 +325,9 @@ impl HardwareReservationState {
                 Self::Detaching,
                 Self::AttachUnknown,
             ],
-            Self::Attached => &[Self::Detaching],
+            Self::Attached | Self::DetachFailed => &[Self::Detaching],
             Self::Detaching => &[Self::Held, Self::Released, Self::DetachFailed],
-            Self::AttachUnknown => &[Self::Attached, Self::Held, Self::Detaching],
-            Self::DetachFailed => &[Self::Detaching, Self::Held, Self::Released],
+            Self::AttachUnknown => &[Self::Attached, Self::Detaching],
             Self::Released => &[],
         }
     }
@@ -408,11 +412,8 @@ mod tests {
             (Detaching, Released),
             (Detaching, DetachFailed),
             (AttachUnknown, Attached),
-            (AttachUnknown, Held),
             (AttachUnknown, Detaching),
             (DetachFailed, Detaching),
-            (DetachFailed, Held),
-            (DetachFailed, Released),
         ];
         for from in HardwareReservationState::ALL {
             for to in HardwareReservationState::ALL {
@@ -425,6 +426,19 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn removed_edges_stay_removed() {
+        // An unknown attach or a failed detach is never resolved to held or
+        // released on a guess; only a retry or a read-back-driven path is
+        // legal.
+        assert!(!AttachUnknown.can_transition_to(Held));
+        assert!(!AttachUnknown.can_transition_to(Released));
+        assert!(!DetachFailed.can_transition_to(Held));
+        assert!(!DetachFailed.can_transition_to(Released));
+        assert_eq!(AttachUnknown.successors(), &[Attached, Detaching]);
+        assert_eq!(DetachFailed.successors(), &[Detaching]);
     }
 
     #[test]
