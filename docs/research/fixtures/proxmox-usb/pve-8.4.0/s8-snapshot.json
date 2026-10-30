@@ -1,0 +1,15 @@
+{
+  "http_status": 200,
+  "pve_version": "8.4.0",
+  "recorded_with": "pvesh (root@pam), status and body reconstructed from the CLI",
+  "request": {
+    "method": "POST",
+    "params": {
+      "snapname": "s1"
+    },
+    "path": "/nodes/pve8/qemu/9563/snapshot"
+  },
+  "response": "UPID:pve8:00000ACA:0000905F:6AE45331:qmsnapshot:9563:root@pam:",
+  "task_log": "snapshotting 'drive-scsi0' (local-lvm:vm-9563-disk-0)\n  WARNING: You have not turned on protection against thin pools running out of space.\n  WARNING: Set activation/thin_pool_autoextend_threshold below 100 to trigger automatic extension of thin pools before they get full.\n  Logical volume \"snap_vm-9563-disk-0_s1\" created.\n  WARNING: Sum of all thin volume sizes (<31.02 GiB) exceeds the size of thin pool pve/data and the amount of free space in volume group (<7.88 GiB).",
+  "who": "root"
+}

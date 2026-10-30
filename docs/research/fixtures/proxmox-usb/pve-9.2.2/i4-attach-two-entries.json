@@ -1,0 +1,19 @@
+{
+  "http_status": 400,
+  "pve_version": "9.2.2",
+  "recorded_with": "pvesh (root@pam), status and body reconstructed from the CLI",
+  "request": {
+    "method": "PUT",
+    "params": {
+      "usb0": "mapping=fm-test-tmp-two"
+    },
+    "path": "/nodes/pve/qemu/9563/config"
+  },
+  "response": {
+    "errors": {
+      "usb0": "hotplug problem - More than one USB mapping per host not supported"
+    },
+    "message": "Parameter verification failed."
+  },
+  "who": "root"
+}

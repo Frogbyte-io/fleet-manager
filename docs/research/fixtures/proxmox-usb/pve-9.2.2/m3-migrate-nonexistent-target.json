@@ -1,0 +1,17 @@
+{
+  "http_status": 500,
+  "pve_version": "9.2.2",
+  "recorded_with": "pvesh (root@pam), status and body reconstructed from the CLI",
+  "request": {
+    "method": "POST",
+    "params": {
+      "online": "1",
+      "target": "nowhere"
+    },
+    "path": "/nodes/pve/qemu/9563/migrate"
+  },
+  "response": {
+    "message": "no such cluster node 'nowhere'"
+  },
+  "who": "root"
+}

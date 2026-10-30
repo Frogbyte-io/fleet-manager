@@ -1,0 +1,19 @@
+{
+  "http_status": 200,
+  "pve_version": "9.2.2",
+  "recorded_with": "pvesh (root@pam), status and body reconstructed from the CLI",
+  "request": {
+    "method": "GET",
+    "params": {},
+    "path": "/cluster/mapping/usb/fm-test-superdrive-a"
+  },
+  "response": {
+    "description": "Fleet M11 test: MacBook Air SuperDrive (port 1-10)",
+    "digest": "9496fd191eaf9792205190511d20822ddd76722e",
+    "map": [
+      "node=pve,id=05ac:1500,path=1-10"
+    ],
+    "type": "usb"
+  },
+  "who": "root"
+}

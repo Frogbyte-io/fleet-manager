@@ -1,0 +1,13 @@
+{
+  "http_status": 200,
+  "pve_version": "9.2.2",
+  "recorded_with": "pvesh (root@pam), status and body reconstructed from the CLI",
+  "request": {
+    "method": "POST",
+    "params": {},
+    "path": "/nodes/pve/qemu/9563/status/start"
+  },
+  "response": "UPID:pve:00182AED:0CA10E08:6AE44DC7:qmstart:9563:root@pam:",
+  "task_log": "generating cloud-init ISO",
+  "who": "root"
+}

@@ -1,0 +1,93 @@
+{
+  "http_status": 200,
+  "pve_version": "9.2.2",
+  "recorded_with": "pvesh (root@pam), status and body reconstructed from the CLI",
+  "request": {
+    "method": "GET",
+    "params": {},
+    "path": "/nodes/pve/qemu/9564/pending"
+  },
+  "response": [
+    {
+      "key": "scsi0",
+      "value": "local-lvm:vm-9564-disk-0,size=3G"
+    },
+    {
+      "key": "vmgenid",
+      "value": "00000000-0000-4000-8000-000000000000"
+    },
+    {
+      "key": "vga",
+      "value": "serial0"
+    },
+    {
+      "key": "boot",
+      "value": "order=scsi0"
+    },
+    {
+      "key": "tags",
+      "value": "fm-s11-spike"
+    },
+    {
+      "key": "smbios1",
+      "value": "uuid=00000000-0000-4000-8000-000000000000"
+    },
+    {
+      "key": "ide2",
+      "value": "local-lvm:vm-9564-cloudinit,media=cdrom,size=4M"
+    },
+    {
+      "key": "digest",
+      "value": "8d14d706f6117d7b10836a3dd896907c2f462864"
+    },
+    {
+      "key": "meta",
+      "value": "creation-qemu=11.0.0,ctime=1790979727"
+    },
+    {
+      "key": "description",
+      "value": "FM-S11 USB spike throwaway 2"
+    },
+    {
+      "key": "name",
+      "value": "fm-s11-usb-second"
+    },
+    {
+      "key": "ipconfig0",
+      "value": "ip=dhcp"
+    },
+    {
+      "key": "scsihw",
+      "value": "virtio-scsi-pci"
+    },
+    {
+      "key": "serial0",
+      "value": "socket"
+    },
+    {
+      "key": "agent",
+      "value": "enabled=1"
+    },
+    {
+      "key": "memory",
+      "value": "1024"
+    },
+    {
+      "key": "ostype",
+      "value": "l26"
+    },
+    {
+      "key": "net0",
+      "value": "virtio=BC:24:11:00:00:01,bridge=vmbr0"
+    },
+    {
+      "key": "cores",
+      "value": 1
+    },
+    {
+      "key": "usb0",
+      "pending": "mapping=fm-test-tmp-absentpath"
+    }
+  ],
+  "who": "root"
+}
