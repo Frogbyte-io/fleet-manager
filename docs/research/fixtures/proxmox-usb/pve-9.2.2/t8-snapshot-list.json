@@ -1,0 +1,19 @@
+{
+  "http_status": 200,
+  "pve_version": "9.2.2",
+  "recorded_with": "pvesh (root@pam), status and body reconstructed from the CLI",
+  "request": {
+    "method": "GET",
+    "params": {},
+    "path": "/nodes/pve/qemu/9563/snapshot"
+  },
+  "response": [
+    {
+      "description": "You are here!",
+      "digest": "cb3243f2b8aa4da5b30d79560b800ffe64b995f7",
+      "name": "current",
+      "running": 0
+    }
+  ],
+  "who": "root"
+}

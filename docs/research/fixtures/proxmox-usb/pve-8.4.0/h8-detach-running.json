@@ -1,0 +1,15 @@
+{
+  "http_status": 200,
+  "pve_version": "8.4.0",
+  "pvesh_log": "update VM 9563: -delete usb0",
+  "recorded_with": "pvesh (root@pam), status and body reconstructed from the CLI",
+  "request": {
+    "method": "PUT",
+    "params": {
+      "delete": "usb0"
+    },
+    "path": "/nodes/pve8/qemu/9563/config"
+  },
+  "response": null,
+  "who": "root"
+}

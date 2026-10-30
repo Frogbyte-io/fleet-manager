@@ -1,0 +1,19 @@
+{
+  "http_status": 200,
+  "pve_version": "9.2.2",
+  "recorded_with": "curl over HTTPS with a temporary privilege-separated API token (real HTTP status and body)",
+  "request": {
+    "method": "GET",
+    "params": {},
+    "path": "/cluster/mapping/usb/fm-test-superdrive-a"
+  },
+  "response": {
+    "description": "Fleet M11 test: MacBook Air SuperDrive (port 1-10)",
+    "digest": "a874138744d80c8c5fd8c931d386d92ecd2d2da8",
+    "map": [
+      "node=pve,id=05ac:1500,path=1-10"
+    ],
+    "type": "usb"
+  },
+  "who": "probe"
+}

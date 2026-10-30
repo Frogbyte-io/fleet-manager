@@ -1,0 +1,13 @@
+{
+  "http_status": 200,
+  "pve_version": "9.2.2",
+  "recorded_with": "pvesh (root@pam), status and body reconstructed from the CLI",
+  "request": {
+    "method": "POST",
+    "params": {},
+    "path": "/nodes/pve/qemu/9564/template"
+  },
+  "response": "UPID:pve:001834E3:0CA1BC78:6AE44F86:qmtemplate:9564:root@pam:",
+  "task_log": "Renamed \"vm-9564-disk-0\" to \"base-9564-disk-0\" in volume group \"pve\"\n  Logical volume pve/base-9564-disk-0 changed.",
+  "who": "root"
+}

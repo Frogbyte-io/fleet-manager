@@ -1,0 +1,19 @@
+{
+  "http_status": 400,
+  "pve_version": "9.2.2",
+  "recorded_with": "pvesh (root@pam), status and body reconstructed from the CLI",
+  "request": {
+    "method": "PUT",
+    "params": {
+      "usb0": "mapping=fm-test-does-not-exist"
+    },
+    "path": "/nodes/pve/qemu/9564/config"
+  },
+  "response": {
+    "errors": {
+      "usb0": "hotplug problem - USB device mapping not found for 'fm-test-does-not-exist'"
+    },
+    "message": "Parameter verification failed."
+  },
+  "who": "root"
+}

@@ -1,0 +1,16 @@
+{
+  "http_status": 200,
+  "pve_version": "9.2.2",
+  "recorded_with": "pvesh (root@pam), status and body reconstructed from the CLI",
+  "request": {
+    "method": "POST",
+    "params": {
+      "description": "fm-s11",
+      "snapname": "s1"
+    },
+    "path": "/nodes/pve/qemu/9563/snapshot"
+  },
+  "response": "UPID:pve:0018323C:0CA19A3F:6AE44F2E:qmsnapshot:9563:root@pam:",
+  "task_log": "freeze guest filesystem\nsnapshotting 'drive-scsi0' (local-lvm:vm-9563-disk-0)\n  Logical volume \"snap_vm-9563-disk-0_s1\" created.\nthaw guest filesystem",
+  "who": "root"
+}

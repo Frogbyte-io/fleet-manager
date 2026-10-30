@@ -1,0 +1,18 @@
+{
+  "http_status": 200,
+  "pve_version": "9.2.2",
+  "recorded_with": "pvesh (root@pam), status and body reconstructed from the CLI",
+  "request": {
+    "method": "GET",
+    "params": {},
+    "path": "/cluster/mapping/usb/fm-test-tmp-nonode"
+  },
+  "response": {
+    "digest": "849beaef1edb0c658ae8e7b5c514d60fc4e8ee15",
+    "map": [
+      "node=nowhere,id=05ac:1500"
+    ],
+    "type": "usb"
+  },
+  "who": "root"
+}

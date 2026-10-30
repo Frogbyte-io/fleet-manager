@@ -1,0 +1,17 @@
+{
+  "http_status": 200,
+  "pve_version": "8.4.0",
+  "recorded_with": "pvesh (root@pam), status and body reconstructed from the CLI",
+  "request": {
+    "method": "POST",
+    "params": {
+      "full": "1",
+      "name": "fm-s11-usb-clone",
+      "newid": "9565"
+    },
+    "path": "/nodes/pve8/qemu/9563/clone"
+  },
+  "response": "UPID:pve8:00000AE2:00009159:6AE45334:qmclone:9563:root@pam:",
+  "task_log": "create full clone of drive ide2 (local-lvm:vm-9563-cloudinit)\n  WARNING: You have not turned on protection against thin pools running out of space.\n  WARNING: Set activation/thin_pool_autoextend_threshold below 100 to trigger automatic extension of thin pools before they get full.\n  Logical volume \"vm-9565-cloudinit\" created.\n  WARNING: Sum of all thin volume sizes (<31.02 GiB) exceeds the size of thin pool pve/data and the amount of free space in volume group (<7.88 GiB).\ncreate full clone of drive scsi0 (local-lvm:vm-9563-disk-0)\n  WARNING: You have not turned on protection against thin pools running out of space.\n  WARNING: Set activation/thin_pool_autoextend_threshold below 100 to trigger automatic extension of thin pools before they get full.\n  Logical volume \"vm-9565-disk-0\" created.\n  WARNING: Sum of all thin volume sizes (<34.02 GiB) exceeds the size of thin pool pve/data and the amount of free space in volume group (<7.88 GiB).\ndrive mirror is starting for drive-scsi0\ndrive-scsi0: transferred 0.0 B of 3.0 GiB (0.00%) in 0s\ndrive-scsi0: transferred 873.0 MiB of 3.0 GiB (28.42%) in 1s\ndrive-scsi0: transferred 1.6 GiB of 3.0 GiB (54.69%) in 2s\ndrive-scsi0: transferred 2.7 GiB of 3.0 GiB (88.87%) in 3s\ndrive-scsi0: transferred 3.0 GiB of 3.0 GiB (100.00%) in 4s, ready\nall 'mirror' jobs are ready\nfreeze filesystem\ndrive-scsi0: Cancelling block job\ndrive-scsi0: Done.\nunfreeze filesystem",
+  "who": "root"
+}

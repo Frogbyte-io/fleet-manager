@@ -1,0 +1,102 @@
+{
+  "http_status": 200,
+  "pve_version": "9.2.2",
+  "recorded_with": "pvesh (root@pam), status and body reconstructed from the CLI",
+  "request": {
+    "method": "GET",
+    "params": {},
+    "path": "/nodes/pve/qemu/9563/pending"
+  },
+  "response": [
+    {
+      "key": "vmgenid",
+      "value": "00000000-0000-4000-8000-000000000000"
+    },
+    {
+      "key": "memory",
+      "value": "1024"
+    },
+    {
+      "key": "hotplug",
+      "value": "network,disk"
+    },
+    {
+      "key": "tags",
+      "value": "fm-s11-spike"
+    },
+    {
+      "key": "serial0",
+      "value": "socket"
+    },
+    {
+      "key": "cores",
+      "value": 1
+    },
+    {
+      "key": "scsihw",
+      "value": "virtio-scsi-pci"
+    },
+    {
+      "key": "ostype",
+      "value": "l26"
+    },
+    {
+      "key": "smbios1",
+      "value": "uuid=00000000-0000-4000-8000-000000000000"
+    },
+    {
+      "delete": 1,
+      "key": "usb0",
+      "value": "mapping=fm-test-superdrive-a"
+    },
+    {
+      "key": "name",
+      "value": "fm-s11-usb-spike"
+    },
+    {
+      "key": "boot",
+      "value": "order=scsi0"
+    },
+    {
+      "key": "agent",
+      "value": "enabled=1"
+    },
+    {
+      "key": "ipconfig0",
+      "value": "ip=dhcp"
+    },
+    {
+      "key": "digest",
+      "value": "97e6c8a1325c19303d32b1834a0cb1518e178f23"
+    },
+    {
+      "key": "net0",
+      "value": "virtio=BC:24:11:00:00:01,bridge=vmbr0"
+    },
+    {
+      "key": "description",
+      "value": "FM-S11 USB spike throwaway"
+    },
+    {
+      "key": "scsi0",
+      "value": "local-lvm:vm-9563-disk-0,size=3G"
+    },
+    {
+      "key": "meta",
+      "value": "creation-qemu=11.0.0,ctime=1790979727"
+    },
+    {
+      "key": "vga",
+      "value": "serial0"
+    },
+    {
+      "key": "ide2",
+      "value": "local-lvm:vm-9563-cloudinit,media=cdrom,size=4M"
+    },
+    {
+      "key": "usb1",
+      "pending": "mapping=fm-test-verbatim"
+    }
+  ],
+  "who": "root"
+}

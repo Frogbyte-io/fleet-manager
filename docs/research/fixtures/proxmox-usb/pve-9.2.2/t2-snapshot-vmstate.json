@@ -1,0 +1,16 @@
+{
+  "http_status": 200,
+  "pve_version": "9.2.2",
+  "recorded_with": "pvesh (root@pam), status and body reconstructed from the CLI",
+  "request": {
+    "method": "POST",
+    "params": {
+      "snapname": "s2",
+      "vmstate": "1"
+    },
+    "path": "/nodes/pve/qemu/9563/snapshot"
+  },
+  "response": "UPID:pve:0018325A:0CA19BD6:6AE44F32:qmsnapshot:9563:root@pam:",
+  "task_log": "Logical volume \"vm-9563-state-s2\" created.\n  Logical volume pve/vm-9563-state-s2 changed.\nsaving VM state and RAM using storage 'local-lvm'\n232.00 B in 0s\ncompleted saving the VM state in 0s, saved 248.69 MiB\nsnapshotting 'drive-scsi0' (local-lvm:vm-9563-disk-0)\n  Logical volume \"snap_vm-9563-disk-0_s2\" created.",
+  "who": "root"
+}

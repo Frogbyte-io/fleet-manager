@@ -1,0 +1,32 @@
+{
+  "http_status": 200,
+  "pve_version": "8.4.0",
+  "recorded_with": "pvesh (root@pam), status and body reconstructed from the CLI",
+  "request": {
+    "method": "GET",
+    "params": {},
+    "path": "/nodes/pve8/qemu/9563/config"
+  },
+  "response": {
+    "agent": "enabled=1",
+    "boot": "order=scsi0",
+    "cores": 1,
+    "digest": "04c3f08a4ccbec8b6cddabfe9a8da2de63132469",
+    "ide2": "local-lvm:vm-9563-cloudinit,media=cdrom,size=4M",
+    "ipconfig0": "ip=dhcp",
+    "memory": "1024",
+    "meta": "creation-qemu=9.2.0,ctime=1790854295",
+    "name": "fm-s11-usb-spike",
+    "net0": "virtio=BC:24:11:00:00:01,bridge=vmbr0",
+    "ostype": "l26",
+    "scsi0": "local-lvm:vm-9563-disk-0,size=3G",
+    "scsihw": "virtio-scsi-pci",
+    "serial0": "socket",
+    "smbios1": "uuid=00000000-0000-4000-8000-000000000000",
+    "tags": "fm-s11-spike",
+    "usb1": "mapping=fm-test-tablet-id,usb3=1",
+    "vga": "serial0",
+    "vmgenid": "00000000-0000-4000-8000-000000000000"
+  },
+  "who": "root"
+}
