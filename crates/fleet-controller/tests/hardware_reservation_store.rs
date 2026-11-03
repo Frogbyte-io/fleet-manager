@@ -98,6 +98,32 @@ impl Fixture {
         .unwrap();
     }
 
+    /// A lease whose provision record exists but never allocated a guest
+    /// (`vmid` is NULL), as a provision that failed before the clone.
+    async fn lease_with_empty_provision(&self, id: &str, state: &str) {
+        sqlx::query(
+            "INSERT INTO lab_provisions (id, template_version_id, state, created_at, updated_at) \
+             VALUES (?1, 'template-version-1', 'provisioning', ?2, ?2)",
+        )
+        .bind(format!("provision-{id}"))
+        .bind(NOW)
+        .execute(&self.pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO lab_leases (id, template_version_id, owner, purpose, state, \
+             provision_id, cleanup, created_at) \
+             VALUES (?1, 'template-version-1', 'tester', 'test', ?2, ?3, 'destroy', ?4)",
+        )
+        .bind(id)
+        .bind(state)
+        .bind(format!("provision-{id}"))
+        .bind(NOW)
+        .execute(&self.pool)
+        .await
+        .unwrap();
+    }
+
     async fn set_lease_state(&self, id: &str, state: &str) {
         sqlx::query("UPDATE lab_leases SET state = ?2 WHERE id = ?1")
             .bind(id)
@@ -413,6 +439,25 @@ async fn a_row_whose_lease_no_longer_counts_is_released_first() {
 
     // The lease finished but its own release write was lost.
     fixture.set_lease_state("old", "released").await;
+
+    // A finished requester is refused, but the stale row it found is
+    // released and committed, and the device goes back to `available`: no
+    // insert follows, so only the release itself can have reset the status.
+    fixture.lease("dead", "released", None).await;
+    let refused = fixture.reserve("dev-1", "dead").await;
+    assert_eq!(refusal(&refused).reason(), "hardware_owner_finished");
+    assert_eq!(refused.released.len(), 1);
+    assert_eq!(refused.released[0].previous, old);
+    assert!(fixture.live("dev-1").await.is_empty());
+    assert_eq!(fixture.status("dev-1").await, DeviceStatus::Available);
+
+    // Put the stale hold back (the release above was real, so re-create the
+    // lost-write situation with a fresh lease) and let a live owner win.
+    fixture.lease("old-2", "reserving", None).await;
+    let stale = fixture.reserve("dev-1", "old-2").await;
+    let (stale, _) = reserved(&stale);
+    let old = stale.clone();
+    fixture.set_lease_state("old-2", "released").await;
     let outcome = fixture.reserve("dev-1", "new").await;
     let (winner, created) = reserved(&outcome);
     assert!(created);
@@ -442,8 +487,9 @@ async fn the_lease_state_decides_not_the_reservation() {
     fixture.lease("other", "reserving", None).await;
 
     // Every state in which the lease still counts keeps its hold.
-    let counting: [(&str, Option<i64>); 8] = [
+    let counting: [(&str, Option<i64>); 10] = [
         ("requested", None),
+        ("queued", None),
         ("reserving", None),
         ("provisioning", Some(100)),
         ("ready", Some(100)),
@@ -452,6 +498,7 @@ async fn the_lease_state_decides_not_the_reservation() {
         // Failed with a guest: cleanup still owes it, so it counts.
         ("failed", Some(100)),
         ("booting", Some(100)),
+        ("bootstrapping", Some(100)),
     ];
     for (index, (state, vmid)) in counting.into_iter().enumerate() {
         let lease = format!("counting-{index}");
@@ -477,6 +524,152 @@ async fn the_lease_state_decides_not_the_reservation() {
     let outcome = fixture.reserve("dev-1", "other").await;
     assert_eq!(outcome.released.len(), 1);
     assert_eq!(reserved(&outcome).0.owner_id, "other");
+}
+
+#[tokio::test]
+async fn a_failed_lease_with_a_provision_but_no_vmid_does_not_count() {
+    let fixture = Fixture::new().await;
+    fixture.device("dev-1", DeviceStatus::Available).await;
+    fixture.lease("other", "reserving", None).await;
+    fixture
+        .lease_with_empty_provision("early-failure", "reserving")
+        .await;
+    reserved(&fixture.reserve("dev-1", "early-failure").await);
+
+    // Failed before any guest existed: nothing can be attached, so the hold
+    // is a lost release write.
+    fixture.set_lease_state("early-failure", "failed").await;
+    let outcome = fixture.reserve("dev-1", "other").await;
+    assert_eq!(outcome.released.len(), 1);
+    assert_eq!(outcome.released[0].previous.owner_id, "early-failure");
+    assert_eq!(reserved(&outcome).0.owner_id, "other");
+
+    // And such a lease reserves nothing new (on a free device).
+    let other_hold = reserved(&outcome).0.id.clone();
+    fixture
+        .reservations
+        .release(&other_hold, NOW + 3)
+        .await
+        .unwrap();
+    fixture
+        .lease_with_empty_provision("early-failure-2", "failed")
+        .await;
+    let refused = fixture.reserve("dev-1", "early-failure-2").await;
+    assert_eq!(refusal(&refused).reason(), "hardware_owner_finished");
+}
+
+/// An audit sink that is down.
+#[derive(Debug)]
+struct DownAudit;
+
+#[async_trait::async_trait]
+impl fleet_application::operation::AuditPort for DownAudit {
+    async fn record_intent(&self, _: &fleet_application::audit::AuditIntent) -> Result<(), String> {
+        Err("audit sink down".to_owned())
+    }
+
+    async fn record_outcome(
+        &self,
+        _: &str,
+        _: fleet_application::audit::AuditOutcome,
+    ) -> Result<(), String> {
+        Err("audit sink down".to_owned())
+    }
+}
+
+#[tokio::test]
+async fn a_down_audit_sink_never_fails_or_undoes_a_reserve_release_or_override() {
+    let fixture = Fixture::new().await;
+    fixture.device("dev-1", DeviceStatus::Available).await;
+    fixture.lease("lease-1", "reserving", None).await;
+    fixture.lease("lease-2", "reserving", None).await;
+    let service = HardwareReservations::new(fixture.reservations.clone(), Arc::new(DownAudit));
+    let context = AuditContext {
+        actor: "controller".to_owned(),
+        operation_id: None,
+    };
+    let ask = |owner: &str| request("dev-1", ReservationOwnerKind::Lease, owner);
+
+    let ReserveDecision::Reserved { reservation, .. } = service
+        .reserve(&context, &ask("lease-1"), NOW)
+        .await
+        .unwrap()
+    else {
+        panic!("expected a reservation");
+    };
+    // A refusal is returned as a refusal, not as the audit error.
+    assert!(matches!(
+        service
+            .reserve(&context, &ask("lease-2"), NOW)
+            .await
+            .unwrap(),
+        ReserveDecision::Refused(ReserveRefusal::Busy { .. })
+    ));
+
+    // Release.
+    let ReleaseOutcome::Released(released) = service
+        .release(&context, &reservation.id, NOW + 1)
+        .await
+        .unwrap()
+    else {
+        panic!("expected a release");
+    };
+    assert_eq!(released.current.state, State::Released);
+    assert!(fixture.live("dev-1").await.is_empty());
+
+    // Override of a row the saga left failed.
+    let ReserveDecision::Reserved { reservation, .. } = service
+        .reserve(&context, &ask("lease-2"), NOW + 2)
+        .await
+        .unwrap()
+    else {
+        panic!("expected a reservation");
+    };
+    fixture
+        .move_to(&reservation.id, &[State::Attaching, State::AttachUnknown])
+        .await;
+    let overridden = service
+        .override_release(&context, &reservation.id, NOW + 3)
+        .await
+        .unwrap();
+    assert_eq!(overridden.previous.state, State::AttachUnknown);
+    let stored = fixture
+        .hardware
+        .reservation(&reservation.id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(stored.state, State::Released);
+    assert_eq!(fixture.status("dev-1").await, DeviceStatus::Available);
+}
+
+#[tokio::test]
+async fn a_device_refresh_over_a_live_hold_is_repaired_by_the_next_reserve() {
+    let fixture = Fixture::new().await;
+    fixture.device("dev-1", DeviceStatus::Available).await;
+    fixture.lease("lease-1", "reserving", None).await;
+    fixture.lease("lease-2", "reserving", None).await;
+    let held = fixture.reserve("dev-1", "lease-1").await;
+    let (held, _) = reserved(&held);
+
+    // A refresh writes the observed status over the derived `reserved`.
+    fixture.device("dev-1", DeviceStatus::Available).await;
+    assert_eq!(fixture.status("dev-1").await, DeviceStatus::Available);
+    let again = fixture.reserve("dev-1", "lease-1").await;
+    assert!(!reserved(&again).1);
+    assert_eq!(reserved(&again).0.id, held.id);
+    assert_eq!(fixture.status("dev-1").await, DeviceStatus::Reserved);
+
+    // The same through a refused second owner.
+    fixture.device("dev-1", DeviceStatus::Available).await;
+    let refused = fixture.reserve("dev-1", "lease-2").await;
+    assert_eq!(refusal(&refused).reason(), "hardware_busy");
+    assert_eq!(fixture.status("dev-1").await, DeviceStatus::Reserved);
+
+    // A status the refresh observed for a real reason is not overwritten.
+    fixture.device("dev-1", DeviceStatus::Missing).await;
+    fixture.reserve("dev-1", "lease-1").await;
+    assert_eq!(fixture.status("dev-1").await, DeviceStatus::Missing);
 }
 
 #[tokio::test]
@@ -867,11 +1060,28 @@ mod properties {
 
     #[derive(Clone, Copy, Debug)]
     enum Op {
-        Reserve { owner: usize, device: usize },
-        Release { pick: usize },
-        Override { pick: usize },
-        Move { pick: usize, to: usize, wild: bool },
-        FinishLease { owner: usize },
+        Reserve {
+            owner: usize,
+            device: usize,
+        },
+        Release {
+            pick: usize,
+        },
+        Override {
+            pick: usize,
+        },
+        Move {
+            pick: usize,
+            to: usize,
+            wild: bool,
+        },
+        FinishLease {
+            owner: usize,
+        },
+        /// A device refresh writes the observed status over the derived one.
+        Refresh {
+            device: usize,
+        },
     }
 
     fn op() -> impl Strategy<Value = Op> {
@@ -881,6 +1091,7 @@ mod properties {
             1 => (0..8_usize).prop_map(|pick| Op::Override { pick }),
             4 => (0..8_usize, 0..7_usize, 0..8_u8).prop_map(|(pick, to, wild)| Op::Move { pick, to, wild: wild == 0 }),
             3 => (0..3_usize).prop_map(|owner| Op::FinishLease { owner }),
+            2 => (0..2_usize).prop_map(|device| Op::Refresh { device }),
         ]
     }
 
@@ -935,6 +1146,8 @@ mod properties {
         }
         fixture.machine("machine-0").await;
         let mut now = NOW;
+        // Devices a refresh wrote over, not yet repaired by a reserve.
+        let mut stale: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
         for op in ops {
             now += 1;
             let before = all_rows(&fixture.pool).await;
@@ -951,8 +1164,14 @@ mod properties {
                     // Only never-attached holds of finished owners are freed.
                     for released in &outcome.released {
                         assert_eq!(released.previous.state, State::Held);
-                        assert!(!has_slot(&released.previous));
                         assert_eq!(released.cause, ReleaseCause::OwnerFinished);
+                        // It was a live row on this device, as read before.
+                        assert!(before.contains(&released.previous));
+                        assert_eq!(released.previous.device_id, device);
+                        // And the database agrees with what was reported.
+                        assert_eq!(released.current.state, State::Released);
+                        let stored = fixture.hardware.reservation(&released.current.id).await;
+                        assert_eq!(stored.unwrap().as_ref(), Some(&released.current));
                     }
                     match &outcome.decision {
                         ReserveDecision::Reserved {
@@ -1040,6 +1259,13 @@ mod properties {
                         .set_lease_state(&format!("lease-{owner}"), "released")
                         .await;
                 }
+                Op::Refresh { device } => {
+                    // The refresh observes nothing referencing the mapping,
+                    // so it writes `available`, over `reserved` if held.
+                    let device = format!("dev-{device}");
+                    fixture.device(&device, DeviceStatus::Available).await;
+                    stale.insert(device);
+                }
             }
 
             let after = all_rows(&fixture.pool).await;
@@ -1047,12 +1273,24 @@ mod properties {
                 let live = live_of(&after, device);
                 assert!(live.len() <= 1, "two live holders of {device}: {live:?}");
                 let status = fixture.status(device).await;
-                let expected = if live.is_empty() {
-                    DeviceStatus::Available
+                // A reserve that found the live row repairs the status in
+                // the same transaction (a repeat or a busy refusal).
+                let repaired = matches!(
+                    op,
+                    Op::Reserve { device: touched, .. } if format!("dev-{touched}") == device
+                ) && !live.is_empty();
+                if live.is_empty() || repaired || !stale.contains(device) {
+                    let expected = if live.is_empty() {
+                        DeviceStatus::Available
+                    } else {
+                        DeviceStatus::Reserved
+                    };
+                    assert_eq!(status, expected, "{device}: {live:?}");
+                    stale.remove(device);
                 } else {
-                    DeviceStatus::Reserved
-                };
-                assert_eq!(status, expected, "{device}: {live:?}");
+                    // Refreshed and not touched since: only ever `available`.
+                    assert_eq!(status, DeviceStatus::Available, "{device}");
+                }
             }
             for row in &after {
                 assert_eq!(row.state == State::Released, row.released_at.is_some());

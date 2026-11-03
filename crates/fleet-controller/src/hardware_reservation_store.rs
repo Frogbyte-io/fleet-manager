@@ -243,6 +243,29 @@ async fn release_row(
     })
 }
 
+/// Keeps the derived status consistent with a live row: a device refresh
+/// (`HardwareStore::upsert_device`) writes the observed status, which is
+/// `available` when nothing references the mapping yet, over `reserved`. A
+/// reserve that finds a live row puts `reserved` back. Only `available` is
+/// replaced: any other observed status (missing, externally attached,
+/// unsupported, quarantined) is information the refresh or the saga owns.
+async fn reassert_reserved(
+    tx: &mut Tx<'_>,
+    device_id: &str,
+    now: i64,
+) -> Result<(), HardwareStoreError> {
+    sqlx::query(
+        "UPDATE hardware_devices SET status = 'reserved', updated_at = ?2 \
+         WHERE id = ?1 AND status = 'available'",
+    )
+    .bind(device_id)
+    .bind(now)
+    .execute(&mut **tx)
+    .await
+    .map_err(|error| backend("keep the device reserved", &error))?;
+    Ok(())
+}
+
 /// The reserve rules, inside the caller's transaction. Rows released on the
 /// way are pushed to `released` even when the decision is a refusal: the
 /// correction is committed regardless.
@@ -258,6 +281,7 @@ async fn reserve_in(
     let requester_counts = owner_counts(tx, request.owner_kind, &request.owner_id).await?;
     if let Some(live) = live_for_device(tx, &request.device_id).await? {
         let same_owner = live.owner_kind == request.owner_kind && live.owner_id == request.owner_id;
+        reassert_reserved(tx, &live.device_id, now).await?;
         if same_owner && requester_counts {
             // A repeat (a retried step, a restart): the existing row,
             // whatever state the saga has taken it to.

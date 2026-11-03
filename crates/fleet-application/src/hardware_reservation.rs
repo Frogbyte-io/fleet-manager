@@ -265,6 +265,10 @@ pub trait HardwareReservationPort: fmt::Debug + Send + Sync {
     /// and `detach_failed`, is refused as an illegal transition and left
     /// untouched. Releasing a released row is a no-op.
     ///
+    /// There is no expected-state precondition: any `detaching` row is
+    /// released, so the caller must only call this after a confirmed
+    /// read-back that the device is gone from the guest.
+    ///
     /// # Errors
     ///
     /// Fails when the reservation does not exist, its state refuses the
