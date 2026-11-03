@@ -1,0 +1,299 @@
+{
+  "data": {
+    "accountId": "01a1a3a1-4685-7ec0-b281-fe37a35b81f5",
+    "devices": [
+      {
+        "accountId": "01a1a3a1-4685-7ec0-b281-fe37a35b81f5",
+        "createdAt": 1793746618004,
+        "entries": [
+          {
+            "lastSeenAt": 1793746618020,
+            "manufacturer": null,
+            "node": "pve",
+            "product": null,
+            "productId": "0001",
+            "usbpath": "1-1",
+            "vendorId": "aaaa"
+          }
+        ],
+        "holder": {
+          "guest": {
+            "accountId": "01a1a3a1-4685-7ec0-b281-fe37a35b81f5",
+            "node": "pve",
+            "usbSlot": 0,
+            "vmid": 9101
+          },
+          "ownerId": "0192f0a0-7c11-7a02-9b2d-1f3d5a7c9e01",
+          "ownerKind": "lease",
+          "reservationId": "res-a",
+          "reservedAt": 1793745418015,
+          "state": "attached"
+        },
+        "id": "01a1a3a1-4695-7e40-9075-b41f561974ad",
+        "kind": "usb",
+        "mappingId": "fm-a",
+        "note": null,
+        "observation": {
+          "externalReferences": [
+            {
+              "guestName": "base",
+              "node": "pve",
+              "pending": null,
+              "slot": "usb0",
+              "template": true,
+              "vmid": 9000
+            }
+          ],
+          "notes": []
+        },
+        "observedAt": 1793746618020,
+        "reason": null,
+        "reasonText": null,
+        "stale": false,
+        "status": "reserved",
+        "updatedAt": 1793746618020
+      },
+      {
+        "accountId": "01a1a3a1-4685-7ec0-b281-fe37a35b81f5",
+        "createdAt": 1793746618004,
+        "entries": [
+          {
+            "lastSeenAt": 1793746618020,
+            "manufacturer": null,
+            "node": "pve",
+            "product": null,
+            "productId": "0002",
+            "usbpath": null,
+            "vendorId": "bbbb"
+          }
+        ],
+        "holder": null,
+        "id": "01a1a3a1-4696-7a91-8529-26d7213bbe0f",
+        "kind": "usb",
+        "mappingId": "fm-b",
+        "note": null,
+        "observation": {
+          "externalReferences": [
+            {
+              "guestName": "guest-a",
+              "node": "pve",
+              "pending": null,
+              "slot": "usb0",
+              "template": false,
+              "vmid": 200
+            }
+          ],
+          "notes": [
+            "the entry for node pve is id-only (bbbb:0002); identical devices cannot be excluded without the node USB inventory"
+          ]
+        },
+        "observedAt": 1793746618020,
+        "reason": null,
+        "reasonText": null,
+        "stale": false,
+        "status": "externally_attached",
+        "updatedAt": 1793746618020
+      },
+      {
+        "accountId": "01a1a3a1-4685-7ec0-b281-fe37a35b81f5",
+        "createdAt": 1793746618004,
+        "entries": [
+          {
+            "lastSeenAt": 0,
+            "manufacturer": null,
+            "node": "pve",
+            "product": null,
+            "productId": "0001",
+            "usbpath": "1-3",
+            "vendorId": "aaaa"
+          }
+        ],
+        "holder": null,
+        "id": "01a1a3a1-4697-7f51-a3bd-197066bf8142",
+        "kind": "usb",
+        "mappingId": "fm-c",
+        "note": null,
+        "observation": {
+          "externalReferences": [],
+          "notes": [
+            "node pve: usb device '1-3' not found"
+          ]
+        },
+        "observedAt": 0,
+        "reason": null,
+        "reasonText": null,
+        "stale": true,
+        "status": "missing",
+        "updatedAt": 1793746618020
+      },
+      {
+        "accountId": "01a1a3a1-4685-7ec0-b281-fe37a35b81f5",
+        "createdAt": 1793746618004,
+        "entries": [],
+        "holder": null,
+        "id": "01a1a3a1-4698-7991-a0a9-1f819ca1cfdc",
+        "kind": "usb",
+        "mappingId": "fm-d",
+        "note": null,
+        "observation": {
+          "externalReferences": [],
+          "notes": []
+        },
+        "observedAt": 1793746618020,
+        "reason": "no_node_entry",
+        "reasonText": "the mapping has no usable entry for any node (it was removed or names no node)",
+        "stale": false,
+        "status": "unsupported",
+        "updatedAt": 1793746618020
+      },
+      {
+        "accountId": "01a1a3a1-4685-7ec0-b281-fe37a35b81f5",
+        "createdAt": 1793746618004,
+        "entries": [
+          {
+            "lastSeenAt": 1793746618020,
+            "manufacturer": null,
+            "node": "pve",
+            "product": null,
+            "productId": "0003",
+            "usbpath": "1-4",
+            "vendorId": "cccc"
+          }
+        ],
+        "holder": null,
+        "id": "01a1a3a1-4699-7fe3-8382-e21d527e62dc",
+        "kind": "usb",
+        "mappingId": "fm-e",
+        "note": null,
+        "observation": {
+          "externalReferences": [],
+          "notes": [
+            "the mapping has more than one entry for node pve; PVE refuses to attach it"
+          ]
+        },
+        "observedAt": 1793746618020,
+        "reason": "ambiguous_mapping",
+        "reasonText": "the device cannot be told apart: two entries for one node, or an id-only entry another device or mapping also matches; use a path-based entry per port",
+        "stale": false,
+        "status": "unsupported",
+        "updatedAt": 1793746618020
+      },
+      {
+        "accountId": "01a1a3a1-4685-7ec0-b281-fe37a35b81f5",
+        "createdAt": 1793746618004,
+        "entries": [
+          {
+            "lastSeenAt": 1793746618020,
+            "manufacturer": null,
+            "node": "pve",
+            "product": null,
+            "productId": "0004",
+            "usbpath": "1-6",
+            "vendorId": "dddd"
+          }
+        ],
+        "holder": null,
+        "id": "01a1a3a1-4699-7fe3-8382-e22c65a86f39",
+        "kind": "usb",
+        "mappingId": "fm-f",
+        "note": null,
+        "observation": {
+          "externalReferences": [],
+          "notes": []
+        },
+        "observedAt": 1793746618020,
+        "reason": "token_lacks_mapping_use",
+        "reasonText": "the token lacks Mapping.Use on the mapping (the opt-in FleetUsb role)",
+        "stale": false,
+        "status": "unsupported",
+        "updatedAt": 1793746618020
+      },
+      {
+        "accountId": "01a1a3a1-4685-7ec0-b281-fe37a35b81f5",
+        "createdAt": 1793746618004,
+        "entries": [
+          {
+            "lastSeenAt": 1793746618020,
+            "manufacturer": null,
+            "node": "pve",
+            "product": null,
+            "productId": "0005",
+            "usbpath": "1-8",
+            "vendorId": "eeee"
+          }
+        ],
+        "holder": {
+          "guest": {
+            "accountId": "01a1a3a1-4685-7ec0-b281-fe37a35b81f5",
+            "node": "pve",
+            "usbSlot": 0,
+            "vmid": 9102
+          },
+          "ownerId": "0192f0a0-7c11-7a02-9b2d-1f3d5a7c9e02",
+          "ownerKind": "machine",
+          "reservationId": "res-g",
+          "reservedAt": 1793745418017,
+          "state": "attach_unknown"
+        },
+        "id": "01a1a3a1-469a-7851-a3ee-366423a06936",
+        "kind": "usb",
+        "mappingId": "fm-g",
+        "note": null,
+        "observation": {
+          "externalReferences": [],
+          "notes": []
+        },
+        "observedAt": 1793746618020,
+        "reason": null,
+        "reasonText": null,
+        "stale": false,
+        "status": "quarantined",
+        "updatedAt": 1793746618020
+      },
+      {
+        "accountId": "01a1a3a1-4685-7ec0-b281-fe37a35b81f5",
+        "createdAt": 1793746618004,
+        "entries": [
+          {
+            "lastSeenAt": 1793746618020,
+            "manufacturer": null,
+            "node": "pve",
+            "product": null,
+            "productId": "0006",
+            "usbpath": "1-9",
+            "vendorId": "ffff"
+          }
+        ],
+        "holder": null,
+        "id": "01a1a3a1-469b-7dd3-8e62-1645dfc15faf",
+        "kind": "usb",
+        "mappingId": "fm-h",
+        "note": null,
+        "observation": {
+          "externalReferences": [],
+          "notes": []
+        },
+        "observedAt": 1793746618020,
+        "reason": null,
+        "reasonText": null,
+        "stale": false,
+        "status": "available",
+        "updatedAt": 1793746618020
+      }
+    ],
+    "guestScan": {
+      "listed": 3,
+      "read": 3,
+      "truncated": false,
+      "unreadable": 0
+    },
+    "observedAt": 1793746618020,
+    "pveVersion": "9.2.2",
+    "support": {
+      "detail": null,
+      "reason": null,
+      "state": "supported"
+    },
+    "warnings": []
+  }
+}

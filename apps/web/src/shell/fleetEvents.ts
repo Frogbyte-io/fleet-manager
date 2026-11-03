@@ -6,10 +6,11 @@ export type FleetEventStatus = 'connecting' | 'live' | 'disconnected'
 // The stream contains no resource payloads. Every notification refreshes the
 // corresponding authorized API reads already held by the web query cache.
 const QUERY_KEYS: Record<string, readonly (readonly string[])[]> = {
-  'machine.changed': [['fleet', 'machines'], ['machine'], ['machines', 'matrix'], ['skills', 'machines'], ['drift'], ['audit', 'recent']],
+  'machine.changed': [['fleet', 'machines'], ['machine'], ['machines', 'matrix'], ['skills', 'machines'], ['drift'], ['hardware', 'devices'], ['audit', 'recent']],
   'operation.changed': [['operation'], ['operations', 'list'], ['requests'], ['drift'], ['images', 'build-operations'], ['audit', 'recent']],
   'request.changed': [['requests'], ['audit', 'recent']],
-  'lease.changed': [['lab', 'leases'], ['lab', 'provisions'], ['audit', 'recent']],
+  // A lease or a machine holds or releases hardware, so the device list's Held-by moves with them.
+  'lease.changed': [['lab', 'leases'], ['lab', 'provisions'], ['hardware', 'devices'], ['audit', 'recent']],
   'onboarding.changed': [['add', 'drafts'], ['onboarding-draft'], ['audit', 'recent']],
   'proxmox.changed': [['audit', 'recent'], ['fleet', 'proxmox-accounts'], ['fleet', 'proxmox-discovery'], ['fleet', 'proxmox-guests'], ['machine']],
   'tailnet.changed': [['audit', 'recent'], ['fleet', 'tailnet-status'], ['fleet', 'tailnet-devices']],

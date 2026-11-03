@@ -71,6 +71,11 @@ export const routes: RouteRecordRaw[] = [
     meta: { title: 'Guest screen', group: 'Infrastructure' },
   },
   {
+    path: '/hardware',
+    component: () => import('./pages/hardware/HardwarePage.vue'),
+    meta: { title: 'Hardware', group: 'Infrastructure' },
+  },
+  {
     path: '/services',
     component: () => import('./pages/services/ServicesPage.vue'),
     meta: { title: 'Services', group: 'Infrastructure' },
