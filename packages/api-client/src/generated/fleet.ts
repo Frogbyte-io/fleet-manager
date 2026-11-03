@@ -3289,10 +3289,10 @@ export interface LabTemplateContentDto {
   /** The guest's operating system: `linux` or `windows`. */
   guestOs: string;
   /**
-     * The devices every lease from this version reserves, empty when it
+     * The devices every lease from this version reserves; absent when it
      * asks for none.
      */
-  hardware: LabHardwareDto[];
+  hardware?: LabHardwareDto[];
   /** The pinned image version id. */
   imageVersionId: string;
   /**
@@ -3370,10 +3370,10 @@ export interface LabTemplateDto {
   /** The guest's operating system: `linux` or `windows`. */
   guestOs: string;
   /**
-     * The devices every lease from this template reserves, empty when it
+     * The devices every lease from this template reserves; absent when it
      * asks for none.
      */
-  hardware: LabHardwareDto[];
+  hardware?: LabHardwareDto[];
   /** The draft's identity. */
   id: string;
   /** The pinned image version id. */
@@ -4871,10 +4871,10 @@ export type PageLabTemplateDtoItemsItem = {
   /** The guest's operating system: `linux` or `windows`. */
   guestOs: string;
   /**
-     * The devices every lease from this template reserves, empty when it
+     * The devices every lease from this template reserves; absent when it
      * asks for none.
      */
-  hardware: LabHardwareDto[];
+  hardware?: LabHardwareDto[];
   /** The draft's identity. */
   id: string;
   /** The pinned image version id. */
@@ -7725,10 +7725,10 @@ export type ResourceLabTemplateDtoData = {
   /** The guest's operating system: `linux` or `windows`. */
   guestOs: string;
   /**
-     * The devices every lease from this template reserves, empty when it
+     * The devices every lease from this template reserves; absent when it
      * asks for none.
      */
-  hardware: LabHardwareDto[];
+  hardware?: LabHardwareDto[];
   /** The draft's identity. */
   id: string;
   /** The pinned image version id. */

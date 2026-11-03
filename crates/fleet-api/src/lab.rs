@@ -162,8 +162,9 @@ pub struct LabTemplateDto {
     /// The local account whose desktop session `--session interactive`
     /// runs in (a name only, never a password); Windows guests only.
     pub interactive_user: Option<String>,
-    /// The devices every lease from this template reserves, empty when it
+    /// The devices every lease from this template reserves; absent when it
     /// asks for none.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub hardware: Vec<LabHardwareDto>,
     /// The published version this draft descends from, when any.
     pub published_from: Option<String>,
@@ -272,8 +273,9 @@ pub struct LabTemplateContentDto {
     /// The local account whose desktop session `--session interactive`
     /// runs in (a name only, never a password); Windows guests only.
     pub interactive_user: Option<String>,
-    /// The devices every lease from this version reserves, empty when it
+    /// The devices every lease from this version reserves; absent when it
     /// asks for none.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub hardware: Vec<LabHardwareDto>,
 }
 

@@ -220,12 +220,12 @@ async fn a_template_declares_hardware_and_the_published_version_freezes_it() {
         )
         .await;
     assert_eq!(status, StatusCode::OK, "{updated}");
-    assert_eq!(updated["data"]["hardware"], serde_json::json!([]));
+    assert!(updated["data"].get("hardware").is_none(), "{updated}");
     let (status, read) = world
         .call("GET", &format!("/lab/templates/{id}"), None)
         .await;
     assert_eq!(status, StatusCode::OK);
-    assert_eq!(read["data"]["hardware"], serde_json::json!([]));
+    assert!(read["data"].get("hardware").is_none(), "{read}");
 }
 
 #[tokio::test]

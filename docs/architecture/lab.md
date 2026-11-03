@@ -345,7 +345,7 @@ Two refusals are not about the device. A template that declares hardware is refu
 
 ### On the API
 
-`POST /lab/templates` and `PUT /lab/templates/{id}` accept `hardware` (a repeat of the whole draft, like every other field: omitting it clears it); templates and published versions return it. `GET /lab/leases/{id}` returns `hardware` for a lease whose version declares any: each entry has its `kind`, `mapping` and the lease's live `reservation` (`id`, `deviceId`, `state`, `usbSlot`), which is null until placement reserves the device and again after it is released. A lease whose version declares none has no `hardware` key.
+`POST /lab/templates` and `PUT /lab/templates/{id}` accept `hardware` (a repeat of the whole draft, like every other field: omitting it clears it); templates and published versions return it when they declare any. `GET /lab/leases/{id}` returns `hardware` for a lease whose version declares any: each entry has its `kind`, `mapping` and the lease's live `reservation` (`id`, `deviceId`, `state`, `usbSlot`), which is null until placement reserves the device and again after it is released. A lease whose version declares none has no `hardware` key.
 
 ### What is still to come
 
