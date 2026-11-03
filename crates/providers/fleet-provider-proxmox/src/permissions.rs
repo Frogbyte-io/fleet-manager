@@ -40,6 +40,102 @@ const MAX_WARNINGS: usize = 32;
 /// `/cluster/nextid` request each.
 pub const MAX_VMID_CHECKS: usize = 32;
 
+/// One PVE privilege the USB attach and detach calls need, and where PVE
+/// checks it (FM-1122). Measured by the FM-S11 spike on PVE 8.4.0 and 9.2.2
+/// (`docs/research/proxmox-usb.md`, section 4), identical on both majors.
+///
+/// This is the provider's own declaration of what its calls ask of the
+/// token, so a refusal can be named and a caller can show the same rows.
+/// The application's `PROXMOX_PRIVILEGE_TABLE` must carry the matching rows
+/// before the token guide or `fleetctl proxmox privileges` can report them;
+/// that table lives outside this crate and is not changed here.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PveUsbPrivilegeRow {
+    /// A stable row identifier.
+    pub id: &'static str,
+    /// The PVE call, as the token guide writes endpoints.
+    pub endpoint: &'static str,
+    /// The ACL path template the privileges are checked on. `{vmid}` and
+    /// `{mapping}` stand for the guest and the mapping id.
+    pub path: &'static str,
+    /// The privileges PVE requires on `path`; all of them.
+    pub privileges: &'static [&'static str],
+    /// Why the call needs them.
+    pub note: &'static str,
+}
+
+/// The privilege rows of the USB attach and detach calls, in call order.
+///
+/// `VM.PowerMgmt` is not needed to hotplug, whether the guest runs or not.
+/// A detach needs `Mapping.Use` on the mapping that is *currently
+/// configured*, so a token that lost `Mapping.Use` can attach and detach
+/// nothing until it is restored.
+pub const USB_ATTACH_PRIVILEGES: &[PveUsbPrivilegeRow] = &[
+    PveUsbPrivilegeRow {
+        id: "usb.read-guest",
+        endpoint: "GET /nodes/{node}/qemu/{vmid}/config and /pending",
+        path: "/vms/{vmid}",
+        privileges: &["VM.Audit"],
+        note: "The config (digest, template flag, lock, usbN entries) and its pending changes are read before every write and again to confirm it.",
+    },
+    PveUsbPrivilegeRow {
+        id: "usb.attach-guest",
+        endpoint: "PUT /nodes/{node}/qemu/{vmid}/config (usbN=mapping=<id>)",
+        path: "/vms/{vmid}",
+        privileges: &["VM.Config.HWType"],
+        note: "qemu-server lists usbN among the hardware-type options. Without any VM.Config.* privilege PVE refuses first, naming all of them.",
+    },
+    PveUsbPrivilegeRow {
+        id: "usb.attach-mapping",
+        endpoint: "PUT /nodes/{node}/qemu/{vmid}/config (usbN=mapping=<id>)",
+        path: "/mapping/usb/{mapping}",
+        privileges: &["Mapping.Use"],
+        note: "Using a resource mapping is checked per mapping. Raw host= passthrough is root-only, so a token can attach only through a mapping.",
+    },
+    PveUsbPrivilegeRow {
+        id: "usb.detach-guest",
+        endpoint: "PUT /nodes/{node}/qemu/{vmid}/config (delete=usbN)",
+        path: "/vms/{vmid}",
+        privileges: &["VM.Config.HWType"],
+        note: "Removing a usbN entry is a hardware-type change like adding one.",
+    },
+    PveUsbPrivilegeRow {
+        id: "usb.detach-mapping",
+        endpoint: "PUT /nodes/{node}/qemu/{vmid}/config (delete=usbN)",
+        path: "/mapping/usb/{mapping}",
+        privileges: &["Mapping.Use"],
+        note: "PVE checks the delete against the mapping the slot currently names, so the role must keep Mapping.Use for as long as a device is attached.",
+    },
+];
+
+/// The privilege a 403 named: `Permission check failed (<path>, <privilege>)`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PveRefusedPrivilege {
+    /// The ACL path PVE checked, such as `/mapping/usb/<id>`.
+    pub path: String,
+    /// The privilege or `|`-separated alternatives PVE listed.
+    pub privilege: String,
+}
+
+/// Reads the privilege out of a 403 detail. PVE words every permission
+/// refusal as `Permission check failed (<path>, <privilege>)`; the detail
+/// may be a JSON body cut at a bound, so a cut-off answer reads as `None`
+/// rather than as a guess. Both parts are bounded and control-free.
+#[must_use]
+pub fn parse_refused_privilege(detail: &str) -> Option<PveRefusedPrivilege> {
+    const LEAD: &str = "Permission check failed (";
+    let rest = &detail[detail.find(LEAD)? + LEAD.len()..];
+    let inner = &rest[..rest.find(')')?];
+    let (path, privilege) = inner.split_once(", ")?;
+    if path.is_empty() || privilege.is_empty() || path.len() > 128 || privilege.len() > 192 {
+        return None;
+    }
+    Some(PveRefusedPrivilege {
+        path: fleet_core::flatten_control_characters(path),
+        privilege: fleet_core::flatten_control_characters(privilege),
+    })
+}
+
 /// The token's effective permissions with the PVE version they were read
 /// from. Provider-owned shape; the composition translates it into the
 /// application's types.
@@ -332,5 +428,58 @@ mod tests {
                 .unwrap();
         assert_eq!(result.warnings.len(), MAX_WARNINGS + 1);
         assert!(result.warnings[MAX_WARNINGS].contains("96 more"));
+    }
+
+    #[test]
+    fn a_refusal_names_its_path_and_privilege() {
+        let detail = r#"{"errors":null,"message":"Permission check failed (/mapping/usb/fm-test-a, Mapping.Use)\n"}"#;
+        assert_eq!(
+            parse_refused_privilege(detail),
+            Some(PveRefusedPrivilege {
+                path: "/mapping/usb/fm-test-a".to_owned(),
+                privilege: "Mapping.Use".to_owned(),
+            })
+        );
+        let any_of = "Permission check failed (/vms/7, VM.Config.Disk|VM.Config.HWType)";
+        assert_eq!(
+            parse_refused_privilege(any_of).unwrap().privilege,
+            "VM.Config.Disk|VM.Config.HWType"
+        );
+    }
+
+    #[test]
+    fn a_cut_off_or_foreign_refusal_names_nothing() {
+        for detail in [
+            "",
+            "no permission",
+            "Permission check failed (/vms/7, VM.Config.HW",
+            "Permission check failed (/vms/7)",
+            "Permission check failed (, VM.Audit)",
+        ] {
+            assert_eq!(parse_refused_privilege(detail), None, "{detail:?}");
+        }
+    }
+
+    #[test]
+    fn the_usb_privilege_rows_are_unique_and_name_real_acl_paths() {
+        let mut ids: Vec<_> = USB_ATTACH_PRIVILEGES.iter().map(|row| row.id).collect();
+        ids.sort_unstable();
+        ids.dedup();
+        assert_eq!(ids.len(), USB_ATTACH_PRIVILEGES.len());
+        for row in USB_ATTACH_PRIVILEGES {
+            assert!(row.path.starts_with("/vms/") || row.path.starts_with("/mapping/usb/"));
+            assert!(!row.privileges.is_empty());
+            assert!(!row.privileges.contains(&"VM.PowerMgmt"), "{}", row.id);
+        }
+        // Attach and detach need the same pair, per the spike.
+        let needs = |prefix: &str| {
+            USB_ATTACH_PRIVILEGES
+                .iter()
+                .filter(|row| row.id.starts_with(prefix))
+                .flat_map(|row| row.privileges.iter().copied())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(needs("usb.attach"), needs("usb.detach"));
+        assert_eq!(needs("usb.attach"), ["VM.Config.HWType", "Mapping.Use"]);
     }
 }

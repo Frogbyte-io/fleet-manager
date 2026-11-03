@@ -46,6 +46,7 @@ use rustls::{DigitallySignedStruct, SignatureScheme};
 use sha2::Digest;
 
 mod permissions;
+pub mod usb_attach;
 mod vnc;
 
 pub use vnc::{HANDSHAKE_TIMEOUT, MAX_MESSAGE_BYTES, PveSocket, PveVncProxy, vnc_auth_response};
