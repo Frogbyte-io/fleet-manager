@@ -1152,14 +1152,18 @@ impl Lab {
         lease_id: &str,
     ) -> Result<Vec<LeaseHardware>, LabUseCaseError> {
         let lease = self.get_lease(authorizer, principal, lease_id).await?;
-        let version = self
-            .templates
-            .get_version(&lease.template_version_id)
-            .await
-            .map_err(|detail| LabUseCaseError::Backend {
-                context: "template versions",
-                detail,
-            })?;
+        let version = match self.templates.get_version(&lease.template_version_id).await {
+            Ok(version) => version,
+            // A lease whose version is gone declares nothing to report; the
+            // detail read must not fail for it.
+            Err(detail) if detail.contains("not found") => return Ok(Vec::new()),
+            Err(detail) => {
+                return Err(LabUseCaseError::Backend {
+                    context: "template versions",
+                    detail,
+                });
+            }
+        };
         if version.content.hardware.is_empty() {
             return Ok(Vec::new());
         }
