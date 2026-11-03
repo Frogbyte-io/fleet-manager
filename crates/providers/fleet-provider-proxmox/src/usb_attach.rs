@@ -14,8 +14,9 @@
 //!    must agree on the digest, or they straddled a change and are read again.
 //! 2. Attach picks the lowest `usbN` slot that is free in **both** views of
 //!    the guest (the applied one and the pending one), so a slot whose
-//!    removal is only pending is not reused. Detach acts only on the slot the
-//!    caller names.
+//!    removal is only pending is not reused, among the slots the guest has
+//!    (see [`usb_slot_limit`]: five, unless the guest provably has more).
+//!    Detach acts only on the slot the caller names.
 //! 3. Write conditional on the digest read in step 1. PVE refuses a stale
 //!    digest with `checksum mismatch`, and nothing is written.
 //! 4. Read back through `pending` and report what was seen. A plain value
@@ -39,11 +40,35 @@
 //!
 //! **A failed hotplug leaves state behind.** PVE answers `400 hotplug
 //! problem` for an absent device or an unusable mapping, yet keeps the entry
-//! as a pending value, and the next start would fail. When the write fails
-//! after PVE has accepted its digest and permissions, attach reads the guest
-//! again and removes the entry it just wrote, conditional on the new digest,
-//! then reports what became of it in [`PveUsbCleanup`]. It never removes a
-//! slot that holds anything other than the value it wrote.
+//! as a pending value, and the next start would fail (FM-S11, measured).
+//! Only that answer proves PVE processed the write, so only that answer
+//! triggers a cleanup: attach reads the guest again and removes the entry it
+//! just wrote, conditional on the new digest, then reports what became of it
+//! in [`PveUsbCleanup`]. It never removes a slot that holds anything other
+//! than the value it wrote. Any other failed answer (a lock-file timeout, an
+//! unclassified 4xx or 5xx, a lost answer) does not prove the digest was
+//! checked, so it is [`PveUsbError::Indeterminate`] with no cleanup write.
+//!
+//! **Unmeasured:** that deleting a pending-only leftover from a *running*
+//! guest succeeds, and what its read-back shows, was not measured by FM-S11.
+//! The cleanup is written to verify its own result and to report
+//! [`PveUsbCleanup::Failed`] (with the slot and the value that may remain)
+//! when the read-back is not an empty slot, so the caller keeps its
+//! reservation. Tests of that path are labelled as assumptions.
+//!
+//! # Caller contract
+//!
+//! Two things this module deliberately does not decide:
+//!
+//! - **Attach cannot tell who wrote an existing entry.** A guest that already
+//!   holds exactly `mapping=<id>` (an operator may have written the same
+//!   value) is reported [`PveUsbChange::Unchanged`], as a retry of Fleet's own
+//!   attach must be. The caller (the saga, under its reservation) checks that
+//!   no guest references the mapping *before* the first attach.
+//! - **Detach looks at one slot.** An empty slot is `Unchanged`/`Applied`
+//!   without a look at the other slots. If the caller recorded the wrong slot
+//!   (or the entry moved), an entry for the mapping can remain elsewhere; the
+//!   reconciler, which reads every guest config, owns that case.
 //!
 //! Needed privileges are declared in [`USB_ATTACH_PRIVILEGES`]:
 //! `VM.Audit` to read, and `VM.Config.HWType` on the guest plus `Mapping.Use`
@@ -63,12 +88,55 @@ use crate::{
     urlencode,
 };
 
-/// How many `usbN` slots a guest has (`usb0` to `usb13`), the
-/// `$MAX_USB_DEVICES` of `qemu-server`'s `PVE::QemuServer::USB`. The spike
-/// used four slots and did not measure the limit; attach takes the lowest
-/// free slot, so a guest reaches the higher ones only when the lower ones are
-/// taken, and PVE refuses a slot beyond its own limit.
+/// The most `usbN` slots any guest has (`usb0` to `usb13`): the upper bound
+/// of `qm.conf(5)` (`usb[n]`, "n" up to 14). Slot names beyond it are not USB
+/// slots.
 pub const MAX_USB_SLOTS: u8 = 14;
+
+/// The slots every guest has (`usb0` to `usb4`), whatever its machine
+/// version or OS type.
+pub const BASE_USB_SLOTS: u8 = 5;
+
+/// How many `usbN` slots a guest has. `qm.conf(5)`: `usb[n]` is `n` in 0..4,
+/// "and up to 14 for machine version >= 7.1 and OS type l26 or Windows > 7".
+///
+/// Attach picks from [`BASE_USB_SLOTS`] slots unless the config *proves* the
+/// guest qualifies: `ostype` is `l26`, `win8`, `win10` or `win11`, and
+/// `machine` pins a version of at least 7.1 (`pc-i440fx-<X.Y>` or
+/// `pc-q35-<X.Y>`, optionally `+pveN`, optionally with more properties after
+/// a comma). A missing, unversioned (`q35`, `pc`) or unparseable value means
+/// the proof is missing and the answer is five. That is deliberate: an
+/// unversioned machine follows PVE's newest version, but the config alone
+/// does not say which.
+#[must_use]
+pub fn usb_slot_limit(ostype: Option<&str>, machine: Option<&str>) -> u8 {
+    let qualifying_os = matches!(ostype, Some("l26" | "win8" | "win10" | "win11"));
+    let qualifying_machine = machine
+        .and_then(machine_version)
+        .is_some_and(|version| version >= (7, 1));
+    if qualifying_os && qualifying_machine {
+        MAX_USB_SLOTS
+    } else {
+        BASE_USB_SLOTS
+    }
+}
+
+/// The `(major, minor)` a `machine` value pins, for the i440fx and q35 types.
+fn machine_version(machine: &str) -> Option<(u32, u32)> {
+    let name = machine.split(',').next()?;
+    let name = name.strip_prefix("type=").unwrap_or(name);
+    let version = name
+        .strip_prefix("pc-i440fx-")
+        .or_else(|| name.strip_prefix("pc-q35-"))?;
+    let version = version.split('+').next()?;
+    let (major, minor) = version.split_once('.')?;
+    let digits = |part: &str| {
+        (!part.is_empty() && part.len() <= 4 && part.bytes().all(|b| b.is_ascii_digit()))
+            .then(|| part.parse().ok())
+            .flatten()
+    };
+    Some((digits(major)?, digits(minor)?))
+}
 
 /// The longest mapping id accepted, in characters.
 pub const MAX_MAPPING_ID_CHARS: usize = 64;
@@ -131,6 +199,10 @@ pub enum PveUsbCleanup {
     /// The entry may still be there. The caller keeps its reservation and
     /// resolves it, as ADR 0019 decision 3 says.
     Failed {
+        /// The slot that may still hold the entry.
+        slot: String,
+        /// The value Fleet wrote there, which may remain.
+        value: String,
         /// Why, bounded.
         detail: String,
     },
@@ -268,8 +340,12 @@ impl fmt::Display for PveUsbError {
                 match cleanup {
                     PveUsbCleanup::Removed => write!(f, "no entry remains"),
                     PveUsbCleanup::NothingToRemove => write!(f, "PVE kept no entry"),
-                    PveUsbCleanup::Failed { detail } => {
-                        write!(f, "the entry may remain: {detail}")
+                    PveUsbCleanup::Failed {
+                        slot,
+                        value,
+                        detail,
+                    } => {
+                        write!(f, "{slot} may still hold {value:?}: {detail}")
                     }
                 }
             }
@@ -428,6 +504,8 @@ struct Snapshot {
     template: bool,
     lock: Option<String>,
     digest: String,
+    /// How many slots attach may use; see [`usb_slot_limit`].
+    slot_limit: u8,
     slots: BTreeMap<u8, SlotView>,
 }
 
@@ -548,10 +626,14 @@ fn parse_snapshot(
             });
         }
     }
+    // Anything but a string is as good as missing: the limit stays at five.
+    let text = |key: &str| config.get(key).and_then(serde_json::Value::as_str);
+    let slot_limit = usb_slot_limit(text("ostype"), text("machine"));
     Ok(Some(Snapshot {
         template,
         lock,
         digest,
+        slot_limit,
         slots,
     }))
 }
@@ -568,11 +650,21 @@ fn pending_path(node: &str, vmid: u32) -> String {
 enum WriteVerdict {
     /// PVE refused before it changed anything.
     Refused(PveUsbError),
-    /// The answer is lost or unreadable; the write may have landed.
-    Lost(String),
-    /// PVE failed after taking the digest and permissions; it may have left
-    /// an entry behind.
-    Failed { status: u16, detail: String },
+    /// The write may or may not have been processed: the answer is lost or
+    /// unreadable, or PVE failed in a way that does not prove its digest was
+    /// checked (a lock-file timeout, an unclassified 4xx or 5xx). No cleanup
+    /// is safe; the caller keeps its reservation.
+    Uncertain(String),
+    /// PVE processed the write and failed to apply it (`400 hotplug
+    /// problem`, measured in FM-S11), which leaves the entry behind as a
+    /// pending value.
+    HotplugFailed { status: u16, detail: String },
+}
+
+/// The one answer that proves PVE processed the write: the hotplug failure
+/// FM-S11 recorded (`400`, `errors.usbN: "hotplug problem - …"`).
+fn is_hotplug_failure(status: u16, detail: &str) -> bool {
+    status == 400 && detail.contains("hotplug problem")
 }
 
 fn classify_write_error(error: PveApiError) -> WriteVerdict {
@@ -580,17 +672,86 @@ fn classify_write_error(error: PveApiError) -> WriteVerdict {
         PveApiError::Forbidden { .. } | PveApiError::Auth => {
             WriteVerdict::Refused(PveUsbError::from(error))
         }
-        PveApiError::Transport(error) => WriteVerdict::Lost(error.to_string()),
-        PveApiError::InvalidPayload { detail } => WriteVerdict::Lost(detail),
+        PveApiError::Transport(error) => WriteVerdict::Uncertain(error.to_string()),
+        PveApiError::InvalidPayload { detail } => WriteVerdict::Uncertain(detail),
         PveApiError::Http { status, detail } => {
             if detail.contains("checksum mismatch") {
                 WriteVerdict::Refused(PveUsbError::DigestConflict)
             } else if let Some(lock) = locked_by(&detail) {
                 WriteVerdict::Refused(PveUsbError::Locked { lock })
+            } else if is_hotplug_failure(status, &detail) {
+                WriteVerdict::HotplugFailed { status, detail }
             } else {
-                WriteVerdict::Failed { status, detail }
+                WriteVerdict::Uncertain(format!("PVE answered {status}: {detail}"))
             }
         }
+    }
+}
+
+/// Removes the token secret from an error detail. PVE does not echo the
+/// token, but a detail is bounded text from a remote host and ends up in
+/// logs and audit, so the one secret this call holds is scrubbed out of every
+/// detail it surfaces.
+fn scrub(error: PveApiError, request: &PveHttpRequest) -> PveApiError {
+    let secret = request.credentials.token.expose();
+    if secret.is_empty() {
+        return error;
+    }
+    let clean = |detail: String| detail.replace(secret, "[redacted]");
+    match error {
+        PveApiError::Forbidden { detail } => PveApiError::Forbidden {
+            detail: clean(detail),
+        },
+        PveApiError::Http { status, detail } => PveApiError::Http {
+            status,
+            detail: clean(detail),
+        },
+        PveApiError::InvalidPayload { detail } => PveApiError::InvalidPayload {
+            detail: clean(detail),
+        },
+        other => other,
+    }
+}
+
+/// What the guest already holds for `mapping_id`, when anything: the slot and
+/// state of exactly Fleet's own value (an idempotent retry), or the reason
+/// attach must not write.
+fn existing_reference(
+    snapshot: &Snapshot,
+    mapping_id: &str,
+    value: &str,
+) -> Option<Result<(String, PveUsbState), PveUsbError>> {
+    let references: Vec<(u8, &SlotView)> = snapshot
+        .slots
+        .iter()
+        .filter(|(_, view)| view.references(mapping_id))
+        .map(|(index, view)| (*index, view))
+        .collect();
+    match references.as_slice() {
+        [] => None,
+        [(index, view)] => {
+            let slot = slot_key(*index);
+            Some(if view.is_applied(value) {
+                Ok((slot, PveUsbState::Applied))
+            } else if view.is_pending_add(value) {
+                Ok((slot, PveUsbState::Pending))
+            } else if [&view.applied, &view.pending]
+                .into_iter()
+                .flatten()
+                .all(|seen| seen == value)
+            {
+                // Exactly our value, with a removal or a change queued.
+                Err(PveUsbError::PendingConflict { slot })
+            } else {
+                Err(PveUsbError::ForeignSlot {
+                    slot,
+                    observed: view.any().to_owned(),
+                })
+            })
+        }
+        many => Some(Err(PveUsbError::Ambiguous {
+            slots: many.iter().map(|(index, _)| slot_key(*index)).collect(),
+        })),
     }
 }
 
@@ -621,14 +782,16 @@ impl ProxmoxClient {
                     method: PveHttpMethod::Get,
                     ..request.clone()
                 })
-                .await?;
+                .await
+                .map_err(|error| scrub(error, request))?;
             let pending = self
                 .call(PveHttpRequest {
                     path: pending_path(node, vmid),
                     method: PveHttpMethod::Get,
                     ..request.clone()
                 })
-                .await?;
+                .await
+                .map_err(|error| scrub(error, request))?;
             if let Some(snapshot) = parse_snapshot(&config, &pending)? {
                 return Ok(snapshot);
             }
@@ -652,6 +815,7 @@ impl ProxmoxClient {
         )
         .await
         .map(|_| ())
+        .map_err(|error| scrub(error, request))
     }
 
     /// Reads the guest and refuses a template or a locked guest.
@@ -704,53 +868,23 @@ impl ProxmoxClient {
         let value = canonical_value(mapping_id);
         let snapshot = self.usb_checked_snapshot(&request, node, vmid).await?;
 
-        let references: Vec<(u8, &SlotView)> = snapshot
-            .slots
-            .iter()
-            .filter(|(_, view)| view.references(mapping_id))
-            .map(|(index, view)| (*index, view))
-            .collect();
-        match references.as_slice() {
-            [] => {}
-            [(index, view)] => {
-                let slot = slot_key(*index);
-                let state = if view.is_applied(&value) {
-                    PveUsbState::Applied
-                } else if view.is_pending_add(&value) {
-                    PveUsbState::Pending
-                } else if [&view.applied, &view.pending]
-                    .into_iter()
-                    .flatten()
-                    .all(|seen| *seen == value)
-                {
-                    // Exactly our value, with a removal or a change queued.
-                    return Err(PveUsbError::PendingConflict { slot });
-                } else {
-                    return Err(PveUsbError::ForeignSlot {
-                        slot,
-                        observed: view.any().to_owned(),
-                    });
-                };
-                return Ok(PveUsbOutcome {
-                    slot,
-                    mapping_id: mapping_id.to_owned(),
-                    change: PveUsbChange::Unchanged,
-                    state,
-                    observed: Some(value),
-                    digest: snapshot.digest,
-                });
-            }
-            many => {
-                return Err(PveUsbError::Ambiguous {
-                    slots: many.iter().map(|(index, _)| slot_key(*index)).collect(),
-                });
-            }
+        if let Some(existing) = existing_reference(&snapshot, mapping_id, &value) {
+            let (slot, state) = existing?;
+            return Ok(PveUsbOutcome {
+                slot,
+                mapping_id: mapping_id.to_owned(),
+                change: PveUsbChange::Unchanged,
+                state,
+                observed: Some(value),
+                digest: snapshot.digest,
+            });
         }
 
-        let Some(index) = (0..MAX_USB_SLOTS).find(|index| !snapshot.slots.contains_key(index))
+        let Some(index) =
+            (0..snapshot.slot_limit).find(|index| !snapshot.slots.contains_key(index))
         else {
             return Err(PveUsbError::SlotsFull {
-                slots: MAX_USB_SLOTS,
+                slots: snapshot.slot_limit,
             });
         };
         let slot = slot_key(index);
@@ -758,11 +892,11 @@ impl ProxmoxClient {
         if let Err(error) = self.usb_write(&request, node, vmid, &body).await {
             return Err(match classify_write_error(error) {
                 WriteVerdict::Refused(error) => error,
-                WriteVerdict::Lost(detail) => PveUsbError::Indeterminate {
+                WriteVerdict::Uncertain(detail) => PveUsbError::Indeterminate {
                     slot: Some(slot),
                     detail,
                 },
-                WriteVerdict::Failed { status, detail } => {
+                WriteVerdict::HotplugFailed { status, detail } => {
                     let cleanup = self
                         .usb_remove_leftover(&request, node, vmid, index, &value)
                         .await;
@@ -806,6 +940,10 @@ impl ProxmoxClient {
 
     /// Removes the entry a failed attach may have left in `index`, but only
     /// if it holds exactly `value`, conditional on a fresh digest.
+    ///
+    /// Deleting a pending-only leftover from a running guest was not
+    /// measured by FM-S11, so the result is never assumed: the guest is read
+    /// back and anything but an empty slot is [`PveUsbCleanup::Failed`].
     async fn usb_remove_leftover(
         &self,
         request: &PveHttpRequest,
@@ -814,12 +952,16 @@ impl ProxmoxClient {
         index: u8,
         value: &str,
     ) -> PveUsbCleanup {
-        let failed = |detail: String| PveUsbCleanup::Failed { detail };
+        let slot = slot_key(index);
+        let failed = |detail: String| PveUsbCleanup::Failed {
+            slot: slot.clone(),
+            value: value.to_owned(),
+            detail,
+        };
         let snapshot = match self.usb_snapshot(request, node, vmid).await {
             Ok(snapshot) => snapshot,
             Err(error) => return failed(format!("the guest could not be read back: {error}")),
         };
-        let slot = slot_key(index);
         match snapshot.slots.get(&index) {
             None => return PveUsbCleanup::NothingToRemove,
             Some(view) if view.is_pending_add(value) || view.is_applied(value) => {}
@@ -930,13 +1072,16 @@ impl ProxmoxClient {
         if let Err(error) = self.usb_write(&request, node, vmid, &body).await {
             return Err(match classify_write_error(error) {
                 WriteVerdict::Refused(error) => error,
-                WriteVerdict::Lost(detail) => PveUsbError::Indeterminate {
+                WriteVerdict::Uncertain(detail) => PveUsbError::Indeterminate {
                     slot: Some(slot.to_owned()),
                     detail,
                 },
-                WriteVerdict::Failed { status, detail } => {
-                    PveUsbError::Api(PveApiError::Http { status, detail })
-                }
+                // A hotplug failure while unplugging was not measured: what
+                // state the entry is in is not known.
+                WriteVerdict::HotplugFailed { status, detail } => PveUsbError::Indeterminate {
+                    slot: Some(slot.to_owned()),
+                    detail: format!("PVE answered {status}: {detail}"),
+                },
             });
         }
 
@@ -1000,6 +1145,22 @@ mod tests {
     }
 
     // -- A fake PVE: one guest whose config behaves like the spike's --------
+    //
+    // MEASURED by FM-S11 and modelled here: the digest check (500 "checksum
+    // mismatch"), the lock refusal wording, the three-view model (config,
+    // pending with `value`/`pending`/`delete`), hotplug applying at once when
+    // the guest's `hotplug` includes `usb` and queueing as pending when it
+    // does not, adding and deleting a *queued-free* entry, Mapping.Use being
+    // required to attach and to detach, and the generic VM.Config.* gate for
+    // a token with none of them (the message for a token that has some
+    // VM.Config.* privileges but not HWType was not recorded).
+    //
+    // ASSUMED, not measured (tests that rest on these say so in their name):
+    // that `delete=usbN` on a pending-only entry of a running guest cancels
+    // it, and what the read-back then shows; and the 4xx/5xx wording of the
+    // failures injected with `fail_next_put` other than the recorded
+    // `400 hotplug problem`. The fake enforces no slot limit, because PVE's
+    // refusal of a slot beyond it was not recorded.
 
     #[derive(Debug)]
     #[allow(clippy::struct_excessive_bools)] // independent fault switches
@@ -1008,6 +1169,13 @@ mod tests {
         hotplug_usb: bool,
         template: bool,
         lock: Option<String>,
+        /// `ostype` and `machine` of the config; the defaults qualify for 14
+        /// slots (l26, a pinned machine version of 7.1 or newer).
+        ostype: Option<String>,
+        machine: Option<String>,
+        /// Error bodies echo the request's Authorization header, as a hostile
+        /// or broken host might.
+        echo_secret: bool,
         applied: BTreeMap<String, String>,
         pending_add: BTreeMap<String, String>,
         pending_delete: BTreeSet<String>,
@@ -1050,6 +1218,9 @@ mod tests {
                     hotplug_usb: true,
                     template: false,
                     lock: None,
+                    ostype: Some("l26".into()),
+                    machine: Some("pc-q35-9.0".into()),
+                    echo_secret: false,
                     applied: BTreeMap::new(),
                     pending_add: BTreeMap::new(),
                     pending_delete: BTreeSet::new(),
@@ -1124,6 +1295,23 @@ mod tests {
     const HW_GATE: &str = "VM.Config.Disk|VM.Config.CDROM|VM.Config.CPU|VM.Config.Memory|VM.Config.Network|VM.Config.HWType|VM.Config.Options|VM.Config.Cloudinit";
 
     impl Fake {
+        /// With `echo_secret`, an error answer repeats the request's
+        /// Authorization header in its message. Real PVE does not; this is
+        /// the hostile case the provider must still not surface.
+        fn echoing(&self, request: &PveHttpRequest, answer: (u16, Value)) -> (u16, Value) {
+            let (status, mut body) = answer;
+            if status >= 400 && self.state.lock().unwrap().echo_secret {
+                let header = format!(
+                    "Authorization: PVEAPIToken={}={}",
+                    request.credentials.token_id,
+                    request.credentials.token.expose()
+                );
+                let message = body["message"].as_str().unwrap_or_default().to_owned();
+                body["message"] = json!(format!("{message} [{header}]"));
+            }
+            (status, body)
+        }
+
         #[allow(clippy::too_many_lines)] // one flat table of PVE's behaviours
         fn answer(&self, method: PveHttpMethod, path: &str, body: Option<Value>) -> (u16, Value) {
             let mut state = self.state.lock().unwrap();
@@ -1154,6 +1342,12 @@ mod tests {
                     }
                     if let Some(lock) = &state.lock {
                         config["lock"] = json!(lock);
+                    }
+                    if let Some(ostype) = &state.ostype {
+                        config["ostype"] = json!(ostype);
+                    }
+                    if let Some(machine) = &state.machine {
+                        config["machine"] = json!(machine);
                     }
                     for (key, value) in merged(&state) {
                         config[key] = json!(value);
@@ -1267,7 +1461,7 @@ mod tests {
             } else if key == "delete" {
                 let key = value.as_str().unwrap().to_owned();
                 if state.pending_add.remove(&key).is_some() {
-                    // A queued add is simply cancelled.
+                    // ASSUMED (not measured): a delete cancels a queued add.
                 } else if hold_back {
                     state.pending_delete.insert(key);
                 } else {
@@ -1284,7 +1478,8 @@ mod tests {
             &self,
             request: PveHttpRequest,
         ) -> Result<PveHttpResponse, PveTransportError> {
-            let (status, body) = self.answer(request.method, &request.path, None);
+            let answer = self.answer(request.method, &request.path, None);
+            let (status, body) = self.echoing(&request, answer);
             Ok(PveHttpResponse {
                 status,
                 body: body.to_string().into_bytes(),
@@ -1306,6 +1501,7 @@ mod tests {
                     detail: "connection reset".to_owned(),
                 });
             }
+            let (status, answer) = self.echoing(&request, (status, answer));
             Ok(PveHttpResponse {
                 status,
                 body: answer.to_string().into_bytes(),
@@ -1443,7 +1639,7 @@ mod tests {
     }
 
     #[test]
-    fn write_failures_are_classified_by_what_pve_did_before_failing() {
+    fn write_failures_are_classified_by_what_proves_pve_processed_them() {
         let http = |status, detail: &str| PveApiError::Http {
             status,
             detail: detail.to_owned(),
@@ -1464,26 +1660,39 @@ mod tests {
             }),
             WriteVerdict::Refused(PveUsbError::Refused { .. })
         ));
-        // A lost answer or an unreadable one may hide a write that landed.
+        // The one answer that proves the write was processed: the recorded
+        // `400 hotplug problem`.
+        let recorded = r#"{"errors":{"usb0":"hotplug problem - USB Mapping invalid (hardware probably changed): usb device '1-55' not found"},"message":"Parameter verification failed."}"#;
         assert!(matches!(
-            classify_write_error(PveApiError::InvalidPayload {
-                detail: "x".to_owned()
-            }),
-            WriteVerdict::Lost(_)
+            classify_write_error(http(400, recorded)),
+            WriteVerdict::HotplugFailed { status: 400, .. }
         ));
-        // Anything else after the checks may have left an entry.
-        assert!(matches!(
-            classify_write_error(http(400, "hotplug problem")),
-            WriteVerdict::Failed { status: 400, .. }
-        ));
-        assert!(matches!(
-            classify_write_error(http(500, "internal error")),
-            WriteVerdict::Failed { status: 500, .. }
-        ));
+        // Everything else may mean the digest was never checked, or that the
+        // write landed: uncertain, and no cleanup may follow.
+        for uncertain in [
+            // A lock-file timeout: PVE never got to the digest.
+            http(
+                500,
+                r#"{"message":"can't lock file '/var/lock/qemu-server/lock-9100.conf' - got timeout"}"#,
+            ),
+            http(500, "internal error"),
+            http(500, "hotplug problem"),
+            http(400, r#"{"message":"Parameter verification failed."}"#),
+            http(501, "not implemented"),
+            http(599, "gateway"),
+            PveApiError::InvalidPayload {
+                detail: "x".to_owned(),
+            },
+        ] {
+            assert!(
+                matches!(classify_write_error(uncertain), WriteVerdict::Uncertain(_)),
+                "uncertain answers must not trigger a cleanup"
+            );
+        }
     }
 
     #[tokio::test]
-    async fn attach_with_every_slot_taken_is_refused_and_writes_nothing() {
+    async fn a_qualifying_guest_with_every_slot_taken_is_refused_and_writes_nothing() {
         let fake = Fake::new().with(|state| {
             for index in 0..MAX_USB_SLOTS {
                 state
@@ -1498,6 +1707,119 @@ mod tests {
         assert!(fake.puts().is_empty());
     }
 
+    fn fill(state: &mut State, slots: u8) {
+        for index in 0..slots {
+            state
+                .applied
+                .insert(format!("usb{index}"), value(&format!("fm-held-{index}")));
+        }
+    }
+
+    #[tokio::test]
+    async fn a_guest_that_does_not_provably_qualify_has_five_slots() {
+        // qm.conf(5): usb0..usb4, and up to usb13 only for machine >= 7.1
+        // with ostype l26 or Windows > 7. Anything else, and anything the
+        // config does not prove, is five.
+        let cases: [(&str, Option<&str>, Option<&str>); 7] = [
+            ("other ostype", Some("other"), Some("pc-q35-9.0")),
+            ("win7", Some("win7"), Some("pc-q35-9.0")),
+            ("machine older than 7.1", Some("l26"), Some("pc-i440fx-7.0")),
+            ("unversioned machine", Some("l26"), Some("q35")),
+            ("no machine", Some("l26"), None),
+            ("no ostype", None, Some("pc-q35-9.0")),
+            ("unparseable machine", Some("l26"), Some("pc-q35-nine")),
+        ];
+        for (label, ostype, machine) in cases {
+            let fake = Fake::new().with(|state| {
+                state.ostype = ostype.map(str::to_owned);
+                state.machine = machine.map(str::to_owned);
+                fill(state, BASE_USB_SLOTS);
+            });
+            match attach(&fake, MAPPING).await {
+                Err(PveUsbError::SlotsFull { slots }) => {
+                    assert_eq!(slots, BASE_USB_SLOTS, "{label}");
+                }
+                other => panic!("{label}: {other:?}"),
+            }
+            assert!(fake.puts().is_empty(), "{label}: nothing was written");
+        }
+    }
+
+    #[tokio::test]
+    async fn a_qualifying_guest_with_usb0_to_usb4_full_gets_usb5() {
+        let fake = Fake::new().with(|state| fill(state, BASE_USB_SLOTS));
+        let outcome = attach(&fake, MAPPING).await.unwrap();
+        assert_eq!(outcome.slot, "usb5");
+        assert_eq!(fake.stored()["usb5"], "mapping=fm-test-reader");
+    }
+
+    #[tokio::test]
+    async fn a_non_qualifying_guest_uses_a_free_slot_among_the_first_five() {
+        let fake = Fake::new().with(|state| {
+            state.ostype = Some("win7".into());
+            fill(state, 4);
+        });
+        assert_eq!(attach(&fake, MAPPING).await.unwrap().slot, "usb4");
+    }
+
+    #[test]
+    fn the_slot_limit_follows_qm_conf() {
+        let limit = usb_slot_limit;
+        for ostype in ["l26", "win8", "win10", "win11"] {
+            assert_eq!(limit(Some(ostype), Some("pc-q35-7.1")), MAX_USB_SLOTS);
+            assert_eq!(
+                limit(Some(ostype), Some("pc-i440fx-9.0+pve1")),
+                MAX_USB_SLOTS
+            );
+        }
+        // The machine value may carry more properties.
+        assert_eq!(
+            limit(Some("l26"), Some("pc-q35-8.1,viommu=intel")),
+            MAX_USB_SLOTS
+        );
+        assert_eq!(
+            limit(Some("l26"), Some("type=pc-q35-8.1,viommu=intel")),
+            MAX_USB_SLOTS
+        );
+        assert_eq!(limit(Some("l26"), Some("pc-q35-10.0")), MAX_USB_SLOTS);
+        for (ostype, machine) in [
+            (Some("l26"), Some("pc-q35-7.0")),
+            (Some("l26"), Some("pc-i440fx-6.2+pve0")),
+            (Some("l26"), Some("pc-q35-")),
+            (Some("l26"), Some("pc-q35-7")),
+            (Some("l26"), Some("pc-q35-+7.1")),
+            (Some("l26"), Some("pc-q35--7.1")),
+            (Some("l26"), Some("virt-9.0")),
+            (Some("l26"), Some("q35")),
+            (Some("l26"), Some("pc")),
+            (Some("l26"), Some("")),
+            (Some("l26"), None),
+            (Some("win7"), Some("pc-q35-9.0")),
+            (Some("wxp"), Some("pc-q35-9.0")),
+            (Some("w2k8"), Some("pc-q35-9.0")),
+            (Some("l24"), Some("pc-q35-9.0")),
+            (Some("solaris"), Some("pc-q35-9.0")),
+            (Some("other"), Some("pc-q35-9.0")),
+            (Some("L26"), Some("pc-q35-9.0")),
+            (Some(""), Some("pc-q35-9.0")),
+            (None, Some("pc-q35-9.0")),
+            (None, None),
+        ] {
+            assert_eq!(
+                limit(ostype, machine),
+                BASE_USB_SLOTS,
+                "{ostype:?} {machine:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_config_whose_ostype_or_machine_is_not_a_string_has_five_slots() {
+        let config = json!({"digest": "d", "ostype": 26, "machine": ["pc-q35-9.0"]});
+        let snapshot = parse_snapshot(&config, &json!([])).unwrap().unwrap();
+        assert_eq!(snapshot.slot_limit, BASE_USB_SLOTS);
+    }
+
     #[tokio::test]
     async fn a_digest_conflict_writes_nothing() {
         let fake = Fake::new().with(|state| {
@@ -1505,12 +1827,17 @@ mod tests {
             state.applied.insert("usb0".into(), value(OTHER));
         });
         let before = fake.stored();
+        let read_digest = digest_of(&fake.state.lock().unwrap());
         assert!(matches!(
             attach(&fake, MAPPING).await,
             Err(PveUsbError::DigestConflict)
         ));
         assert_eq!(fake.stored(), before);
-        assert_eq!(fake.puts().len(), 1, "no cleanup write follows a conflict");
+        let puts = fake.puts();
+        assert_eq!(puts.len(), 1, "no cleanup write follows a conflict");
+        // The write named the digest that was read (now stale), not another.
+        assert_eq!(puts[0]["digest"], json!(read_digest));
+        assert_ne!(read_digest, digest_of(&fake.state.lock().unwrap()));
     }
 
     #[tokio::test]
@@ -1551,8 +1878,13 @@ mod tests {
         assert!(fake.puts().is_empty());
     }
 
+    // ASSUMPTION, NOT MEASURED. FM-S11 recorded the `400 hotplug problem`
+    // and the entry it leaves behind as a pending value (a3-*). It did not
+    // delete that leftover from a running guest, so that the delete succeeds,
+    // and what the read-back then shows, are modelled by the fake, not
+    // recorded. The test checks the provider's behaviour under that model.
     #[tokio::test]
-    async fn a_failed_hotplug_removes_the_entry_it_left_behind() {
+    async fn assumption_unmeasured_a_hotplug_failure_leftover_is_removed_by_a_delete() {
         let fake = Fake::new().with(|state| {
             state.running = true;
             state.leave_leftover = true;
@@ -1580,13 +1912,18 @@ mod tests {
         let puts = fake.puts();
         assert_eq!(puts.len(), 2);
         assert_eq!(puts[1]["delete"], "usb0");
+        assert!(puts[1]["digest"].is_string());
         assert_ne!(puts[1]["digest"], puts[0]["digest"]);
     }
 
     #[tokio::test]
-    async fn a_failed_write_that_left_nothing_reports_nothing_to_remove() {
+    async fn a_hotplug_failure_that_left_nothing_reports_nothing_to_remove() {
         let fake = Fake::new().with(|state| {
-            state.fail_next_put = Some((400, json!({"message": "Parameter verification failed."})));
+            state.fail_next_put = Some((
+                400,
+                json!({"message": "Parameter verification failed.",
+                       "errors": {"usb0": "hotplug problem - USB Mapping invalid (hardware probably changed): usb device '1-55' not found"}}),
+            ));
         });
         match attach(&fake, MAPPING).await {
             Err(PveUsbError::WriteFailed { cleanup, .. }) => {
@@ -1598,6 +1935,47 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_failure_that_does_not_prove_the_write_was_processed_gets_no_cleanup() {
+        for (label, status, body) in [
+            (
+                "lock-file timeout",
+                500,
+                json!({"message": "can't lock file '/var/lock/qemu-server/lock-9100.conf' - got timeout"}),
+            ),
+            (
+                "unclassified 500",
+                500,
+                json!({"message": "internal error"}),
+            ),
+            (
+                "plain verification failure",
+                400,
+                json!({"message": "Parameter verification failed."}),
+            ),
+            (
+                "hotplug wording on another status",
+                500,
+                json!({"message": "hotplug problem"}),
+            ),
+        ] {
+            // Even with an entry sitting in the slot, no delete may be sent:
+            // the answer does not prove that entry is Fleet's.
+            let fake = Fake::new().with(|state| {
+                state.leave_leftover = true;
+                state.fail_next_put = Some((status, body));
+            });
+            match attach(&fake, MAPPING).await {
+                Err(PveUsbError::Indeterminate { slot, detail }) => {
+                    assert_eq!(slot.as_deref(), Some("usb0"), "{label}");
+                    assert!(detail.contains(&status.to_string()), "{label}: {detail}");
+                }
+                other => panic!("{label}: {other:?}"),
+            }
+            assert_eq!(fake.puts().len(), 1, "{label}: no cleanup write was sent");
+        }
+    }
+
+    #[tokio::test]
     async fn a_cleanup_that_cannot_run_is_reported_so_the_caller_keeps_its_reservation() {
         let fake = Fake::new().with(|state| {
             state.leave_leftover = true;
@@ -1606,7 +1984,13 @@ mod tests {
         });
         match attach(&fake, MAPPING).await {
             Err(PveUsbError::WriteFailed { cleanup, .. }) => match cleanup {
-                PveUsbCleanup::Failed { detail } => {
+                PveUsbCleanup::Failed {
+                    slot,
+                    value,
+                    detail,
+                } => {
+                    assert_eq!(slot, "usb0");
+                    assert_eq!(value, "mapping=fm-test-reader");
                     assert!(detail.contains("Mapping.Use"), "{detail}");
                 }
                 other => panic!("{other:?}"),
@@ -1614,6 +1998,34 @@ mod tests {
             other => panic!("{other:?}"),
         }
         assert_eq!(fake.stored()["usb0"], "mapping=fm-test-reader");
+    }
+
+    #[tokio::test]
+    async fn a_cleanup_whose_read_back_still_shows_the_entry_is_failed_not_removed() {
+        // Whatever PVE does with the delete, only an empty slot counts: here
+        // the delete is accepted and the entry is still there.
+        let fake = Fake::new().with(|state| {
+            state.leave_leftover = true;
+            state.drop_writes = true;
+            state.fail_next_put = Some((400, json!({"message": "hotplug problem"})));
+        });
+        match attach(&fake, MAPPING).await {
+            Err(PveUsbError::WriteFailed { cleanup, .. }) => match cleanup {
+                PveUsbCleanup::Failed {
+                    slot,
+                    value,
+                    detail,
+                } => {
+                    assert_eq!(
+                        (slot.as_str(), value.as_str()),
+                        ("usb0", "mapping=fm-test-reader")
+                    );
+                    assert!(detail.contains("still configured"), "{detail}");
+                }
+                other => panic!("{other:?}"),
+            },
+            other => panic!("{other:?}"),
+        }
     }
 
     #[tokio::test]
@@ -1627,7 +2039,15 @@ mod tests {
         });
         match attach(&fake, MAPPING).await {
             Err(PveUsbError::WriteFailed { cleanup, .. }) => match cleanup {
-                PveUsbCleanup::Failed { detail } => {
+                PveUsbCleanup::Failed {
+                    slot,
+                    value,
+                    detail,
+                } => {
+                    assert_eq!(
+                        (slot.as_str(), value.as_str()),
+                        ("usb0", "mapping=fm-test-reader")
+                    );
                     assert!(detail.contains("did not write"), "{detail}");
                 }
                 other => panic!("{other:?}"),
@@ -1751,10 +2171,84 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn errors_never_carry_the_token_secret() {
-        let fake = Fake::new().with(|state| state.has_mapping_use = false);
-        let error = attach(&fake, MAPPING).await.unwrap_err();
-        assert!(!format!("{error} {error:?}").contains(SECRET));
+    async fn errors_never_carry_the_token_secret_even_when_the_host_echoes_it() {
+        // The fake repeats the Authorization header in every error body. Each
+        // way a call can surface remote text must scrub it.
+        let echo = |change: fn(&mut State)| {
+            Fake::new().with(|state| {
+                state.echo_secret = true;
+                change(state);
+            })
+        };
+        let mut errors = Vec::new();
+        // A refusal on the write (403).
+        errors.push(
+            attach(&echo(|state| state.has_mapping_use = false), MAPPING)
+                .await
+                .unwrap_err(),
+        );
+        // A refusal on the read.
+        errors.push(
+            attach(&echo(|state| state.has_audit = false), MAPPING)
+                .await
+                .unwrap_err(),
+        );
+        // An uncertain failure carrying the answer's text.
+        errors.push(
+            attach(
+                &echo(|state| {
+                    state.fail_next_put = Some((500, json!({"message": "lock timeout"})));
+                }),
+                MAPPING,
+            )
+            .await
+            .unwrap_err(),
+        );
+        // A hotplug failure and a cleanup that cannot run.
+        errors.push(
+            attach(
+                &echo(|state| {
+                    state.leave_leftover = true;
+                    state.deny_delete = true;
+                    state.fail_next_put = Some((400, json!({"message": "hotplug problem"})));
+                }),
+                MAPPING,
+            )
+            .await
+            .unwrap_err(),
+        );
+        // A detach refusal.
+        errors.push(
+            detach(
+                &echo(|state| {
+                    state.applied.insert("usb0".into(), value(MAPPING));
+                    state.has_mapping_use = false;
+                }),
+                "usb0",
+                MAPPING,
+            )
+            .await
+            .unwrap_err(),
+        );
+        for error in errors {
+            let shown = format!("{error} {error:?}");
+            assert!(!shown.contains(SECRET), "{shown}");
+        }
+    }
+
+    #[test]
+    fn scrubbing_is_what_removes_the_secret() {
+        // Guards the test above: without `scrub` the echoed text survives.
+        let request = request();
+        let echoed = format!("denied [Authorization: PVEAPIToken=x={SECRET}]");
+        let raw = PveApiError::Http {
+            status: 500,
+            detail: echoed.clone(),
+        };
+        assert!(raw.to_string().contains(SECRET));
+        let clean = scrub(raw, &request);
+        assert!(!clean.to_string().contains(SECRET), "{clean}");
+        assert!(clean.to_string().contains("[redacted]"));
     }
 
     // -- Detach ---------------------------------------------------------------
@@ -1765,15 +2259,17 @@ mod tests {
             state.applied.insert("usb0".into(), value(OTHER));
             state.applied.insert("usb1".into(), value(MAPPING));
         });
+        let read_digest = digest_of(&fake.state.lock().unwrap());
         let outcome = detach(&fake, "usb1", MAPPING).await.unwrap();
         assert_eq!(outcome.change, PveUsbChange::Written);
         assert_eq!(outcome.state, PveUsbState::Applied);
         assert_eq!(outcome.observed, None);
         assert_eq!(fake.stored().len(), 1);
         assert_eq!(fake.stored()["usb0"], value(OTHER));
-        let puts = fake.puts();
-        assert_eq!(puts[0]["delete"], "usb1");
-        assert!(puts[0]["digest"].is_string());
+        assert_eq!(
+            fake.puts(),
+            [json!({"delete": "usb1", "digest": read_digest})]
+        );
     }
 
     #[tokio::test]
@@ -1818,7 +2314,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn detach_cancels_an_attach_that_is_still_pending() {
+    async fn assumption_unmeasured_detach_cancels_an_attach_that_is_still_pending() {
         let fake = Fake::new().with(running_hotplug_off);
         let attached = attach(&fake, MAPPING).await.unwrap();
         assert_eq!(attached.state, PveUsbState::Pending);
@@ -1913,11 +2409,16 @@ mod tests {
             state.bump_before_put = true;
             state.applied.insert("usb0".into(), value(MAPPING));
         });
+        let read_digest = digest_of(&fake.state.lock().unwrap());
         assert!(matches!(
             detach(&fake, "usb0", MAPPING).await,
             Err(PveUsbError::DigestConflict)
         ));
         assert_eq!(fake.stored()["usb0"], value(MAPPING));
+        assert_eq!(
+            fake.puts(),
+            [json!({"delete": "usb0", "digest": read_digest})]
+        );
     }
 
     #[tokio::test]
@@ -2038,7 +2539,13 @@ mod tests {
                     .replace("/nodes/pve8/", "/nodes/pve9-n1/")
                     .replace("/nodes/pve/", "/nodes/pve9-n1/")
             ),
-            params: (method == PveHttpMethod::Put).then(|| request["params"].clone()),
+            // The recorded params of a refused write may carry the (stale)
+            // digest it was sent with; the digest is asserted separately.
+            params: (method == PveHttpMethod::Put).then(|| {
+                let mut params = request["params"].clone();
+                params.as_object_mut().unwrap().remove("digest");
+                params
+            }),
             digest: digest.map(str::to_owned),
             status,
             body,
@@ -2078,6 +2585,12 @@ mod tests {
             if let Some(expected) = &step.params {
                 let mut sent = body.expect("a write has a body");
                 let digest = sent.as_object_mut().unwrap().remove("digest");
+                assert!(
+                    digest
+                        .as_ref()
+                        .is_some_and(|d| d.as_str().is_some_and(|d| !d.is_empty())),
+                    "every write carries the digest it was read under"
+                );
                 assert_eq!(&sent, expected, "the write matches the recording");
                 if let Some(want) = &step.digest {
                     assert_eq!(
@@ -2271,9 +2784,15 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_recorded_failed_hotplug_leaves_an_entry_that_is_removed() {
+    async fn assumption_unmeasured_recorded_failed_hotplug_leftover_is_removed() {
         // 9564: the recorded attach of a mapping whose port is empty answered
-        // 400 and left usb0 queued (a3-config, a3-pending).
+        // 400 and left usb0 queued (a3-config, a3-pending). RECORDED: the
+        // failed write (a3-set-absentpath-running) and the leftover (a3-config
+        // and a3-pending). NOT RECORDED, assumed: the delete of that leftover
+        // from the running guest, its `null` answer, and the read-back that
+        // shows the slot empty (derived by removing usb0 from the recordings).
+        // This is a contract for the provider's request sequence, not evidence
+        // of how PVE answers that delete.
         let pre = "00000000000000000000000000000000000000bb";
         let after = "00000000000000000000000000000000000000cc";
         let steps = vec![
@@ -2320,23 +2839,20 @@ mod tests {
 
     #[tokio::test]
     async fn a_recorded_stale_digest_is_a_conflict_for_attach_and_detach() {
-        // The recorded refusals (k3, k4): 500 "checksum mismatch".
-        let pre = "00000000000000000000000000000000000000dd";
+        // The recorded refusals (k3, k4): 500 "checksum mismatch". The guest
+        // is the recorded h2 state (usb0 held, digest 576c...), so attach's
+        // lowest free slot is usb1 and its request equals the recorded one
+        // (k3: usb1=mapping=fm-test-superdrive-b), plus the digest it read.
+        const READ: &str = "576cb8843c272804a9ea5f2a93342df47352528e";
         let steps = vec![
-            step(
-                &without_usb0(&recording!("9.2.2", "h2-config-after-attach"), pre),
-                None,
-            ),
-            step(
-                &without_usb0(&recording!("9.2.2", "h2-pending-after-attach"), pre),
-                None,
-            ),
-            step(&recording!("9.2.2", "k3-attach-stale-digest"), None),
+            step(&recording!("9.2.2", "h2-config-after-attach"), None),
+            step(&recording!("9.2.2", "h2-pending-after-attach"), None),
+            step(&recording!("9.2.2", "k3-attach-stale-digest"), Some(READ)),
         ];
-        // The recorded write named usb1; ours names usb0, so compare loosely
-        // by replaying only the recorded answer.
-        let mut steps = steps;
-        steps[2].params = None;
+        assert_eq!(
+            steps[2].params,
+            Some(json!({"usb1": "mapping=fm-test-superdrive-b"}))
+        );
         let (result, replay) = replay_attach(steps, 9563, "fm-test-superdrive-b").await;
         assert!(
             matches!(result, Err(PveUsbError::DigestConflict)),
@@ -2344,15 +2860,13 @@ mod tests {
         );
         replay.done();
 
+        // k4 recorded `delete=usb0`; ours is the same request with the digest.
         let steps = vec![
             step(&recording!("9.2.2", "h2-config-after-attach"), None),
             step(&recording!("9.2.2", "h2-pending-after-attach"), None),
-            {
-                let mut write = step(&recording!("9.2.2", "k4-delete-stale-digest"), None);
-                write.params = Some(json!({"delete": "usb0"}));
-                write
-            },
+            step(&recording!("9.2.2", "k4-delete-stale-digest"), Some(READ)),
         ];
+        assert_eq!(steps[2].params, Some(json!({"delete": "usb0"})));
         let (result, replay) = replay_detach(steps, 9563, "usb0", A).await;
         assert!(
             matches!(result, Err(PveUsbError::DigestConflict)),
@@ -2415,8 +2929,15 @@ mod tests {
         let steps = vec![
             step(&recording!("9.2.2", "h2-config-after-attach"), None),
             step(&recording!("9.2.2", "h2-pending-after-attach"), None),
-            step(&recording!("9.2.2", "pw5-delete-usb-hwtype-only"), None),
+            step(
+                &recording!("9.2.2", "pw5-delete-usb-hwtype-only"),
+                Some("576cb8843c272804a9ea5f2a93342df47352528e"),
+            ),
         ];
+        // The replay asserts the request equals the recorded one: PUT
+        // `delete=usb0`, conditional on the digest read.
+        assert_eq!(steps[2].params, Some(json!({"delete": "usb0"})));
+        assert_eq!(steps[2].method, PveHttpMethod::Put);
         let (result, replay) = replay_detach(steps, 9563, "usb0", A).await;
         match result {
             Err(PveUsbError::Refused { privilege, .. }) => {
