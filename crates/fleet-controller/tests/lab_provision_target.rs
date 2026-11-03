@@ -995,6 +995,20 @@ impl Harness {
         guest_os: fleet_core::GuestOs,
         ssh_user: &str,
     ) -> Self {
+        Self::build(audio, guest_os, ssh_user, Vec::new()).await
+    }
+
+    /// As [`Self::new`], over a template that declares `hardware` (FM-1121).
+    async fn with_hardware(hardware: Vec<fleet_core::LabHardware>) -> Self {
+        Self::build(None, fleet_core::GuestOs::default(), "root", hardware).await
+    }
+
+    async fn build(
+        audio: Option<fleet_core::LabAudio>,
+        guest_os: fleet_core::GuestOs,
+        ssh_user: &str,
+        hardware: Vec<fleet_core::LabHardware>,
+    ) -> Self {
         let dir = tempfile::tempdir().unwrap();
         let store = Store::open(&dir.path().join("fleet.db")).await.unwrap();
         let pool = store.pool().clone();
@@ -1035,6 +1049,7 @@ impl Harness {
             audio,
             guest_os,
             interactive_user: None,
+            hardware,
         };
         let template: LabTemplate = LabTemplatePort::create(
             labs.as_ref(),
@@ -4383,4 +4398,611 @@ async fn oversized_image_keys_fail_at_ssh_key_instead_of_being_overwritten() {
     assert!(pve.hardware_writes().is_empty());
     assert!(first(&pve, "/status/start").is_none());
     assert_eq!(stored.failed_step.as_deref(), Some("ssh_key"));
+}
+
+// FM-1121: hardware in placement ---------------------------------------------
+
+mod hardware_placement {
+    use super::*;
+    use fleet_application::hardware::{DeviceObservation, HardwareStore as _};
+    use fleet_application::hardware_reservation::HardwareReservations;
+    use fleet_application::lab_placement::{HardwareDemand, HardwarePlacement};
+    use fleet_controller::hardware_reservation_store::SqliteHardwareReservations;
+    use fleet_core::{
+        DeviceNodeEntry, DeviceStatus, HardwareKind, HardwareReservation, HardwareReservationState,
+        LabHardware, ReservationOwnerKind, UnsupportedReason,
+    };
+    use fleet_storage_sqlite::HardwareRepository;
+
+    const MAPPING: &str = "fm-test-superdrive-a";
+    const SECOND: &str = "fm-test-verbatim";
+
+    fn usb(mapping: &str) -> LabHardware {
+        LabHardware {
+            kind: HardwareKind::Usb,
+            mapping: mapping.to_owned(),
+        }
+    }
+
+    fn entry(node: &str, seen_ago_ms: i64) -> DeviceNodeEntry {
+        DeviceNodeEntry {
+            node: node.to_owned(),
+            vendor_id: "05ac".to_owned(),
+            product_id: "1500".to_owned(),
+            usbpath: Some("1-10".to_owned()),
+            manufacturer: None,
+            product: None,
+            last_seen_at: fleet_core::SystemClock::now_unix_millis() - seen_ago_ms,
+        }
+    }
+
+    /// Records a device in the harness account's inventory.
+    async fn seed(
+        harness: &Harness,
+        mapping: &str,
+        status: DeviceStatus,
+        entries: Vec<DeviceNodeEntry>,
+    ) -> String {
+        HardwareRepository::new(harness.pool.clone())
+            .upsert_device(
+                &DeviceObservation {
+                    id: format!("device-{mapping}"),
+                    account_id: harness.account_id.clone(),
+                    mapping_id: mapping.to_owned(),
+                    kind: HardwareKind::Usb,
+                    entries,
+                    status,
+                },
+                fleet_core::SystemClock::now_unix_millis(),
+            )
+            .await
+            .unwrap()
+            .id
+    }
+
+    async fn available_on_template_node(harness: &Harness, mapping: &str) -> String {
+        seed(
+            harness,
+            mapping,
+            DeviceStatus::Available,
+            vec![entry(TEMPLATE_NODE, 1_000)],
+        )
+        .await
+    }
+
+    fn placement(harness: &Harness) -> Arc<HardwarePlacement> {
+        Arc::new(HardwarePlacement::new(
+            Arc::new(HardwareRepository::new(harness.pool.clone())),
+            Arc::new(HardwareReservations::new(
+                Arc::new(SqliteHardwareReservations::new(harness.pool.clone())),
+                Arc::new(AuditSink::new(harness.pool.clone())),
+            )),
+            900_000,
+        ))
+    }
+
+    fn executor(
+        harness: &Harness,
+        pve: &Arc<Pve>,
+    ) -> fleet_controller::proxmox_exec::ProvisionExecutor {
+        harness
+            .placed_executor(pve, PlacementPolicy::default())
+            .with_device_placement(placement(harness))
+    }
+
+    async fn live(harness: &Harness, lease_id: &str) -> Vec<HardwareReservation> {
+        HardwareRepository::new(harness.pool.clone())
+            .live_reservations_for_owner(ReservationOwnerKind::Lease, lease_id)
+            .await
+            .unwrap()
+    }
+
+    async fn device_status(harness: &Harness, mapping: &str) -> DeviceStatus {
+        HardwareRepository::new(harness.pool.clone())
+            .device_by_mapping(&harness.account_id, mapping)
+            .await
+            .unwrap()
+            .unwrap()
+            .status
+    }
+
+    /// Provisions `lease_id` through the harness account with `executor`.
+    async fn provision(
+        harness: &Harness,
+        pve: &Arc<Pve>,
+        executor: fleet_controller::proxmox_exec::ProvisionExecutor,
+        lease_id: &str,
+        record_id: &str,
+    ) -> (String, Option<(String, String)>, ProvisionRecord) {
+        let account = harness.account_id.clone();
+        harness
+            .run_with_account(pve, executor, lease_id, record_id, Some(&account))
+            .await
+    }
+
+    /// Nothing was allocated: no VMID taken, no clone, no capacity held.
+    async fn assert_nothing_allocated(
+        harness: &Harness,
+        pve: &Pve,
+        lease_id: &str,
+        stored: &ProvisionRecord,
+    ) {
+        assert!(pve.clones().is_empty(), "no clone was requested");
+        assert!(
+            !pve.paths()
+                .iter()
+                .any(|path| path == "/api2/json/cluster/nextid"),
+            "no VMID was asked for"
+        );
+        assert_eq!(stored.vmid, None);
+        assert!(
+            CapacityRepository::new(harness.pool.clone())
+                .for_lease(lease_id)
+                .await
+                .unwrap()
+                .is_none_or(|capacity| capacity.state == ReservationState::Released),
+            "no capacity is held"
+        );
+    }
+
+    fn pve_with_room() -> Arc<Pve> {
+        let pve = Pve::new(Vec::new());
+        *pve.capacity.lock().unwrap() = Some(16);
+        pve
+    }
+
+    #[tokio::test]
+    async fn a_lease_with_hardware_reserves_the_device_with_the_capacity() {
+        let harness = Harness::with_hardware(vec![usb(MAPPING)]).await;
+        let device_id = available_on_template_node(&harness, MAPPING).await;
+        let (lease_id, record) = harness.record().await;
+        let pve = pve_with_room();
+
+        let (_, error, stored) = provision(
+            &harness,
+            &pve,
+            executor(&harness, &pve),
+            &lease_id,
+            &record.id,
+        )
+        .await;
+
+        // The saga ran on to the agent probe, as without hardware.
+        assert_eq!(error.unwrap().0, "never_ready");
+        assert_eq!(pve.clones().len(), 1);
+        assert!(stored.vmid.is_some());
+        let held = live(&harness, &lease_id).await;
+        assert_eq!(held.len(), 1);
+        assert_eq!(held[0].device_id, device_id);
+        // Placement only reserves: the attach is the saga's, so nothing is
+        // attached and no slot is recorded.
+        assert_eq!(held[0].state, HardwareReservationState::Held);
+        assert!(held[0].guest.is_none());
+        assert_eq!(
+            device_status(&harness, MAPPING).await,
+            DeviceStatus::Reserved
+        );
+        // No request about the device ever reached Proxmox: reserving is
+        // Fleet-side only.
+        assert!(
+            pve.paths()
+                .iter()
+                .all(|path| !path.contains("/mapping/") && !path.ends_with("/hardware/usb")),
+            "{:?}",
+            pve.paths()
+        );
+        let capacity = CapacityRepository::new(harness.pool.clone())
+            .for_lease(&lease_id)
+            .await
+            .unwrap()
+            .expect("the capacity is reserved too");
+        assert_eq!(capacity.state, ReservationState::Held);
+        assert_eq!(harness.audit_events("hardware_reserved").await, 1);
+    }
+
+    #[tokio::test]
+    async fn a_lease_without_hardware_is_unchanged() {
+        // The executor can reserve devices, the template declares none.
+        let harness = Harness::new().await;
+        let (lease_id, record) = harness.record().await;
+        let pve = pve_with_room();
+
+        let (_, error, _) = provision(
+            &harness,
+            &pve,
+            executor(&harness, &pve),
+            &lease_id,
+            &record.id,
+        )
+        .await;
+
+        assert_eq!(error.unwrap().0, "never_ready");
+        assert_eq!(pve.clones().len(), 1);
+        assert!(live(&harness, &lease_id).await.is_empty());
+        let rows: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM hardware_reservations")
+            .fetch_one(&harness.pool)
+            .await
+            .unwrap();
+        assert_eq!(rows, 0);
+        assert_eq!(harness.audit_events("hardware_reserved").await, 0);
+    }
+
+    #[tokio::test]
+    async fn a_mapping_the_inventory_does_not_have_refuses_before_anything_is_allocated() {
+        let harness = Harness::with_hardware(vec![usb(MAPPING)]).await;
+        let (lease_id, record) = harness.record().await;
+        let pve = pve_with_room();
+
+        let (state, error, stored) = provision(
+            &harness,
+            &pve,
+            executor(&harness, &pve),
+            &lease_id,
+            &record.id,
+        )
+        .await;
+
+        assert_eq!(state, "failed");
+        let (reason, detail) = error.unwrap();
+        assert_eq!(reason, "hardware_unknown");
+        assert!(
+            detail.contains(&format!("hardware {MAPPING} is not in the inventory")),
+            "{detail}"
+        );
+        assert_nothing_allocated(&harness, &pve, &lease_id, &stored).await;
+        assert!(live(&harness, &lease_id).await.is_empty());
+        assert_eq!(harness.audit_events("lab_placement_refused").await, 1);
+    }
+
+    #[tokio::test]
+    async fn a_device_on_another_node_refuses_naming_the_node_constraint() {
+        let harness = Harness::with_hardware(vec![usb(MAPPING)]).await;
+        // The template, and so the clone, is on pve-b; the device is on pve-a.
+        seed(
+            &harness,
+            MAPPING,
+            DeviceStatus::Available,
+            vec![entry("pve-a", 1_000)],
+        )
+        .await;
+        let (lease_id, record) = harness.record().await;
+        let pve = pve_with_room();
+
+        let (state, error, stored) = provision(
+            &harness,
+            &pve,
+            executor(&harness, &pve),
+            &lease_id,
+            &record.id,
+        )
+        .await;
+
+        assert_eq!(state, "failed");
+        let (reason, detail) = error.unwrap();
+        assert_eq!(reason, "hardware_wrong_node");
+        assert!(detail.contains("hardware fm-test-superdrive-a is present on node pve-a"));
+        assert!(detail.contains("the clone, is on node pve-b"), "{detail}");
+        assert_nothing_allocated(&harness, &pve, &lease_id, &stored).await;
+        assert!(live(&harness, &lease_id).await.is_empty());
+        assert_eq!(
+            device_status(&harness, MAPPING).await,
+            DeviceStatus::Available
+        );
+    }
+
+    #[tokio::test]
+    async fn a_mapping_with_no_node_entry_refuses() {
+        let harness = Harness::with_hardware(vec![usb(MAPPING)]).await;
+        seed(
+            &harness,
+            MAPPING,
+            DeviceStatus::Unsupported(UnsupportedReason::NoNodeEntry),
+            Vec::new(),
+        )
+        .await;
+        let (lease_id, record) = harness.record().await;
+        let pve = pve_with_room();
+
+        let (_, error, stored) = provision(
+            &harness,
+            &pve,
+            executor(&harness, &pve),
+            &lease_id,
+            &record.id,
+        )
+        .await;
+
+        let (reason, detail) = error.unwrap();
+        assert_eq!(reason, "hardware_no_node_entry");
+        assert!(detail.contains("no entry for any node"), "{detail}");
+        assert_nothing_allocated(&harness, &pve, &lease_id, &stored).await;
+    }
+
+    #[tokio::test]
+    async fn a_busy_device_fails_fast_naming_the_holder_and_leaves_the_holder_alone() {
+        let harness = Harness::with_hardware(vec![usb(MAPPING)]).await;
+        available_on_template_node(&harness, MAPPING).await;
+        let (first_lease, first) = harness.record().await;
+        let (second_lease, second) = harness.record().await;
+        let pve = pve_with_room();
+        let (_, error, _) = provision(
+            &harness,
+            &pve,
+            executor(&harness, &pve),
+            &first_lease,
+            &first.id,
+        )
+        .await;
+        assert_eq!(error.unwrap().0, "never_ready");
+        let clones_before = pve.clones().len();
+
+        let (state, error, stored) = provision(
+            &harness,
+            &pve,
+            executor(&harness, &pve),
+            &second_lease,
+            &second.id,
+        )
+        .await;
+
+        assert_eq!(state, "failed");
+        let (reason, detail) = error.unwrap();
+        assert_eq!(reason, "hardware_busy");
+        assert!(
+            detail.contains(&format!("reserved by lease {first_lease}")),
+            "{detail}"
+        );
+        // Fail fast: no queue, no clone, no capacity, and the holder keeps it.
+        assert_eq!(pve.clones().len(), clones_before);
+        assert_eq!(stored.vmid, None);
+        assert!(live(&harness, &second_lease).await.is_empty());
+        let holder = live(&harness, &first_lease).await;
+        assert_eq!(holder.len(), 1);
+        assert_eq!(holder[0].state, HardwareReservationState::Held);
+        assert!(
+            CapacityRepository::new(harness.pool.clone())
+                .for_lease(&second_lease)
+                .await
+                .unwrap()
+                .is_none_or(|capacity| capacity.state == ReservationState::Released)
+        );
+        // The store's refusal and placement's are audited with the mapping
+        // and the holder, never anything the provider said.
+        assert_eq!(harness.audit_events("hardware_refused").await, 1);
+        assert_eq!(harness.audit_events("lab_placement_refused").await, 1);
+        let metadata: String = sqlx::query_scalar(
+            "SELECT metadata_json FROM audit_events WHERE outcome IS NULL \
+             AND metadata_json LIKE '%lab_placement_refused%'",
+        )
+        .fetch_one(&harness.pool)
+        .await
+        .unwrap();
+        for fact in [
+            "\"reason\":\"hardware_busy\"",
+            "\"mapping\":\"fm-test-superdrive-a\"",
+            &format!("\"holder_id\":\"{first_lease}\""),
+            "\"holder_state\":\"held\"",
+        ] {
+            assert!(metadata.contains(fact), "{fact} in {metadata}");
+        }
+    }
+
+    #[tokio::test]
+    async fn an_unsupported_or_externally_attached_device_refuses_with_its_reason() {
+        for (status, reason, fragment) in [
+            (
+                DeviceStatus::Unsupported(UnsupportedReason::TokenLacksMappingUse),
+                "hardware_unsupported",
+                "token_lacks_mapping_use",
+            ),
+            (
+                DeviceStatus::ExternallyAttached,
+                "hardware_externally_attached",
+                "externally_attached",
+            ),
+        ] {
+            let harness = Harness::with_hardware(vec![usb(MAPPING)]).await;
+            seed(&harness, MAPPING, status, vec![entry(TEMPLATE_NODE, 1_000)]).await;
+            let (lease_id, record) = harness.record().await;
+            let pve = pve_with_room();
+
+            let (_, error, stored) = provision(
+                &harness,
+                &pve,
+                executor(&harness, &pve),
+                &lease_id,
+                &record.id,
+            )
+            .await;
+
+            let (got, detail) = error.unwrap();
+            assert_eq!(got, reason, "{detail}");
+            assert!(detail.contains(fragment), "{detail}");
+            assert_nothing_allocated(&harness, &pve, &lease_id, &stored).await;
+        }
+    }
+
+    #[tokio::test]
+    async fn a_device_last_seen_long_ago_is_refused_as_stale() {
+        let harness = Harness::with_hardware(vec![usb(MAPPING)]).await;
+        seed(
+            &harness,
+            MAPPING,
+            DeviceStatus::Available,
+            vec![entry(TEMPLATE_NODE, 3_600_000)],
+        )
+        .await;
+        let (lease_id, record) = harness.record().await;
+        let pve = pve_with_room();
+
+        let (_, error, stored) = provision(
+            &harness,
+            &pve,
+            executor(&harness, &pve),
+            &lease_id,
+            &record.id,
+        )
+        .await;
+
+        let (reason, detail) = error.unwrap();
+        assert_eq!(reason, "hardware_stale");
+        assert!(detail.contains("stale observation"), "{detail}");
+        assert_nothing_allocated(&harness, &pve, &lease_id, &stored).await;
+    }
+
+    #[tokio::test]
+    async fn a_capacity_refusal_releases_the_devices_reserved_for_the_lease() {
+        let harness = Harness::with_hardware(vec![usb(MAPPING), usb(SECOND)]).await;
+        available_on_template_node(&harness, MAPPING).await;
+        available_on_template_node(&harness, SECOND).await;
+        let (lease_id, record) = harness.record().await;
+        let pve = Pve::new(Vec::new());
+        // 1 GiB free; the template wants 2 GiB.
+        *pve.capacity.lock().unwrap() = Some(1);
+
+        let (state, error, stored) = provision(
+            &harness,
+            &pve,
+            executor(&harness, &pve),
+            &lease_id,
+            &record.id,
+        )
+        .await;
+
+        assert_eq!(state, "failed");
+        assert_eq!(error.unwrap().0, "insufficient_memory");
+        assert_eq!(stored.vmid, None);
+        // The lease failed without allocating a guest: both devices are
+        // released again, and show available.
+        assert!(live(&harness, &lease_id).await.is_empty());
+        for mapping in [MAPPING, SECOND] {
+            assert_eq!(
+                device_status(&harness, mapping).await,
+                DeviceStatus::Available,
+                "{mapping}"
+            );
+        }
+        assert_eq!(harness.audit_events("hardware_released").await, 2);
+    }
+
+    #[tokio::test]
+    async fn a_second_device_that_is_busy_releases_the_first_the_step_reserved() {
+        let harness = Harness::with_hardware(vec![usb(SECOND), usb(MAPPING)]).await;
+        available_on_template_node(&harness, MAPPING).await;
+        available_on_template_node(&harness, SECOND).await;
+        // Another lease holds the device that sorts second.
+        let (other_lease, _) = harness.record().await;
+        let (lease_id, record) = harness.record().await;
+        let held = placement(&harness)
+            .reserve(
+                "tester",
+                &HardwareDemand {
+                    lease_id: &other_lease,
+                    account_id: &harness.account_id,
+                    clone_node: TEMPLATE_NODE,
+                    declared: &[usb(SECOND)],
+                    operation_id: None,
+                },
+                fleet_core::SystemClock::now_unix_millis(),
+            )
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(held.len(), 1);
+        let pve = pve_with_room();
+
+        let (_, error, stored) = provision(
+            &harness,
+            &pve,
+            executor(&harness, &pve),
+            &lease_id,
+            &record.id,
+        )
+        .await;
+
+        // Devices are taken in mapping order, so the busy one is reached
+        // second: the first is released again, never stranded.
+        let (reason, detail) = error.unwrap();
+        assert_eq!(reason, "hardware_busy");
+        assert!(
+            detail.starts_with(&format!("hardware {SECOND} ")),
+            "{detail}"
+        );
+        assert_nothing_allocated(&harness, &pve, &lease_id, &stored).await;
+        assert!(live(&harness, &lease_id).await.is_empty());
+        assert_eq!(
+            device_status(&harness, MAPPING).await,
+            DeviceStatus::Available
+        );
+        assert_eq!(live(&harness, &other_lease).await.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn a_template_that_declares_hardware_is_never_provisioned_without_it() {
+        // A controller that cannot reserve devices refuses instead of
+        // cloning a guest that silently lacks them.
+        let harness = Harness::with_hardware(vec![usb(MAPPING)]).await;
+        available_on_template_node(&harness, MAPPING).await;
+        let (lease_id, record) = harness.record().await;
+        let pve = pve_with_room();
+
+        let (state, error, stored) = provision(
+            &harness,
+            &pve,
+            harness.placed_executor(&pve, PlacementPolicy::default()),
+            &lease_id,
+            &record.id,
+        )
+        .await;
+
+        assert_eq!(state, "failed");
+        assert_eq!(error.unwrap().0, "hardware_unavailable");
+        assert_nothing_allocated(&harness, &pve, &lease_id, &stored).await;
+    }
+
+    #[tokio::test]
+    async fn a_resumed_provision_keeps_its_reservation_and_does_not_reserve_twice() {
+        let harness = Harness::with_hardware(vec![usb(MAPPING)]).await;
+        available_on_template_node(&harness, MAPPING).await;
+        let (lease_id, record) = harness.record().await;
+        // A run reserved the VMID and stopped before its clone.
+        harness
+            .labs
+            .reserve_clone_target(&record.id, TEMPLATE_NODE, 9005)
+            .await
+            .unwrap();
+        let pve = pve_with_room();
+        // The device is already this lease's.
+        let first = placement(&harness)
+            .reserve(
+                fleet_auth::LAN_PRINCIPAL_ID,
+                &HardwareDemand {
+                    lease_id: &lease_id,
+                    account_id: &harness.account_id,
+                    clone_node: TEMPLATE_NODE,
+                    declared: &[usb(MAPPING)],
+                    operation_id: None,
+                },
+                fleet_core::SystemClock::now_unix_millis(),
+            )
+            .await
+            .unwrap()
+            .unwrap();
+
+        let (_, error, stored) = provision(
+            &harness,
+            &pve,
+            executor(&harness, &pve),
+            &lease_id,
+            &record.id,
+        )
+        .await;
+
+        assert_eq!(error.unwrap().0, "never_ready");
+        assert_eq!(stored.vmid, Some(9005));
+        let held = live(&harness, &lease_id).await;
+        assert_eq!(held.len(), 1, "the same row, not a second hold");
+        assert_eq!(held[0].id, first[0].id);
+        assert_eq!(harness.audit_events("hardware_reserved").await, 1);
+    }
 }

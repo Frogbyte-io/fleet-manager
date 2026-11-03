@@ -3876,6 +3876,7 @@ fn fleetctl_lists_and_downloads_lab_artifacts_with_digest_verification() {
             audio: None,
             guest_os: fleet_core::GuestOs::default(),
             interactive_user: None,
+            hardware: Vec::new(),
         };
         let template = LabTemplatePort::create(
             labs.as_ref(),

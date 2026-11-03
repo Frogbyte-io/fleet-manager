@@ -96,6 +96,8 @@ pub struct LabCleanupExecutor {
     reservations: Option<Arc<dyn CapacityReservationPort>>,
     /// Pooled guests (FM-717).
     pools: Option<PoolCleanup>,
+    /// The physical devices a lease reserved (FM-1121).
+    devices: Option<Arc<fleet_application::lab_placement::HardwarePlacement>>,
 }
 
 impl LabCleanupExecutor {
@@ -116,7 +118,19 @@ impl LabCleanupExecutor {
             destroyer,
             reservations: None,
             pools: None,
+            devices: None,
         }
+    }
+
+    /// Releases the devices a lease reserved but never attached when its
+    /// cleanup completes (FM-1121).
+    #[must_use]
+    pub fn with_devices(
+        mut self,
+        devices: Arc<fleet_application::lab_placement::HardwarePlacement>,
+    ) -> Self {
+        self.devices = Some(devices);
+        self
     }
 
     /// Reverts pooled leases' members instead of destroying them (FM-717).
@@ -207,6 +221,22 @@ impl LabCleanupExecutor {
                 outcome,
             )
             .await;
+        }
+        // FM-1121: the devices the lease reserved but never attached are
+        // released with it. A device that was attached, or whose attach or
+        // detach is unconfirmed, is not: the detach path (FM-1123) owns it,
+        // and the reservation store never releases it on the lease's word.
+        if let Some(devices) = &self.devices {
+            let _ = devices
+                .release_unattached(
+                    fleet_auth::LAN_PRINCIPAL_ID,
+                    &lease.id,
+                    // Named by the lease, not the operation: the operation's
+                    // outcome stays attached to its own intent.
+                    None,
+                    fleet_core::SystemClock::now_unix_millis(),
+                )
+                .await;
         }
         let mut audited = vec![("outcome", outcome.to_owned())];
         audited.extend(facts.iter().cloned());

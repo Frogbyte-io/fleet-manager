@@ -131,6 +131,7 @@ impl World {
             audio: None,
             guest_os: fleet_core::GuestOs::default(),
             interactive_user: None,
+            hardware: Vec::new(),
         };
         let template: LabTemplate = LabTemplatePort::create(
             labs.as_ref(),

@@ -155,6 +155,7 @@ impl Fixture {
             audio: None,
             guest_os,
             interactive_user: None,
+            hardware: Vec::new(),
         };
         let template: LabTemplate = LabTemplatePort::create(
             labs.as_ref(),

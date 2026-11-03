@@ -59,6 +59,8 @@ impl LabRepository {
             },
             guest_os: GuestOs::from_id(&row.get::<String, _>("guest_os"))?,
             interactive_user: row.get("interactive_user"),
+            hardware: serde_json::from_str(&row.get::<String, _>("hardware"))
+                .map_err(|error| format!("the template's hardware is not valid: {error}"))?,
         })
     }
 
@@ -112,14 +114,22 @@ impl LabRepository {
         })
     }
 }
+
+/// The template's declared hardware as the JSON array its column stores.
+fn hardware_json(content: &LabTemplateContent) -> Result<String, String> {
+    serde_json::to_string(&content.hardware)
+        .map_err(|error| format!("the template's hardware cannot be serialized: {error}"))
+}
+
 #[async_trait]
 impl LabTemplatePort for LabRepository {
     async fn create(&self, template: &NewLabTemplate, now: i64) -> Result<LabTemplate, String> {
         let id = Uuid::now_v7().to_string();
         let content = &template.content;
+        let hardware = hardware_json(content)?;
         let result = sqlx::query(
-            "INSERT INTO lab_templates (id, name, description, image_version_id, cores, memory_mib, disk_gib, bootstrap_project_id, readiness_probe, readiness_command, readiness_deadline_seconds, ttl_seconds, cleanup, published_from, created_at, updated_at, ssh_user, ssh_port, ssh_trust_mode, ssh_fingerprint, audio_device, audio_driver, guest_os, interactive_user) \
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, NULL, ?14, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22)",
+            "INSERT INTO lab_templates (id, name, description, image_version_id, cores, memory_mib, disk_gib, bootstrap_project_id, readiness_probe, readiness_command, readiness_deadline_seconds, ttl_seconds, cleanup, published_from, created_at, updated_at, ssh_user, ssh_port, ssh_trust_mode, ssh_fingerprint, audio_device, audio_driver, guest_os, interactive_user, hardware) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, NULL, ?14, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23)",
         )
         .bind(&id)
         .bind(&content.name)
@@ -141,6 +151,7 @@ impl LabTemplatePort for LabRepository {
         .bind(content.audio.as_ref().map(|audio| audio.driver.as_str()))
         .bind(content.guest_os.id())
         .bind(&content.interactive_user)
+        .bind(&hardware)
         .execute(&self.pool)
         .await;
         match result {
@@ -178,8 +189,9 @@ impl LabTemplatePort for LabRepository {
         content: &LabTemplateContent,
         now: i64,
     ) -> Result<LabTemplate, String> {
+        let hardware = hardware_json(content)?;
         let updated = sqlx::query(
-            "UPDATE lab_templates SET name = ?2, description = ?3, image_version_id = ?4, cores = ?5, memory_mib = ?6, disk_gib = ?7, bootstrap_project_id = ?8, readiness_probe = ?9, readiness_command = ?10, readiness_deadline_seconds = ?11, ttl_seconds = ?12, cleanup = ?13, updated_at = ?14, ssh_user = ?15, ssh_port = ?16, ssh_trust_mode = ?17, ssh_fingerprint = ?18, audio_device = ?19, audio_driver = ?20, guest_os = ?21, interactive_user = ?22 WHERE id = ?1",
+            "UPDATE lab_templates SET name = ?2, description = ?3, image_version_id = ?4, cores = ?5, memory_mib = ?6, disk_gib = ?7, bootstrap_project_id = ?8, readiness_probe = ?9, readiness_command = ?10, readiness_deadline_seconds = ?11, ttl_seconds = ?12, cleanup = ?13, updated_at = ?14, ssh_user = ?15, ssh_port = ?16, ssh_trust_mode = ?17, ssh_fingerprint = ?18, audio_device = ?19, audio_driver = ?20, guest_os = ?21, interactive_user = ?22, hardware = ?23 WHERE id = ?1",
         )
         .bind(id)
         .bind(&content.name)
@@ -201,6 +213,7 @@ impl LabTemplatePort for LabRepository {
         .bind(content.audio.as_ref().map(|audio| audio.driver.as_str()))
         .bind(content.guest_os.id())
         .bind(&content.interactive_user)
+        .bind(&hardware)
         .execute(&self.pool)
         .await
         .map_err(|error| format!("update failed: {error}"))?;

@@ -73,6 +73,7 @@ async fn lab_exec_runs_on_the_lease_machine_and_refuses_an_expired_lease() {
         audio: None,
         guest_os: fleet_core::GuestOs::default(),
         interactive_user: None,
+        hardware: Vec::new(),
     };
     let template: LabTemplate = LabTemplatePort::create(
         labs.as_ref(),

@@ -112,6 +112,12 @@ struct Harness {
 
 impl Harness {
     async fn new(members: &[u32]) -> Self {
+        Self::with_hardware(members, Vec::new()).await
+    }
+
+    /// As [`Self::new`], over a template version that declares `hardware`
+    /// (FM-1121).
+    async fn with_hardware(members: &[u32], hardware: Vec<fleet_core::LabHardware>) -> Self {
         let dir = tempfile::tempdir().unwrap();
         let store = Store::open(&dir.path().join("fleet.db")).await.unwrap();
         let pool = store.pool().clone();
@@ -152,6 +158,7 @@ impl Harness {
             audio: None,
             guest_os: fleet_core::GuestOs::default(),
             interactive_user: None,
+            hardware,
         };
         let template: LabTemplate = LabTemplatePort::create(
             labs.as_ref(),
@@ -381,4 +388,33 @@ async fn an_exhausted_pool_fails_the_provision_without_allocating() {
             .unwrap()
             .is_empty()
     );
+}
+
+#[tokio::test]
+async fn a_pooled_template_that_declares_hardware_is_refused_before_a_member_is_leased() {
+    // FM-1121: a pool member is a prebuilt guest, so the device could not be
+    // reserved and attached before its boot. The lease fails instead of
+    // handing the caller a guest that silently lacks the device.
+    let harness = Harness::with_hardware(
+        &[MEMBER_VMID],
+        vec![fleet_core::LabHardware {
+            kind: fleet_core::HardwareKind::Usb,
+            mapping: "fm-test-superdrive-a".to_owned(),
+        }],
+    )
+    .await;
+    let pve = Arc::new(Pve::default());
+    let (state, reason, lease, record) = harness.provision(&pve).await;
+    assert_eq!(
+        (state.as_str(), reason.as_str()),
+        ("failed", "hardware_pool_unsupported")
+    );
+    assert_eq!(lease.state, LeaseState::Failed);
+    assert_eq!(record.vmid, None);
+    assert!(pve.seen.lock().unwrap().is_empty(), "nothing touched PVE");
+    // No member was claimed.
+    let members = harness.pools.members(&harness.pool_id).await.unwrap();
+    assert_eq!(members.len(), 1);
+    assert_eq!(members[0].state, MemberState::Available);
+    assert_eq!(members[0].lease_id, None);
 }

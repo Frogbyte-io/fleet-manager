@@ -2686,6 +2686,9 @@ pub struct ProvisionExecutor {
     /// The public keys written to a Windows clone's cloud-init drive before
     /// its first boot (#561). Without a source nothing is written.
     login_keys: Option<Arc<dyn crate::lab_ssh_keys::LabKeySource>>,
+    /// Reserves the physical devices a template declares (FM-1121). Not to
+    /// be confused with the CPU, memory, and disk "hardware" step above.
+    devices: Option<Arc<fleet_application::lab_placement::HardwarePlacement>>,
 }
 
 /// The placement and capacity reservation parts (FM-715).
@@ -2774,7 +2777,23 @@ impl ProvisionExecutor {
             hardware_confirm_timeout: HARDWARE_CONFIRM_TIMEOUT,
             persistent: None,
             login_keys: None,
+            devices: None,
         }
+    }
+
+    /// Enables the reservation of the physical devices a template declares
+    /// (FM-1121): placement reserves them for the lease, before capacity,
+    /// the VMID, and the clone, and a lease that fails without allocating a
+    /// guest releases them again. Without it a template that declares
+    /// hardware is refused (`hardware_unavailable`) rather than leased
+    /// without its devices.
+    #[must_use]
+    pub fn with_device_placement(
+        mut self,
+        devices: Arc<fleet_application::lab_placement::HardwarePlacement>,
+    ) -> Self {
+        self.devices = Some(devices);
+        self
     }
 
     /// Supplies the source of the SSH public keys Lab installs in a Windows
@@ -2856,9 +2875,9 @@ impl ProvisionExecutor {
     /// a held row whose lease is `failed` without a VMID, so a skipped or
     /// failed release here cannot strand capacity.
     async fn release_unallocated(&self, operation: &Operation) {
-        let Some(placement) = &self.placement else {
+        if self.placement.is_none() && self.devices.is_none() {
             return;
-        };
+        }
         let Some(lease_id) = operation
             .payload_json
             .as_deref()
@@ -2883,13 +2902,28 @@ impl ProvisionExecutor {
             None => false,
         };
         if !allocated {
-            let _ = release_reservation(
-                placement.reservations.as_ref(),
-                placement.audit.as_ref(),
-                &lease_id,
-                "failed_without_allocation",
-            )
-            .await;
+            if let Some(placement) = &self.placement {
+                let _ = release_reservation(
+                    placement.reservations.as_ref(),
+                    placement.audit.as_ref(),
+                    &lease_id,
+                    "failed_without_allocation",
+                )
+                .await;
+            }
+            // The devices the lease reserved are released the same way. Only
+            // a hold that never started an attach is: bookkeeping that the
+            // reservation store would do on the lease's word anyway.
+            if let Some(devices) = &self.devices {
+                let _ = devices
+                    .release_unattached(
+                        fleet_auth::LAN_PRINCIPAL_ID,
+                        &lease_id,
+                        None,
+                        fleet_core::SystemClock::now_unix_millis(),
+                    )
+                    .await;
+            }
         }
     }
 
@@ -3232,6 +3266,15 @@ impl ProvisionExecutor {
 
         // The target: reserved and recorded before the clone call. A
         // record that already holds a reservation resumes with it.
+        // FM-1121: the devices the template declares are reserved first. The
+        // node is fixed (the template's), so a device on another node, or
+        // one that is busy or unusable, refuses before capacity is held.
+        if let Err(refusal) = self
+            .reserve_devices(record, content, &node, account_id, operation_id)
+            .await?
+        {
+            return Ok(Err(refusal));
+        }
         // FM-715: every pending clone (this function only runs before the
         // clone starts) holds the template's capacity on its node before a
         // VMID is taken or anything is cloned, including a record that
@@ -4280,6 +4323,82 @@ impl ProvisionExecutor {
             .map_err(|refusal| Refusal::new(refusal.reason(), refusal.to_string())))
     }
 
+    /// Reserves the physical devices the template declares for the record's
+    /// lease (FM-1121), on `node`, the node the clone runs on. Nothing here
+    /// calls Proxmox: the attach is the saga's. A template that declares
+    /// none reserves nothing and is unchanged. A refusal is audited best
+    /// effort like capacity's; the store audits its own reservations and
+    /// refusals.
+    async fn reserve_devices(
+        &self,
+        record: &fleet_application::lab::ProvisionRecord,
+        content: &fleet_core::LabTemplateContent,
+        node: &str,
+        account_id: &str,
+        operation_id: &str,
+    ) -> Result<Result<(), Refusal>, String> {
+        if content.hardware.is_empty() {
+            return Ok(Ok(()));
+        }
+        let (Some(devices), Some(lease_id)) = (&self.devices, record.lease_id.as_deref()) else {
+            // A template that asks for hardware is never provisioned
+            // without it: not through a standalone provision (no lease to
+            // own the reservation), and not by a controller that cannot
+            // reserve.
+            return Ok(Err(Refusal::new(
+                if self.devices.is_none() {
+                    "hardware_unavailable"
+                } else {
+                    "hardware_needs_lease"
+                },
+                if self.devices.is_none() {
+                    "this controller has no hardware reservation configured, so a template that declares hardware cannot be provisioned"
+                        .to_owned()
+                } else {
+                    "a template that declares hardware can only be provisioned through a lease, which owns the reservation"
+                        .to_owned()
+                },
+            )));
+        };
+        let outcome = devices
+            .reserve(
+                fleet_auth::LAN_PRINCIPAL_ID,
+                &fleet_application::lab_placement::HardwareDemand {
+                    lease_id,
+                    account_id,
+                    clone_node: node,
+                    declared: &content.hardware,
+                    operation_id: Some(operation_id),
+                },
+                fleet_core::SystemClock::now_unix_millis(),
+            )
+            .await
+            .map_err(|error| format!("the hardware reservation failed: {error}"))?;
+        Ok(match outcome {
+            Ok(_) => Ok(()),
+            Err(refusal) => {
+                if let Some(placement) = &self.placement {
+                    let mut facts = vec![
+                        ("node", node.to_owned()),
+                        ("reason", refusal.reason().to_owned()),
+                    ];
+                    facts.extend(refusal.hardware_audit_facts());
+                    let _ = placement
+                        .audit
+                        .record_intent(&fleet_application::lab_placement::reservation_audit(
+                            fleet_auth::LAN_PRINCIPAL_ID,
+                            lease_id,
+                            Some(operation_id),
+                            "lab_placement_refused",
+                            &facts,
+                        ))
+                        .await;
+                }
+                Err(Refusal::new(refusal.reason(), refusal.to_string()))
+            }
+        })
+    }
+
     /// Reserves the template's capacity on `node` for the record's lease in
     /// one transaction (FM-715). The node's capacity observation is
     /// refreshed first; when the refresh fails the stored observation
@@ -4645,6 +4764,19 @@ impl ProvisionExecutor {
                     "the template version is pooled through account {}; provision without --account, or with that account",
                     pool.account_id
                 ),
+            )
+            .await;
+        }
+        // FM-1121: a pool member is a prebuilt guest the operator owns, so a
+        // device cannot be reserved for the lease and attached before its
+        // boot. Leasing the member without the device would hand the caller a
+        // guest that silently lacks what the template asks for.
+        if pool.is_some() && !version.content.hardware.is_empty() {
+            return complete_failure(
+                operations,
+                &operation.id,
+                "hardware_pool_unsupported",
+                "the template version declares hardware, which pooled leases do not support yet; lease it without a pool",
             )
             .await;
         }
