@@ -21,6 +21,7 @@ pub mod external_accounts_store;
 pub mod frogenv;
 pub mod gateway;
 pub mod git_credentials;
+pub mod hardware_reservation_store;
 pub mod image_secrets;
 pub mod images_exec;
 pub mod install;
