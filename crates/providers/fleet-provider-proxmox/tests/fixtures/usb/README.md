@@ -10,8 +10,13 @@ privilege-separated token, `who: root` records come from `pvesh`.
 They are sanitized as the spike's README describes: no token, ticket,
 password, device serial (the API returns none), IP address or MAC address;
 the node names (`pve`, `pve8`) and the test mapping names are kept. A test
-in `usb_reads.rs` scans every file for serials, address-shaped runs and
-credential words.
+in `usb_reads.rs` scans every `.json` file in this directory (not a fixed
+list) for serials, credential words and IPv4-, IPv6-, MAC- and UUID-shaped
+runs, and a second test compares every copy byte for byte with the spike's
+recording (`pve9/` is `pve-9.2.2/`, `pve8/` is `pve-8.4.0/`), so a
+re-recording that is not copied here fails the build. That comparison is
+skipped, with a message, only when `docs/research/fixtures/proxmox-usb/` is
+absent from the checkout.
 
 | Fixture | Request | What it pins |
 |---|---|---|
@@ -29,5 +34,7 @@ credential words.
 
 No PVE that predates resource mappings was recorded, so the
 endpoint-absent answers (501 `Method '...' not implemented`, and 404) are
-synthetic and inline in the test. Malformed and oversized answers are inline
-too.
+synthetic and inline in the test. So is the answer for an unknown or deleted
+mapping id on the single-mapping read (404, a 500 saying not found, or a 200
+with no data, all read as `NotFound`): the spike never read one, so that
+mapping is an assumption. Malformed and oversized answers are inline too.

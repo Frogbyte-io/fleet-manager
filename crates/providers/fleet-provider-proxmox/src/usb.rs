@@ -13,17 +13,31 @@
 //!   `{message, severity}`, which is how the presence and the fingerprint of
 //!   a device are known without the node inventory. The listing needs
 //!   `Mapping.Audit`; **without it PVE answers an empty `200`, not an
-//!   error**, so an empty list proves nothing about privileges. The
-//!   distinguishing probe is a per-mapping read ([`ProxmoxClient::usb_mapping`]),
-//!   which answers 403 without the privilege.
+//!   error**, so an empty list proves nothing about privileges. Two ways
+//!   settle it. A per-mapping read of an id the caller already knows
+//!   ([`ProxmoxClient::usb_mapping`]) answers 403 without the privilege.
+//!   Without a known id, the provider's `token_permissions` read
+//!   (`GET /access/permissions`, see `permissions.rs`) lists the token's
+//!   effective privileges and shows whether `Mapping.Audit` is held on
+//!   `/mapping/usb` (or on a single `/mapping/usb/<id>`); this module does
+//!   not call it, the inventory service can.
 //! - `GET /nodes/{node}/hardware/usb` needs `Sys.Modify` on `/`, which no
 //!   read-only role holds, so a 403 here is the normal case for the base
 //!   Fleet token and not a fault. Its items carry no serial, and `usbpath`
 //!   only on devices that are not root hubs.
 //! - The endpoints are absent on a PVE that predates resource mappings;
 //!   PVE answers 501 `Method '…' not implemented` (404 is treated the same
-//!   way). No old-PVE answer was recorded by the spike, so that case is
-//!   covered by a synthetic test.
+//!   way) for the list and the inventory. No old-PVE answer was recorded by
+//!   the spike, so that case is covered by a synthetic test.
+//! - A single-mapping read of an id that does not exist is
+//!   [`PveUsbError::NotFound`], never `EndpointAbsent`: the endpoint is
+//!   there, the mapping is not. **The spike never read an unknown or
+//!   deleted mapping id**, so what PVE answers is an assumption: a 404, a
+//!   500 whose message says the mapping is `not found` / does not exist, or
+//!   a `200` with `data: null` are all read as not found (see
+//!   `classify_mapping_read`). The tests for it are synthetic. The
+//!   attach-time message `USB device mapping not found for '<id>'` was
+//!   recorded, but that is a task error, not this read.
 //! - `check-node` messages are decorated (the recordings carry an
 //!   `Invalid configuration: ` prefix and a trailing newline on device
 //!   errors, none on the node warning); they are normalized and classified
@@ -97,15 +111,27 @@ pub enum PveUsbError {
     /// The credentials were refused (401).
     Unauthenticated,
     /// The token lacks a privilege (403). The node inventory needs
-    /// `Sys.Modify` on `/`; a per-mapping read needs `Mapping.Audit`.
+    /// `Sys.Modify` on `/` and PVE names it (`required` is set). A
+    /// per-mapping read needs `Mapping.Audit`, but PVE's 403 there is a bare
+    /// `Permission check failed` that names no privilege, so `required` is
+    /// `None`; the caller knows which privilege that read needs.
     PermissionDenied {
         /// The bounded, redacted API detail.
         detail: String,
         /// The privilege PVE named, when its message could be read.
         required: Option<PveUsbRequiredPrivilege>,
     },
-    /// The endpoint does not exist: a PVE that predates USB resource
-    /// mappings (or the node inventory) answers 501 or 404.
+    /// The mapping read found no such mapping (a deleted or never-created
+    /// id). Only [`ProxmoxClient::usb_mapping`] returns this. How PVE
+    /// answers an unknown id was not measured by the spike; see the module
+    /// docs.
+    NotFound {
+        /// The bounded API detail (a fixed note for a `200` with no data).
+        detail: String,
+    },
+    /// The list or inventory endpoint does not exist: a PVE that predates
+    /// USB resource mappings (or the node inventory) answers 501 or 404.
+    /// The single-mapping read never reports a 404 this way.
     EndpointAbsent {
         /// The PVE version, when it could be read.
         version: Option<String>,
@@ -143,6 +169,7 @@ impl fmt::Display for PveUsbError {
                 ),
                 None => write!(f, "the token lacks the privilege (403): {detail}"),
             },
+            Self::NotFound { detail } => write!(f, "no such USB mapping: {detail}"),
             Self::EndpointAbsent { version, detail } => write!(
                 f,
                 "this Proxmox VE ({}) has no such USB endpoint: {detail}",
@@ -268,6 +295,10 @@ pub struct PveUsbMappings {
     pub checked_node: Option<String>,
     /// The mappings, sorted by id.
     pub mappings: Vec<PveUsbMapping>,
+    /// How many rows PVE returned, before any was found malformed or
+    /// dropped. Zero is the only answer that can mean "no `Mapping.Audit`";
+    /// rows that were all malformed are not an empty answer.
+    pub rows_returned: usize,
     /// Entries isolated as malformed, bounded.
     pub warnings: Vec<String>,
     /// Whether rows were dropped by the bounds; the list is then incomplete.
@@ -275,16 +306,23 @@ pub struct PveUsbMappings {
 }
 
 impl PveUsbMappings {
-    /// Whether an empty list could mean the token lacks `Mapping.Audit`.
-    /// PVE answers an unprivileged listing with an empty `200`, so an empty
-    /// list is "no visible mappings", not "no mappings". Settle it with a
-    /// per-mapping read of an id the caller already knows
-    /// ([`ProxmoxClient::usb_mapping`]). A non-empty list proves the
+    /// Whether the answer was truly empty, which could mean the token lacks
+    /// `Mapping.Audit`. PVE answers an unprivileged listing with an empty
+    /// `200`, so an empty list is "no visible mappings", not "no mappings".
+    /// Only an answer with no rows at all counts: PVE returning rows that
+    /// were all malformed shows the rows were visible, and a truncated
+    /// answer was not empty either.
+    ///
+    /// Settle it with a per-mapping read of an id the caller already knows
+    /// ([`ProxmoxClient::usb_mapping`]), or, with no known id, from the
+    /// token's effective permissions (`GET /access/permissions`, already
+    /// read by the provider's `token_permissions`): `Mapping.Audit` on
+    /// `/mapping/usb` or `/mapping/usb/<id>`. A non-empty list proves the
     /// privilege, though not that every mapping is visible: with
     /// `Mapping.Audit` on one mapping only, only that one is listed.
     #[must_use]
     pub fn could_be_unprivileged(&self) -> bool {
-        self.mappings.is_empty() && !self.truncated
+        self.rows_returned == 0 && !self.truncated
     }
 }
 
@@ -399,7 +437,9 @@ impl ProxmoxClient {
     ///
     /// # Errors
     ///
-    /// [`PveUsbError`], classified.
+    /// [`PveUsbError`], classified. An id that does not exist is
+    /// [`PveUsbError::NotFound`] (an assumption about PVE's answer; see the
+    /// module docs), distinct from an endpoint a PVE does not have.
     pub async fn usb_mapping(
         &self,
         request: PveHttpRequest,
@@ -411,8 +451,17 @@ impl ProxmoxClient {
             });
         }
         let path = format!("/api2/json/cluster/mapping/usb/{}", urlencode(mapping_id));
-        let (version, data) = self.usb_get(&request, path).await?;
+        let (version, data) = self
+            .usb_get_with(&request, path, classify_mapping_read)
+            .await?;
         let mut warnings = Warnings::default();
+        if data.is_null() {
+            // Assumed, not measured: PVE returning nothing for an id means
+            // there is no such mapping.
+            return Err(PveUsbError::NotFound {
+                detail: "the answer carries no data".to_owned(),
+            });
+        }
         let Some(object) = data.as_object() else {
             return Err(PveUsbError::Unreadable {
                 cause: PveApiError::InvalidPayload {
@@ -477,6 +526,17 @@ impl ProxmoxClient {
         request: &PveHttpRequest,
         path: String,
     ) -> Result<(String, serde_json::Value), PveUsbError> {
+        self.usb_get_with(request, path, classify).await
+    }
+
+    /// [`Self::usb_get`] with the classifier of the failing GET chosen by the
+    /// caller (the single-mapping read reads a 404 differently).
+    async fn usb_get_with(
+        &self,
+        request: &PveHttpRequest,
+        path: String,
+        classify_read: fn(PveApiError, Option<&str>) -> PveUsbError,
+    ) -> Result<(String, serde_json::Value), PveUsbError> {
         let version = self
             .read_version(request)
             .await
@@ -489,7 +549,7 @@ impl ProxmoxClient {
         let data = self
             .call(read)
             .await
-            .map_err(|error| classify(error, Some(&version)))?;
+            .map_err(|error| classify_read(error, Some(&version)))?;
         Ok((version, data))
     }
 }
@@ -512,6 +572,39 @@ fn classify(error: PveApiError, version: Option<&str>) -> PveUsbError {
         },
         other => PveUsbError::Unreadable { cause: other },
     }
+}
+
+/// Classifies a failure of the single-mapping read. The endpoint exists on
+/// any PVE that has USB mappings, so a 404 here is "no such mapping", not
+/// "no such endpoint". Everything else is classified as for the list.
+///
+/// Assumption, unmeasured by the spike (it never read an unknown id): PVE
+/// may also answer a missing id with a 500 whose message says so
+/// (`mapping '<id>' not found`, `... does not exist`), as it does for other
+/// missing config entries. Only a 500 whose body says not found / no such /
+/// does not exist is read as not found; any other 500 stays unreadable. A
+/// 501 stays `EndpointAbsent`: a router that cannot route the path at all
+/// has no mapping endpoint.
+fn classify_mapping_read(error: PveApiError, version: Option<&str>) -> PveUsbError {
+    match error {
+        PveApiError::Http {
+            status: 404,
+            detail,
+        } => PveUsbError::NotFound { detail },
+        PveApiError::Http {
+            status: 500,
+            detail,
+        } if says_not_found(&detail) => PveUsbError::NotFound { detail },
+        other => classify(other, version),
+    }
+}
+
+/// Whether an API message says something does not exist.
+fn says_not_found(detail: &str) -> bool {
+    let lowered = detail.to_ascii_lowercase();
+    ["not found", "no such", "does not exist"]
+        .iter()
+        .any(|phrase| lowered.contains(phrase))
 }
 
 /// The privilege a 403 body names, from `Permission check failed (/, Sys.Modify)`.
@@ -760,7 +853,15 @@ fn normalize_mapping_fields(
     let mut entries = Vec::new();
     let mut unreadable_entries = 0_usize;
     match entry.get("map") {
-        None | Some(serde_json::Value::Null) => {}
+        // PVE requires `map`; an answer without one is not a clean mapping
+        // with no entries but a mapping that could not be read.
+        None | Some(serde_json::Value::Null) => {
+            unreadable_entries += 1;
+            warnings.push(format!(
+                "mapping {}: the answer carries no map (PVE requires one)",
+                excerpt(id)
+            ));
+        }
         Some(serde_json::Value::Array(rows)) => {
             for (index, row) in rows.iter().enumerate() {
                 if index >= MAX_USB_MAP_ENTRIES {
@@ -900,6 +1001,7 @@ fn normalize_mappings(
         version,
         checked_node: checked_node.map(str::to_owned),
         mappings,
+        rows_returned: rows.len(),
         warnings: warnings.finish(),
         truncated,
     })
@@ -911,10 +1013,13 @@ enum Row {
     RootHub,
 }
 
-/// Normalizes one inventory row. A root hub is `level` 0 with no `usbpath`;
+/// Normalizes one inventory row, with a warning for each optional field that
+/// was malformed and left absent. A root hub is `level` 0 with no `usbpath`;
 /// a row with no `usbpath` that is not plainly a root hub cannot be
-/// addressed and is malformed.
-fn normalize_device(row: &serde_json::Value) -> Result<Row, String> {
+/// addressed and is malformed. A device stays as long as its `busnum`,
+/// `devnum`, `usbpath`, `vendid` and `prodid` are valid; a malformed
+/// `level`, `port` or `class` only drops that field.
+fn normalize_device(row: &serde_json::Value) -> Result<(Row, Vec<String>), String> {
     if !row.is_object() {
         return Err(format!("the row is a {}, not an object", type_name_of(row)));
     }
@@ -929,7 +1034,17 @@ fn normalize_device(row: &serde_json::Value) -> Result<Row, String> {
     };
     let busnum = number("busnum")?.ok_or_else(|| "the row carries no busnum".to_owned())?;
     let devnum = number("devnum")?.ok_or_else(|| "the row carries no devnum".to_owned())?;
-    let level = number("level")?;
+    let mut field_warnings = Vec::new();
+    let mut optional = |key: &str| match number(key) {
+        Ok(value) => value,
+        Err(detail) => {
+            field_warnings.push(format!("{detail}; the field is left out"));
+            None
+        }
+    };
+    let level = optional("level");
+    let port = optional("port");
+    let class = optional("class");
     let usbpath = match row.get("usbpath") {
         None | Some(serde_json::Value::Null) => None,
         Some(serde_json::Value::String(path)) if valid_usbpath(path) => Some(path.clone()),
@@ -949,7 +1064,7 @@ fn normalize_device(row: &serde_json::Value) -> Result<Row, String> {
     };
     let Some(usbpath) = usbpath else {
         return if level == Some(0) {
-            Ok(Row::RootHub)
+            Ok((Row::RootHub, field_warnings))
         } else {
             Err("the row carries no usbpath and is not a root hub".to_owned())
         };
@@ -979,20 +1094,23 @@ fn normalize_device(row: &serde_json::Value) -> Result<Row, String> {
             .and_then(serde_json::Value::as_str)
             .and_then(display_text)
     };
-    Ok(Row::Device(Box::new(PveUsbDevice {
-        busnum,
-        devnum,
-        vendor_id,
-        product_id,
-        path: format!("{busnum}-{usbpath}"),
-        usbpath,
-        level,
-        port: number("port")?,
-        class: number("class")?,
-        speed,
-        manufacturer: text("manufacturer"),
-        product: text("product"),
-    })))
+    Ok((
+        Row::Device(Box::new(PveUsbDevice {
+            busnum,
+            devnum,
+            vendor_id,
+            product_id,
+            path: format!("{busnum}-{usbpath}"),
+            usbpath,
+            level,
+            port,
+            class,
+            speed,
+            manufacturer: text("manufacturer"),
+            product: text("product"),
+        })),
+        field_warnings,
+    ))
 }
 
 /// Normalizes a `/nodes/{node}/hardware/usb` payload.
@@ -1020,9 +1138,19 @@ fn normalize_inventory(
     let mut devices: Vec<PveUsbDevice> = Vec::new();
     let mut root_hubs = 0_usize;
     for (index, row) in rows.iter().take(MAX_ROWS_EXAMINED).enumerate() {
-        match normalize_device(row) {
-            Ok(Row::RootHub) => root_hubs += 1,
-            Ok(Row::Device(device)) => {
+        let (row, field_warnings) = match normalize_device(row) {
+            Ok(normalized) => normalized,
+            Err(detail) => {
+                warnings.push(format!("device #{index}: {detail}"));
+                continue;
+            }
+        };
+        for detail in field_warnings {
+            warnings.push(format!("device #{index}: {detail}"));
+        }
+        match row {
+            Row::RootHub => root_hubs += 1,
+            Row::Device(device) => {
                 if devices
                     .iter()
                     .any(|seen| (seen.busnum, seen.devnum) == (device.busnum, device.devnum))
@@ -1037,7 +1165,6 @@ fn normalize_inventory(
                     devices.push(*device);
                 }
             }
-            Err(detail) => warnings.push(format!("device #{index}: {detail}")),
         }
     }
     if truncated {
@@ -1161,6 +1288,45 @@ mod tests {
         ] {
             assert!(all.contains(needle), "missing {needle:?} in:\n{all}");
         }
+    }
+
+    #[test]
+    fn a_mapping_with_no_map_is_unreadable_not_clean() {
+        let list = mappings(&json!([
+            {"id": "absent", "type": "usb"},
+            {"id": "null-map", "map": null},
+            {"id": "empty-map", "map": []},
+        ]));
+        let by_id = |id: &str| list.mappings.iter().find(|m| m.id == id).unwrap();
+        assert_eq!(by_id("absent").unreadable_entries, 1);
+        assert_eq!(by_id("null-map").unreadable_entries, 1);
+        assert_eq!(
+            by_id("empty-map").unreadable_entries,
+            0,
+            "a present, empty map is a mapping with no entries, which is readable"
+        );
+        let all = list.warnings.join("\n");
+        assert_eq!(list.warnings.len(), 2, "{all}");
+        assert!(all.contains("carries no map"), "{all}");
+    }
+
+    #[test]
+    fn rows_that_were_all_malformed_are_not_an_empty_answer() {
+        let list = mappings(&json!([{"type": "usb"}, "junk", null]));
+        assert!(list.mappings.is_empty());
+        assert_eq!(list.rows_returned, 3);
+        assert!(
+            !list.could_be_unprivileged(),
+            "PVE returned rows, so the privilege is held; the rows were bad"
+        );
+
+        let empty = mappings(&json!([]));
+        assert_eq!(empty.rows_returned, 0);
+        assert!(empty.could_be_unprivileged());
+        assert!(mappings(&json!(null)).could_be_unprivileged());
+
+        let over = vec![json!(null); MAX_ROWS_EXAMINED + 1];
+        assert!(!mappings(&serde_json::Value::Array(over)).could_be_unprivileged());
     }
 
     #[test]
@@ -1339,6 +1505,37 @@ mod tests {
     }
 
     #[test]
+    fn a_malformed_optional_field_keeps_the_device_and_warns() {
+        let inv = inventory(&json!([
+            {"busnum": 1, "devnum": 2, "level": "high", "port": {"n": 1}, "class": "x9",
+             "usbpath": "4", "vendid": "05ac", "prodid": "1500", "speed": "480"},
+            {"busnum": 1, "devnum": 3, "level": 1, "port": 2, "class": 3,
+             "usbpath": "5", "vendid": "05ac", "prodid": "1500"},
+            // The identity fields stay strict: a bad vendid drops the row.
+            {"busnum": 1, "devnum": 4, "level": "x", "usbpath": "6", "vendid": "zz", "prodid": "1500"},
+        ]));
+        assert_eq!(inv.devices.len(), 2);
+        let kept = &inv.devices[0];
+        assert_eq!(kept.path, "1-4");
+        assert_eq!((kept.level, kept.port, kept.class), (None, None, None));
+        assert_eq!(kept.speed.as_deref(), Some("480"), "valid fields survive");
+        let whole = &inv.devices[1];
+        assert_eq!(
+            (whole.level, whole.port, whole.class),
+            (Some(1), Some(2), Some(3))
+        );
+        let all = inv.warnings.join("\n");
+        for needle in [
+            "device #0: the level field is not a number; the field is left out",
+            "device #0: the port field is not a number; the field is left out",
+            "device #0: the class field is not a number; the field is left out",
+            "device #2: the vendid field is not four hex digits",
+        ] {
+            assert!(all.contains(needle), "missing {needle:?} in:\n{all}");
+        }
+    }
+
+    #[test]
     fn oversized_inventory_is_bounded_and_says_so() {
         let rows: Vec<_> = (0..MAX_USB_DEVICES + 20)
             .map(|index| {
@@ -1409,5 +1606,53 @@ mod tests {
                 PveUsbError::Unreadable { .. }
             ));
         }
+    }
+
+    #[test]
+    fn the_mapping_read_reads_not_found_where_the_list_reads_endpoint_absent() {
+        let http = |status: u16, detail: &str| PveApiError::Http {
+            status,
+            detail: detail.to_owned(),
+        };
+        // 404 on the list or inventory means no endpoint; on one mapping it
+        // means no such mapping.
+        assert!(matches!(
+            classify(http(404, "x"), Some("9.2.2")),
+            PveUsbError::EndpointAbsent { .. }
+        ));
+        assert!(matches!(
+            classify_mapping_read(http(404, "x"), Some("9.2.2")),
+            PveUsbError::NotFound { .. }
+        ));
+        // Assumed: a 500 that says the mapping is not there.
+        for detail in [
+            "mapping 'gone' not found\n",
+            "No such mapping",
+            "the mapping does not exist",
+        ] {
+            assert!(matches!(
+                classify_mapping_read(http(500, detail), None),
+                PveUsbError::NotFound { .. }
+            ));
+        }
+        // A 500 for any other reason is not a missing mapping, and a 500 on
+        // the list is never one.
+        assert!(matches!(
+            classify_mapping_read(http(500, "boom"), None),
+            PveUsbError::Unreadable { .. }
+        ));
+        assert!(matches!(
+            classify(http(500, "mapping 'gone' not found"), None),
+            PveUsbError::Unreadable { .. }
+        ));
+        // Other classes are unchanged, and 501 is still an absent endpoint.
+        assert!(matches!(
+            classify_mapping_read(http(501, "Method not implemented"), Some("7.4-17")),
+            PveUsbError::EndpointAbsent { .. }
+        ));
+        assert!(matches!(
+            classify_mapping_read(PveApiError::Auth, None),
+            PveUsbError::Unauthenticated
+        ));
     }
 }
