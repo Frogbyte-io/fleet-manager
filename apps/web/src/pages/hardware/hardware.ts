@@ -9,6 +9,7 @@ import type {
   HardwareEntryDto,
   HardwareGuestDto,
   HardwareHolderDto,
+  HardwareObservationDto,
 } from '@frogbyte-io/fleet-api-client'
 
 import { relativeTime, type Tone } from '../fleet/inventory'
@@ -87,9 +88,49 @@ export function guestLabel(guest: HardwareGuestDto): string {
   return `QEMU ${guest.vmid} · ${guest.node}${slot}`
 }
 
-/** A lease owner opens in the Lab page; a machine owner has no verified route. */
+/**
+ * A lease owner opens in the Lab drawer, a machine owner on its machine page
+ * (`/fleet/machines/:id`; a reservation's machine owner is a Fleet machine id).
+ */
 export function holderLink(holder: Pick<HardwareHolderDto, 'ownerKind' | 'ownerId'>): string | null {
-  return holder.ownerKind === 'lease' ? `/lab?lease=${encodeURIComponent(holder.ownerId)}` : null
+  const id = encodeURIComponent(holder.ownerId)
+  switch (holder.ownerKind) {
+    case 'lease': return `/lab?lease=${id}`
+    case 'machine': return `/fleet/machines/${id}`
+    default: return null
+  }
+}
+
+/**
+ * When the device was last observed. For a device with no node entry the API
+ * falls back to when the record last changed (`observedAt` is never 0 then), so
+ * it is labelled as that: no node ever reported such a device.
+ */
+export function observedLabel(device: Pick<HardwareDeviceDto, 'entries' | 'observedAt'>, now: number): string {
+  if (device.entries.length === 0)
+    return `Last changed ${relativeTime(device.observedAt, now)}`
+  return `Observed ${seenLabel(device.observedAt, now)}`
+}
+
+/**
+ * What a refresh found for one device, kept with when it was taken. It is
+ * `superseded` once the list reports a different status for the device than the
+ * refresh did, so the page never shows detail that contradicts the list.
+ */
+export interface SessionObservation {
+  data: HardwareObservationDto
+  takenAt: number
+  superseded: boolean
+}
+
+export function sessionObservation(
+  device: Pick<HardwareDeviceDto, 'status'>,
+  refreshed: Pick<HardwareDeviceDto, 'status' | 'observation'> | undefined,
+  takenAt: number,
+): SessionObservation | null {
+  if (!refreshed?.observation)
+    return null
+  return { data: refreshed.observation, takenAt, superseded: refreshed.status !== device.status }
 }
 
 export interface Summary {

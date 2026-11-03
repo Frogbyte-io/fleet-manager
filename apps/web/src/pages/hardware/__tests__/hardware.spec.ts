@@ -7,14 +7,16 @@ import {
   guestLabel,
   holderLink,
   holderTone,
+  observedLabel,
   reasonLabel,
   refreshCommand,
   seenLabel,
+  sessionObservation,
   statusTone,
   summarize,
   words,
 } from '../hardware'
-import { allDevices, device } from './fixtures'
+import { MINUTE, REAL_NOW, device, realDevice, realDevices, realRefresh } from './fixtures'
 
 describe('statusTone', () => {
   it('gives every API status its documented tone', () => {
@@ -74,25 +76,73 @@ describe('labels', () => {
 })
 
 describe('holderLink', () => {
-  it('links a lease owner to its Lab drawer and nothing else', () => {
+  it('links a lease owner to its Lab drawer and a machine owner to its machine page', () => {
     expect(holderLink({ ownerKind: 'lease', ownerId: 'lease-1' })).toBe('/lab?lease=lease-1')
-    expect(holderLink({ ownerKind: 'machine', ownerId: 'machine-1' })).toBeNull()
+    expect(holderLink({ ownerKind: 'machine', ownerId: 'machine-1' })).toBe('/fleet/machines/machine-1')
+  })
+
+  it('links no owner kind it does not know, and escapes the id', () => {
+    expect(holderLink({ ownerKind: 'something_new', ownerId: 'x' })).toBeNull()
+    expect(holderLink({ ownerKind: 'machine', ownerId: 'a/b' })).toBe('/fleet/machines/a%2Fb')
+  })
+})
+
+describe('observedLabel', () => {
+  it('reads a device with no node entry as last changed, because the API falls back to updatedAt for it', () => {
+    const noEntry = realDevice('fm-d')
+    expect(noEntry.entries).toEqual([])
+    expect(noEntry.observedAt).toBeGreaterThan(0)
+    expect(observedLabel(noEntry, REAL_NOW)).toBe('Last changed 2M AGO')
+  })
+
+  it('reads a seen device as observed, and an entry that was never seen as never observed', () => {
+    expect(observedLabel(realDevice('fm-a'), REAL_NOW)).toBe('Observed 2M AGO')
+    const never = realDevice('fm-c')
+    expect(never.entries.length).toBeGreaterThan(0)
+    expect(never.observedAt).toBe(0)
+    expect(observedLabel(never, REAL_NOW)).toBe('Observed NEVER')
+  })
+})
+
+describe('sessionObservation', () => {
+  const refreshed = realRefresh().devices.find(d => d.mappingId === 'fm-b')!
+
+  it('dates the observation and keeps it while the list agrees with the refresh', () => {
+    const found = sessionObservation(realDevice('fm-b'), refreshed, 1234)
+    expect(found).toMatchObject({ takenAt: 1234, superseded: false })
+    expect(found?.data.externalReferences[0]?.vmid).toBe(200)
+  })
+
+  it('marks it superseded once the list reports a different status', () => {
+    const listed = { ...realDevice('fm-b'), status: 'available' as const }
+    expect(sessionObservation(listed, refreshed, 1234)?.superseded).toBe(true)
+  })
+
+  it('has none for a device the refresh did not report an observation for', () => {
+    expect(sessionObservation(realDevice('fm-b'), { ...refreshed, observation: null }, 1)).toBeNull()
+    expect(sessionObservation(realDevice('fm-b'), undefined, 1)).toBeNull()
   })
 })
 
 describe('summarize', () => {
-  it('counts the statuses present in API order and the stale flags', () => {
-    const summary = summarize(allDevices())
-    expect(summary.total).toBe(10)
+  it('counts the statuses present in API order and the stale flags, over the real capture', () => {
+    const summary = summarize(realDevices())
+    expect(summary.total).toBe(8)
     expect(summary.byStatus).toEqual([
       { status: 'available', count: 1 },
-      { status: 'reserved', count: 2 },
+      { status: 'reserved', count: 1 },
       { status: 'externally_attached', count: 1 },
       { status: 'missing', count: 1 },
-      { status: 'unsupported', count: 4 },
+      { status: 'unsupported', count: 3 },
       { status: 'quarantined', count: 1 },
     ])
-    expect(summary.stale).toBe(2)
+    // Only the device that was never seen is stale in the capture.
+    expect(summary.stale).toBe(1)
+  })
+
+  it('counts a seen device that went stale', () => {
+    const aged = device({ stale: true, observedAt: REAL_NOW - 30 * MINUTE })
+    expect(summarize([aged, device({ id: 'other' })]).stale).toBe(1)
   })
 
   it('lists an unknown status after the known ones and handles an empty list', () => {

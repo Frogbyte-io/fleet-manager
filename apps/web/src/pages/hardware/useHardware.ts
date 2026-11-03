@@ -54,10 +54,13 @@ export function useHardware() {
   const accountNames = computed(() => new Map((accounts.data.value ?? []).map(a => [a.id, a.name])))
 
   // What each account's last refresh in this session reported (the list carries
-  // no observation), and whether the API refused the action to this viewer.
+  // no observation).
   const reports = ref(new Map<string, HardwareRefreshDto>())
+
+  // `hardware.refresh` is authorized per account, so a 403 hides the action for
+  // that account only (and keeps the API's message). A page reload asks again.
+  const denied = ref(new Map<string, string>())
   const refreshError = ref<RefreshFailure | null>(null)
-  const refreshDenied = ref(false)
 
   const refresh = useMutation({
     mutationFn: async (accountId: string) => unwrap<HardwareRefreshDto>(await refreshHardware({ accountId })),
@@ -70,16 +73,20 @@ export function useHardware() {
     },
     onError: (error, accountId) => {
       const status = error instanceof ApiRequestError ? error.status : null
-      refreshError.value = { accountId, status, message: error instanceof Error ? error.message : String(error) }
-      // The API decides who may refresh; once it says no, the action goes away.
+      const message = error instanceof Error ? error.message : String(error)
       if (status === 403)
-        refreshDenied.value = true
+        denied.value = new Map(denied.value).set(accountId, message)
+      else
+        refreshError.value = { accountId, status, message }
     },
   })
 
   // The action is offered only while the list itself loads: a viewer the API
   // refuses (`hardware.read`) or a controller without the surface sees none.
-  const canRefresh = computed(() => devices.isSuccess.value && !refreshDenied.value)
+  // Accounts the API refused a refresh for are left out.
+  const refreshActions = computed(() => (devices.isSuccess.value
+    ? refreshable.value.filter(account => !denied.value.has(account.id))
+    : []))
 
-  return { devices, accounts, refreshable, accountNames, reports, refresh, refreshError, refreshDenied, canRefresh }
+  return { devices, accounts, refreshable, accountNames, reports, refresh, refreshError, denied, refreshActions }
 }

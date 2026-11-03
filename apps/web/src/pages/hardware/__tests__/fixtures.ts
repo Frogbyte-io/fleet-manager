@@ -6,20 +6,74 @@ import type {
   ProxmoxAccountDto,
 } from '@frogbyte-io/fleet-api-client'
 
-// Invented data only: no real serial, hostname, IP, account or token. The
-// shapes follow the OpenAPI document (`HardwareDeviceDto`), which is also what
-// `fleetctl hardware list --output json` prints. Shared by the component tests
-// and by the screenshot fixture server.
+import accountsJson from './real/accounts.json'
+import listJson from './real/list.json'
+import listDeniedJson from './real/list-denied-403.json'
+import oldRefreshJson from './real/old-refresh.json'
+import refreshDeniedJson from './real/refresh-denied-403.json'
+import refreshJson from './real/refresh-second.json'
+import unwiredJson from './real/unwired-503.json'
 
-export const ACCOUNT_A = 'acct-example-a'
-export const ACCOUNT_B = 'acct-example-b'
+// The `real/*.json` files are the answers of a real controller router (the
+// hardware routes, the SQLite store and the account routes of this repository)
+// over the scripted Proxmox of `crates/fleet-controller/tests/hardware_inventory.rs`,
+// captured over HTTP: `GET /hardware/devices` after two refreshes with one lease
+// and one machine reservation, the `POST /hardware/refresh` answer of the same
+// state, the answer for an account whose Proxmox predates USB mappings, the
+// account list, and the 403 and 503 envelopes. Everything in them is invented
+// by that test (`fm-*` mappings, `aaaa:0001`, the documentation address range).
+// The builders below are synthetic and only fill the cases that capture did not
+// produce; each is named for what it adds.
 
-const MINUTE = 60_000
-const HOUR = 60 * MINUTE
+export const MINUTE = 60_000
 
-export function entry(overrides: Partial<HardwareEntryDto> = {}, now = Date.now()): HardwareEntryDto {
+export const REAL_DEVICES = listJson.items as unknown as HardwareDeviceDto[]
+
+/** Two minutes after the capture, so relative times read the way they did live. */
+export const REAL_NOW = Math.max(...REAL_DEVICES.map(device => device.updatedAt)) + 2 * MINUTE
+
+export const LAB_ACCOUNT = REAL_DEVICES[0]!.accountId
+const ACCOUNTS = accountsJson.items as unknown as ProxmoxAccountDto[]
+/** The account of the capture that has no device (nothing has refreshed it). */
+export const SPARE_ACCOUNT = ACCOUNTS.find(account => account.id !== LAB_ACCOUNT)!.id
+export const LAB_ACCOUNT_NAME = ACCOUNTS.find(account => account.id === LAB_ACCOUNT)!.name
+export const SPARE_ACCOUNT_NAME = ACCOUNTS.find(account => account.id === SPARE_ACCOUNT)!.name
+
+export function realDevices(): HardwareDeviceDto[] {
+  return structuredClone(REAL_DEVICES)
+}
+
+export function realDevice(mappingId: string): HardwareDeviceDto {
+  return structuredClone(REAL_DEVICES.find(device => device.mappingId === mappingId)!)
+}
+
+/** Both captured accounts plus one synthetic account whose certificate is not pinned. */
+export function accounts(): ProxmoxAccountDto[] {
+  return [
+    ...structuredClone(ACCOUNTS),
+    { id: 'acct-example-unpinned', name: 'unpinned-cluster', fingerprintState: 'unconfirmed' } as ProxmoxAccountDto,
+  ]
+}
+
+/** The captured refresh of the lab account (devices carry their `observation`). */
+export function realRefresh(): HardwareRefreshDto {
+  return structuredClone(refreshJson.data) as unknown as HardwareRefreshDto
+}
+
+/** The captured refresh of the account whose Proxmox predates USB mappings. */
+export function oldRefresh(): HardwareRefreshDto {
+  return structuredClone(oldRefreshJson.data) as unknown as HardwareRefreshDto
+}
+
+export const LIST_DENIED = { status: 403, data: listDeniedJson, headers: new Headers() }
+export const REFRESH_DENIED = { status: 403, data: refreshDeniedJson, headers: new Headers() }
+export const UNWIRED = { status: 503, data: unwiredJson, headers: new Headers() }
+
+// ---- synthetic builders ------------------------------------------------------
+
+export function entry(overrides: Partial<HardwareEntryDto> = {}, now = REAL_NOW): HardwareEntryDto {
   return {
-    node: 'pve-a',
+    node: 'pve',
     vendorId: 'f00d',
     productId: 'c0de',
     usbpath: '1-4',
@@ -30,23 +84,24 @@ export function entry(overrides: Partial<HardwareEntryDto> = {}, now = Date.now(
   }
 }
 
-export function holder(overrides: Partial<HardwareHolderDto> = {}, now = Date.now()): HardwareHolderDto {
+export function holder(overrides: Partial<HardwareHolderDto> = {}, now = REAL_NOW): HardwareHolderDto {
   return {
     reservationId: 'resv-0001-example',
     ownerKind: 'lease',
     ownerId: 'lease-ready-0001',
     state: 'attached',
-    guest: { accountId: ACCOUNT_A, node: 'pve-a', vmid: 9101, usbSlot: 0 },
+    guest: { accountId: LAB_ACCOUNT, node: 'pve', vmid: 9101, usbSlot: 0 },
     reservedAt: now - 20 * MINUTE,
     ...overrides,
   }
 }
 
-export function device(overrides: Partial<HardwareDeviceDto> = {}, now = Date.now()): HardwareDeviceDto {
+/** A synthetic device, for what the capture did not produce (a seen device that went stale, a held device with pending changes). */
+export function device(overrides: Partial<HardwareDeviceDto> = {}, now = REAL_NOW): HardwareDeviceDto {
   return {
-    id: 'hw-0001',
-    accountId: ACCOUNT_A,
-    mappingId: 'test-dongle-1',
+    id: 'hw-synthetic-0001',
+    accountId: LAB_ACCOUNT,
+    mappingId: 'synthetic-dongle',
     kind: 'usb',
     status: 'available',
     reason: null,
@@ -57,112 +112,8 @@ export function device(overrides: Partial<HardwareDeviceDto> = {}, now = Date.no
     holder: null,
     note: null,
     observation: null,
-    createdAt: now - 3 * 24 * HOUR,
+    createdAt: now - 3 * 24 * 60 * MINUTE,
     updatedAt: now - 2 * MINUTE,
     ...overrides,
-  }
-}
-
-/** One device per API status and per unsupported reason, plus the stale flag. */
-export function allDevices(now = Date.now()): HardwareDeviceDto[] {
-  return [
-    device({ id: 'hw-01', mappingId: 'bench-dongle-a', status: 'available' }, now),
-    device({
-      id: 'hw-02',
-      mappingId: 'bench-dongle-b',
-      status: 'reserved',
-      holder: holder({}, now),
-      entries: [entry({ usbpath: '1-5', lastSeenAt: now - MINUTE }, now)],
-    }, now),
-    device({
-      id: 'hw-03',
-      mappingId: 'shared-reader',
-      status: 'reserved',
-      holder: holder({ ownerKind: 'machine', ownerId: 'machine-example-01', state: 'held', guest: null }, now),
-      entries: [entry({ vendorId: 'beef', productId: '0042', usbpath: null, manufacturer: null, product: null }, now)],
-    }, now),
-    device({
-      id: 'hw-04',
-      mappingId: 'hand-attached',
-      status: 'externally_attached',
-      entries: [entry({ usbpath: '2-1' }, now)],
-      observation: {
-        externalReferences: [
-          { node: 'pve-a', vmid: 9200, guestName: 'scratch-vm', slot: 'usb1', template: false, pending: null },
-        ],
-        notes: [],
-      },
-    }, now),
-    device({
-      id: 'hw-05',
-      mappingId: 'unplugged-board',
-      status: 'missing',
-      stale: true,
-      observedAt: now - 3 * 24 * HOUR,
-      updatedAt: now - 3 * 24 * HOUR,
-      entries: [entry({ usbpath: '3-2', lastSeenAt: now - 3 * 24 * HOUR }, now)],
-    }, now),
-    device({
-      id: 'hw-06',
-      mappingId: 'no-node-mapping',
-      status: 'unsupported',
-      reason: 'no_node_entry',
-      reasonText: 'the mapping has no entry for any node',
-      stale: true,
-      observedAt: 0,
-      entries: [],
-    }, now),
-    device({
-      id: 'hw-07',
-      mappingId: 'token-limited',
-      status: 'unsupported',
-      reason: 'token_lacks_mapping_use',
-      reasonText: 'the API token lacks Mapping.Use on this mapping',
-      entries: [entry({ usbpath: '1-8' }, now)],
-    }, now),
-    device({
-      id: 'hw-08',
-      mappingId: 'twin-readers',
-      status: 'unsupported',
-      reason: 'ambiguous_mapping',
-      reasonText: 'more than one device on the node matches this mapping',
-      entries: [entry({ vendorId: 'f00d', productId: '0001', usbpath: null }, now)],
-    }, now),
-    device({
-      id: 'hw-09',
-      mappingId: 'stuck-attach',
-      status: 'quarantined',
-      holder: holder({ state: 'attach_unknown', ownerId: 'lease-cleanup-0002', guest: { accountId: ACCOUNT_A, node: 'pve-b', vmid: 9102, usbSlot: 1 } }, now),
-      entries: [entry({ node: 'pve-b', usbpath: '1-2' }, now)],
-    }, now),
-    device({
-      id: 'hw-10',
-      mappingId: 'pve-eight-device',
-      accountId: ACCOUNT_B,
-      status: 'unsupported',
-      reason: 'pve_too_old',
-      reasonText: 'the PVE predates USB resource mappings',
-      entries: [],
-    }, now),
-  ]
-}
-
-export function accounts(): ProxmoxAccountDto[] {
-  return [
-    { id: ACCOUNT_A, name: 'lab-cluster-a', fingerprintState: 'confirmed' },
-    { id: ACCOUNT_B, name: 'lab-cluster-b', fingerprintState: 'confirmed' },
-    { id: 'acct-example-c', name: 'unpinned-cluster', fingerprintState: 'unconfirmed' },
-  ] as ProxmoxAccountDto[]
-}
-
-export function refreshReport(accountId: string, devices: HardwareDeviceDto[], now = Date.now()): HardwareRefreshDto {
-  return {
-    accountId,
-    observedAt: now,
-    pveVersion: '9.0.0',
-    support: { state: 'supported', reason: null, detail: null },
-    guestScan: { listed: 12, read: 11, unreadable: 1, truncated: false },
-    devices: devices.filter(d => d.accountId === accountId),
-    warnings: ['one guest config could not be read; a device it references may read as unsupported'],
   }
 }

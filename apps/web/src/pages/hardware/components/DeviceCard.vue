@@ -2,7 +2,7 @@
 import { computed } from 'vue'
 import { RouterLink } from 'vue-router'
 
-import type { HardwareDeviceDto, HardwareObservationDto } from '@frogbyte-io/fleet-api-client'
+import type { HardwareDeviceDto } from '@frogbyte-io/fleet-api-client'
 import StatusChip from '@/components/fleet/StatusChip.vue'
 
 import { relativeTime } from '../../fleet/inventory'
@@ -12,28 +12,33 @@ import {
   guestLabel,
   holderLink,
   holderTone,
+  observedLabel,
   reasonLabel,
   seenLabel,
   statusTone,
+  type SessionObservation,
   words,
 } from '../hardware'
 
 // One PVE USB resource mapping. Every value is the API's: the status and its
 // reason are the controller's, `stale` is its freshness bound, the holder is
 // the live reservation. `observation` is only present for a device that came
-// back from a refresh in this session (the list makes no Proxmox call).
+// back from a refresh in this session (the list makes no Proxmox call); it is
+// dated, and reduced to a notice once the list no longer agrees with it.
 const props = defineProps<{
   device: HardwareDeviceDto
   accountName: string
   now: number
-  observation?: HardwareObservationDto | null
+  observation?: SessionObservation | null
 }>()
 
 const reason = computed(() => reasonLabel(props.device))
 const holder = computed(() => props.device.holder ?? null)
 const link = computed(() => (holder.value ? holderLink(holder.value) : null))
 const hasObservation = computed(() => !!props.observation
-  && (props.observation.externalReferences.length > 0 || props.observation.notes.length > 0))
+  && (props.observation.superseded
+    || props.observation.data.externalReferences.length > 0
+    || props.observation.data.notes.length > 0))
 
 const labelClass = 'fc-kicker'
 </script>
@@ -79,10 +84,10 @@ const labelClass = 'fc-kicker'
     >
       <p
         v-if="device.reason"
-        class="font-mono text-[10px] uppercase tracking-wider text-fc-muted"
+        class="font-mono text-[11px] text-fc-muted"
         data-testid="reason-code"
       >
-        {{ words(device.reason) }}
+        {{ device.reason }}
       </p>
       <p
         v-if="reason"
@@ -171,14 +176,21 @@ const labelClass = 'fc-kicker'
       data-testid="observation"
     >
       <p :class="labelClass">
-        Last refresh found
+        Found by the refresh {{ relativeTime(observation.takenAt, now) }}
+      </p>
+      <p
+        v-if="observation.superseded"
+        class="text-xs text-fc-muted"
+        data-testid="observation-superseded"
+      >
+        The list has changed since that refresh, so what it found is not shown.
       </p>
       <ul
-        v-if="observation.externalReferences.length"
+        v-else-if="observation.data.externalReferences.length"
         class="space-y-0.5"
       >
         <li
-          v-for="reference in observation.externalReferences"
+          v-for="reference in observation.data.externalReferences"
           :key="`${reference.node}-${reference.vmid}-${reference.slot}`"
           class="font-mono text-[11px]"
           data-testid="external-reference"
@@ -192,7 +204,7 @@ const labelClass = 'fc-kicker'
         </li>
       </ul>
       <p
-        v-for="note in observation.notes"
+        v-for="note in observation.superseded ? [] : observation.data.notes"
         :key="note"
         class="text-xs text-fc-muted"
         data-testid="observation-note"
@@ -210,7 +222,9 @@ const labelClass = 'fc-kicker'
     </p>
 
     <footer class="font-mono text-[10px] uppercase tracking-wider text-fc-faint">
-      <span data-testid="observed">Observed {{ seenLabel(device.observedAt, now) }}</span> · updated {{ relativeTime(device.updatedAt, now) }}
+      <span data-testid="observed">{{ observedLabel(device, now) }}</span><template v-if="device.entries.length">
+        · updated {{ relativeTime(device.updatedAt, now) }}
+      </template>
     </footer>
   </article>
 </template>
