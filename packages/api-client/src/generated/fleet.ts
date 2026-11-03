@@ -2701,6 +2701,276 @@ export type FrogenvAuthDto = {
 };
 
 /**
+ * What one node last observed for a device. There is no serial: the PVE
+ * node inventory does not return one.
+ */
+export interface HardwareEntryDto {
+  /**
+     * When the device was last seen on this node (epoch milliseconds; `0`
+     * when never).
+     */
+  lastSeenAt: number;
+  /**
+     * The manufacturer string, when the node inventory was readable.
+     * @nullable
+     */
+  manufacturer?: string | null;
+  /** The PVE node. */
+  node: string;
+  /**
+     * The product string, when the node inventory was readable.
+     * @nullable
+     */
+  product?: string | null;
+  /** The USB product id (four hex digits). */
+  productId: string;
+  /**
+     * The bus-port path of the mapping or of the device seen, such as `1-10`.
+     * @nullable
+     */
+  usbpath?: string | null;
+  /** The USB vendor id (four hex digits). */
+  vendorId: string;
+}
+
+/**
+ * The guest a reservation targets.
+ */
+export interface HardwareGuestDto {
+  /** The Proxmox account. */
+  accountId: string;
+  /** The guest's node. */
+  node: string;
+  /**
+     * The `usbN` slot, once known.
+     * @minimum 0
+     * @nullable
+     */
+  usbSlot?: number | null;
+  /**
+     * The guest's VMID.
+     * @minimum 0
+     */
+  vmid: number;
+}
+
+/**
+ * The live reservation that holds a device.
+ */
+export interface HardwareHolderDto {
+  guest?: null | HardwareGuestDto;
+  /** The owner's id. */
+  ownerId: string;
+  /** `lease` or `machine`. */
+  ownerKind: string;
+  /** The reservation's id. */
+  reservationId: string;
+  /** When the reservation was made (epoch milliseconds). */
+  reservedAt: number;
+  /**
+     * The reservation's state (`held`, `attaching`, `attached`, `detaching`,
+     * `attach_unknown`, `detach_failed`).
+     */
+  state: string;
+}
+
+/**
+ * A guest that references a device and is not the reservation's own guest.
+ */
+export interface HardwareExternalReferenceDto {
+  /**
+     * The guest's name, when known.
+     * @nullable
+     */
+  guestName?: string | null;
+  /** The guest's node. */
+  node: string;
+  /**
+     * `add` or `remove` when only one of the stored and applied configs of
+     * a running guest has the entry.
+     * @nullable
+     */
+  pending?: string | null;
+  /** The `usbN` slot. */
+  slot: string;
+  /**
+     * Whether the guest is a template (it holds no device; its clones
+     * inherit the entry).
+     */
+  template: boolean;
+  /**
+     * The guest's VMID.
+     * @minimum 0
+     */
+  vmid: number;
+}
+
+/**
+ * What a refresh observed beyond the stored record. Present in the refresh
+ * answer; `null` in the list, which makes no Proxmox call.
+ */
+export interface HardwareObservationDto {
+  /** The guests that reference the mapping. */
+  externalReferences: HardwareExternalReferenceDto[];
+  /**
+     * Explanatory notes (the finding behind `missing`, an id-only entry
+     * that cannot be told apart, a partly read mapping).
+     */
+  notes: string[];
+}
+
+/**
+ * Why an `unsupported` device cannot be allocated.
+ */
+export type HardwareUnsupportedReasonDto = typeof HardwareUnsupportedReasonDto[keyof typeof HardwareUnsupportedReasonDto];
+
+
+export const HardwareUnsupportedReasonDto = {
+  no_node_entry: 'no_node_entry',
+  ambiguous_mapping: 'ambiguous_mapping',
+  token_lacks_mapping_use: 'token_lacks_mapping_use',
+  token_lacks_guest_hwtype: 'token_lacks_guest_hwtype',
+  pve_too_old: 'pve_too_old',
+  usb_inventory_unreadable: 'usb_inventory_unreadable',
+} as const;
+
+/**
+ * A device's status. `unsupported` always carries a `reason`.
+ */
+export type HardwareStatusDto = typeof HardwareStatusDto[keyof typeof HardwareStatusDto];
+
+
+export const HardwareStatusDto = {
+  available: 'available',
+  reserved: 'reserved',
+  externally_attached: 'externally_attached',
+  missing: 'missing',
+  unsupported: 'unsupported',
+  quarantined: 'quarantined',
+} as const;
+
+/**
+ * One inventoried device: a PVE USB resource mapping.
+ */
+export interface HardwareDeviceDto {
+  /** The Proxmox account whose cluster owns the mapping. */
+  accountId: string;
+  /** When the record was created (epoch milliseconds). */
+  createdAt: number;
+  /** The per-node entries. */
+  entries: HardwareEntryDto[];
+  holder?: null | HardwareHolderDto;
+  /** The Fleet id. */
+  id: string;
+  /** The device kind (`usb`). */
+  kind: string;
+  /** The PVE resource mapping id; this is the device's identity. */
+  mappingId: string;
+  /**
+     * The operator's note.
+     * @nullable
+     */
+  note?: string | null;
+  observation?: null | HardwareObservationDto;
+  /**
+     * When the device was last seen on any node (epoch milliseconds; `0`
+     * when it never was, which also reads as stale). For a device with no
+     * entry it is when the record last changed.
+     */
+  observedAt: number;
+  reason?: null | HardwareUnsupportedReasonDto;
+  /**
+     * The reason in words, when `status` is `unsupported`.
+     * @nullable
+     */
+  reasonText?: string | null;
+  /**
+     * Whether the device was last seen longer ago than the controller's
+     * bound (a device that was never seen is stale).
+     */
+  stale: boolean;
+  /**
+     * The status to act on: a live reservation decides `reserved` and
+     * `quarantined`, and an available device whose observation is stale
+     * reads `missing`.
+     */
+  status: HardwareStatusDto;
+  /** When the record last changed (epoch milliseconds). */
+  updatedAt: number;
+}
+
+/**
+ * What the guest scan covered.
+ */
+export interface HardwareGuestScanDto {
+  /**
+     * How many QEMU guests the cluster listed.
+     * @minimum 0
+     */
+  listed: number;
+  /**
+     * How many configs were read.
+     * @minimum 0
+     */
+  read: number;
+  /**
+     * Whether the bound dropped guests. A scan with unreadable or dropped
+     * guests is incomplete: an available device may be referenced by a guest
+     * that was not read.
+     */
+  truncated: boolean;
+  /**
+     * How many could not be read.
+     * @minimum 0
+     */
+  unreadable: number;
+}
+
+/**
+ * Whether the account could be inventoried.
+ */
+export interface HardwareSupportDto {
+  /**
+     * The reason in words, unless supported.
+     * @nullable
+     */
+  detail?: string | null;
+  /**
+     * `pve_too_old`, `no_mapping_audit` or `permissions_unreadable`, unless
+     * supported.
+     * @nullable
+     */
+  reason?: string | null;
+  /**
+     * `supported`, `unsupported` (the account cannot be inventoried) or
+     * `unverified` (the list could not be verified; no device was changed).
+     */
+  state: string;
+}
+
+/**
+ * The outcome of one refresh.
+ */
+export interface HardwareRefreshDto {
+  /** The account refreshed. */
+  accountId: string;
+  /** The account's devices after the refresh, ordered by mapping id. */
+  devices: HardwareDeviceDto[];
+  guestScan?: null | HardwareGuestScanDto;
+  /** When the observation was taken (epoch milliseconds). */
+  observedAt: number;
+  /**
+     * The PVE version, when it could be read.
+     * @nullable
+     */
+  pveVersion?: string | null;
+  /** Whether the account could be inventoried. */
+  support: HardwareSupportDto;
+  /** Warnings, bounded. */
+  warnings: string[];
+}
+
+/**
  * A concrete output template identity.
  */
 export interface ImageBuildTemplateDto {
@@ -4251,6 +4521,69 @@ export type PageExternalAccountDtoItemsItem = {
 export interface PageExternalAccountDto {
   /** The items on this page, in the endpoint's documented order. */
   items: PageExternalAccountDtoItemsItem[];
+  /** Where this page sits in the result set. */
+  page: PageInfo;
+}
+
+/**
+ * One inventoried device: a PVE USB resource mapping.
+ */
+export type PageHardwareDeviceDtoItemsItem = {
+  /** The Proxmox account whose cluster owns the mapping. */
+  accountId: string;
+  /** When the record was created (epoch milliseconds). */
+  createdAt: number;
+  /** The per-node entries. */
+  entries: HardwareEntryDto[];
+  holder?: null | HardwareHolderDto;
+  /** The Fleet id. */
+  id: string;
+  /** The device kind (`usb`). */
+  kind: string;
+  /** The PVE resource mapping id; this is the device's identity. */
+  mappingId: string;
+  /**
+     * The operator's note.
+     * @nullable
+     */
+  note?: string | null;
+  observation?: null | HardwareObservationDto;
+  /**
+     * When the device was last seen on any node (epoch milliseconds; `0`
+     * when it never was, which also reads as stale). For a device with no
+     * entry it is when the record last changed.
+     */
+  observedAt: number;
+  reason?: null | HardwareUnsupportedReasonDto;
+  /**
+     * The reason in words, when `status` is `unsupported`.
+     * @nullable
+     */
+  reasonText?: string | null;
+  /**
+     * Whether the device was last seen longer ago than the controller's
+     * bound (a device that was never seen is stale).
+     */
+  stale: boolean;
+  /**
+     * The status to act on: a live reservation decides `reserved` and
+     * `quarantined`, and an available device whose observation is stale
+     * reads `missing`.
+     */
+  status: HardwareStatusDto;
+  /** When the record last changed (epoch milliseconds). */
+  updatedAt: number;
+};
+
+/**
+ * A page of resources.
+ *
+ * The concrete schema for a list endpoint appears when that endpoint does;
+ * [`PageInfo`] is the part of the shape that is fixed for every one of them.
+ */
+export interface PageHardwareDeviceDto {
+  /** The items on this page, in the endpoint's documented order. */
+  items: PageHardwareDeviceDtoItemsItem[];
   /** Where this page sits in the result set. */
   page: PageInfo;
 }
@@ -5978,6 +6311,14 @@ export interface RecordCheckoutsRequest {
 }
 
 /**
+ * The refresh request.
+ */
+export interface RefreshHardwareRequest {
+  /** The Proxmox account to refresh. */
+  accountId: string;
+}
+
+/**
  * The body of the register review and register calls.
  */
 export interface RegisterGuestRequest {
@@ -7019,6 +7360,39 @@ export type ResourceExternalAccountDtoData = {
 export interface ResourceExternalAccountDto {
   /** One external provider account. The token is never here. */
   data: ResourceExternalAccountDtoData;
+}
+
+/**
+ * The outcome of one refresh.
+ */
+export type ResourceHardwareRefreshDtoData = {
+  /** The account refreshed. */
+  accountId: string;
+  /** The account's devices after the refresh, ordered by mapping id. */
+  devices: HardwareDeviceDto[];
+  guestScan?: null | HardwareGuestScanDto;
+  /** When the observation was taken (epoch milliseconds). */
+  observedAt: number;
+  /**
+     * The PVE version, when it could be read.
+     * @nullable
+     */
+  pveVersion?: string | null;
+  /** Whether the account could be inventoried. */
+  support: HardwareSupportDto;
+  /** Warnings, bounded. */
+  warnings: string[];
+};
+
+/**
+ * A single resource.
+ *
+ * The payload is nested under `data` so that later top-level fields are an
+ * additive change rather than a breaking one.
+ */
+export interface ResourceHardwareRefreshDto {
+  /** The outcome of one refresh. */
+  data: ResourceHardwareRefreshDtoData;
 }
 
 /**
@@ -10301,6 +10675,22 @@ limit?: number;
 cursor?: string;
 };
 
+export type ListHardwareDevicesParams = {
+/**
+ * Only this account's devices.
+ */
+accountId?: string;
+/**
+ * The maximum number of devices to return.
+ * @minimum 0
+ */
+limit?: number;
+/**
+ * The opaque cursor: the last device id of the previous page.
+ */
+cursor?: string;
+};
+
 export type ListImageBuildsParams = {
 /**
  * Maximum records per page (default 50, maximum 200).
@@ -12690,6 +13080,180 @@ export const probeExternalAccount = async (accountId: string, options?: RequestI
 
   const data: probeExternalAccountResponse['data'] = body ? JSON.parse(body) : {}
   return { data, status: res.status, headers: res.headers } as probeExternalAccountResponse
+}
+
+
+
+export type listHardwareDevicesResponse200 = {
+  data: PageHardwareDeviceDto
+  status: 200
+}
+
+export type listHardwareDevicesResponse400 = {
+  data: ApiError
+  status: 400
+}
+
+export type listHardwareDevicesResponse403 = {
+  data: ApiError
+  status: 403
+}
+
+export type listHardwareDevicesResponse404 = {
+  data: ApiError
+  status: 404
+}
+
+export type listHardwareDevicesResponse500 = {
+  data: ApiError
+  status: 500
+}
+
+export type listHardwareDevicesResponse503 = {
+  data: ApiError
+  status: 503
+}
+
+export type listHardwareDevicesResponseSuccess = (listHardwareDevicesResponse200) & {
+  headers: Headers;
+};
+export type listHardwareDevicesResponseError = (listHardwareDevicesResponse400 | listHardwareDevicesResponse403 | listHardwareDevicesResponse404 | listHardwareDevicesResponse500 | listHardwareDevicesResponse503) & {
+  headers: Headers;
+};
+
+export type listHardwareDevicesResponse = (listHardwareDevicesResponseSuccess | listHardwareDevicesResponseError)
+
+export const getListHardwareDevicesUrl = (params?: ListHardwareDevicesParams,) => {
+  const normalizedParams = new URLSearchParams();
+
+  Object.entries(params || {}).forEach(([key, value]) => {
+
+    if (value !== undefined) {
+      normalizedParams.append(key, value === null ? 'null' : String(value))
+    }
+  });
+
+  const stringifiedParams = normalizedParams.toString();
+
+  return stringifiedParams.length > 0 ? `/api/v1/hardware/devices?${stringifiedParams}` : `/api/v1/hardware/devices`
+}
+
+/**
+ * # Errors
+ *
+ * Returns the public error envelope on refusal, an unknown account, an
+ * unknown cursor, an unwired surface or a backend failure.
+ * @summary Lists the inventoried hardware devices with their status and the reason
+for it. A read of Fleet's own records: it makes no Proxmox call, so a
+device is as fresh as the last `POST /hardware/refresh` (`stale` says when
+that is too old to trust).
+ */
+export const listHardwareDevices = async (params?: ListHardwareDevicesParams, options?: RequestInit): Promise<listHardwareDevicesResponse> => {
+
+  const res = await fetch(getListHardwareDevicesUrl(params),
+  {
+    ...options,
+    method: 'GET'
+
+
+  }
+)
+
+
+  const body = [204, 205, 304].includes(res.status) ? null : await res.text();
+
+  const data: listHardwareDevicesResponse['data'] = body ? JSON.parse(body) : {}
+  return { data, status: res.status, headers: res.headers } as listHardwareDevicesResponse
+}
+
+
+
+export type refreshHardwareResponse200 = {
+  data: ResourceHardwareRefreshDto
+  status: 200
+}
+
+export type refreshHardwareResponse403 = {
+  data: ApiError
+  status: 403
+}
+
+export type refreshHardwareResponse404 = {
+  data: ApiError
+  status: 404
+}
+
+export type refreshHardwareResponse409 = {
+  data: ApiError
+  status: 409
+}
+
+export type refreshHardwareResponse500 = {
+  data: ApiError
+  status: 500
+}
+
+export type refreshHardwareResponse502 = {
+  data: ApiError
+  status: 502
+}
+
+export type refreshHardwareResponse503 = {
+  data: ApiError
+  status: 503
+}
+
+export type refreshHardwareResponseSuccess = (refreshHardwareResponse200) & {
+  headers: Headers;
+};
+export type refreshHardwareResponseError = (refreshHardwareResponse403 | refreshHardwareResponse404 | refreshHardwareResponse409 | refreshHardwareResponse500 | refreshHardwareResponse502 | refreshHardwareResponse503) & {
+  headers: Headers;
+};
+
+export type refreshHardwareResponse = (refreshHardwareResponseSuccess | refreshHardwareResponseError)
+
+export const getRefreshHardwareUrl = () => {
+
+
+
+
+  return `/api/v1/hardware/refresh`
+}
+
+/**
+ * # Errors
+ *
+ * Returns the public error envelope on refusal, an unknown or unconfirmed
+ * account, a missing token secret, an unwired surface, a failed audit write
+ * or a Proxmox failure that makes the observation meaningless.
+ * @summary Refreshes one account's hardware inventory: reads its USB mappings, the
+nodes they name, every guest config and the token's own permissions
+through the account's API token, and records the derived status of each
+mapping. An authorized, audited mutation (`hardware.refresh`); it changes
+nothing on Proxmox.
+ */
+export const refreshHardware = async (refreshHardwareRequest: RefreshHardwareRequest, options?: RequestInit): Promise<refreshHardwareResponse> => {
+
+    const getHeaders = (h?: NonNullable<RequestInit['headers']>): Record<string, string | readonly string[]> => {
+    if (!h) return {};
+    if (h instanceof Headers) return Object.fromEntries(h.entries());
+    if (Array.isArray(h)) return Object.fromEntries(h);
+    return h;
+  };
+const res = await fetch(getRefreshHardwareUrl(),
+  {
+    ...options,
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...getHeaders(options?.headers) },
+    body: JSON.stringify(refreshHardwareRequest)
+  }
+)
+
+
+  const body = [204, 205, 304].includes(res.status) ? null : await res.text();
+
+  const data: refreshHardwareResponse['data'] = body ? JSON.parse(body) : {}
+  return { data, status: res.status, headers: res.headers } as refreshHardwareResponse
 }
 
 

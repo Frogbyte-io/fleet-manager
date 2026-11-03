@@ -763,6 +763,9 @@ pub struct ProxmoxAccounts {
     /// The console sessions (FM-495), attached by
     /// [`ProxmoxAccounts::with_console`].
     console: Option<Arc<console::ConsoleState>>,
+    /// The hardware inventory (FM-1111), attached by
+    /// [`ProxmoxAccounts::with_hardware`].
+    hardware: Option<Arc<crate::hardware_inventory::HardwareInventory>>,
 }
 
 impl ProxmoxAccounts {
@@ -789,7 +792,25 @@ impl ProxmoxAccounts {
             task_history: None,
             permissions: None,
             console: None,
+            hardware: None,
         }
+    }
+
+    /// Attaches the hardware inventory (FM-1111), which the API reads
+    /// through [`Self::hardware`].
+    #[must_use]
+    pub fn with_hardware(
+        mut self,
+        hardware: Arc<crate::hardware_inventory::HardwareInventory>,
+    ) -> Self {
+        self.hardware = Some(hardware);
+        self
+    }
+
+    /// The hardware inventory, when composed.
+    #[must_use]
+    pub fn hardware(&self) -> Option<&Arc<crate::hardware_inventory::HardwareInventory>> {
+        self.hardware.as_ref()
     }
 
     /// Attaches the process event hub so notifications follow durable commits,
