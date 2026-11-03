@@ -78,6 +78,12 @@ fleetctl --output json lab provisions
   -> GET /api/v1/lab/provisions
 fleetctl --output json lab release <lease-id>
   -> POST /api/v1/lab/leases/lease-id-example/release body {"keep":false}
+fleetctl --output json hardware list
+  -> GET /api/v1/hardware/devices
+fleetctl --output json hardware list --account <account-id>
+  -> GET /api/v1/hardware/devices?accountId=account-id-example
+fleetctl --output json hardware refresh --account <account-id>
+  -> POST /api/v1/hardware/refresh body {"accountId":"account-id-example"}
 fleetctl --output json registry types
   -> GET /api/v1/registry/types
 fleetctl --output json registry find aptabase
