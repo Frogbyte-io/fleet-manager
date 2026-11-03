@@ -279,6 +279,20 @@ pub enum Permission {
     /// public lookups. The resource is `<type>/<key>` for one entry and
     /// absent for the whole sweep.
     RegistryObserve,
+    /// List and read the inventoried hardware devices (FM-1111, ADR 0019):
+    /// their mapping ids, status with its reason, and the holder of a
+    /// reservation. A read of Fleet's own records; it makes no Proxmox
+    /// call. Risky like [`Permission::ProxmoxRead`]: the inventory names
+    /// what hangs off the hosts and which guest holds it. Never delegated
+    /// to Lab credentials.
+    HardwareRead,
+    /// Refresh the hardware inventory of one Proxmox account (FM-1111): read
+    /// the account's USB mappings, node checks and every guest config through
+    /// its token, and record the derived device status. A mutation of
+    /// Fleet-side records that sends the account's token to the Proxmox
+    /// host; audited. The resource is the account id. Never delegated to
+    /// Lab credentials.
+    HardwareRefresh,
 }
 
 impl Permission {
@@ -365,6 +379,8 @@ impl Permission {
         Permission::MachineCollect,
         Permission::ProxmoxGuestConfig,
         Permission::MachineProvision,
+        Permission::HardwareRead,
+        Permission::HardwareRefresh,
     ];
 
     /// The stable action id, as recorded in decisions and audit events.
@@ -450,6 +466,8 @@ impl Permission {
             Permission::MachineCollect => "machines.collect",
             Permission::ProxmoxGuestConfig => "proxmox.guest.config",
             Permission::MachineProvision => "machines.provision",
+            Permission::HardwareRead => "hardware.read",
+            Permission::HardwareRefresh => "hardware.refresh",
         }
     }
 
@@ -537,6 +555,8 @@ impl Permission {
             | Permission::MachineCollect
             | Permission::ProxmoxGuestConfig
             | Permission::MachineProvision
+            | Permission::HardwareRead
+            | Permission::HardwareRefresh
             | Permission::RegistryObserve => true,
         }
     }
@@ -584,6 +604,8 @@ impl Permission {
             | Permission::DnsRead
             | Permission::ProxmoxGuestConfig
             | Permission::MachineProvision
+            | Permission::HardwareRead
+            | Permission::HardwareRefresh
             | Permission::RegistryObserve => false,
             Permission::MachineReadSensitive
             | Permission::OperationCancel

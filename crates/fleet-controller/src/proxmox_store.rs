@@ -501,11 +501,25 @@ pub fn compose_proxmox_with_events(
 ) -> fleet_application::proxmox::ProxmoxAccounts {
     let client = fleet_provider_proxmox::ProxmoxClient::new(transport.clone());
     let discovery = Arc::new(ProviderDiscovery::new(client.clone()));
+    let account_port: Arc<dyn fleet_application::proxmox::ProxmoxAccountPort> = Arc::new(
+        fleet_storage_sqlite::ProxmoxAccountRepository::new(pool.clone()),
+    );
+    let credential_store: Arc<dyn ProxmoxCredentialStore> =
+        Arc::new(SecretBackedProxmoxCredentials::new(secrets));
+    // The hardware inventory (FM-1111) reads through the same account,
+    // credential and audit ports as the rest of the Proxmox surface.
+    let hardware = Arc::new(
+        fleet_application::hardware_inventory::HardwareInventory::new(
+            account_port.clone(),
+            credential_store.clone(),
+            Arc::new(fleet_storage_sqlite::HardwareRepository::new(pool.clone())),
+            crate::hardware_observer::shared(client.clone()),
+            audit.clone(),
+        ),
+    );
     let accounts = fleet_application::proxmox::ProxmoxAccounts::new(
-        Arc::new(fleet_storage_sqlite::ProxmoxAccountRepository::new(
-            pool.clone(),
-        )),
-        Arc::new(SecretBackedProxmoxCredentials::new(secrets)),
+        account_port,
+        credential_store,
         discovery.clone(),
         discovery.clone(),
         Arc::new(ProviderTrustProbe::new(transport)),
@@ -513,6 +527,7 @@ pub fn compose_proxmox_with_events(
         audit,
     )
     .with_permissions(discovery.clone())
+    .with_hardware(hardware)
     .with_console(discovery)
     .with_console_limits(console_limits())
     .with_task_history(

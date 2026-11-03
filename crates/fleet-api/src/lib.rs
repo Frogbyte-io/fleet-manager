@@ -23,6 +23,7 @@ mod envelope;
 mod error;
 pub mod external_accounts;
 pub mod frogenv;
+pub mod hardware;
 pub mod images;
 pub mod lab;
 pub mod lab_artifacts;
@@ -289,6 +290,18 @@ pub const API_BASE_PATH: &str = "/api/v1";
         proxmox_privileges::ProxmoxMissingPrivilegesDto,
         proxmox_privileges::ProxmoxPrivilegeTierDto,
         proxmox_privileges::ProxmoxPrivilegeStatusDto,
+        hardware::HardwareStatusDto,
+        hardware::HardwareUnsupportedReasonDto,
+        hardware::HardwareEntryDto,
+        hardware::HardwareGuestDto,
+        hardware::HardwareHolderDto,
+        hardware::HardwareExternalReferenceDto,
+        hardware::HardwareObservationDto,
+        hardware::HardwareDeviceDto,
+        hardware::HardwareSupportDto,
+        hardware::HardwareGuestScanDto,
+        hardware::HardwareRefreshDto,
+        hardware::RefreshHardwareRequest,
         node::CreateEnrollmentTokenRequest,
         node::EnrollmentTokenCreatedDto,
         node::EnrollmentTokenDto,
@@ -347,6 +360,10 @@ pub const API_BASE_PATH: &str = "/api/v1";
         (
             name = "proxmox",
             description = "Proxmox accounts, TLS fingerprint trust, and cluster discovery. The token secret is write-only; discovery is locked until the host fingerprint is confirmed."
+        ),
+        (
+            name = "hardware",
+            description = "The USB hardware inventory (M11, ADR 0019): PVE USB resource mappings as devices with an explained status. Listing reads Fleet's own records; refresh reads Proxmox through the account's token and is an authorized, audited mutation of those records. Fleet never creates or edits a mapping."
         ),
         (
             name = "nodes",
@@ -487,6 +504,8 @@ pub fn api(state: Arc<operations::ApiState>) -> (Router, utoipa::openapi::OpenAp
                 .routes(routes!(proxmox::confirm_proxmox_fingerprint))
                 .routes(routes!(proxmox::discover_proxmox_cluster))
                 .routes(routes!(proxmox_privileges::get_proxmox_privileges))
+                .routes(routes!(hardware::list_hardware_devices))
+                .routes(routes!(hardware::refresh_hardware))
                 .routes(routes!(proxmox_console::create_proxmox_console_session))
                 .routes(routes!(proxmox::list_proxmox_guests))
                 .routes(routes!(proxmox::observe_proxmox_guest))

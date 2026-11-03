@@ -1039,6 +1039,7 @@ dependencies = [
  "fleet-config",
  "fleet-controller",
  "fleet-core",
+ "fleet-provider-proxmox",
  "fleet-provider-ssh",
  "fleet-schema",
  "fleet-secrets",

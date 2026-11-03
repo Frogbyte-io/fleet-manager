@@ -44,10 +44,10 @@ The two tables below are the PVE privileges per tier, keyed by major. Each entry
 <!-- privilege-table:begin major=9 -->
 | Tier | Role | Required | Opt-in | Also in the role |
 |---|---|---|---|---|
-| discover | `FleetDiscover` | `Sys.Audit` on `/nodes/{node}`, `VM.Audit` on `/vms/{vmid}`, `Datastore.Audit` on `/storage/{storage}`, `VM.GuestAgent.Audit` or `VM.GuestAgent.Unrestricted` on `/vms/{vmid}` | `Pool.Audit` on `/pool/{pool}` | `Pool.Audit`: the opt-in row. Fleet's discovery does not use pool rows today; drop it from the role if you prefer |
+| discover | `FleetDiscover` | `Sys.Audit` on `/nodes/{node}`, `VM.Audit` on `/vms/{vmid}`, `Datastore.Audit` on `/storage/{storage}`, `VM.GuestAgent.Audit` or `VM.GuestAgent.Unrestricted` on `/vms/{vmid}` | `Pool.Audit` on `/pool/{pool}`, `Mapping.Audit` on `/mapping/usb/{mapping}` | `Pool.Audit`: the opt-in row. Fleet's discovery does not use pool rows today; drop it from the role if you prefer |
 | operate | `FleetOperate` | `VM.PowerMgmt` on `/vms/{vmid}` | — | — |
 | destructive | `FleetDestructive` | `VM.Audit` on `/vms/{vmid}`, `VM.PowerMgmt` on `/vms/{vmid}`, `VM.Snapshot` on `/vms/{vmid}`, `VM.Clone` on `/vms/{vmid}`, `VM.Allocate` on `/vms/{newid}`, `Datastore.AllocateSpace` on `/storage/{storage}`, `SDN.Use` on `/sdn/zones/{zone}/{bridge}`, `VM.Allocate` on `/vms/{vmid}` | `Sys.Modify` on `/nodes/{node}` | `VM.Snapshot.Rollback`: the revert row accepts either it or `VM.Snapshot`; it is kept so a rollback-only role can be split off |
-| lab | `FleetLab`, `FleetLabTarget` | `VM.Audit` on `/vms/{vmid}`, `VM.Clone` on `/vms/{vmid}`, `VM.Allocate` on `/vms/{newid}`, `Datastore.AllocateSpace` on `/storage/{storage}`, `SDN.Use` on `/sdn/zones/{zone}/{bridge}`, `VM.Audit` on `/vms/{newid}`, `VM.Config.Options` on `/vms/{newid}`, `VM.Config.CPU` on `/vms/{newid}`, `VM.Config.Memory` on `/vms/{newid}`, `VM.Config.Disk` on `/vms/{newid}`, `VM.PowerMgmt` on `/vms/{newid}`, `VM.GuestAgent.Audit` or `VM.GuestAgent.Unrestricted` on `/vms/{newid}` | `VM.Config.Cloudinit` on `/vms/{newid}`, `VM.Config.HWType` on `/vms/{newid}` | — |
+| lab | `FleetLab`, `FleetLabTarget` | `VM.Audit` on `/vms/{vmid}`, `VM.Clone` on `/vms/{vmid}`, `VM.Allocate` on `/vms/{newid}`, `Datastore.AllocateSpace` on `/storage/{storage}`, `SDN.Use` on `/sdn/zones/{zone}/{bridge}`, `VM.Audit` on `/vms/{newid}`, `VM.Config.Options` on `/vms/{newid}`, `VM.Config.CPU` on `/vms/{newid}`, `VM.Config.Memory` on `/vms/{newid}`, `VM.Config.Disk` on `/vms/{newid}`, `VM.PowerMgmt` on `/vms/{newid}`, `VM.GuestAgent.Audit` or `VM.GuestAgent.Unrestricted` on `/vms/{newid}` | `VM.Config.Cloudinit` on `/vms/{newid}`, `VM.Config.HWType` on `/vms/{newid}`, `VM.Config.HWType` on `/vms/{vmid}`, `Mapping.Use` on `/mapping/usb/{mapping}` | — |
 | console | `FleetConsole` | `VM.Console` on `/vms/{vmid}` | — | — |
 <!-- privilege-table:end -->
 
@@ -58,10 +58,10 @@ Grant `VM.GuestAgent.Audit`, never `VM.GuestAgent.Unrestricted`: Unrestricted al
 <!-- privilege-table:begin major=8 -->
 | Tier | Role | Required | Opt-in | Also in the role |
 |---|---|---|---|---|
-| discover | `FleetDiscover` | `Sys.Audit` on `/nodes/{node}`, `VM.Audit` on `/vms/{vmid}`, `Datastore.Audit` on `/storage/{storage}` | `Pool.Audit` on `/pool/{pool}`, `VM.Monitor` on `/vms/{vmid}` | `Pool.Audit`: the opt-in row, as on 9.x. The agent privilege is a separate opt-in role, not part of this one |
+| discover | `FleetDiscover` | `Sys.Audit` on `/nodes/{node}`, `VM.Audit` on `/vms/{vmid}`, `Datastore.Audit` on `/storage/{storage}` | `Pool.Audit` on `/pool/{pool}`, `VM.Monitor` on `/vms/{vmid}`, `Mapping.Audit` on `/mapping/usb/{mapping}` | `Pool.Audit`: the opt-in row, as on 9.x. The agent privilege is a separate opt-in role, not part of this one |
 | operate | `FleetOperate` | `VM.PowerMgmt` on `/vms/{vmid}` | — | — |
 | destructive | `FleetDestructive` | `VM.Audit` on `/vms/{vmid}`, `VM.PowerMgmt` on `/vms/{vmid}`, `VM.Snapshot` on `/vms/{vmid}`, `VM.Clone` on `/vms/{vmid}`, `VM.Allocate` on `/vms/{newid}`, `Datastore.AllocateSpace` on `/storage/{storage}`, `SDN.Use` on `/sdn/zones/{zone}/{bridge}`, `VM.Allocate` on `/vms/{vmid}` | `Sys.Modify` on `/nodes/{node}` | `VM.Snapshot.Rollback`: as on 9.x |
-| lab | `FleetLab`, `FleetLabTarget`, `FleetAgent8` | `VM.Audit` on `/vms/{vmid}`, `VM.Clone` on `/vms/{vmid}`, `VM.Allocate` on `/vms/{newid}`, `Datastore.AllocateSpace` on `/storage/{storage}`, `SDN.Use` on `/sdn/zones/{zone}/{bridge}`, `VM.Audit` on `/vms/{newid}`, `VM.Config.Options` on `/vms/{newid}`, `VM.Config.CPU` on `/vms/{newid}`, `VM.Config.Memory` on `/vms/{newid}`, `VM.Config.Disk` on `/vms/{newid}`, `VM.PowerMgmt` on `/vms/{newid}`, `VM.Monitor` on `/vms/{newid}` | `VM.Config.Cloudinit` on `/vms/{newid}`, `VM.Config.HWType` on `/vms/{newid}` | — |
+| lab | `FleetLab`, `FleetLabTarget`, `FleetAgent8` | `VM.Audit` on `/vms/{vmid}`, `VM.Clone` on `/vms/{vmid}`, `VM.Allocate` on `/vms/{newid}`, `Datastore.AllocateSpace` on `/storage/{storage}`, `SDN.Use` on `/sdn/zones/{zone}/{bridge}`, `VM.Audit` on `/vms/{newid}`, `VM.Config.Options` on `/vms/{newid}`, `VM.Config.CPU` on `/vms/{newid}`, `VM.Config.Memory` on `/vms/{newid}`, `VM.Config.Disk` on `/vms/{newid}`, `VM.PowerMgmt` on `/vms/{newid}`, `VM.Monitor` on `/vms/{newid}` | `VM.Config.Cloudinit` on `/vms/{newid}`, `VM.Config.HWType` on `/vms/{newid}`, `VM.Config.HWType` on `/vms/{vmid}`, `Mapping.Use` on `/mapping/usb/{mapping}` | — |
 | console | `FleetConsole` | `VM.Console` on `/vms/{vmid}` | — | — |
 <!-- privilege-table:end -->
 
@@ -175,6 +175,11 @@ pveum role add FleetLabAudio --privs "VM.Config.HWType"
 # with guestOs windows. Lab writes the clone's cloud-init user and the
 # controller's SSH public keys before its first boot (#561).
 pveum role add FleetLabLogin --privs "VM.Config.Cloudinit"
+# Opt-in only, not granted below: USB devices (M11, ADR 0019). Mapping.Audit
+# lists the USB resource mappings (it is also part of PVEAuditor), Mapping.Use
+# attaches and detaches one (a detach is checked against the mapping the slot
+# currently names), and VM.Config.HWType changes the guest's hardware.
+pveum role add FleetUsb --privs "Mapping.Audit,Mapping.Use,VM.Config.HWType"
 ```
 <!-- privilege-roles:end -->
 
@@ -201,6 +206,8 @@ pveum role add FleetCancelAnyTask --privs "Sys.Modify"
 pveum role add FleetLabAudio --privs "VM.Config.HWType"
 # Opt-in only, not granted below (see FleetLabLogin in the 9.x block).
 pveum role add FleetLabLogin --privs "VM.Config.Cloudinit"
+# Opt-in only, not granted below (see FleetUsb in the 9.x block).
+pveum role add FleetUsb --privs "Mapping.Audit,Mapping.Use,VM.Config.HWType"
 ```
 <!-- privilege-roles:end -->
 
@@ -279,6 +286,14 @@ The clone also starts with the image template's hardware, which the Lab template
 A Lab template may also declare a virtual audio device (issue #398): `audio` with a `device` of `ich9-intel-hda`, `intel-hda`, or `AC97`, and a `driver` of `none` (a guest-visible sound card with no host audio; `spice` is not offered because a headless Lab guest has no SPICE display). Where the clone's `audio0` differs, the executor writes `audio0=device=<device>,driver=none` in the same digest-conditional config update as cores and memory; PVE requires `VM.Config.HWType` for it (qemu-server lists `audio0` among its hardware-type options), so a template with audio needs it on the clone targets. It is an opt-in privilege: the token report shows it without gating the Lab tier, because only templates that declare audio use it. A template without `audio` leaves the clone as the image has it: it does not remove an audio device the image carries. **Upgrading:** nothing changes for existing tokens and the Lab tier stays granted without it. A token without `VM.Config.HWType` keeps working for templates without audio or whose clone already has the declared device, and fails a provision at the `hardware` step (reason `hardware_failed`, naming the privilege) otherwise; to use audio templates, create the role and grant it on the clone-target VMIDs next to `FleetLabTarget` (`pveum role add FleetLabAudio --privs "VM.Config.HWType"`, then the same ACL as `FleetLabTarget`). `VM.Config.HWType` also permits changing the clone's machine type, display, and similar hardware options, on the clone-target VMIDs only.
 
 A Lab template with `guestOs: windows` ([#561](https://github.com/Frogbyte-io/fleet-manager/issues/561)) needs `VM.Config.Cloudinit` on the clone targets as well: before the first boot, Lab writes the clone's cloud-init `ciuser` and the controller's SSH *public* keys, so Cloudbase-Init authorizes them (the re-generalized image has no key). It is opt-in like audio: create `FleetLabLogin` (`VM.Config.Cloudinit`) and grant it with the same ACL as `FleetLabTarget`. Without it a Windows template's provision fails at the `ssh_key` step (`ssh_key_failed`, naming the privilege) before the guest starts. Linux templates and pool members never use it.
+
+USB devices ([M11](../planning/m11-usb-hardware.md), [ADR 0019](../adr/0019-usb-device-allocation.md)) use a separate opt-in role, `FleetUsb`, so a token without it keeps every tier and Fleet reports the devices `unsupported` with a reason instead of guessing. You create the USB resource mappings yourself (`Mapping.Modify` stays with you; Fleet never creates or edits one). The role holds three privileges:
+
+- `Mapping.Audit` on `/mapping/usb` lists the mappings. Without it PVE answers an **empty** `200`, not an error, so Fleet reads the token's own permissions to tell "no mappings" from "no `Mapping.Audit`" and reports the latter as `no_mapping_audit` instead of an empty inventory. `PVEAuditor` already includes it.
+- `Mapping.Use` on `/mapping/usb/<id>` attaches a device and, just as much, detaches it: PVE checks a delete against the mapping the slot currently names, so a token that loses `Mapping.Use` while a device is attached cannot detach it.
+- `VM.Config.HWType` on the guest, for both.
+
+Grant `FleetUsb` to the user and the token on `/mapping/usb` (every mapping) and on the guests that may receive a device (`/pool/fleet` or the clone-target VMIDs, for `VM.Config.HWType`), for example `pveum acl modify /mapping/usb --roles FleetUsb --users fleet@pve` and the same with `--tokens`. **Narrowing it to `/mapping/usb/<id>` is not measured:** FM-S11 measured a per-mapping `Mapping.Audit` for the list and the single-mapping read (only that mapping is listed), but not for `?check-node=`, which Fleet uses for presence. A token with `Mapping.Audit` on single mappings only may therefore list them yet fail the node check, and the device then reads `unsupported` (`usb_inventory_unreadable`). Fleet also never marks a mapping gone unless `Mapping.Audit` covers `/mapping/usb`. `Sys.Modify` on `/` is **not** requested: the node USB inventory (`GET /nodes/{node}/hardware/usb`) needs it, no read-only role has it, and Fleet reads presence from the mapping list with `?check-node=` instead. `fleetctl hardware list` and `fleetctl hardware refresh` show what the token allows; `usb.read-mappings`, `usb.attach-*` and `usb.detach-*` appear as opt-in checks in `fleetctl proxmox privileges`.
 
 On 8.x, if you opt into agent reads for the pool:
 

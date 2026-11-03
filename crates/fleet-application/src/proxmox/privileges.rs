@@ -114,6 +114,10 @@ pub enum PrivilegeScope {
     /// One bridge in an SDN zone: `/sdn/zones/{zone}/{bridge}` (VLAN tag
     /// paths below it count too).
     SdnBridge,
+    /// One USB resource mapping: `/mapping/usb/{mapping}` (FM-1111).
+    /// `/mapping/usb`, `/mapping` and `/` count with their propagating
+    /// privileges.
+    UsbMapping,
 }
 
 impl PrivilegeScope {
@@ -128,6 +132,7 @@ impl PrivilegeScope {
             Self::Storage => "/storage/{storage}",
             Self::Pool => "/pool/{pool}",
             Self::SdnBridge => "/sdn/zones/{zone}/{bridge}",
+            Self::UsbMapping => "/mapping/usb/{mapping}",
         }
     }
 
@@ -146,14 +151,14 @@ impl PrivilegeScope {
             | (Self::Guest | Self::NewGuest, ["vms", _])
             | (Self::Storage, ["storage", _])
             | (Self::Pool, ["pool", _, ..])
-            | (Self::SdnBridge, ["sdn", "zones", _, _, ..]) => Some(Relation::Exact),
+            | (Self::SdnBridge, ["sdn", "zones", _, _, ..])
+            | (Self::UsbMapping, ["mapping", "usb", _]) => Some(Relation::Exact),
             (Self::Node, ["nodes"])
             | (Self::Guest | Self::NewGuest, ["vms"])
             | (Self::Storage, ["storage"])
             | (Self::Pool, ["pool"])
-            | (Self::SdnBridge, ["sdn"] | ["sdn", "zones"] | ["sdn", "zones", _]) => {
-                Some(Relation::Propagated)
-            }
+            | (Self::SdnBridge, ["sdn"] | ["sdn", "zones"] | ["sdn", "zones", _])
+            | (Self::UsbMapping, ["mapping"] | ["mapping", "usb"]) => Some(Relation::Propagated),
             (Self::Guest | Self::Storage, ["pool", _, ..]) => Some(Relation::PoolMember),
             _ => None,
         }
@@ -800,6 +805,73 @@ pub const PROXMOX_PRIVILEGE_TABLE: &[PrivilegeRequirement] = &[
         matching: PrivilegeMatch::All,
         required: true,
         note: "The VNC proxy (websocket=1) and its WebSocket check VM.Console on the guest; verified live on PVE 8.4 and 9.2 with an API token (PVEAuditor alone is refused with 403).",
+    },
+    // ── usb (opt-in, FM-1111) ───────────────────────────────────────────
+    // The `usb.attach-*` and `usb.detach-*` rows mirror the provider's own
+    // declaration (`USB_ATTACH_PRIVILEGES` in `fleet-provider-proxmox`), which
+    // a provider test compares against this table. Every row is opt-in: a
+    // token without the separate `FleetUsb` role keeps each tier it has, and
+    // the hardware inventory reports its devices `unsupported` with the
+    // reason instead (ADR 0019 decision 7, maintainer decision 6).
+    PrivilegeRequirement {
+        id: "usb.read-mappings",
+        capability: "read.usb-mappings",
+        tier: PrivilegeTier::Discover,
+        endpoint: "GET /cluster/mapping/usb",
+        majors: BOTH,
+        scope: PrivilegeScope::UsbMapping,
+        privileges: &["Mapping.Audit"],
+        matching: PrivilegeMatch::All,
+        required: false,
+        note: "Lists the USB resource mappings; without it PVE answers an empty 200, which looks like a cluster with no mappings. Part of PVEAuditor.",
+    },
+    PrivilegeRequirement {
+        id: "usb.attach-guest",
+        capability: "usb.attach",
+        tier: PrivilegeTier::Lab,
+        endpoint: "PUT /nodes/{node}/qemu/{vmid}/config (usbN=mapping=<id>)",
+        majors: BOTH,
+        scope: PrivilegeScope::Guest,
+        privileges: &["VM.Config.HWType"],
+        matching: PrivilegeMatch::All,
+        required: false,
+        note: "qemu-server lists usbN among the hardware-type options. Without any VM.Config.* privilege PVE refuses first, naming all of them.",
+    },
+    PrivilegeRequirement {
+        id: "usb.attach-mapping",
+        capability: "usb.attach",
+        tier: PrivilegeTier::Lab,
+        endpoint: "PUT /nodes/{node}/qemu/{vmid}/config (usbN=mapping=<id>)",
+        majors: BOTH,
+        scope: PrivilegeScope::UsbMapping,
+        privileges: &["Mapping.Use"],
+        matching: PrivilegeMatch::All,
+        required: false,
+        note: "Using a resource mapping is checked per mapping. Raw host= passthrough is root-only, so a token can attach only through a mapping.",
+    },
+    PrivilegeRequirement {
+        id: "usb.detach-guest",
+        capability: "usb.detach",
+        tier: PrivilegeTier::Lab,
+        endpoint: "PUT /nodes/{node}/qemu/{vmid}/config (delete=usbN)",
+        majors: BOTH,
+        scope: PrivilegeScope::Guest,
+        privileges: &["VM.Config.HWType"],
+        matching: PrivilegeMatch::All,
+        required: false,
+        note: "Removing a usbN entry is a hardware-type change like adding one.",
+    },
+    PrivilegeRequirement {
+        id: "usb.detach-mapping",
+        capability: "usb.detach",
+        tier: PrivilegeTier::Lab,
+        endpoint: "PUT /nodes/{node}/qemu/{vmid}/config (delete=usbN)",
+        majors: BOTH,
+        scope: PrivilegeScope::UsbMapping,
+        privileges: &["Mapping.Use"],
+        matching: PrivilegeMatch::All,
+        required: false,
+        note: "PVE checks the delete against the mapping the slot currently names, so the role must keep Mapping.Use for as long as a device is attached.",
     },
 ];
 
@@ -1462,9 +1534,14 @@ mod tests {
                 "VM.Config.Disk",
                 "VM.Config.HWType",
             ] {
+                // The opt-in USB rows (FM-1111) are the one exception: a
+                // persistent machine's guest exists, so attaching a device to
+                // it needs VM.Config.HWType on `/vms/{vmid}`; they are in the
+                // separate FleetUsb role and gate nothing.
                 assert!(
                     requirements_for_major(major)
                         .filter(|row| row.scope != PrivilegeScope::NewGuest)
+                        .filter(|row| !row.id.starts_with("usb."))
                         .all(|row| !row.privileges.contains(&privilege)),
                     "{major}.x: nothing outside the new guest needs {privilege}"
                 );
@@ -1491,6 +1568,73 @@ mod tests {
                 "{major}.x: no required Lab row needs VM.Config.Cloudinit"
             );
         }
+    }
+
+    #[test]
+    fn the_usb_privileges_are_opt_in_and_never_gate_a_tier() {
+        // FM-1111, maintainer decision 6: Mapping.Use, Mapping.Audit and the
+        // guest hardware privilege live in a separate opt-in role.
+        for major in [8, 9] {
+            let usb: Vec<_> = requirements_for_major(major)
+                .filter(|row| row.id.starts_with("usb."))
+                .collect();
+            assert_eq!(usb.len(), 5, "{major}.x");
+            assert!(usb.iter().all(|row| !row.required));
+            // A token with every non-USB privilege stays granted on every
+            // tier, and the opt-in rows report as missing.
+            let mut permissions = EffectivePermissions::new();
+            for row in requirements_for_major(major).filter(|row| !row.id.starts_with("usb.")) {
+                let path = match row.scope {
+                    PrivilegeScope::Root => "/".to_owned(),
+                    PrivilegeScope::Node => "/nodes/pve".to_owned(),
+                    PrivilegeScope::Guest | PrivilegeScope::NewGuest => "/vms/9000".to_owned(),
+                    PrivilegeScope::Storage => "/storage/local".to_owned(),
+                    PrivilegeScope::Pool => "/pool/p".to_owned(),
+                    PrivilegeScope::SdnBridge => "/sdn/zones/z/vmbr0".to_owned(),
+                    PrivilegeScope::UsbMapping => "/mapping/usb/x".to_owned(),
+                };
+                let entry = permissions.entry(path).or_default();
+                for privilege in row.privileges {
+                    entry.insert((*privilege).to_owned(), true);
+                }
+            }
+            let tiers = evaluate_tiers(major, &permissions);
+            for tier in &tiers {
+                assert_eq!(tier.status, PrivilegeStatus::Granted, "{major}.x {tier:?}");
+            }
+            let missing: Vec<_> = tiers
+                .iter()
+                .flat_map(|tier| &tier.checks)
+                .filter(|check| check.requirement.starts_with("usb."))
+                .filter(|check| check.status == PrivilegeStatus::Missing)
+                .map(|check| check.requirement.as_str())
+                .collect();
+            assert!(missing.contains(&"usb.attach-mapping"), "{missing:?}");
+            assert!(missing.contains(&"usb.read-mappings"), "{missing:?}");
+        }
+    }
+
+    #[test]
+    fn a_mapping_grant_counts_on_the_mapping_or_by_propagation_from_above() {
+        let row = requirements_for_major(9)
+            .find(|row| row.id == "usb.attach-mapping")
+            .unwrap();
+        let granted = |entries: &[(&str, &[(&str, bool)])]| {
+            evaluate_requirement(row, &map(entries)).status == PrivilegeStatus::Granted
+        };
+        assert!(granted(&[("/mapping/usb/dev", &[("Mapping.Use", false)])]));
+        assert!(granted(&[("/mapping/usb", &[("Mapping.Use", true)])]));
+        assert!(granted(&[("/mapping", &[("Mapping.Use", true)])]));
+        assert!(granted(&[("/", &[("Mapping.Use", true)])]));
+        // Only propagating privileges reach a mapping from above.
+        assert!(!granted(&[("/mapping/usb", &[("Mapping.Use", false)])]));
+        assert!(!granted(&[("/", &[("Mapping.Use", false)])]));
+        // Another family or another privilege never counts.
+        assert!(!granted(&[("/mapping/pci/dev", &[("Mapping.Use", true)])]));
+        assert!(!granted(&[(
+            "/mapping/usb/dev",
+            &[("Mapping.Audit", true)]
+        )]));
     }
 
     #[test]

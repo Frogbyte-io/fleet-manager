@@ -17,6 +17,7 @@ pub mod dns;
 pub mod events;
 pub mod external_accounts;
 pub mod hardware;
+pub mod hardware_inventory;
 pub mod hardware_reservation;
 pub mod idempotency;
 pub mod images;

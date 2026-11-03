@@ -1954,6 +1954,201 @@
         }
       }
     },
+    "/api/v1/hardware/devices": {
+      "get": {
+        "tags": [
+          "hardware"
+        ],
+        "summary": "Lists the inventoried hardware devices with their status and the reason\nfor it. A read of Fleet's own records: it makes no Proxmox call, so a\ndevice is as fresh as the last `POST /hardware/refresh` (`stale` says when\nthat is too old to trust).",
+        "description": "# Errors\n\nReturns the public error envelope on refusal, an unknown account, an\nunknown cursor, an unwired surface or a backend failure.",
+        "operationId": "listHardwareDevices",
+        "parameters": [
+          {
+            "name": "accountId",
+            "in": "query",
+            "description": "Only this account's devices.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "description": "The maximum number of devices to return.",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int32",
+              "minimum": 0
+            }
+          },
+          {
+            "name": "cursor",
+            "in": "query",
+            "description": "The opaque cursor: the last device id of the previous page.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The devices ordered by account then mapping id, each with its status and, when unsupported, its reason.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Page_HardwareDeviceDto"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The cursor names no device in the list.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The caller may not read the hardware inventory (`hardware.read`).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "The account does not exist.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "The controller's storage failed.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The hardware surface is not wired.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/hardware/refresh": {
+      "post": {
+        "tags": [
+          "hardware"
+        ],
+        "summary": "Refreshes one account's hardware inventory: reads its USB mappings, the\nnodes they name, every guest config and the token's own permissions\nthrough the account's API token, and records the derived status of each\nmapping. An authorized, audited mutation (`hardware.refresh`); it changes\nnothing on Proxmox.",
+        "description": "# Errors\n\nReturns the public error envelope on refusal, an unknown or unconfirmed\naccount, a missing token secret, an unwired surface, a failed audit write\nor a Proxmox failure that makes the observation meaningless.",
+        "operationId": "refreshHardware",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RefreshHardwareRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "The account's devices after the refresh, with the support state of the account, what the guest scan covered and what each device's observation added.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Resource_HardwareRefreshDto"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The caller may not refresh the hardware inventory (`hardware.refresh`).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "The account does not exist.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The account's trust is unconfirmed (`proxmox_unconfirmed`), its pinned fingerprint no longer matches (`proxmox_fingerprint_mismatch`), or its token secret is unavailable (`proxmox_no_secret`).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "The controller's storage, secret store or audit sink failed.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "The PVE API failed or refused the token.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The hardware surface is not wired.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/images/build-addresses": {
       "get": {
         "tags": [
@@ -17515,6 +17710,454 @@
           }
         }
       },
+      "HardwareDeviceDto": {
+        "type": "object",
+        "description": "One inventoried device: a PVE USB resource mapping.",
+        "required": [
+          "id",
+          "accountId",
+          "mappingId",
+          "kind",
+          "status",
+          "stale",
+          "observedAt",
+          "entries",
+          "createdAt",
+          "updatedAt"
+        ],
+        "properties": {
+          "accountId": {
+            "type": "string",
+            "description": "The Proxmox account whose cluster owns the mapping."
+          },
+          "createdAt": {
+            "type": "integer",
+            "format": "int64",
+            "description": "When the record was created (epoch milliseconds)."
+          },
+          "entries": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/HardwareEntryDto"
+            },
+            "description": "The per-node entries."
+          },
+          "holder": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/HardwareHolderDto",
+                "description": "The live reservation, when one holds the device."
+              }
+            ]
+          },
+          "id": {
+            "type": "string",
+            "description": "The Fleet id."
+          },
+          "kind": {
+            "type": "string",
+            "description": "The device kind (`usb`)."
+          },
+          "mappingId": {
+            "type": "string",
+            "description": "The PVE resource mapping id; this is the device's identity."
+          },
+          "note": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The operator's note."
+          },
+          "observation": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/HardwareObservationDto",
+                "description": "What the last refresh added; `null` in the list."
+              }
+            ]
+          },
+          "observedAt": {
+            "type": "integer",
+            "format": "int64",
+            "description": "When the device was last seen on any node (epoch milliseconds; `0`\nwhen it never was, which also reads as stale). For a device with no\nentry it is when the record last changed."
+          },
+          "reason": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/HardwareUnsupportedReasonDto",
+                "description": "Why, when `status` is `unsupported`."
+              }
+            ]
+          },
+          "reasonText": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The reason in words, when `status` is `unsupported`."
+          },
+          "stale": {
+            "type": "boolean",
+            "description": "Whether the device was last seen longer ago than the controller's\nbound (a device that was never seen is stale)."
+          },
+          "status": {
+            "$ref": "#/components/schemas/HardwareStatusDto",
+            "description": "The status to act on: a live reservation decides `reserved` and\n`quarantined`, and an available device whose observation is stale\nreads `missing`."
+          },
+          "updatedAt": {
+            "type": "integer",
+            "format": "int64",
+            "description": "When the record last changed (epoch milliseconds)."
+          }
+        }
+      },
+      "HardwareEntryDto": {
+        "type": "object",
+        "description": "What one node last observed for a device. There is no serial: the PVE\nnode inventory does not return one.",
+        "required": [
+          "node",
+          "vendorId",
+          "productId",
+          "lastSeenAt"
+        ],
+        "properties": {
+          "lastSeenAt": {
+            "type": "integer",
+            "format": "int64",
+            "description": "When the device was last seen on this node (epoch milliseconds; `0`\nwhen never)."
+          },
+          "manufacturer": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The manufacturer string, when the node inventory was readable."
+          },
+          "node": {
+            "type": "string",
+            "description": "The PVE node."
+          },
+          "product": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The product string, when the node inventory was readable."
+          },
+          "productId": {
+            "type": "string",
+            "description": "The USB product id (four hex digits)."
+          },
+          "usbpath": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The bus-port path of the mapping or of the device seen, such as `1-10`."
+          },
+          "vendorId": {
+            "type": "string",
+            "description": "The USB vendor id (four hex digits)."
+          }
+        }
+      },
+      "HardwareExternalReferenceDto": {
+        "type": "object",
+        "description": "A guest that references a device and is not the reservation's own guest.",
+        "required": [
+          "node",
+          "vmid",
+          "slot",
+          "template"
+        ],
+        "properties": {
+          "guestName": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The guest's name, when known."
+          },
+          "node": {
+            "type": "string",
+            "description": "The guest's node."
+          },
+          "pending": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "`add` or `remove` when only one of the stored and applied configs of\na running guest has the entry."
+          },
+          "slot": {
+            "type": "string",
+            "description": "The `usbN` slot."
+          },
+          "template": {
+            "type": "boolean",
+            "description": "Whether the guest is a template (it holds no device; its clones\ninherit the entry)."
+          },
+          "vmid": {
+            "type": "integer",
+            "format": "int32",
+            "description": "The guest's VMID.",
+            "minimum": 0
+          }
+        }
+      },
+      "HardwareGuestDto": {
+        "type": "object",
+        "description": "The guest a reservation targets.",
+        "required": [
+          "accountId",
+          "node",
+          "vmid"
+        ],
+        "properties": {
+          "accountId": {
+            "type": "string",
+            "description": "The Proxmox account."
+          },
+          "node": {
+            "type": "string",
+            "description": "The guest's node."
+          },
+          "usbSlot": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "The `usbN` slot, once known.",
+            "minimum": 0
+          },
+          "vmid": {
+            "type": "integer",
+            "format": "int32",
+            "description": "The guest's VMID.",
+            "minimum": 0
+          }
+        }
+      },
+      "HardwareGuestScanDto": {
+        "type": "object",
+        "description": "What the guest scan covered.",
+        "required": [
+          "listed",
+          "read",
+          "unreadable",
+          "truncated"
+        ],
+        "properties": {
+          "listed": {
+            "type": "integer",
+            "description": "How many QEMU guests the cluster listed.",
+            "minimum": 0
+          },
+          "read": {
+            "type": "integer",
+            "description": "How many configs were read.",
+            "minimum": 0
+          },
+          "truncated": {
+            "type": "boolean",
+            "description": "Whether the bound dropped guests. A scan with unreadable or dropped\nguests is incomplete: a device that would be available is reported\n`unsupported` (`usb_inventory_unreadable`) instead, since a guest may reference it\nthat was not read."
+          },
+          "unreadable": {
+            "type": "integer",
+            "description": "How many could not be read.",
+            "minimum": 0
+          }
+        }
+      },
+      "HardwareHolderDto": {
+        "type": "object",
+        "description": "The live reservation that holds a device.",
+        "required": [
+          "reservationId",
+          "ownerKind",
+          "ownerId",
+          "state",
+          "reservedAt"
+        ],
+        "properties": {
+          "guest": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/HardwareGuestDto",
+                "description": "The guest, once known."
+              }
+            ]
+          },
+          "ownerId": {
+            "type": "string",
+            "description": "The owner's id."
+          },
+          "ownerKind": {
+            "type": "string",
+            "description": "`lease` or `machine`."
+          },
+          "reservationId": {
+            "type": "string",
+            "description": "The reservation's id."
+          },
+          "reservedAt": {
+            "type": "integer",
+            "format": "int64",
+            "description": "When the reservation was made (epoch milliseconds)."
+          },
+          "state": {
+            "type": "string",
+            "description": "The reservation's state (`held`, `attaching`, `attached`, `detaching`,\n`attach_unknown`, `detach_failed`)."
+          }
+        }
+      },
+      "HardwareObservationDto": {
+        "type": "object",
+        "description": "What a refresh observed beyond the stored record. Present in the refresh\nanswer; `null` in the list, which makes no Proxmox call.",
+        "required": [
+          "externalReferences",
+          "notes"
+        ],
+        "properties": {
+          "externalReferences": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/HardwareExternalReferenceDto"
+            },
+            "description": "The guests that reference the mapping."
+          },
+          "notes": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Explanatory notes (the finding behind `missing`, an id-only entry\nthat cannot be told apart, a partly read mapping)."
+          }
+        }
+      },
+      "HardwareRefreshDto": {
+        "type": "object",
+        "description": "The outcome of one refresh.",
+        "required": [
+          "accountId",
+          "observedAt",
+          "support",
+          "devices",
+          "warnings"
+        ],
+        "properties": {
+          "accountId": {
+            "type": "string",
+            "description": "The account refreshed."
+          },
+          "devices": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/HardwareDeviceDto"
+            },
+            "description": "The account's devices after the refresh, ordered by mapping id."
+          },
+          "guestScan": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/HardwareGuestScanDto",
+                "description": "What the guest scan covered; `null` when the mapping list was not\nusable."
+              }
+            ]
+          },
+          "observedAt": {
+            "type": "integer",
+            "format": "int64",
+            "description": "When the observation was taken (epoch milliseconds)."
+          },
+          "pveVersion": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The PVE version, when it could be read."
+          },
+          "support": {
+            "$ref": "#/components/schemas/HardwareSupportDto",
+            "description": "Whether the account could be inventoried."
+          },
+          "warnings": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Warnings, bounded."
+          }
+        }
+      },
+      "HardwareStatusDto": {
+        "type": "string",
+        "description": "A device's status. `unsupported` always carries a `reason`.",
+        "enum": [
+          "available",
+          "reserved",
+          "externally_attached",
+          "missing",
+          "unsupported",
+          "quarantined"
+        ]
+      },
+      "HardwareSupportDto": {
+        "type": "object",
+        "description": "Whether the account could be inventoried.",
+        "required": [
+          "state"
+        ],
+        "properties": {
+          "detail": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The reason in words, unless supported."
+          },
+          "reason": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "`pve_too_old`, `no_mapping_audit`, `permissions_unreadable` or\n`mapping_list_unreadable`, unless\nsupported."
+          },
+          "state": {
+            "type": "string",
+            "description": "`supported`, `unsupported` (the account cannot be inventoried) or\n`unverified` (the list could not be verified; no device was changed)."
+          }
+        }
+      },
+      "HardwareUnsupportedReasonDto": {
+        "type": "string",
+        "description": "Why an `unsupported` device cannot be allocated.",
+        "enum": [
+          "no_node_entry",
+          "ambiguous_mapping",
+          "token_lacks_mapping_use",
+          "token_lacks_guest_hwtype",
+          "pve_too_old",
+          "usb_inventory_unreadable"
+        ]
+      },
       "ImageBuildDto": {
         "type": "object",
         "description": "Safe build provenance and outcome; credentials and work paths are excluded.",
@@ -20574,6 +21217,135 @@
                   "type": "integer",
                   "format": "int64",
                   "description": "When the account last changed (epoch millis)."
+                }
+              }
+            },
+            "description": "The items on this page, in the endpoint's documented order."
+          },
+          "page": {
+            "$ref": "#/components/schemas/PageInfo",
+            "description": "Where this page sits in the result set."
+          }
+        }
+      },
+      "Page_HardwareDeviceDto": {
+        "type": "object",
+        "description": "A page of resources.\n\nThe concrete schema for a list endpoint appears when that endpoint does;\n[`PageInfo`] is the part of the shape that is fixed for every one of them.",
+        "required": [
+          "items",
+          "page"
+        ],
+        "properties": {
+          "items": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "description": "One inventoried device: a PVE USB resource mapping.",
+              "required": [
+                "id",
+                "accountId",
+                "mappingId",
+                "kind",
+                "status",
+                "stale",
+                "observedAt",
+                "entries",
+                "createdAt",
+                "updatedAt"
+              ],
+              "properties": {
+                "accountId": {
+                  "type": "string",
+                  "description": "The Proxmox account whose cluster owns the mapping."
+                },
+                "createdAt": {
+                  "type": "integer",
+                  "format": "int64",
+                  "description": "When the record was created (epoch milliseconds)."
+                },
+                "entries": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/HardwareEntryDto"
+                  },
+                  "description": "The per-node entries."
+                },
+                "holder": {
+                  "oneOf": [
+                    {
+                      "type": "null"
+                    },
+                    {
+                      "$ref": "#/components/schemas/HardwareHolderDto",
+                      "description": "The live reservation, when one holds the device."
+                    }
+                  ]
+                },
+                "id": {
+                  "type": "string",
+                  "description": "The Fleet id."
+                },
+                "kind": {
+                  "type": "string",
+                  "description": "The device kind (`usb`)."
+                },
+                "mappingId": {
+                  "type": "string",
+                  "description": "The PVE resource mapping id; this is the device's identity."
+                },
+                "note": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "description": "The operator's note."
+                },
+                "observation": {
+                  "oneOf": [
+                    {
+                      "type": "null"
+                    },
+                    {
+                      "$ref": "#/components/schemas/HardwareObservationDto",
+                      "description": "What the last refresh added; `null` in the list."
+                    }
+                  ]
+                },
+                "observedAt": {
+                  "type": "integer",
+                  "format": "int64",
+                  "description": "When the device was last seen on any node (epoch milliseconds; `0`\nwhen it never was, which also reads as stale). For a device with no\nentry it is when the record last changed."
+                },
+                "reason": {
+                  "oneOf": [
+                    {
+                      "type": "null"
+                    },
+                    {
+                      "$ref": "#/components/schemas/HardwareUnsupportedReasonDto",
+                      "description": "Why, when `status` is `unsupported`."
+                    }
+                  ]
+                },
+                "reasonText": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "description": "The reason in words, when `status` is `unsupported`."
+                },
+                "stale": {
+                  "type": "boolean",
+                  "description": "Whether the device was last seen longer ago than the controller's\nbound (a device that was never seen is stale)."
+                },
+                "status": {
+                  "$ref": "#/components/schemas/HardwareStatusDto",
+                  "description": "The status to act on: a live reservation decides `reserved` and\n`quarantined`, and an available device whose observation is stale\nreads `missing`."
+                },
+                "updatedAt": {
+                  "type": "integer",
+                  "format": "int64",
+                  "description": "When the record last changed (epoch milliseconds)."
                 }
               }
             },
@@ -23662,6 +24434,19 @@
           }
         }
       },
+      "RefreshHardwareRequest": {
+        "type": "object",
+        "description": "The refresh request.",
+        "required": [
+          "accountId"
+        ],
+        "properties": {
+          "accountId": {
+            "type": "string",
+            "description": "The Proxmox account to refresh."
+          }
+        }
+      },
       "RegisterGuestRequest": {
         "type": "object",
         "description": "The body of the register review and register calls.",
@@ -25358,6 +26143,73 @@
                 "type": "integer",
                 "format": "int64",
                 "description": "When the account last changed (epoch millis)."
+              }
+            }
+          }
+        }
+      },
+      "Resource_HardwareRefreshDto": {
+        "type": "object",
+        "description": "A single resource.\n\nThe payload is nested under `data` so that later top-level fields are an\nadditive change rather than a breaking one.",
+        "required": [
+          "data"
+        ],
+        "properties": {
+          "data": {
+            "type": "object",
+            "description": "The outcome of one refresh.",
+            "required": [
+              "accountId",
+              "observedAt",
+              "support",
+              "devices",
+              "warnings"
+            ],
+            "properties": {
+              "accountId": {
+                "type": "string",
+                "description": "The account refreshed."
+              },
+              "devices": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/components/schemas/HardwareDeviceDto"
+                },
+                "description": "The account's devices after the refresh, ordered by mapping id."
+              },
+              "guestScan": {
+                "oneOf": [
+                  {
+                    "type": "null"
+                  },
+                  {
+                    "$ref": "#/components/schemas/HardwareGuestScanDto",
+                    "description": "What the guest scan covered; `null` when the mapping list was not\nusable."
+                  }
+                ]
+              },
+              "observedAt": {
+                "type": "integer",
+                "format": "int64",
+                "description": "When the observation was taken (epoch milliseconds)."
+              },
+              "pveVersion": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "description": "The PVE version, when it could be read."
+              },
+              "support": {
+                "$ref": "#/components/schemas/HardwareSupportDto",
+                "description": "Whether the account could be inventoried."
+              },
+              "warnings": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                },
+                "description": "Warnings, bounded."
               }
             }
           }
@@ -30969,6 +31821,10 @@
     {
       "name": "proxmox",
       "description": "Proxmox accounts, TLS fingerprint trust, and cluster discovery. The token secret is write-only; discovery is locked until the host fingerprint is confirmed."
+    },
+    {
+      "name": "hardware",
+      "description": "The USB hardware inventory (M11, ADR 0019): PVE USB resource mappings as devices with an explained status. Listing reads Fleet's own records; refresh reads Proxmox through the account's token and is an authorized, audited mutation of those records. Fleet never creates or edits a mapping."
     },
     {
       "name": "nodes",

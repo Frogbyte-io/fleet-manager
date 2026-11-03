@@ -158,6 +158,10 @@ fn the_named_refusals_of_the_issue_are_refused() {
         (Permission::ExternalAccountRead, None),
         (Permission::ExternalAccountConfig, None),
         (Permission::DnsRead, None),
+        // the hardware inventory (FM-1111): reads name what hangs off the
+        // hosts, refresh sends the account's token to Proxmox
+        (Permission::HardwareRead, None),
+        (Permission::HardwareRefresh, Some("account-1")),
         (Permission::TailnetConfig, None),
         (Permission::SourceActivate, None),
         (Permission::SourceSettings, None),
