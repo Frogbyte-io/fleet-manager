@@ -253,6 +253,10 @@ impl Harness {
                 audit.clone(),
             )),
             audit.clone(),
+            Arc::new(LeaseRepository::new(pool.clone())),
+            Arc::new(fleet_controller::lab_hardware::SqliteFingerprintPins::new(
+                pool.clone(),
+            )),
         ));
         Self {
             _dir: dir,

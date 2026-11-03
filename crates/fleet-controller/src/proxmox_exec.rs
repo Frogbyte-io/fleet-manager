@@ -444,6 +444,7 @@ pub struct ProxmoxDestructiveExecutor {
     pool_members: Option<Arc<dyn fleet_application::operation::PoolMemberLookup>>,
     persistent: Option<Arc<dyn fleet_application::persistent::PersistentGuestPort>>,
     audit: Option<Arc<dyn fleet_application::operation::AuditPort>>,
+    hardware: Option<Arc<dyn fleet_application::hardware::HardwareStore>>,
 }
 
 impl ProxmoxDestructiveExecutor {
@@ -461,6 +462,7 @@ impl ProxmoxDestructiveExecutor {
             links: None,
             artifacts: None,
             pool_members: None,
+            hardware: None,
             persistent: None,
             audit: None,
         }
@@ -604,6 +606,80 @@ impl ProxmoxDestructiveExecutor {
         self
     }
 
+    /// Supplies the hardware reservations (FM-1123, ADR 0019 decision 5): a
+    /// destroy, snapshot revert or template conversion of a guest that holds
+    /// a reserved device (a reservation that is not merely `held`) is
+    /// refused until the Lab saga or an operator has detached it, because a
+    /// revert restores the snapshot's `usbN` set, a template's clones inherit
+    /// it, and a destroy would free a device nobody confirmed. Without it
+    /// the executor does not check, so every production construction site
+    /// must supply it.
+    #[must_use]
+    pub fn with_hardware_guard(
+        mut self,
+        hardware: Arc<dyn fleet_application::hardware::HardwareStore>,
+    ) -> Self {
+        self.hardware = Some(hardware);
+        self
+    }
+
+    /// Refuses (by completing the operation as failed) a destroy, revert or
+    /// template conversion of a guest a live, attached or unconfirmed
+    /// hardware reservation references. Answers whether the operation ended
+    /// here.
+    async fn refuse_held_hardware(
+        &self,
+        operations: &Operations,
+        operation: &Operation,
+        payload: &DestructivePayload,
+    ) -> Result<bool, String> {
+        let Some(store) = &self.hardware else {
+            return Ok(false);
+        };
+        if !matches!(
+            operation.kind.as_str(),
+            "proxmox.guest.destroy" | "proxmox.guest.snapshot-revert" | "proxmox.guest.template"
+        ) {
+            return Ok(false);
+        }
+        match store.list_live_reservations().await {
+            Ok(rows) => {
+                let held = rows.iter().find(|row| {
+                    row.state != fleet_core::HardwareReservationState::Held
+                        && row.guest.as_ref().is_some_and(|guest| {
+                            guest.account_id == payload.account_id && guest.vmid == payload.vmid
+                        })
+                });
+                if let Some(row) = held {
+                    complete_failure(
+                        operations,
+                        &operation.id,
+                        "hardware_attached",
+                        &format!(
+                            "VMID {} holds a USB device (reservation {} is {}); detach it first (a Lab lease's cleanup does, an operator confirms and releases it with hardware.override-release)",
+                            payload.vmid,
+                            row.id,
+                            row.state.id()
+                        ),
+                    )
+                    .await?;
+                    return Ok(true);
+                }
+                Ok(false)
+            }
+            Err(error) => {
+                complete_failure(
+                    operations,
+                    &operation.id,
+                    "hardware_unreadable",
+                    &format!("the hardware reservations could not be read: {error}"),
+                )
+                .await?;
+                Ok(true)
+            }
+        }
+    }
+
     /// The pool the target belongs to, when it is a member. A membership
     /// that cannot be read is an error: the caller fails closed.
     async fn pool_of_target(&self, payload: &DestructivePayload) -> Result<Option<String>, String> {
@@ -685,6 +761,12 @@ impl OperationExecutor for ProxmoxDestructiveExecutor {
         let payload: DestructivePayload = payload(operation)?;
         if self
             .refuse_pool_member(operations, operation, &payload)
+            .await?
+        {
+            return Ok(());
+        }
+        if self
+            .refuse_held_hardware(operations, operation, &payload)
             .await?
         {
             return Ok(());
@@ -4464,6 +4546,17 @@ impl ProvisionExecutor {
             )
             .await
             .map_err(|error| format!("the hardware reservation failed: {error}"))?;
+        // FM-1123: the fingerprint each device has now is what the attach
+        // verifies against, minutes later, whatever a refresh records between.
+        if outcome.is_ok()
+            && let Some(saga) = &self.device_saga
+        {
+            saga.pin_fingerprints(lease_id, account_id, node, &content.hardware)
+                .await
+                .map_err(|error| {
+                    format!("the device fingerprints could not be recorded: {error}")
+                })?;
+        }
         Ok(match outcome {
             Ok(_) => Ok(()),
             Err(refusal) => {

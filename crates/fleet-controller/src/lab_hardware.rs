@@ -21,30 +21,37 @@
 //! Rules this module keeps, from the callers' contracts:
 //!
 //! - **Verify immediately before attaching.** The inventory applies staleness
-//!   when a device is read, not when it is reserved, and a refresh can race a
-//!   reservation, so the saga refreshes (re-observes) right before it writes
-//!   and checks the result: the device is present on the guest's node, its
-//!   fingerprint (vendor:product and port) is the one that was recorded, the
-//!   observation is recent, the reservation is this lease's, and no guest
-//!   other than the reservation's own references the mapping.
-//! - **Only a slot Fleet recorded is ever deleted.** `qemu_usb_attach` picks
-//!   the slot itself and answers `Unchanged` for an identical entry an
+//!   when a device is read, not when it is reserved, and keeps a reserved
+//!   device `available` on an incomplete guest scan, so the saga refreshes
+//!   (re-observes) right before it writes and checks the result: the guest
+//!   scan was complete, the device is present on the guest's node, its
+//!   fingerprint (vendor:product and port) is the one pinned when placement
+//!   reserved it (a refresh in between cannot re-baseline it), the observation
+//!   is recent, the reservation is this lease's, and no guest other than the
+//!   reservation's own references the mapping. The lease must still count
+//!   immediately before the write and after it.
+//! - **Only what Fleet may have written is ever deleted.** `qemu_usb_attach`
+//!   picks the slot itself and answers `Unchanged` for an identical entry an
 //!   operator wrote, so the saga records the slot it expects before it writes
-//!   (the store is passed the guest and slot on `held -> attaching`), accepts
-//!   an `Unchanged` answer as its own only on a resume of a row that already
-//!   started the attach, and corrects the recorded slot to the one the
-//!   provider reports.
-//! - **Never release on a guess.** A row is released only after a read-back
-//!   proved the device is not on the guest (the provider's read-back of the
-//!   slot, confirmed by a read of every `usbN` entry of the guest). A failed
+//!   (the store is passed the guest and slot on `held -> attaching`) and
+//!   corrects it to the one the provider reports. That record is made
+//!   *before* the write, so it proves nothing about an entry the guest shows
+//!   later: such an entry is never adopted, and a row that only recorded its
+//!   attach becomes `attach_unknown` with no slot when the guest shows one, a
+//!   state cleanup never deletes for. Only a row that attempted the write
+//!   (and lost the answer) or attached carries a slot cleanup deletes at.
+//! - **Never release on a guess.** A row is released only after a read of
+//!   every `usbN` entry of the guest shows no reference to the mapping (after
+//!   the provider's read-back of the slot, when Fleet deleted one). A failed
 //!   or pending detach keeps the row; an unknown attach is `attach_unknown`.
 //!   The override release is the only way out of either and is not here.
 //! - **Pending is not done.** A running guest whose `hotplug` option lacks
 //!   `usb` keeps the device until it restarts: a pending detach keeps the
 //!   reservation `detaching`, and the lease in cleanup retry.
 //!
-//! Audit events (best effort once the PVE call is made; the attach intent is
-//! required before the first write, like a pool claim): `hardware_attach_requested`,
+//! Audit events (outcomes are best effort; the attach and detach intents are
+//! required before the write or delete, like a pool claim): `hardware_attach_requested`,
+//! `hardware_detach_requested`,
 //! `hardware_attached`, `hardware_attach_failed` (outcome `released` or
 //! `unknown`), `hardware_detached`, `hardware_detach_pending`,
 //! `hardware_detach_failed`, and the reservation store's `hardware_released`.
@@ -54,16 +61,19 @@
 use std::collections::BTreeSet;
 use std::sync::Arc;
 
+use async_trait::async_trait;
+
 use fleet_application::audit::{AuditIntent, AuditMetadata};
 use fleet_application::authz::{ActingPrincipal, Decision, Permission};
 use fleet_application::hardware::{HardwareStore, HardwareStoreError};
 use fleet_application::hardware_inventory::{AccountSupport, HardwareInventory, reason_text};
 use fleet_application::hardware_reservation::{AuditContext, HardwareReservations};
+use fleet_application::lab::LeasePort;
 use fleet_application::operation::{AuditPort, Operations};
 use fleet_application::proxmox::{ProxmoxAccountPort, ProxmoxCredentialStore};
 use fleet_core::{
-    DeviceStatus, GuestTarget, HardwareDevice, HardwareReservation, HardwareReservationState,
-    LabHardware, ReservationOwnerKind, USB_SLOT_COUNT,
+    DeviceNodeEntry, DeviceStatus, GuestTarget, HardwareDevice, HardwareReservation,
+    HardwareReservationState, LabHardware, LeaseState, ReservationOwnerKind, USB_SLOT_COUNT,
 };
 use fleet_provider_proxmox::usb_attach::{PveUsbChange, PveUsbCleanup, PveUsbError, PveUsbState};
 use fleet_provider_proxmox::{ProxmoxClient, PveHttpRequest};
@@ -79,6 +89,10 @@ const MAX_DETAIL_CHARS: usize = 240;
 /// How many times a digest conflict (somebody else wrote the guest's config
 /// between the provider's read and write; nothing was written) is retried.
 const DIGEST_ATTEMPTS: u32 = 3;
+
+/// How many times cleanup re-reads a lease's live reservations (a provision
+/// that was still writing may add a row between two reads).
+const DETACH_PASSES: u32 = 3;
 
 /// The guest a lease's devices are attached to.
 #[derive(Clone, Copy, Debug)]
@@ -130,6 +144,116 @@ pub struct DetachUnconfirmed {
     pub guest: Option<(String, u32)>,
 }
 
+/// The fingerprint a device had when it was reserved (ADR 0019: observed
+/// facts are compared with the fingerprint from the reservation, not with
+/// whatever a later refresh recorded).
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PinnedFingerprint {
+    /// The node the device was reserved on.
+    pub node: String,
+    /// The USB vendor id.
+    pub vendor_id: String,
+    /// The USB product id.
+    pub product_id: String,
+    /// The bus-port path, when the mapping names one.
+    pub usbpath: Option<String>,
+}
+
+impl PinnedFingerprint {
+    fn of(entry: &DeviceNodeEntry) -> Self {
+        Self {
+            node: entry.node.clone(),
+            vendor_id: entry.vendor_id.clone(),
+            product_id: entry.product_id.clone(),
+            usbpath: entry.usbpath.clone(),
+        }
+    }
+}
+
+/// Where reservation-time fingerprints are kept.
+#[async_trait]
+pub trait FingerprintPins: std::fmt::Debug + Send + Sync {
+    /// Records the fingerprint for a reservation unless one is already
+    /// recorded (the first one wins: a resumed placement keeps the original).
+    ///
+    /// # Errors
+    ///
+    /// Fails when the backend errors.
+    async fn pin(
+        &self,
+        reservation_id: &str,
+        fingerprint: &PinnedFingerprint,
+        now: i64,
+    ) -> Result<(), String>;
+
+    /// The fingerprint recorded for a reservation, when there is one.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the backend errors.
+    async fn pinned(&self, reservation_id: &str) -> Result<Option<PinnedFingerprint>, String>;
+}
+
+/// SQLite-backed [`FingerprintPins`] (`hardware_reservation_fingerprints`).
+#[derive(Clone, Debug)]
+pub struct SqliteFingerprintPins {
+    pool: sqlx::SqlitePool,
+}
+
+impl SqliteFingerprintPins {
+    /// Over the controller's pool.
+    #[must_use]
+    pub fn new(pool: sqlx::SqlitePool) -> Self {
+        Self { pool }
+    }
+}
+
+#[async_trait]
+impl FingerprintPins for SqliteFingerprintPins {
+    async fn pin(
+        &self,
+        reservation_id: &str,
+        fingerprint: &PinnedFingerprint,
+        now: i64,
+    ) -> Result<(), String> {
+        sqlx::query(
+            "INSERT OR IGNORE INTO hardware_reservation_fingerprints \
+             (reservation_id, node, vendor_id, product_id, usbpath, pinned_at) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+        )
+        .bind(reservation_id)
+        .bind(&fingerprint.node)
+        .bind(&fingerprint.vendor_id)
+        .bind(&fingerprint.product_id)
+        .bind(&fingerprint.usbpath)
+        .bind(now)
+        .execute(&self.pool)
+        .await
+        .map(|_| ())
+        .map_err(|error| format!("the fingerprint could not be recorded: {error}"))
+    }
+
+    async fn pinned(&self, reservation_id: &str) -> Result<Option<PinnedFingerprint>, String> {
+        use sqlx::Row as _;
+        sqlx::query(
+            "SELECT node, vendor_id, product_id, usbpath \
+             FROM hardware_reservation_fingerprints WHERE reservation_id = ?1",
+        )
+        .bind(reservation_id)
+        .fetch_optional(&self.pool)
+        .await
+        .map(|row| {
+            row.map(|row| PinnedFingerprint {
+                node: row.get("node"),
+                vendor_id: row.get("vendor_id"),
+                product_id: row.get("product_id"),
+                usbpath: row.get("usbpath"),
+            })
+        })
+        .map_err(|error| format!("the fingerprint could not be read: {error}"))
+    }
+}
+
 /// The Lab hardware saga.
 #[derive(Debug)]
 pub struct LabHardwareSaga {
@@ -140,6 +264,8 @@ pub struct LabHardwareSaga {
     reservations: Arc<HardwareReservations>,
     inventory: Arc<HardwareInventory>,
     audit: Arc<dyn AuditPort>,
+    leases: Arc<dyn LeasePort>,
+    pins: Arc<dyn FingerprintPins>,
     max_age_ms: i64,
 }
 
@@ -194,6 +320,8 @@ impl LabHardwareSaga {
         reservations: Arc<HardwareReservations>,
         inventory: Arc<HardwareInventory>,
         audit: Arc<dyn AuditPort>,
+        leases: Arc<dyn LeasePort>,
+        pins: Arc<dyn FingerprintPins>,
     ) -> Self {
         Self {
             accounts,
@@ -203,6 +331,8 @@ impl LabHardwareSaga {
             reservations,
             inventory,
             audit,
+            leases,
+            pins,
             max_age_ms: fleet_application::hardware_inventory::DEFAULT_OBSERVATION_MAX_AGE_MS,
         }
     }
@@ -368,12 +498,76 @@ impl LabHardwareSaga {
                                 &done,
                                 Some(guest.operation_id),
                                 guest.lease_id,
+                                true,
                             )
                             .await;
                     }
                     return Err(failure);
                 }
             }
+        }
+        Ok(())
+    }
+
+    /// Whether the lease still counts for a provision: it is in the saga or
+    /// ready. An unreadable lease counts (the write is not refused on a
+    /// guess; the post-write check and cleanup cover the race).
+    async fn lease_counts(&self, lease_id: &str) -> bool {
+        match self.leases.get(lease_id).await {
+            Ok(lease) => matches!(
+                lease.state,
+                LeaseState::Provisioning
+                    | LeaseState::Booting
+                    | LeaseState::Bootstrapping
+                    | LeaseState::Ready
+            ),
+            Err(_) => true,
+        }
+    }
+
+    /// Records the fingerprint each device of the lease has now, as of its
+    /// reservation, unless one is already recorded. Called right after
+    /// placement reserved the devices (before capacity, the VMID and the
+    /// clone), so the attach, which comes minutes later, compares with this
+    /// and not with whatever a refresh recorded in between. A repeat (a
+    /// resumed provision) keeps the first.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the store cannot be read or written.
+    pub async fn pin_fingerprints(
+        &self,
+        lease_id: &str,
+        account_id: &str,
+        node: &str,
+        declared: &[LabHardware],
+    ) -> Result<(), String> {
+        for mapping in declared.iter().map(|device| device.mapping.as_str()) {
+            let Some(device) = self
+                .store
+                .device_by_mapping(account_id, mapping)
+                .await
+                .map_err(|error| error.to_string())?
+            else {
+                continue;
+            };
+            let Some(row) = self
+                .store
+                .live_reservation_for_device(&device.id)
+                .await
+                .map_err(|error| error.to_string())?
+                .filter(|row| {
+                    row.owner_kind == ReservationOwnerKind::Lease && row.owner_id == lease_id
+                })
+            else {
+                continue;
+            };
+            let Some(entry) = device.entries.iter().find(|entry| entry.node == node) else {
+                continue;
+            };
+            self.pins
+                .pin(&row.id, &PinnedFingerprint::of(entry), now())
+                .await?;
         }
         Ok(())
     }
@@ -395,11 +589,21 @@ impl LabHardwareSaga {
                 self.attach_held(operations, guest, request, device, reservation, false)
                     .await
             }
-            State::Attaching | State::AttachUnknown => {
+            State::Attaching => {
                 Self::same_guest(guest, &reservation)?;
                 self.attach_held(operations, guest, request, device, reservation, true)
                     .await
             }
+            // An unknown attach is resolved by reading the guest, which is
+            // cleanup's job (a provision whose attach ended unknown has
+            // failed and is never resumed): the saga does not write over it.
+            State::AttachUnknown => Err(refused(
+                "hardware_attach_unknown",
+                format!(
+                    "the reservation for {} is attach_unknown; the lease's cleanup resolves it by reading the guest",
+                    device.mapping_id
+                ),
+            )),
             State::Detaching | State::DetachFailed | State::Released => Err(refused(
                 "hardware_detach_unconfirmed",
                 format!(
@@ -457,8 +661,11 @@ impl LabHardwareSaga {
     }
 
     /// Verify, record, write, read back. `resumed` is a row that already
-    /// started an attach (a crashed run, or an unknown outcome): an entry
-    /// the guest already holds is then its own.
+    /// recorded an attach (a crashed run): the record was made before the
+    /// write, so it proves nothing about an entry the guest shows. Such an
+    /// entry is never adopted (it may be an operator's identical one) and
+    /// never deleted: the row becomes `attach_unknown` with no slot, and the
+    /// provision fails.
     #[allow(clippy::too_many_lines)]
     async fn attach_held(
         &self,
@@ -476,6 +683,34 @@ impl LabHardwareSaga {
 
         // The slot the write is expected to use, recorded before the write.
         let (reservation, slot) = if resumed {
+            match self
+                .references_of(request, guest.node, guest.vmid, mapping)
+                .await
+            {
+                Ok(held) if held.is_empty() => {}
+                Ok(held) => {
+                    let detail = format!(
+                        "the guest references {mapping} in {} and the row only recorded the attach, so nothing shows Fleet wrote it; it was left untouched",
+                        held.join(", ")
+                    );
+                    return self
+                        .leave_unknown(
+                            guest,
+                            device,
+                            &reservation,
+                            "hardware_attach_unknown",
+                            &detail,
+                            None,
+                        )
+                        .await;
+                }
+                Err(read) => {
+                    return Err(refused(
+                        "hardware_attach_failed",
+                        format!("the guest could not be read before the resumed attach: {read}"),
+                    ));
+                }
+            }
             let slot = reservation
                 .guest
                 .as_ref()
@@ -570,6 +805,22 @@ impl LabHardwareSaga {
             (moved, Some(slot_name(predicted)))
         };
 
+        // The lease may have ended while the device was verified (a release,
+        // an expiry, the sweeper's compensation): nothing is written for a
+        // lease that no longer counts, and its cleanup finds no entry.
+        if !self.lease_counts(guest.lease_id).await {
+            return self
+                .fail_unwritten(
+                    guest,
+                    request,
+                    device,
+                    &reservation,
+                    !resumed,
+                    "hardware_lease_ended",
+                    "the lease ended before the device was written",
+                )
+                .await;
+        }
         let mut attempt = 0;
         let result = loop {
             attempt += 1;
@@ -584,17 +835,18 @@ impl LabHardwareSaga {
         };
         let wrote_or_ours = match result {
             Ok(outcome) => {
-                if outcome.change == PveUsbChange::Unchanged && !resumed {
-                    // Nothing was written, and the entry is not Fleet's: the
-                    // verify step proved the guest referenced nothing, so an
-                    // operator wrote it in between. Never claimed, never
-                    // deleted.
+                if outcome.change == PveUsbChange::Unchanged {
+                    // Nothing was written, and the entry is not shown to be
+                    // Fleet's: the guest was verified to reference nothing,
+                    // so an operator wrote it in between. Never claimed,
+                    // never deleted.
                     return self
                         .fail_unwritten(
                             guest,
                             request,
                             device,
                             &reservation,
+                            !resumed,
                             "hardware_externally_attached",
                             &format!(
                                 "the guest holds an identical {mapping} entry in {} that Fleet did not write; it was left untouched",
@@ -606,9 +858,28 @@ impl LabHardwareSaga {
                 let index = slot_index(&outcome.slot);
                 match (outcome.state, index.filter(|index| *index < USB_SLOT_COUNT)) {
                     (PveUsbState::Applied, Some(index)) => {
-                        return self
+                        let attached = self
                             .record_attached(guest, device, &reservation, index, slot.as_deref())
-                            .await;
+                            .await?;
+                        // The lease may have ended during the write, after
+                        // cleanup looked: take the device off again now.
+                        if !self.lease_counts(guest.lease_id).await {
+                            let _ = self
+                                .detach_reservation(
+                                    request,
+                                    attached.clone(),
+                                    device,
+                                    Some(guest.operation_id),
+                                    guest.lease_id,
+                                    true,
+                                )
+                                .await;
+                            return Err(refused(
+                                "hardware_lease_ended",
+                                "the lease ended while the device was written; it was detached again",
+                            ));
+                        }
+                        return Ok(attached);
                     }
                     (PveUsbState::Applied, None) => (
                         outcome.slot,
@@ -629,7 +900,7 @@ impl LabHardwareSaga {
             }
             Err(error) => {
                 return self
-                    .fail_attach(guest, request, device, &reservation, resumed, slot, error)
+                    .fail_attach(guest, request, device, &reservation, !resumed, slot, error)
                     .await;
             }
         };
@@ -643,6 +914,7 @@ impl LabHardwareSaga {
                 device,
                 Some(guest.operation_id),
                 guest.lease_id,
+                true,
             )
             .await;
         let outcome = match result {
@@ -722,7 +994,7 @@ impl LabHardwareSaga {
         request: &PveHttpRequest,
         device: &HardwareDevice,
         reservation: &HardwareReservation,
-        resumed: bool,
+        fresh: bool,
         predicted: Option<String>,
         error: PveUsbError,
     ) -> Result<HardwareReservation, AttachFailure> {
@@ -746,36 +1018,23 @@ impl LabHardwareSaga {
                     PveUsbError::SlotsFull { .. } => "hardware_no_free_slot",
                     _ => "hardware_attach_failed",
                 };
-                if resumed {
-                    // An earlier run may have written: the guest decides.
-                    self.settle_unknown_or_absent(
-                        guest,
-                        request,
-                        device,
-                        reservation,
-                        reason,
-                        &detail,
-                        predicted,
-                    )
+                self.fail_unwritten(guest, request, device, reservation, fresh, reason, &detail)
                     .await
-                } else {
-                    self.fail_unwritten(guest, request, device, reservation, reason, &detail)
-                        .await
-                }
             }
             PveUsbError::WriteFailed {
-                slot,
                 cleanup: PveUsbCleanup::Removed | PveUsbCleanup::NothingToRemove,
                 ..
             } => {
-                self.settle_unknown_or_absent(
+                // The provider wrote and removed its entry. A reference that
+                // is there afterwards is not shown to be Fleet's.
+                self.fail_unwritten(
                     guest,
                     request,
                     device,
                     reservation,
+                    false,
                     "hardware_attach_failed",
                     &detail,
-                    Some(slot),
                 )
                 .await
             }
@@ -808,56 +1067,24 @@ impl LabHardwareSaga {
         }
     }
 
-    /// The attach wrote nothing (the provider's contract for its refusals,
-    /// and `Unchanged`): read every `usbN` entry back to confirm the guest
-    /// holds nothing of Fleet's, then release. Anything unreadable leaves
-    /// the row `attach_unknown`.
+    /// The attach wrote nothing Fleet can claim (the provider's contract for
+    /// its refusals, `Unchanged`, and a failed write whose leftover was
+    /// removed): read every `usbN` entry back. A guest that holds no
+    /// reference to the mapping releases the row. A reference that is there
+    /// was not written by this attach, so it is never claimed and never
+    /// deleted: the row is `attach_unknown` with no slot, which cleanup only
+    /// ever releases when the guest shows no reference, and otherwise leaves
+    /// to an operator. An unreadable guest is the same unproven state.
+    #[allow(clippy::too_many_arguments)]
     async fn fail_unwritten(
         &self,
         guest: &LeaseGuest<'_>,
         request: &PveHttpRequest,
         device: &HardwareDevice,
         reservation: &HardwareReservation,
+        fresh: bool,
         reason: &'static str,
         detail: &str,
-    ) -> Result<HardwareReservation, AttachFailure> {
-        match self
-            .references_of(request, guest.node, guest.vmid, &device.mapping_id)
-            .await
-        {
-            // Present or not, this call wrote nothing, so the reservation
-            // holds nothing on the guest. A reference that is there is
-            // someone else's and stays.
-            Ok(_) => {
-                self.release_failed(guest, device, reservation, reason, detail)
-                    .await
-            }
-            Err(read) => {
-                let detail = format!("{detail}; the guest could not be read back: {read}");
-                let slot = reservation
-                    .guest
-                    .as_ref()
-                    .and_then(|recorded| recorded.usb_slot)
-                    .map(slot_name);
-                self.leave_unknown(guest, device, reservation, reason, &detail, slot)
-                    .await
-            }
-        }
-    }
-
-    /// The call failed after a possible write: the guest decides. No
-    /// reference to the mapping anywhere on it releases the row, a reference
-    /// or an unreadable guest leaves it `attach_unknown`.
-    #[allow(clippy::too_many_arguments)]
-    async fn settle_unknown_or_absent(
-        &self,
-        guest: &LeaseGuest<'_>,
-        request: &PveHttpRequest,
-        device: &HardwareDevice,
-        reservation: &HardwareReservation,
-        reason: &'static str,
-        detail: &str,
-        slot: Option<String>,
     ) -> Result<HardwareReservation, AttachFailure> {
         match self
             .references_of(request, guest.node, guest.vmid, &device.mapping_id)
@@ -867,15 +1094,24 @@ impl LabHardwareSaga {
                 self.release_failed(guest, device, reservation, reason, detail)
                     .await
             }
+            // Fresh attempt (the verify step proved nothing referenced the
+            // mapping): the entry is somebody else's, and the row holds
+            // nothing on the guest.
+            Ok(_) if fresh => {
+                self.release_failed(guest, device, reservation, reason, detail)
+                    .await
+            }
             Ok(held) => {
-                let detail = format!("{detail}; the guest still references {}", held.join(", "));
-                let slot = held.first().cloned().or(slot);
-                self.leave_unknown(guest, device, reservation, reason, &detail, slot)
+                let detail = format!(
+                    "{detail}; the guest references the mapping in {} and Fleet cannot show it wrote that entry",
+                    held.join(", ")
+                );
+                self.leave_unknown(guest, device, reservation, reason, &detail, None)
                     .await
             }
             Err(read) => {
                 let detail = format!("{detail}; the guest could not be read back: {read}");
-                self.leave_unknown(guest, device, reservation, reason, &detail, slot)
+                self.leave_unknown(guest, device, reservation, reason, &detail, None)
                     .await
             }
         }
@@ -924,12 +1160,16 @@ impl LabHardwareSaga {
             .await;
         Err(refused(
             reason,
-            format!("{detail}; the entry is confirmed absent and the reservation was released"),
+            format!(
+                "{detail}; the guest holds nothing Fleet wrote and the reservation was released"
+            ),
         ))
     }
 
-    /// The outcome cannot be determined: `attach_unknown`, with the slot the
-    /// entry may be in. Cleanup resolves it by reading the guest.
+    /// The outcome cannot be determined: `attach_unknown`. With a slot, an
+    /// attempted write of Fleet's may be there and cleanup removes it by
+    /// reading the guest; with no slot, nothing shows Fleet wrote whatever is
+    /// there, and cleanup never deletes it.
     async fn leave_unknown(
         &self,
         guest: &LeaseGuest<'_>,
@@ -939,35 +1179,18 @@ impl LabHardwareSaga {
         detail: &str,
         slot: Option<String>,
     ) -> Result<HardwareReservation, AttachFailure> {
-        let target = GuestTarget {
-            account_id: guest.account_id.to_owned(),
-            node: guest.node.to_owned(),
-            vmid: guest.vmid,
-            usb_slot: slot
-                .as_deref()
-                .and_then(slot_index)
-                .filter(|index| *index < USB_SLOT_COUNT)
-                .or_else(|| {
-                    reservation
-                        .guest
-                        .as_ref()
-                        .and_then(|recorded| recorded.usb_slot)
-                }),
-        };
-        let unknown = if reservation.state == State::AttachUnknown {
-            reservation.clone()
-        } else {
-            self.store
-                .transition_reservation(
-                    &reservation.id,
-                    reservation.state,
-                    State::AttachUnknown,
-                    Some(&target),
-                    now(),
-                )
-                .await
-                .map_err(|error| infra(&error))?
-        };
+        let unknown = self
+            .mark_unknown(
+                reservation,
+                guest.account_id,
+                guest.node,
+                guest.vmid,
+                slot.as_deref()
+                    .and_then(slot_index)
+                    .filter(|index| *index < USB_SLOT_COUNT),
+            )
+            .await
+            .map_err(|error| infra(&error))?;
         let _ = self
             .event(
                 "hardware_attach_failed",
@@ -984,9 +1207,41 @@ impl LabHardwareSaga {
         Err(refused(
             reason,
             format!(
-                "{detail}; the reservation is attach_unknown and the lease's cleanup resolves it by reading the guest"
+                "{detail}; the reservation is attach_unknown and the lease's cleanup resolves it"
             ),
         ))
+    }
+
+    /// Moves a row to `attach_unknown` with the given slot (`None`: the
+    /// ownership of anything on the guest is unproven).
+    async fn mark_unknown(
+        &self,
+        reservation: &HardwareReservation,
+        account_id: &str,
+        node: &str,
+        vmid: u32,
+        slot: Option<u8>,
+    ) -> Result<HardwareReservation, HardwareStoreError> {
+        let target = GuestTarget {
+            account_id: account_id.to_owned(),
+            node: node.to_owned(),
+            vmid,
+            usb_slot: slot,
+        };
+        // `attach_unknown` to `attach_unknown` is not an edge: a row that
+        // is already unknown keeps its record.
+        if reservation.state == State::AttachUnknown {
+            return Ok(reservation.clone());
+        }
+        self.store
+            .transition_reservation(
+                &reservation.id,
+                reservation.state,
+                State::AttachUnknown,
+                Some(&target),
+                now(),
+            )
+            .await
     }
 
     /// The slots of the guest that reference `mapping`, in either view.
@@ -1022,19 +1277,46 @@ impl LabHardwareSaga {
         reservation: &HardwareReservation,
     ) -> Result<(), AttachFailure> {
         let mapping = device.mapping_id.as_str();
-        // The fingerprint recorded before the re-observation is the one the
-        // device must still have after it.
-        let expected = device
-            .entries
-            .iter()
-            .find(|entry| entry.node == guest.node)
-            .cloned()
-            .ok_or_else(|| {
-                refused(
-                    "hardware_no_node_entry",
-                    format!("hardware {mapping} has no entry for node {}", guest.node),
-                )
-            })?;
+        // The fingerprint the device had when it was reserved is the one it
+        // must still have. A reservation without a pin (taken before the pin
+        // existed, or interrupted between the reserve and the pin) is pinned
+        // from the stored entry now: the limit is that a refresh in between
+        // would already have moved that entry.
+        let expected = match self
+            .pins
+            .pinned(&reservation.id)
+            .await
+            .map_err(AttachFailure::Infrastructure)?
+        {
+            Some(pinned) => pinned,
+            None => {
+                let entry = device
+                    .entries
+                    .iter()
+                    .find(|entry| entry.node == guest.node)
+                    .ok_or_else(|| {
+                        refused(
+                            "hardware_no_node_entry",
+                            format!("hardware {mapping} has no entry for node {}", guest.node),
+                        )
+                    })?;
+                let pinned = PinnedFingerprint::of(entry);
+                self.pins
+                    .pin(&reservation.id, &pinned, now())
+                    .await
+                    .map_err(AttachFailure::Infrastructure)?;
+                pinned
+            }
+        };
+        if expected.node != guest.node {
+            return Err(refused(
+                "hardware_wrong_node",
+                format!(
+                    "hardware {mapping} was reserved on node {}, not on node {}",
+                    expected.node, guest.node
+                ),
+            ));
+        }
         let report = self
             .inventory
             .refresh(
@@ -1065,6 +1347,31 @@ impl LabHardwareSaga {
                         .unwrap_or_default()
                 ),
             ));
+        }
+        // `available` for a reserved device is kept on an incomplete guest
+        // scan (the reservation is what excludes a second holder), so the
+        // scan's completeness is checked here: a guest that was not read may
+        // reference the device.
+        match &report.guest_scan {
+            Some(scan) if !scan.truncated && scan.unreadable == 0 && scan.read == scan.listed => {}
+            other => {
+                return Err(refused(
+                    "hardware_scan_incomplete",
+                    format!(
+                        "not every guest config could be read at the re-observation ({}); a guest that was not read may reference {mapping}",
+                        other.as_ref().map_or_else(
+                            || "no guest scan".to_owned(),
+                            |scan| format!(
+                                "{} of {} read, {} unreadable{}",
+                                scan.read,
+                                scan.listed,
+                                scan.unreadable,
+                                if scan.truncated { ", truncated" } else { "" }
+                            )
+                        )
+                    ),
+                ));
+            }
         }
         let found = report
             .devices
@@ -1179,7 +1486,9 @@ impl LabHardwareSaga {
     /// guest's fate (destroy, revert, keep). Idempotent: a released row is
     /// not live, a `detaching` row is continued, a `detach_failed` row is
     /// retried. Rows that never attached (`held`) are left to the lease's
-    /// own release.
+    /// own release. The live rows are read again after each pass, so a row
+    /// that became attached while cleanup ran (a provision still writing) is
+    /// taken too.
     ///
     /// # Errors
     ///
@@ -1195,68 +1504,83 @@ impl LabHardwareSaga {
             detail: bounded(&detail),
             guest,
         };
-        let live = self
-            .store
-            .live_reservations_for_owner(ReservationOwnerKind::Lease, lease_id)
-            .await
-            .map_err(|error| {
-                unconfirmed(format!("the lease's hardware is unreadable: {error}"), None)
-            })?;
         let mut problems = Vec::new();
         let mut guest = None;
-        for row in live {
-            if row.state == State::Held && row.guest.as_ref().is_none_or(|g| g.usb_slot.is_none()) {
-                continue;
-            }
-            let Some(target) = row.guest.clone() else {
-                problems.push(format!(
-                    "reservation {} is {} with no guest recorded",
-                    row.id,
-                    row.state.id()
-                ));
-                continue;
-            };
-            let device = match self.store.device(&row.device_id).await {
-                Ok(Some(device)) => device,
-                Ok(None) => {
-                    problems.push(format!("device {} of {} is unknown", row.device_id, row.id));
-                    continue;
-                }
-                Err(error) => {
-                    problems.push(format!("device {} is unreadable: {error}", row.device_id));
-                    continue;
-                }
-            };
-            let request = match self.request(&target.account_id).await {
-                Ok(request) => request,
-                Err(detail) => {
-                    guest.get_or_insert((target.node.clone(), target.vmid));
-                    problems.push(format!("{}: {detail}", device.mapping_id));
-                    continue;
-                }
-            };
-            match self
-                .detach_reservation(&request, row, &device, operation_id, lease_id)
+        let mut seen: BTreeSet<String> = BTreeSet::new();
+        for _pass in 0..DETACH_PASSES {
+            let live = self
+                .store
+                .live_reservations_for_owner(ReservationOwnerKind::Lease, lease_id)
                 .await
-            {
-                Ok(DetachResult::Released) => {}
-                Ok(DetachResult::Pending) => {
-                    guest.get_or_insert((target.node.clone(), target.vmid));
+                .map_err(|error| {
+                    unconfirmed(format!("the lease's hardware is unreadable: {error}"), None)
+                })?;
+            let todo: Vec<HardwareReservation> = live
+                .into_iter()
+                .filter(|row| {
+                    !(row.state == State::Held
+                        && row.guest.as_ref().is_none_or(|g| g.usb_slot.is_none()))
+                })
+                .filter(|row| seen.insert(row.id.clone()))
+                .collect();
+            if todo.is_empty() {
+                break;
+            }
+            for row in todo {
+                let Some(target) = row.guest.clone() else {
                     problems.push(format!(
-                        "{} is detach_pending: the guest's hotplug option lacks usb, so PVE removes it when the guest restarts",
-                        device.mapping_id
+                        "reservation {} is {} with no guest recorded",
+                        row.id,
+                        row.state.id()
                     ));
-                }
-                Ok(DetachResult::Failed(detail)) => {
-                    guest.get_or_insert((target.node.clone(), target.vmid));
-                    problems.push(format!("{}: {detail}", device.mapping_id));
-                }
-                Err(error) => {
-                    guest.get_or_insert((target.node.clone(), target.vmid));
-                    problems.push(format!(
-                        "{}: the reservation store failed: {error}",
-                        device.mapping_id
-                    ));
+                    continue;
+                };
+                let device = match self.store.device(&row.device_id).await {
+                    Ok(Some(device)) => device,
+                    Ok(None) => {
+                        problems.push(format!("device {} of {} is unknown", row.device_id, row.id));
+                        continue;
+                    }
+                    Err(error) => {
+                        problems.push(format!("device {} is unreadable: {error}", row.device_id));
+                        continue;
+                    }
+                };
+                let request = match self.request(&target.account_id).await {
+                    Ok(request) => request,
+                    Err(detail) => {
+                        guest.get_or_insert((target.node.clone(), target.vmid));
+                        problems.push(format!("{}: {detail}", device.mapping_id));
+                        continue;
+                    }
+                };
+                // A row that only started its attach proves nothing about an
+                // entry the guest shows; the others came from a write Fleet
+                // made (or attempted and could not confirm).
+                let proven = row.state != State::Attaching;
+                match self
+                    .detach_reservation(&request, row, &device, operation_id, lease_id, proven)
+                    .await
+                {
+                    Ok(DetachResult::Released) => {}
+                    Ok(DetachResult::Pending) => {
+                        guest.get_or_insert((target.node.clone(), target.vmid));
+                        problems.push(format!(
+                            "{} is detach_pending: the guest's hotplug option lacks usb, so PVE removes it when the guest restarts",
+                            device.mapping_id
+                        ));
+                    }
+                    Ok(DetachResult::Failed(detail)) => {
+                        guest.get_or_insert((target.node.clone(), target.vmid));
+                        problems.push(format!("{}: {detail}", device.mapping_id));
+                    }
+                    Err(error) => {
+                        guest.get_or_insert((target.node.clone(), target.vmid));
+                        problems.push(format!(
+                            "{}: the reservation store failed: {error}",
+                            device.mapping_id
+                        ));
+                    }
                 }
             }
         }
@@ -1273,9 +1597,15 @@ impl LabHardwareSaga {
         }
     }
 
-    /// Detaches one reservation. The row is released only after the
-    /// provider's read-back of the slot and a read of every `usbN` entry of
-    /// the guest agree the device is gone.
+    /// Detaches one reservation. The row is released only after a read of
+    /// every `usbN` entry of the guest (and, when Fleet deleted one, the
+    /// provider's read-back of the slot) shows no reference to the mapping.
+    ///
+    /// `proven` says the caller knows Fleet wrote (or attempted to write) the
+    /// entry. A row that only recorded its attach proves nothing: an entry
+    /// the guest shows may be an operator's identical one, so it is never
+    /// deleted and the row is left `attach_unknown` without a slot, which
+    /// stays that way until the guest shows nothing or an operator decides.
     #[allow(clippy::too_many_lines)]
     async fn detach_reservation(
         &self,
@@ -1284,6 +1614,7 @@ impl LabHardwareSaga {
         device: &HardwareDevice,
         operation_id: Option<&str>,
         lease_id: &str,
+        proven: bool,
     ) -> Result<DetachResult, HardwareStoreError> {
         let context = Self::audit_context(operation_id);
         let mapping = device.mapping_id.as_str();
@@ -1295,6 +1626,7 @@ impl LabHardwareSaga {
             return Ok(DetachResult::Released);
         };
         let mut recorded_slot = recorded.usb_slot.map(slot_name);
+        let owned = proven && recorded_slot.is_some();
         // The guest may have moved since the row recorded it.
         let node = self
             .live_node(request, recorded.vmid)
@@ -1302,16 +1634,35 @@ impl LabHardwareSaga {
             .unwrap_or_else(|| recorded.node.clone());
 
         // Every state but `attached` may hold the entry in a slot other than
-        // the recorded one (a prediction that was wrong, a crash before the
-        // correction): the guest says where, and only an exact Fleet value
-        // there is ever deleted.
+        // the recorded one (a prediction that was wrong), or none at all (a
+        // slot that sat on somebody's `host=` entry): the guest says which.
         if reservation.state != State::Attached {
             match self
                 .references_of(request, &node, recorded.vmid, mapping)
                 .await
             {
+                // The full read shows nothing Fleet could have written: the
+                // device is not on the guest, whatever the row recorded.
+                Ok(held) if held.is_empty() => {
+                    return self
+                        .release_absent(&reservation, device, operation_id, &node, &recorded)
+                        .await;
+                }
+                Ok(held) if !owned => {
+                    return self
+                        .unproven(
+                            &reservation,
+                            device,
+                            operation_id,
+                            &recorded,
+                            format!(
+                                "the guest references the mapping in {}, and nothing shows Fleet wrote it (the row only recorded the attach); it is left untouched",
+                                held.join(", ")
+                            ),
+                        )
+                        .await;
+                }
                 Ok(held) => match held.as_slice() {
-                    [] => {}
                     [only] => recorded_slot = Some(only.clone()),
                     many => {
                         return self
@@ -1345,7 +1696,7 @@ impl LabHardwareSaga {
                     &reservation,
                     device,
                     operation_id,
-                    "no usb slot was recorded for the attach and the guest shows none".to_owned(),
+                    "no usb slot was recorded for the attach".to_owned(),
                 )
                 .await;
         };
@@ -1381,6 +1732,28 @@ impl LabHardwareSaga {
             all.extend(extra.iter().cloned());
             all
         };
+        // The intent is required: a delete the audit sink refused is not
+        // made (the outcome events below stay best effort).
+        if let Err(detail) = self
+            .event(
+                "hardware_detach_requested",
+                device,
+                &detaching,
+                operation_id,
+                &facts(&[]),
+                true,
+            )
+            .await
+        {
+            return self
+                .detach_failed(
+                    &detaching,
+                    device,
+                    operation_id,
+                    format!("the detach audit failed, so nothing was deleted: {detail}"),
+                )
+                .await;
+        }
         let outcome = self
             .client
             .qemu_usb_detach(request.clone(), &node, recorded.vmid, &slot, mapping)
@@ -1450,8 +1823,93 @@ impl LabHardwareSaga {
         }
     }
 
+    /// The guest shows no reference to the mapping: release without a
+    /// delete (nothing was written by this step, so nothing is audited as an
+    /// intent), through `detaching`.
+    async fn release_absent(
+        &self,
+        reservation: &HardwareReservation,
+        device: &HardwareDevice,
+        operation_id: Option<&str>,
+        node: &str,
+        recorded: &GuestTarget,
+    ) -> Result<DetachResult, HardwareStoreError> {
+        let detaching = if reservation.state == State::Detaching {
+            reservation.clone()
+        } else {
+            self.store
+                .transition_reservation(
+                    &reservation.id,
+                    reservation.state,
+                    State::Detaching,
+                    None,
+                    now(),
+                )
+                .await?
+        };
+        self.reservations
+            .release(&Self::audit_context(operation_id), &detaching.id, now())
+            .await?;
+        let _ = self
+            .event(
+                "hardware_detached",
+                device,
+                &detaching,
+                operation_id,
+                &[
+                    ("node", node.to_owned()),
+                    ("guest_vmid", recorded.vmid.to_string()),
+                    ("confirmed_absent", "true".to_owned()),
+                ],
+                false,
+            )
+            .await;
+        Ok(DetachResult::Released)
+    }
+
+    /// An entry the guest shows cannot be shown to be Fleet's: the row is
+    /// `attach_unknown` with no slot (so no later attempt deletes it) and the
+    /// detach is reported unconfirmed.
+    async fn unproven(
+        &self,
+        reservation: &HardwareReservation,
+        device: &HardwareDevice,
+        operation_id: Option<&str>,
+        recorded: &GuestTarget,
+        detail: String,
+    ) -> Result<DetachResult, HardwareStoreError> {
+        let marked = match reservation.state {
+            State::Attaching | State::AttachUnknown => {
+                self.mark_unknown(
+                    reservation,
+                    &recorded.account_id,
+                    &recorded.node,
+                    recorded.vmid,
+                    None,
+                )
+                .await?
+            }
+            // Other states are never unproven by construction; fail closed
+            // without touching the row.
+            _ => reservation.clone(),
+        };
+        let detail = bounded(&detail);
+        let _ = self
+            .event(
+                "hardware_detach_failed",
+                device,
+                &marked,
+                operation_id,
+                &[("reason", detail.clone())],
+                false,
+            )
+            .await;
+        Ok(DetachResult::Failed(detail))
+    }
+
     /// Records a failed or unconfirmed detach: the row goes `detach_failed`
-    /// (quarantined) and stays held. Never released.
+    /// (quarantined) and stays held. Never released. A row that only
+    /// recorded its attach stays unproven (`attach_unknown`, no slot).
     async fn detach_failed(
         &self,
         reservation: &HardwareReservation,
@@ -1472,6 +1930,19 @@ impl LabHardwareSaga {
                     .await?
             }
             State::DetachFailed => reservation.clone(),
+            State::Attaching => match reservation.guest.clone() {
+                Some(recorded) => {
+                    self.mark_unknown(
+                        reservation,
+                        &recorded.account_id,
+                        &recorded.node,
+                        recorded.vmid,
+                        None,
+                    )
+                    .await?
+                }
+                None => reservation.clone(),
+            },
             // A guest that could not be read before the row moved: it goes
             // through `detaching` to say the detach failed.
             other => {

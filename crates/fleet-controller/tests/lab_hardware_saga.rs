@@ -25,9 +25,11 @@ mod usb_pve;
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use async_trait::async_trait;
 use fake_pve::{FINGERPRINT, FakePve, Fault, Faults, Step, TEMPLATE_NODE, TEMPLATE_VMID};
+use fleet_application::audit::AuditOutcome;
 use fleet_application::authz::{AccessRequest, ActingPrincipal, Authorizer, Decision};
 use fleet_application::hardware::HardwareStore;
 use fleet_application::hardware_inventory::{DeviceFilter, HardwareInventory};
@@ -37,7 +39,7 @@ use fleet_application::lab::{
     LabTemplateVersion, LeasePort, NewLabTemplate, NewLease, ProvisionPort, ProvisionRecord,
 };
 use fleet_application::lab_placement::{HardwareDemand, HardwarePlacement};
-use fleet_application::operation::{NewOperation, Operation, Operations};
+use fleet_application::operation::{AuditPort, NewOperation, Operation, Operations};
 use fleet_application::project::{NewProject, ProjectPort as _};
 use fleet_application::proxmox::{
     CredentialStoreError, NewProxmoxAccount, ProxmoxAccountPort, ProxmoxCredentialStore,
@@ -45,7 +47,9 @@ use fleet_application::proxmox::{
 use fleet_application::worker::OperationExecutor;
 use fleet_controller::hardware_reservation_store::SqliteHardwareReservations;
 use fleet_controller::lab_cleanup::LabCleanupExecutor;
-use fleet_controller::lab_hardware::{AttachFailure, LabHardwareSaga, LeaseGuest};
+use fleet_controller::lab_hardware::{
+    AttachFailure, LabHardwareSaga, LeaseGuest, SqliteFingerprintPins,
+};
 use fleet_controller::lab_sweeper::{LabSweeper, ProxmoxLabGuests, TickReport};
 use fleet_controller::proxmox_exec::{
     LabDispatch, ProvisionExecutor, ProxmoxDestructiveExecutor, ProxmoxDispatch,
@@ -93,6 +97,39 @@ impl Authorizer for AllowAll {
     }
 }
 
+/// The saga's audit sink, which can be told to refuse the detach intent.
+#[derive(Debug)]
+struct GateAudit {
+    inner: AuditSink,
+    refuse_detach_intent: Arc<AtomicBool>,
+}
+
+#[async_trait]
+impl AuditPort for GateAudit {
+    async fn record_intent(
+        &self,
+        intent: &fleet_application::audit::AuditIntent,
+    ) -> Result<(), String> {
+        if self.refuse_detach_intent.load(Ordering::SeqCst)
+            && intent
+                .metadata
+                .entries()
+                .any(|(key, value)| key == "event" && value == "hardware_detach_requested")
+        {
+            return Err("the audit sink is refusing".to_owned());
+        }
+        self.inner.record_intent(intent).await
+    }
+
+    async fn record_outcome(
+        &self,
+        operation_id: &str,
+        outcome: AuditOutcome,
+    ) -> Result<(), String> {
+        self.inner.record_outcome(operation_id, outcome).await
+    }
+}
+
 /// The world a controller runs in: one SQLite file and one Proxmox host that
 /// outlive every controller.
 struct World {
@@ -101,6 +138,7 @@ struct World {
     faults: Arc<Faults>,
     pve: Arc<FakePve>,
     usb: Arc<UsbHost>,
+    refuse_detach_intent: Arc<AtomicBool>,
     account_id: String,
     version_id: String,
 }
@@ -196,6 +234,7 @@ impl World {
             faults,
             pve,
             usb: usb_host,
+            refuse_detach_intent: Arc::new(AtomicBool::new(false)),
             account_id: account.id,
             version_id: version.id,
         }
@@ -399,6 +438,7 @@ struct Controller {
     inventory: Arc<HardwareInventory>,
     placement: Arc<HardwarePlacement>,
     saga: Arc<LabHardwareSaga>,
+    destroyer: Arc<ProxmoxDestructiveExecutor>,
     account_id: String,
     version_id: String,
 }
@@ -441,14 +481,20 @@ impl Controller {
             accounts.clone(),
             credentials.clone(),
             client.clone(),
-            store_port,
+            store_port.clone(),
             reservations,
             inventory.clone(),
-            audit.clone(),
+            Arc::new(GateAudit {
+                inner: AuditSink::new(pool.clone()),
+                refuse_detach_intent: world.refuse_detach_intent.clone(),
+            }),
+            leases.clone(),
+            Arc::new(SqliteFingerprintPins::new(pool.clone())),
         ));
         let destroyer = Arc::new(
             ProxmoxDestructiveExecutor::new(accounts.clone(), credentials.clone(), client.clone())
-                .with_image_artifacts(Arc::new(Artifacts)),
+                .with_image_artifacts(Arc::new(Artifacts))
+                .with_hardware_guard(store_port),
         );
         let cleanup = Arc::new(
             LabCleanupExecutor::new(
@@ -484,7 +530,7 @@ impl Controller {
                         credentials.clone(),
                         client.clone(),
                     )),
-                    destroyer,
+                    destroyer.clone(),
                 )),
                 provision,
             )
@@ -524,6 +570,7 @@ impl Controller {
             inventory,
             placement,
             saga,
+            destroyer,
             account_id: world.account_id.clone(),
             version_id: world.version_id.clone(),
         }
@@ -1303,26 +1350,107 @@ async fn a_crash_before_the_attach_write_converges_to_nothing() {
 }
 
 #[tokio::test]
-async fn a_crash_after_the_attach_write_finds_and_removes_the_entry() {
+async fn a_crash_after_the_attach_write_fails_closed_because_the_row_proves_nothing() {
     let world = World::new(&[READER_A]).await;
     let (controller, lease) = crash_attach(&world, UsbFault::CrashAfter).await;
+    // The row recorded the attach before the write, so an entry on the guest
+    // cannot be told from an operator's identical one: it is not adopted,
+    // not marked attached, and not deleted.
     assert_eq!(controller.states().await, vec!["attaching"]);
     assert_eq!(world.usb.stored(FIRST_VMID), stored(&[slot(0, READER_A)]));
     controller.settle(&world, now() + HOUR_MS).await;
-    assert_released(&world, &controller, &lease).await;
     assert_eq!(
-        world.usb.writes(),
-        vec![
-            "attach usb0=mapping=fm-test-reader-a".to_owned(),
-            "detach usb0".to_owned()
-        ]
+        controller.lease(&lease).await.state,
+        LeaseState::CleanupFailed,
+        "the bounded retries end cleanup_failed, naming the guest"
     );
+    assert_eq!(controller.states().await, vec!["attach_unknown"]);
+    assert_eq!(
+        controller.rows().await[0].1,
+        None,
+        "no slot is recorded for an entry nobody can prove Fleet wrote"
+    );
+    assert_eq!(
+        controller.device_view(READER_A).await,
+        DeviceStatus::Quarantined
+    );
+    assert_eq!(world.usb.stored(FIRST_VMID), stored(&[slot(0, READER_A)]));
+    assert_eq!(world.usb.writes().len(), 1, "only the attach was written");
+    assert!(world.pve.lab_guests().contains_key(&FIRST_VMID));
+    assert_eq!(world.usb.count(|line| line.starts_with("Delete ")), 0);
+
+    // A re-armed retry stays closed, and opens once the guest shows nothing.
+    for operator_removed in [false, true] {
+        if operator_removed {
+            world.usb.clear_slot(FIRST_VMID, 0);
+        }
+        controller
+            .lab
+            .retry_cleanup(
+                &AllowAll,
+                &ActingPrincipal {
+                    id: PRINCIPAL.to_owned(),
+                },
+                &lease,
+            )
+            .await
+            .expect("cleanup-retry re-arms the lease");
+        controller.settle(&world, now() + 2 * HOUR_MS).await;
+        if !operator_removed {
+            assert_eq!(controller.states().await, vec!["attach_unknown"]);
+            assert_eq!(world.usb.stored(FIRST_VMID), stored(&[slot(0, READER_A)]));
+        }
+    }
+    assert_released(&world, &controller, &lease).await;
 }
 
 #[tokio::test]
-async fn a_resumed_attach_after_a_crash_adopts_its_own_entry_and_a_repeat_changes_nothing() {
+async fn an_operators_identical_entry_after_a_crash_before_the_write_is_never_adopted_or_deleted() {
     let world = World::new(&[READER_A]).await;
-    let (controller, lease) = crash_attach(&world, UsbFault::CrashAfter).await;
+    let (controller, lease) = crash_attach(&world, UsbFault::CrashBefore).await;
+    assert_eq!(controller.states().await, vec!["attaching"]);
+    // While the controller was down an operator gave the clone the device.
+    world
+        .usb
+        .set_slot(FIRST_VMID, 0, "mapping=fm-test-reader-a");
+    let record = controller.record(&lease).await;
+    let operation = controller.provision_operation(&lease).await;
+    let guest = LeaseGuest {
+        lease_id: &lease,
+        account_id: &world.account_id,
+        node: TEMPLATE_NODE,
+        vmid: record.vmid.unwrap(),
+        operation_id: &operation.id,
+    };
+    // The resumed attach does not take the entry for its own.
+    let result = controller
+        .saga
+        .attach_for_lease(&controller.operations, &guest, &[usb(READER_A)])
+        .await;
+    let Err(AttachFailure::Refused { reason, .. }) = result else {
+        panic!("the resume must refuse: {result:?}");
+    };
+    assert_eq!(reason, "hardware_attach_unknown");
+    assert_eq!(controller.states().await, vec!["attach_unknown"]);
+    assert_eq!(controller.rows().await[0].1, None);
+    // Nor does cleanup delete it: the bounded retries end cleanup_failed.
+    controller.settle(&world, now() + HOUR_MS).await;
+    assert_eq!(
+        controller.lease(&lease).await.state,
+        LeaseState::CleanupFailed
+    );
+    assert_eq!(world.usb.stored(FIRST_VMID), stored(&[slot(0, READER_A)]));
+    assert!(
+        world.usb.writes().is_empty(),
+        "Fleet wrote and deleted nothing"
+    );
+    assert_eq!(controller.states().await, vec!["attach_unknown"]);
+}
+
+#[tokio::test]
+async fn a_resumed_attach_with_no_entry_on_the_guest_writes_it_and_a_repeat_changes_nothing() {
+    let world = World::new(&[READER_A]).await;
+    let (controller, lease) = crash_attach(&world, UsbFault::CrashBefore).await;
     let record = controller.record(&lease).await;
     let vmid = record.vmid.unwrap();
     let operation = controller.provision_operation(&lease).await;
@@ -1333,18 +1461,17 @@ async fn a_resumed_attach_after_a_crash_adopts_its_own_entry_and_a_repeat_change
         vmid,
         operation_id: &operation.id,
     };
-    // The row started the attach and the entry is there: it is Fleet's own,
-    // not an operator's, and the resume only records it.
+    assert_eq!(controller.states().await, vec!["attaching"]);
     controller
         .saga
         .attach_for_lease(&controller.operations, &guest, &[usb(READER_A)])
         .await
-        .expect("the resume completes the attach");
+        .expect("the resume writes the entry the crashed run never did");
     assert_eq!(
         controller.rows().await,
         vec![("attached".to_owned(), Some(0), Some(i64::from(vmid)))]
     );
-    assert_eq!(world.usb.writes().len(), 1, "no second write");
+    assert_eq!(world.usb.writes().len(), 1);
     // A repeat is a no-op: nothing is read from or written to the guest.
     let calls = world.usb.log().len();
     controller
@@ -1353,11 +1480,24 @@ async fn a_resumed_attach_after_a_crash_adopts_its_own_entry_and_a_repeat_change
         .await
         .expect("a repeat is idempotent");
     assert_eq!(world.usb.writes().len(), 1);
-    assert_eq!(
-        world.usb.log().len(),
-        calls,
-        "an attached row is confirmed from the record alone"
-    );
+    assert_eq!(world.usb.log().len(), calls);
+}
+
+#[tokio::test]
+async fn a_slot_that_sat_on_an_operators_host_entry_is_released_when_the_guest_shows_no_reference()
+{
+    // The expected slot (usb0) was chosen from mapping references only and
+    // sits on a raw `host=` entry; the crash came before the write, so the
+    // guest has no entry of Fleet's. A detach of usb0 would be refused as a
+    // foreign slot and strand the row: the full read releases it instead.
+    let world = World::new(&[READER_A]).await;
+    world.usb.set_slot(FIRST_VMID, 0, "host=1-5");
+    let (controller, lease) = crash_attach(&world, UsbFault::CrashBefore).await;
+    assert_eq!(controller.states().await, vec!["attaching"]);
+    assert_eq!(controller.rows().await[0].1, Some(0));
+    controller.settle(&world, now() + HOUR_MS).await;
+    assert_released(&world, &controller, &lease).await;
+    assert!(world.usb.writes().is_empty());
 }
 
 #[tokio::test]
@@ -1658,7 +1798,328 @@ async fn a_failing_detach_is_never_overridden_by_the_lease_giving_up() {
     }
     let after = controller.lease(&lease).await;
     assert_eq!(after.state, LeaseState::CleanupFailed);
+    assert_eq!(
+        after.cleanup_attempts,
+        fleet_application::lab::MAX_CLEANUP_ATTEMPTS,
+        "bounded retries"
+    );
     assert!(world.pve.lab_guests().contains_key(&vmid));
     assert_eq!(controller.states().await, vec!["detach_failed"]);
     assert_eq!(controller.audit_events("lab_lease_cleanup_failed").await, 1);
+}
+
+// ---------------------------------------------------------------------
+// Review fixes: scan completeness, the pinned fingerprint, the lease
+// ending mid-provision, the reviewed routes, the detach audit.
+// ---------------------------------------------------------------------
+
+/// A hook that runs `work` once.
+fn hook<F>(work: F) -> usb_pve::Hook
+where
+    F: Fn() + Send + Sync + 'static,
+{
+    let work = Arc::new(work);
+    Arc::new(move || {
+        let work = work.clone();
+        Box::pin(async move { work() })
+    })
+}
+
+#[tokio::test]
+async fn an_incomplete_guest_scan_at_the_re_observation_refuses_before_any_write() {
+    // The cluster's guest list is unreadable during the re-observation, so
+    // a guest may reference the device unseen.
+    let world = World::new(&[READER_A]).await;
+    let controller = Controller::start(&world).await;
+    controller.refresh_inventory().await;
+    let usb_host = world.usb.clone();
+    world.usb.inject(
+        UsbStep::CheckNode,
+        UsbFault::Hook(hook(move || usb_host.fail_next_resources(1))),
+        1,
+    );
+    let lease = controller.request_lease().await;
+    assert_eq!(controller.drain(&world).await, Run::Done(2));
+    assert_attach_failed(&world, &controller, &lease, "hardware_scan_incomplete").await;
+    assert!(world.usb.writes().is_empty());
+}
+
+#[tokio::test]
+async fn an_unreadable_guest_config_at_the_re_observation_refuses_before_any_write() {
+    let world = World::new(&[READER_A]).await;
+    let controller = Controller::start(&world).await;
+    controller.refresh_inventory().await;
+    let usb_host = world.usb.clone();
+    world.usb.inject(
+        UsbStep::CheckNode,
+        UsbFault::Hook(hook(move || usb_host.fail_next_config(FIRST_VMID, 1))),
+        1,
+    );
+    let lease = controller.request_lease().await;
+    assert_eq!(controller.drain(&world).await, Run::Done(2));
+    assert_attach_failed(&world, &controller, &lease, "hardware_scan_incomplete").await;
+    assert!(world.usb.writes().is_empty());
+}
+
+#[tokio::test]
+async fn a_refresh_between_the_reservation_and_the_attach_cannot_re_baseline_the_fingerprint() {
+    let world = World::new(&[READER_A]).await;
+    let controller = Controller::start(&world).await;
+    controller.refresh_inventory().await;
+    // After placement reserved the device (and pinned its fingerprint) and
+    // before the attach, the operator moves the cable and an inventory
+    // refresh records the new port. Comparing with the stored entry at the
+    // attach would pass; comparing with the reservation's does not.
+    let usb_host = world.usb.clone();
+    let inventory = controller.inventory.clone();
+    let account = world.account_id.clone();
+    world.usb.inject(
+        UsbStep::NextId,
+        UsbFault::Hook(Arc::new(move || {
+            let usb_host = usb_host.clone();
+            let inventory = inventory.clone();
+            let account = account.clone();
+            Box::pin(async move {
+                usb_host.set_entries(READER_A, &["node=pve-b,id=aaaa:0001,path=1-9"]);
+                inventory
+                    .refresh(
+                        &AllowAll,
+                        &ActingPrincipal {
+                            id: PRINCIPAL.to_owned(),
+                        },
+                        None,
+                        &account,
+                    )
+                    .await
+                    .expect("the refresh runs");
+            })
+        })),
+        1,
+    );
+    let lease = controller.request_lease().await;
+    assert_eq!(controller.drain(&world).await, Run::Done(2));
+    assert_attach_failed(&world, &controller, &lease, "hardware_fingerprint_changed").await;
+    assert!(world.usb.writes().is_empty());
+    let stored_entry = controller.rows().await.len();
+    assert_eq!(stored_entry, 1);
+}
+
+#[tokio::test]
+async fn an_attach_unknown_row_is_left_to_cleanup_and_never_written_over() {
+    let world = World::new(&[READER_A]).await;
+    let controller = Controller::start(&world).await;
+    controller.refresh_inventory().await;
+    world.usb.inject(UsbStep::Attach, UsbFault::Lost, 1);
+    let lease = controller.request_lease().await;
+    assert_eq!(controller.step(&world).await, Run::Done(true));
+    assert_eq!(controller.states().await, vec!["attach_unknown"]);
+    let record = controller.record(&lease).await;
+    let operation = controller.provision_operation(&lease).await;
+    let result = controller
+        .saga
+        .attach_for_lease(
+            &controller.operations,
+            &LeaseGuest {
+                lease_id: &lease,
+                account_id: &world.account_id,
+                node: TEMPLATE_NODE,
+                vmid: record.vmid.unwrap(),
+                operation_id: &operation.id,
+            },
+            &[usb(READER_A)],
+        )
+        .await;
+    let Err(AttachFailure::Refused { reason, .. }) = result else {
+        panic!("{result:?}");
+    };
+    assert_eq!(reason, "hardware_attach_unknown");
+    assert_eq!(world.usb.writes().len(), 1, "nothing was written again");
+    assert_eq!(controller.states().await, vec!["attach_unknown"]);
+}
+
+/// Marks the lease as ended the way a release or the sweeper's compensation
+/// does (`releasing`), from inside a hook.
+fn end_lease(controller: &Controller, lease_id: &str) -> usb_pve::Hook {
+    let leases = controller.leases.clone();
+    let lease_id = lease_id.to_owned();
+    Arc::new(move || {
+        let leases = leases.clone();
+        let lease_id = lease_id.clone();
+        Box::pin(async move {
+            let mut lease = leases.get(&lease_id).await.unwrap();
+            lease.state = LeaseState::Releasing;
+            leases.update(&lease).await.unwrap();
+        })
+    })
+}
+
+#[tokio::test]
+async fn a_lease_released_during_the_re_observation_gets_no_write() {
+    let world = World::new(&[READER_A]).await;
+    let controller = Controller::start(&world).await;
+    controller.refresh_inventory().await;
+    let lease = controller.request_lease().await;
+    world.usb.inject(
+        UsbStep::CheckNode,
+        UsbFault::Hook(end_lease(&controller, &lease)),
+        1,
+    );
+    assert_eq!(controller.drain(&world).await, Run::Done(1));
+    assert_eq!(
+        controller.failure_reason(&lease).await,
+        "hardware_lease_ended"
+    );
+    assert!(world.usb.writes().is_empty());
+    controller.settle(&world, now() + HOUR_MS).await;
+    assert_released(&world, &controller, &lease).await;
+    assert!(world.usb.writes().is_empty());
+}
+
+#[tokio::test]
+async fn a_lease_released_during_the_write_has_the_device_detached_again() {
+    let world = World::new(&[READER_A]).await;
+    let controller = Controller::start(&world).await;
+    controller.refresh_inventory().await;
+    let lease = controller.request_lease().await;
+    world.usb.inject(
+        UsbStep::Attach,
+        UsbFault::Hook(end_lease(&controller, &lease)),
+        1,
+    );
+    assert_eq!(controller.drain(&world).await, Run::Done(1));
+    // The write landed after cleanup could have looked; the saga took the
+    // device off again itself and released the row, so nothing is left
+    // attached to a dying guest.
+    assert_eq!(
+        controller.failure_reason(&lease).await,
+        "hardware_lease_ended"
+    );
+    assert_eq!(
+        world.usb.writes(),
+        vec![
+            "attach usb0=mapping=fm-test-reader-a".to_owned(),
+            "detach usb0".to_owned()
+        ]
+    );
+    assert_eq!(controller.states().await, vec!["released"]);
+    controller.settle(&world, now() + HOUR_MS).await;
+    assert_released(&world, &controller, &lease).await;
+}
+
+#[tokio::test]
+async fn the_reviewed_destroy_revert_and_template_routes_refuse_a_guest_that_holds_a_device() {
+    let world = World::new(&[READER_A]).await;
+    let controller = Controller::start(&world).await;
+    let (lease, vmid) = ready_lease(&world, &controller).await;
+    for kind in [
+        "proxmox.guest.destroy",
+        "proxmox.guest.snapshot-revert",
+        "proxmox.guest.template",
+    ] {
+        let payload = serde_json::json!({
+            "accountId": world.account_id,
+            "node": TEMPLATE_NODE,
+            "vmid": vmid,
+            "timeoutSeconds": 60,
+            "params": {"snapshot": "baseline", "purge": true},
+        })
+        .to_string();
+        let child = fleet_controller::lab_pool::run_reviewed_child(
+            &controller.operations,
+            controller.destroyer.as_ref(),
+            kind,
+            payload,
+            format!("review-{kind}"),
+            &lease,
+            std::time::Duration::from_secs(30),
+        )
+        .await
+        .unwrap();
+        assert_eq!(child.state, "failed", "{kind}");
+        let error: serde_json::Value =
+            serde_json::from_str(child.error_json.as_deref().unwrap()).unwrap();
+        assert_eq!(error["reason"], "hardware_attached", "{kind}");
+        assert!(
+            error["detail"]
+                .as_str()
+                .unwrap()
+                .contains("holds a USB device"),
+            "{error}"
+        );
+    }
+    assert!(world.pve.lab_guests().contains_key(&vmid));
+    assert_eq!(world.usb.count(|line| line.contains("/status/stop")), 0);
+    assert_eq!(world.usb.count(|line| line.starts_with("Delete ")), 0);
+    // After the saga's detach the same route goes through.
+    controller.release(&lease).await;
+    assert_eq!(controller.drain(&world).await, Run::Done(1));
+    assert_released(&world, &controller, &lease).await;
+}
+
+#[tokio::test]
+async fn a_guest_deleted_by_hand_while_it_held_a_device_fails_closed() {
+    let world = World::new(&[READER_A]).await;
+    let controller = Controller::start(&world).await;
+    let (lease, vmid) = ready_lease(&world, &controller).await;
+    world.usb.remove_guest(vmid).await;
+    controller.release(&lease).await;
+    assert_eq!(controller.drain(&world).await, Run::Done(1));
+    // An absent guest is not a confirmed detach (the cluster list omits
+    // guests the token cannot audit): the row and the lease stay, for an
+    // operator to confirm and override.
+    assert_eq!(controller.lease(&lease).await.state, LeaseState::Releasing);
+    assert_eq!(controller.states().await, vec!["detach_failed"]);
+    assert_eq!(world.usb.writes().len(), 1, "only the attach was written");
+}
+
+#[tokio::test]
+async fn a_refusing_audit_sink_prevents_the_detach_delete() {
+    let world = World::new(&[READER_A]).await;
+    let controller = Controller::start(&world).await;
+    let (lease, vmid) = ready_lease(&world, &controller).await;
+    world.refuse_detach_intent.store(true, Ordering::SeqCst);
+    controller.release(&lease).await;
+    assert_eq!(controller.drain(&world).await, Run::Done(1));
+    assert_eq!(controller.lease(&lease).await.state, LeaseState::Releasing);
+    assert_eq!(controller.states().await, vec!["detach_failed"]);
+    assert_eq!(world.usb.writes().len(), 1, "no delete was made");
+    assert_eq!(world.usb.stored(vmid), stored(&[slot(0, READER_A)]));
+    assert_eq!(
+        controller.audit_events("hardware_detach_requested").await,
+        0
+    );
+    // With the sink back the retry detaches, audits the intent and finishes.
+    world.refuse_detach_intent.store(false, Ordering::SeqCst);
+    controller.settle(&world, now() + HOUR_MS).await;
+    assert_released(&world, &controller, &lease).await;
+    assert_eq!(
+        controller.audit_events("hardware_detach_requested").await,
+        1
+    );
+}
+
+#[tokio::test]
+async fn one_of_two_devices_failing_to_detach_leaves_only_that_one_held() {
+    let world = World::new(&[READER_A, READER_B]).await;
+    let controller = Controller::start(&world).await;
+    let (lease, vmid) = ready_lease(&world, &controller).await;
+    // The first delete is refused, the second goes through.
+    world.usb.inject(UsbStep::Detach, UsbFault::Forbidden, 1);
+    controller.release(&lease).await;
+    assert_eq!(controller.drain(&world).await, Run::Done(1));
+    assert_eq!(controller.lease(&lease).await.state, LeaseState::Releasing);
+    let mut states = controller.states().await;
+    states.sort();
+    assert_eq!(states, vec!["detach_failed", "released"]);
+    assert!(
+        world.pve.lab_guests().contains_key(&vmid),
+        "the guest is kept"
+    );
+    assert_eq!(
+        world.usb.stored(vmid).len(),
+        1,
+        "exactly the device that failed to detach is still on the guest"
+    );
+    controller.settle(&world, now() + HOUR_MS).await;
+    assert_released(&world, &controller, &lease).await;
 }

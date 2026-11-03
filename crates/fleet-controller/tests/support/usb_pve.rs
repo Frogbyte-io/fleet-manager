@@ -46,6 +46,9 @@ pub enum UsbStep {
     Pending,
     /// `GET /cluster/mapping/usb?check-node=…` (the re-observation).
     CheckNode,
+    /// `GET /cluster/nextid` (the provision's VMID step, after placement
+    /// reserved the devices and before the clone).
+    NextId,
 }
 
 /// What happens at a scripted step.
@@ -127,6 +130,10 @@ struct UsbState {
     writes: Vec<String>,
     /// Whether the node's USB inventory is readable (it needs `Sys.Modify`).
     permissions_read: bool,
+    /// How many of the next `GET /cluster/resources` fail (500).
+    fail_resources: u32,
+    /// How many of the next config reads of a guest fail (500), by VMID.
+    fail_config: BTreeMap<u32, u32>,
 }
 
 /// The USB-aware host.
@@ -215,6 +222,60 @@ impl UsbHost {
             .applied
             .insert(slot, value.to_owned());
         Self::guest_in(&mut state, vmid).revision += 1;
+    }
+
+    /// The next `times` `GET /cluster/resources` fail with a 500.
+    pub fn fail_next_resources(&self, times: u32) {
+        self.state.lock().unwrap().fail_resources = times;
+    }
+
+    /// The next `times` config reads of the guest fail with a 500.
+    pub fn fail_next_config(&self, vmid: u32, times: u32) {
+        self.state.lock().unwrap().fail_config.insert(vmid, times);
+    }
+
+    /// An operator removes the entry in `slot` from the guest (applied).
+    pub fn clear_slot(&self, vmid: u32, slot: u8) {
+        let mut state = self.state.lock().unwrap();
+        let guest = Self::guest_in(&mut state, vmid);
+        guest.applied.remove(&slot);
+        guest.pending_add.remove(&slot);
+        guest.pending_delete.remove(&slot);
+        guest.revision += 1;
+    }
+
+    /// The guest is deleted by hand (stopped, then destroyed on the host).
+    pub async fn remove_guest(&self, vmid: u32) {
+        let node = crate::fake_pve::TEMPLATE_NODE;
+        let request = |method, path: String| PveHttpRequest {
+            host: crate::fake_pve::API_HOST.to_owned(),
+            port: 8006,
+            path,
+            pinned_fingerprint: Some(FINGERPRINT.to_owned()),
+            credentials: Arc::new(fleet_provider_proxmox::PveCredentials {
+                token_id: "fleet@pve!lab".to_owned(),
+                token: fleet_core::SensitiveString::new("fake-token-material"),
+            }),
+            method,
+        };
+        let _ = self
+            .transport
+            .execute_with_body(
+                request(
+                    PveHttpMethod::Post,
+                    format!("/api2/json/nodes/{node}/qemu/{vmid}/status/stop"),
+                ),
+                b"{}".to_vec(),
+            )
+            .await;
+        self.transport
+            .execute(request(
+                PveHttpMethod::Delete,
+                format!("/api2/json/nodes/{node}/qemu/{vmid}?purge=1"),
+            ))
+            .await
+            .expect("the fake deletes the guest");
+        self.state.lock().unwrap().guests.remove(&vmid);
     }
 
     /// The guest's `hotplug` option includes `usb` (the default) or not.
@@ -448,6 +509,25 @@ impl UsbHost {
                 }
                 Some(Self::ok(&self.mapping_list(check_node)))
             }
+            (PveHttpMethod::Get, ["cluster", "resources"]) => {
+                self.record(line);
+                let mut state = self.state.lock().unwrap();
+                if state.fail_resources > 0 {
+                    state.fail_resources -= 1;
+                    return Some(Self::error(
+                        500,
+                        &json!({"data": null, "message": "internal error (injected)"}),
+                    ));
+                }
+                None
+            }
+            (PveHttpMethod::Get, ["cluster", "nextid"]) => {
+                self.record(line);
+                if let Some(response) = self.fault(UsbStep::NextId, true).await {
+                    return Some(response);
+                }
+                None
+            }
             (PveHttpMethod::Get, ["access", "permissions"]) => {
                 self.record(line);
                 self.assert_pinned(request);
@@ -493,6 +573,18 @@ impl UsbHost {
             (PveHttpMethod::Get, ["nodes", node, "qemu", vmid, "config"]) => {
                 self.record(line);
                 let vmid: u32 = vmid.parse().unwrap();
+                {
+                    let mut state = self.state.lock().unwrap();
+                    if let Some(left) = state.fail_config.get_mut(&vmid)
+                        && *left > 0
+                    {
+                        *left -= 1;
+                        return Some(Self::error(
+                            500,
+                            &json!({"data": null, "message": "internal error (injected)"}),
+                        ));
+                    }
+                }
                 // The fake host answers (and may fault) first.
                 let answer = self.transport.execute(request.clone()).await;
                 let Ok(response) = answer else {
