@@ -177,6 +177,7 @@ async fn the_provision_executor_links_its_clone_and_start_tasks_to_the_operation
         audio: None,
         guest_os: fleet_core::GuestOs::default(),
         interactive_user: None,
+        hardware: Vec::new(),
     };
     let template: LabTemplate = LabTemplatePort::create(
         labs.as_ref(),

@@ -1084,6 +1084,20 @@ pub struct Lab {
     machine_access: Option<Arc<crate::machine_access::MachineAccess>>,
     pools: Option<Arc<crate::lab_pool::LabPools>>,
     reservations: Option<Arc<dyn crate::lab_placement::CapacityReservationPort>>,
+    hardware: Option<Arc<dyn crate::hardware::HardwareStore>>,
+}
+
+/// One device a lease asked for through its template version, and the
+/// reservation that holds it for the lease now (FM-1121).
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct LeaseHardware {
+    /// The device kind.
+    pub kind: fleet_core::HardwareKind,
+    /// The PVE mapping id the template declared.
+    pub mapping: String,
+    /// The lease's live reservation of it. `None` until placement reserves
+    /// it, and again once the lease released it.
+    pub reservation: Option<fleet_core::HardwareReservation>,
 }
 
 impl Lab {
@@ -1110,7 +1124,79 @@ impl Lab {
             machine_access: None,
             pools: None,
             reservations: None,
+            hardware: None,
         }
+    }
+
+    /// Serves the read of a lease's declared hardware and its reservations
+    /// (FM-1121).
+    #[must_use]
+    pub fn with_hardware(mut self, hardware: Arc<dyn crate::hardware::HardwareStore>) -> Self {
+        self.hardware = Some(hardware);
+        self
+    }
+
+    /// The hardware the lease asked for through its template version, each
+    /// with the lease's live reservation of it, in declaration order. Empty
+    /// for a lease whose version declares none, which is every lease that
+    /// predates the field. A read: authorized as a lease read, scoped to the
+    /// caller's own leases when the credential is delegated, not audited.
+    ///
+    /// # Errors
+    ///
+    /// Fails on denial, an unknown lease, or a backend failure.
+    pub async fn lease_hardware(
+        &self,
+        authorizer: &dyn Authorizer,
+        principal: &ActingPrincipal,
+        lease_id: &str,
+    ) -> Result<Vec<LeaseHardware>, LabUseCaseError> {
+        let lease = self.get_lease(authorizer, principal, lease_id).await?;
+        let version = match self.templates.get_version(&lease.template_version_id).await {
+            Ok(version) => version,
+            // A lease whose version is gone declares nothing to report; the
+            // detail read must not fail for it.
+            Err(detail) if detail.contains("not found") => return Ok(Vec::new()),
+            Err(detail) => {
+                return Err(LabUseCaseError::Backend {
+                    context: "template versions",
+                    detail,
+                });
+            }
+        };
+        if version.content.hardware.is_empty() {
+            return Ok(Vec::new());
+        }
+        let backend = |error: crate::hardware::HardwareStoreError| LabUseCaseError::Backend {
+            context: "hardware",
+            detail: error.to_string(),
+        };
+        let mut held = std::collections::BTreeMap::new();
+        if let Some(store) = &self.hardware {
+            for reservation in store
+                .live_reservations_for_owner(fleet_core::ReservationOwnerKind::Lease, lease_id)
+                .await
+                .map_err(backend)?
+            {
+                if let Some(device) = store
+                    .device(&reservation.device_id)
+                    .await
+                    .map_err(backend)?
+                {
+                    held.insert(device.mapping_id, reservation);
+                }
+            }
+        }
+        Ok(version
+            .content
+            .hardware
+            .into_iter()
+            .map(|declared| LeaseHardware {
+                kind: declared.kind,
+                reservation: held.get(&declared.mapping).cloned(),
+                mapping: declared.mapping,
+            })
+            .collect())
     }
 
     /// Serves the read of a lease's capacity reservation (FM-715).

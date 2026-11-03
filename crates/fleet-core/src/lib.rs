@@ -64,8 +64,9 @@ pub use image::{
 };
 pub use lab::{
     CleanupStrategy, ExecSession, GuestOs, GuestState, LAB_AUDIO_DEVICES, LAB_AUDIO_DRIVERS,
-    LabAudio, LabTemplateContent, Lease, LeaseState, MAX_INTERACTIVE_USER_LEN,
-    MAX_LAB_LEASE_LIFETIME_MILLIS, ReadinessProbe, validate_interactive_user_name,
+    LabAudio, LabHardware, LabTemplateContent, Lease, LeaseState, MAX_INTERACTIVE_USER_LEN,
+    MAX_LAB_HARDWARE, MAX_LAB_LEASE_LIFETIME_MILLIS, ReadinessProbe, is_valid_hardware_mapping_id,
+    validate_interactive_user_name, validate_lab_hardware,
 };
 pub use machine::{
     CapabilityFact, CapabilityStatus, EndpointKind, MAX_CAPABILITY_FACTS, RESERVED_FACT_NAMESPACE,

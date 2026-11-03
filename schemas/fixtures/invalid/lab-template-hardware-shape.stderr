@@ -1,0 +1,3 @@
+schemas/fixtures/invalid/lab-template-hardware-shape.yaml#document=1/spec/hardware/0/kind [FM_SCHEMA_INVALID] document does not match the registered resource schema
+schemas/fixtures/invalid/lab-template-hardware-shape.yaml#document=1/spec/hardware/1/mapping [FM_SCHEMA_INVALID] document does not match the registered resource schema
+schemas/fixtures/invalid/lab-template-hardware-shape.yaml#document=1/spec/hardware/2 [FM_SCHEMA_INVALID] document does not match the registered resource schema

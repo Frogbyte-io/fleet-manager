@@ -240,7 +240,7 @@ A pool binds a small set of preallocated QEMU guests to one published template v
 
 ## Placement and later scheduling
 
-The first Lab release selects among compatible Proxmox targets and transactionally reserves the CPU/memory/storage capacity needed to prevent over-allocation. It does not claim rich fairness, quotas, preemption, or exclusive hardware scheduling. The later scheduler filters then ranks:
+The first Lab release selects among compatible Proxmox targets and transactionally reserves the CPU/memory/storage capacity needed to prevent over-allocation. It does not claim rich fairness, quotas, or preemption, and a busy exclusive device fails fast instead of queueing; USB devices a template declares are reserved in the same placement step ([USB and physical resources](#later-usb-and-physical-resources)). The later scheduler filters then ranks:
 
 1. Authorized provider accounts/hosts for the caller/project/template
 2. Compatible provider/template/version, architecture/OS, capabilities, storage/network, readiness route
@@ -309,13 +309,53 @@ Object storage, test-report parsing, screenshots, and result bundles remain foll
 
 ## Later USB and physical resources
 
-- Inventory uses stable host topology identifiers (vendor/product/serial and physical port/path where available), not transient bus numbers alone.
-- A resource declares which Proxmox node owns it, passthrough/IOMMU constraints, reset needs, and concurrency (`exclusive` initially).
-- Reservation precedes VM configuration. Attach verifies the expected device immediately before mutation.
-- Detach/release is a mandatory compensation even when tests fail. A reconciler compares reservation, Proxmox config, host inventory, and lease state.
-- Conflicts queue rather than stealing a device. Manual override is elevated and audited.
+Physical USB devices follow [ADR 0019](../adr/0019-usb-device-allocation.md) and the [M11 plan](../planning/m11-usb-hardware.md). This section records what the Lab surface does today and what is still to come; the heading keeps its name because other documents refer to it.
 
-The first Lab release should omit USB if the real hardware validation environment is unavailable; it must not ship an untested “exclusive” claim.
+### What a template declares (FM-1121)
+
+A template (draft and published version) has an optional `hardware` list, up to four entries, each `{ kind: usb, mapping: <PVE mapping id> }`:
+
+```json
+"hardware": [{ "kind": "usb", "mapping": "fm-test-superdrive-a" }]
+```
+
+- The mapping is the device's identity. Operators create the Proxmox USB resource mapping; Fleet only reads it, never writes `host=`, and never creates or edits a mapping. Identical devices need one path-based mapping per port.
+- A mapping id is 1 to 64 characters of letters, digits, `-`, `_` and `.`, starting with a letter or digit, because it ends up in `usbN=mapping=<id>`. A mapping may be named once. `fleet-core` (`LabHardware`) and the desired-state `LabTemplate` schema (`spec.hardware`, `FM_SCHEMA_SEMANTIC_DUPLICATE_HARDWARE`) enforce the same rules, and a test keeps their id grammar from drifting apart.
+- Devices are looked up in the inventory of the account the clone is made through (`fleetctl hardware list`). A template without `hardware`, which is every template that predates the field, behaves exactly as before.
+- Groups or labels ("any device of this model") are not supported.
+
+### Placement and reservation
+
+Placement runs in the clone step, before capacity, a VMID, or the clone. Lab clones on the node that holds the pinned image's template (its clone call sends no `target`; Proxmox itself could clone onto another node on shared storage, as persistent machines do, so this is Lab's choice and not a Proxmox limit), and a mapping entry is bound to one node (a path-based entry names a port on it). So the node is fixed first and each declared device is checked against it:
+
+| Check | Refusal (`reason`) |
+|---|---|
+| The mapping is not in the account's inventory | `hardware_unknown` |
+| The mapping has no entry for any node | `hardware_no_node_entry` |
+| The device is not on the clone's node (it has no entry there, or was seen recently only on another node); the message names both | `hardware_wrong_node` |
+| The device is unsupported, missing, externally attached or quarantined; `unsupported` carries its reason | `hardware_unsupported`, `hardware_missing`, `hardware_externally_attached`, `hardware_quarantined` |
+| The device was not seen on the node within the observation bound (15 minutes by default), so a stored `available` is not trusted | `hardware_stale` |
+| Another owner holds it, named in the message (no queue: conflicts fail fast) | `hardware_busy` |
+
+Each refusal fails the provision before anything is allocated and is audited as `lab_placement_refused` with the mapping (and the holder, when busy). Devices are then reserved in mapping order, each in one `BEGIN IMMEDIATE` transaction of the reservation store ([FM-1120](../planning/m11-usb-hardware.md)), which is what excludes a second holder and what decides `hardware_busy`; a hold whose lease is over is freed there, and a device taken over that way must still have been seen on the node within the bound, as an available one must (otherwise `hardware_stale`). Reserving never calls Proxmox: the attach is the Lab saga's (FM-1123), which must re-observe and verify the device immediately before it writes, because the inventory applies staleness when a device is read, not when it is reserved.
+
+The compensation matches capacity's. If a later device in the same step refuses, the ones the step reserved are released. If the clone step then ends in an infrastructure error (an unreadable VMID, a failed clone, a store error), which only fails the operation later through the worker, the step releases the devices it took on that error exit too. If the lease then fails without allocating a guest, its held devices are released with its capacity. When cleanup completes, the devices the lease never attached are released with the lease. A device that was attached, or whose attach or detach outcome is unknown, is never released on the lease's word: detach is the saga's, and it precedes every guest fate (ADR 0019 decisions 3 and 5).
+
+Some refusals are not about the device. A template that declares hardware is refused, with `hardware_pool_unsupported`, when its version is pooled (a pool member is a prebuilt guest, so the device could not be attached before its boot), and with `hardware_needs_lease` or `hardware_unavailable` when there is no lease to own the reservation or the controller cannot reserve.
+
+**Until the attach saga (#571, FM-1123) lands, a lease with hardware reserves the device but does not attach it.** The lease can reach `ready` with the device only `held`, and the guest does not have it. The lease detail shows that plainly (`held`, no `usbSlot`); `held` must not be read as attached. There is deliberately no gate that fails such a lease.
+
+### On the API
+
+`POST /lab/templates` and `PUT /lab/templates/{id}` accept `hardware` (a repeat of the whole draft, like every other field: omitting it clears it); templates and published versions return it when they declare any. `GET /lab/leases/{id}` returns `hardware` for a lease whose version declares any: each entry has its `kind`, `mapping` and the lease's live `reservation` (`id`, `deviceId`, `state`, `usbSlot`), which is null until placement reserves the device and again after it is released. A lease whose version declares none has no `hardware` key.
+
+### What is still to come
+
+- Reservation, attach and detach: `held` is a reservation only. The attach after the clone and before the start, the detach before guest fate, and the compensation of both are the Lab saga (FM-1123); until it lands a lease with hardware reserves the device but does not attach it, and the lease detail says so by showing `held`.
+- A reconciler that compares reservation, Proxmox config, host inventory and lease state (FM-1124), mid-run hotplug (FM-1126), and persistent machines (FM-1125).
+- Queueing: a busy device fails the lease request.
+- Manual override is elevated and audited (`hardware.override-release`).
+- The hardware-in-the-loop runbook and live validation (FM-1133). Until the real hardware has been exercised end to end, the "exclusive" claim rests on the reservation store's guarantees and tests, not on a hardware run.
 
 ## Failure-injection acceptance
 

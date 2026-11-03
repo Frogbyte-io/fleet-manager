@@ -1,0 +1,1 @@
+schemas/fixtures/invalid/lab-template-hardware-duplicate.yaml#document=1/spec/hardware/1/mapping [FM_SCHEMA_SEMANTIC_DUPLICATE_HARDWARE] the hardware mapping "fm-test-superdrive-a" is declared more than once; one device is one reservation

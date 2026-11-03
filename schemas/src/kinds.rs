@@ -233,6 +233,37 @@ pub struct LabTemplateSpec {
     #[serde(default)]
     #[schemars(range(min = 128, max = 1_048_576))]
     pub memory_mib: Option<u32>,
+    /// The physical devices every lease from the template reserves
+    /// (FM-1121, ADR 0019): one entry per operator-created Proxmox USB
+    /// resource mapping, at most four, none twice. Omitted asks for none.
+    #[serde(default)]
+    #[schemars(length(max = 4))]
+    pub hardware: Vec<LabHardwareSpec>,
+}
+
+/// The kind of a device a Lab template declares.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum LabHardwareKind {
+    /// A USB device attached through a Proxmox USB resource mapping.
+    Usb,
+}
+
+/// One device a Lab template asks for: the Proxmox resource mapping that
+/// names it. The mapping is the device's identity; Fleet never writes
+/// `host=` and never creates mappings. Device groups are deferred.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct LabHardwareSpec {
+    /// The device kind.
+    pub kind: LabHardwareKind,
+    /// The Proxmox USB resource mapping id: letters, digits, `-`, `_` and
+    /// `.`, starting with a letter or digit.
+    #[schemars(
+        length(min = 1, max = 64),
+        regex(pattern = r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
+    )]
+    pub mapping: String,
 }
 
 /// The `PolicyBinding` spec: non-secret bindings between principals and

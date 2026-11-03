@@ -878,6 +878,29 @@ fn run_serve(mut config: fleet_config::ControllerConfig) -> ExitCode {
                 let lab_capacity = std::sync::Arc::new(
                     fleet_storage_sqlite::CapacityRepository::new(store.pool().clone()),
                 );
+                // FM-1121: the physical devices a template declares are
+                // reserved in the same placement step, over the hardware
+                // inventory and the transactional reservation store.
+                let lab_devices = std::sync::Arc::new(
+                    fleet_application::lab_placement::HardwarePlacement::new(
+                        std::sync::Arc::new(fleet_storage_sqlite::HardwareRepository::new(
+                            store.pool().clone(),
+                        )),
+                        std::sync::Arc::new(
+                            fleet_application::hardware_reservation::HardwareReservations::new(
+                                std::sync::Arc::new(
+                                    fleet_controller::hardware_reservation_store::SqliteHardwareReservations::new(
+                                        store.pool().clone(),
+                                    ),
+                                ),
+                                std::sync::Arc::new(fleet_storage_sqlite::AuditSink::new(
+                                    store.pool().clone(),
+                                )),
+                            ),
+                        ),
+                        fleet_application::hardware_inventory::DEFAULT_OBSERVATION_MAX_AGE_MS,
+                    ),
+                );
                 let lab_placement_policy = fleet_application::lab_placement::PlacementPolicy {
                     memory_overcommit: config.lab_placement.memory_overcommit,
                     cpu_overcommit: config.lab_placement.cpu_overcommit,
@@ -948,6 +971,7 @@ fn run_serve(mut config: fleet_config::ControllerConfig) -> ExitCode {
                         lab_destructive.clone(),
                     )
                     .with_reservations(lab_capacity.clone())
+                    .with_devices(lab_devices.clone())
                     .with_pools(
                         lab_pools.clone(),
                         lab_pool_guests.clone(),
@@ -1028,6 +1052,7 @@ fn run_serve(mut config: fleet_config::ControllerConfig) -> ExitCode {
                                 )),
                                 lab_placement_policy,
                             )
+                            .with_device_placement(lab_devices)
                             .with_pools(lab_pools)
                             .with_login_keys(lab_login_keys.clone()),
                         ),
@@ -1467,6 +1492,10 @@ fn run_serve(mut config: fleet_config::ControllerConfig) -> ExitCode {
         // application.
         let lab = lab.with_reservations(std::sync::Arc::new(
             fleet_storage_sqlite::CapacityRepository::new(store.pool().clone()),
+        ));
+        // FM-1121: a lease reads the devices it asked for and holds.
+        let lab = lab.with_hardware(std::sync::Arc::new(
+            fleet_storage_sqlite::HardwareRepository::new(store.pool().clone()),
         ));
         let lab = lab.with_pools(std::sync::Arc::new(
             fleet_application::lab_pool::LabPools::new(

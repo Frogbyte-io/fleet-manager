@@ -1,0 +1,14 @@
+apiVersion: fleet.frogbyte.io/v1alpha1
+kind: LabTemplate
+metadata:
+  id: 01890f3e-9b4a-7cc2-98c3-d24e8f58f2ab
+  name: ubuntu-usb-test
+spec:
+  imageVersion: "24.04"
+  cores: 4
+  memoryMib: 8192
+  hardware:
+    - kind: usb
+      mapping: fm-test-superdrive-a
+    - kind: usb
+      mapping: fm-test-verbatim

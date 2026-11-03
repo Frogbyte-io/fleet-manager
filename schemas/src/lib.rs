@@ -546,6 +546,32 @@ fn validate_discriminator(document: &Value, base: &str, diagnostics: &mut Vec<Di
     }
 }
 
+/// Lab template hardware (FM-1121): one device is one reservation, so a
+/// mapping named twice is a mistake the schema cannot express.
+fn validate_lab_template_hardware(document: &Value, base: &str, diagnostics: &mut Vec<Diagnostic>) {
+    let Some(hardware) = document.pointer("/spec/hardware").and_then(Value::as_array) else {
+        return;
+    };
+    let mut seen: BTreeSet<(&str, &str)> = BTreeSet::new();
+    for (index, device) in hardware.iter().enumerate() {
+        let (Some(device_kind), Some(mapping)) = (
+            device.get("kind").and_then(Value::as_str),
+            device.get("mapping").and_then(Value::as_str),
+        ) else {
+            continue;
+        };
+        if !seen.insert((device_kind, mapping)) {
+            diagnostics.push(Diagnostic {
+                code: "FM_SCHEMA_SEMANTIC_DUPLICATE_HARDWARE",
+                location: format!("{base}/spec/hardware/{index}/mapping"),
+                message: format!(
+                    "the hardware mapping {mapping:?} is declared more than once; one device is one reservation"
+                ),
+            });
+        }
+    }
+}
+
 /// Semantic validation beyond the schema: credential-bearing references
 /// and remotes are refused before activation, because a schema-valid
 /// document can still carry secrets in its string fields.
@@ -615,6 +641,9 @@ fn validate_semantics(document: &Value, base: &str, diagnostics: &mut Vec<Diagno
                 }
             }
         }
+    }
+    if kind == "LabTemplate" {
+        validate_lab_template_hardware(document, base, diagnostics);
     }
     // Machine endpoints: credential-bearing userinfo is refused.
     if kind == "Machine"

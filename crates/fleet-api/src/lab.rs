@@ -96,6 +96,27 @@ impl From<fleet_core::LabAudio> for LabAudioDto {
     }
 }
 
+/// One physical device a template asks for: the operator-created Proxmox
+/// resource mapping that names it (ADR 0019).
+#[derive(Clone, Debug, Serialize, Deserialize, ToSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct LabHardwareDto {
+    /// The device kind: `usb`.
+    pub kind: String,
+    /// The Proxmox USB resource mapping id (letters, digits, `-`, `_` and
+    /// `.`; at most 64 characters).
+    pub mapping: String,
+}
+
+impl From<fleet_core::LabHardware> for LabHardwareDto {
+    fn from(hardware: fleet_core::LabHardware) -> Self {
+        Self {
+            kind: hardware.kind.id().to_owned(),
+            mapping: hardware.mapping,
+        }
+    }
+}
+
 /// One template draft.
 #[derive(Clone, Debug, Serialize, ToSchema)]
 #[serde(rename_all = "camelCase")]
@@ -141,6 +162,10 @@ pub struct LabTemplateDto {
     /// The local account whose desktop session `--session interactive`
     /// runs in (a name only, never a password); Windows guests only.
     pub interactive_user: Option<String>,
+    /// The devices every lease from this template reserves; absent when it
+    /// asks for none.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub hardware: Vec<LabHardwareDto>,
     /// The published version this draft descends from, when any.
     pub published_from: Option<String>,
     /// When the draft was created.
@@ -172,6 +197,12 @@ impl From<LabTemplate> for LabTemplateDto {
             audio: template.content.audio.map(Into::into),
             guest_os: template.content.guest_os.id().to_owned(),
             interactive_user: template.content.interactive_user,
+            hardware: template
+                .content
+                .hardware
+                .into_iter()
+                .map(Into::into)
+                .collect(),
             published_from: template.published_from,
             created_at: template.created_at,
             updated_at: template.updated_at,
@@ -242,6 +273,10 @@ pub struct LabTemplateContentDto {
     /// The local account whose desktop session `--session interactive`
     /// runs in (a name only, never a password); Windows guests only.
     pub interactive_user: Option<String>,
+    /// The devices every lease from this version reserves; absent when it
+    /// asks for none.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub hardware: Vec<LabHardwareDto>,
 }
 
 impl From<LabTemplateVersion> for LabTemplateVersionDto {
@@ -270,6 +305,12 @@ impl From<LabTemplateVersion> for LabTemplateVersionDto {
                 audio: version.content.audio.map(Into::into),
                 guest_os: version.content.guest_os.id().to_owned(),
                 interactive_user: version.content.interactive_user,
+                hardware: version
+                    .content
+                    .hardware
+                    .into_iter()
+                    .map(Into::into)
+                    .collect(),
             },
             image_digest: version.image_digest,
             published_by: version.published_by,
@@ -389,6 +430,11 @@ pub struct SaveLabTemplateRequest {
     /// runs in: a name only, never a password. Windows guests only.
     #[serde(default)]
     pub interactive_user: Option<String>,
+    /// The physical devices every lease from this template reserves: one
+    /// entry per operator-created Proxmox USB mapping (at most four). Absent
+    /// or empty asks for none.
+    #[serde(default)]
+    pub hardware: Vec<LabHardwareDto>,
 }
 
 fn default_lab_guest_os() -> String {
@@ -416,6 +462,17 @@ impl SaveLabTemplateRequest {
             .map_err(|detail| crate::machines::invalid_request(&detail, correlation_id))?;
         let guest_os = fleet_core::GuestOs::from_id(&self.guest_os)
             .map_err(|detail| crate::machines::invalid_request(&detail, correlation_id))?;
+        let hardware = self
+            .hardware
+            .into_iter()
+            .map(|device| {
+                Ok(fleet_core::LabHardware {
+                    kind: fleet_core::HardwareKind::from_id(&device.kind)?,
+                    mapping: device.mapping,
+                })
+            })
+            .collect::<Result<Vec<_>, String>>()
+            .map_err(|detail| crate::machines::invalid_request(&detail, correlation_id))?;
         Ok(fleet_core::LabTemplateContent {
             name: self.name,
             description: self.description,
@@ -439,6 +496,7 @@ impl SaveLabTemplateRequest {
             }),
             guest_os,
             interactive_user: self.interactive_user,
+            hardware,
         })
     }
 }
@@ -1400,6 +1458,62 @@ pub struct LeaseDetailDto {
     /// The capacity Fleet reserved for the lease (FM-715), when it has one.
     /// Null for a lease that reserved nothing, such as a pooled lease.
     pub reservation: Option<LeaseReservationDto>,
+    /// The physical devices the lease asked for through its template
+    /// version, each with the reservation that holds it (FM-1121). Absent
+    /// for a lease whose version asks for none, so such a lease reads as it
+    /// always did.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub hardware: Vec<LeaseHardwareDto>,
+}
+
+/// One device a lease asked for and the reservation that holds it for the
+/// lease.
+#[derive(Clone, Debug, Serialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct LeaseHardwareDto {
+    /// The device kind: `usb`.
+    pub kind: String,
+    /// The Proxmox USB resource mapping id the template declared.
+    pub mapping: String,
+    /// The lease's live reservation of the device: null until placement
+    /// reserves it, and again once the lease released it.
+    pub reservation: Option<LeaseHardwareReservationDto>,
+}
+
+/// A lease's reservation of one device. The attach and detach of the device
+/// to the lease's guest move it through these states.
+#[derive(Clone, Debug, Serialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct LeaseHardwareReservationDto {
+    /// The reservation's identity.
+    pub id: String,
+    /// The inventoried device's identity (`fleetctl hardware list`).
+    pub device_id: String,
+    /// The reservation state: `held`, `attaching`, `attached`, `detaching`,
+    /// `attach_unknown` or `detach_failed`.
+    pub state: String,
+    /// The `usbN` slot the device occupies on the guest, once attached.
+    pub usb_slot: Option<u8>,
+    /// When the device was reserved (epoch milliseconds).
+    pub created_at: i64,
+}
+
+impl From<fleet_application::lab::LeaseHardware> for LeaseHardwareDto {
+    fn from(hardware: fleet_application::lab::LeaseHardware) -> Self {
+        Self {
+            kind: hardware.kind.id().to_owned(),
+            mapping: hardware.mapping,
+            reservation: hardware
+                .reservation
+                .map(|reservation| LeaseHardwareReservationDto {
+                    usb_slot: reservation.guest.as_ref().and_then(|guest| guest.usb_slot),
+                    id: reservation.id,
+                    device_id: reservation.device_id,
+                    state: reservation.state.id().to_owned(),
+                    created_at: reservation.created_at,
+                }),
+        }
+    }
 }
 
 /// A lease's capacity reservation: what it holds on a node.
@@ -1492,6 +1606,13 @@ pub async fn get_lab_lease(
         .await
         .map_err(|error| map_lab_error(&error, correlation_id))?
         .map(Into::into);
+    let hardware = lab
+        .lease_hardware(state.authorizer.as_ref(), &principal, &lease_id)
+        .await
+        .map_err(|error| map_lab_error(&error, correlation_id))?
+        .into_iter()
+        .map(Into::into)
+        .collect();
     Ok(Json(Resource::new(LeaseDetailDto {
         lease: lease.into(),
         provision_state: record.as_ref().map(|record| record.state.id().to_owned()),
@@ -1505,6 +1626,7 @@ pub async fn get_lab_lease(
         failed_step: record.and_then(|record| record.failed_step),
         collection_failure,
         reservation,
+        hardware,
     })))
 }
 

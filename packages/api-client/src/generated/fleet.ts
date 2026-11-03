@@ -3168,6 +3168,20 @@ export interface LabAudioDto {
 }
 
 /**
+ * One physical device a template asks for: the operator-created Proxmox
+ * resource mapping that names it (ADR 0019).
+ */
+export interface LabHardwareDto {
+  /** The device kind: `usb`. */
+  kind: string;
+  /**
+     * The Proxmox USB resource mapping id (letters, digits, `-`, `_` and
+     * `.`; at most 64 characters).
+     */
+  mapping: string;
+}
+
+/**
  * What a drain did.
  */
 export interface LabPoolDrainDto {
@@ -3274,6 +3288,11 @@ export interface LabTemplateContentDto {
   diskGib: number;
   /** The guest's operating system: `linux` or `windows`. */
   guestOs: string;
+  /**
+     * The devices every lease from this version reserves; absent when it
+     * asks for none.
+     */
+  hardware?: LabHardwareDto[];
   /** The pinned image version id. */
   imageVersionId: string;
   /**
@@ -3350,6 +3369,11 @@ export interface LabTemplateDto {
   diskGib: number;
   /** The guest's operating system: `linux` or `windows`. */
   guestOs: string;
+  /**
+     * The devices every lease from this template reserves; absent when it
+     * asks for none.
+     */
+  hardware?: LabHardwareDto[];
   /** The draft's identity. */
   id: string;
   /** The pinned image version id. */
@@ -3481,6 +3505,42 @@ export interface LeaseDto {
 }
 
 /**
+ * A lease's reservation of one device. The attach and detach of the device
+ * to the lease's guest move it through these states.
+ */
+export interface LeaseHardwareReservationDto {
+  /** When the device was reserved (epoch milliseconds). */
+  createdAt: number;
+  /** The inventoried device's identity (`fleetctl hardware list`). */
+  deviceId: string;
+  /** The reservation's identity. */
+  id: string;
+  /**
+     * The reservation state: `held`, `attaching`, `attached`, `detaching`,
+     * `attach_unknown` or `detach_failed`.
+     */
+  state: string;
+  /**
+     * The `usbN` slot the device occupies on the guest, once attached.
+     * @minimum 0
+     * @nullable
+     */
+  usbSlot?: number | null;
+}
+
+/**
+ * One device a lease asked for and the reservation that holds it for the
+ * lease.
+ */
+export interface LeaseHardwareDto {
+  /** The device kind: `usb`. */
+  kind: string;
+  /** The Proxmox USB resource mapping id the template declared. */
+  mapping: string;
+  reservation?: null | LeaseHardwareReservationDto;
+}
+
+/**
  * A lease's capacity reservation: what it holds on a node.
  */
 export interface LeaseReservationDto {
@@ -3529,6 +3589,13 @@ export type LeaseDetailDto = LeaseDto & ({
      * @nullable
      */
   failedStep?: string | null;
+  /**
+     * The physical devices the lease asked for through its template
+     * version, each with the reservation that holds it (FM-1121). Absent
+     * for a lease whose version asks for none, so such a lease reads as it
+     * always did.
+     */
+  hardware?: LeaseHardwareDto[];
   /**
      * The Lab-owned Fleet machine the guest was registered as.
      * @nullable
@@ -4803,6 +4870,11 @@ export type PageLabTemplateDtoItemsItem = {
   diskGib: number;
   /** The guest's operating system: `linux` or `windows`. */
   guestOs: string;
+  /**
+     * The devices every lease from this template reserves; absent when it
+     * asks for none.
+     */
+  hardware?: LabHardwareDto[];
   /** The draft's identity. */
   id: string;
   /** The pinned image version id. */
@@ -7652,6 +7724,11 @@ export type ResourceLabTemplateDtoData = {
   diskGib: number;
   /** The guest's operating system: `linux` or `windows`. */
   guestOs: string;
+  /**
+     * The devices every lease from this template reserves; absent when it
+     * asks for none.
+     */
+  hardware?: LabHardwareDto[];
   /** The draft's identity. */
   id: string;
   /** The pinned image version id. */
@@ -7771,6 +7848,13 @@ export type ResourceLeaseDetailDtoData = LeaseDto & ({
      * @nullable
      */
   failedStep?: string | null;
+  /**
+     * The physical devices the lease asked for through its template
+     * version, each with the reservation that holds it (FM-1121). Absent
+     * for a lease whose version asks for none, so such a lease reads as it
+     * always did.
+     */
+  hardware?: LeaseHardwareDto[];
   /**
      * The Lab-owned Fleet machine the guest was registered as.
      * @nullable
@@ -9633,6 +9717,12 @@ export interface SaveLabTemplateRequest {
   diskGib: number;
   /** The guest's operating system: `linux` (the default) or `windows`. */
   guestOs?: string;
+  /**
+     * The physical devices every lease from this template reserves: one
+     * entry per operator-created Proxmox USB mapping (at most four). Absent
+     * or empty asks for none.
+     */
+  hardware?: LabHardwareDto[];
   /** The pinned image version id. */
   imageVersionId: string;
   /**

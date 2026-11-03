@@ -18526,6 +18526,25 @@
           }
         }
       },
+      "LabHardwareDto": {
+        "type": "object",
+        "description": "One physical device a template asks for: the operator-created Proxmox\nresource mapping that names it (ADR 0019).",
+        "required": [
+          "kind",
+          "mapping"
+        ],
+        "properties": {
+          "kind": {
+            "type": "string",
+            "description": "The device kind: `usb`."
+          },
+          "mapping": {
+            "type": "string",
+            "description": "The Proxmox USB resource mapping id (letters, digits, `-`, `_` and\n`.`; at most 64 characters)."
+          }
+        },
+        "additionalProperties": false
+      },
       "LabPoolDrainDto": {
         "type": "object",
         "description": "What a drain did.",
@@ -18734,6 +18753,13 @@
             "type": "string",
             "description": "The guest's operating system: `linux` or `windows`."
           },
+          "hardware": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/LabHardwareDto"
+            },
+            "description": "The devices every lease from this version reserves; absent when it\nasks for none."
+          },
           "imageVersionId": {
             "type": "string",
             "description": "The pinned image version id."
@@ -18870,6 +18896,13 @@
           "guestOs": {
             "type": "string",
             "description": "The guest's operating system: `linux` or `windows`."
+          },
+          "hardware": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/LabHardwareDto"
+            },
+            "description": "The devices every lease from this template reserves; absent when it\nasks for none."
           },
           "id": {
             "type": "string",
@@ -19039,6 +19072,13 @@
                 ],
                 "description": "The saga step that failed, when provisioning failed."
               },
+              "hardware": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/components/schemas/LeaseHardwareDto"
+                },
+                "description": "The physical devices the lease asked for through its template\nversion, each with the reservation that holds it (FM-1121). Absent\nfor a lease whose version asks for none, so such a lease reads as it\nalways did."
+              },
               "machineId": {
                 "type": [
                   "string",
@@ -19176,6 +19216,73 @@
             "type": "integer",
             "format": "int32",
             "description": "The template's ready TTL, in seconds.",
+            "minimum": 0
+          }
+        }
+      },
+      "LeaseHardwareDto": {
+        "type": "object",
+        "description": "One device a lease asked for and the reservation that holds it for the\nlease.",
+        "required": [
+          "kind",
+          "mapping"
+        ],
+        "properties": {
+          "kind": {
+            "type": "string",
+            "description": "The device kind: `usb`."
+          },
+          "mapping": {
+            "type": "string",
+            "description": "The Proxmox USB resource mapping id the template declared."
+          },
+          "reservation": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/LeaseHardwareReservationDto",
+                "description": "The lease's live reservation of the device: null until placement\nreserves it, and again once the lease released it."
+              }
+            ]
+          }
+        }
+      },
+      "LeaseHardwareReservationDto": {
+        "type": "object",
+        "description": "A lease's reservation of one device. The attach and detach of the device\nto the lease's guest move it through these states.",
+        "required": [
+          "id",
+          "deviceId",
+          "state",
+          "createdAt"
+        ],
+        "properties": {
+          "createdAt": {
+            "type": "integer",
+            "format": "int64",
+            "description": "When the device was reserved (epoch milliseconds)."
+          },
+          "deviceId": {
+            "type": "string",
+            "description": "The inventoried device's identity (`fleetctl hardware list`)."
+          },
+          "id": {
+            "type": "string",
+            "description": "The reservation's identity."
+          },
+          "state": {
+            "type": "string",
+            "description": "The reservation state: `held`, `attaching`, `attached`, `detaching`,\n`attach_unknown` or `detach_failed`."
+          },
+          "usbSlot": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "The `usbN` slot the device occupies on the guest, once attached.",
             "minimum": 0
           }
         }
@@ -21767,6 +21874,13 @@
                 "guestOs": {
                   "type": "string",
                   "description": "The guest's operating system: `linux` or `windows`."
+                },
+                "hardware": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/LabHardwareDto"
+                  },
+                  "description": "The devices every lease from this template reserves; absent when it\nasks for none."
                 },
                 "id": {
                   "type": "string",
@@ -26654,6 +26768,13 @@
                 "type": "string",
                 "description": "The guest's operating system: `linux` or `windows`."
               },
+              "hardware": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/components/schemas/LabHardwareDto"
+                },
+                "description": "The devices every lease from this template reserves; absent when it\nasks for none."
+              },
               "id": {
                 "type": "string",
                 "description": "The draft's identity."
@@ -26839,6 +26960,13 @@
                       "null"
                     ],
                     "description": "The saga step that failed, when provisioning failed."
+                  },
+                  "hardware": {
+                    "type": "array",
+                    "items": {
+                      "$ref": "#/components/schemas/LeaseHardwareDto"
+                    },
+                    "description": "The physical devices the lease asked for through its template\nversion, each with the reservation that holds it (FM-1121). Absent\nfor a lease whose version asks for none, so such a lease reads as it\nalways did."
                   },
                   "machineId": {
                     "type": [
@@ -29365,6 +29493,13 @@
           "guestOs": {
             "type": "string",
             "description": "The guest's operating system: `linux` (the default) or `windows`."
+          },
+          "hardware": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/LabHardwareDto"
+            },
+            "description": "The physical devices every lease from this template reserves: one\nentry per operator-created Proxmox USB mapping (at most four). Absent\nor empty asks for none."
           },
           "imageVersionId": {
             "type": "string",
