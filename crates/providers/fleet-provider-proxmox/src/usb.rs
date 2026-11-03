@@ -24,9 +24,10 @@
 //!   PVE answers 501 `Method '…' not implemented` (404 is treated the same
 //!   way). No old-PVE answer was recorded by the spike, so that case is
 //!   covered by a synthetic test.
-//! - `check-node` messages differ in decoration between answers (a
-//!   `Invalid configuration: ` prefix and a trailing newline); they are
-//!   normalized and classified into [`PveUsbCheckKind`], with the text kept.
+//! - `check-node` messages are decorated (the recordings carry an
+//!   `Invalid configuration: ` prefix and a trailing newline on device
+//!   errors, none on the node warning); they are normalized and classified
+//!   into [`PveUsbCheckKind`], with the text kept.
 //!
 //! Decoding is tolerant and bounded, like the rest of the provider: a
 //! malformed entry becomes a bounded warning and never fails the list; every
