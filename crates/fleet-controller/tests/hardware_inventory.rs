@@ -412,11 +412,137 @@ async fn a_guest_that_cannot_be_read_is_counted_and_never_fatal() {
         report["guestScan"],
         json!({"listed": 3, "read": 2, "unreadable": 1, "truncated": false})
     );
+    // Positive evidence stands; "nothing references it" cannot be claimed,
+    // so nothing is `available`, in the answer, in the stored records or in
+    // a later list.
     assert_eq!(device(report, "fm-b")["status"], "externally_attached");
+    for mapping in ["fm-a", "fm-g"] {
+        assert_eq!(
+            device(report, mapping)["status"],
+            "unsupported",
+            "{mapping}"
+        );
+        assert_eq!(
+            device(report, mapping)["reason"],
+            "usb_inventory_unreadable"
+        );
+    }
+    let (_, listed) = world.raw("GET", "/api/v1/hardware/devices", None).await;
+    assert!(
+        listed["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|item| item["status"] != "available"),
+        "{listed}"
+    );
+    let stored: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM hardware_devices WHERE status = 'available'")
+            .fetch_one(&world.pool)
+            .await
+            .unwrap();
+    assert_eq!(stored, 0, "no allocatable status was stored");
     let warnings = report["warnings"].to_string();
     assert!(warnings.contains("qemu/201"), "{warnings}");
     assert!(warnings.contains("guest scan is incomplete"), "{warnings}");
     assert!(!warnings.contains(SECRET));
+
+    // The next complete scan makes them available again.
+    world.pve.data(
+        "/api2/json/nodes/pve/qemu/201/config",
+        &json!({"name": "guest-b", "digest": "d201"}),
+    );
+    let (_, body) = refresh(&world, &account).await;
+    assert_eq!(device(&body["data"], "fm-a")["status"], "available");
+}
+
+#[tokio::test]
+async fn a_failed_applied_view_keeps_the_stored_reference_and_marks_the_scan_incomplete() {
+    let pve = ScriptedPve::standard();
+    // The running guest's applied config is refused; its stored config
+    // still shows the reference.
+    pve.route(
+        "/api2/json/nodes/pve/qemu/200/config?current=1",
+        500,
+        r#"{"data":null,"message":"config busy"}"#,
+    );
+    let world = World::start(pve).await;
+    let account = world.account(true).await;
+    let (status, body) = refresh(&world, &account).await;
+    assert_eq!(status, 200, "{body}");
+    let report = &body["data"];
+    assert_eq!(device(report, "fm-b")["status"], "externally_attached");
+    assert_eq!(
+        device(report, "fm-b")["observation"]["externalReferences"][0]["vmid"],
+        200
+    );
+    // No guessed pending state from a view that was not read.
+    assert_eq!(
+        device(report, "fm-b")["observation"]["externalReferences"][0]["pending"],
+        Value::Null
+    );
+    assert_eq!(
+        report["guestScan"],
+        json!({"listed": 3, "read": 2, "unreadable": 1, "truncated": false})
+    );
+    assert_eq!(device(report, "fm-a")["status"], "unsupported");
+    assert!(
+        report["warnings"].to_string().contains("applied config"),
+        "{}",
+        report["warnings"]
+    );
+}
+
+#[tokio::test]
+async fn an_absent_endpoint_on_a_known_current_pve_is_not_pve_too_old() {
+    let pve = ScriptedPve::standard();
+    let world = World::start(pve.clone()).await;
+    let account = world.account(true).await;
+    refresh(&world, &account).await;
+    let (_, before) = world.raw("GET", "/api/v1/hardware/devices", None).await;
+    // The version stays 9.2.2; only the list answers as absent.
+    pve.route(
+        "/api2/json/cluster/mapping/usb",
+        501,
+        r#"{"data":null,"message":"Method 'GET /cluster/mapping/usb' not implemented"}"#,
+    );
+    let (status, body) = refresh(&world, &account).await;
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(body["data"]["pveVersion"], "9.2.2");
+    assert_eq!(body["data"]["support"]["state"], "unverified");
+    assert_eq!(body["data"]["support"]["reason"], "mapping_list_unreadable");
+    let (_, after) = world.raw("GET", "/api/v1/hardware/devices", None).await;
+    assert_eq!(before["items"], after["items"], "no device changed");
+}
+
+#[tokio::test]
+async fn a_refresh_whose_proxmox_read_fails_has_an_outcome_on_the_ledger() {
+    let pve = ScriptedPve::standard();
+    let world = World::start(pve.clone()).await;
+    let account = world.account(true).await;
+    // The token is refused outright.
+    pve.route(
+        "/api2/json/version",
+        401,
+        r#"{"data":null,"message":"no ticket"}"#,
+    );
+    let (status, body) = refresh(&world, &account).await;
+    assert_eq!(status, 502, "{body}");
+    let events: Vec<String> = sqlx::query_scalar(
+        "SELECT metadata_json FROM audit_events WHERE action = 'hardware.refresh' ORDER BY seq",
+    )
+    .fetch_all(&world.pool)
+    .await
+    .unwrap();
+    assert_eq!(events.len(), 2, "{events:?}");
+    assert!(events[0].contains("hardware_refresh_started"));
+    assert!(
+        events[1].contains("hardware_refresh_failed"),
+        "{}",
+        events[1]
+    );
+    assert!(events[1].contains("\"failure\":\"auth\""), "{}", events[1]);
+    assert!(!events[1].contains(SECRET));
 }
 
 #[tokio::test]

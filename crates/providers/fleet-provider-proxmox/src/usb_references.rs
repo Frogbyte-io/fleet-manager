@@ -54,6 +54,11 @@ pub struct PveUsbGuestReferences {
     pub template: bool,
     /// The references, ordered by slot index.
     pub references: Vec<PveUsbReference>,
+    /// Set when the applied view was asked for and could not be read (why,
+    /// bounded). The references are then the stored view's only, and one
+    /// that only the running guest holds may be missing; the caller must
+    /// not treat the guest as fully read.
+    pub applied_unread: Option<String>,
 }
 
 fn slot_index(key: &str) -> Option<u8> {
@@ -141,11 +146,26 @@ impl ProxmoxClient {
         }
         let base = format!("/api2/json/nodes/{}/qemu/{vmid}/config", urlencode(node));
         let stored = self.usb_config_read(&request, base.clone()).await?;
+        // The stored view is the one that must be read. A failure of the
+        // applied view keeps what the stored view already showed and says
+        // the answer is partial: a reference only the applied view holds
+        // (a pending removal) may be missing.
+        let mut applied_unread = None;
         let applied = if include_applied {
-            Some(
-                self.usb_config_read(&request, format!("{base}?current=1"))
-                    .await?,
-            )
+            match self
+                .usb_config_read(&request, format!("{base}?current=1"))
+                .await
+            {
+                Ok(value) if value.is_object() => Some(value),
+                Ok(value) => {
+                    applied_unread = Some(not_a_config(&value).to_string());
+                    None
+                }
+                Err(error) => {
+                    applied_unread = Some(error.to_string());
+                    None
+                }
+            }
         } else {
             None
         };
@@ -184,6 +204,7 @@ impl ProxmoxClient {
         Ok(PveUsbGuestReferences {
             template,
             references: merged.into_values().collect(),
+            applied_unread,
         })
     }
 
@@ -328,6 +349,64 @@ mod tests {
             .map(|r| (r.slot.as_str(), r.stored, r.applied))
             .collect();
         assert_eq!(summary, [("usb0", false, true), ("usb1", true, true)]);
+    }
+
+    #[tokio::test]
+    async fn a_failed_applied_view_keeps_the_stored_references_and_says_partial() {
+        let (reader, _) = client(vec![
+            (
+                "/qemu/7/config?current=1",
+                403,
+                serde_json::json!({"message": "Permission check failed top-secret-value"}),
+            ),
+            (
+                "/qemu/7/config",
+                200,
+                serde_json::json!({"data": {"usb0": "mapping=dev-a"}}),
+            ),
+        ]);
+        let refs = reader
+            .qemu_usb_references(request(), "pve", 7, true)
+            .await
+            .unwrap();
+        assert_eq!(refs.references.len(), 1);
+        assert_eq!(refs.references[0].mapping_id, "dev-a");
+        assert!(refs.references[0].stored && !refs.references[0].applied);
+        let why = refs.applied_unread.expect("partial");
+        assert!(why.contains("403") || why.contains("privilege"), "{why}");
+        assert!(!why.contains("top-secret-value"), "{why}");
+
+        // An applied view that is not a config object is partial too.
+        let (reader, _) = client(vec![
+            (
+                "/qemu/8/config?current=1",
+                200,
+                serde_json::json!({"data": "oops"}),
+            ),
+            (
+                "/qemu/8/config",
+                200,
+                serde_json::json!({"data": {"usb1": "mapping=dev-b"}}),
+            ),
+        ]);
+        let refs = reader
+            .qemu_usb_references(request(), "pve", 8, true)
+            .await
+            .unwrap();
+        assert_eq!(refs.references.len(), 1);
+        assert!(refs.applied_unread.is_some());
+
+        // Not asked for: not partial.
+        let (reader, _) = client(vec![(
+            "/qemu/9/config",
+            200,
+            serde_json::json!({"data": {}}),
+        )]);
+        let refs = reader
+            .qemu_usb_references(request(), "pve", 9, false)
+            .await
+            .unwrap();
+        assert!(refs.applied_unread.is_none());
     }
 
     #[tokio::test]

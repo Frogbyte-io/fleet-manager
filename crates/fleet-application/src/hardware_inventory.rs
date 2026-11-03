@@ -303,8 +303,12 @@ pub enum AccountReason {
     /// refused and says nothing about the devices.
     NoMappingAudit,
     /// The mapping list was empty and the token's permissions could not be
-    /// read, so "no mappings" cannot be told from "no `Mapping.Audit`".
+    /// read in full (refused or truncated), so "no mappings" cannot be told
+    /// from "no `Mapping.Audit`".
     PermissionsUnreadable,
+    /// The mapping list answered as an absent endpoint although the PVE
+    /// version is one that has it: the list is unreadable, not unsupported.
+    MappingListUnreadable,
 }
 
 impl AccountReason {
@@ -315,6 +319,7 @@ impl AccountReason {
             Self::PveTooOld => "pve_too_old",
             Self::NoMappingAudit => "no_mapping_audit",
             Self::PermissionsUnreadable => "permissions_unreadable",
+            Self::MappingListUnreadable => "mapping_list_unreadable",
         }
     }
 
@@ -327,7 +332,10 @@ impl AccountReason {
                 "the token lacks Mapping.Audit on /mapping/usb, so the mapping list says nothing about the devices; grant the opt-in FleetUsb role"
             }
             Self::PermissionsUnreadable => {
-                "the mapping list was empty and the token's permissions could not be read, so no mappings cannot be told from no Mapping.Audit"
+                "the token's permissions could not be read in full, so an empty mapping list cannot be told from a token without Mapping.Audit and no token reason can be derived"
+            }
+            Self::MappingListUnreadable => {
+                "the mapping list answered as an absent endpoint on a Proxmox VE version that has USB resource mappings, so it could not be read; no device was changed"
             }
         }
     }
@@ -469,7 +477,7 @@ pub const fn reason_text(reason: UnsupportedReason) -> &'static str {
         }
         UnsupportedReason::PveTooOld => "this Proxmox VE predates USB resource mappings",
         UnsupportedReason::UsbInventoryUnreadable => {
-            "whether the device is present could not be determined (the node check failed or the mapping is only partly readable)"
+            "whether the device is present or held could not be determined (a node check failed, the mapping is only partly readable, or not every guest config could be read)"
         }
     }
 }
@@ -686,6 +694,23 @@ impl Observation<'_> {
         }
     }
 
+    /// Says so for an id-only entry whose node inventory was not readable:
+    /// identical devices cannot be excluded without it.
+    fn note_unverified_id_only(&self, mapping: &RawMapping, notes: &mut Vec<String>) {
+        for entry in mapping.entries.iter().filter(|entry| entry.path.is_none()) {
+            let readable = self
+                .nodes
+                .get(entry.node.as_str())
+                .is_some_and(|node| node.inventory.is_some());
+            if !readable {
+                notes.push(format!(
+                    "the entry for node {} is id-only ({}:{}); identical devices cannot be excluded without the node USB inventory",
+                    entry.node, entry.vendor_id, entry.product_id
+                ));
+            }
+        }
+    }
+
     fn derive(&self, mapping: &RawMapping, has_live_reservation: bool) -> Derived {
         let mut notes = Vec::new();
         if mapping.unreadable_entries > 0 {
@@ -752,18 +777,7 @@ impl Observation<'_> {
                 };
             }
         }
-        for entry in mapping.entries.iter().filter(|entry| entry.path.is_none()) {
-            let readable = self
-                .nodes
-                .get(entry.node.as_str())
-                .is_some_and(|node| node.inventory.is_some());
-            if !readable {
-                notes.push(format!(
-                    "the entry for node {} is id-only ({}:{}); identical devices cannot be excluded without the node USB inventory",
-                    entry.node, entry.vendor_id, entry.product_id
-                ));
-            }
-        }
+        self.note_unverified_id_only(mapping, &mut notes);
         let referenced = self
             .references
             .iter()
@@ -779,6 +793,18 @@ impl Observation<'_> {
                 "not every guest config could be read, so a guest may reference this device unseen"
                     .to_owned(),
             );
+            // `available` is a claim that nothing references the device. An
+            // incomplete scan cannot make it, and a stored `available` is
+            // trusted by readers and by the reservation store, so it is not
+            // recorded: the device is not allocatable until a complete scan.
+            // A device Fleet itself holds keeps its place (the reservation
+            // is what excludes a second holder).
+            if !has_live_reservation {
+                return Derived {
+                    status: DeviceStatus::Unsupported(UnsupportedReason::UsbInventoryUnreadable),
+                    notes,
+                };
+            }
         }
         Derived {
             status: DeviceStatus::Available,
@@ -1041,13 +1067,35 @@ impl HardwareInventory {
             &[],
         )
         .await?;
-        let raw = self
-            .observer
-            .observe(&account, &SensitiveString::new(secret))
-            .await
-            .map_err(ProxmoxUseCaseError::Source)?;
-        let now = (self.clock)();
-        let mut report = self.apply(&account.id, raw, now).await?;
+        let observed = async {
+            let raw = self
+                .observer
+                .observe(&account, &SensitiveString::new(secret))
+                .await
+                .map_err(ProxmoxUseCaseError::Source)?;
+            let now = (self.clock)();
+            self.apply(&account.id, raw, now).await
+        }
+        .await;
+        let mut report = match observed {
+            Ok(report) => report,
+            Err(error) => {
+                // The intent is on the ledger; give it a result. Best
+                // effort: the failure being reported matters more than an
+                // audit sink that is also failing.
+                let _ = self
+                    .record(
+                        principal,
+                        &decision,
+                        correlation_id,
+                        &account.id,
+                        "hardware_refresh_failed",
+                        &[("failure", failure_class(&error))],
+                    )
+                    .await;
+                return Err(error);
+            }
+        };
         let mut counts: BTreeMap<&'static str, usize> = BTreeMap::new();
         for device in &report.devices {
             *counts.entry(device.view.status.id()).or_default() += 1;
@@ -1143,8 +1191,19 @@ impl HardwareInventory {
         now: i64,
     ) -> Result<RefreshReport, ProxmoxUseCaseError> {
         let mut warnings = raw.warnings;
+        // A truncated permissions map may lack the very path that grants a
+        // privilege, so it proves nothing about what is missing: it is
+        // treated as unread.
         let permissions = match &raw.permissions {
-            RawPermissionsRead::Read(read) => Some(read),
+            RawPermissionsRead::Read(read) if !read.truncated => Some(read),
+            RawPermissionsRead::Read(_) => {
+                push_warning(
+                    &mut warnings,
+                    "the token's permissions were truncated at the provider's bounds; token reasons and Mapping.Audit are not derived from them"
+                        .to_owned(),
+                );
+                None
+            }
             RawPermissionsRead::Unreadable { .. } => None,
         };
         if let RawPermissionsRead::Unreadable { detail } = &raw.permissions {
@@ -1157,6 +1216,33 @@ impl HardwareInventory {
         }
         let (version, mappings, rows_returned, truncated) = match raw.mappings {
             RawMappingsRead::EndpointAbsent { version } => {
+                // Absent means "too old" for a version below the first that
+                // has mappings, or one that is not known (the endpoint is
+                // all there is). On a version that has them, the answer is a
+                // fault, and calling it "too old" would contradict the
+                // version in the same report.
+                let known_current = version
+                    .as_deref()
+                    .and_then(pve_major)
+                    .is_some_and(|major| major >= MIN_PVE_MAJOR);
+                if known_current {
+                    push_warning(
+                        &mut warnings,
+                        "the mapping list answered as an absent endpoint; no device was changed"
+                            .to_owned(),
+                    );
+                    return self
+                        .report(
+                            account_id,
+                            now,
+                            version,
+                            AccountSupport::Unverified(AccountReason::MappingListUnreadable),
+                            None,
+                            &BTreeMap::new(),
+                            warnings,
+                        )
+                        .await;
+                }
                 self.mark_all(account_id, UnsupportedReason::PveTooOld, now)
                     .await?;
                 return self
@@ -1481,6 +1567,24 @@ impl HardwareInventory {
             devices,
             warnings,
         })
+    }
+}
+
+/// A stable, secret-free class of a refresh failure, for the audit ledger.
+const fn failure_class(error: &ProxmoxUseCaseError) -> &'static str {
+    match error {
+        ProxmoxUseCaseError::Source(source) => match source {
+            ProxmoxSourceError::FingerprintMismatch { .. } => "fingerprint_mismatch",
+            ProxmoxSourceError::Auth => "auth",
+            ProxmoxSourceError::Forbidden { .. } => "forbidden",
+            ProxmoxSourceError::Http { .. } => "http",
+            ProxmoxSourceError::InvalidPayload { .. } => "invalid_payload",
+            ProxmoxSourceError::Connect { .. } => "connect",
+            ProxmoxSourceError::Credentials(_) => "credentials",
+        },
+        ProxmoxUseCaseError::Credentials(_) => "credentials",
+        ProxmoxUseCaseError::Backend { .. } => "backend",
+        _ => "error",
     }
 }
 
@@ -1917,7 +2021,7 @@ mod tests {
     }
 
     #[test]
-    fn an_incomplete_guest_scan_is_said_on_an_available_device() {
+    fn an_incomplete_guest_scan_never_yields_available() {
         let mut fixture = Fixture::new(
             vec![mapping(
                 "dev-a",
@@ -1927,7 +2031,10 @@ mod tests {
         );
         fixture.scan_complete = false;
         let derived = fixture.status("dev-a", false);
-        assert_eq!(derived.status, DeviceStatus::Available);
+        assert_eq!(
+            derived.status,
+            DeviceStatus::Unsupported(UnsupportedReason::UsbInventoryUnreadable)
+        );
         assert!(
             derived
                 .notes
@@ -1935,6 +2042,17 @@ mod tests {
                 .any(|note| note.contains("guest config")),
             "{:?}",
             derived.notes
+        );
+        // A device Fleet holds is the reservation's business, not the scan's.
+        assert_eq!(
+            fixture.status("dev-a", true).status,
+            DeviceStatus::Available
+        );
+        // Positive evidence still stands: a reference found is a reference.
+        fixture.references = vec![reference("dev-a", false)];
+        assert_eq!(
+            fixture.status("dev-a", false).status,
+            DeviceStatus::ExternallyAttached
         );
     }
 

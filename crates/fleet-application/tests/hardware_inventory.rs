@@ -140,6 +140,19 @@ impl AuditPort for Audit {
 struct MemStore {
     devices: Mutex<Vec<HardwareDevice>>,
     reservations: Mutex<Vec<HardwareReservation>>,
+    fail_upserts: Mutex<bool>,
+}
+
+impl MemStore {
+    fn fail_upserts(&self) {
+        *self.fail_upserts.lock().unwrap() = true;
+    }
+}
+
+fn reason_text_of(view: &fleet_application::hardware_inventory::DeviceView) -> &'static str {
+    view.status
+        .reason()
+        .map_or("", fleet_application::hardware_inventory::reason_text)
 }
 
 #[async_trait]
@@ -150,6 +163,9 @@ impl HardwareStore for MemStore {
         now: i64,
     ) -> Result<HardwareDevice, HardwareStoreError> {
         assert_ne!(observation.status, DeviceStatus::Reserved);
+        if *self.fail_upserts.lock().unwrap() {
+            return Err(HardwareStoreError::Backend("disk full".to_owned()));
+        }
         let mut devices = self.devices.lock().unwrap();
         if let Some(device) = devices.iter_mut().find(|device| {
             device.account_id == observation.account_id
@@ -885,7 +901,42 @@ async fn an_incomplete_guest_scan_is_reported_and_never_fatal() {
     answer.guests.guests_read = 1;
     let rig = rig(answer);
     let report = refresh(&rig).await;
-    assert_eq!(status_of(&report, "m-available"), DeviceStatus::Available);
+    // An incomplete scan cannot claim "nothing references it".
+    let unknown = DeviceStatus::Unsupported(UnsupportedReason::UsbInventoryUnreadable);
+    assert_eq!(status_of(&report, "m-available"), unknown);
+    // Positive evidence still stands.
+    assert_eq!(
+        status_of(&report, "m-external"),
+        DeviceStatus::ExternallyAttached
+    );
+    // Nothing allocatable was stored, and a later list (a read of the
+    // stored records, long after) does not show plain `available` either.
+    let stored = rig.store.list_devices(ACCOUNT).await.unwrap();
+    assert!(
+        stored
+            .iter()
+            .all(|device| device.status != DeviceStatus::Available),
+        "{stored:?}"
+    );
+    let listed = list_all(&rig).await;
+    for view in &listed {
+        assert_ne!(
+            view.status,
+            DeviceStatus::Available,
+            "{}",
+            view.device.mapping_id
+        );
+    }
+    let available = listed
+        .iter()
+        .find(|view| view.device.mapping_id == "m-available")
+        .unwrap();
+    assert_eq!(available.status, unknown);
+    assert!(
+        reason_text_of(available).contains("guest config"),
+        "{}",
+        reason_text_of(available)
+    );
     let scan = report.guest_scan.unwrap();
     assert_eq!((scan.listed, scan.read, scan.unreadable), (3, 1, 2));
     assert!(
@@ -1303,7 +1354,7 @@ async fn the_trust_gate_and_the_secret_gate_hold_before_any_call() {
 }
 
 #[tokio::test]
-async fn a_failing_proxmox_read_is_a_source_error_after_the_intent() {
+async fn a_failing_proxmox_read_is_a_source_error_with_an_outcome_on_the_ledger() {
     let rig = rig_with(Some("AA"), true, Err(ProxmoxSourceError::Auth));
     let error = rig
         .inventory
@@ -1314,9 +1365,81 @@ async fn a_failing_proxmox_read_is_a_source_error_after_the_intent() {
         error,
         ProxmoxUseCaseError::Source(ProxmoxSourceError::Auth)
     ));
-    // The intent is on the ledger as evidence that a refresh was accepted
-    // and its outcome is unknown.
-    assert_eq!(rig.audit.events(), ["hardware_refresh_started"]);
+    // The intent has a result: a failure class, never the detail.
+    assert_eq!(
+        rig.audit.events(),
+        ["hardware_refresh_started", "hardware_refresh_failed"]
+    );
+    let (failed, action) = {
+        let intents = rig.audit.intents.lock().unwrap();
+        (intents[1].metadata.to_json(), intents[1].action.clone())
+    };
+    assert!(failed.contains("\"failure\":\"auth\""), "{failed}");
+    assert_eq!(action, "hardware.refresh");
+
+    // A detail that could carry anything stays out of the ledger.
+    let rig = rig_with(
+        Some("AA"),
+        true,
+        Err(ProxmoxSourceError::Http {
+            status: 500,
+            detail: format!("boom {SECRET}"),
+        }),
+    );
+    let _ = rig
+        .inventory
+        .refresh(&Allow, &operator(), None, ACCOUNT)
+        .await
+        .unwrap_err();
+    let failed = rig.audit.intents.lock().unwrap()[1].metadata.to_json();
+    assert!(failed.contains("\"failure\":\"http\""), "{failed}");
+    assert!(!failed.contains(SECRET), "{failed}");
+
+    // An audit sink that is down does not hide the failure being reported.
+    let rig = rig_with(Some("AA"), true, Err(ProxmoxSourceError::Auth));
+    *rig.audit.refuse_from.lock().unwrap() = 2;
+    let error = rig
+        .inventory
+        .refresh(&Allow, &operator(), None, ACCOUNT)
+        .await
+        .unwrap_err();
+    assert!(matches!(
+        error,
+        ProxmoxUseCaseError::Source(ProxmoxSourceError::Auth)
+    ));
+}
+
+#[tokio::test]
+async fn a_failure_while_recording_is_also_given_an_outcome() {
+    // The observation succeeds and the records cannot be written: the ledger
+    // still ends with a result for the intent.
+    let rig = rig(every_status());
+    rig.store.fail_upserts();
+    let error = rig
+        .inventory
+        .refresh(&Allow, &operator(), None, ACCOUNT)
+        .await
+        .unwrap_err();
+    assert!(matches!(
+        error,
+        ProxmoxUseCaseError::Backend {
+            context: "hardware",
+            ..
+        }
+    ));
+    assert_eq!(
+        rig.audit.events(),
+        ["hardware_refresh_started", "hardware_refresh_failed"]
+    );
+    let intents = rig.audit.intents.lock().unwrap();
+    assert!(
+        intents[1]
+            .metadata
+            .to_json()
+            .contains("\"failure\":\"backend\""),
+        "{}",
+        intents[1].metadata.to_json()
+    );
 }
 
 // ── listing ─────────────────────────────────────────────────────────────
@@ -1384,4 +1507,112 @@ async fn the_list_is_ordered_paged_and_scoped_to_known_accounts() {
         .await
         .unwrap_err();
     assert!(matches!(error, ProxmoxUseCaseError::NotFound { .. }));
+}
+
+// ── an absent endpoint, and a truncated permissions map ─────────────────
+
+#[tokio::test]
+async fn an_absent_mapping_endpoint_is_too_old_only_when_the_version_says_so() {
+    let absent = |version: Option<&str>| {
+        let mut answer = empty_list(RawPermissionsRead::Unreadable {
+            detail: "not read".to_owned(),
+        });
+        answer.mappings = RawMappingsRead::EndpointAbsent {
+            version: version.map(str::to_owned),
+        };
+        answer
+    };
+    // A PVE that has mappings answering "absent" is a fault, not "too old":
+    // the report cannot contradict its own version, and no device changes.
+    let rig = rig(every_status());
+    refresh(&rig).await;
+    let before = rig.store.list_devices(ACCOUNT).await.unwrap();
+    *rig.observer.answer.lock().unwrap() = Ok(absent(Some("9.2.2")));
+    let report = refresh(&rig).await;
+    assert_eq!(
+        report.support,
+        AccountSupport::Unverified(AccountReason::MappingListUnreadable)
+    );
+    assert_eq!(report.pve_version.as_deref(), Some("9.2.2"));
+    assert_eq!(before, rig.store.list_devices(ACCOUNT).await.unwrap());
+    assert!(
+        report
+            .warnings
+            .iter()
+            .any(|warning| warning.contains("absent endpoint")),
+        "{:?}",
+        report.warnings
+    );
+
+    // An old version, or one that cannot be read, is too old.
+    for version in [Some("7.4-3"), None] {
+        *rig.observer.answer.lock().unwrap() = Ok(absent(version));
+        let report = refresh(&rig).await;
+        assert_eq!(
+            report.support,
+            AccountSupport::Unsupported(AccountReason::PveTooOld),
+            "{version:?}"
+        );
+    }
+}
+
+fn truncated(paths: EffectivePermissions) -> RawPermissionsRead {
+    RawPermissionsRead::Read(RawTokenPermissions {
+        version: "9.2.2".to_owned(),
+        paths,
+        truncated: true,
+        ..RawTokenPermissions::default()
+    })
+}
+
+#[tokio::test]
+async fn a_truncated_permissions_map_derives_nothing_from_what_it_lacks() {
+    // An empty list with a truncated map that shows no Mapping.Audit: the
+    // missing path may be among the dropped ones, so it is unverified, not
+    // `no_mapping_audit`, and no device is touched.
+    let rig = rig(every_status());
+    refresh(&rig).await;
+    let before = rig.store.list_devices(ACCOUNT).await.unwrap();
+    *rig.observer.answer.lock().unwrap() = Ok(empty_list(truncated(paths(&[(
+        "/vms",
+        &[("VM.Audit", true)],
+    )]))));
+    let report = refresh(&rig).await;
+    assert_eq!(
+        report.support,
+        AccountSupport::Unverified(AccountReason::PermissionsUnreadable)
+    );
+    assert_eq!(before, rig.store.list_devices(ACCOUNT).await.unwrap());
+    assert!(
+        report
+            .warnings
+            .iter()
+            .any(|warning| warning.contains("truncated")),
+        "{:?}",
+        report.warnings
+    );
+
+    // A non-empty list with a truncated map that shows no Mapping.Use or
+    // HWType: no token reason is derived, and nothing is pruned.
+    let mut answer = every_status();
+    answer.permissions = truncated(paths(&[("/mapping/usb", &[("Mapping.Audit", true)])]));
+    *rig.observer.answer.lock().unwrap() = Ok(answer);
+    let report = refresh(&rig).await;
+    assert_eq!(report.support, AccountSupport::Supported);
+    assert_eq!(status_of(&report, "m-available"), DeviceStatus::Available);
+    assert_eq!(status_of(&report, "m-nouse"), DeviceStatus::Available);
+
+    // Not truncated, the same map is a token without the privileges.
+    let mut answer = every_status();
+    answer.permissions = RawPermissionsRead::Read(RawTokenPermissions {
+        version: "9.2.2".to_owned(),
+        paths: paths(&[("/mapping/usb", &[("Mapping.Audit", true)])]),
+        ..RawTokenPermissions::default()
+    });
+    *rig.observer.answer.lock().unwrap() = Ok(answer);
+    let report = refresh(&rig).await;
+    assert_eq!(
+        status_of(&report, "m-available"),
+        DeviceStatus::Unsupported(UnsupportedReason::TokenLacksMappingUse)
+    );
 }

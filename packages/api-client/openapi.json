@@ -17971,7 +17971,7 @@
           },
           "truncated": {
             "type": "boolean",
-            "description": "Whether the bound dropped guests. A scan with unreadable or dropped\nguests is incomplete: an available device may be referenced by a guest\nthat was not read."
+            "description": "Whether the bound dropped guests. A scan with unreadable or dropped\nguests is incomplete: a device that would be available is reported\n`unsupported` (`usb_inventory_unreadable`) instead, since a guest may reference it\nthat was not read."
           },
           "unreadable": {
             "type": "integer",
@@ -18138,7 +18138,7 @@
               "string",
               "null"
             ],
-            "description": "`pve_too_old`, `no_mapping_audit` or `permissions_unreadable`, unless\nsupported."
+            "description": "`pve_too_old`, `no_mapping_audit`, `permissions_unreadable` or\n`mapping_list_unreadable`, unless\nsupported."
           },
           "state": {
             "type": "string",

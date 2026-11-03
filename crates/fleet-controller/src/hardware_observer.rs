@@ -277,9 +277,29 @@ async fn scan_guests(
     for (node, vmid, name, template, running, result) in reads {
         match result {
             Ok(references) => {
-                scan.guests_read += 1;
+                // A guest whose applied view could not be read keeps the
+                // references its stored view showed, but it is not fully
+                // read: a reference only the running guest holds may be
+                // missing, so it counts with the unreadable ones.
+                let partial = references.applied_unread.clone();
+                if let Some(detail) = &partial {
+                    scan.guests_unreadable += 1;
+                    failures += 1;
+                    if failures <= MAX_GUEST_WARNINGS {
+                        warnings.push(format!(
+                            "guest qemu/{vmid} on {node}: the applied config could not be read: {}",
+                            bounded(detail)
+                        ));
+                    }
+                } else {
+                    scan.guests_read += 1;
+                }
                 for reference in references.references {
-                    let pending = match (running, reference.stored, reference.applied) {
+                    let pending = match (
+                        partial.is_none() && running,
+                        reference.stored,
+                        reference.applied,
+                    ) {
                         (true, true, false) => Some(ReferencePending::Add),
                         (true, false, true) => Some(ReferencePending::Remove),
                         _ => None,

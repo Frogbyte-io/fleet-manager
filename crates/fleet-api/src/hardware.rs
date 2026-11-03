@@ -319,7 +319,8 @@ pub struct HardwareSupportDto {
     /// `supported`, `unsupported` (the account cannot be inventoried) or
     /// `unverified` (the list could not be verified; no device was changed).
     pub state: String,
-    /// `pve_too_old`, `no_mapping_audit` or `permissions_unreadable`, unless
+    /// `pve_too_old`, `no_mapping_audit`, `permissions_unreadable` or
+    /// `mapping_list_unreadable`, unless
     /// supported.
     pub reason: Option<String>,
     /// The reason in words, unless supported.
@@ -337,7 +338,8 @@ pub struct HardwareGuestScanDto {
     /// How many could not be read.
     pub unreadable: usize,
     /// Whether the bound dropped guests. A scan with unreadable or dropped
-    /// guests is incomplete: an available device may be referenced by a guest
+    /// guests is incomplete: a device that would be available is reported
+    /// `unsupported` (`usb_inventory_unreadable`) instead, since a guest may reference it
     /// that was not read.
     pub truncated: bool,
 }
