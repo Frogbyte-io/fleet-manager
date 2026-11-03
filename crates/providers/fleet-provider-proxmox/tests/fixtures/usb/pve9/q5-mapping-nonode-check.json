@@ -1,0 +1,69 @@
+{
+  "http_status": 200,
+  "pve_version": "9.2.2",
+  "recorded_with": "pvesh (root@pam), status and body reconstructed from the CLI",
+  "request": {
+    "method": "GET",
+    "params": {
+      "check-node": "pve"
+    },
+    "path": "/cluster/mapping/usb"
+  },
+  "response": [
+    {
+      "description": "Fleet M11 test: Verbatim 4K BD RW",
+      "digest": "849beaef1edb0c658ae8e7b5c514d60fc4e8ee15",
+      "errors": [],
+      "id": "fm-test-verbatim",
+      "map": [
+        "node=pve,id=18a5:0428"
+      ],
+      "type": "usb"
+    },
+    {
+      "digest": "849beaef1edb0c658ae8e7b5c514d60fc4e8ee15",
+      "errors": [
+        {
+          "message": "No mapping for node pve.",
+          "severity": "warning"
+        }
+      ],
+      "id": "fm-test-tmp-nonode",
+      "map": [
+        "node=nowhere,id=05ac:1500"
+      ],
+      "type": "usb"
+    },
+    {
+      "description": "DotMatrixLabs Decker (Dot X testing)",
+      "digest": "849beaef1edb0c658ae8e7b5c514d60fc4e8ee15",
+      "errors": [],
+      "id": "decker",
+      "map": [
+        "node=pve,id=04d8:e626"
+      ],
+      "type": "usb"
+    },
+    {
+      "description": "Fleet M11 test: MacBook Air SuperDrive (port 1-10)",
+      "digest": "849beaef1edb0c658ae8e7b5c514d60fc4e8ee15",
+      "errors": [],
+      "id": "fm-test-superdrive-a",
+      "map": [
+        "node=pve,id=05ac:1500,path=1-10"
+      ],
+      "type": "usb"
+    },
+    {
+      "description": "Fleet M11 test: MacBook Air SuperDrive (port 1-7)",
+      "digest": "849beaef1edb0c658ae8e7b5c514d60fc4e8ee15",
+      "errors": [],
+      "id": "fm-test-superdrive-b",
+      "map": [
+        "node=pve,id=05ac:1500,path=1-7"
+      ],
+      "type": "usb"
+    }
+  ],
+  "who": "root"
+}

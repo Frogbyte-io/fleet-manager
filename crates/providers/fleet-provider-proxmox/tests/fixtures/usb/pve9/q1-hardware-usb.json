@@ -1,0 +1,137 @@
+{
+  "http_status": 200,
+  "pve_version": "9.2.2",
+  "recorded_with": "pvesh (root@pam), status and body reconstructed from the CLI",
+  "request": {
+    "method": "GET",
+    "params": {},
+    "path": "/nodes/pve/hardware/usb"
+  },
+  "response": [
+    {
+      "busnum": 1,
+      "class": 9,
+      "devnum": 1,
+      "level": 0,
+      "manufacturer": "Linux 7.0.2-6-pve xhci-hcd",
+      "port": 0,
+      "prodid": "0002",
+      "product": "xHCI Host Controller",
+      "speed": "480",
+      "vendid": "1d6b"
+    },
+    {
+      "busnum": 1,
+      "class": 0,
+      "devnum": 2,
+      "level": 1,
+      "manufacturer": "Apple Inc.",
+      "port": 9,
+      "prodid": "1500",
+      "product": "MacBook Air SuperDrive",
+      "speed": "480",
+      "usbpath": "10",
+      "vendid": "05ac"
+    },
+    {
+      "busnum": 1,
+      "class": 0,
+      "devnum": 3,
+      "level": 1,
+      "manufacturer": "Apple Inc.",
+      "port": 6,
+      "prodid": "1500",
+      "product": "MacBook Air SuperDrive",
+      "speed": "480",
+      "usbpath": "7",
+      "vendid": "05ac"
+    },
+    {
+      "busnum": 2,
+      "class": 9,
+      "devnum": 1,
+      "level": 0,
+      "manufacturer": "Linux 7.0.2-6-pve xhci-hcd",
+      "port": 0,
+      "prodid": "0003",
+      "product": "xHCI Host Controller",
+      "speed": "10000",
+      "vendid": "1d6b"
+    },
+    {
+      "busnum": 3,
+      "class": 9,
+      "devnum": 1,
+      "level": 0,
+      "manufacturer": "Linux 7.0.2-6-pve xhci-hcd",
+      "port": 0,
+      "prodid": "0002",
+      "product": "xHCI Host Controller",
+      "speed": "480",
+      "vendid": "1d6b"
+    },
+    {
+      "busnum": 4,
+      "class": 9,
+      "devnum": 1,
+      "level": 0,
+      "manufacturer": "Linux 7.0.2-6-pve xhci-hcd",
+      "port": 0,
+      "prodid": "0003",
+      "product": "xHCI Host Controller",
+      "speed": "10000",
+      "vendid": "1d6b"
+    },
+    {
+      "busnum": 5,
+      "class": 9,
+      "devnum": 1,
+      "level": 0,
+      "manufacturer": "Linux 7.0.2-6-pve xhci-hcd",
+      "port": 0,
+      "prodid": "0002",
+      "product": "xHCI Host Controller",
+      "speed": "480",
+      "vendid": "1d6b"
+    },
+    {
+      "busnum": 5,
+      "class": 239,
+      "devnum": 2,
+      "level": 1,
+      "manufacturer": "Frogbyte AS",
+      "port": 0,
+      "prodid": "e626",
+      "product": "Decker",
+      "speed": "12",
+      "usbpath": "1",
+      "vendid": "04d8"
+    },
+    {
+      "busnum": 5,
+      "class": 0,
+      "devnum": 3,
+      "level": 1,
+      "manufacturer": "Verbatim",
+      "port": 2,
+      "prodid": "0428",
+      "product": "Verbatim 4K BD RW",
+      "speed": "480",
+      "usbpath": "3",
+      "vendid": "18a5"
+    },
+    {
+      "busnum": 6,
+      "class": 9,
+      "devnum": 1,
+      "level": 0,
+      "manufacturer": "Linux 7.0.2-6-pve xhci-hcd",
+      "port": 0,
+      "prodid": "0003",
+      "product": "xHCI Host Controller",
+      "speed": "10000",
+      "vendid": "1d6b"
+    }
+  ],
+  "who": "root"
+}

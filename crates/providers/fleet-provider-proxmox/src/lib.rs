@@ -46,6 +46,7 @@ use rustls::{DigitallySignedStruct, SignatureScheme};
 use sha2::Digest;
 
 mod permissions;
+pub mod usb;
 pub mod usb_attach;
 mod vnc;
 

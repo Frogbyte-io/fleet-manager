@@ -1,0 +1,12 @@
+{
+  "http_status": 200,
+  "pve_version": "8.4.0",
+  "recorded_with": "curl over HTTPS with a temporary privilege-separated API token (real HTTP status and body)",
+  "request": {
+    "method": "GET",
+    "params": {},
+    "path": "/cluster/mapping/usb"
+  },
+  "response": [],
+  "who": "probe"
+}
