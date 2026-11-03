@@ -59,6 +59,11 @@ impl Fixture {
     }
 
     async fn device(&self, mapping: &str) -> String {
+        self.device_seen(mapping, NOW).await
+    }
+
+    /// Records the device as last seen at `seen_at`.
+    async fn device_seen(&self, mapping: &str, seen_at: i64) -> String {
         self.hardware
             .upsert_device(
                 &DeviceObservation {
@@ -73,7 +78,7 @@ impl Fixture {
                         usbpath: Some("1-10".to_owned()),
                         manufacturer: None,
                         product: None,
-                        last_seen_at: NOW,
+                        last_seen_at: seen_at,
                     }],
                     status: DeviceStatus::Available,
                 },
@@ -115,6 +120,16 @@ impl Fixture {
         node: &str,
         declared: &[LabHardware],
     ) -> Result<Vec<HardwareReservation>, PlacementRefusal> {
+        self.reserve_at(lease, node, declared, NOW + 1).await
+    }
+
+    async fn reserve_at(
+        &self,
+        lease: &str,
+        node: &str,
+        declared: &[LabHardware],
+        now: i64,
+    ) -> Result<Vec<HardwareReservation>, PlacementRefusal> {
         self.placement
             .reserve(
                 "tester",
@@ -125,7 +140,7 @@ impl Fixture {
                     declared,
                     operation_id: None,
                 },
-                NOW + 1,
+                now,
             )
             .await
             .expect("the store must not fail")
@@ -243,6 +258,88 @@ async fn a_device_held_by_a_finished_lease_is_free_to_the_next() {
     assert_eq!(held.len(), 1);
     assert_eq!(held[0].device_id, device);
     assert!(fixture.live("lease-1").await.is_empty());
+}
+
+#[tokio::test]
+async fn a_device_taken_over_from_a_finished_lease_must_still_be_fresh() {
+    // The store frees a dead owner's hold, but it checks the stored status,
+    // not how old the observation is: the takeover owes the freshness an
+    // available device owes, or the lease would reserve on a stale view.
+    let fixture = Fixture::new().await;
+    let device = fixture.device("dev-a").await;
+    fixture.lease("lease-1", "provisioning").await;
+    fixture.lease("lease-2", "provisioning").await;
+    fixture
+        .reserve("lease-1", NODE, &[usb("dev-a")])
+        .await
+        .unwrap();
+    sqlx::query("UPDATE lab_leases SET state = 'released' WHERE id = 'lease-1'")
+        .execute(&fixture.pool)
+        .await
+        .unwrap();
+
+    // Two hours on, nothing has refreshed the observation (seen at NOW).
+    let refusal = fixture
+        .reserve_at("lease-2", NODE, &[usb("dev-a")], NOW + 7_200_000)
+        .await
+        .unwrap_err();
+    assert_eq!(refusal.reason(), "hardware_stale", "{refusal}");
+    assert!(
+        refusal.to_string().contains("stale observation"),
+        "{refusal}"
+    );
+    // Nothing is held, by the dead lease or the refused one, and the device
+    // is not shown reserved.
+    assert!(fixture.live("lease-1").await.is_empty());
+    assert!(fixture.live("lease-2").await.is_empty());
+    assert_eq!(fixture.rows().await, 2, "history only, nothing live");
+    assert_eq!(fixture.status(&device).await, DeviceStatus::Available);
+
+    // The same takeover on a fresh observation is granted.
+    let refreshed = fixture.device_seen("dev-a", NOW + 7_199_000).await;
+    assert_eq!(refreshed, device);
+    let held = fixture
+        .reserve_at("lease-2", NODE, &[usb("dev-a")], NOW + 7_200_000)
+        .await
+        .unwrap();
+    assert_eq!(held.len(), 1);
+}
+
+#[tokio::test]
+async fn a_second_device_that_fails_the_takeover_check_releases_the_first() {
+    let fixture = Fixture::new().await;
+    fixture.device("dev-a").await;
+    fixture.device("dev-b").await;
+    for lease in ["lease-1", "lease-2"] {
+        fixture.lease(lease, "provisioning").await;
+    }
+    // lease-1 held dev-b and is over.
+    fixture
+        .reserve("lease-1", NODE, &[usb("dev-b")])
+        .await
+        .unwrap();
+    sqlx::query("UPDATE lab_leases SET state = 'released' WHERE id = 'lease-1'")
+        .execute(&fixture.pool)
+        .await
+        .unwrap();
+    // dev-a is freshly seen, dev-b only long ago.
+    fixture.device_seen("dev-a", NOW + 7_199_000).await;
+
+    let refusal = fixture
+        .reserve_at(
+            "lease-2",
+            NODE,
+            &[usb("dev-a"), usb("dev-b")],
+            NOW + 7_200_000,
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(refusal.reason(), "hardware_stale", "{refusal}");
+    assert!(
+        refusal.to_string().starts_with("hardware dev-b "),
+        "{refusal}"
+    );
+    assert!(fixture.live("lease-2").await.is_empty(), "dev-a released");
 }
 
 #[tokio::test]

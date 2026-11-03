@@ -687,6 +687,20 @@ Refusals fail the provision operation with a reason:
 | `insufficient_memory`, `insufficient_cpu` | The node lacks memory or cores after overcommit, usage, and held reservations | Release leases, free the node, or raise `FLEET_LAB_MEMORY_OVERCOMMIT` or `FLEET_LAB_CPU_OVERCOMMIT` |
 | `insufficient_disk` | The image's storage pool on the node lacks free space after held reservations (no overcommit applies). A running Lab guest's disk is in the observed used space and in its reservation, so it counts twice | Free space on that pool, or release leases that hold disk on it |
 | `reservation_mismatch` | The lease's held reservation is for another node, account, demand, or storage pool. This can happen when the template moved or a re-promotion changed the pinned build's pool | Release the lease and request a new one |
+| `hardware_unknown` | The template declares a USB mapping that is not in the inventory of the account the clone is made through | Have an operator create the Proxmox USB mapping, then `fleetctl hardware refresh --account <account-id>` |
+| `hardware_no_node_entry` | The mapping has no entry for any node | Add a node entry to the Proxmox mapping, then refresh |
+| `hardware_wrong_node` | The device is not on the node Lab clones on (the node that holds the pinned image's template): it has no entry there, or was seen recently only on another node. The message names both | Pin an image whose template is on the device's node, or give the mapping an entry for the template's node |
+| `hardware_unsupported` | The device cannot be allocated; the message carries the reason (for example the token lacks `Mapping.Use`) | Fix the cause the reason names, then refresh |
+| `hardware_missing` | The mapping exists but the device was not seen on its node | Check the cable and port, then refresh |
+| `hardware_externally_attached` | A guest Fleet did not attach already references the mapping. Fleet never adopts or detaches it | Detach it by hand, or leave the device to its owner |
+| `hardware_quarantined` | A failed or unknown attach or detach needs an operator or the reconciler | Resolve it (`hardware.override-release` is elevated and audited) |
+| `hardware_stale` | The device was not seen on the node within the observation bound (15 minutes by default), so it is not reserved on that observation | `fleetctl hardware refresh --account <account-id>`, then retry |
+| `hardware_busy` | Another owner holds the device; the message names the holder. There is no queue: the request fails | Wait for the holder, or release its lease |
+| `hardware_pool_unsupported` | The template version declares hardware and is pooled; a pool member is a prebuilt guest that cannot take a device before it boots | Lease it without a pool |
+| `hardware_needs_lease`, `hardware_unavailable` | There is no lease to own the reservation, or this controller has no hardware placement configured | Provision through a lease; fix the controller composition |
+| `hardware_not_allocatable`, `hardware_owner_finished` | A reservation was refused for a status that should have allowed it, or the owner no longer counts | Refresh the inventory and retry |
+
+**USB hardware (FM-1121).** A template may declare `hardware: [{ "kind": "usb", "mapping": "<id>" }]` (up to four). Placement reserves those devices for the lease with the capacity, and the refusals above name the constraint that failed. **Until the attach saga ([#571](https://github.com/Frogbyte-io/fleet-manager/issues/571)) lands, a lease with hardware reserves the device but does not attach it:** the lease can reach `ready` with the device only held, the guest does not have it, and the lease detail shows the reservation as `held` (`hardware[].reservation.state`, with `id`, `deviceId`, `usbSlot` and `createdAt`). Do not treat `held` as attached. Reserving is Fleet-side only and calls nothing on Proxmox. Hold-releases follow the capacity rules: a refused or failed-before-allocation lease releases its devices, and cleanup releases devices that were never attached.
 
 `FLEET_LAB_MEMORY_OVERCOMMIT` and `FLEET_LAB_CPU_OVERCOMMIT` (default `1.0`, at most 16) scale the node's total memory and CPU count; disk is never overcommitted. A lease's reservation stops counting once the lease is released, or failed without a guest. A lease in `cleanup_failed` keeps its reservation until `lab cleanup-retry` destroys the guest. [`docs/architecture/lab.md`](../architecture/lab.md) has the exact rule.
 
@@ -756,6 +770,6 @@ Not yet guaranteed:
 
 ## Out of scope
 
-USB, GPU, and other hardware-in-the-loop resources are a separate sub-epic.
+USB devices are reserved for a lease (FM-1121) but not yet attached to its guest (the attach saga, [#571](https://github.com/Frogbyte-io/fleet-manager/issues/571)); GPU and other hardware-in-the-loop resources are a separate sub-epic.
 
 Windows guests ([ADR 0015](../adr/0015-windows-lab-guest-transport.md), epic #396) are in scope for readiness, `lab exec` (synchronous, detached and interactive-session), `lab put` and `lab collect`, audio, and pools; see [Windows guests](#windows-guests) and [Pooled guests](#pooled-guests). Still unverified, and tracked in [#555](https://github.com/Frogbyte-io/fleet-manager/issues/555): activation across a snapshot rollback, clone SID uniqueness, and leases on the Cloudbase-Init re-generalized image. [#556](https://github.com/Frogbyte-io/fleet-manager/issues/556) tracks an automated test of the pool flow with a Windows template. ADR 0015 is still Proposed.

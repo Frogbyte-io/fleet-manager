@@ -85,7 +85,7 @@ impl ReserveRefusal {
                 DeviceStatus::Missing => "hardware_missing",
                 DeviceStatus::Unsupported(_) => "hardware_unsupported",
                 DeviceStatus::Quarantined => "hardware_quarantined",
-                DeviceStatus::Available | DeviceStatus::Reserved => "hardware_unavailable",
+                DeviceStatus::Available | DeviceStatus::Reserved => "hardware_not_allocatable",
             },
             Self::OwnerFinished { .. } => "hardware_owner_finished",
         }
@@ -790,5 +790,45 @@ mod tests {
             decision,
             ReserveDecision::Reserved { created: true, .. }
         ));
+    }
+
+    #[test]
+    fn every_refusal_reason_is_its_own_code() {
+        // A status that is allocatable has no refusal of its own; if one is
+        // ever reported it must not read as another refusal's code.
+        let codes: Vec<&str> = [
+            ReserveRefusal::DeviceUnknown,
+            ReserveRefusal::OwnerFinished {
+                owner_kind: ReservationOwnerKind::Lease,
+                owner_id: "lease-1".to_owned(),
+            },
+            ReserveRefusal::NotAllocatable {
+                status: DeviceStatus::Available,
+            },
+            ReserveRefusal::NotAllocatable {
+                status: DeviceStatus::Reserved,
+            },
+            ReserveRefusal::NotAllocatable {
+                status: DeviceStatus::Missing,
+            },
+            ReserveRefusal::NotAllocatable {
+                status: DeviceStatus::ExternallyAttached,
+            },
+            ReserveRefusal::NotAllocatable {
+                status: DeviceStatus::Quarantined,
+            },
+            ReserveRefusal::NotAllocatable {
+                status: DeviceStatus::Unsupported(UnsupportedReason::PveTooOld),
+            },
+        ]
+        .iter()
+        .map(ReserveRefusal::reason)
+        .collect();
+        let mut distinct = codes.clone();
+        distinct.sort_unstable();
+        // Available and Reserved share the one "not allocatable" code.
+        distinct.dedup();
+        assert_eq!(distinct.len(), codes.len() - 1, "{codes:?}");
+        assert!(!codes.contains(&"hardware_unavailable"), "{codes:?}");
     }
 }

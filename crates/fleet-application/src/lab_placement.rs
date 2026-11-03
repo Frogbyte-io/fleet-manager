@@ -253,10 +253,11 @@ pub enum PlacementRefusal {
         /// The declared PVE mapping id.
         mapping: String,
     },
-    /// The declared device is not on the node the clone runs on. The clone
-    /// runs on the node that holds the pinned template and cannot move, and
-    /// a path-based mapping entry is bound to one node, so the two
-    /// constraints cannot both hold.
+    /// The declared device is not on the node the clone runs on. Lab clones
+    /// on the node that holds the pinned template (its clone call sends no
+    /// `target`, though Proxmox could clone onto another node on shared
+    /// storage), and a path-based mapping entry is bound to one node, so the
+    /// two constraints do not meet.
     HardwareNodeConflict {
         /// The declared PVE mapping id.
         mapping: String,
@@ -437,7 +438,7 @@ impl fmt::Display for PlacementRefusal {
                 let nodes = device_nodes.join(", ");
                 write!(
                     f,
-                    "hardware {mapping} {} node {nodes}, but the pinned image's template, and so the clone, is on node {clone_node}; a clone cannot leave the template's node, so the template needs an image whose template is on {nodes} or the mapping an entry for {clone_node}",
+                    "hardware {mapping} {} node {nodes}, but the pinned image's template, and so Lab's clone, is on node {clone_node} (Lab clones on the template's node); the template needs an image whose template is on {nodes} or the mapping an entry for {clone_node}",
                     if *seen {
                         "is present on"
                     } else {
@@ -791,7 +792,7 @@ pub struct HardwareCheck<'a> {
     /// The account the clone is made through.
     pub account_id: &'a str,
     /// The node the clone runs on: the node that holds the pinned template.
-    /// It is fixed before hardware is considered and cannot move.
+    /// It is fixed before hardware is considered: Lab does not move it.
     pub clone_node: &'a str,
     /// The clock, in epoch milliseconds.
     pub now: i64,
@@ -877,6 +878,20 @@ pub fn check_hardware(
     Ok(ids)
 }
 
+/// Whether an observation time is within the bound (a time in the future,
+/// from a clock step, is as untrustworthy as an old one; never seen is 0).
+fn seen_recently(last_seen_at: i64, check: &HardwareCheck<'_>) -> bool {
+    last_seen_at > 0 && check.now.saturating_sub(last_seen_at).abs() <= check.max_age_ms
+}
+
+/// Whether the device was seen on the clone's node within the bound.
+fn observed_on_node(device: &HardwareDevice, check: &HardwareCheck<'_>) -> bool {
+    device
+        .entries
+        .iter()
+        .any(|entry| entry.node == check.clone_node && seen_recently(entry.last_seen_at, check))
+}
+
 /// The node half of [`check_hardware`] for one device.
 fn check_device_node(
     device: &HardwareDevice,
@@ -888,9 +903,7 @@ fn check_device_node(
             mapping: mapping.to_owned(),
         });
     }
-    let recent = |last_seen_at: i64| {
-        last_seen_at > 0 && check.now.saturating_sub(last_seen_at).abs() <= check.max_age_ms
-    };
+    let recent = |last_seen_at: i64| seen_recently(last_seen_at, check);
     let seen_nodes: Vec<String> = device
         .entries
         .iter()
@@ -1052,6 +1065,26 @@ impl HardwarePlacement {
                 }) => {
                     if new {
                         created.push(reservation.id.clone());
+                        // A live row held the device when it was looked up,
+                        // so the pre-check left it to the store, and the
+                        // store has now freed it because its owner no longer
+                        // counts: a takeover. It still owes the freshness an
+                        // available device owes (the store checks the stored
+                        // status, not how old the observation is).
+                        let taken_over = declared_device
+                            .found
+                            .as_ref()
+                            .filter(|(_, holder)| holder.is_some());
+                        if let Some((device, _)) = taken_over
+                            && !observed_on_node(device, &check)
+                        {
+                            self.release_ids(&context, &created, now).await;
+                            return Ok(Err(PlacementRefusal::HardwareStale {
+                                mapping: declared_device.mapping.clone(),
+                                node: demand.clone_node.to_owned(),
+                                max_age_seconds: self.max_age_ms / 1_000,
+                            }));
+                        }
                     }
                     held.push(reservation);
                 }
@@ -1558,7 +1591,7 @@ mod tests {
         assert_eq!(refusal.reason(), "hardware_wrong_node");
         assert_eq!(
             refusal.to_string(),
-            "hardware usb-a is present on node pve-b, but the pinned image's template, and so the clone, is on node pve-a; a clone cannot leave the template's node, so the template needs an image whose template is on pve-b or the mapping an entry for pve-a"
+            "hardware usb-a is present on node pve-b, but the pinned image's template, and so Lab's clone, is on node pve-a (Lab clones on the template's node); the template needs an image whose template is on pve-b or the mapping an entry for pve-a"
         );
         // Mapped on pve-b only and not seen anywhere recently: the message
         // says mapped, not present.
@@ -1653,7 +1686,10 @@ mod tests {
                 "{owner} {state:?}"
             );
         }
-        // Its observation may even be old: the row is what holds it.
+        // The pre-check does not judge a held device's freshness: whether the
+        // row survives is the store's call. A device the store frees from a
+        // dead owner is checked for freshness right after (`HardwarePlacement`,
+        // tests in `lab_hardware_placement`), exactly like an available one.
         let old = device(
             "usb-a",
             DeviceStatus::Reserved,

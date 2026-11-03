@@ -394,7 +394,7 @@ async fn an_exhausted_pool_fails_the_provision_without_allocating() {
 async fn a_pooled_template_that_declares_hardware_is_refused_before_a_member_is_leased() {
     // FM-1121: a pool member is a prebuilt guest, so the device could not be
     // reserved and attached before its boot. The lease fails instead of
-    // handing the caller a guest that silently lacks the device.
+    // handing the caller a guest with no reservation for the device.
     let harness = Harness::with_hardware(
         &[MEMBER_VMID],
         vec![fleet_core::LabHardware {
