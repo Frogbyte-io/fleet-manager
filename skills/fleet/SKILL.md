@@ -1,6 +1,6 @@
 ---
 name: fleet
-description: Operate this Fleet Manager controller with fleetctl --output json - check controller health, find machines, prepare projects on a machine, run disposable Lab environments, follow operations, and read skill deployments, request brokered Coolify and DNS changes, and look up or record the Registry (domains, services, vendors, accounts, hosting). Use whenever a task involves the fleet's machines, Lab leases, controller state, or where something is hosted or who provides it.
+description: Operate this Fleet Manager controller with fleetctl --output json - check controller health, find machines, prepare projects on a machine, run disposable Lab environments (including leases with USB hardware), list the USB hardware inventory, follow operations, and read skill deployments, request brokered Coolify and DNS changes, and look up or record the Registry (domains, services, vendors, accounts, hosting). Use whenever a task involves the fleet's machines, Lab leases, USB devices, controller state, or where something is hosted or who provides it.
 ---
 
 # Fleet
@@ -319,6 +319,73 @@ fleetctl --output json lab release <lease-id>
   resolves `placement_ambiguous` and `placement_unresolved` but not
   `placement_no_candidate` (that fails with `template_missing`).
 - `lab release` is the low-level `lab destroy`; the same rules apply.
+
+## Hardware (USB devices)
+
+A Lab lease can be given a physical USB device. A person with Proxmox access
+creates a USB resource mapping for each device; Fleet only reads it. The
+mapping id (`mappingId`) is the device's name everywhere. You do not create,
+edit, attach, or detach devices.
+
+```bash
+fleetctl --output json hardware list
+fleetctl --output json hardware list --account <account-id>
+fleetctl --output json hardware refresh --account <account-id>
+```
+
+- `hardware list` reads Fleet's own records and calls nothing on Proxmox, so a
+  device is only as fresh as the last refresh. An empty list means nothing has
+  been refreshed yet. Each item has `mappingId`, `status`, `stale`, `entries`
+  (`node`, `vendorId`, `productId`, `usbpath`), `holder` (`ownerKind`,
+  `ownerId`, `state`) when a lease holds it, and `reason` and `reasonText`
+  when the status is `unsupported`.
+- `hardware refresh` reads Proxmox and records what it saw. Nothing refreshes
+  on a schedule yet, so run it before a lease that needs hardware, and again
+  when a device is `stale`. It changes nothing on Proxmox. It needs
+  `hardware.refresh`, and `hardware list` needs `hardware.read`; if either is
+  denied, say so and stop.
+- `status` is `available` (you can request it), `reserved` (a lease holds it;
+  `holder` says which), `externally_attached` (a guest Fleet did not attach
+  already uses it; it is never taken), `missing` (not seen on its node, or not
+  seen recently: `stale` is true), `unsupported` (read `reason`, for example
+  `token_lacks_mapping_use` means the Fleet token lacks the opt-in `FleetUsb`
+  Proxmox role), or `quarantined` (a failed attach or detach needs an
+  operator). Only `available` can be requested.
+
+To use a device, lease a template version that declares it. The template's
+`hardware` is a list (up to four) of `{"kind": "usb", "mapping": "<mapping-id>"}`,
+and `lab templates` shows it on each version that has any. `lab create`
+takes no hardware flag: pick a published version whose `hardware` names the
+mapping you need, run `hardware refresh`, then lease as in Lab environments.
+`lab template-create` cannot declare hardware; if no version has it, ask the
+user to have a template published with it (the API takes the `hardware` field).
+
+```json
+{ "hardware": [{ "kind": "usb", "mapping": "fm-test-superdrive-a" }] }
+```
+
+A device that cannot be reserved fails the provision before anything is
+allocated, with the reason and a message in the operation's `errorJson`. There
+is no queue: a busy device fails at once. Report the reason and message; do
+not retry in a loop, and never work around it by leasing the same device
+twice.
+
+| `reason` | What you do |
+| --- | --- |
+| `hardware_busy` | Another lease holds it (the message names it). Wait for that lease to end, or ask its owner; do not retry in a loop |
+| `hardware_stale`, `hardware_missing` | Run `hardware refresh --account <account-id>` once and retry once; if it is still `missing`, tell the user to check the cable and port |
+| `hardware_unknown`, `hardware_no_node_entry`, `hardware_wrong_node` | The mapping is not in the inventory, has no node entry, or is not on the node Lab clones on. Refresh once; otherwise this needs an operator (the message says what to change) |
+| `hardware_unsupported` | The message gives the reason (for example the token lacks `Mapping.Use`). Tell the user |
+| `hardware_externally_attached`, `hardware_quarantined` | Someone else's guest has it, or an attach or detach failed. Tell the user; do not try to free it |
+| `hardware_pool_unsupported` | The version is pooled; hardware does not work with a pool. Choose another version |
+
+**Not yet end to end:** until the attach saga ships, a lease with hardware only
+reserves the device. `lab status <lease-id>` shows it in `hardware[]` with
+`reservation.state` `held` and `usbSlot` null, and the guest does not have the
+device. Do not read `held` as attached and do not run a test that needs the
+device; report that the attach is not available yet. Once the saga ships, the
+lease attaches the device before the guest starts. Destroy the lease as usual; its
+cleanup releases the reservation.
 
 ## Registry
 
