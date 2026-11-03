@@ -698,17 +698,24 @@ Refusals fail the provision operation with a reason:
 | `hardware_busy` | Another owner holds the device; the message names the holder. There is no queue: the request fails | Wait for the holder, or release its lease |
 | `hardware_pool_unsupported` | The template version declares hardware and is pooled; a pool member is a prebuilt guest that cannot take a device before it boots | Lease it without a pool |
 | `hardware_needs_lease`, `hardware_unavailable` | There is no lease to own the reservation, or this controller has no hardware placement configured | Provision through a lease; fix the controller composition |
+| `hardware_attach_failed`, `hardware_no_free_slot` | The attach step (after the clone, before the start) could not write the device: PVE refused it (the token needs `Mapping.Use` and `VM.Config.HWType`), the guest is locked, or every `usbN` slot is taken. The entry was read back absent and the reservation released | Fix the cause in the detail, then lease again |
+| `hardware_fingerprint_changed`, `hardware_stale`, `hardware_reservation_lost`, `hardware_verify_failed` | The re-observation right before the attach found the device on another port or with another id than when it was reserved, not seen, no longer reserved for the lease, or could not be observed | Check the cable and the mapping, `fleetctl hardware refresh --account <account-id>`, lease again |
+| `hardware_guest_mismatch`, `hardware_detach_unconfirmed`, `hardware_not_reserved` | The saga found the lease's reservation recording another guest, still detaching, or missing, and did not touch it | Release the lease; cleanup resolves the reservation, or an operator does (`hardware.override-release`) |
+| `hardware_attach_pending` | The guest is running and its `hotplug` option lacks `usb`, so PVE would only apply the device at the next restart; Fleet removed the entry and does not call that attached | Add `usb` to the guest's `hotplug` option |
+| `hardware_attach_unknown` | The outcome of the attach write could not be determined (a lost answer). The reservation is `attach_unknown`; the lease's cleanup reads the guest, removes the entry and releases | None while cleanup runs; if cleanup ends `cleanup_failed`, see below |
 | `hardware_not_allocatable`, `hardware_owner_finished` | A reservation was refused for a status that should have allowed it, or the owner no longer counts | Refresh the inventory and retry |
 
-**USB hardware.** A template may declare USB devices, which placement reserves with the capacity; the refusals above name the constraint that failed. See [USB hardware](#usb-hardware) for setup, the inventory commands, and what is not attached yet.
+**USB hardware.** A template may declare USB devices, which placement reserves with the capacity; the refusals above name the constraint that failed. See [USB hardware](#usb-hardware) for setup, the inventory commands, attach and detach, and what is not covered yet.
 
 `FLEET_LAB_MEMORY_OVERCOMMIT` and `FLEET_LAB_CPU_OVERCOMMIT` (default `1.0`, at most 16) scale the node's total memory and CPU count; disk is never overcommitted. A lease's reservation stops counting once the lease is released, or failed without a guest. A lease in `cleanup_failed` keeps its reservation until `lab cleanup-retry` destroys the guest. [`docs/architecture/lab.md`](../architecture/lab.md) has the exact rule.
 
 ### USB hardware
 
-A template can ask for a physical USB device. Fleet reserves the device for the lease, so no second lease can hold it, and (once the attach saga ships) attaches it to the lease's guest and takes it away again at cleanup. The design is [ADR 0019](../adr/0019-usb-device-allocation.md) and the [M11 plan](../planning/m11-usb-hardware.md); the Lab-side rules are in [`docs/architecture/lab.md`](../architecture/lab.md#later-usb-and-physical-resources).
+A template can ask for a physical USB device. Fleet reserves the device for the lease, so no second lease can hold it, and attaches it to the lease's guest and takes it away again at cleanup. The design is [ADR 0019](../adr/0019-usb-device-allocation.md) and the [M11 plan](../planning/m11-usb-hardware.md); the Lab-side rules are in [`docs/architecture/lab.md`](../architecture/lab.md#later-usb-and-physical-resources).
 
-> **Not yet end to end.** What is true on `dev` today is the inventory, the template declaration, placement, and the reservation. **Until the attach saga ([#571](https://github.com/Frogbyte-io/fleet-manager/issues/571)) ships, a lease with hardware reserves the device but does not attach it:** the lease can reach `ready` with the device only `held`, the guest does not have it, and nothing on Proxmox changes. Once the saga ships, the lease attaches the device before the guest starts and detaches it before the guest is destroyed or reverted. Do not treat `held` as attached, and do not rely on a USB device in a lease until the saga ships. Nothing has been exercised against real hardware end to end yet (the runbook and live validation are FM-1133).
+**Attach and detach (FM-1123).** A template may declare `hardware: [{ "kind": "usb", "mapping": "<id>" }]` (up to four). Placement reserves those devices for the lease with the capacity, and the refusals above name the constraint that failed. The lab saga then attaches each device to the clone after its hardware step and before it starts, and cleanup detaches it before the guest is destroyed, reverted or kept. The lease detail shows the reservation (`hardware[].reservation.state`, with `id`, `deviceId`, `usbSlot` and `createdAt`): `held` is reserved and not attached, `attached` has the device on the guest in `usbSlot`, and a lease is `ready` only when every device is `attached` and read back. Attach and detach are Proxmox writes, so the token needs the opt-in `FleetUsb` role (`Mapping.Use` on the mapping and `VM.Config.HWType` on the guest, for attach **and** detach); see [proxmox-token.md](proxmox-token.md). Hold-releases follow the capacity rules: a refused or failed-before-allocation lease releases its devices, and cleanup releases devices that were never attached.
+
+*A device that cannot be detached.* Cleanup does not destroy, revert or return a guest while a device is not confirmed off it. A refused detach (for example the token lost `Mapping.Use`), a detach PVE could only store as pending (the guest's `hotplug` option lacks `usb`, so it applies at the next restart), or a guest the controller cannot read keeps the reservation (`detach_failed` or `detaching`, the device `quarantined` or `reserved` in `fleetctl hardware list`) and the lease in cleanup retry, with the backoff of any failed cleanup. Fix the cause (restore the role, restart the guest to apply the pending removal, or remove the entry by hand) and the next attempt confirms it and continues. After the last attempt the lease is `cleanup_failed` and names its guest; `lab cleanup-retry` runs it again. Only when you have confirmed the device is free (a guest removed by hand is not proof to Fleet, because the cluster listing omits guests the token cannot audit) does the elevated, audited override release (`hardware.override-release`) free the reservation without the detach. Never delete a `usbN` entry Fleet did not write: Fleet leaves an entry in a slot that holds anything but its own value.
 
 #### What you set up
 
@@ -777,14 +784,14 @@ fleetctl --output json lab status <lease-id> | jq .hardware
 fleetctl --output json lab destroy <lease-id> --wait
 ```
 
-`lab status` shows each declared device with the lease's live reservation. Today it reads like this, a reservation and no attachment:
+`lab status` shows each declared device with the lease's live reservation. While the lease is provisioning, before the attach step, it reads like this, a reservation and no attachment:
 
 ```json
 [{ "kind": "usb", "mapping": "fm-test-superdrive-a",
    "reservation": { "id": "<reservation-id>", "deviceId": "<device-id>", "state": "held", "usbSlot": null, "createdAt": 1767225600000 } }]
 ```
 
-When the saga ships the state is meant to move through `attaching` to `attached` with a `usbSlot` set, and `attach_unknown` or `detach_failed` mark an outcome that needs an operator. A template without `hardware` behaves exactly as before. A pooled version cannot declare hardware (`hardware_pool_unsupported`).
+A ready lease shows `"state": "attached"` with `usbSlot` set (`0` for the first free slot). `attach_unknown` and `detach_failed` mark an outcome that needs the lease's cleanup to resolve it, or an operator; `detaching` is a detach in flight or one PVE keeps pending until the guest restarts. A template without `hardware` behaves exactly as before. A pooled version cannot declare hardware (`hardware_pool_unsupported`).
 
 #### When a device is refused
 
@@ -870,6 +877,6 @@ Not yet guaranteed:
 
 ## Out of scope
 
-USB devices are inventoried and reserved for a lease but not yet attached to its guest (the attach saga, [#571](https://github.com/Frogbyte-io/fleet-manager/issues/571)); see [USB hardware](#usb-hardware). PCI and GPU passthrough, whole USB controllers, queueing for a busy device, and Fleet-created mappings are not supported.
+USB devices are attached only before a lease's guest starts (mid-run hotplug is FM-1126); see [USB hardware](#usb-hardware). PCI and GPU passthrough, whole USB controllers, queueing for a busy device, and Fleet-created mappings are not supported.
 
 Windows guests ([ADR 0015](../adr/0015-windows-lab-guest-transport.md), epic #396) are in scope for readiness, `lab exec` (synchronous, detached and interactive-session), `lab put` and `lab collect`, audio, and pools; see [Windows guests](#windows-guests) and [Pooled guests](#pooled-guests). Still unverified, and tracked in [#555](https://github.com/Frogbyte-io/fleet-manager/issues/555): activation across a snapshot rollback, clone SID uniqueness, and leases on the Cloudbase-Init re-generalized image. [#556](https://github.com/Frogbyte-io/fleet-manager/issues/556) tracks an automated test of the pool flow with a Windows template. ADR 0015 is still Proposed.

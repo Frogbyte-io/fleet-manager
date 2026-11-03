@@ -2689,6 +2689,9 @@ pub struct ProvisionExecutor {
     /// Reserves the physical devices a template declares (FM-1121). Not to
     /// be confused with the CPU, memory, and disk "hardware" step above.
     devices: Option<Arc<fleet_application::lab_placement::HardwarePlacement>>,
+    /// Attaches the devices placement reserved, before the guest starts
+    /// (FM-1123).
+    device_saga: Option<Arc<crate::lab_hardware::LabHardwareSaga>>,
 }
 
 /// The placement and capacity reservation parts (FM-715).
@@ -2778,6 +2781,7 @@ impl ProvisionExecutor {
             persistent: None,
             login_keys: None,
             devices: None,
+            device_saga: None,
         }
     }
 
@@ -2793,6 +2797,17 @@ impl ProvisionExecutor {
         devices: Arc<fleet_application::lab_placement::HardwarePlacement>,
     ) -> Self {
         self.devices = Some(devices);
+        self
+    }
+
+    /// Enables the attach of the devices a lease reserved (FM-1123): after
+    /// the clone's hardware step and before the start, each device is
+    /// re-observed, verified against its fingerprint, and attached to the
+    /// clone, with compensation. Without it a lease whose template declares
+    /// hardware reserves the devices but attaches nothing.
+    #[must_use]
+    pub fn with_device_saga(mut self, saga: Arc<crate::lab_hardware::LabHardwareSaga>) -> Self {
+        self.device_saga = Some(saga);
         self
     }
 
@@ -4359,6 +4374,45 @@ impl ProvisionExecutor {
             .map_err(|refusal| Refusal::new(refusal.reason(), refusal.to_string())))
     }
 
+    /// Attaches the devices the lease reserved to its clone (FM-1123; the
+    /// work is [`crate::lab_hardware::LabHardwareSaga`]'s). The outer error
+    /// is an infrastructure failure; the inner one a classified refusal.
+    #[allow(clippy::too_many_arguments)]
+    async fn attach_devices(
+        &self,
+        operations: &Operations,
+        operation_id: &str,
+        lease_id: &str,
+        account_id: &str,
+        node: &str,
+        vmid: u32,
+        content: &fleet_core::LabTemplateContent,
+    ) -> Result<Result<(), Refusal>, String> {
+        let Some(saga) = &self.device_saga else {
+            return Ok(Ok(()));
+        };
+        match saga
+            .attach_for_lease(
+                operations,
+                &crate::lab_hardware::LeaseGuest {
+                    lease_id,
+                    account_id,
+                    node,
+                    vmid,
+                    operation_id,
+                },
+                &content.hardware,
+            )
+            .await
+        {
+            Ok(()) => Ok(Ok(())),
+            Err(crate::lab_hardware::AttachFailure::Refused { reason, detail }) => {
+                Ok(Err(Refusal::new(reason, detail)))
+            }
+            Err(crate::lab_hardware::AttachFailure::Infrastructure(detail)) => Err(detail),
+        }
+    }
+
     /// Reserves the physical devices the template declares for the record's
     /// lease (FM-1121), on `node`, the node the clone runs on. Nothing here
     /// calls Proxmox: the attach is the saga's. A template that declares
@@ -5068,6 +5122,33 @@ impl ProvisionExecutor {
         {
             return self
                 .fail_at(operations, &operation.id, &record.id, "ssh_key", &refusal)
+                .await;
+        }
+
+        // Step 1e (FM-1123): the devices the lease reserved are attached to
+        // the clone, verified, before anything starts it. A pool member never
+        // gets here with hardware (refused above).
+        if pooled.is_none()
+            && let Err(refusal) = self
+                .attach_devices(
+                    operations,
+                    &operation.id,
+                    &lease_id,
+                    &account_id,
+                    &node,
+                    vmid,
+                    &version.content,
+                )
+                .await?
+        {
+            return self
+                .fail_at(
+                    operations,
+                    &operation.id,
+                    &record.id,
+                    crate::lab_hardware::ATTACH_STEP,
+                    &refusal,
+                )
                 .await;
         }
 
