@@ -18,9 +18,10 @@
 //!    a guest it cannot attribute.
 //! 5. deletes Lab artifacts past their retention deadline (FM-721), when
 //!    the artifact store is composed.
-//! 6. runs the hardware reconciler's periodic pass (FM-1124), when one is
-//!    composed; it paces and backs itself off, and its startup pass runs
-//!    once before the first tick.
+//!
+//! A composed hardware reconciler (FM-1124) is not a step of the tick: `run`
+//! spawns it on its own task (one instance, stopped with the sweeper), so a
+//! slow Proxmox never delays expiry, compensation or cleanup scheduling.
 //!
 //! The rules (what is stuck, what is owned, what is due) live in
 //! `fleet_application::lab`; this module only reads rows, applies them, and
@@ -240,8 +241,8 @@ impl LabSweeper {
         self
     }
 
-    /// Runs the hardware reconciler (FM-1124): a startup pass before the
-    /// first tick and a periodic pass from every tick that finds one due.
+    /// Registers the hardware reconciler (FM-1124). [`Self::run`] spawns it
+    /// on its own task, with its own pacing and deadline; no tick awaits it.
     #[must_use]
     pub fn with_hardware_reconciler(
         mut self,
@@ -511,19 +512,6 @@ impl LabSweeper {
                     .push(format!("sweeping expired artifacts: {error}")),
             }
         }
-
-        // 6. Hardware reconciliation (FM-1124). It paces itself (a pass is
-        // due every few minutes, or after its backoff) and its failures
-        // never stall the steps above.
-        if let Some(reconciler) = &self.hardware
-            && let Some(pass) = reconciler.tick(now).await
-        {
-            report.failures.extend(
-                pass.failures
-                    .into_iter()
-                    .map(|failure| format!("hardware reconciler: {failure}")),
-            );
-        }
         Ok(report)
     }
 
@@ -594,30 +582,27 @@ impl LabSweeper {
     /// rows. A failed tick is logged and retried on the next one. Each tick
     /// transitions lease rows (expiry and compensation), records audit
     /// intents, publishes `lease.changed`, and queues cleanup operations; it
-    /// never runs Lab Proxmox work itself, so it never blocks the worker. The
-    /// one exception is the hardware reconciler (FM-1124), when composed: it
-    /// reads guest configs and deletes only Fleet's own USB entry, on its
-    /// own schedule and bounds, and its startup pass runs before the first
-    /// interval.
+    /// never runs Proxmox work itself, so it never blocks the worker. The
+    /// hardware reconciler (FM-1124), when composed, runs on its own spawned
+    /// task for as long as this loop runs, so a slow Proxmox never delays a
+    /// tick.
     pub async fn run(
         self: Arc<Self>,
         interval: Duration,
         shutdown: impl std::future::Future<Output = ()>,
     ) {
         tokio::pin!(shutdown);
-        // The hardware reconciler's startup pass: what a crash left behind
-        // is converged before the first interval passes.
-        if let Some(reconciler) = &self.hardware {
-            let now = fleet_core::SystemClock::now_unix_millis();
-            tokio::select! {
-                () = &mut shutdown => return,
-                pass = reconciler.startup(now) => {
-                    for failure in &pass.failures {
-                        eprintln!("hardware reconciler: {failure}; retrying on the next pass");
-                    }
-                }
-            }
-        }
+        // The hardware reconciler runs beside the ticks, never inside them.
+        let reconciler = self.hardware.clone().map(|reconciler| {
+            let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
+            let task = tokio::spawn(reconciler.run(
+                crate::hardware_reconciler::TASK_TICK,
+                async move {
+                    let _ = stopped.await;
+                },
+            ));
+            (stop, task)
+        });
         loop {
             tokio::select! {
                 () = &mut shutdown => break,
@@ -642,6 +627,10 @@ impl LabSweeper {
                 }
                 Err(error) => eprintln!("lab sweeper: tick failed: {error}"),
             }
+        }
+        if let Some((stop, task)) = reconciler {
+            let _ = stop.send(());
+            let _ = task.await;
         }
     }
 }

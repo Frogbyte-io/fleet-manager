@@ -37,8 +37,8 @@ use fleet_application::proxmox::{
     CredentialStoreError, NewProxmoxAccount, ProxmoxAccountPort, ProxmoxCredentialStore,
 };
 use fleet_controller::hardware_reconciler::{
-    FRESH_ROW_MS, HardwareReconciler, MAX_GUEST_READS_PER_PASS, PASS_INTERVAL_MS, ReconcileReport,
-    SqliteReconcilerRecords,
+    FRESH_ROW_MS, HardwareReconciler, MAX_BACKOFF_MS, MAX_GUEST_READS_PER_PASS, PASS_INTERVAL_MS,
+    ReconcileReport, SqliteReconcilerRecords,
 };
 use fleet_controller::hardware_reservation_store::SqliteHardwareReservations;
 use fleet_controller::lab_sweeper::LabSweeper;
@@ -50,7 +50,7 @@ use fleet_storage_sqlite::{
     AuditSink, HardwareRepository, LabRepository, LeaseRepository, OperationRepository,
     ProjectRepository, ProxmoxAccountRepository, Store,
 };
-use usb_pve::UsbHost;
+use usb_pve::{UsbFault, UsbHost, UsbStep};
 
 const PRINCIPAL: &str = fleet_auth::LAN_PRINCIPAL_ID;
 const READER_A: &str = "fm-test-reader-a";
@@ -239,6 +239,16 @@ struct Rig {
 
 impl Rig {
     async fn start(world: &World) -> Self {
+        Self::start_with(world, None, None).await
+    }
+
+    /// A controller run whose reconciler has its own refresh interval
+    /// (seconds; `0` is off) and pass deadline.
+    async fn start_with(
+        world: &World,
+        refresh_seconds: Option<u64>,
+        deadline: Option<std::time::Duration>,
+    ) -> Self {
         let store = Store::open(&world.database)
             .await
             .expect("the previous run released the database");
@@ -263,7 +273,7 @@ impl Rig {
             fleet_controller::hardware_observer::shared(client.clone()),
             audit.clone(),
         ));
-        let reconciler = Arc::new(HardwareReconciler::new(
+        let mut reconciler = HardwareReconciler::new(
             accounts,
             credentials,
             client,
@@ -272,7 +282,14 @@ impl Rig {
             inventory.clone(),
             audit.clone(),
             Arc::new(SqliteReconcilerRecords::new(pool.clone())),
-        ));
+        );
+        if let Some(seconds) = refresh_seconds {
+            reconciler = reconciler.with_refresh_interval_seconds(seconds);
+        }
+        if let Some(deadline) = deadline {
+            reconciler = reconciler.with_pass_deadline(deadline);
+        }
+        let reconciler = Arc::new(reconciler);
         let labs = Arc::new(LabRepository::new(pool.clone()));
         let leases = Arc::new(LeaseRepository::new(pool.clone()));
         let operations = Arc::new(Operations::new(
@@ -507,8 +524,34 @@ impl Rig {
         rows.join("\n")
     }
 
+    /// The startup pass: runs at once and skips no row for being fresh.
     async fn pass(&self, at: i64) -> ReconcileReport {
         self.reconciler.startup(at).await
+    }
+
+    /// The periodic pass, as the reconciler's task makes it: paced, and
+    /// skipping rows that changed in the last few minutes.
+    async fn periodic(&self, at: i64) -> ReconcileReport {
+        self.reconciler
+            .tick(at)
+            .await
+            .expect("a periodic pass is due")
+    }
+
+    async fn pass_in(&self, periodic: bool, at: i64) -> ReconcileReport {
+        if periodic {
+            self.periodic(at).await
+        } else {
+            self.pass(at).await
+        }
+    }
+
+    /// How many `check-node` reads the inventory has made (one per refresh
+    /// and node).
+    fn refreshes(world: &World) -> usize {
+        world
+            .usb
+            .count(|line| line.contains("/cluster/mapping/usb?check-node="))
     }
 }
 
@@ -800,8 +843,7 @@ const CASES: &[Case] = &[
     },
 ];
 
-#[tokio::test]
-async fn the_reconciliation_table() {
+async fn run_table(periodic: bool) {
     for case in CASES {
         let world = World::new(0).await;
         world.guests(&[GUEST]).await;
@@ -814,10 +856,14 @@ async fn the_reconciliation_table() {
         }
         rig.set_lease(&lease, case.lease).await;
 
-        let report = rig.pass(later()).await;
+        let report = rig.pass_in(periodic, later()).await;
 
         let (state, _) = rig.row(&reservation).await;
-        assert_eq!(state, case.expect_row, "{}: {report:?}", case.name);
+        assert_eq!(
+            state, case.expect_row,
+            "{} (periodic={periodic}): {report:?}",
+            case.name
+        );
         assert_eq!(
             world.usb.stored(GUEST),
             entries(case.expect_entries),
@@ -836,7 +882,18 @@ async fn the_reconciliation_table() {
 }
 
 #[tokio::test]
-async fn a_second_pass_changes_nothing() {
+async fn the_reconciliation_table_at_startup() {
+    run_table(false).await;
+}
+
+#[tokio::test]
+async fn the_reconciliation_table_on_the_periodic_path() {
+    run_table(true).await;
+}
+
+/// A second pass beyond every backoff changes nothing: the logic, not the
+/// backoff, is idempotent.
+async fn run_idempotency(periodic: bool) {
     for case in CASES {
         let world = World::new(0).await;
         world.guests(&[GUEST]).await;
@@ -848,7 +905,7 @@ async fn a_second_pass_changes_nothing() {
             world.usb.set_slot(GUEST, *slot, value);
         }
         rig.set_lease(&lease, case.lease).await;
-        rig.pass(later()).await;
+        rig.pass_in(periodic, later()).await;
         let first = (
             rig.row(&reservation).await,
             world.usb.stored(GUEST),
@@ -856,19 +913,33 @@ async fn a_second_pass_changes_nothing() {
             rig.audit("hardware_reconciled").await.len(),
         );
 
-        let again = rig.pass(later() + MINUTE_MS).await;
+        let again = rig.pass_in(periodic, later() + 2 * MAX_BACKOFF_MS).await;
         let second = (
             rig.row(&reservation).await,
             world.usb.stored(GUEST),
             world.usb.writes(),
             rig.audit("hardware_reconciled").await.len(),
         );
-        assert_eq!(first, second, "{}: {again:?}", case.name);
+        assert_eq!(
+            first, second,
+            "{} (periodic={periodic}): {again:?}",
+            case.name
+        );
         assert_eq!(again.released, 0, "{}", case.name);
         assert_eq!(again.entries_removed, 0, "{}", case.name);
         assert_eq!(again.marked_unproven, 0, "{}", case.name);
         rig.kill().await;
     }
+}
+
+#[tokio::test]
+async fn a_second_pass_beyond_the_backoff_changes_nothing_at_startup() {
+    run_idempotency(false).await;
+}
+
+#[tokio::test]
+async fn a_second_pass_beyond_the_backoff_changes_nothing_on_the_periodic_path() {
+    run_idempotency(true).await;
 }
 
 #[tokio::test]
@@ -1299,21 +1370,21 @@ async fn a_restart_after_a_repair_changes_nothing_more() {
 }
 
 // ---------------------------------------------------------------------
-// An entry recorded for a released reservation.
+// A released row is never examined: a slot kept as history says nothing about
+// who wrote what is there now.
 // ---------------------------------------------------------------------
 
 #[tokio::test]
-async fn an_entry_recorded_for_a_released_reservation_is_removed_when_nobody_holds_the_device() {
+async fn an_entry_a_maintainer_wrote_where_a_released_row_recorded_a_slot_is_never_touched() {
     let world = World::new(0).await;
     world.guests(&[GUEST]).await;
     let rig = Rig::start(&world).await;
     rig.refresh().await;
     let lease = rig.lease("ready", true).await;
     let reservation = rig.seed(&lease, READER_A, "attached", GUEST, Some(1)).await;
-    // The row was released by the lease's own flow (slot kept as history),
-    // and Fleet's write landed afterwards where it had recorded it.
+    // The lease's own flow detached it and released the row, keeping the
+    // slot as history (`release_row` does for every flow release) ...
     rig.set_lease(&lease, "released").await;
-    world.usb.set_slot(GUEST, 1, OURS_A);
     sqlx::query(
         "UPDATE hardware_reservations SET state = 'released', released_at = ?2 WHERE id = ?1",
     )
@@ -1322,69 +1393,25 @@ async fn an_entry_recorded_for_a_released_reservation_is_removed_when_nobody_hol
     .execute(&rig.pool)
     .await
     .unwrap();
+    // ... and the guest survives; a maintainer attaches the same mapping by
+    // hand in the same slot (`qm set`).
+    world.usb.set_slot(GUEST, 1, OURS_A);
 
-    let report = rig.pass(now()).await;
+    let startup = rig.pass(now()).await;
+    let periodic = rig.periodic(later() + 2 * MAX_BACKOFF_MS).await;
 
-    assert_eq!(report.entries_removed, 1, "{report:?}");
-    assert!(world.usb.stored(GUEST).is_empty());
-    assert_eq!(world.usb.writes(), ["detach usb1"]);
-    let reconciled = rig.audit("hardware_reconciled").await;
-    assert_eq!(reconciled[0]["outcome"], "leftover_removed");
-    let intents = rig.audit("hardware_detach_requested").await;
-    assert_eq!(intents.len(), 1);
-    assert_eq!(intents[0]["leftover"], "true");
-}
-
-#[tokio::test]
-async fn a_released_row_is_not_examined_when_another_owner_holds_the_device_or_it_was_overridden() {
-    let world = World::new(0).await;
-    world.guests(&[GUEST, OTHER_GUEST]).await;
-    let rig = Rig::start(&world).await;
-    rig.refresh().await;
-    // A: released with its slot, but a new live reservation holds the device.
-    let old = rig.lease("ready", true).await;
-    let first = rig.seed(&old, READER_A, "attached", GUEST, Some(0)).await;
-    sqlx::query(
-        "UPDATE hardware_reservations SET state = 'released', released_at = ?2 WHERE id = ?1",
-    )
-    .bind(&first)
-    .bind(now() - 10 * MINUTE_MS)
-    .execute(&rig.pool)
-    .await
-    .unwrap();
-    let holder = rig.lease("ready", true).await;
-    rig.seed(&holder, READER_A, "held", GUEST, None).await;
-    world.usb.set_slot(GUEST, 0, OURS_A);
-    // B: released by an override, which clears the slot: nothing recorded.
-    let lease_b = rig.lease("ready", true).await;
-    let second = rig
-        .seed(&lease_b, READER_B, "attached", OTHER_GUEST, Some(0))
-        .await;
-    rig.reservations
-        .override_release(
-            &AuditContext {
-                actor: PRINCIPAL.to_owned(),
-                operation_id: None,
-            },
-            &second,
-            now() - 10 * MINUTE_MS,
-        )
-        .await
-        .unwrap();
-    world
-        .usb
-        .set_slot(OTHER_GUEST, 0, "mapping=fm-test-reader-b");
-
-    let report = rig.pass(now()).await;
-
-    assert_eq!(report.entries_removed, 0, "{report:?}");
-    assert!(world.usb.writes().is_empty());
-    assert_eq!(world.usb.stored(GUEST), entries(&[(0, OURS_A)]));
-    assert_eq!(
-        world.usb.stored(OTHER_GUEST),
-        entries(&[(0, "mapping=fm-test-reader-b")])
+    for report in [&startup, &periodic] {
+        assert_eq!(report.entries_removed, 0, "{report:?}");
+        assert!(report.failures.is_empty(), "{report:?}");
+    }
+    assert!(
+        world.usb.writes().is_empty(),
+        "Fleet never detaches what it did not attach"
     );
-    assert_eq!(rig.status(READER_B).await, DeviceStatus::ExternallyAttached);
+    assert_eq!(world.usb.stored(GUEST), entries(&[(1, OURS_A)]));
+    assert!(rig.audit("hardware_detach_requested").await.is_empty());
+    // It is reported for what it is.
+    assert_eq!(rig.status(READER_A).await, DeviceStatus::ExternallyAttached);
 }
 
 // ---------------------------------------------------------------------
@@ -1475,8 +1502,23 @@ async fn the_periodic_pass_is_paced_and_a_failed_pass_backs_off() {
     );
 }
 
+/// Waits until `check` is true, up to `seconds`.
+async fn eventually<F, Fut>(seconds: u64, mut check: F) -> bool
+where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = bool>,
+{
+    for _ in 0..(seconds * 20) {
+        if check().await {
+            return true;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    false
+}
+
 #[tokio::test]
-async fn the_sweeper_runs_the_reconciler_and_the_audit_carries_no_secret() {
+async fn the_sweeper_spawns_the_reconciler_and_the_audit_carries_no_secret() {
     let world = World::new(0).await;
     world.guests(&[GUEST]).await;
     let rig = Rig::start(&world).await;
@@ -1486,10 +1528,23 @@ async fn the_sweeper_runs_the_reconciler_and_the_audit_carries_no_secret() {
     world.usb.set_slot(GUEST, 0, OURS_A);
     rig.set_lease(&lease, "released").await;
 
-    let report = rig.sweeper.tick(later()).await.unwrap();
-
-    assert!(report.failures.is_empty(), "{:?}", report.failures);
-    assert_eq!(rig.row(&reservation).await.0, "released");
+    // The sweeper's loop starts the reconciler's startup pass on its own task.
+    let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
+    let sweeper = tokio::spawn(rig.sweeper.clone().run(
+        std::time::Duration::from_millis(50),
+        async move {
+            let _ = stopped.await;
+        },
+    ));
+    assert!(
+        eventually(20, || async { rig.row(&reservation).await.0 == "released" }).await,
+        "the reconciler ran beside the sweeper"
+    );
+    let _ = stop.send(());
+    tokio::time::timeout(std::time::Duration::from_secs(5), sweeper)
+        .await
+        .expect("the sweeper stops with its reconciler")
+        .unwrap();
     assert_eq!(world.usb.writes(), ["detach usb0"]);
 
     let reconciled = rig.audit("hardware_reconciled").await;
@@ -1501,7 +1556,7 @@ async fn the_sweeper_runs_the_reconciler_and_the_audit_carries_no_secret() {
     assert_eq!(facts["usb_slot"], "usb0");
     assert_eq!(facts["guest_vmid"], GUEST.to_string());
     assert_eq!(facts["mapping"], READER_A);
-    assert_eq!(facts["pass"], "periodic");
+    assert_eq!(facts["pass"], "startup");
     // Ids, states and slots only: no token, no host, no serial.
     let everything = rig.audit_text().await;
     assert!(!everything.contains(SECRET), "{everything}");
@@ -1513,6 +1568,237 @@ async fn the_sweeper_runs_the_reconciler_and_the_audit_carries_no_secret() {
     // The store's own release event followed the intent.
     assert_eq!(rig.audit("hardware_released").await.len(), 1);
     assert_eq!(rig.audit("hardware_detach_requested").await.len(), 1);
+}
+
+fn hang_on_check_node(world: &World, entered: &Arc<AtomicBool>) {
+    let entered = entered.clone();
+    world.usb.inject(
+        UsbStep::CheckNode,
+        UsbFault::Hook(Arc::new(move || {
+            let entered = entered.clone();
+            Box::pin(async move {
+                entered.store(true, Ordering::SeqCst);
+                tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+            })
+        })),
+        1,
+    );
+}
+
+#[tokio::test]
+async fn a_slow_proxmox_never_delays_the_sweeper_tick() {
+    let world = World::new(0).await;
+    world.guests(&[GUEST]).await;
+    let rig = Rig::start(&world).await;
+    rig.refresh().await;
+    // A ready lease past its TTL: the next tick expires it.
+    let lease = rig.lease("ready", true).await;
+    sqlx::query("UPDATE lab_leases SET expires_at = 1 WHERE id = ?1")
+        .bind(&lease)
+        .execute(&rig.pool)
+        .await
+        .unwrap();
+    // The reconciler's startup pass hangs in its first inventory read.
+    let entered = Arc::new(AtomicBool::new(false));
+    hang_on_check_node(&world, &entered);
+
+    let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
+    let sweeper = tokio::spawn(rig.sweeper.clone().run(
+        std::time::Duration::from_millis(50),
+        async move {
+            let _ = stopped.await;
+        },
+    ));
+    assert!(
+        eventually(10, || async { entered.load(Ordering::SeqCst) }).await,
+        "the reconciler's pass is stuck in Proxmox"
+    );
+    // While it is, the sweeper's own work goes on.
+    let moved = eventually(10, || async {
+        let state: String = sqlx::query_scalar("SELECT state FROM lab_leases WHERE id = ?1")
+            .bind(&lease)
+            .fetch_one(&rig.pool)
+            .await
+            .unwrap();
+        state == "releasing"
+    })
+    .await;
+    assert!(
+        moved,
+        "the lease expired while the reconciler waited on Proxmox"
+    );
+
+    // Shutdown does not wait for the stuck pass either.
+    let _ = stop.send(());
+    tokio::time::timeout(std::time::Duration::from_secs(5), sweeper)
+        .await
+        .expect("a stuck pass does not hold the sweeper's shutdown")
+        .unwrap();
+}
+
+#[tokio::test]
+async fn a_pass_that_overruns_its_deadline_is_cut_off_and_backs_the_schedule_off() {
+    let world = World::new(0).await;
+    let rig = Rig::start_with(&world, None, Some(std::time::Duration::from_millis(300))).await;
+    rig.refresh().await;
+    let entered = Arc::new(AtomicBool::new(false));
+    hang_on_check_node(&world, &entered);
+    let base = now();
+
+    let started = std::time::Instant::now();
+    let report = rig.reconciler.startup(base).await;
+
+    assert!(started.elapsed() < std::time::Duration::from_secs(10));
+    assert!(entered.load(Ordering::SeqCst));
+    assert!(report.pass_failed, "{report:?}");
+    assert!(
+        report.failures[0].contains("did not finish"),
+        "{:?}",
+        report.failures
+    );
+    // The failed pass doubled the wait before the next one.
+    assert!(
+        rig.reconciler
+            .tick(base + PASS_INTERVAL_MS + 1)
+            .await
+            .is_none()
+    );
+    assert!(
+        rig.reconciler
+            .tick(base + 2 * PASS_INTERVAL_MS)
+            .await
+            .is_some()
+    );
+}
+
+#[tokio::test]
+async fn a_second_reconciler_task_does_nothing() {
+    let world = World::new(0).await;
+    let rig = Rig::start(&world).await;
+    let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
+    let first = tokio::spawn(rig.reconciler.clone().run(
+        std::time::Duration::from_millis(50),
+        async move {
+            let _ = stopped.await;
+        },
+    ));
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    // The second returns at once, whatever its shutdown does.
+    tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        rig.reconciler
+            .clone()
+            .run(std::time::Duration::from_millis(50), std::future::pending()),
+    )
+    .await
+    .expect("a second instance returns at once");
+    let _ = stop.send(());
+    first.await.unwrap();
+}
+
+// ---------------------------------------------------------------------
+// Retry and backoff: an unfixable row is not retried every tick.
+// ---------------------------------------------------------------------
+
+#[tokio::test]
+async fn a_refused_delete_backs_off_and_neither_spams_events_nor_forces_refreshes() {
+    let world = World::new(0).await;
+    world.guests(&[GUEST]).await;
+    // The scheduled refresh is hourly, so a refresh in between is a bug.
+    let rig = Rig::start_with(&world, Some(3600), None).await;
+    rig.refresh().await;
+    let lease = rig.lease("ready", true).await;
+    let reservation = rig.seed(&lease, READER_A, "attached", GUEST, Some(0)).await;
+    world.usb.set_slot(GUEST, 0, OURS_A);
+    rig.set_lease(&lease, "released").await;
+    world.usb.inject(UsbStep::Detach, UsbFault::Forbidden, 1000);
+    let base = later();
+
+    let first = rig.periodic(base).await;
+    assert_eq!(rig.row(&reservation).await.0, "detach_failed");
+    assert_eq!(first.released, 0);
+    let refreshes_after_first = Rig::refreshes(&world);
+
+    // A tick every five minutes for most of an hour: the retries back off 10, 20, 40
+    // minutes, so the row is tried at 0, 10 and 30, not twelve times.
+    for minute in (5_i64..=55).step_by(5) {
+        rig.reconciler.tick(base + minute * MINUTE_MS).await;
+    }
+
+    let intents = rig.audit("hardware_detach_requested").await.len();
+    assert_eq!(intents, 3, "attempts at 0, 10 and 30 minutes");
+    assert_eq!(rig.row(&reservation).await.0, "detach_failed");
+    assert!(world.usb.writes().is_empty());
+    // The finding was reported once, and no refresh was forced by an
+    // unfixable row (the hourly one is not due yet).
+    assert_eq!(rig.audit("hardware_reconcile_finding").await.len(), 1);
+    assert_eq!(Rig::refreshes(&world), refreshes_after_first);
+    // Once the privilege is back, the next attempt succeeds.
+    world.usb.clear();
+    let done = rig
+        .reconciler
+        .tick(base + 3 * MAX_BACKOFF_MS)
+        .await
+        .unwrap();
+    assert_eq!(done.released, 1, "{done:?}");
+    assert_eq!(rig.row(&reservation).await.0, "released");
+}
+
+// ---------------------------------------------------------------------
+// The scheduled refresh: configurable, quiet, and it reports changes.
+// ---------------------------------------------------------------------
+
+#[tokio::test]
+async fn the_scheduled_refresh_is_quiet_reports_status_changes_and_can_be_off() {
+    let world = World::new(0).await;
+    let rig = Rig::start_with(&world, Some(600), None).await;
+    // A manual refresh is fully audited.
+    rig.refresh().await;
+    assert_eq!(rig.audit("hardware_refresh_started").await.len(), 1);
+    assert_eq!(rig.audit("hardware_refreshed").await.len(), 1);
+    let base = later();
+
+    // The scheduled one sets a baseline and audits nothing.
+    let first = rig.periodic(base).await;
+    assert_eq!(first.accounts_refreshed, 1);
+    assert_eq!(rig.audit("hardware_refresh_started").await.len(), 1);
+    assert_eq!(rig.audit("hardware_refreshed").await.len(), 1);
+    assert!(rig.audit("hardware_status_changed").await.is_empty());
+    let reads = Rig::refreshes(&world);
+
+    // Not due again before the interval.
+    let early = rig.reconciler.tick(base + PASS_INTERVAL_MS).await.unwrap();
+    assert_eq!(early.accounts_refreshed, 0);
+    assert_eq!(Rig::refreshes(&world), reads);
+
+    // A device is unplugged: the next scheduled refresh says so, once, and
+    // is still quiet otherwise.
+    world.usb.set_present(READER_A, false);
+    let after = rig
+        .reconciler
+        .tick(base + 3 * PASS_INTERVAL_MS)
+        .await
+        .unwrap();
+    assert_eq!(after.accounts_refreshed, 1);
+    let changes = rig.audit("hardware_status_changed").await;
+    assert_eq!(changes.len(), 1, "{changes:?}");
+    assert_eq!(changes[0]["mapping"], READER_A);
+    assert_eq!(changes[0]["from_status"], "available");
+    assert_eq!(changes[0]["to_status"], "missing");
+    assert_eq!(rig.audit("hardware_refresh_started").await.len(), 1);
+    assert_eq!(rig.audit("hardware_refreshed").await.len(), 1);
+
+    // Off means off: no refresh, and no status change reported, but a manual
+    // refresh still works and is audited.
+    let off_world = World::new(0).await;
+    let off = Rig::start_with(&off_world, Some(0), None).await;
+    off.refresh().await;
+    let calls = Rig::refreshes(&off_world);
+    let report = off.pass(later()).await;
+    assert_eq!(report.accounts_refreshed, 0);
+    assert_eq!(Rig::refreshes(&off_world), calls);
+    off.refresh().await;
+    assert_eq!(off.audit("hardware_refresh_started").await.len(), 2);
 }
 
 #[tokio::test]

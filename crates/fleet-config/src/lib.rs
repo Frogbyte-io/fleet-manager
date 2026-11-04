@@ -41,6 +41,14 @@
 //! sweeper and leaves the manual sweep. A value that is not a whole number
 //! of seconds fails configuration loading.
 //!
+//! `FLEET_HARDWARE_REFRESH_INTERVAL_SECONDS` (TOML
+//! `hardware_refresh_interval_seconds`, default 600) is how often the hardware
+//! reconciler refreshes the USB inventory of each Proxmox account that has
+//! inventoried devices; `0` turns the scheduled refresh off, and a non-zero
+//! value must be at least 60. Each refresh reads the account's mappings,
+//! nodes and up to 512 guest configs. Above 900 seconds the inventory's
+//! observation bound makes devices read as stale between refreshes.
+//!
 //! `FLEET_DESIRED_FETCH_INTERVAL_SECONDS` (TOML
 //! `desired_fetch_interval_seconds`, default `0` = off) makes the
 //! controller fetch the configured desired source's head periodically; a
@@ -95,6 +103,13 @@ pub const TAILSCALE_SERVE_LISTEN_VAR: &str = "FLEET_TAILSCALE_SERVE_LISTEN";
 pub const LAB_SWEEP_INTERVAL_VAR: &str = "FLEET_LAB_SWEEP_INTERVAL_SECONDS";
 /// The default Lab sweeper interval (FM-716).
 pub const DEFAULT_LAB_SWEEP_INTERVAL_SECONDS: u64 = 60;
+/// Environment variable holding the scheduled hardware inventory refresh
+/// interval in seconds (`0` turns it off).
+pub const HARDWARE_REFRESH_INTERVAL_VAR: &str = "FLEET_HARDWARE_REFRESH_INTERVAL_SECONDS";
+/// The default scheduled hardware inventory refresh interval (FM-1124).
+pub const DEFAULT_HARDWARE_REFRESH_INTERVAL_SECONDS: u64 = 600;
+/// The shortest allowed non-zero hardware refresh interval, in seconds.
+pub const MIN_HARDWARE_REFRESH_INTERVAL_SECONDS: u64 = 60;
 /// Environment variable holding the periodic desired-source fetch interval
 /// in seconds (`0`, the default, disables the periodic fetch).
 pub const DESIRED_FETCH_INTERVAL_VAR: &str = "FLEET_DESIRED_FETCH_INTERVAL_SECONDS";
@@ -178,6 +193,11 @@ pub struct ControllerConfig {
     /// How often the Lab sweeper expires leases, queues due cleanups, and
     /// reconciles Lab guests, in seconds; `0` disables it.
     pub lab_sweep_interval_seconds: u64,
+    /// How often the hardware reconciler refreshes the USB inventory of each
+    /// account with inventoried devices, in seconds; `0` turns the scheduled
+    /// refresh off. A non-zero value must be at least
+    /// [`MIN_HARDWARE_REFRESH_INTERVAL_SECONDS`].
+    pub hardware_refresh_interval_seconds: u64,
     /// How often the controller fetches the configured desired source's
     /// head, in seconds; `0` (the default) disables the periodic fetch. A
     /// non-zero value must be at least [`MIN_DESIRED_FETCH_INTERVAL_SECONDS`].
@@ -359,6 +379,7 @@ struct ConfigFile {
     data_dir: Option<String>,
     master_key_file: Option<String>,
     lab_sweep_interval_seconds: Option<u64>,
+    hardware_refresh_interval_seconds: Option<u64>,
     desired_fetch_interval_seconds: Option<u64>,
     lab_memory_overcommit: Option<f64>,
     lab_cpu_overcommit: Option<f64>,
@@ -413,6 +434,12 @@ pub enum ConfigError {
     /// The periodic fetch interval is not `0` or a whole number of seconds
     /// of at least the minimum.
     DesiredFetchIntervalInvalid {
+        /// The value that failed to parse or validate.
+        value: String,
+    },
+    /// The hardware refresh interval is not `0` or a whole number of
+    /// seconds of at least the minimum.
+    HardwareRefreshIntervalInvalid {
         /// The value that failed to parse or validate.
         value: String,
     },
@@ -534,6 +561,10 @@ impl fmt::Display for ConfigError {
                 f,
                 "{DESIRED_FETCH_INTERVAL_VAR} must be 0 (off) or a whole number of seconds of at least {MIN_DESIRED_FETCH_INTERVAL_SECONDS}, not {value:?}"
             ),
+            Self::HardwareRefreshIntervalInvalid { value } => write!(
+                f,
+                "{HARDWARE_REFRESH_INTERVAL_VAR} must be 0 (off) or a whole number of seconds of at least {MIN_HARDWARE_REFRESH_INTERVAL_SECONDS}, not {value:?}"
+            ),
             Self::LabSweepIntervalInvalid { value } => write!(
                 f,
                 "{LAB_SWEEP_INTERVAL_VAR} must be a whole number of seconds (0 disables the sweeper), not {value:?}"
@@ -616,6 +647,7 @@ pub fn load(
     let mut data_dir: Option<String> = None;
     let mut master_key_file: Option<String> = None;
     let mut lab_sweep_interval_seconds: Option<u64> = None;
+    let mut hardware_refresh_interval_seconds: Option<u64> = None;
     let mut desired_fetch_interval_seconds: Option<u64> = None;
     let mut lab_placement = LabPlacementConfig::default();
     let mut lab_artifacts_dir: Option<String> = None;
@@ -647,6 +679,7 @@ pub fn load(
         data_dir = file.data_dir;
         master_key_file = file.master_key_file;
         lab_sweep_interval_seconds = file.lab_sweep_interval_seconds;
+        hardware_refresh_interval_seconds = file.hardware_refresh_interval_seconds;
         desired_fetch_interval_seconds = file.desired_fetch_interval_seconds;
         if let Some(ratio) = file.lab_memory_overcommit {
             lab_placement.memory_overcommit = ratio;
@@ -688,6 +721,21 @@ pub fn load(
                 .parse()
                 .map_err(|_| ConfigError::LabSweepIntervalInvalid { value: raw })?,
         );
+    }
+    if let Some(raw) = env(HARDWARE_REFRESH_INTERVAL_VAR) {
+        hardware_refresh_interval_seconds = Some(
+            raw.trim()
+                .parse()
+                .map_err(|_| ConfigError::HardwareRefreshIntervalInvalid { value: raw })?,
+        );
+    }
+    if let Some(value) = hardware_refresh_interval_seconds
+        && value != 0
+        && value < MIN_HARDWARE_REFRESH_INTERVAL_SECONDS
+    {
+        return Err(ConfigError::HardwareRefreshIntervalInvalid {
+            value: value.to_string(),
+        });
     }
     if let Some(raw) = env(DESIRED_FETCH_INTERVAL_VAR) {
         desired_fetch_interval_seconds = Some(
@@ -758,6 +806,8 @@ pub fn load(
         master_key_file: master_key_file.map(PathBuf::from),
         lab_sweep_interval_seconds: lab_sweep_interval_seconds
             .unwrap_or(DEFAULT_LAB_SWEEP_INTERVAL_SECONDS),
+        hardware_refresh_interval_seconds: hardware_refresh_interval_seconds
+            .unwrap_or(DEFAULT_HARDWARE_REFRESH_INTERVAL_SECONDS),
         desired_fetch_interval_seconds: desired_fetch_interval_seconds.unwrap_or(0),
         lab_placement,
         image_build_proxy,
@@ -1089,6 +1139,7 @@ impl ControllerConfig {
     /// shown, and no secret value can appear because this crate never reads
     /// file contents.
     #[must_use]
+    #[allow(clippy::too_many_lines)]
     pub fn summary(&self) -> String {
         let mut lines = vec![
             format!("listen = {}", self.listen),
@@ -1100,6 +1151,15 @@ impl ControllerConfig {
                 self.lab_sweep_interval_seconds,
                 if self.lab_sweep_interval_seconds == 0 {
                     " (disabled)"
+                } else {
+                    ""
+                }
+            ),
+            format!(
+                "hardware_refresh_interval_seconds = {}{}",
+                self.hardware_refresh_interval_seconds,
+                if self.hardware_refresh_interval_seconds == 0 {
+                    " (off)"
                 } else {
                     ""
                 }

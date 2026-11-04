@@ -1,6 +1,10 @@
 //! The hardware reconciler (FM-1124, ADR 0019 decision 8, M11): converges
 //! the database and Proxmox after crashes and manual changes. It runs once
-//! at startup and then periodically from the Lab sweeper.
+//! at startup and then periodically, on its **own task** ([`HardwareReconciler::run`],
+//! spawned by the Lab sweeper's `run`, one instance, stopped with it): a pass
+//! reads guest configs from Proxmox, so no sweeper tick ever awaits it, and
+//! every pass has an overall deadline ([`PASS_DEADLINE`]) after which it is
+//! cut off, counts as failed and backs the schedule off.
 //!
 //! The reconciler **reports** what it does not own and **repairs** only what
 //! Fleet itself attached. The rules, in the order they bind:
@@ -37,19 +41,32 @@
 //!   device. A row touched in the last few minutes is skipped by the
 //!   periodic pass (a step may be in flight), not by the startup pass (no
 //!   step of this process can be).
-//! - **An entry Fleet recorded for a released reservation** (a write that
-//!   landed after its row was released and that the saga could not remove)
-//!   is removed under the same exact-value rule, when the device has no live
-//!   reservation, the guest is listed, and the release is recent. A row
-//!   released by an override has its slot cleared and is never examined.
+//! - **A released reservation is not examined.** `release_row` keeps the
+//!   recorded slot of every flow release, so a slot on a released row says
+//!   nothing about who wrote what is there now: a maintainer's own
+//!   `qm set usb0 mapping=<id>` on a surviving guest would match it. Fleet
+//!   never detaches what it did not attach (ADR 0019), so nothing is deleted
+//!   for a released row. The one write that can outlive its row, a write that
+//!   landed after cleanup released the `attaching` row and whose removal the
+//!   saga then failed (`hardware_attach_unrecorded`, outcome `unremoved`),
+//!   surfaces as `externally_attached` at the next refresh, and the runbook
+//!   has an operator remove it by hand.
 //!
 //! Bounded and idempotent: a pass inspects at most [`MAX_ROWS_PER_PASS`]
 //! live rows and makes at most [`MAX_GUEST_READS_PER_PASS`] guest reads (a
 //! guest read is two config reads), one resource listing per account. A row
 //! whose pass changed nothing is not examined again before a doubling
-//! backoff (a pass interval up to an hour); a pass that cannot read the
-//! store or an account backs the whole pass off the same way. Rows beyond
-//! the budget wait for a later pass; nothing loops.
+//! backoff (a pass interval up to an hour, kept as long as the row is live);
+//! a pass that cannot read the store or an account, or that overruns its
+//! deadline, backs the whole schedule off the same way. Rows beyond the
+//! budget wait for a later pass; nothing loops.
+//!
+//! The inventory refresh that makes findings reach the device status is
+//! scheduled by `hardware_refresh_interval_seconds` (`0` turns it off), is
+//! serialized per account with every other refresh, and audits only what
+//! matters: a failure, and a device whose status changed
+//! (`hardware_status_changed`); not `hardware_refresh_started` and
+//! `hardware_refreshed` every time (a manual refresh stays fully audited).
 //!
 //! Audit events (ids, nodes, VMIDs and slots only; provider detail is
 //! scrubbed and bounded; never a secret or a serial), filed under
@@ -62,7 +79,9 @@
 //! refused sink means no delete), and the store's own `hardware_released`.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use async_trait::async_trait;
 use fleet_application::audit::{AuditIntent, AuditMetadata};
@@ -92,23 +111,24 @@ pub const MAX_BACKOFF_MS: i64 = 3_600_000;
 /// saga step may be running), in milliseconds.
 pub const FRESH_ROW_MS: i64 = 300_000;
 
-/// How often an account with devices is refreshed, in milliseconds. It stays
-/// under the inventory's observation bound (15 minutes), so devices do not
-/// read as stale between two refreshes.
-pub const REFRESH_INTERVAL_MS: i64 = 600_000;
+/// How often the reconciler's task looks at whether a pass is due.
+pub const TASK_TICK: Duration = Duration::from_secs(30);
+
+/// The longest one pass may run before it is cut off. Every step of a pass
+/// commits on its own, so a cut-off pass leaves only committed changes; the
+/// rows it did not reach wait for the next pass.
+pub const PASS_DEADLINE: Duration = Duration::from_secs(180);
+
+/// The default gap between scheduled inventory refreshes of an account, in
+/// milliseconds. It stays under the inventory's observation bound (15
+/// minutes), so devices do not read as stale between two refreshes.
+pub const DEFAULT_REFRESH_INTERVAL_MS: i64 = 600_000;
 
 /// The most live rows one pass inspects.
 pub const MAX_ROWS_PER_PASS: usize = 256;
 
 /// The most guests one pass reads (each is two config reads).
 pub const MAX_GUEST_READS_PER_PASS: usize = 32;
-
-/// How long after its release a row that recorded a slot is still examined
-/// for a leftover entry, in milliseconds.
-pub const RELEASED_LOOKBACK_MS: i64 = 86_400_000;
-
-/// The most recently released rows one pass considers.
-pub const MAX_RELEASED_PER_PASS: usize = 64;
 
 /// The longest provider detail kept in an audit fact.
 const MAX_DETAIL_CHARS: usize = 240;
@@ -297,15 +317,8 @@ pub fn backoff_ms(attempts: u32) -> i64 {
 
 // ── the records the reconciler reads ────────────────────────────────────
 
-/// A released reservation that recorded a guest and slot.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct ReleasedSlot {
-    /// The reservation.
-    pub reservation: HardwareReservation,
-}
-
 /// What the reconciler reads beyond the hardware store port: whether an
-/// owner still counts, and the recently released rows.
+/// owner still counts.
 #[async_trait]
 pub trait ReconcilerRecords: std::fmt::Debug + Send + Sync {
     /// The standing of an owner. An unknown lease or machine is `Ended`.
@@ -318,18 +331,6 @@ pub trait ReconcilerRecords: std::fmt::Debug + Send + Sync {
         kind: ReservationOwnerKind,
         owner_id: &str,
     ) -> Result<OwnerStanding, String>;
-
-    /// Rows released at or after `since` that recorded a guest and slot,
-    /// newest first, at most `limit`.
-    ///
-    /// # Errors
-    ///
-    /// Fails when the backend errors.
-    async fn released_with_slot(
-        &self,
-        since: i64,
-        limit: usize,
-    ) -> Result<Vec<ReleasedSlot>, String>;
 }
 
 /// [`ReconcilerRecords`] over the controller's SQLite pool.
@@ -386,54 +387,6 @@ impl ReconcilerRecords for SqliteReconcilerRecords {
             }
         }
     }
-
-    async fn released_with_slot(
-        &self,
-        since: i64,
-        limit: usize,
-    ) -> Result<Vec<ReleasedSlot>, String> {
-        let rows = sqlx::query(
-            "SELECT id, device_id, owner_kind, owner_id, guest_account, guest_node, guest_vmid, \
-             usb_slot, created_at, updated_at, released_at \
-             FROM hardware_reservations \
-             WHERE state = 'released' AND usb_slot IS NOT NULL AND guest_vmid IS NOT NULL \
-             AND released_at >= ?1 ORDER BY released_at DESC LIMIT ?2",
-        )
-        .bind(since)
-        .bind(i64::try_from(limit).unwrap_or(i64::MAX))
-        .fetch_all(&self.pool)
-        .await
-        .map_err(|error| format!("the released reservations could not be read: {error}"))?;
-        rows.iter()
-            .map(|row| {
-                let owner_kind: String = row.get("owner_kind");
-                let vmid: i64 = row.get("guest_vmid");
-                let slot: i64 = row.get("usb_slot");
-                Ok(ReleasedSlot {
-                    reservation: HardwareReservation {
-                        id: row.get("id"),
-                        device_id: row.get("device_id"),
-                        owner_kind: ReservationOwnerKind::from_id(&owner_kind)?,
-                        owner_id: row.get("owner_id"),
-                        state: State::Released,
-                        guest: Some(GuestTarget {
-                            account_id: row.get("guest_account"),
-                            node: row.get("guest_node"),
-                            vmid: u32::try_from(vmid)
-                                .map_err(|_| "a stored VMID is out of range".to_owned())?,
-                            usb_slot: Some(
-                                u8::try_from(slot)
-                                    .map_err(|_| "a stored slot is out of range".to_owned())?,
-                            ),
-                        }),
-                        created_at: row.get("created_at"),
-                        updated_at: row.get("updated_at"),
-                        released_at: row.get("released_at"),
-                    },
-                })
-            })
-            .collect()
-    }
 }
 
 // ── the reconciler ──────────────────────────────────────────────────────
@@ -453,7 +406,7 @@ pub struct ReconcileReport {
     pub guest_reads: usize,
     /// Reservations released.
     pub released: usize,
-    /// `usbN` entries Fleet deleted (its own, from live rows and leftovers).
+    /// `usbN` entries Fleet deleted (its own, from live rows).
     pub entries_removed: usize,
     /// Rows moved to `attach_unknown` because an entry could not be proven.
     pub marked_unproven: usize,
@@ -499,7 +452,8 @@ struct Inner {
     refreshes: HashMap<String, RefreshMemory>,
     reported: HashSet<(String, &'static str)>,
     external: HashMap<String, HashSet<String>>,
-    released_checked: HashSet<String>,
+    /// The last status seen per device, to report a change once.
+    statuses: HashMap<String, String>,
 }
 
 /// What one pass may still read.
@@ -533,6 +487,9 @@ pub struct HardwareReconciler {
     records: Arc<dyn ReconcilerRecords>,
     inner: Mutex<Inner>,
     running: tokio::sync::Mutex<()>,
+    started: AtomicBool,
+    refresh_interval_ms: i64,
+    deadline: Duration,
 }
 
 fn bounded(text: &str) -> String {
@@ -572,7 +529,26 @@ impl HardwareReconciler {
             records,
             inner: Mutex::new(Inner::default()),
             running: tokio::sync::Mutex::new(()),
+            started: AtomicBool::new(false),
+            refresh_interval_ms: DEFAULT_REFRESH_INTERVAL_MS,
+            deadline: PASS_DEADLINE,
         }
+    }
+
+    /// Sets how often an account with devices is refreshed, in seconds; `0`
+    /// turns the scheduled refresh off (repairs still run; findings then
+    /// reach the device status only through a manual refresh).
+    #[must_use]
+    pub fn with_refresh_interval_seconds(mut self, seconds: u64) -> Self {
+        self.refresh_interval_ms = i64::try_from(seconds.saturating_mul(1_000)).unwrap_or(i64::MAX);
+        self
+    }
+
+    /// Sets the overall deadline of one pass.
+    #[must_use]
+    pub fn with_pass_deadline(mut self, deadline: Duration) -> Self {
+        self.deadline = deadline;
+        self
     }
 
     fn inner(&self) -> std::sync::MutexGuard<'_, Inner> {
@@ -587,7 +563,7 @@ impl HardwareReconciler {
     /// skip recently changed rows (no step of this process can be running).
     pub async fn startup(&self, now: i64) -> ReconcileReport {
         let _guard = self.running.lock().await;
-        self.run(now, true).await
+        self.run_pass(now, true).await
     }
 
     /// The periodic pass: runs when one is due (the interval, or the
@@ -598,11 +574,61 @@ impl HardwareReconciler {
             return None;
         }
         let _guard = self.running.try_lock().ok()?;
-        Some(self.run(now, false).await)
+        Some(self.run_pass(now, false).await)
     }
 
-    async fn run(&self, now: i64, startup: bool) -> ReconcileReport {
-        let report = self.pass(now, startup).await;
+    /// Runs the reconciler until `shutdown` resolves: the startup pass, then
+    /// a look every `tick` at whether a pass is due. Meant to be spawned once
+    /// (a second call returns at once). Shutdown cuts a pass off; every step
+    /// of a pass commits on its own, so the next run resumes from the rows.
+    pub async fn run(
+        self: Arc<Self>,
+        tick: Duration,
+        shutdown: impl std::future::Future<Output = ()>,
+    ) {
+        if self.started.swap(true, Ordering::SeqCst) {
+            eprintln!("hardware reconciler: already running; this instance does nothing");
+            return;
+        }
+        tokio::pin!(shutdown);
+        let log = |pass: &ReconcileReport| {
+            for failure in &pass.failures {
+                eprintln!("hardware reconciler: {failure}; retrying on a later pass");
+            }
+        };
+        tokio::select! {
+            () = &mut shutdown => return,
+            pass = self.startup(fleet_core::SystemClock::now_unix_millis()) => log(&pass),
+        }
+        loop {
+            tokio::select! {
+                () = &mut shutdown => break,
+                () = tokio::time::sleep(tick) => {}
+            }
+            tokio::select! {
+                () = &mut shutdown => break,
+                pass = self.tick(fleet_core::SystemClock::now_unix_millis()) => {
+                    if let Some(pass) = pass {
+                        log(&pass);
+                    }
+                }
+            }
+        }
+    }
+
+    async fn run_pass(&self, now: i64, startup: bool) -> ReconcileReport {
+        let report = match tokio::time::timeout(self.deadline, self.pass(now, startup)).await {
+            Ok(report) => report,
+            Err(_) => ReconcileReport {
+                startup,
+                pass_failed: true,
+                failures: vec![format!(
+                    "the pass did not finish within {}s and was cut off; what it committed stands",
+                    self.deadline.as_secs()
+                )],
+                ..ReconcileReport::default()
+            },
+        };
         let mut inner = self.inner();
         if report.pass_failed {
             inner.pass_failures = inner.pass_failures.saturating_add(1);
@@ -649,24 +675,7 @@ impl HardwareReconciler {
             let mut inner = self.inner();
             inner.rows.retain(|id, _| ids.contains(id.as_str()));
             inner.reported.retain(|(id, _)| ids.contains(id.as_str()));
-            if inner.released_checked.len() > 4 * MAX_RELEASED_PER_PASS {
-                inner.released_checked.clear();
-            }
         }
-        let released = match self
-            .records
-            .released_with_slot(
-                now.saturating_sub(RELEASED_LOOKBACK_MS),
-                MAX_RELEASED_PER_PASS,
-            )
-            .await
-        {
-            Ok(released) => released,
-            Err(detail) => {
-                report.failures.push(detail);
-                Vec::new()
-            }
-        };
         let fresh_ms = if startup { 0 } else { FRESH_ROW_MS };
         let mut budget = Budget {
             left: MAX_GUEST_READS_PER_PASS,
@@ -711,15 +720,6 @@ impl HardwareReconciler {
                     None => true,
                 },
             );
-            let mut leftovers = Vec::new();
-            for row in &released {
-                if let Some(device) = by_device.get(row.reservation.device_id.as_str()) {
-                    leftovers.push(Row {
-                        reservation: row.reservation.clone(),
-                        device: (*device).clone(),
-                    });
-                }
-            }
             let mut run = AccountRun {
                 request: self.request(&account.id).await,
                 resources: None,
@@ -728,17 +728,6 @@ impl HardwareReconciler {
             self.reconcile_rows(
                 &mut run,
                 rows,
-                now,
-                fresh_ms,
-                startup,
-                &mut budget,
-                &mut report,
-                &mut changed,
-            )
-            .await;
-            self.reconcile_leftovers(
-                &mut run,
-                leftovers,
                 now,
                 fresh_ms,
                 startup,
@@ -1258,7 +1247,6 @@ impl HardwareReconciler {
                 Err(error) => return self.moved_or_failed(&id, &error, report),
             }
         };
-        *changed = true;
         let row = Row {
             reservation: detaching,
             device: row.device.clone(),
@@ -1299,9 +1287,8 @@ impl HardwareReconciler {
                         report.entries_removed += 1;
                         match self.release(&row, now).await {
                             Ok(()) => {
-                                // Released after a delete and a confirming
-                                // read: nothing is left to look for.
-                                self.inner().released_checked.insert(id.clone());
+                                // A real change: the account is refreshed.
+                                *changed = true;
                                 report.released += 1;
                                 self.reconciled(
                                     startup,
@@ -1385,165 +1372,17 @@ impl HardwareReconciler {
             .await;
     }
 
-    // ── entries recorded for a released reservation ──────────────────────
-
-    #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
-    async fn reconcile_leftovers(
-        &self,
-        run: &mut AccountRun,
-        rows: Vec<Row>,
-        now: i64,
-        fresh_ms: i64,
-        startup: bool,
-        budget: &mut Budget,
-        report: &mut ReconcileReport,
-        changed: &mut bool,
-    ) {
-        for row in rows {
-            let id = row.reservation.id.clone();
-            let Some(recorded) = row.reservation.guest.clone() else {
-                continue;
-            };
-            let Some(slot) = recorded.usb_slot else {
-                continue;
-            };
-            let released_at = row.reservation.released_at.unwrap_or(now);
-            let (checked, backing_off) = {
-                let inner = self.inner();
-                (
-                    inner.released_checked.contains(&id),
-                    inner
-                        .rows
-                        .get(&id)
-                        .is_some_and(|memory| memory.next_try_at > now),
-                )
-            };
-            if checked || backing_off || now.saturating_sub(released_at) < fresh_ms {
-                continue;
-            }
-            // A device someone holds now is that holder's to account for.
-            match self.store.live_reservation_for_device(&row.device.id).await {
-                Ok(None) => {}
-                Ok(Some(_)) => {
-                    self.inner().released_checked.insert(id);
-                    continue;
-                }
-                Err(error) => {
-                    report.failures.push(format!("reservation {id}: {error}"));
-                    continue;
-                }
-            }
-            let view = self
-                .view_at(
-                    run,
-                    recorded.vmid,
-                    &row.device.mapping_id,
-                    Some(&mut *budget),
-                )
-                .await;
-            let slot_text = slot_name(slot);
-            match view {
-                GuestView::Deferred => report.deferred += 1,
-                GuestView::Refs(slots) if slots.len() == 1 && slots[0] == slot_text => {
-                    self.remove_leftover(run, &row, slot, now, startup, report, changed)
-                        .await;
-                }
-                GuestView::Unreadable(_) => {
-                    let mut inner = self.inner();
-                    let memory = inner.rows.entry(id).or_default();
-                    memory.attempts = memory.attempts.saturating_add(1);
-                    memory.next_try_at = now.saturating_add(backoff_ms(memory.attempts));
-                }
-                // No entry, an entry elsewhere (not what the row recorded),
-                // a template, or a guest the cluster does not list: nothing
-                // this row can claim. Not looked at again by this process.
-                _ => {
-                    self.inner().released_checked.insert(id);
-                }
-            }
-        }
-    }
-
-    /// Deletes the exact entry a released row recorded, which nothing holds.
-    #[allow(clippy::too_many_arguments)]
-    async fn remove_leftover(
-        &self,
-        run: &mut AccountRun,
-        row: &Row,
-        slot: u8,
-        now: i64,
-        startup: bool,
-        report: &mut ReconcileReport,
-        changed: &mut bool,
-    ) {
-        let id = row.reservation.id.clone();
-        let Some(recorded) = row.reservation.guest.clone() else {
-            return;
-        };
-        let Ok(Some(node)) = self.node_of(run, recorded.vmid).await else {
-            return;
-        };
-        let Ok(request) = run.request.clone() else {
-            return;
-        };
-        let slot_text = slot_name(slot);
-        let mapping = row.device.mapping_id.as_str();
-        let intent = [
-            ("node", node.clone()),
-            ("guest_vmid", recorded.vmid.to_string()),
-            ("usb_slot", slot_text.clone()),
-            ("leftover", "true".to_owned()),
-        ];
-        if let Err(detail) = self
-            .event("hardware_detach_requested", startup, row, &intent)
-            .await
-        {
-            report.failures.push(format!(
-                "released reservation {id}: the detach audit failed, so nothing was deleted: {}",
-                bounded(&detail)
-            ));
-            self.back_off(&id, now);
-            return;
-        }
-        let outcome = match self
-            .client
-            .qemu_usb_detach(request, &node, recorded.vmid, &slot_text, mapping)
-            .await
-        {
-            Ok(done) if done.state == PveUsbState::Applied => {
-                *changed = true;
-                report.entries_removed += 1;
-                self.inner().released_checked.insert(id);
-                "leftover_removed"
-            }
-            Ok(_) => {
-                self.back_off(&id, now);
-                "leftover_pending"
-            }
-            Err(_) => {
-                self.back_off(&id, now);
-                "leftover_unremoved"
-            }
-        };
-        self.reconciled(startup, row, outcome, &[("leftover", "true".to_owned())])
-            .await;
-    }
-
-    fn back_off(&self, id: &str, now: i64) {
-        let mut inner = self.inner();
-        let memory = inner.rows.entry(id.to_owned()).or_default();
-        memory.attempts = memory.attempts.saturating_add(1);
-        memory.next_try_at = now.saturating_add(backoff_ms(memory.attempts));
-    }
-
     // ── the inventory ────────────────────────────────────────────────────
 
     /// Refreshes the account's inventory so the findings reach the device
     /// status: an unreferenced device is `available`, a device a guest Fleet
     /// did not attach it to is `externally_attached`, an unknown or failed
-    /// row reads `quarantined`. Done the first time this process sees the
-    /// account (so after a restart), when the pass changed something, and
-    /// when the last refresh is older than [`REFRESH_INTERVAL_MS`].
+    /// row reads `quarantined`. Scheduled by `hardware_refresh_interval_seconds`
+    /// (`0` is off): the first time this process sees the account (so after
+    /// a restart), after a pass that really changed something, and when the
+    /// last refresh is older than the interval. It is the quiet refresh:
+    /// only a failure and a status change reach the audit trail, and it is
+    /// serialized with every other refresh of the account.
     async fn refresh_account(
         &self,
         account_id: &str,
@@ -1552,13 +1391,17 @@ impl HardwareReconciler {
         changed: bool,
         report: &mut ReconcileReport,
     ) {
+        if self.refresh_interval_ms <= 0 {
+            return;
+        }
         let due = {
             let inner = self.inner();
             match inner.refreshes.get(account_id) {
                 None => true,
                 Some(memory) => {
                     memory.next_try_at <= now
-                        && (changed || now.saturating_sub(memory.last_ok) >= REFRESH_INTERVAL_MS)
+                        && (changed
+                            || now.saturating_sub(memory.last_ok) >= self.refresh_interval_ms)
                 }
             }
         };
@@ -1567,12 +1410,11 @@ impl HardwareReconciler {
         }
         let refreshed = self
             .inventory
-            .refresh(
+            .refresh_scheduled(
                 &fleet_auth::LanAllowAllAuthorizer,
                 &ActingPrincipal {
                     id: fleet_auth::LAN_PRINCIPAL_ID.to_owned(),
                 },
-                None,
                 account_id,
             )
             .await;
@@ -1586,6 +1428,8 @@ impl HardwareReconciler {
                     memory.next_try_at = 0;
                 }
                 report.accounts_refreshed += 1;
+                self.report_status_changes(startup, &refreshed, report)
+                    .await;
                 self.report_external(account_id, startup, &refreshed, report)
                     .await;
             }
@@ -1598,6 +1442,47 @@ impl HardwareReconciler {
                     "the inventory of account {account_id} could not be refreshed: {}",
                     bounded(&error.to_string())
                 ));
+            }
+        }
+    }
+
+    /// Reports a device whose status differs from the last refresh this
+    /// process saw (the first sight of a device only sets the baseline).
+    async fn report_status_changes(
+        &self,
+        startup: bool,
+        refreshed: &fleet_application::hardware_inventory::RefreshReport,
+        report: &mut ReconcileReport,
+    ) {
+        let mut changes = Vec::new();
+        {
+            let mut inner = self.inner();
+            for device in &refreshed.devices {
+                let now_status = match device.view.status.reason() {
+                    Some(reason) => format!("{} ({})", device.view.status.id(), reason.id()),
+                    None => device.view.status.id().to_owned(),
+                };
+                let id = device.view.device.id.clone();
+                if let Some(before) = inner.statuses.insert(id, now_status.clone())
+                    && before != now_status
+                {
+                    changes.push((
+                        device.view.device.id.clone(),
+                        device.view.device.mapping_id.clone(),
+                        before,
+                        now_status,
+                    ));
+                }
+            }
+        }
+        for (device_id, mapping, from, to) in changes {
+            let mut metadata = Self::metadata("hardware_status_changed", startup);
+            let _ = metadata.insert("device_id", &device_id);
+            let _ = metadata.insert("mapping", &mapping);
+            let _ = metadata.insert("from_status", &from);
+            let _ = metadata.insert("to_status", &to);
+            if self.record(&device_id, metadata).await.is_ok() {
+                report.findings += 1;
             }
         }
     }

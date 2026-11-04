@@ -1701,7 +1701,8 @@ fn run_serve(mut config: fleet_config::ControllerConfig) -> ExitCode {
                                 store.pool().clone(),
                             ),
                         ),
-                    ),
+                    )
+                    .with_refresh_interval_seconds(config.hardware_refresh_interval_seconds),
                 ));
             }
             let interval = std::time::Duration::from_secs(config.lab_sweep_interval_seconds);
