@@ -517,6 +517,22 @@ pub fn compose_proxmox_with_events(
             audit.clone(),
         ),
     );
+    // The operator's override release (FM-1124) runs the reservation store's
+    // elevated release, with a required audit intent before it.
+    let hardware_override = Arc::new(fleet_application::hardware_override::HardwareOverride::new(
+        Arc::new(fleet_storage_sqlite::HardwareRepository::new(pool.clone())),
+        Arc::new(
+            fleet_application::hardware_reservation::HardwareReservations::new(
+                Arc::new(
+                    crate::hardware_reservation_store::SqliteHardwareReservations::new(
+                        pool.clone(),
+                    ),
+                ),
+                audit.clone(),
+            ),
+        ),
+        audit.clone(),
+    ));
     let accounts = fleet_application::proxmox::ProxmoxAccounts::new(
         account_port,
         credential_store,
@@ -528,6 +544,7 @@ pub fn compose_proxmox_with_events(
     )
     .with_permissions(discovery.clone())
     .with_hardware(hardware)
+    .with_hardware_override(hardware_override)
     .with_console(discovery)
     .with_console_limits(console_limits())
     .with_task_history(

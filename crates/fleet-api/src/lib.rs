@@ -303,6 +303,9 @@ pub const API_BASE_PATH: &str = "/api/v1";
         hardware::HardwareGuestScanDto,
         hardware::HardwareRefreshDto,
         hardware::RefreshHardwareRequest,
+        hardware::OverrideReleaseRequest,
+        hardware::HardwareOverrideOutcomeDto,
+        hardware::HardwareOverrideReleaseDto,
         node::CreateEnrollmentTokenRequest,
         node::EnrollmentTokenCreatedDto,
         node::EnrollmentTokenDto,
@@ -507,6 +510,7 @@ pub fn api(state: Arc<operations::ApiState>) -> (Router, utoipa::openapi::OpenAp
                 .routes(routes!(proxmox_privileges::get_proxmox_privileges))
                 .routes(routes!(hardware::list_hardware_devices))
                 .routes(routes!(hardware::refresh_hardware))
+                .routes(routes!(hardware::override_release_hardware_reservation))
                 .routes(routes!(proxmox_console::create_proxmox_console_session))
                 .routes(routes!(proxmox::list_proxmox_guests))
                 .routes(routes!(proxmox::observe_proxmox_guest))

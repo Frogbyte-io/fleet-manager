@@ -1616,3 +1616,142 @@ async fn a_truncated_permissions_map_derives_nothing_from_what_it_lacks() {
         DeviceStatus::Unsupported(UnsupportedReason::TokenLacksMappingUse)
     );
 }
+
+// ── the scheduled refresh (FM-1124) ─────────────────────────────────────
+
+#[tokio::test]
+async fn a_scheduled_refresh_records_what_a_refresh_records_but_audits_only_failures() {
+    let rig = rig(every_status());
+    let report = rig
+        .inventory
+        .refresh_scheduled(&Allow, &operator(), ACCOUNT)
+        .await
+        .expect("a scheduled refresh");
+    // The same records, the token went to the port, and nothing was audited
+    // (not the intent, not the completion).
+    assert_eq!(report.devices.len(), 9);
+    assert_eq!(rig.store.list_devices(ACCOUNT).await.unwrap().len(), 9);
+    assert_eq!(*rig.observer.secrets.lock().unwrap(), [SECRET]);
+    assert!(rig.audit.events().is_empty(), "{:?}", rig.audit.events());
+
+    // A manual refresh stays fully audited.
+    refresh(&rig).await;
+    assert_eq!(
+        rig.audit.events(),
+        ["hardware_refresh_started", "hardware_refreshed"]
+    );
+
+    // A failure is recorded, once, without an intent before it.
+    *rig.observer.answer.lock().unwrap() = Err(ProxmoxSourceError::Auth);
+    let error = rig
+        .inventory
+        .refresh_scheduled(&Allow, &operator(), ACCOUNT)
+        .await
+        .unwrap_err();
+    assert!(matches!(error, ProxmoxUseCaseError::Source(_)), "{error}");
+    assert_eq!(
+        rig.audit.events(),
+        [
+            "hardware_refresh_started",
+            "hardware_refreshed",
+            "hardware_refresh_failed"
+        ]
+    );
+}
+
+#[tokio::test]
+async fn a_scheduled_refresh_is_authorized_and_gated_like_any_refresh() {
+    let rig = rig(every_status());
+    let error = rig
+        .inventory
+        .refresh_scheduled(&Deny(Permission::HardwareRefresh), &operator(), ACCOUNT)
+        .await
+        .unwrap_err();
+    assert!(matches!(error, ProxmoxUseCaseError::Denied(_)), "{error}");
+    assert_eq!(*rig.observer.calls.lock().unwrap(), 0);
+    let unconfirmed = rig_with(None, true, Ok(every_status()));
+    let error = unconfirmed
+        .inventory
+        .refresh_scheduled(&Allow, &operator(), ACCOUNT)
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(error, ProxmoxUseCaseError::UnconfirmedTrust { .. }),
+        "{error}"
+    );
+    assert_eq!(*unconfirmed.observer.calls.lock().unwrap(), 0);
+}
+
+/// An observer that takes a while and counts how many run at once.
+#[derive(Debug, Default)]
+struct SlowObserver {
+    running: Mutex<usize>,
+    most: Mutex<usize>,
+    calls: Mutex<usize>,
+}
+
+#[async_trait]
+impl HardwareObservePort for SlowObserver {
+    async fn observe(
+        &self,
+        _account: &ProxmoxAccount,
+        _secret: &SensitiveString,
+    ) -> Result<RawHardwareObservation, ProxmoxSourceError> {
+        {
+            let mut running = self.running.lock().unwrap();
+            *running += 1;
+            let mut most = self.most.lock().unwrap();
+            *most = (*most).max(*running);
+        }
+        *self.calls.lock().unwrap() += 1;
+        tokio::time::sleep(std::time::Duration::from_millis(60)).await;
+        *self.running.lock().unwrap() -= 1;
+        Ok(every_status())
+    }
+}
+
+#[tokio::test]
+async fn refreshes_of_one_account_never_overlap_whoever_asks() {
+    let account = ProxmoxAccount {
+        id: "acct-single-flight".to_owned(),
+        ..account(Some("AA"))
+    };
+    let observer = Arc::new(SlowObserver::default());
+    // Two inventories over one account, as the API and the reconciler are.
+    let compose = || {
+        Arc::new(HardwareInventory::new(
+            Arc::new(Accounts(vec![account.clone()])),
+            Arc::new(Credentials(true)),
+            Arc::new(MemStore::default()),
+            observer.clone(),
+            Arc::new(Audit::default()),
+        ))
+    };
+    let (first, second) = (compose(), compose());
+    let mut tasks = Vec::new();
+    for index in 0..6 {
+        let inventory = if index % 2 == 0 {
+            first.clone()
+        } else {
+            second.clone()
+        };
+        tasks.push(tokio::spawn(async move {
+            if index % 3 == 0 {
+                inventory
+                    .refresh(&Allow, &operator(), None, "acct-single-flight")
+                    .await
+                    .map(|_| ())
+            } else {
+                inventory
+                    .refresh_scheduled(&Allow, &operator(), "acct-single-flight")
+                    .await
+                    .map(|_| ())
+            }
+        }));
+    }
+    for task in tasks {
+        task.await.unwrap().expect("a refresh");
+    }
+    assert_eq!(*observer.calls.lock().unwrap(), 6, "each caller refreshed");
+    assert_eq!(*observer.most.lock().unwrap(), 1, "never two at once");
+}

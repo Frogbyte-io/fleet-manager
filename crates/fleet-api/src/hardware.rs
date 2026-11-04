@@ -1,5 +1,7 @@
 //! The hardware inventory surface (FM-1111, M11, ADR 0019):
-//! `GET /hardware/devices` and `POST /hardware/refresh`.
+//! `GET /hardware/devices` and `POST /hardware/refresh`, and the operator's
+//! override release of a stuck reservation (FM-1124,
+//! `POST /hardware/reservations/{id}/override-release`).
 //!
 //! Handlers only translate. What a status means, which privileges a refresh
 //! needs and how the observation becomes a status live in
@@ -13,7 +15,7 @@ use std::sync::Arc;
 
 use axum::{
     Extension, Json,
-    extract::{Query, State},
+    extract::{Path, Query, State},
     http::StatusCode,
 };
 use fleet_application::hardware_inventory::{
@@ -397,6 +399,67 @@ pub struct RefreshHardwareRequest {
     pub account_id: String,
 }
 
+/// The override-release request.
+#[derive(Debug, Deserialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct OverrideReleaseRequest {
+    /// Must be `true`: the caller confirms that this frees the reservation
+    /// without Fleet verifying the guest, so the device may still be
+    /// attached. Absent or `false` is refused and nothing is changed.
+    #[serde(default)]
+    pub confirm_unverified: bool,
+}
+
+/// What an override release did.
+#[derive(Clone, Copy, Debug, Serialize, ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum HardwareOverrideOutcomeDto {
+    /// This call released the reservation.
+    Released,
+    /// It was already released (a repeat); nothing changed.
+    AlreadyReleased,
+}
+
+/// The answer of an override release.
+#[derive(Clone, Debug, Serialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct HardwareOverrideReleaseDto {
+    /// The reservation's id.
+    pub reservation_id: String,
+    /// The device it held.
+    pub device_id: String,
+    /// Whether this call released it or it already was.
+    pub outcome: HardwareOverrideOutcomeDto,
+    /// The reservation as it was before this call: its state and `usbN` slot
+    /// (the release clears the slot), the owner and the guest. The audit
+    /// intent recorded the same.
+    pub previous: HardwareHolderDto,
+    /// Always `false`: an override never reads the guest. A device that is
+    /// still attached reads `externally_attached` at the next refresh.
+    pub guest_verified: bool,
+}
+
+impl From<fleet_application::hardware_override::OverrideOutcome> for HardwareOverrideReleaseDto {
+    fn from(outcome: fleet_application::hardware_override::OverrideOutcome) -> Self {
+        use fleet_application::hardware_override::OverrideOutcome;
+        let (kind, previous) = match outcome {
+            OverrideOutcome::Released { previous, .. } => {
+                (HardwareOverrideOutcomeDto::Released, *previous)
+            }
+            OverrideOutcome::AlreadyReleased(row) => {
+                (HardwareOverrideOutcomeDto::AlreadyReleased, *row)
+            }
+        };
+        Self {
+            reservation_id: previous.id.clone(),
+            device_id: previous.device_id.clone(),
+            outcome: kind,
+            previous: previous.into(),
+            guest_verified: false,
+        }
+    }
+}
+
 /// The list-devices query parameters.
 #[derive(Debug, Deserialize, ToSchema)]
 #[serde(rename_all = "camelCase")]
@@ -424,6 +487,23 @@ fn hardware_or_error(
     };
     let proxmox = proxmox_or_error(state, correlation_id)?;
     proxmox.hardware().cloned().ok_or_else(unwired)
+}
+
+fn override_or_error(
+    state: &crate::operations::ApiState,
+    correlation_id: CorrelationId,
+) -> Result<Arc<fleet_application::hardware_override::HardwareOverride>, ApiErrorResponse> {
+    let unwired = || {
+        let public = PublicError::new(
+            ErrorCode::from_str("machine_unavailable")
+                .expect("the literal is valid error code syntax"),
+            "the hardware override is not wired; the controller needs its database and secret store",
+            RetryClass::Backoff,
+        );
+        ApiError::new(&public, correlation_id).with_status(StatusCode::SERVICE_UNAVAILABLE)
+    };
+    let proxmox = proxmox_or_error(state, correlation_id)?;
+    proxmox.hardware_override().cloned().ok_or_else(unwired)
 }
 
 /// Lists the inventoried hardware devices with their status and the reason
@@ -598,4 +678,84 @@ pub async fn refresh_hardware(
         .await
         .map_err(|error| map_proxmox_error(&error, correlation_id))?;
     Ok(Json(Resource::new(report.into())))
+}
+
+/// Frees a hardware reservation without verifying the guest: the elevated
+/// operator override for a reservation stuck in `attach_unknown`,
+/// `detach_failed` or `detaching` that nothing else resolves. Authorized as
+/// `hardware.override-release` on the reservation (no delegated Lab
+/// credential holds it) and requires `confirmUnverified: true`. The audit
+/// intent, carrying the row's state and `usbN` slot and recording that Fleet
+/// did not verify the guest, is written before the release and is required.
+/// It changes Fleet's records only: it never calls Proxmox and removes
+/// nothing from the guest. Idempotent: a reservation that is already released
+/// answers `already_released`.
+///
+/// # Errors
+///
+/// Returns the public error envelope on refusal, a missing confirmation, an
+/// unknown reservation, an unwired surface, or a failed audit write (nothing
+/// is released then).
+#[utoipa::path(
+    post,
+    path = "/hardware/reservations/{reservationId}/override-release",
+    tag = "hardware",
+    operation_id = "overrideReleaseHardwareReservation",
+    params(("reservationId" = String, Path, description = "The reservation's id.")),
+    request_body = OverrideReleaseRequest,
+    responses(
+        (
+            status = 200,
+            description = "The reservation was released, or already was (`outcome`). `previous` is the row before this call; `guestVerified` is always false.",
+            body = Resource<HardwareOverrideReleaseDto>
+        ),
+        (
+            status = 400,
+            description = "`confirmUnverified` was not `true`; nothing was changed.",
+            body = crate::error::ApiError
+        ),
+        (
+            status = 403,
+            description = "The caller may not override a reservation (`hardware.override-release`, never delegated to Lab credentials).",
+            body = crate::error::ApiError
+        ),
+        (
+            status = 404,
+            description = "The reservation does not exist.",
+            body = crate::error::ApiError
+        ),
+        (
+            status = 500,
+            description = "The controller's storage or audit sink failed; nothing was released.",
+            body = crate::error::ApiError
+        ),
+        (
+            status = 503,
+            description = "The hardware surface is not wired.",
+            body = crate::error::ApiError
+        ),
+    )
+)]
+pub async fn override_release_hardware_reservation(
+    State(state): State<Arc<crate::operations::ApiState>>,
+    principal: Option<Extension<crate::ActingPrincipal>>,
+    Extension(correlation_id): Extension<CorrelationId>,
+    Path(reservation_id): Path<String>,
+    Json(request): Json<OverrideReleaseRequest>,
+) -> Result<Json<Resource<HardwareOverrideReleaseDto>>, ApiErrorResponse> {
+    let hardware = override_or_error(&state, correlation_id)?;
+    let principal = crate::operations::principal_or_error(principal, correlation_id)?;
+    let correlation = correlation_id.to_string();
+    let outcome = hardware
+        .release(
+            state.authorizer.as_ref(),
+            &principal,
+            Some(&correlation),
+            &reservation_id,
+            request.confirm_unverified,
+            fleet_core::SystemClock::now_unix_millis(),
+        )
+        .await
+        .map_err(|error| map_proxmox_error(&error, correlation_id))?;
+    Ok(Json(Resource::new(outcome.into())))
 }

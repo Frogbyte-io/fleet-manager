@@ -1021,7 +1021,9 @@ impl HardwareInventory {
     /// guest config and the token's permissions through the account's token
     /// and records the derived status of each mapping. Authorized as
     /// `hardware.refresh` on the account; the audit intent lands before any
-    /// Proxmox call, and a completion event follows the records.
+    /// Proxmox call, and a completion event follows the records. Refreshes of
+    /// one account never overlap, in this process, whoever asks: a second
+    /// caller waits for the first and then makes its own.
     ///
     /// # Errors
     ///
@@ -1034,6 +1036,45 @@ impl HardwareInventory {
         principal: &ActingPrincipal,
         correlation_id: Option<&str>,
         account_id: &str,
+    ) -> Result<RefreshReport, ProxmoxUseCaseError> {
+        self.refresh_audited(
+            authorizer,
+            principal,
+            correlation_id,
+            account_id,
+            RefreshAudit::Full,
+        )
+        .await
+    }
+
+    /// The refresh the controller schedules for itself: the same read and the
+    /// same records, serialized with every other refresh of the account, but
+    /// quiet. It records no `hardware_refresh_started` and no
+    /// `hardware_refreshed` (the scheduler reports status changes itself); a
+    /// failure is still recorded (`hardware_refresh_failed`). Authorized as
+    /// `hardware.refresh` like any refresh.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::refresh`], except that no audit write is required.
+    pub async fn refresh_scheduled(
+        &self,
+        authorizer: &dyn Authorizer,
+        principal: &ActingPrincipal,
+        account_id: &str,
+    ) -> Result<RefreshReport, ProxmoxUseCaseError> {
+        self.refresh_audited(authorizer, principal, None, account_id, RefreshAudit::Quiet)
+            .await
+    }
+
+    #[allow(clippy::too_many_lines)]
+    async fn refresh_audited(
+        &self,
+        authorizer: &dyn Authorizer,
+        principal: &ActingPrincipal,
+        correlation_id: Option<&str>,
+        account_id: &str,
+        audit: RefreshAudit,
     ) -> Result<RefreshReport, ProxmoxUseCaseError> {
         let decision = authorize(
             authorizer,
@@ -1058,15 +1099,20 @@ impl HardwareInventory {
             .ok_or_else(|| ProxmoxUseCaseError::NoSecret {
                 account: account.name.clone(),
             })?;
-        self.record(
-            principal,
-            &decision,
-            correlation_id,
-            &account.id,
-            "hardware_refresh_started",
-            &[],
-        )
-        .await?;
+        // One refresh of an account at a time, whoever asks and however
+        // they audit: the lock is held to the end of the call.
+        let _single_flight = account_lock(&account.id).lock_owned().await;
+        if audit == RefreshAudit::Full {
+            self.record(
+                principal,
+                &decision,
+                correlation_id,
+                &account.id,
+                "hardware_refresh_started",
+                &[],
+            )
+            .await?;
+        }
         let observed = async {
             let raw = self
                 .observer
@@ -1105,6 +1151,9 @@ impl HardwareInventory {
             .map(|(status, count)| format!("{status}={count}"))
             .collect::<Vec<_>>()
             .join(",");
+        if audit == RefreshAudit::Quiet {
+            return Ok(report);
+        }
         let devices = report.devices.len().to_string();
         if let Err(error) = self
             .record(
@@ -1568,6 +1617,33 @@ impl HardwareInventory {
             warnings,
         })
     }
+}
+
+/// How much of a refresh reaches the audit trail.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum RefreshAudit {
+    /// The intent before any Proxmox call and the completion event (a manual
+    /// refresh).
+    Full,
+    /// Only a failure (the controller's own scheduled refresh).
+    Quiet,
+}
+
+/// The per-account lock that keeps two refreshes of one account from
+/// overlapping, across every [`HardwareInventory`] in the process (the API,
+/// the saga's re-observation and the reconciler each compose their own).
+fn account_lock(account_id: &str) -> Arc<tokio::sync::Mutex<()>> {
+    static LOCKS: std::sync::OnceLock<
+        std::sync::Mutex<BTreeMap<String, Arc<tokio::sync::Mutex<()>>>>,
+    > = std::sync::OnceLock::new();
+    let mut locks = LOCKS
+        .get_or_init(|| std::sync::Mutex::new(BTreeMap::new()))
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    locks
+        .entry(account_id.to_owned())
+        .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
+        .clone()
 }
 
 /// A stable, secret-free class of a refresh failure, for the audit ledger.

@@ -293,6 +293,13 @@ pub enum Permission {
     /// host; audited. The resource is the account id. Never delegated to
     /// Lab credentials.
     HardwareRefresh,
+    /// The elevated override release of one hardware reservation (ADR 0019
+    /// decision 9): frees a live reservation in any state without the detach
+    /// path and without Fleet verifying the guest, for an operator who has
+    /// confirmed the device is free or accepts that it is not. The resource
+    /// is the reservation id. Elevated: required audit intent first, never
+    /// delegated to Lab credentials.
+    HardwareOverrideRelease,
     /// Attach a device a Lab lease reserved to the lease's running guest
     /// (FM-1126, ADR 0019). The resource is the lease id. A privileged
     /// mutation of a guest, lease-bound: a delegated credential may do it
@@ -390,6 +397,7 @@ impl Permission {
         Permission::MachineProvision,
         Permission::HardwareRead,
         Permission::HardwareRefresh,
+        Permission::HardwareOverrideRelease,
         Permission::LabHardwareAttach,
         Permission::LabHardwareDetach,
     ];
@@ -479,6 +487,7 @@ impl Permission {
             Permission::MachineProvision => "machines.provision",
             Permission::HardwareRead => "hardware.read",
             Permission::HardwareRefresh => "hardware.refresh",
+            Permission::HardwareOverrideRelease => "hardware.override-release",
             Permission::LabHardwareAttach => "lab.hardware.attach",
             Permission::LabHardwareDetach => "lab.hardware.detach",
         }
@@ -570,6 +579,7 @@ impl Permission {
             | Permission::MachineProvision
             | Permission::HardwareRead
             | Permission::HardwareRefresh
+            | Permission::HardwareOverrideRelease
             | Permission::LabHardwareAttach
             | Permission::LabHardwareDetach
             | Permission::RegistryObserve => true,
@@ -662,6 +672,7 @@ impl Permission {
             | Permission::MachinePut
             | Permission::MachineTerminal
             | Permission::MachineCollect
+            | Permission::HardwareOverrideRelease
             | Permission::LabHardwareAttach
             | Permission::LabHardwareDetach
             | Permission::ActionDeny => true,

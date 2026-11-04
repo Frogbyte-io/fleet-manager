@@ -19,6 +19,10 @@
 //! 5. deletes Lab artifacts past their retention deadline (FM-721), when
 //!    the artifact store is composed.
 //!
+//! A composed hardware reconciler (FM-1124) is not a step of the tick: `run`
+//! spawns it on its own task (one instance, stopped with the sweeper), so a
+//! slow Proxmox never delays expiry, compensation or cleanup scheduling.
+//!
 //! The rules (what is stuck, what is owned, what is due) live in
 //! `fleet_application::lab`; this module only reads rows, applies them, and
 //! queues operations. Every deadline and attempt lives in the rows, so a
@@ -184,6 +188,7 @@ pub struct LabSweeper {
     events: Option<Arc<fleet_application::events::EventHub>>,
     inventory: Option<Arc<dyn LabGuestInventory>>,
     artifacts: Option<Arc<fleet_application::lab_artifacts::LabArtifacts>>,
+    hardware: Option<Arc<crate::hardware_reconciler::HardwareReconciler>>,
     /// Orphans already reported by this process, so each is audited once.
     reported: Mutex<HashSet<(String, u32)>>,
 }
@@ -207,6 +212,7 @@ impl LabSweeper {
             events: None,
             inventory: None,
             artifacts: None,
+            hardware: None,
             reported: Mutex::new(HashSet::new()),
         }
     }
@@ -232,6 +238,17 @@ impl LabSweeper {
         artifacts: Arc<fleet_application::lab_artifacts::LabArtifacts>,
     ) -> Self {
         self.artifacts = Some(artifacts);
+        self
+    }
+
+    /// Registers the hardware reconciler (FM-1124). [`Self::run`] spawns it
+    /// on its own task, with its own pacing and deadline; no tick awaits it.
+    #[must_use]
+    pub fn with_hardware_reconciler(
+        mut self,
+        reconciler: Arc<crate::hardware_reconciler::HardwareReconciler>,
+    ) -> Self {
+        self.hardware = Some(reconciler);
         self
     }
 
@@ -565,13 +582,27 @@ impl LabSweeper {
     /// rows. A failed tick is logged and retried on the next one. Each tick
     /// transitions lease rows (expiry and compensation), records audit
     /// intents, publishes `lease.changed`, and queues cleanup operations; it
-    /// never runs Proxmox work itself, so it never blocks the worker.
+    /// never runs Proxmox work itself, so it never blocks the worker. The
+    /// hardware reconciler (FM-1124), when composed, runs on its own spawned
+    /// task for as long as this loop runs, so a slow Proxmox never delays a
+    /// tick.
     pub async fn run(
         self: Arc<Self>,
         interval: Duration,
         shutdown: impl std::future::Future<Output = ()>,
     ) {
         tokio::pin!(shutdown);
+        // The hardware reconciler runs beside the ticks, never inside them.
+        let reconciler = self.hardware.clone().map(|reconciler| {
+            let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
+            let task = tokio::spawn(reconciler.run(
+                crate::hardware_reconciler::TASK_TICK,
+                async move {
+                    let _ = stopped.await;
+                },
+            ));
+            (stop, task)
+        });
         loop {
             tokio::select! {
                 () = &mut shutdown => break,
@@ -596,6 +627,10 @@ impl LabSweeper {
                 }
                 Err(error) => eprintln!("lab sweeper: tick failed: {error}"),
             }
+        }
+        if let Some((stop, task)) = reconciler {
+            let _ = stop.send(());
+            let _ = task.await;
         }
     }
 }
