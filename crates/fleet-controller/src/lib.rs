@@ -30,6 +30,7 @@ pub mod lab_artifacts_store;
 pub mod lab_cleanup;
 pub mod lab_detach_store;
 pub mod lab_hardware;
+pub mod lab_hardware_hotplug;
 pub mod lab_pool;
 pub mod lab_put_store;
 pub mod lab_ssh_keys;

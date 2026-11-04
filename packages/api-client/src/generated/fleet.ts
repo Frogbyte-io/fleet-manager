@@ -600,6 +600,17 @@ export interface AssociatedGuestDto {
 }
 
 /**
+ * Which device to attach to the lease's running guest.
+ */
+export interface AttachLabHardwareRequest {
+  /**
+     * The Proxmox USB resource mapping id of a device the lease reserved
+     * (the mapping its template declared).
+     */
+  mapping: string;
+}
+
+/**
  * One audit event, containing validated metadata and no raw request payload.
  */
 export interface AuditEventDto {
@@ -1944,6 +1955,20 @@ export interface DesiredStatusDto {
 }
 
 /**
+ * Which device to detach from the lease's running guest.
+ */
+export interface DetachLabHardwareRequest {
+  /** The Proxmox USB resource mapping id of a device the lease reserved. */
+  mapping: string;
+  /**
+     * Also give the device up once the read-back confirms it is off the
+     * guest. By default the lease keeps it reserved until the lease is
+     * released, so it can be attached again.
+     */
+  release?: boolean;
+}
+
+/**
  * The public operation resource. The application type is the transport
  * truth; this type is the documented shape, kept one `From` away so the two
  * cannot drift silently.
@@ -3179,6 +3204,43 @@ export interface LabHardwareDto {
      * `.`; at most 64 characters).
      */
   mapping: string;
+}
+
+/**
+ * What a hotplug request came to.
+ */
+export interface LabHardwareHotplugDto {
+  /** The lease. */
+  leaseId: string;
+  /** The mapping id. */
+  mapping: string;
+  /** Whether the guest has the device once the request is answered. */
+  onGuest: boolean;
+  /**
+     * `attached` and `already_attached` (the guest has the device),
+     * `detached` and `already_detached` (it does not), or `detach_pending`:
+     * PVE stored the removal but the guest keeps the device until it
+     * restarts (its `hotplug` option lacks `usb`), so the device is still
+     * attached and the reservation stays `detaching`. An attach PVE would
+     * leave pending is refused instead (`hardware_attach_pending`); it is
+     * never reported as attached.
+     */
+  outcome: string;
+  /** Whether the request released the reservation. */
+  released: boolean;
+  /** The lease's reservation of the device. */
+  reservationId: string;
+  /**
+     * The reservation's state after the request: `attached`, `held` (the
+     * lease keeps a detached device), `detaching` (a pending detach) or
+     * `released`.
+     */
+  reservationState: string;
+  /**
+     * The `usbN` slot the guest holds the device in, when it does.
+     * @nullable
+     */
+  usbSlot?: string | null;
 }
 
 /**
@@ -7631,6 +7693,54 @@ export type ResourceLabArtifactDtoData = {
 export interface ResourceLabArtifactDto {
   /** One stored Lab artifact's metadata. */
   data: ResourceLabArtifactDtoData;
+}
+
+/**
+ * What a hotplug request came to.
+ */
+export type ResourceLabHardwareHotplugDtoData = {
+  /** The lease. */
+  leaseId: string;
+  /** The mapping id. */
+  mapping: string;
+  /** Whether the guest has the device once the request is answered. */
+  onGuest: boolean;
+  /**
+     * `attached` and `already_attached` (the guest has the device),
+     * `detached` and `already_detached` (it does not), or `detach_pending`:
+     * PVE stored the removal but the guest keeps the device until it
+     * restarts (its `hotplug` option lacks `usb`), so the device is still
+     * attached and the reservation stays `detaching`. An attach PVE would
+     * leave pending is refused instead (`hardware_attach_pending`); it is
+     * never reported as attached.
+     */
+  outcome: string;
+  /** Whether the request released the reservation. */
+  released: boolean;
+  /** The lease's reservation of the device. */
+  reservationId: string;
+  /**
+     * The reservation's state after the request: `attached`, `held` (the
+     * lease keeps a detached device), `detaching` (a pending detach) or
+     * `released`.
+     */
+  reservationState: string;
+  /**
+     * The `usbN` slot the guest holds the device in, when it does.
+     * @nullable
+     */
+  usbSlot?: string | null;
+};
+
+/**
+ * A single resource.
+ *
+ * The payload is nested under `data` so that later top-level fields are an
+ * additive change rather than a breaking one.
+ */
+export interface ResourceLabHardwareHotplugDto {
+  /** What a hotplug request came to. */
+  data: ResourceLabHardwareHotplugDtoData;
 }
 
 /**
@@ -15464,6 +15574,200 @@ const res = await fetch(getPutLabFileUrl(leaseId,params),
 
   const data: putLabFileResponse['data'] = body ? JSON.parse(body) : {}
   return { data, status: res.status, headers: res.headers } as putLabFileResponse
+}
+
+
+
+export type attachLabLeaseHardwareResponse200 = {
+  data: ResourceLabHardwareHotplugDto
+  status: 200
+}
+
+export type attachLabLeaseHardwareResponse400 = {
+  data: ApiError
+  status: 400
+}
+
+export type attachLabLeaseHardwareResponse403 = {
+  data: ApiError
+  status: 403
+}
+
+export type attachLabLeaseHardwareResponse404 = {
+  data: ApiError
+  status: 404
+}
+
+export type attachLabLeaseHardwareResponse409 = {
+  data: ApiError
+  status: 409
+}
+
+export type attachLabLeaseHardwareResponse500 = {
+  data: ApiError
+  status: 500
+}
+
+export type attachLabLeaseHardwareResponse503 = {
+  data: ApiError
+  status: 503
+}
+
+export type attachLabLeaseHardwareResponseSuccess = (attachLabLeaseHardwareResponse200) & {
+  headers: Headers;
+};
+export type attachLabLeaseHardwareResponseError = (attachLabLeaseHardwareResponse400 | attachLabLeaseHardwareResponse403 | attachLabLeaseHardwareResponse404 | attachLabLeaseHardwareResponse409 | attachLabLeaseHardwareResponse500 | attachLabLeaseHardwareResponse503) & {
+  headers: Headers;
+};
+
+export type attachLabLeaseHardwareResponse = (attachLabLeaseHardwareResponseSuccess | attachLabLeaseHardwareResponseError)
+
+export const getAttachLabLeaseHardwareUrl = (leaseId: string,) => {
+
+
+
+
+  return `/api/v1/lab/leases/${leaseId}/hardware/attach`
+}
+
+/**
+ * # Errors
+ *
+ * Returns the public error envelope on refusal, an unknown lease (or
+ * another owner's), a lease that is not ready, a device the lease did not
+ * reserve, a failed verification of the device, or a failed write.
+ * @summary Attaches a device the lease reserved to the lease's running guest: a
+digest-conditional write of the mapping into a free `usbN` slot, read back
+before it is reported. Only the lease's holder (or an administrator) may
+act, only for a device the lease reserved, and only on a ready lease. An
+attach PVE would leave pending (the guest's `hotplug` option lacks `usb`)
+is removed again and refused as `hardware_attach_pending`: it is never
+reported as attached. The attach is audited before the write.
+ */
+export const attachLabLeaseHardware = async (leaseId: string,
+    attachLabHardwareRequest: AttachLabHardwareRequest, options?: RequestInit): Promise<attachLabLeaseHardwareResponse> => {
+
+    const getHeaders = (h?: NonNullable<RequestInit['headers']>): Record<string, string | readonly string[]> => {
+    if (!h) return {};
+    if (h instanceof Headers) return Object.fromEntries(h.entries());
+    if (Array.isArray(h)) return Object.fromEntries(h);
+    return h;
+  };
+const res = await fetch(getAttachLabLeaseHardwareUrl(leaseId),
+  {
+    ...options,
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...getHeaders(options?.headers) },
+    body: JSON.stringify(attachLabHardwareRequest)
+  }
+)
+
+
+  const body = [204, 205, 304].includes(res.status) ? null : await res.text();
+
+  const data: attachLabLeaseHardwareResponse['data'] = body ? JSON.parse(body) : {}
+  return { data, status: res.status, headers: res.headers } as attachLabLeaseHardwareResponse
+}
+
+
+
+export type detachLabLeaseHardwareResponse200 = {
+  data: ResourceLabHardwareHotplugDto
+  status: 200
+}
+
+export type detachLabLeaseHardwareResponse202 = {
+  data: ResourceLabHardwareHotplugDto
+  status: 202
+}
+
+export type detachLabLeaseHardwareResponse400 = {
+  data: ApiError
+  status: 400
+}
+
+export type detachLabLeaseHardwareResponse403 = {
+  data: ApiError
+  status: 403
+}
+
+export type detachLabLeaseHardwareResponse404 = {
+  data: ApiError
+  status: 404
+}
+
+export type detachLabLeaseHardwareResponse409 = {
+  data: ApiError
+  status: 409
+}
+
+export type detachLabLeaseHardwareResponse500 = {
+  data: ApiError
+  status: 500
+}
+
+export type detachLabLeaseHardwareResponse503 = {
+  data: ApiError
+  status: 503
+}
+
+export type detachLabLeaseHardwareResponseSuccess = (detachLabLeaseHardwareResponse200 | detachLabLeaseHardwareResponse202) & {
+  headers: Headers;
+};
+export type detachLabLeaseHardwareResponseError = (detachLabLeaseHardwareResponse400 | detachLabLeaseHardwareResponse403 | detachLabLeaseHardwareResponse404 | detachLabLeaseHardwareResponse409 | detachLabLeaseHardwareResponse500 | detachLabLeaseHardwareResponse503) & {
+  headers: Headers;
+};
+
+export type detachLabLeaseHardwareResponse = (detachLabLeaseHardwareResponseSuccess | detachLabLeaseHardwareResponseError)
+
+export const getDetachLabLeaseHardwareUrl = (leaseId: string,) => {
+
+
+
+
+  return `/api/v1/lab/leases/${leaseId}/hardware/detach`
+}
+
+/**
+ * # Errors
+ *
+ * Returns the public error envelope on refusal, an unknown lease (or
+ * another owner's), a lease that is not ready, a device the lease did not
+ * reserve, or a detach that failed or could not be confirmed (the
+ * reservation stays with the lease and its cleanup retries).
+ * @summary Detaches a device the lease reserved from the lease's running guest: the
+recorded `usbN` entry is deleted only when it holds exactly what Fleet
+wrote, and every `usbN` entry is read back before the answer. The lease
+keeps the device reserved (it can attach it again) unless the request
+sets `release`, which gives it up after the read-back confirmed it is
+gone. A removal PVE leaves pending (the guest's `hotplug` option lacks
+`usb`) answers `detach_pending` with the device still attached. Cleanup
+still detaches whatever the lease holds before it decides the guest's
+fate. Audited before the delete.
+ */
+export const detachLabLeaseHardware = async (leaseId: string,
+    detachLabHardwareRequest: DetachLabHardwareRequest, options?: RequestInit): Promise<detachLabLeaseHardwareResponse> => {
+
+    const getHeaders = (h?: NonNullable<RequestInit['headers']>): Record<string, string | readonly string[]> => {
+    if (!h) return {};
+    if (h instanceof Headers) return Object.fromEntries(h.entries());
+    if (Array.isArray(h)) return Object.fromEntries(h);
+    return h;
+  };
+const res = await fetch(getDetachLabLeaseHardwareUrl(leaseId),
+  {
+    ...options,
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...getHeaders(options?.headers) },
+    body: JSON.stringify(detachLabHardwareRequest)
+  }
+)
+
+
+  const body = [204, 205, 304].includes(res.status) ? null : await res.text();
+
+  const data: detachLabLeaseHardwareResponse['data'] = body ? JSON.parse(body) : {}
+  return { data, status: res.status, headers: res.headers } as detachLabLeaseHardwareResponse
 }
 
 

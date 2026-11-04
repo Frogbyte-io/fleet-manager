@@ -57,6 +57,14 @@
 //! `hardware_detach_failed`, and the reservation store's `hardware_released`.
 //! Facts are ids, nodes, VMIDs and slots; provider detail is scrubbed and
 //! bounded.
+//!
+//! **Mid-run hotplug (FM-1126).** `lab_hardware_hotplug` drives the same attach
+//! and detach paths for a lease whose guest is running. The differences are
+//! only what a finished step leaves behind: a device the lease detaches (or an
+//! attach that wrote nothing) stays reserved by the lease in `held` instead of
+//! being released ([`Disposition::KeepHeld`]), the acting principal and the
+//! `lab.hardware.*` action are the audited ones ([`LabHardwareSaga::acting_as`])
+//! and no provision operation is there to cancel.
 
 use std::collections::BTreeSet;
 use std::sync::Arc;
@@ -105,8 +113,9 @@ pub struct LeaseGuest<'a> {
     pub node: &'a str,
     /// The clone's VMID.
     pub vmid: u32,
-    /// The provision operation the step belongs to.
-    pub operation_id: &'a str,
+    /// The provision operation the step belongs to; `None` for a step that
+    /// belongs to no operation (a mid-run hotplug request, FM-1126).
+    pub operation_id: Option<&'a str>,
 }
 
 /// Why the attach step did not complete.
@@ -254,8 +263,31 @@ impl FingerprintPins for SqliteFingerprintPins {
     }
 }
 
+/// What a confirmed detach (or an attach that wrote nothing) leaves of the
+/// reservation.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum Disposition {
+    /// The reservation is released: the lease's provision and cleanup.
+    Release,
+    /// The lease still holds the device (`held`, slot cleared): a mid-run
+    /// detach that does not release it, and a failed mid-run attach.
+    KeepHeld,
+}
+
+/// Who an audited step is attributed to.
+#[derive(Clone, Debug)]
+struct Actor {
+    /// The acting principal's id.
+    id: String,
+    /// The catalog action the intents are filed under.
+    action: &'static str,
+    /// Set on a step that is not the lease's own provision or cleanup, and
+    /// recorded as the `source` fact.
+    source: Option<&'static str>,
+}
+
 /// The Lab hardware saga.
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct LabHardwareSaga {
     accounts: Arc<dyn ProxmoxAccountPort>,
     credentials: Arc<dyn ProxmoxCredentialStore>,
@@ -267,6 +299,7 @@ pub struct LabHardwareSaga {
     leases: Arc<dyn LeasePort>,
     pins: Arc<dyn FingerprintPins>,
     max_age_ms: i64,
+    actor: Actor,
 }
 
 fn bounded(text: &str) -> String {
@@ -277,6 +310,36 @@ fn bounded(text: &str) -> String {
         let mut cut: String = scrubbed.chars().take(MAX_DETAIL_CHARS).collect();
         cut.push('…');
         cut
+    }
+}
+
+/// Whether a refusal's detail names facts a lease-bound caller must not see:
+/// another guest's VMID and node, or a device's ids and port.
+fn is_revealing(reason: &str) -> bool {
+    matches!(
+        reason,
+        "hardware_externally_attached"
+            | "hardware_fingerprint_changed"
+            | "hardware_wrong_node"
+            | "hardware_missing"
+            | "hardware_no_node_entry"
+            | "hardware_stale"
+    )
+}
+
+/// What a lease-bound caller is told for a [`is_revealing`] reason; the real
+/// detail goes to the audit trail (`hardware_refused`).
+fn public_detail(reason: &str) -> &'static str {
+    match reason {
+        "hardware_externally_attached" => {
+            "the device is attached elsewhere (a guest other than this lease's, or an entry Fleet did not write); nothing was changed"
+        }
+        "hardware_fingerprint_changed" => {
+            "the device is not as it was when it was reserved (a cable or the mapping changed); nothing was changed"
+        }
+        _ => {
+            "the device was not found where it was reserved at the re-observation; nothing was changed"
+        }
     }
 }
 
@@ -298,9 +361,10 @@ fn infra(error: &HardwareStoreError) -> AttachFailure {
 }
 
 /// What a detach of one reservation came to.
-enum DetachResult {
-    /// The device is off the guest and the reservation is released.
-    Released,
+pub(crate) enum DetachResult {
+    /// The device is off the guest and the reservation is released (or, for
+    /// [`Disposition::KeepHeld`], back in `held`).
+    Detached,
     /// PVE keeps the device until the guest restarts.
     Pending,
     /// The detach failed or could not be confirmed; the row stays live.
@@ -334,6 +398,31 @@ impl LabHardwareSaga {
             leases,
             pins,
             max_age_ms: fleet_application::hardware_inventory::DEFAULT_OBSERVATION_MAX_AGE_MS,
+            actor: Actor {
+                id: fleet_auth::LAN_PRINCIPAL_ID.to_owned(),
+                action: Permission::LabProvision.id(),
+                source: None,
+            },
+        }
+    }
+
+    /// The same saga with its audited steps attributed to `principal_id`
+    /// under `action` and tagged with `source` (the caller's own request, not
+    /// the lease's provision or cleanup).
+    #[must_use]
+    pub(crate) fn acting_as(
+        &self,
+        principal_id: &str,
+        action: Permission,
+        source: &'static str,
+    ) -> Self {
+        Self {
+            actor: Actor {
+                id: principal_id.to_owned(),
+                action: action.id(),
+                source: Some(source),
+            },
+            ..self.clone()
         }
     }
 
@@ -345,7 +434,7 @@ impl LabHardwareSaga {
         self
     }
 
-    async fn request(&self, account_id: &str) -> Result<PveHttpRequest, String> {
+    pub(crate) async fn request(&self, account_id: &str) -> Result<PveHttpRequest, String> {
         let account = self
             .accounts
             .get(account_id)
@@ -388,14 +477,17 @@ impl LabHardwareSaga {
         let _ = metadata.insert("owner_kind", reservation.owner_kind.id());
         let _ = metadata.insert("owner_id", &reservation.owner_id);
         let _ = metadata.insert("mapping", &device.mapping_id);
+        if let Some(source) = self.actor.source {
+            let _ = metadata.insert("source", source);
+        }
         for (key, value) in facts {
             let _ = metadata.insert(key, value);
         }
         let outcome = self
             .audit
             .record_intent(&AuditIntent {
-                actor: fleet_auth::LAN_PRINCIPAL_ID.to_owned(),
-                action: Permission::LabProvision.id().to_owned(),
+                actor: self.actor.id.clone(),
+                action: self.actor.action.to_owned(),
                 resource: Some(device.id.clone()),
                 decision: Decision::allow(),
                 correlation_id: None,
@@ -406,9 +498,9 @@ impl LabHardwareSaga {
         if required { outcome } else { Ok(()) }
     }
 
-    fn audit_context(operation_id: Option<&str>) -> AuditContext {
+    fn audit_context(&self, operation_id: Option<&str>) -> AuditContext {
         AuditContext {
-            actor: fleet_auth::LAN_PRINCIPAL_ID.to_owned(),
+            actor: self.actor.id.clone(),
             operation_id: operation_id.map(str::to_owned),
         }
     }
@@ -483,7 +575,14 @@ impl LabHardwareSaga {
         let mut attached: Vec<(HardwareDevice, HardwareReservation)> = Vec::new();
         for (device, held) in targets {
             match self
-                .attach_one(operations, guest, &request, &device, held)
+                .attach_one(
+                    Some(operations),
+                    guest,
+                    &request,
+                    &device,
+                    held,
+                    Disposition::Release,
+                )
                 .await
             {
                 Ok(row) => attached.push((device, row)),
@@ -496,9 +595,10 @@ impl LabHardwareSaga {
                                 &request,
                                 row,
                                 &done,
-                                Some(guest.operation_id),
+                                guest.operation_id,
                                 guest.lease_id,
                                 true,
+                                Disposition::Release,
                             )
                             .await;
                     }
@@ -512,7 +612,7 @@ impl LabHardwareSaga {
     /// Whether the lease still counts for a provision: it is in the saga or
     /// ready. An unreadable lease counts (the write is not refused on a
     /// guess; the post-write check and cleanup cover the race).
-    async fn lease_counts(&self, lease_id: &str) -> bool {
+    pub(crate) async fn lease_counts(&self, lease_id: &str) -> bool {
         match self.leases.get(lease_id).await {
             Ok(lease) => matches!(
                 lease.state,
@@ -574,11 +674,12 @@ impl LabHardwareSaga {
 
     async fn attach_one(
         &self,
-        operations: &Operations,
+        operations: Option<&Operations>,
         guest: &LeaseGuest<'_>,
         request: &PveHttpRequest,
         device: &HardwareDevice,
         reservation: HardwareReservation,
+        keep: Disposition,
     ) -> Result<HardwareReservation, AttachFailure> {
         match reservation.state {
             State::Attached => {
@@ -586,12 +687,12 @@ impl LabHardwareSaga {
                 Ok(reservation)
             }
             State::Held => {
-                self.attach_held(operations, guest, request, device, reservation, false)
+                self.attach_held(operations, guest, request, device, reservation, false, keep)
                     .await
             }
             State::Attaching => {
                 Self::same_guest(guest, &reservation)?;
-                self.attach_held(operations, guest, request, device, reservation, true)
+                self.attach_held(operations, guest, request, device, reservation, true, keep)
                     .await
             }
             // An unknown attach is resolved by reading the guest, which is
@@ -616,39 +717,45 @@ impl LabHardwareSaga {
     }
 
     /// The recorded guest must be this guest: a row that names another one
-    /// is never attached here and never touched.
+    /// is never attached here and never touched. The account and the VMID
+    /// identify the guest; the node is not compared, because a guest that
+    /// migrated since the row recorded it is still the same guest (the node
+    /// is resolved live where it matters).
     fn same_guest(
         guest: &LeaseGuest<'_>,
         reservation: &HardwareReservation,
     ) -> Result<(), AttachFailure> {
         match &reservation.guest {
             Some(recorded)
-                if recorded.account_id == guest.account_id
-                    && recorded.node == guest.node
-                    && recorded.vmid == guest.vmid =>
+                if recorded.account_id == guest.account_id && recorded.vmid == guest.vmid =>
             {
                 Ok(())
             }
             other => Err(refused(
                 "hardware_guest_mismatch",
                 format!(
-                    "the reservation records guest {:?}, not qemu/{} on {}",
+                    "the reservation records guest {:?}, not qemu/{} through account {}",
                     other
                         .as_ref()
-                        .map(|recorded| (&recorded.node, recorded.vmid)),
+                        .map(|recorded| (&recorded.account_id, recorded.vmid)),
                     guest.vmid,
-                    guest.node
+                    guest.account_id
                 ),
             )),
         }
     }
 
+    /// Whether the provision was cancelled. A step that belongs to no
+    /// operation (a mid-run hotplug request) has nothing to cancel.
     async fn cancelled(
-        operations: &Operations,
+        operations: Option<&Operations>,
         guest: &LeaseGuest<'_>,
     ) -> Result<(), AttachFailure> {
+        let (Some(operations), Some(operation_id)) = (operations, guest.operation_id) else {
+            return Ok(());
+        };
         if operations
-            .cancel_requested(guest.operation_id)
+            .cancel_requested(operation_id)
             .await
             .map_err(|error| AttachFailure::Infrastructure(error.to_string()))?
         {
@@ -666,15 +773,16 @@ impl LabHardwareSaga {
     /// entry is never adopted (it may be an operator's identical one) and
     /// never deleted: the row becomes `attach_unknown` with no slot, and the
     /// provision fails.
-    #[allow(clippy::too_many_lines)]
+    #[allow(clippy::too_many_lines, clippy::too_many_arguments)]
     async fn attach_held(
         &self,
-        operations: &Operations,
+        operations: Option<&Operations>,
         guest: &LeaseGuest<'_>,
         request: &PveHttpRequest,
         device: &HardwareDevice,
         reservation: HardwareReservation,
         resumed: bool,
+        keep: Disposition,
     ) -> Result<HardwareReservation, AttachFailure> {
         Self::cancelled(operations, guest).await?;
         self.verify(guest, device, &reservation).await?;
@@ -773,7 +881,7 @@ impl LabHardwareSaga {
                 "hardware_attach_requested",
                 device,
                 &reservation,
-                Some(guest.operation_id),
+                guest.operation_id,
                 &[
                     ("node", guest.node.to_owned()),
                     ("guest_vmid", guest.vmid.to_string()),
@@ -818,6 +926,8 @@ impl LabHardwareSaga {
                     !resumed,
                     "hardware_lease_ended",
                     "the lease ended before the device was written",
+                    // A lease that no longer counts holds nothing.
+                    Disposition::Release,
                 )
                 .await;
         }
@@ -852,6 +962,7 @@ impl LabHardwareSaga {
                                 "the guest holds an identical {mapping} entry in {} that Fleet did not write; it was left untouched",
                                 outcome.slot
                             ),
+                            keep,
                         )
                         .await;
                 }
@@ -889,9 +1000,10 @@ impl LabHardwareSaga {
                                     request,
                                     attached.clone(),
                                     device,
-                                    Some(guest.operation_id),
+                                    guest.operation_id,
                                     guest.lease_id,
                                     true,
+                                    Disposition::Release,
                                 )
                                 .await;
                             return Err(refused(
@@ -920,7 +1032,16 @@ impl LabHardwareSaga {
             }
             Err(error) => {
                 return self
-                    .fail_attach(guest, request, device, &reservation, !resumed, slot, error)
+                    .fail_attach(
+                        guest,
+                        request,
+                        device,
+                        &reservation,
+                        !resumed,
+                        slot,
+                        error,
+                        keep,
+                    )
                     .await;
             }
         };
@@ -932,13 +1053,15 @@ impl LabHardwareSaga {
                 request,
                 reservation.clone(),
                 device,
-                Some(guest.operation_id),
+                guest.operation_id,
                 guest.lease_id,
                 true,
+                keep,
             )
             .await;
-        let outcome = match result {
-            Ok(DetachResult::Released) => "released",
+        let outcome = match (result, keep) {
+            (Ok(DetachResult::Detached), Disposition::Release) => "released",
+            (Ok(DetachResult::Detached), Disposition::KeepHeld) => "held",
             _ => "unknown",
         };
         let _ = self
@@ -946,7 +1069,7 @@ impl LabHardwareSaga {
                 "hardware_attach_failed",
                 device,
                 &reservation,
-                Some(guest.operation_id),
+                guest.operation_id,
                 &[
                     ("outcome", outcome.to_owned()),
                     ("reason", reason.to_owned()),
@@ -984,7 +1107,7 @@ impl LabHardwareSaga {
                 "hardware_detach_requested",
                 device,
                 reservation,
-                Some(guest.operation_id),
+                guest.operation_id,
                 &facts,
                 true,
             )
@@ -1020,7 +1143,7 @@ impl LabHardwareSaga {
                 "hardware_attach_failed",
                 device,
                 reservation,
-                Some(guest.operation_id),
+                guest.operation_id,
                 &[
                     ("outcome", outcome.to_owned()),
                     ("reason", "hardware_attach_unrecorded".to_owned()),
@@ -1077,7 +1200,7 @@ impl LabHardwareSaga {
                 "hardware_attached",
                 device,
                 &attached,
-                Some(guest.operation_id),
+                guest.operation_id,
                 &facts,
                 false,
             )
@@ -1096,6 +1219,7 @@ impl LabHardwareSaga {
         fresh: bool,
         predicted: Option<String>,
         error: PveUsbError,
+        keep: Disposition,
     ) -> Result<HardwareReservation, AttachFailure> {
         let detail = error.to_string();
         match error {
@@ -1117,8 +1241,17 @@ impl LabHardwareSaga {
                     PveUsbError::SlotsFull { .. } => "hardware_no_free_slot",
                     _ => "hardware_attach_failed",
                 };
-                self.fail_unwritten(guest, request, device, reservation, fresh, reason, &detail)
-                    .await
+                self.fail_unwritten(
+                    guest,
+                    request,
+                    device,
+                    reservation,
+                    fresh,
+                    reason,
+                    &detail,
+                    keep,
+                )
+                .await
             }
             PveUsbError::WriteFailed {
                 cleanup: PveUsbCleanup::Removed | PveUsbCleanup::NothingToRemove,
@@ -1134,6 +1267,7 @@ impl LabHardwareSaga {
                     false,
                     "hardware_attach_failed",
                     &detail,
+                    keep,
                 )
                 .await
             }
@@ -1184,20 +1318,21 @@ impl LabHardwareSaga {
         fresh: bool,
         reason: &'static str,
         detail: &str,
+        keep: Disposition,
     ) -> Result<HardwareReservation, AttachFailure> {
         match self
             .references_of(request, guest.node, guest.vmid, &device.mapping_id)
             .await
         {
             Ok(held) if held.is_empty() => {
-                self.release_failed(guest, device, reservation, reason, detail)
+                self.release_failed(guest, device, reservation, reason, detail, keep)
                     .await
             }
             // Fresh attempt (the verify step proved nothing referenced the
             // mapping): the entry is somebody else's, and the row holds
             // nothing on the guest.
             Ok(_) if fresh => {
-                self.release_failed(guest, device, reservation, reason, detail)
+                self.release_failed(guest, device, reservation, reason, detail, keep)
                     .await
             }
             Ok(held) => {
@@ -1216,7 +1351,8 @@ impl LabHardwareSaga {
         }
     }
 
-    /// The entry is confirmed absent: release through `detaching`.
+    /// The entry is confirmed absent: release through `detaching` (or, for a
+    /// lease that still holds the device, return it to `held`).
     async fn release_failed(
         &self,
         guest: &LeaseGuest<'_>,
@@ -1224,6 +1360,7 @@ impl LabHardwareSaga {
         reservation: &HardwareReservation,
         reason: &'static str,
         detail: &str,
+        keep: Disposition,
     ) -> Result<HardwareReservation, AttachFailure> {
         let detaching = self
             .store
@@ -1236,12 +1373,7 @@ impl LabHardwareSaga {
             )
             .await
             .map_err(|error| infra(&error))?;
-        self.reservations
-            .release(
-                &Self::audit_context(Some(guest.operation_id)),
-                &detaching.id,
-                now(),
-            )
+        self.finish_detached(guest.operation_id, &detaching, keep)
             .await
             .map_err(|error| infra(&error))?;
         let _ = self
@@ -1249,9 +1381,16 @@ impl LabHardwareSaga {
                 "hardware_attach_failed",
                 device,
                 &detaching,
-                Some(guest.operation_id),
+                guest.operation_id,
                 &[
-                    ("outcome", "released".to_owned()),
+                    (
+                        "outcome",
+                        match keep {
+                            Disposition::Release => "released",
+                            Disposition::KeepHeld => "held",
+                        }
+                        .to_owned(),
+                    ),
                     ("reason", reason.to_owned()),
                 ],
                 false,
@@ -1259,10 +1398,66 @@ impl LabHardwareSaga {
             .await;
         Err(refused(
             reason,
-            format!(
-                "{detail}; the guest holds nothing Fleet wrote and the reservation was released"
-            ),
+            match keep {
+                Disposition::Release => format!(
+                    "{detail}; the guest holds nothing Fleet wrote and the reservation was released"
+                ),
+                Disposition::KeepHeld => format!(
+                    "{detail}; the guest holds nothing Fleet wrote and the lease still holds the device"
+                ),
+            },
         ))
+    }
+
+    /// Releases a row through the reservation store. A release a caller's own
+    /// request causes (mid-run hotplug) is filed under the action the caller
+    /// was authorized for; the lease's provision and cleanup keep the owner's
+    /// default.
+    async fn release_row(
+        &self,
+        operation_id: Option<&str>,
+        id: &str,
+    ) -> Result<(), HardwareStoreError> {
+        let context = self.audit_context(operation_id);
+        match self.actor.source {
+            Some(_) => self
+                .reservations
+                .release_under(&context, self.actor.action, id, now())
+                .await
+                .map(|_| ()),
+            None => self
+                .reservations
+                .release(&context, id, now())
+                .await
+                .map(|_| ()),
+        }
+    }
+
+    /// A confirmed-absent device leaves its `detaching` row: released, or
+    /// (for a lease that still holds the device) back in `held` with the slot
+    /// cleared. A row somebody else already released (the lease ended while
+    /// the request ran) is not an error for either.
+    async fn finish_detached(
+        &self,
+        operation_id: Option<&str>,
+        detaching: &HardwareReservation,
+        keep: Disposition,
+    ) -> Result<(), HardwareStoreError> {
+        match keep {
+            Disposition::Release => self.release_row(operation_id, &detaching.id).await,
+            Disposition::KeepHeld => match self
+                .store
+                .transition_reservation(&detaching.id, State::Detaching, State::Held, None, now())
+                .await
+            {
+                Ok(_) => Ok(()),
+                Err(HardwareStoreError::IllegalTransition {
+                    actual: State::Released,
+                    ..
+                }) => Ok(()),
+                Err(error) => Err(error),
+            },
+        }
     }
 
     /// The outcome cannot be determined: `attach_unknown`. With a slot, an
@@ -1295,7 +1490,7 @@ impl LabHardwareSaga {
                 "hardware_attach_failed",
                 device,
                 &unknown,
-                Some(guest.operation_id),
+                guest.operation_id,
                 &[
                     ("outcome", "unknown".to_owned()),
                     ("reason", reason.to_owned()),
@@ -1579,6 +1774,195 @@ impl LabHardwareSaga {
         Ok(())
     }
 
+    // ── mid-run hotplug (FM-1126) ────────────────────────────────────────
+
+    /// Attaches a device the lease holds in `held` to its running guest:
+    /// the same verify, record, write and read-back as the provision's
+    /// attach, minus a provision operation to cancel. Whatever does not end
+    /// attached leaves the lease holding the device in `held` (a refused,
+    /// failed or pending attach), unless the lease no longer counts.
+    ///
+    /// A pending attach (the guest's `hotplug` option lacks `usb`) is removed
+    /// again and reported as the refusal `hardware_attach_pending`: it is
+    /// never attached, and a later restart cannot attach a device nobody
+    /// confirmed.
+    ///
+    /// # Errors
+    ///
+    /// [`AttachFailure::Refused`] with the stable reason, or
+    /// [`AttachFailure::Infrastructure`].
+    pub(crate) async fn hotplug_attach(
+        &self,
+        guest: &LeaseGuest<'_>,
+        device: &HardwareDevice,
+        reservation: HardwareReservation,
+    ) -> Result<HardwareReservation, AttachFailure> {
+        if reservation.state != State::Held {
+            return Err(refused(
+                "hardware_not_detached",
+                format!(
+                    "the reservation for {} is {}, not held; only a held device attaches",
+                    device.mapping_id,
+                    reservation.state.id()
+                ),
+            ));
+        }
+        if reservation.guest.is_some() {
+            Self::same_guest(guest, &reservation)?;
+        }
+        let request = self
+            .request(guest.account_id)
+            .await
+            .map_err(AttachFailure::Infrastructure)?;
+        // The guest may have moved since the provision recorded its node.
+        let node = self
+            .live_node(&request, guest.vmid)
+            .await
+            .unwrap_or_else(|| guest.node.to_owned());
+        let guest = LeaseGuest {
+            node: &node,
+            ..*guest
+        };
+        let before = reservation.clone();
+        let result = self
+            .attach_held(
+                None,
+                &guest,
+                &request,
+                device,
+                reservation,
+                false,
+                Disposition::KeepHeld,
+            )
+            .await;
+        // The caller sees a refusal's reason and a generic detail: what the
+        // verify found (another guest's VMID, a device's ids and port) is for
+        // the audit trail, not for a lease-bound credential.
+        match result {
+            Err(AttachFailure::Refused { reason, detail }) if is_revealing(reason) => {
+                let _ = self
+                    .event(
+                        "hardware_refused",
+                        device,
+                        &before,
+                        None,
+                        &[
+                            ("reason", reason.to_owned()),
+                            ("detail", detail),
+                            ("node", node.clone()),
+                            ("guest_vmid", guest.vmid.to_string()),
+                        ],
+                        false,
+                    )
+                    .await;
+                Err(AttachFailure::Refused {
+                    reason,
+                    detail: public_detail(reason).to_owned(),
+                })
+            }
+            other => other,
+        }
+    }
+
+    /// Detaches an attached device from the guest it was recorded on, with
+    /// the detach path's rules (only the recorded slot, only the exact value
+    /// Fleet wrote, a read of every `usbN` entry before the row moves).
+    /// `release` says whether the lease gives the device up (`released`) or
+    /// keeps it (`held`). A `detaching` or `detach_failed` row is retried.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the reservation store does.
+    pub(crate) async fn hotplug_detach(
+        &self,
+        reservation: HardwareReservation,
+        device: &HardwareDevice,
+        lease_id: &str,
+        release: bool,
+    ) -> Result<DetachResult, HardwareStoreError> {
+        let Some(account_id) = reservation
+            .guest
+            .as_ref()
+            .map(|recorded| recorded.account_id.clone())
+        else {
+            return Ok(DetachResult::Failed(
+                "the reservation records no guest to detach from".to_owned(),
+            ));
+        };
+        let request = match self.request(&account_id).await {
+            Ok(request) => request,
+            Err(detail) => return Ok(DetachResult::Failed(bounded(&detail))),
+        };
+        self.detach_reservation(
+            &request,
+            reservation,
+            device,
+            None,
+            lease_id,
+            true,
+            if release {
+                Disposition::Release
+            } else {
+                Disposition::KeepHeld
+            },
+        )
+        .await
+    }
+
+    /// Releases a lease's device that is already detached (`held`, no slot
+    /// recorded) because the request gives it up. A `held` row proves nothing
+    /// about the guest, so every `usbN` entry is read first: a reference to
+    /// the mapping (somebody attached it since) or a guest that cannot be read
+    /// in full keeps the row, and the refusal says so.
+    ///
+    /// # Errors
+    ///
+    /// [`AttachFailure::Refused`] when the guest still references the mapping
+    /// or cannot be read; [`AttachFailure::Infrastructure`] when the store or
+    /// the account fails.
+    pub(crate) async fn hotplug_release_held(
+        &self,
+        guest: &LeaseGuest<'_>,
+        device: &HardwareDevice,
+        reservation: &HardwareReservation,
+    ) -> Result<(), AttachFailure> {
+        let request = self
+            .request(guest.account_id)
+            .await
+            .map_err(AttachFailure::Infrastructure)?;
+        let node = self
+            .live_node(&request, guest.vmid)
+            .await
+            .unwrap_or_else(|| guest.node.to_owned());
+        match self
+            .references_of(&request, &node, guest.vmid, &device.mapping_id)
+            .await
+        {
+            Ok(held) if held.is_empty() => {}
+            Ok(held) => {
+                return Err(refused(
+                    "hardware_detach_unconfirmed",
+                    format!(
+                        "the guest references {} in {}; the lease keeps the reservation (detach it first)",
+                        device.mapping_id,
+                        held.join(", ")
+                    ),
+                ));
+            }
+            Err(read) => {
+                return Err(refused(
+                    "hardware_detach_unconfirmed",
+                    format!(
+                        "the guest could not be read in full ({read}); the lease keeps the reservation"
+                    ),
+                ));
+            }
+        }
+        self.release_row(None, &reservation.id)
+            .await
+            .map_err(|error| infra(&error))
+    }
+
     // ── detach ───────────────────────────────────────────────────────────
 
     /// Detaches every device the lease holds and releases it, before the
@@ -1657,11 +2041,31 @@ impl LabHardwareSaga {
                 // entry the guest shows; the others came from a write Fleet
                 // made (or attempted and could not confirm).
                 let proven = row.state != State::Attaching;
-                match self
-                    .detach_reservation(&request, row, &device, operation_id, lease_id, proven)
-                    .await
-                {
-                    Ok(DetachResult::Released) => {}
+                let row_id = row.id.clone();
+                let first = self
+                    .detach_reservation(
+                        &request,
+                        row,
+                        &device,
+                        operation_id,
+                        lease_id,
+                        proven,
+                        Disposition::Release,
+                    )
+                    .await;
+                // A request of the lease's holder (a mid-run hotplug) may have
+                // moved the row between cleanup's read and its own move: read
+                // it once more and continue from where it is, instead of
+                // counting a lost race as an unconfirmed detach.
+                let outcome = match first {
+                    Err(HardwareStoreError::IllegalTransition { .. }) => {
+                        self.resync_detach(&request, &row_id, &device, operation_id, lease_id)
+                            .await
+                    }
+                    other => other,
+                };
+                match outcome {
+                    Ok(DetachResult::Detached) => {}
                     Ok(DetachResult::Pending) => {
                         guest.get_or_insert((target.node.clone(), target.vmid));
                         problems.push(format!(
@@ -1696,6 +2100,40 @@ impl LabHardwareSaga {
         }
     }
 
+    /// Continues a detach whose row another writer moved first: a released
+    /// row or a `held` row that records no slot is done, any other live row is
+    /// detached from its new state (once; a second lost race is reported).
+    async fn resync_detach(
+        &self,
+        request: &PveHttpRequest,
+        id: &str,
+        device: &HardwareDevice,
+        operation_id: Option<&str>,
+        lease_id: &str,
+    ) -> Result<DetachResult, HardwareStoreError> {
+        let Some(fresh) = self.store.reservation(id).await? else {
+            return Ok(DetachResult::Detached);
+        };
+        match fresh.state {
+            State::Released => Ok(DetachResult::Detached),
+            State::Held if fresh.guest.as_ref().is_none_or(|g| g.usb_slot.is_none()) => {
+                Ok(DetachResult::Detached)
+            }
+            state => {
+                self.detach_reservation(
+                    request,
+                    fresh,
+                    device,
+                    operation_id,
+                    lease_id,
+                    state != State::Attaching,
+                    Disposition::Release,
+                )
+                .await
+            }
+        }
+    }
+
     /// Detaches one reservation. The row is released only after a read of
     /// every `usbN` entry of the guest (and, when Fleet deleted one, the
     /// provider's read-back of the slot) shows no reference to the mapping.
@@ -1705,8 +2143,10 @@ impl LabHardwareSaga {
     /// the guest shows may be an operator's identical one, so it is never
     /// deleted and the row is left `attach_unknown` without a slot, which
     /// stays that way until the guest shows nothing or an operator decides.
-    #[allow(clippy::too_many_lines)]
-    async fn detach_reservation(
+    ///
+    /// `keep` says what a confirmed detach leaves of the row.
+    #[allow(clippy::too_many_lines, clippy::too_many_arguments)]
+    pub(crate) async fn detach_reservation(
         &self,
         request: &PveHttpRequest,
         reservation: HardwareReservation,
@@ -1714,15 +2154,16 @@ impl LabHardwareSaga {
         operation_id: Option<&str>,
         lease_id: &str,
         proven: bool,
+        keep: Disposition,
     ) -> Result<DetachResult, HardwareStoreError> {
-        let context = Self::audit_context(operation_id);
         let mapping = device.mapping_id.as_str();
         let Some(recorded) = reservation.guest.clone() else {
-            // Never attached: nothing on any guest to remove.
-            self.reservations
-                .release(&context, &reservation.id, now())
-                .await?;
-            return Ok(DetachResult::Released);
+            // Never attached: nothing on any guest to remove. A row that is
+            // kept is already `held`; a released one is released here.
+            if keep == Disposition::Release {
+                self.release_row(operation_id, &reservation.id).await?;
+            }
+            return Ok(DetachResult::Detached);
         };
         let mut recorded_slot = recorded.usb_slot.map(slot_name);
         let owned = proven && recorded_slot.is_some();
@@ -1744,7 +2185,7 @@ impl LabHardwareSaga {
                 // device is not on the guest, whatever the row recorded.
                 Ok(held) if held.is_empty() => {
                     return self
-                        .release_absent(&reservation, device, operation_id, &node, &recorded)
+                        .release_absent(&reservation, device, operation_id, &node, &recorded, keep)
                         .await;
                 }
                 Ok(held) if !owned => {
@@ -1864,9 +2305,7 @@ impl LabHardwareSaga {
                     .await
                 {
                     Ok(held) if held.is_empty() => {
-                        self.reservations
-                            .release(&context, &detaching.id, now())
-                            .await?;
+                        self.finish_detached(operation_id, &detaching, keep).await?;
                         let _ = self
                             .event(
                                 "hardware_detached",
@@ -1877,7 +2316,7 @@ impl LabHardwareSaga {
                                 false,
                             )
                             .await;
-                        Ok(DetachResult::Released)
+                        Ok(DetachResult::Detached)
                     }
                     Ok(held) => {
                         self.detach_failed(
@@ -1922,9 +2361,9 @@ impl LabHardwareSaga {
         }
     }
 
-    /// The guest shows no reference to the mapping: release without a
-    /// delete (nothing was written by this step, so nothing is audited as an
-    /// intent), through `detaching`.
+    /// The guest shows no reference to the mapping: release (or keep held)
+    /// without a delete (nothing was written by this step, so nothing is
+    /// audited as an intent), through `detaching`.
     async fn release_absent(
         &self,
         reservation: &HardwareReservation,
@@ -1932,6 +2371,7 @@ impl LabHardwareSaga {
         operation_id: Option<&str>,
         node: &str,
         recorded: &GuestTarget,
+        keep: Disposition,
     ) -> Result<DetachResult, HardwareStoreError> {
         let detaching = if reservation.state == State::Detaching {
             reservation.clone()
@@ -1946,9 +2386,7 @@ impl LabHardwareSaga {
                 )
                 .await?
         };
-        self.reservations
-            .release(&Self::audit_context(operation_id), &detaching.id, now())
-            .await?;
+        self.finish_detached(operation_id, &detaching, keep).await?;
         let _ = self
             .event(
                 "hardware_detached",
@@ -1963,7 +2401,7 @@ impl LabHardwareSaga {
                 false,
             )
             .await;
-        Ok(DetachResult::Released)
+        Ok(DetachResult::Detached)
     }
 
     /// An entry the guest shows cannot be shown to be Fleet's: the row is

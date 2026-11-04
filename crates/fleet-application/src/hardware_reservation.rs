@@ -329,7 +329,7 @@ impl HardwareReservations {
     ) -> Result<ReserveDecision, HardwareStoreError> {
         let outcome = self.port.reserve(request, now).await?;
         for released in &outcome.released {
-            self.record(release_audit(context, released)).await;
+            self.record(release_audit(context, released, None)).await;
         }
         match &outcome.decision {
             ReserveDecision::Reserved {
@@ -396,7 +396,30 @@ impl HardwareReservations {
     ) -> Result<ReleaseOutcome, HardwareStoreError> {
         let outcome = self.port.release(id, now).await?;
         if let ReleaseOutcome::Released(released) = &outcome {
-            self.record(release_audit(context, released)).await;
+            self.record(release_audit(context, released, None)).await;
+        }
+        Ok(outcome)
+    }
+
+    /// [`Self::release`], with the `hardware_released` event filed under
+    /// `action` instead of the owner's default: a release the caller asked
+    /// for (a lease holder giving a device up mid-run) is audited under the
+    /// action the caller was authorized for.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the store refuses or fails.
+    pub async fn release_under(
+        &self,
+        context: &AuditContext,
+        action: &str,
+        id: &str,
+        now: i64,
+    ) -> Result<ReleaseOutcome, HardwareStoreError> {
+        let outcome = self.port.release(id, now).await?;
+        if let ReleaseOutcome::Released(released) = &outcome {
+            self.record(release_audit(context, released, Some(action)))
+                .await;
         }
         Ok(outcome)
     }
@@ -415,7 +438,7 @@ impl HardwareReservations {
         now: i64,
     ) -> Result<ReleasedReservation, HardwareStoreError> {
         let released = self.port.override_release(id, now).await?;
-        self.record(release_audit(context, &released)).await;
+        self.record(release_audit(context, &released, None)).await;
         Ok(released)
     }
 
@@ -472,7 +495,11 @@ fn intent_with_action(
 }
 
 /// The `hardware_released` event, carrying the prior state and slot.
-fn release_audit(context: &AuditContext, released: &ReleasedReservation) -> AuditIntent {
+fn release_audit(
+    context: &AuditContext,
+    released: &ReleasedReservation,
+    action_override: Option<&str>,
+) -> AuditIntent {
     let previous = &released.previous;
     let mut facts = vec![
         ("reservation_id", previous.id.clone()),
@@ -490,7 +517,7 @@ fn release_audit(context: &AuditContext, released: &ReleasedReservation) -> Audi
     let action = if released.cause == ReleaseCause::Override {
         OVERRIDE_RELEASE_ACTION
     } else {
-        owner_action(previous.owner_kind)
+        action_override.unwrap_or_else(|| owner_action(previous.owner_kind))
     };
     intent_with_action(
         context,
@@ -630,6 +657,7 @@ mod tests {
                 current,
                 cause: ReleaseCause::Override,
             },
+            None,
         );
         assert_eq!(intent.action, OVERRIDE_RELEASE_ACTION);
         assert_eq!(intent.resource.as_deref(), Some("dev-1"));
@@ -639,6 +667,33 @@ mod tests {
         assert_eq!(facts["usb_slot"], "2");
         assert_eq!(facts["outcome"], "override");
         assert_eq!(facts["guest_vmid"], "9001");
+    }
+
+    #[test]
+    fn a_requested_release_is_filed_under_the_action_given_and_an_override_never_is() {
+        let context = AuditContext {
+            actor: "holder".to_owned(),
+            operation_id: None,
+        };
+        let released = |cause| ReleasedReservation {
+            previous: reservation(Detaching, Some(0)),
+            current: reservation(Released, None),
+            cause,
+        };
+        let completed = release_audit(
+            &context,
+            &released(ReleaseCause::Completed),
+            Some("lab.hardware.detach"),
+        );
+        assert_eq!(completed.action, "lab.hardware.detach");
+        let default = release_audit(&context, &released(ReleaseCause::Completed), None);
+        assert_eq!(default.action, "lab.provision");
+        let forced = release_audit(
+            &context,
+            &released(ReleaseCause::Override),
+            Some("lab.hardware.detach"),
+        );
+        assert_eq!(forced.action, OVERRIDE_RELEASE_ACTION);
     }
 
     #[derive(Debug, Default)]

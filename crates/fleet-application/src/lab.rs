@@ -1085,6 +1085,7 @@ pub struct Lab {
     pools: Option<Arc<crate::lab_pool::LabPools>>,
     reservations: Option<Arc<dyn crate::lab_placement::CapacityReservationPort>>,
     hardware: Option<Arc<dyn crate::hardware::HardwareStore>>,
+    hotplug: Option<Arc<crate::lab_hardware_hotplug::LabHardwareHotplug>>,
 }
 
 /// One device a lease asked for through its template version, and the
@@ -1125,6 +1126,7 @@ impl Lab {
             pools: None,
             reservations: None,
             hardware: None,
+            hotplug: None,
         }
     }
 
@@ -1279,6 +1281,24 @@ impl Lab {
     pub fn with_artifacts(mut self, artifacts: Arc<crate::lab_artifacts::LabArtifacts>) -> Self {
         self.artifacts = Some(artifacts);
         self
+    }
+
+    /// Serves the mid-run hardware hotplug use cases (FM-1126) beside the
+    /// Lab surface.
+    #[must_use]
+    pub fn with_hotplug(
+        mut self,
+        hotplug: Arc<crate::lab_hardware_hotplug::LabHardwareHotplug>,
+    ) -> Self {
+        self.hotplug = Some(hotplug);
+        self
+    }
+
+    /// The mid-run hardware hotplug use cases, when the controller composed
+    /// them.
+    #[must_use]
+    pub fn hotplug(&self) -> Option<&Arc<crate::lab_hardware_hotplug::LabHardwareHotplug>> {
+        self.hotplug.as_ref()
     }
 
     /// Serves the Lab put use cases (#393) beside the Lab surface.

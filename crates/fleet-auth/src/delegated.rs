@@ -186,6 +186,17 @@ pub const DELEGATED_LAB_LOOP: &[DelegatedAction] = &[
         action: Permission::LabArtifactRead,
         resource: ResourceRule::Any,
     },
+    // lab hardware attach / detach (FM-1126, ADR 0019): hotplug a device the
+    // caller's own lease reserved. The resource is the lease id; the use case
+    // applies owner scope, and only a device the lease reserved is touched.
+    DelegatedAction {
+        action: Permission::LabHardwareAttach,
+        resource: ResourceRule::Named,
+    },
+    DelegatedAction {
+        action: Permission::LabHardwareDetach,
+        resource: ResourceRule::Named,
+    },
     // The operations a Lab route queues for the caller, and reading one.
     DelegatedAction {
         action: Permission::OperationCreate,
