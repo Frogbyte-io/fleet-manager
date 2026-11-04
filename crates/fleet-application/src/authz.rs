@@ -293,6 +293,15 @@ pub enum Permission {
     /// host; audited. The resource is the account id. Never delegated to
     /// Lab credentials.
     HardwareRefresh,
+    /// Attach a device a Lab lease reserved to the lease's running guest
+    /// (FM-1126, ADR 0019). The resource is the lease id. A privileged
+    /// mutation of a guest, lease-bound: a delegated credential may do it
+    /// only for its own leases, and only for devices the lease reserved.
+    LabHardwareAttach,
+    /// Detach a device a Lab lease reserved from the lease's running guest,
+    /// keeping it reserved or giving it up (FM-1126). The resource is the
+    /// lease id. Lease-bound like [`Permission::LabHardwareAttach`].
+    LabHardwareDetach,
 }
 
 impl Permission {
@@ -381,6 +390,8 @@ impl Permission {
         Permission::MachineProvision,
         Permission::HardwareRead,
         Permission::HardwareRefresh,
+        Permission::LabHardwareAttach,
+        Permission::LabHardwareDetach,
     ];
 
     /// The stable action id, as recorded in decisions and audit events.
@@ -468,6 +479,8 @@ impl Permission {
             Permission::MachineProvision => "machines.provision",
             Permission::HardwareRead => "hardware.read",
             Permission::HardwareRefresh => "hardware.refresh",
+            Permission::LabHardwareAttach => "lab.hardware.attach",
+            Permission::LabHardwareDetach => "lab.hardware.detach",
         }
     }
 
@@ -557,6 +570,8 @@ impl Permission {
             | Permission::MachineProvision
             | Permission::HardwareRead
             | Permission::HardwareRefresh
+            | Permission::LabHardwareAttach
+            | Permission::LabHardwareDetach
             | Permission::RegistryObserve => true,
         }
     }
@@ -647,6 +662,8 @@ impl Permission {
             | Permission::MachinePut
             | Permission::MachineTerminal
             | Permission::MachineCollect
+            | Permission::LabHardwareAttach
+            | Permission::LabHardwareDetach
             | Permission::ActionDeny => true,
         }
     }
