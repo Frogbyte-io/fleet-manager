@@ -392,7 +392,7 @@ async fn an_account_whose_guests_cannot_all_be_audited_says_so_and_lists_nothing
             "{text}"
         );
         assert!(!row(text, "fm-g").contains("available"), "{text}");
-        assert!(text.contains("audit every guest"), "{text}");
+        assert!(text.contains("guest_audit_not_granted"), "{text}");
     }
     // The JSON carries the same state for scripts.
     let json = cli(
