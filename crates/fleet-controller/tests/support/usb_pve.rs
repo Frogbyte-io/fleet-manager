@@ -137,6 +137,12 @@ struct UsbState {
     fail_resources: u32,
     /// How many of the next config reads of a guest fail (500), by VMID.
     fail_config: BTreeMap<u32, u32>,
+    /// Passive monitor (FM-1130): an attach landed on a mapping that a guest
+    /// config (applied or pending, any slot) already referenced elsewhere.
+    double_assignments: Vec<String>,
+    /// Passive monitor (FM-1130): a guest was destroyed while its config
+    /// still held a mapping reference (a detach did not precede the destroy).
+    destroyed_holding: Vec<String>,
 }
 
 /// The USB-aware host.
@@ -322,6 +328,77 @@ impl UsbHost {
         self.state.lock().unwrap().writes.clone()
     }
 
+    /// An operator stops and destroys the guest through the host's own
+    /// request path (so the destroy monitor sees it, unlike
+    /// [`Self::remove_guest`]).
+    pub async fn operator_destroy(&self, vmid: u32) {
+        let node = crate::fake_pve::TEMPLATE_NODE;
+        let request = |method, path: String| PveHttpRequest {
+            host: crate::fake_pve::API_HOST.to_owned(),
+            port: 8006,
+            path,
+            pinned_fingerprint: Some(FINGERPRINT.to_owned()),
+            credentials: Arc::new(fleet_provider_proxmox::PveCredentials {
+                token_id: "fleet@pve!lab".to_owned(),
+                token: fleet_core::SensitiveString::new("fake-token-material"),
+            }),
+            method,
+        };
+        let _ = self
+            .transport
+            .execute_with_body(
+                request(
+                    PveHttpMethod::Post,
+                    format!("/api2/json/nodes/{node}/qemu/{vmid}/status/stop"),
+                ),
+                b"{}".to_vec(),
+            )
+            .await;
+        let answer = self
+            .serve(
+                &request(
+                    PveHttpMethod::Delete,
+                    format!("/api2/json/nodes/{node}/qemu/{vmid}?purge=1"),
+                ),
+                None,
+            )
+            .await
+            .expect("the layer serves a delete")
+            .expect("the fake deletes the guest");
+        assert_eq!(answer.status, 200);
+    }
+
+    /// An operator's own attach, written through the host's write path (so
+    /// the double-assignment monitor sees it, unlike [`Self::set_slot`]).
+    pub fn operator_attach(&self, vmid: u32, slot: u8, value: &str) {
+        let digest = {
+            let mut state = self.state.lock().unwrap();
+            let usb = Self::guest_in(&mut state, vmid);
+            Self::digest(vmid, usb)
+        };
+        let body = json!({ format!("usb{slot}"): value, "digest": digest });
+        let running = self
+            .guest_exists(crate::fake_pve::TEMPLATE_NODE, vmid)
+            .is_some_and(|guest| guest.running);
+        assert!(
+            self.write_config(vmid, running, &body, false).is_none(),
+            "the operator's write lands"
+        );
+    }
+
+    /// Every attach that landed on a mapping a guest config already
+    /// referenced (a device assigned twice), as it happened. Empty unless a
+    /// writer broke exclusivity. Passive: it changes nothing.
+    pub fn double_assignments(&self) -> Vec<String> {
+        self.state.lock().unwrap().double_assignments.clone()
+    }
+
+    /// Every guest destroyed while its config still referenced a mapping
+    /// (`vmid: usbN=value`), as it happened. Passive: it changes nothing.
+    pub fn destroyed_holding(&self) -> Vec<String> {
+        self.state.lock().unwrap().destroyed_holding.clone()
+    }
+
     /// How many logged requests satisfy `predicate`.
     pub fn count(&self, predicate: impl Fn(&str) -> bool) -> usize {
         self.state
@@ -387,6 +464,31 @@ impl UsbHost {
         }
         stored.extend(guest.pending_add.clone());
         stored
+    }
+
+    /// The mapping id a `usbN` value references (`mapping=<id>[,opts]`).
+    fn mapping_of(value: &str) -> Option<&str> {
+        value
+            .strip_prefix("mapping=")
+            .map(|rest| rest.split(',').next().unwrap_or(rest))
+    }
+
+    /// The FM-1130 monitor's check: where else (another guest, or another
+    /// slot of this one) the mapping an attach to `vmid`/`slot` carries is
+    /// already referenced, in the stored view (pending entries included).
+    fn referenced_elsewhere(state: &UsbState, vmid: u32, slot: u8, value: &str) -> Option<String> {
+        let mapping = Self::mapping_of(value)?;
+        let mut elsewhere = Vec::new();
+        for (other, guest) in &state.guests {
+            for (index, held) in Self::stored_of(guest) {
+                if (*other != vmid || index != slot) && Self::mapping_of(&held) == Some(mapping) {
+                    elsewhere.push(format!("{other}/usb{index}"));
+                }
+            }
+        }
+        (!elsewhere.is_empty()).then(|| {
+            format!("{vmid}/usb{slot}={value} landed while {mapping} was on {elsewhere:?}")
+        })
     }
 
     fn digest(vmid: u32, guest: &GuestUsb) -> String {
@@ -646,12 +748,25 @@ impl UsbHost {
                 let vmid: u32 = vmid.parse().unwrap();
                 Some(self.put_config(node, vmid, body?).await)
             }
-            (PveHttpMethod::Delete, ["nodes", _node, "qemu", vmid]) => {
+            (PveHttpMethod::Delete, ["nodes", node, "qemu", vmid]) => {
                 self.record(line);
                 let vmid: u32 = vmid.parse().unwrap();
+                let held: Vec<String> = {
+                    let mut state = self.state.lock().unwrap();
+                    Self::stored_of(Self::guest_in(&mut state, vmid))
+                        .into_iter()
+                        .filter(|(_, value)| Self::mapping_of(value).is_some())
+                        .map(|(slot, value)| format!("{vmid}: usb{slot}={value}"))
+                        .collect()
+                };
                 let answer = self.transport.execute(request.clone()).await;
                 if matches!(&answer, Ok(response) if response.status == 200) {
-                    self.state.lock().unwrap().guests.remove(&vmid);
+                    let mut state = self.state.lock().unwrap();
+                    state.guests.remove(&vmid);
+                    // The guest is really gone (a task error leaves it).
+                    if self.guest_exists(node, vmid).is_none() {
+                        state.destroyed_holding.extend(held);
+                    }
                 }
                 Some(answer)
             }
@@ -784,6 +899,18 @@ impl UsbHost {
         hotplug_fails: bool,
     ) -> Option<Result<PveHttpResponse, PveTransportError>> {
         let mut state = self.state.lock().unwrap();
+        // The FM-1130 monitor: what an attach would double up (reported only
+        // when the write lands).
+        let doubled = if body.get("delete").is_none() {
+            body.as_object()
+                .and_then(|fields| fields.iter().find(|(key, _)| key.starts_with("usb")))
+                .and_then(|(key, value)| {
+                    let slot: u8 = key.trim_start_matches("usb").parse().ok()?;
+                    Self::referenced_elsewhere(&state, vmid, slot, value.as_str()?)
+                })
+        } else {
+            None
+        };
         let usb = Self::guest_in(&mut state, vmid);
         if body["digest"].as_str() != Some(Self::digest(vmid, usb).as_str()) {
             return Some(Self::error(
@@ -818,6 +945,7 @@ impl UsbHost {
                 state
                     .writes
                     .push(format!("attach {slot}={value} (hotplug failed)"));
+                state.double_assignments.extend(doubled);
                 return Some(Self::error(
                     400,
                     &json!({
@@ -835,6 +963,7 @@ impl UsbHost {
         }
         usb.revision += 1;
         state.writes.push(effect);
+        state.double_assignments.extend(doubled);
         None
     }
 }
