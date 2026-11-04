@@ -1900,8 +1900,19 @@ async fn a_refresh_between_the_reservation_and_the_attach_cannot_re_baseline_the
     assert_eq!(controller.drain(&world).await, Run::Done(2));
     assert_attach_failed(&world, &controller, &lease, "hardware_fingerprint_changed").await;
     assert!(world.usb.writes().is_empty());
-    let stored_entry = controller.rows().await.len();
-    assert_eq!(stored_entry, 1);
+    // The refresh did move the stored entry (so comparing with it would have
+    // passed): the pinned fingerprint is what caught the change.
+    let stored_path: String = sqlx::query_scalar("SELECT usbpath FROM hardware_device_entries")
+        .fetch_one(&controller.pool)
+        .await
+        .unwrap();
+    assert_eq!(stored_path, "1-9");
+    let pinned_path: String =
+        sqlx::query_scalar("SELECT usbpath FROM hardware_reservation_fingerprints")
+            .fetch_one(&controller.pool)
+            .await
+            .unwrap();
+    assert_eq!(pinned_path, "1-1");
 }
 
 #[tokio::test]
@@ -2122,4 +2133,295 @@ async fn one_of_two_devices_failing_to_detach_leaves_only_that_one_held() {
     );
     controller.settle(&world, now() + HOUR_MS).await;
     assert_released(&world, &controller, &lease).await;
+}
+
+/// A hook recording the id of the one reservation row (taken in placement,
+/// so it exists once the saga re-observes the device).
+fn capture_row_id(
+    controller: &Controller,
+    into: &Arc<std::sync::Mutex<Option<String>>>,
+) -> usb_pve::Hook {
+    let pool = controller.pool.clone();
+    let into = into.clone();
+    Arc::new(move || {
+        let pool = pool.clone();
+        let into = into.clone();
+        Box::pin(async move {
+            let found: Option<String> = sqlx::query_scalar("SELECT id FROM hardware_reservations")
+                .fetch_optional(&pool)
+                .await
+                .unwrap();
+            *into.lock().unwrap() = found;
+        })
+    })
+}
+
+/// A hook that releases the captured row, as a cleanup that read the guest
+/// before the write landed would.
+fn release_captured_row(
+    controller: &Controller,
+    id: &Arc<std::sync::Mutex<Option<String>>>,
+) -> usb_pve::Hook {
+    let pool = controller.pool.clone();
+    let id = id.clone();
+    Arc::new(move || {
+        let pool = pool.clone();
+        let id = id.lock().unwrap().clone().expect("the row exists");
+        Box::pin(async move {
+            fleet_application::hardware_reservation::HardwareReservationPort::override_release(
+                &fleet_controller::hardware_reservation_store::SqliteHardwareReservations::new(
+                    pool,
+                ),
+                &id,
+                now(),
+            )
+            .await
+            .expect("the row is released");
+        })
+    })
+}
+
+#[tokio::test]
+async fn a_row_released_between_the_cleanup_read_and_the_write_gets_its_entry_removed_not_an_error()
+{
+    let world = World::new(&[READER_A]).await;
+    let controller = Controller::start(&world).await;
+    controller.refresh_inventory().await;
+    let lease = controller.request_lease().await;
+    let id = Arc::new(std::sync::Mutex::new(None::<String>));
+    world.usb.inject(
+        UsbStep::CheckNode,
+        UsbFault::Hook(capture_row_id(&controller, &id)),
+        1,
+    );
+    // The row is released when the write is about to land.
+    world.usb.inject(
+        UsbStep::Attach,
+        UsbFault::Hook(release_captured_row(&controller, &id)),
+        1,
+    );
+    assert_eq!(controller.drain(&world).await, Run::Done(2));
+    // The write landed on a released row: its recording could not happen, so
+    // exactly the entry Fleet wrote was deleted again and the failure says so.
+    assert_eq!(
+        controller.failure_reason(&lease).await,
+        "hardware_attach_unrecorded"
+    );
+    assert_eq!(
+        world.usb.writes(),
+        vec![
+            "attach usb0=mapping=fm-test-reader-a".to_owned(),
+            "detach usb0".to_owned()
+        ]
+    );
+    assert_released(&world, &controller, &lease).await;
+    let metadata = controller.audit_metadata("hardware_attach_failed").await;
+    assert!(
+        metadata
+            .iter()
+            .any(|entry| entry.contains("\"outcome\":\"removed\"")),
+        "{metadata:?}"
+    );
+}
+
+#[tokio::test]
+async fn an_unrecorded_write_whose_removal_fails_is_surfaced_not_hidden() {
+    let world = World::new(&[READER_A]).await;
+    let controller = Controller::start(&world).await;
+    controller.refresh_inventory().await;
+    let lease = controller.request_lease().await;
+    let id = Arc::new(std::sync::Mutex::new(None::<String>));
+    world.usb.inject(
+        UsbStep::CheckNode,
+        UsbFault::Hook(capture_row_id(&controller, &id)),
+        1,
+    );
+    world.usb.inject(
+        UsbStep::Attach,
+        UsbFault::Hook(release_captured_row(&controller, &id)),
+        1,
+    );
+    world.usb.inject(UsbStep::Detach, UsbFault::Forbidden, 5);
+    assert_eq!(controller.step(&world).await, Run::Done(true));
+    assert_eq!(
+        controller.failure_reason(&lease).await,
+        "hardware_attach_unrecorded"
+    );
+    // Fleet's entry is still on the guest, and the audit trail says so.
+    assert_eq!(world.usb.stored(FIRST_VMID), stored(&[slot(0, READER_A)]));
+    let metadata = controller.audit_metadata("hardware_attach_failed").await;
+    assert!(
+        metadata
+            .iter()
+            .any(|entry| entry.contains("\"outcome\":\"unremoved\"")),
+        "{metadata:?}"
+    );
+}
+
+#[tokio::test]
+async fn the_destroy_gate_fails_closed_when_the_reservations_cannot_be_read() {
+    let world = World::new(&[READER_A]).await;
+    let controller = Controller::start(&world).await;
+    let (lease, vmid) = ready_lease(&world, &controller).await;
+    sqlx::query("ALTER TABLE hardware_reservations RENAME TO hardware_reservations_away")
+        .execute(&controller.pool)
+        .await
+        .unwrap();
+    let payload = serde_json::json!({
+        "accountId": world.account_id,
+        "node": TEMPLATE_NODE,
+        "vmid": vmid,
+        "timeoutSeconds": 60,
+        "params": {"purge": true},
+    })
+    .to_string();
+    let child = fleet_controller::lab_pool::run_reviewed_child(
+        &controller.operations,
+        controller.destroyer.as_ref(),
+        "proxmox.guest.destroy",
+        payload,
+        "review-unreadable".to_owned(),
+        &lease,
+        std::time::Duration::from_secs(30),
+    )
+    .await
+    .unwrap();
+    sqlx::query("ALTER TABLE hardware_reservations_away RENAME TO hardware_reservations")
+        .execute(&controller.pool)
+        .await
+        .unwrap();
+    assert_eq!(child.state, "failed");
+    let error: serde_json::Value =
+        serde_json::from_str(child.error_json.as_deref().unwrap()).unwrap();
+    assert_eq!(error["reason"], "hardware_unreadable");
+    assert!(world.pve.lab_guests().contains_key(&vmid));
+    assert_eq!(world.usb.count(|line| line.starts_with("Delete ")), 0);
+}
+
+#[tokio::test]
+async fn a_reservation_without_a_pin_is_pinned_at_its_first_attach() {
+    // A reservation taken before the pin existed (or interrupted between the
+    // reserve and the pin): the attach pins from the stored entry and goes on.
+    let world = World::new(&[READER_A]).await;
+    let controller = Controller::start(&world).await;
+    controller.refresh_inventory().await;
+    let pool = controller.pool.clone();
+    world.usb.inject(
+        UsbStep::NextId,
+        UsbFault::Hook(Arc::new(move || {
+            let pool = pool.clone();
+            Box::pin(async move {
+                sqlx::query("DELETE FROM hardware_reservation_fingerprints")
+                    .execute(&pool)
+                    .await
+                    .unwrap();
+            })
+        })),
+        1,
+    );
+    let lease = controller.request_lease().await;
+    assert_eq!(controller.drain(&world).await, Run::Done(1));
+    assert_eq!(controller.lease(&lease).await.state, LeaseState::Ready);
+    let pinned: Vec<(String, String, Option<String>)> = sqlx::query_as(
+        "SELECT vendor_id, product_id, usbpath FROM hardware_reservation_fingerprints",
+    )
+    .fetch_all(&controller.pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        pinned,
+        vec![("aaaa".to_owned(), "0001".to_owned(), Some("1-1".to_owned()))]
+    );
+}
+
+#[tokio::test]
+async fn cleanup_takes_a_row_that_became_attached_while_it_ran() {
+    // The template declares A only; B is reserved for the lease afterwards by
+    // hand, `held` when cleanup first reads the lease's rows.
+    let world = World::new(&[READER_A]).await;
+    let controller = Controller::start(&world).await;
+    let (lease, _) = ready_lease(&world, &controller).await;
+    let record = controller.record(&lease).await;
+    let vmid = record.vmid.unwrap();
+    controller
+        .placement
+        .reserve(
+            PRINCIPAL,
+            &HardwareDemand {
+                lease_id: &lease,
+                account_id: &world.account_id,
+                clone_node: TEMPLATE_NODE,
+                declared: &[usb(READER_B)],
+                operation_id: None,
+            },
+            now(),
+        )
+        .await
+        .unwrap()
+        .expect("the second device is reserved");
+    let second: String = sqlx::query_scalar(
+        "SELECT r.id FROM hardware_reservations r JOIN hardware_devices d ON d.id = r.device_id \
+         WHERE d.mapping_id = ?1",
+    )
+    .bind(READER_B)
+    .fetch_one(&controller.pool)
+    .await
+    .unwrap();
+    // The second device's entry is on the guest, and while cleanup detaches
+    // the first, a provision that was still writing records it: its row is
+    // `attached` on cleanup's next read.
+    world.usb.set_slot(vmid, 1, "mapping=fm-test-reader-b");
+    let pool = controller.pool.clone();
+    let account = world.account_id.clone();
+    world.usb.inject(
+        UsbStep::Detach,
+        UsbFault::Hook(Arc::new(move || {
+            let store = HardwareRepository::new(pool.clone());
+            let account = account.clone();
+            let second = second.clone();
+            Box::pin(async move {
+                use fleet_application::hardware::HardwareStore as _;
+                let target = fleet_core::GuestTarget {
+                    account_id: account,
+                    node: TEMPLATE_NODE.to_owned(),
+                    vmid,
+                    usb_slot: Some(1),
+                };
+                store
+                    .transition_reservation(
+                        &second,
+                        fleet_core::HardwareReservationState::Held,
+                        fleet_core::HardwareReservationState::Attaching,
+                        Some(&target),
+                        now(),
+                    )
+                    .await
+                    .unwrap();
+                store
+                    .transition_reservation(
+                        &second,
+                        fleet_core::HardwareReservationState::Attaching,
+                        fleet_core::HardwareReservationState::Attached,
+                        None,
+                        now(),
+                    )
+                    .await
+                    .unwrap();
+            })
+        })),
+        1,
+    );
+    controller.release(&lease).await;
+    assert_eq!(controller.drain(&world).await, Run::Done(1));
+    assert_released(&world, &controller, &lease).await;
+    assert_eq!(
+        world.usb.writes(),
+        vec![
+            "attach usb0=mapping=fm-test-reader-a".to_owned(),
+            "detach usb0".to_owned(),
+            "detach usb1".to_owned()
+        ],
+        "the row that appeared during the first pass was detached by the second"
+    );
+    assert_eq!(controller.audit_events("hardware_detached").await, 2);
 }

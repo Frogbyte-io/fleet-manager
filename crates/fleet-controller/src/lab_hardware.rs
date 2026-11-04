@@ -858,9 +858,29 @@ impl LabHardwareSaga {
                 let index = slot_index(&outcome.slot);
                 match (outcome.state, index.filter(|index| *index < USB_SLOT_COUNT)) {
                     (PveUsbState::Applied, Some(index)) => {
-                        let attached = self
+                        // The write landed. Recording it can fail when the row
+                        // moved meanwhile (cleanup read the guest before the
+                        // write and released the `attaching` row): the entry
+                        // is then Fleet's, unreserved. Remove exactly what was
+                        // written, and say so, instead of propagating.
+                        let attached = match self
                             .record_attached(guest, device, &reservation, index, slot.as_deref())
-                            .await?;
+                            .await
+                        {
+                            Ok(attached) => attached,
+                            Err(error) => {
+                                return Err(self
+                                    .undo_unrecorded_write(
+                                        guest,
+                                        request,
+                                        device,
+                                        &reservation,
+                                        &outcome.slot,
+                                        &error,
+                                    )
+                                    .await);
+                            }
+                        };
                         // The lease may have ended during the write, after
                         // cleanup looked: take the device off again now.
                         if !self.lease_counts(guest.lease_id).await {
@@ -937,6 +957,86 @@ impl LabHardwareSaga {
         Err(refused(reason, detail))
     }
 
+    /// A write that landed could not be recorded (the row was released or
+    /// moved by someone else meanwhile). Deletes exactly what was written, the
+    /// `mapping=<id>` value in the slot the provider reported (the provider
+    /// deletes only that exact value), behind the same required audit intent
+    /// as every delete, and answers the refusal that surfaces the condition:
+    /// a refused or failed delete leaves Fleet's entry on a guest with no
+    /// reservation behind it, which the detail and the audit event name.
+    async fn undo_unrecorded_write(
+        &self,
+        guest: &LeaseGuest<'_>,
+        request: &PveHttpRequest,
+        device: &HardwareDevice,
+        reservation: &HardwareReservation,
+        slot: &str,
+        why: &HardwareStoreError,
+    ) -> AttachFailure {
+        let mapping = device.mapping_id.as_str();
+        let facts = [
+            ("node", guest.node.to_owned()),
+            ("guest_vmid", guest.vmid.to_string()),
+            ("usb_slot", slot.to_owned()),
+        ];
+        let intent = self
+            .event(
+                "hardware_detach_requested",
+                device,
+                reservation,
+                Some(guest.operation_id),
+                &facts,
+                true,
+            )
+            .await;
+        let removed = match intent {
+            Err(detail) => Err(format!(
+                "the detach audit failed, so nothing was deleted: {detail}"
+            )),
+            Ok(()) => match self
+                .client
+                .qemu_usb_detach(request.clone(), guest.node, guest.vmid, slot, mapping)
+                .await
+            {
+                Ok(done) if done.state == PveUsbState::Applied => Ok(()),
+                Ok(_) => Err("PVE keeps the removal pending until the guest restarts".to_owned()),
+                Err(error) => Err(error.to_string()),
+            },
+        };
+        let (outcome, tail) = match &removed {
+            Ok(()) => (
+                "removed",
+                "the entry Fleet wrote was removed again".to_owned(),
+            ),
+            Err(detail) => (
+                "unremoved",
+                format!(
+                    "the entry Fleet wrote in {slot} is STILL on the guest with no reservation behind it ({detail})"
+                ),
+            ),
+        };
+        let _ = self
+            .event(
+                "hardware_attach_failed",
+                device,
+                reservation,
+                Some(guest.operation_id),
+                &[
+                    ("outcome", outcome.to_owned()),
+                    ("reason", "hardware_attach_unrecorded".to_owned()),
+                    ("usb_slot", slot.to_owned()),
+                ],
+                false,
+            )
+            .await;
+        refused(
+            "hardware_attach_unrecorded",
+            format!(
+                "{mapping} was written to {slot} but the reservation could not be recorded ({why}); {tail}"
+            ),
+        )
+    }
+
     /// The write was read back applied: record the attachment, with the slot
     /// the provider reports.
     async fn record_attached(
@@ -946,7 +1046,7 @@ impl LabHardwareSaga {
         reservation: &HardwareReservation,
         index: u8,
         predicted: Option<&str>,
-    ) -> Result<HardwareReservation, AttachFailure> {
+    ) -> Result<HardwareReservation, HardwareStoreError> {
         let target = GuestTarget {
             account_id: guest.account_id.to_owned(),
             node: guest.node.to_owned(),
@@ -962,8 +1062,7 @@ impl LabHardwareSaga {
                 Some(&target),
                 now(),
             )
-            .await
-            .map_err(|error| infra(&error))?;
+            .await?;
         let slot = slot_name(index);
         let mut facts = vec![
             ("node", guest.node.to_owned()),
