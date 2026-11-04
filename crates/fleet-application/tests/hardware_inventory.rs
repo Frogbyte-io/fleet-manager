@@ -174,6 +174,7 @@ impl HardwareStore for MemStore {
         }) {
             device.entries.clone_from(&observation.entries);
             device.status = observation.status;
+            device.status_detail.clone_from(&observation.status_detail);
             device.updated_at = now;
             return Ok(device.clone());
         }
@@ -185,6 +186,7 @@ impl HardwareStore for MemStore {
             entries: observation.entries.clone(),
             status: observation.status,
             note: None,
+            status_detail: observation.status_detail.clone(),
             created_at: now,
             updated_at: now,
         };
@@ -554,6 +556,7 @@ fn observation(
             guests_unreadable: 0,
             truncated: false,
             hidden_vmids: Vec::new(),
+            cross_check_failed: false,
         },
         permissions,
         warnings: Vec::new(),
@@ -774,10 +777,10 @@ fn with_vms(vms: &[(&str, &[(&str, bool)])]) -> Rig {
 }
 
 #[tokio::test]
-async fn a_token_that_audits_every_guest_is_verified_and_a_device_can_be_available() {
+async fn a_token_with_no_evidence_of_a_hidden_guest_lets_a_device_be_available() {
     let rig = rig(every_status());
     let report = refresh(&rig).await;
-    assert_eq!(report.guest_visibility, Some(GuestVisibility::Verified));
+    assert_eq!(report.guest_visibility, Some(GuestVisibility::NotDisproved));
     assert_eq!(status_of(&report, "m-available"), DeviceStatus::Available);
     let available = report
         .devices
@@ -834,7 +837,7 @@ async fn a_token_without_vm_audit_on_the_guests_reads_no_device_available_and_sa
             device
                 .notes
                 .iter()
-                .any(|note| note.contains("guest visibility is not verified")),
+                .any(|note| note.contains("guest visibility is incomplete")),
             "{:?}",
             device.notes
         );
@@ -893,7 +896,7 @@ async fn a_guest_pve_says_exists_but_the_listing_omits_makes_the_account_incompl
         device
             .notes
             .iter()
-            .any(|note| note.contains("100, 101 exist")),
+            .any(|note| note.contains("2 guests exist")),
         "{:?}",
         device.notes
     );
@@ -918,20 +921,63 @@ async fn a_guest_path_without_vm_audit_is_an_explicit_gap_naming_the_path() {
         status_of(&report, "m-available"),
         DeviceStatus::Unsupported(UnsupportedReason::UsbInventoryUnreadable)
     );
-    // The same token with an empty entry for a guest, as PVE would show a
-    // path the token holds nothing on if it listed one.
-    let rig = with_vms(&[
-        ("/vms", &[("VM.Audit", true), ("VM.Config.HWType", true)]),
-        ("/vms/201", &[]),
-    ]);
+}
+
+#[tokio::test]
+async fn the_cause_is_stored_on_the_device_and_cleared_when_it_no_longer_holds() {
+    let rig = with_vms(&[("/vms", &[("VM.Config.HWType", true)])]);
+    refresh(&rig).await;
+    let detail_of = |devices: &[fleet_core::HardwareDevice]| {
+        devices
+            .iter()
+            .find(|device| device.mapping_id == "m-available")
+            .and_then(|device| device.status_detail.clone())
+    };
+    let stored = rig.store.list_devices(ACCOUNT).await.unwrap();
+    let detail = detail_of(&stored).expect("the cause is stored on the device");
+    assert!(detail.contains("guest_audit_not_granted"), "{detail}");
+    assert!(detail.contains("grant VM.Audit on /vms"), "{detail}");
+    // Only the devices that this made unsupported carry it.
+    assert!(
+        stored
+            .iter()
+            .filter(|device| device.status_detail.is_some())
+            .all(|device| matches!(
+                device.status,
+                DeviceStatus::Unsupported(UnsupportedReason::UsbInventoryUnreadable)
+            ))
+    );
+    // The cause is gone, and so is its text.
+    *rig.observer.answer.lock().unwrap() = Ok(every_status());
+    refresh(&rig).await;
+    let stored = rig.store.list_devices(ACCOUNT).await.unwrap();
+    assert_eq!(detail_of(&stored), None);
+    assert_eq!(
+        status_of(&refresh(&rig).await, "m-available"),
+        DeviceStatus::Available
+    );
+}
+
+#[tokio::test]
+async fn a_cross_check_that_could_not_run_is_unverified_with_a_transient_reason() {
+    let mut answer = every_status();
+    answer.guests.cross_check_failed = true;
+    let rig = rig(answer);
     let report = refresh(&rig).await;
     assert_eq!(
         report.guest_visibility,
-        Some(GuestVisibility::Incomplete(
-            GuestVisibilityGap::GuestPathNarrowed {
-                path: "/vms/201".to_owned()
-            }
+        Some(GuestVisibility::Unverified(
+            GuestVisibilityGap::CrossCheckUnavailable
         ))
+    );
+    assert_eq!(
+        status_of(&report, "m-available"),
+        DeviceStatus::Unsupported(UnsupportedReason::UsbInventoryUnreadable)
+    );
+    // The permissions were read, so the token reasons are still derived.
+    assert_eq!(
+        status_of(&report, "m-nouse"),
+        DeviceStatus::Unsupported(UnsupportedReason::TokenLacksMappingUse)
     );
 }
 
@@ -1380,6 +1426,7 @@ fn the_view_function_is_the_one_rule() {
         entries: Vec::new(),
         status: DeviceStatus::Available,
         note: None,
+        status_detail: None,
         created_at: 0,
         updated_at: 10,
     };

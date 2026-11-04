@@ -133,6 +133,7 @@ impl Bench {
                         last_seen_at: now(),
                     }],
                     status: DeviceStatus::Available,
+                    status_detail: None,
                 },
                 now(),
             )

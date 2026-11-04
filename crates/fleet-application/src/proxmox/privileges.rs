@@ -119,8 +119,10 @@ pub enum PrivilegeScope {
     /// privileges.
     UsbMapping,
     /// Every guest at once: `/vms` (#596). Only a *propagating* grant on
-    /// `/vms` or `/` counts, because a grant on one guest (or a pool member)
-    /// says nothing about the guests the token cannot see. A concrete
+    /// `/vms` itself counts (PVE lists `/vms` with what it inherits from
+    /// `/`, so a grant from `/` shows there, and a `NoAccess` on `/vms` that
+    /// leaves `/` granted does not), because a grant on one guest (or a pool
+    /// member) says nothing about the guests the token cannot see. A concrete
     /// `/vms/{id}` entry never satisfies it, and one that lacks the
     /// privilege makes the row not granted ([`guest_audit_coverage`]).
     AllGuests,
@@ -145,6 +147,9 @@ impl PrivilegeScope {
 
     /// How a path entry in the effective map relates to this scope.
     fn relation(self, path: &str) -> Option<Relation> {
+        if path == "/" && self == Self::AllGuests {
+            return None;
+        }
         if path == "/" {
             return Some(if self == Self::Root {
                 Relation::Exact
@@ -890,7 +895,7 @@ pub const PROXMOX_PRIVILEGE_TABLE: &[PrivilegeRequirement] = &[
         privileges: &["VM.Audit"],
         matching: PrivilegeMatch::All,
         required: false,
-        note: "PVE gives a mapping no exclusivity, so Fleet can call a device available only if it can read every guest's config. A guest without VM.Audit is omitted from the cluster listing, so the scan cannot see it. Needs VM.Audit propagating from /vms or /, with no guest path narrowed below it; an explicit NoAccess on one guest is not visible in the token's permissions (#596).",
+        note: "PVE gives a mapping no exclusivity, so Fleet can call a device available only if it can read every guest's config. A guest without VM.Audit is omitted from the cluster listing, so the scan cannot see it. Needs VM.Audit propagating on /vms (a grant on / shows there too), with no guest path narrowed below it; an explicit NoAccess on one guest is not visible in the token's permissions (#596).",
     },
 ];
 
@@ -1032,8 +1037,11 @@ pub struct PrivilegeReport {
 /// every guest only if the token holds `VM.Audit` on all of them. What the
 /// effective map can and cannot show:
 ///
-/// - `VM.Audit` propagating from `/vms` (or `/`) is visible, and is the
-///   grant that covers every guest, including ones created later.
+/// - `VM.Audit` propagating on `/vms` is visible, and is the grant that
+///   covers every guest, including ones created later. PVE lists `/vms` with
+///   what it inherits from `/`, so a grant on `/` shows there; a grant on `/`
+///   with nothing (or no `VM.Audit`) on `/vms` is a propagating denial on
+///   `/vms` and does not count.
 /// - A concrete `/vms/{id}` entry that lacks `VM.Audit` is an explicit
 ///   narrowing below that grant and is reported with its path. An entry
 ///   with no privilege at all is kept by the provider when PVE sends one.
@@ -1044,10 +1052,9 @@ pub struct PrivilegeReport {
 ///   tell".
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum GuestAuditCoverage {
-    /// `VM.Audit` propagates from `/vms` or `/` and no visible guest path
-    /// narrows it.
+    /// `VM.Audit` propagates on `/vms` and no visible guest path narrows it.
     Unrestricted,
-    /// `VM.Audit` does not propagate from `/vms` or `/`: only the guests
+    /// `VM.Audit` does not propagate on `/vms`: only the guests
     /// that carry their own grant (a pool member, a named VMID) can be
     /// audited, and the rest are invisible to the token.
     NotGranted,
@@ -1062,12 +1069,10 @@ pub enum GuestAuditCoverage {
 /// Derives [`GuestAuditCoverage`] from the token's effective permissions.
 #[must_use]
 pub fn guest_audit_coverage(permissions: &EffectivePermissions) -> GuestAuditCoverage {
-    let propagates = ["/vms", "/"].iter().any(|path| {
-        permissions
-            .get(*path)
-            .and_then(|privileges| privileges.get("VM.Audit"))
-            == Some(&true)
-    });
+    let propagates = permissions
+        .get("/vms")
+        .and_then(|privileges| privileges.get("VM.Audit"))
+        == Some(&true);
     if !propagates {
         return GuestAuditCoverage::NotGranted;
     }
@@ -1724,8 +1729,17 @@ mod tests {
                 status(&[("/vms", &[("VM.Audit", true)])]),
                 PrivilegeStatus::Granted
             );
+            // `/` alone does not: a propagating NoAccess on `/vms` leaves `/`
+            // granted and hides every guest, so `/vms` must carry it too.
             assert_eq!(
                 status(&[("/", &[("VM.Audit", true)])]),
+                PrivilegeStatus::Missing
+            );
+            assert_eq!(
+                status(&[
+                    ("/", &[("VM.Audit", true)]),
+                    ("/vms", &[("VM.Audit", true)])
+                ]),
                 PrivilegeStatus::Granted
             );
             // A guest that holds its own grant (a pool member, a named VMID)
@@ -1847,7 +1861,9 @@ mod tests {
             .iter()
             .flat_map(|r| r.privileges.iter().map(|p| (*p, true)))
             .collect();
-        let permissions = map(&[("/", &all)]);
+        // PVE lists `/vms` with what it inherits from `/` (the recorded
+        // read-only token has both), and the all-guests row reads `/vms`.
+        let permissions = map(&[("/", &all), ("/vms", &all)]);
         for major in SUPPORTED_PVE_MAJORS {
             let tiers = evaluate_tiers(major, &permissions);
             for entry in &tiers {

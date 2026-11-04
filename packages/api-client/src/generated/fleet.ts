@@ -2954,32 +2954,51 @@ export interface HardwareGuestScanDto {
 }
 
 /**
- * Whether the token can be shown to audit every guest (#596). The guest scan
- * sees only the guests the token may audit (PVE omits a guest without
- * `VM.Audit` from the cluster listing), and PVE gives a mapping no
- * exclusivity, so `available` means "no guest references it" only when
- * the visibility is `verified`.
+ * Why the guest visibility is not `not_disproved`.
+ */
+export type HardwareGuestVisibilityReasonDto = typeof HardwareGuestVisibilityReasonDto[keyof typeof HardwareGuestVisibilityReasonDto];
+
+
+export const HardwareGuestVisibilityReasonDto = {
+  permissions_unreadable: 'permissions_unreadable',
+  permissions_truncated: 'permissions_truncated',
+  cross_check_unavailable: 'cross_check_unavailable',
+  guest_audit_not_granted: 'guest_audit_not_granted',
+  guest_path_narrowed: 'guest_path_narrowed',
+  hidden_guests_found: 'hidden_guests_found',
+} as const;
+
+/**
+ * What Fleet can say about guests the token cannot see (#596).
+ */
+export type HardwareGuestVisibilityStateDto = typeof HardwareGuestVisibilityStateDto[keyof typeof HardwareGuestVisibilityStateDto];
+
+
+export const HardwareGuestVisibilityStateDto = {
+  not_disproved: 'not_disproved',
+  incomplete: 'incomplete',
+  unverified: 'unverified',
+} as const;
+
+/**
+ * What Fleet can say about guests the token cannot see (#596). The guest
+ * scan sees only the guests the token may audit (PVE omits a guest without
+ * `VM.Audit` from the cluster listing) and PVE gives a mapping no
+ * exclusivity, so `available` is reported only while nothing shows a hidden
+ * guest. There is no state that means "every guest was seen".
  */
 export interface HardwareGuestVisibilityDto {
-  /** What the state rests on, and the remedy when it is not verified. */
+  /**
+     * What the state rests on and does not cover, and the remedy when it is
+     * not `not_disproved`.
+     */
   detail: string;
+  reason?: null | HardwareGuestVisibilityReasonDto;
   /**
-     * `permissions_unreadable`, `permissions_truncated`,
-     * `guest_audit_not_granted` or `guest_path_narrowed`, unless
-     * verified.
-     * @nullable
+     * The state; anything but `not_disproved` means no device of the
+     * account is reported `available` and no attach is made.
      */
-  reason?: string | null;
-  /**
-     * `verified` (`VM.Audit` propagates from `/vms` or `/` and no visible
-     * guest path narrows it), `incomplete` (the token's permissions show
-     * that some guests are not audited) or `unverified` (the permissions
-     * could not be read in full). Anything but `verified` means no device
-     * of the account is reported `available` and no attach is made. An
-     * explicit `NoAccess` on one guest does not show in the token's
-     * permissions, so `verified` is as far as they tell.
-     */
-  state: string;
+  state: HardwareGuestVisibilityStateDto;
 }
 
 /**

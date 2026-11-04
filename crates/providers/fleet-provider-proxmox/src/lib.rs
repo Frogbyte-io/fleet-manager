@@ -2634,6 +2634,30 @@ impl ProxmoxClient {
         })
     }
 
+    /// The token's effective permissions without the per-VMID `nextid`
+    /// checks that [`ProxmoxSource::token_permissions`] makes for clone
+    /// targets. For a caller that only reads the map (the hardware refresh's
+    /// guest visibility, #596): a failing VMID probe cannot fail this read, so
+    /// a transient `nextid` error never hides a readable permission map.
+    ///
+    /// # Errors
+    ///
+    /// Fails with [`PveApiError`] when the version or the permissions cannot
+    /// be read.
+    pub async fn token_permissions_map(
+        &self,
+        request: PveHttpRequest,
+    ) -> Result<PveTokenPermissions, PveApiError> {
+        let version = self.read_version(&request).await?;
+        let permissions_request = PveHttpRequest {
+            path: "/api2/json/access/permissions".to_owned(),
+            method: PveHttpMethod::Get,
+            ..request
+        };
+        let data = self.call(permissions_request).await?;
+        normalize_token_permissions(version, &data)
+    }
+
     /// Whether a VMID is in use anywhere in the cluster
     /// (`GET /cluster/nextid?vmid=<id>`): `200` when it is free, `400` when
     /// it exists. Unlike the guest listing it does not depend on the

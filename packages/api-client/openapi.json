@@ -18323,7 +18323,7 @@
       },
       "HardwareGuestVisibilityDto": {
         "type": "object",
-        "description": "Whether the token can be shown to audit every guest (#596). The guest scan\nsees only the guests the token may audit (PVE omits a guest without\n`VM.Audit` from the cluster listing), and PVE gives a mapping no\nexclusivity, so `available` means \"no guest references it\" only when\nthe visibility is `verified`.",
+        "description": "What Fleet can say about guests the token cannot see (#596). The guest\nscan sees only the guests the token may audit (PVE omits a guest without\n`VM.Audit` from the cluster listing) and PVE gives a mapping no\nexclusivity, so `available` is reported only while nothing shows a hidden\nguest. There is no state that means \"every guest was seen\".",
         "required": [
           "state",
           "detail"
@@ -18331,20 +18331,45 @@
         "properties": {
           "detail": {
             "type": "string",
-            "description": "What the state rests on, and the remedy when it is not verified."
+            "description": "What the state rests on and does not cover, and the remedy when it is\nnot `not_disproved`."
           },
           "reason": {
-            "type": [
-              "string",
-              "null"
-            ],
-            "description": "`permissions_unreadable`, `permissions_truncated`,\n`guest_audit_not_granted` or `guest_path_narrowed`, unless\nverified."
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/HardwareGuestVisibilityReasonDto",
+                "description": "Why, unless `not_disproved`."
+              }
+            ]
           },
           "state": {
-            "type": "string",
-            "description": "`verified` (`VM.Audit` propagates from `/vms` or `/` and no visible\nguest path narrows it), `incomplete` (the token's permissions show\nthat some guests are not audited) or `unverified` (the permissions\ncould not be read in full). Anything but `verified` means no device\nof the account is reported `available` and no attach is made. An\nexplicit `NoAccess` on one guest does not show in the token's\npermissions, so `verified` is as far as they tell."
+            "$ref": "#/components/schemas/HardwareGuestVisibilityStateDto",
+            "description": "The state; anything but `not_disproved` means no device of the\naccount is reported `available` and no attach is made."
           }
         }
+      },
+      "HardwareGuestVisibilityReasonDto": {
+        "type": "string",
+        "description": "Why the guest visibility is not `not_disproved`.",
+        "enum": [
+          "permissions_unreadable",
+          "permissions_truncated",
+          "cross_check_unavailable",
+          "guest_audit_not_granted",
+          "guest_path_narrowed",
+          "hidden_guests_found"
+        ]
+      },
+      "HardwareGuestVisibilityStateDto": {
+        "type": "string",
+        "description": "What Fleet can say about guests the token cannot see (#596).",
+        "enum": [
+          "not_disproved",
+          "incomplete",
+          "unverified"
+        ]
       },
       "HardwareHolderDto": {
         "type": "object",
@@ -18496,7 +18521,7 @@
               },
               {
                 "$ref": "#/components/schemas/HardwareGuestVisibilityDto",
-                "description": "Whether the token can be shown to audit every guest, which `available`\nneeds to be trustworthy; `null` when the mapping list was not usable."
+                "description": "What Fleet can say about guests the token cannot see, which `available`\nneeds to be trustworthy; `null` when the mapping list was not usable.\nNever \"every guest was seen\": the best state is `not_disproved`."
               }
             ]
           },
@@ -26829,7 +26854,7 @@
                   },
                   {
                     "$ref": "#/components/schemas/HardwareGuestVisibilityDto",
-                    "description": "Whether the token can be shown to audit every guest, which `available`\nneeds to be trustworthy; `null` when the mapping list was not usable."
+                    "description": "What Fleet can say about guests the token cannot see, which `available`\nneeds to be trustworthy; `null` when the mapping list was not usable.\nNever \"every guest was seen\": the best state is `not_disproved`."
                   }
                 ]
               },

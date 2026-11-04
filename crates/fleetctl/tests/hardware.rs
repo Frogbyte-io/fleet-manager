@@ -310,7 +310,11 @@ async fn the_text_output_names_the_status_the_reason_and_the_holder_of_each_devi
         "{refreshed}"
     );
     assert!(
-        refreshed.contains("guest visibility: verified"),
+        refreshed.contains("guest visibility: not_disproved"),
+        "{refreshed}"
+    );
+    assert!(
+        refreshed.contains("not proof that every guest was seen"),
         "{refreshed}"
     );
     let line = |text: &str, mapping: &str| {
@@ -370,7 +374,7 @@ async fn an_account_whose_guests_cannot_all_be_audited_says_so_and_lists_nothing
     );
     assert!(refreshed.contains("grant VM.Audit on /vms"), "{refreshed}");
     assert!(
-        refreshed.contains("none can be attached until it is verified"),
+        refreshed.contains("none can be attached while that holds"),
         "{refreshed}"
     );
     let row = |text: &str, mapping: &str| {

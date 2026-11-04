@@ -302,6 +302,8 @@ pub const API_BASE_PATH: &str = "/api/v1";
         hardware::HardwareSupportDto,
         hardware::HardwareGuestScanDto,
         hardware::HardwareGuestVisibilityDto,
+        hardware::HardwareGuestVisibilityStateDto,
+        hardware::HardwareGuestVisibilityReasonDto,
         hardware::HardwareRefreshDto,
         hardware::RefreshHardwareRequest,
         hardware::OverrideReleaseRequest,

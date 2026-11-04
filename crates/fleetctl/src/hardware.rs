@@ -339,18 +339,22 @@ fn render_refresh(report: &Value) -> String {
     {
         let state = text(&visibility["state"]);
         lines.push(format!("guest visibility: {state}"));
-        // `verified` carries what it rests on and does not cover; anything
-        // else carries the remedy, because no device reads available then.
+        // `not_disproved` is "no evidence of a hidden guest", never "every
+        // guest was seen", and says so; anything else carries the remedy,
+        // because no device reads available then.
         let detail = text(&visibility["detail"]);
-        if visibility["state"].as_str() == Some("verified") {
+        if visibility["state"].as_str() == Some("not_disproved") {
+            lines.push(
+                "  no evidence of a hidden guest (not proof that every guest was seen)".to_owned(),
+            );
             lines.push(format!("  {detail}"));
         } else {
             lines.push(format!(
                 "  {}: {detail}",
-                visibility["reason"].as_str().unwrap_or("not verified")
+                visibility["reason"].as_str().unwrap_or("not established")
             ));
             lines.push(
-                "  no device of this account is reported available and none can be attached until it is verified"
+                "  no device of this account is reported available and none can be attached while that holds"
                     .to_owned(),
             );
         }

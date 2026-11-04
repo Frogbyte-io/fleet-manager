@@ -287,6 +287,9 @@ pub enum PlacementRefusal {
         mapping: String,
         /// Why the reservation was refused.
         refusal: ReserveRefusal,
+        /// The cause in words, when the device is `unsupported` for an
+        /// account-level reason its fixed text cannot carry (#596).
+        detail: Option<String>,
     },
 }
 
@@ -454,14 +457,20 @@ impl fmt::Display for PlacementRefusal {
                 f,
                 "hardware {mapping} was not seen on node {node} within the last {max_age_seconds}s; refusing to reserve it on a stale observation (refresh the inventory and retry)"
             ),
-            Self::HardwareRefused { mapping, refusal } => match refusal {
+            Self::HardwareRefused {
+                mapping,
+                refusal,
+                detail,
+            } => match refusal {
                 ReserveRefusal::NotAllocatable {
                     status: DeviceStatus::Unsupported(reason),
                 } => write!(
                     f,
                     "hardware {mapping} is unsupported ({}): {}",
                     reason.id(),
-                    crate::hardware_inventory::reason_text(*reason)
+                    detail
+                        .as_deref()
+                        .unwrap_or_else(|| crate::hardware_inventory::reason_text(*reason))
                 ),
                 other => write!(f, "hardware {mapping} cannot be reserved: {other}"),
             },
@@ -839,6 +848,7 @@ pub fn check_hardware(
         let refuse = |refusal| PlacementRefusal::HardwareRefused {
             mapping: mapping.clone(),
             refusal,
+            detail: device.status_detail.clone(),
         };
         match seen.status {
             // `reserved` means a live row holds it: this lease's own (a
@@ -1093,6 +1103,10 @@ impl HardwarePlacement {
                     return Ok(Err(PlacementRefusal::HardwareRefused {
                         mapping: declared_device.mapping.clone(),
                         refusal,
+                        detail: declared_device
+                            .found
+                            .as_ref()
+                            .and_then(|(device, _)| device.status_detail.clone()),
                     }));
                 }
                 Err(error) => {
@@ -1485,6 +1499,7 @@ mod tests {
             entries,
             status,
             note: None,
+            status_detail: None,
             created_at: NOW - 1_000_000,
             updated_at: NOW - 1_000,
         }
@@ -1641,6 +1656,7 @@ mod tests {
             refusal: ReserveRefusal::Busy {
                 holder: Box::new(holder("lease-2", HardwareReservationState::Attached)),
             },
+            detail: None,
         };
         assert_eq!(refusal.reason(), "hardware_busy");
         assert_eq!(

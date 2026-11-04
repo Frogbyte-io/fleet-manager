@@ -808,6 +808,17 @@ impl Controller {
             .unwrap_or_default()
     }
 
+    /// The message the provision operation failed with.
+    async fn failure_message(&self, lease_id: &str) -> String {
+        let operation = self.provision_operation(lease_id).await;
+        let operation = self
+            .operations
+            .get(&AllowAll, PRINCIPAL, &operation.id)
+            .await
+            .unwrap();
+        operation.error_json.unwrap_or_default()
+    }
+
     /// Every reservation row, oldest first: state, slot, guest VMID.
     async fn rows(&self) -> Vec<(String, Option<i64>, Option<i64>)> {
         sqlx::query_as(
@@ -1894,10 +1905,6 @@ async fn a_token_that_cannot_audit_every_guest_is_refused_at_the_re_observation_
                 "/vms/200": {"VM.PowerMgmt": 1}
             }),
         ),
-        (
-            "a guest path with nothing at all",
-            json!({"/vms": {"VM.Audit": 1, "VM.Config.HWType": 1}, "/vms/200": {}}),
-        ),
     ] {
         let world = World::new(&[READER_A]).await;
         let controller = Controller::start(&world).await;
@@ -1915,11 +1922,11 @@ async fn a_token_that_cannot_audit_every_guest_is_refused_at_the_re_observation_
 }
 
 #[tokio::test]
-async fn a_guest_pve_says_exists_but_the_token_cannot_list_refuses_even_with_a_full_audit_grant() {
-    // The Decker case with a token that holds VM.Audit on `/vms` and a
-    // NoAccess ACL on one guest: the permissions read clean, but PVE answers
-    // `nextid?vmid=100` with "already exists" for a guest the listing does
-    // not name (the next free VMID is far above it).
+async fn a_guest_pve_says_exists_but_the_token_cannot_list_refuses_even_with_a_clean_grant() {
+    // A token that holds VM.Audit on `/vms` and a NoAccess ACL on one guest:
+    // the permissions read clean, but PVE answers `nextid?vmid=8999` with
+    // "already exists" for a guest the listing does not name, right below the
+    // next free VMID (9000).
     let world = World::new(&[READER_A]).await;
     let controller = Controller::start(&world).await;
     controller.refresh_inventory().await;
@@ -1927,7 +1934,7 @@ async fn a_guest_pve_says_exists_but_the_token_cannot_list_refuses_even_with_a_f
         controller.device_view(READER_A).await,
         DeviceStatus::Available
     );
-    world.usb.hide_guest(100);
+    world.usb.hide_guest(fake_pve::FIRST_LAB_VMID - 1);
     let lease = controller.request_lease().await;
     assert_eq!(controller.drain(&world).await, Run::Done(2));
     assert_attach_failed(&world, &controller, &lease, "hardware_guests_unverifiable").await;
@@ -1983,7 +1990,16 @@ async fn a_refresh_with_a_visibility_gap_makes_the_device_unallocatable_before_t
     let lease = controller.request_lease().await;
     controller.drain(&world).await;
     assert!(world.usb.writes().is_empty());
-    assert_ne!(controller.failure_reason(&lease).await, "");
+    assert_eq!(
+        controller.failure_reason(&lease).await,
+        "hardware_unsupported"
+    );
+    // The refusal carries the stored cause, not the catch-all text, and
+    // names no guest.
+    let message = controller.failure_message(&lease).await;
+    assert!(message.contains("usb_inventory_unreadable"), "{message}");
+    assert!(message.contains("guest_audit_not_granted"), "{message}");
+    assert!(message.contains("grant VM.Audit on /vms"), "{message}");
 }
 
 #[tokio::test]

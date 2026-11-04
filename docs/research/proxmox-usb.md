@@ -278,16 +278,17 @@ that raised it (a device on a guest the token had a `NoAccess` ACL on read
 | Question | Answer |
 |---|---|
 | Does `GET /cluster/resources` (or `GET /nodes/{node}/qemu`) name a guest the token cannot audit? | No: a guest appears only with `VM.Audit` on `/vms/{vmid}`. The listing is clean, not flagged. |
-| Does `GET /access/permissions` show a `NoAccess` guest path as an empty entry? | Not expected: PVE leaves out every path on which the token holds no privilege, so a `NoAccess` guest answers like a guest nobody mentioned. Fleet keeps an empty entry as a denial if PVE ever sends one. |
-| Can the token's `VM.Audit` on `/vms` be read from it? | Yes: the effective map carries `/vms` (and `/`) with each privilege and its propagate flag. `VM.Audit` with propagation on `/vms` or `/` is the grant that covers every guest, including later ones; a guest-scoped or pool-scoped grant does not. A concrete `/vms/{id}` entry without `VM.Audit` is an explicit narrowing and is visible. |
+| Does `GET /access/permissions` show a `NoAccess` guest path as an empty entry? | Not expected: PVE leaves out every path on which the token holds no privilege, so a `NoAccess` guest answers like a guest nobody mentioned. |
+| Can the token's `VM.Audit` on `/vms` be read from it? | Yes: the effective map carries `/vms` (and `/`) with each privilege and its propagate flag, and `/vms` carries what it inherits from `/`. `VM.Audit` with propagation on `/vms` is the grant that covers every guest, including later ones; a guest-scoped or pool-scoped grant does not, and a grant on `/` with nothing on `/vms` is a propagating denial. A concrete `/vms/{id}` entry without `VM.Audit` is a narrowing and is visible (a deeper ACL for the same token replaces what it inherits). |
 | Is there a cheap guest count to compare with? | No. The listing, the per-node lists and the ACL listing are filtered or refused for the token, and no node or cluster status carries a guest count. |
-| Is there anything unfiltered? | `GET /cluster/nextid` and `?vmid=<id>` (`user => 'all'`): the lowest free VMID, or `400` "already exists". Below the next free VMID every ID is in use (at the default lower bound of 100), so an in-use VMID the listing did not name is proof of a guest the token cannot see. It finds guests, never rules them out, and a raised `next-id` lower bound ends the search at the first free ID it probes. |
+| Is there anything unfiltered? | `GET /cluster/nextid` and `?vmid=<id>` (`user => 'all'`): the lowest free VMID at or above the `next-id` lower bound, or `400` "already exists". From the lower bound up to the next free VMID every ID is in use, so an in-use VMID in that run that the listing did not name is proof of a guest the token cannot see. Fleet walks down from the next free VMID and stops at the first free ID (below a raised lower bound). It finds guests, never rules them out, and does not see a guest above the next free VMID (the layout of #596: VMIDs 100 to 199 unused, `nextid` answers 100, guest 200 hidden). |
 
 Fleet therefore requires `VM.Audit` on `/vms` with propagation for any account that
 drives USB devices, reports `guestVisibility` from the permissions and the VMID
-cross-check, shows no device `available` unless it is `verified`, and refuses the
-attach otherwise (`hardware_guests_unverifiable`). What stays undetectable: an
-explicit `NoAccess` on a guest whose VMID is above the cluster's next free one.
+cross-check, shows no device `available` unless nothing shows a hidden guest
+(`not_disproved`: no evidence, not proof), and refuses the attach otherwise
+(`hardware_guests_unverifiable`). What stays undetectable: an explicit `NoAccess`
+on a guest whose VMID is above the cluster's next free one.
 
 ## 6. Snapshot, rollback, clone, template
 

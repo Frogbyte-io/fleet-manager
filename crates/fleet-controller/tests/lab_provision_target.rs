@@ -4472,6 +4472,7 @@ mod hardware_placement {
                     kind: HardwareKind::Usb,
                     entries,
                     status,
+                    status_detail: None,
                 },
                 fleet_core::SystemClock::now_unix_millis(),
             )

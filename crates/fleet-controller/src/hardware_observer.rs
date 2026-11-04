@@ -21,10 +21,11 @@
 //!    The listing omits every guest the token cannot audit, so a clean scan
 //!    proves nothing about those. One cross-check exists (#596):
 //!    `GET /cluster/nextid` and `GET /cluster/nextid?vmid=<id>` answer for any
-//!    caller, whatever its `VM.Audit`. Every VMID below the cluster's next
-//!    free one that the listing did not name, and PVE says is in use, is a
-//!    guest the token cannot see ([`find_hidden_guests`]). It can only find
-//!    guests, never rule them out.
+//!    caller, whatever its `VM.Audit`. Walking down from the cluster's next
+//!    free VMID, every VMID the listing did not name and PVE says is in use
+//!    is a guest the token cannot see ([`find_hidden_guests`]). It can only
+//!    find guests, never rule them out, and does not look above the next
+//!    free VMID.
 //!
 //! Provider shapes are translated here into the application's own
 //! (`fleet_application::hardware_inventory`).
@@ -42,7 +43,7 @@ use fleet_application::proxmox::privileges::RawTokenPermissions;
 use fleet_application::proxmox::{ProxmoxAccount, ProxmoxSourceError};
 use fleet_core::SensitiveString;
 use fleet_provider_proxmox::usb::{PveUsbCheckKind, PveUsbError, PveUsbSeverity};
-use fleet_provider_proxmox::{ProxmoxClient, ProxmoxSource as _, PveApiError};
+use fleet_provider_proxmox::{ProxmoxClient, PveApiError};
 use futures_util::StreamExt as _;
 
 use crate::proxmox_store::{map_api_error, pinned_request};
@@ -54,6 +55,9 @@ pub const MAX_SCANNED_GUESTS: usize = 512;
 /// The most VMIDs probed for a hidden guest in one refresh (`nextid?vmid=`
 /// requests, one after the other).
 const MAX_HIDDEN_PROBES: usize = 16;
+
+/// The most VMIDs one refresh walks over while looking for a hidden guest.
+const MAX_HIDDEN_STEPS: usize = 256;
 
 /// The most hidden VMIDs one refresh reports.
 const MAX_HIDDEN_REPORTED: usize = 8;
@@ -235,44 +239,78 @@ async fn observe_node(
     )
 }
 
+/// What the VMID cross-check found.
+#[derive(Debug, Default)]
+struct HiddenGuests {
+    /// VMIDs PVE says exist although the listing did not name them,
+    /// ascending.
+    vmids: Vec<u32>,
+    /// Whether a transient failure stopped the check from running.
+    failed: bool,
+}
+
+/// Whether a failed read is the kind that clears by itself (a server error
+/// or a transport failure), as against a refusal or an absent endpoint,
+/// which say nothing either way.
+fn is_transient(error: &PveApiError) -> bool {
+    matches!(error, PveApiError::Transport(_))
+        || matches!(error, PveApiError::Http { status, .. } if *status >= 500)
+}
+
 /// Finds guests that exist although the listing did not name them.
 ///
 /// `first_free` is `GET /cluster/nextid` read *before* the listing, so a
 /// guest created in between can only add to the listing, never to the
 /// suspects. PVE hands out the lowest free VMID at or above the cluster's
 /// `next-id` lower bound (default 100, not readable without `Sys.Audit` on
-/// `/`), so a VMID below `first_free` is used only if the bound is 100. The
-/// probe `nextid?vmid=` settles each unnamed VMID: `400` means it exists
-/// (hidden from the token), and the first free one means the lower bound is
-/// higher than that and nothing below it says anything, so the search
-/// stops. Positive evidence only: no result never means "none".
+/// `/`), so every VMID from that bound up to `first_free` is in use. The
+/// search walks down from `first_free - 1` over that run: a VMID the listing
+/// named is a visible guest and costs nothing; an unnamed one is settled with
+/// `nextid?vmid=` (`400` means it exists, hidden from the token). The first
+/// *free* VMID means the walk has left the run (below a raised lower bound)
+/// and ends it. Bounded in probes and steps. Positive evidence only: no
+/// finding never means "none", and a guest above `first_free` or beyond the
+/// bounds is not looked for.
 async fn find_hidden_guests(
     client: &ProxmoxClient,
     account: &ProxmoxAccount,
     secret: &SensitiveString,
     first_free: Option<u32>,
     listed: &BTreeSet<u32>,
-) -> Vec<u32> {
+) -> HiddenGuests {
+    let mut found = HiddenGuests::default();
     let Some(first_free) = first_free else {
-        return Vec::new();
+        return found;
     };
-    let mut hidden = Vec::new();
-    let candidates = (FIRST_VMID..first_free).filter(|vmid| !listed.contains(vmid));
-    for vmid in candidates.take(MAX_HIDDEN_PROBES) {
+    let mut probes = 0;
+    let mut steps = 0;
+    let mut vmid = first_free;
+    while vmid > FIRST_VMID && steps < MAX_HIDDEN_STEPS && probes < MAX_HIDDEN_PROBES {
+        vmid -= 1;
+        steps += 1;
+        if listed.contains(&vmid) {
+            continue;
+        }
         let Ok(request) = pinned_request(account, secret, "/api2/json/version") else {
             break;
         };
+        probes += 1;
         match client.vmid_in_use(request, vmid).await {
             Ok(true) => {
-                hidden.push(vmid);
-                if hidden.len() >= MAX_HIDDEN_REPORTED {
+                found.vmids.push(vmid);
+                if found.vmids.len() >= MAX_HIDDEN_REPORTED {
                     break;
                 }
             }
-            Ok(false) | Err(_) => break,
+            Ok(false) => break,
+            Err(error) => {
+                found.failed = is_transient(&error);
+                break;
+            }
         }
     }
-    hidden
+    found.vmids.sort_unstable();
+    found
 }
 
 async fn scan_guests(
@@ -283,8 +321,15 @@ async fn scan_guests(
 ) -> RawGuestScan {
     let mut scan = RawGuestScan::default();
     // Before the listing, see `find_hidden_guests`.
+    let mut cross_check_failed = false;
     let first_free = match pinned_request(account, secret, "/api2/json/version") {
-        Ok(request) => client.next_vmid(request).await.ok(),
+        Ok(request) => match client.next_vmid(request).await {
+            Ok(vmid) => Some(vmid),
+            Err(error) => {
+                cross_check_failed = is_transient(&error);
+                None
+            }
+        },
         Err(_) => None,
     };
     let listed = match pinned_request(account, secret, "/api2/json/cluster/resources") {
@@ -397,7 +442,9 @@ async fn scan_guests(
             failures - MAX_GUEST_WARNINGS
         ));
     }
-    scan.hidden_vmids = find_hidden_guests(client, account, secret, first_free, &named).await;
+    let hidden = find_hidden_guests(client, account, secret, first_free, &named).await;
+    scan.hidden_vmids = hidden.vmids;
+    scan.cross_check_failed = cross_check_failed || hidden.failed;
     scan.references.sort_by(|left, right| {
         (&left.node, left.vmid, &left.slot).cmp(&(&right.node, right.vmid, &right.slot))
     });
@@ -447,7 +494,7 @@ impl HardwareObservePort for ProviderHardwareObserver {
 
         let permissions = match self
             .client
-            .token_permissions(pinned_request(
+            .token_permissions_map(pinned_request(
                 account,
                 secret,
                 "/api2/json/access/permissions",

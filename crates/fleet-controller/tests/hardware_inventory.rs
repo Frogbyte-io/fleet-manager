@@ -351,17 +351,25 @@ fn token_with_vms(vms: &Value) -> Value {
 }
 
 #[tokio::test]
-async fn a_token_that_audits_every_guest_reports_guest_visibility_verified() {
+async fn a_token_with_no_evidence_of_a_hidden_guest_reports_not_disproved_and_says_what_that_is_not()
+ {
     let world = World::start(ScriptedPve::standard()).await;
     let account = world.account(true).await;
     let (status, body) = refresh(&world, &account).await;
     assert_eq!(status, 200, "{body}");
     let visibility = &body["data"]["guestVisibility"];
-    assert_eq!(visibility["state"], "verified", "{visibility}");
+    assert_eq!(visibility["state"], "not_disproved", "{visibility}");
     assert_eq!(visibility["reason"], Value::Null);
     assert!(
         visibility["detail"].as_str().unwrap().contains("NoAccess"),
-        "verified says what it cannot rule out: {visibility}"
+        "not_disproved says what it cannot rule out: {visibility}"
+    );
+    assert!(
+        visibility["detail"]
+            .as_str()
+            .unwrap()
+            .contains("not proof that every guest was seen"),
+        "{visibility}"
     );
     assert_eq!(device(&body["data"], "fm-a")["status"], "available");
     let spec = openapi_shape::spec();
@@ -410,7 +418,7 @@ async fn a_token_without_vm_audit_on_the_guests_reads_nothing_available_and_says
             device["reasonText"]
                 .as_str()
                 .unwrap()
-                .contains("audit every guest"),
+                .contains("guest_audit_not_granted"),
             "{device}"
         );
         assert!(
@@ -421,7 +429,7 @@ async fn a_token_without_vm_audit_on_the_guests_reads_nothing_available_and_says
                 .any(|note| note
                     .as_str()
                     .unwrap()
-                    .contains("guest visibility is not verified")),
+                    .contains("guest visibility is incomplete")),
             "{device}"
         );
     }
@@ -440,19 +448,15 @@ async fn a_token_without_vm_audit_on_the_guests_reads_nothing_available_and_says
     );
     let spec = openapi_shape::spec();
     openapi_shape::assert_matches_schema(&spec, "HardwareRefreshDto", report);
-    // The list (no Proxmox call) shows the same status and reason: the gap
-    // is stored, not only reported once.
+    // The list (no Proxmox call) shows the same status, reason and cause:
+    // the gap is stored with the device, not only reported once.
     let (_, listed) = world.raw("GET", "/api/v1/hardware/devices", None).await;
     let a = device(&listed, "fm-a");
     assert_eq!(a["status"], "unsupported");
     assert_eq!(a["reason"], "usb_inventory_unreadable");
-    assert!(
-        a["reasonText"]
-            .as_str()
-            .unwrap()
-            .contains("VM.Audit on /vms"),
-        "{a}"
-    );
+    let text = a["reasonText"].as_str().unwrap();
+    assert!(text.contains("guest_audit_not_granted"), "{a}");
+    assert!(text.contains("grant VM.Audit on /vms"), "{a}");
 }
 
 #[tokio::test]
@@ -526,6 +530,11 @@ async fn guests_pve_says_exist_below_the_next_free_vmid_but_the_listing_omits_ar
     assert!(detail.contains("100, 101"), "{detail}");
     assert_eq!(device(report, "fm-a")["status"], "unsupported");
     assert_eq!(device(report, "fm-a")["reason"], "usb_inventory_unreadable");
+    // The stored cause says why (without naming a guest), in the list too.
+    let (_, listed) = world.raw("GET", "/api/v1/hardware/devices", None).await;
+    let text = device(&listed, "fm-a")["reasonText"].as_str().unwrap();
+    assert!(text.contains("2 guests exist"), "{text}");
+    assert!(!text.contains("100"), "{text}");
     // A visible reference still stands.
     assert_eq!(device(report, "fm-b")["status"], "externally_attached");
     let spec = openapi_shape::spec();
@@ -535,15 +544,15 @@ async fn guests_pve_says_exist_below_the_next_free_vmid_but_the_listing_omits_ar
 #[tokio::test]
 async fn a_raised_next_id_lower_bound_is_not_mistaken_for_hidden_guests() {
     // `nextid` answers 900 because the operator set `next-id lower=900`: the
-    // first unnamed VMID below it is free, which proves nothing, so the
-    // search stops and the account stays verified.
+    // first unnamed VMID below it (899) is free, which proves nothing, so the
+    // search stops and nothing is found.
     let pve = ScriptedPve::standard();
     pve.data("/api2/json/cluster/nextid", &json!("900"));
-    pve.data("/api2/json/cluster/nextid?vmid=100", &json!("100"));
+    pve.data("/api2/json/cluster/nextid?vmid=899", &json!("899"));
     let world = World::start(pve.clone()).await;
     let account = world.account(true).await;
     let (_, body) = refresh(&world, &account).await;
-    assert_eq!(body["data"]["guestVisibility"]["state"], "verified");
+    assert_eq!(body["data"]["guestVisibility"]["state"], "not_disproved");
     assert_eq!(device(&body["data"], "fm-a")["status"], "available");
     let probes = pve
         .calls()
@@ -554,6 +563,106 @@ async fn a_raised_next_id_lower_bound_is_not_mistaken_for_hidden_guests() {
 }
 
 #[tokio::test]
+async fn hidden_guests_in_the_run_below_a_raised_next_id_lower_bound_are_found() {
+    // `next-id lower=900`, guests 900 to 902 exist and the next free VMID is
+    // 903; the listing names none of them. The search walks down from 902 and
+    // ends at 899, which is free (below the lower bound).
+    let pve = ScriptedPve::standard();
+    pve.data("/api2/json/cluster/nextid", &json!("903"));
+    for vmid in [900, 901, 902] {
+        pve.route(
+            &format!("/api2/json/cluster/nextid?vmid={vmid}"),
+            400,
+            &format!(r#"{{"data":null,"errors":{{"vmid":"VM {vmid} already exists"}}}}"#),
+        );
+    }
+    pve.data("/api2/json/cluster/nextid?vmid=899", &json!("899"));
+    let world = World::start(pve).await;
+    let account = world.account(true).await;
+    let (_, body) = refresh(&world, &account).await;
+    let visibility = &body["data"]["guestVisibility"];
+    assert_eq!(visibility["state"], "incomplete", "{visibility}");
+    assert_eq!(visibility["reason"], "hidden_guests_found");
+    assert!(
+        visibility["detail"]
+            .as_str()
+            .unwrap()
+            .contains("900, 901, 902"),
+        "{visibility}"
+    );
+}
+
+#[tokio::test]
+async fn a_failing_cross_check_degrades_only_the_visibility_not_the_permissions_read() {
+    // A transient 5xx of `nextid` leaves the permissions readable (so the
+    // token reasons still derive) and makes the visibility unverified with a
+    // transient reason; a 4xx (refused or absent) says nothing either way.
+    let pve = ScriptedPve::standard();
+    pve.route(
+        "/api2/json/cluster/nextid",
+        500,
+        r#"{"data":null,"message":"cluster not ready\n"}"#,
+    );
+    let world = World::start(pve.clone()).await;
+    let account = world.account(true).await;
+    let (_, body) = refresh(&world, &account).await;
+    let report = &body["data"];
+    let visibility = &report["guestVisibility"];
+    assert_eq!(visibility["state"], "unverified", "{visibility}");
+    assert_eq!(visibility["reason"], "cross_check_unavailable");
+    assert!(
+        visibility["detail"]
+            .as_str()
+            .unwrap()
+            .contains("refresh again"),
+        "{visibility}"
+    );
+    assert_eq!(device(report, "fm-a")["status"], "unsupported");
+    assert_eq!(device(report, "fm-f")["reason"], "token_lacks_mapping_use");
+    // It clears by itself.
+    pve.route(
+        "/api2/json/cluster/nextid",
+        404,
+        r#"{"data":null,"message":"not found\n"}"#,
+    );
+    let (_, body) = refresh(&world, &account).await;
+    assert_eq!(body["data"]["guestVisibility"]["state"], "not_disproved");
+    assert_eq!(device(&body["data"], "fm-a")["status"], "available");
+}
+
+#[tokio::test]
+async fn a_failing_vmid_probe_of_the_permissions_read_cannot_fail_the_refresh() {
+    // The permissions map names a concrete guest, which the privileges report
+    // would probe with `nextid?vmid=`. The hardware refresh does not: it
+    // reads the map only.
+    let pve = ScriptedPve::standard();
+    pve.data(
+        "/api2/json/access/permissions",
+        &token_with_vms(&json!({
+            "/vms": {"VM.Audit": 1, "VM.Config.HWType": 1},
+            "/vms/9000": {"VM.Audit": 1, "VM.Clone": 1}
+        })),
+    );
+    pve.route(
+        "/api2/json/cluster/nextid?vmid=9000",
+        500,
+        r#"{"data":null,"message":"cluster not ready\n"}"#,
+    );
+    let world = World::start(pve.clone()).await;
+    let account = world.account(true).await;
+    let (_, body) = refresh(&world, &account).await;
+    assert_eq!(body["data"]["guestVisibility"]["state"], "not_disproved");
+    assert_eq!(device(&body["data"], "fm-a")["status"], "available");
+    assert!(
+        !pve.calls()
+            .iter()
+            .any(|call| call.ends_with("nextid?vmid=9000")),
+        "{:?}",
+        pve.calls()
+    );
+}
+
+#[tokio::test]
 async fn an_explicit_noaccess_on_one_guest_is_invisible_in_the_permissions_and_is_the_known_limit()
 {
     // What this check cannot do (#596, docs/operations/proxmox-token.md): PVE
@@ -561,9 +670,12 @@ async fn an_explicit_noaccess_on_one_guest_is_invisible_in_the_permissions_and_i
     // VM.Audit propagating from `/vms` and a `NoAccess` ACL on one guest
     // answers exactly like a token with no such ACL. The hidden guest is
     // absent from the listing too, so the device it holds reads available
-    // and the visibility reads verified (when its VMID is below the next
-    // free one, `nextid` still exposes it: see the test above). This test
-    // pins the limit so the docs stay true; it is not a feature.
+    // and the visibility reads not_disproved, which is "no evidence", not
+    // "every guest was seen". `nextid` exposes such a guest only when its VMID
+    // is in the run below the next free one (see the tests above); the
+    // layout of #596 (VMIDs 100 to 199 unused, so `nextid` answers 100) has
+    // no such run and is not detected. This test pins the limit so the docs
+    // stay true; it is not a feature.
     let pve = ScriptedPve::standard();
     pve.data(
         "/api2/json/access/permissions",
@@ -581,7 +693,7 @@ async fn an_explicit_noaccess_on_one_guest_is_invisible_in_the_permissions_and_i
     let account = world.account(true).await;
     let (_, body) = refresh(&world, &account).await;
     let report = &body["data"];
-    assert_eq!(report["guestVisibility"]["state"], "verified");
+    assert_eq!(report["guestVisibility"]["state"], "not_disproved");
     assert_eq!(device(report, "fm-g")["status"], "available");
 }
 

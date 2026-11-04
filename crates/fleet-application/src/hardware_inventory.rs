@@ -29,14 +29,17 @@
 //!   audit: `GET /cluster/resources` omits a guest without `VM.Audit`, so a
 //!   device attached to such a guest would read `available` while the scan
 //!   looks complete. The refresh therefore also derives
-//!   [`GuestVisibility`] from the token's own permissions: `verified` only
-//!   when `VM.Audit` propagates from `/vms` (or `/`) and no visible guest
-//!   path narrows it. Otherwise (`incomplete`: the grant is absent or a guest
-//!   path is narrowed; `unverified`: the permissions could not be read in
-//!   full) no device is reported `available` and the saga refuses to attach.
-//!   An explicit `NoAccess` on one guest is invisible in the permissions, so
-//!   `verified` means "as far as the token's permissions tell", never "every
-//!   guest was seen".
+//!   [`GuestVisibility`]: `not_disproved` only when the token's own
+//!   permissions show `VM.Audit` propagating from `/vms` with no visible
+//!   guest path narrowing it, and a privilege-free cross-check
+//!   (`GET /cluster/nextid`) finds no guest PVE says exists that the
+//!   listing omits. Otherwise (`incomplete`: the permissions show a gap or a
+//!   hidden guest was found; `unverified`: the permissions or the
+//!   cross-check could not be read) no device is reported `available` and
+//!   the saga refuses to attach. `not_disproved` means "no evidence of a
+//!   hidden guest", never "every guest was seen": an explicit `NoAccess` on
+//!   one guest is invisible in the permissions, and the cross-check only
+//!   looks at VMIDs below the cluster's next free one.
 //! - **Ambiguity** (`ambiguous_mapping`) is a mapping with two entries for one
 //!   node (PVE accepts it and refuses the attach) or an id-only entry whose
 //!   vendor:product another mapping on the node also claims, or that more than
@@ -224,6 +227,10 @@ pub struct RawGuestScan {
     /// that the token cannot audit those guests (#596). Found only below the
     /// cluster's next free VMID, bounded; an empty list proves nothing.
     pub hidden_vmids: Vec<u32>,
+    /// Whether the VMID cross-check could not run (a transient failure of
+    /// `GET /cluster/nextid`, not a refusal or an absent endpoint); the
+    /// check then says nothing and the visibility is `unverified`.
+    pub cross_check_failed: bool,
 }
 
 impl RawGuestScan {
@@ -391,7 +398,7 @@ impl AccountSupport {
     }
 }
 
-/// Why the account's guest visibility is not `verified`.
+/// Why the account's guest visibility is not `not_disproved`.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum GuestVisibilityGap {
     /// The token's permissions could not be read, so whether it audits every
@@ -400,7 +407,11 @@ pub enum GuestVisibilityGap {
     /// The token's permissions were cut at the provider's bounds, so the
     /// path that grants (or narrows) `VM.Audit` may be missing from them.
     PermissionsTruncated,
-    /// `VM.Audit` does not propagate from `/vms` or `/`: a guest without its
+    /// The VMID cross-check could not be completed (a transient failure of
+    /// `GET /cluster/nextid`), so the check that looks for hidden guests did
+    /// not run. Retried by the next refresh.
+    CrossCheckUnavailable,
+    /// `VM.Audit` does not propagate on `/vms`: a guest without its
     /// own grant is omitted from the scan.
     AuditNotGranted,
     /// A guest path lacks `VM.Audit`, so that guest is omitted from the scan.
@@ -424,9 +435,29 @@ impl GuestVisibilityGap {
         match self {
             Self::PermissionsUnreadable => "permissions_unreadable",
             Self::PermissionsTruncated => "permissions_truncated",
+            Self::CrossCheckUnavailable => "cross_check_unavailable",
             Self::AuditNotGranted => "guest_audit_not_granted",
             Self::GuestPathNarrowed { .. } => "guest_path_narrowed",
             Self::HiddenGuestsFound { .. } => "hidden_guests_found",
+        }
+    }
+
+    /// The text kept on a device: the cause and the remedy without naming
+    /// any guest, because a placement refusal quotes it to a lease-bound
+    /// caller, who must not learn another guest's id.
+    fn device_text(&self) -> String {
+        const FIX: &str = "grant VM.Audit on /vms (propagating) to the user and the token, and remove any ACL that hides a guest; see docs/operations/proxmox-token.md";
+        match self {
+            Self::GuestPathNarrowed { .. } => format!(
+                "the token lacks VM.Audit on a guest path, so that guest is invisible to the guest scan and a device attached to it would read available; {FIX}"
+            ),
+            Self::HiddenGuestsFound { vmids } => format!(
+                "PVE says {} guest{} exist{} that the token cannot audit, so a device attached to one would read available; {FIX}",
+                vmids.len(),
+                if vmids.len() == 1 { "" } else { "s" },
+                if vmids.len() == 1 { "s" } else { "" },
+            ),
+            other => other.text(),
         }
     }
 
@@ -441,6 +472,9 @@ impl GuestVisibilityGap {
             Self::PermissionsTruncated => format!(
                 "the token's permissions were cut at the provider's bounds, so Fleet cannot tell whether it can audit every guest; a device attached to a guest it cannot see would read available. Reduce the token's per-guest ACLs, and {FIX}"
             ),
+            Self::CrossCheckUnavailable => {
+                "the check for guests the token cannot see (GET /cluster/nextid) failed just now, so Fleet cannot rule one out; this usually clears by itself, so refresh again".to_owned()
+            }
             Self::AuditNotGranted => format!(
                 "the token does not hold VM.Audit on /vms with propagation, so guests without their own grant are invisible to the guest scan and a device attached to one would read available; {FIX}"
             ),
@@ -466,35 +500,49 @@ impl GuestVisibilityGap {
     }
 }
 
-/// Whether the token can be shown to audit every guest, which the guest scan
+/// What Fleet can say about guests the token cannot see, which the guest scan
 /// needs for `available` to mean "no guest references this device" (#596).
+///
+/// There is no state that means "every guest was seen": PVE exposes nothing
+/// that proves it. The best state is the absence of evidence.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum GuestVisibility {
-    /// `VM.Audit` propagates from `/vms` (or `/`) and no visible guest path
-    /// narrows it. An explicit `NoAccess` on one guest is not visible in the
-    /// token's permissions, so this is as far as they tell.
-    Verified,
-    /// It could not be established (the permissions were not readable in
-    /// full). Nothing is reported `available` and no attach is made.
+    /// No evidence of a hidden guest: `VM.Audit` propagates from `/vms` and
+    /// no visible guest path narrows it, and no guest PVE says exists below
+    /// the next free VMID is missing from the listing. **Not proof that
+    /// every guest was seen**: an explicit `NoAccess` on one guest is not
+    /// visible in the token's permissions, and a hidden guest above the next
+    /// free VMID is not looked for.
+    NotDisproved,
+    /// It could not be established (the permissions or the cross-check could
+    /// not be read in full). Nothing is reported `available` and no attach
+    /// is made.
     Unverified(GuestVisibilityGap),
-    /// The permissions show that some guests are not audited. Nothing is
-    /// reported `available` and no attach is made.
+    /// The permissions show that some guests are not audited, or a hidden
+    /// guest was found. Nothing is reported `available` and no attach is
+    /// made.
     Incomplete(GuestVisibilityGap),
 }
 
 impl GuestVisibility {
-    /// Derives it from what the permissions read returned and from the
-    /// guests PVE says exist but the listing did not name. Evidence of a
-    /// hidden guest outranks a verified or unverified reading of the
-    /// permissions; a permissions gap with its own remedy stays as it is.
-    fn derive(permissions: &RawPermissionsRead, hidden_vmids: &[u32]) -> Self {
+    /// Derives it from what the permissions read returned and what the
+    /// VMID cross-check found. Evidence of a hidden guest outranks a clean or
+    /// unknown reading of the permissions; a permissions gap with its own
+    /// remedy stays as it is.
+    fn derive(permissions: &RawPermissionsRead, scan: &RawGuestScan) -> Self {
         let from_permissions = Self::from_permissions(permissions);
-        if hidden_vmids.is_empty() || matches!(from_permissions, Self::Incomplete(_)) {
+        if matches!(from_permissions, Self::Incomplete(_)) {
             return from_permissions;
         }
-        Self::Incomplete(GuestVisibilityGap::HiddenGuestsFound {
-            vmids: hidden_vmids.to_vec(),
-        })
+        if !scan.hidden_vmids.is_empty() {
+            return Self::Incomplete(GuestVisibilityGap::HiddenGuestsFound {
+                vmids: scan.hidden_vmids.clone(),
+            });
+        }
+        if matches!(from_permissions, Self::NotDisproved) && scan.cross_check_failed {
+            return Self::Unverified(GuestVisibilityGap::CrossCheckUnavailable);
+        }
+        from_permissions
     }
 
     fn from_permissions(permissions: &RawPermissionsRead) -> Self {
@@ -506,7 +554,7 @@ impl GuestVisibility {
                 Self::Unverified(GuestVisibilityGap::PermissionsTruncated)
             }
             RawPermissionsRead::Read(read) => match guest_audit_coverage(&read.paths) {
-                GuestAuditCoverage::Unrestricted => Self::Verified,
+                GuestAuditCoverage::Unrestricted => Self::NotDisproved,
                 GuestAuditCoverage::NotGranted => {
                     Self::Incomplete(GuestVisibilityGap::AuditNotGranted)
                 }
@@ -521,35 +569,55 @@ impl GuestVisibility {
     #[must_use]
     pub const fn state(&self) -> &'static str {
         match self {
-            Self::Verified => "verified",
+            Self::NotDisproved => "not_disproved",
             Self::Unverified(_) => "unverified",
             Self::Incomplete(_) => "incomplete",
         }
     }
 
-    /// The gap, unless verified.
+    /// The gap, unless nothing was found.
     #[must_use]
     pub const fn gap(&self) -> Option<&GuestVisibilityGap> {
         match self {
-            Self::Verified => None,
+            Self::NotDisproved => None,
             Self::Unverified(gap) | Self::Incomplete(gap) => Some(gap),
         }
     }
 
-    /// Whether `available` may be trusted for exclusivity.
+    /// Whether `available` may be reported: only when no evidence of a
+    /// hidden guest was found and the checks could run. This is not a claim
+    /// that every guest was seen.
     #[must_use]
-    pub const fn is_verified(&self) -> bool {
-        matches!(self, Self::Verified)
+    pub const fn is_not_disproved(&self) -> bool {
+        matches!(self, Self::NotDisproved)
     }
 
-    /// The human text: the gap with its remedy, or what `verified` rests on
-    /// and does not cover.
+    /// The human text: the gap with its remedy, or what `not_disproved`
+    /// rests on and does not cover.
     #[must_use]
     pub fn text(&self) -> String {
         match self.gap() {
             Some(gap) => gap.text(),
-            None => "the token holds VM.Audit on /vms with propagation and no visible guest path narrows it; an explicit NoAccess on a single guest is not visible in the token's permissions, so this is as far as they tell".to_owned(),
+            None => "no evidence of a hidden guest, which is not proof that every guest was seen: the token holds VM.Audit on /vms with propagation, no visible guest path narrows it, and no guest PVE says exists below the next free VMID is missing from the listing; an explicit NoAccess on one guest is not visible in the token's permissions, and a hidden guest above the next free VMID is not looked for".to_owned(),
         }
+    }
+
+    /// The text kept on a device that cannot be `available` because of
+    /// this, so a list or a placement refusal shows the cause; `None` when
+    /// nothing was found.
+    #[must_use]
+    pub fn device_detail(&self) -> Option<String> {
+        self.gap().map(|gap| {
+            fleet_core::flatten_control_characters(&format!(
+                "guest visibility is {} ({}): {}",
+                self.state(),
+                gap.id(),
+                gap.device_text()
+            ))
+            .chars()
+            .take(1000)
+            .collect()
+        })
     }
 }
 
@@ -781,6 +849,9 @@ enum Presence {
 struct Derived {
     status: DeviceStatus,
     notes: Vec<String>,
+    /// A cause-bearing text kept on the device (see
+    /// `HardwareDevice::status_detail`).
+    detail: Option<String>,
 }
 
 struct Observation<'a> {
@@ -790,8 +861,8 @@ struct Observation<'a> {
     mappings: &'a [RawMapping],
     references: &'a [RawGuestReference],
     scan_complete: bool,
-    /// Why guest visibility is not verified (#596), when it is not.
-    visibility_gap: Option<&'a GuestVisibilityGap>,
+    /// What is known about guests the token cannot see (#596).
+    visibility: &'a GuestVisibility,
 }
 
 impl Observation<'_> {
@@ -896,6 +967,7 @@ impl Observation<'_> {
         }
     }
 
+    #[allow(clippy::too_many_lines)]
     fn derive(&self, mapping: &RawMapping, has_live_reservation: bool) -> Derived {
         let mut notes = Vec::new();
         if mapping.unreadable_entries > 0 {
@@ -912,6 +984,7 @@ impl Observation<'_> {
         let status = |status| Derived {
             status,
             notes: Vec::new(),
+            detail: None,
         };
         if self.too_old {
             return status(DeviceStatus::Unsupported(UnsupportedReason::PveTooOld));
@@ -924,6 +997,7 @@ impl Observation<'_> {
                     UnsupportedReason::NoNodeEntry
                 }),
                 notes,
+                detail: None,
             };
         }
         if let Some(note) = self.ambiguity(mapping) {
@@ -931,6 +1005,7 @@ impl Observation<'_> {
             return Derived {
                 status: DeviceStatus::Unsupported(UnsupportedReason::AmbiguousMapping),
                 notes,
+                detail: None,
             };
         }
         if let Some(token) = &self.token {
@@ -938,12 +1013,14 @@ impl Observation<'_> {
                 return Derived {
                     status: DeviceStatus::Unsupported(UnsupportedReason::TokenLacksMappingUse),
                     notes,
+                    detail: None,
                 };
             }
             if !token.guest_hwtype() {
                 return Derived {
                     status: DeviceStatus::Unsupported(UnsupportedReason::TokenLacksGuestHwtype),
                     notes,
+                    detail: None,
                 };
             }
         }
@@ -953,12 +1030,14 @@ impl Observation<'_> {
                 return Derived {
                     status: DeviceStatus::Missing,
                     notes,
+                    detail: None,
                 };
             }
             Presence::Unknown => {
                 return Derived {
                     status: DeviceStatus::Unsupported(UnsupportedReason::UsbInventoryUnreadable),
                     notes,
+                    detail: None,
                 };
             }
         }
@@ -971,10 +1050,12 @@ impl Observation<'_> {
             return Derived {
                 status: DeviceStatus::ExternallyAttached,
                 notes,
+                detail: None,
             };
         }
-        if let Some(gap) = self.visibility_gap {
-            notes.push(format!("guest visibility is not verified: {}", gap.text()));
+        let detail = self.visibility.device_detail();
+        if let Some(detail) = &detail {
+            notes.push(detail.clone());
         }
         if !self.scan_complete {
             notes.push(
@@ -982,7 +1063,7 @@ impl Observation<'_> {
                     .to_owned(),
             );
         }
-        if !self.scan_complete || self.visibility_gap.is_some() {
+        if !self.scan_complete || detail.is_some() {
             // `available` is a claim that nothing references the device. An
             // incomplete scan cannot make it, and a stored `available` is
             // trusted by readers and by the reservation store, so it is not
@@ -993,12 +1074,14 @@ impl Observation<'_> {
                 return Derived {
                     status: DeviceStatus::Unsupported(UnsupportedReason::UsbInventoryUnreadable),
                     notes,
+                    detail,
                 };
             }
         }
         Derived {
             status: DeviceStatus::Available,
             notes,
+            detail: None,
         }
     }
 }
@@ -1594,7 +1677,7 @@ impl HardwareInventory {
         // The scan sees only the guests the token may audit (#596), so what
         // the token's permissions show about guest `VM.Audit` decides
         // whether an unreferenced device may be called available.
-        let visibility = GuestVisibility::derive(&raw.permissions, &raw.guests.hidden_vmids);
+        let visibility = GuestVisibility::derive(&raw.permissions, &raw.guests);
         let can_prune =
             !truncated && permissions.is_some_and(|read| audit_covers_every_mapping(&read.paths));
         if !can_prune && !truncated && permissions.is_none() {
@@ -1615,7 +1698,7 @@ impl HardwareInventory {
             mappings: &mappings,
             references: &raw.guests.references,
             scan_complete: raw.guests.is_complete(),
-            visibility_gap: visibility.gap(),
+            visibility: &visibility,
         };
         let stored: BTreeMap<String, HardwareDevice> = self
             .store
@@ -1642,6 +1725,9 @@ impl HardwareInventory {
             // refresh never clears it.
             if previous.is_some_and(|device| device.status == DeviceStatus::Quarantined) {
                 derived.status = DeviceStatus::Quarantined;
+            }
+            if !matches!(derived.status, DeviceStatus::Unsupported(_)) {
+                derived.detail = None;
             }
             let own_guest = reservation.and_then(|reservation| reservation.guest.as_ref());
             let references: Vec<ExternalReference> = raw
@@ -1679,6 +1765,7 @@ impl HardwareInventory {
                         kind: HardwareKind::Usb,
                         entries: entries_for(mapping, &observation.nodes, previous, now),
                         status: derived.status,
+                        status_detail: derived.detail.clone(),
                     },
                     now,
                 )
@@ -1737,7 +1824,7 @@ impl HardwareInventory {
             push_warning(
                 &mut warnings,
                 format!(
-                    "guest visibility is {} ({}): no device is reported available and no device can be attached until it is verified. {}",
+                    "guest visibility is {} ({}): no device is reported available and no device can be attached while that holds. {}",
                     visibility.state(),
                     gap.id(),
                     gap.text()
@@ -1973,7 +2060,7 @@ mod tests {
         references: Vec<RawGuestReference>,
         permissions: Option<EffectivePermissions>,
         scan_complete: bool,
-        visibility_gap: Option<GuestVisibilityGap>,
+        visibility: GuestVisibility,
         too_old: bool,
     }
 
@@ -1985,7 +2072,7 @@ mod tests {
                 references: Vec::new(),
                 permissions: Some(full_token()),
                 scan_complete: true,
-                visibility_gap: None,
+                visibility: GuestVisibility::NotDisproved,
                 too_old: false,
             }
         }
@@ -2001,7 +2088,7 @@ mod tests {
                 mappings: &self.mappings,
                 references: &self.references,
                 scan_complete: self.scan_complete,
-                visibility_gap: self.visibility_gap.as_ref(),
+                visibility: &self.visibility,
             };
             let mapping = self
                 .mappings
@@ -2366,8 +2453,10 @@ mod tests {
             },
             GuestVisibilityGap::PermissionsUnreadable,
             GuestVisibilityGap::PermissionsTruncated,
+            GuestVisibilityGap::CrossCheckUnavailable,
+            GuestVisibilityGap::HiddenGuestsFound { vmids: vec![100] },
         ] {
-            fixture.visibility_gap = Some(gap.clone());
+            fixture.visibility = GuestVisibility::Incomplete(gap.clone());
             let derived = fixture.status("dev-a", false);
             assert_eq!(
                 derived.status,
@@ -2378,10 +2467,18 @@ mod tests {
                 derived
                     .notes
                     .iter()
-                    .any(|note| note.contains("guest visibility is not verified")
-                        && note.contains("VM.Audit")),
+                    .any(|note| note.contains("guest visibility is incomplete")),
                 "{gap:?} {:?}",
                 derived.notes
+            );
+            // The cause is kept on the device, so a list shows it.
+            assert!(
+                derived
+                    .detail
+                    .as_deref()
+                    .is_some_and(|detail| detail.contains(gap.id())),
+                "{gap:?} {:?}",
+                derived.detail
             );
             // A complete scan does not make it available: the scan only sees
             // the guests the token may audit.
@@ -2407,20 +2504,24 @@ mod tests {
                 paths: permissions(entries),
                 ..RawTokenPermissions::default()
             }),
-            &[],
+            &RawGuestScan::default(),
         )
     }
 
     #[test]
     fn guest_visibility_is_derived_from_the_tokens_audit_on_every_guest() {
-        // Propagating VM.Audit from /vms or /: verified.
+        // Propagating VM.Audit on /vms: no evidence of a hidden guest.
         assert_eq!(
             visibility_of(&[("/vms", &[("VM.Audit", true)])]),
-            GuestVisibility::Verified
+            GuestVisibility::NotDisproved
         );
+        // Also from `/`, which PVE inherits into `/vms` when it propagates.
         assert_eq!(
-            visibility_of(&[("/", &[("VM.Audit", true)])]),
-            GuestVisibility::Verified
+            visibility_of(&[
+                ("/", &[("VM.Audit", true)]),
+                ("/vms", &[("VM.Audit", true)])
+            ]),
+            GuestVisibility::NotDisproved
         );
         // A guest entry that still holds VM.Audit does not narrow it.
         assert_eq!(
@@ -2428,16 +2529,19 @@ mod tests {
                 ("/vms", &[("VM.Audit", true)]),
                 ("/vms/9000", &[("VM.Audit", true), ("VM.Clone", true)]),
             ]),
-            GuestVisibility::Verified
+            GuestVisibility::NotDisproved
         );
         // No VM.Audit above the guests, or one that does not propagate: only
-        // guests with their own grant are audited.
+        // guests with their own grant are audited. A grant on `/` alone does
+        // not count when `/vms` carries nothing: a propagating NoAccess on
+        // `/vms` hides every guest while `/` still reads VM.Audit.
         for entries in [
             &[][..],
             &[("/vms", &[("VM.Audit", false)][..])][..],
             &[("/vms/9000", &[("VM.Audit", true)][..])][..],
             &[("/pool/fleet", &[("VM.Audit", true)][..])][..],
             &[("/vms", &[("VM.PowerMgmt", true)][..])][..],
+            &[("/", &[("VM.Audit", true)][..])][..],
         ] {
             assert_eq!(
                 visibility_of(entries),
@@ -2445,8 +2549,11 @@ mod tests {
                 "{entries:?}"
             );
         }
-        // A guest path that lacks VM.Audit, or holds nothing at all, hides
-        // that guest below a grant that would cover it.
+        // A guest path that lacks VM.Audit hides that guest. PVE's effective
+        // map is what the token holds there, and a deeper ACL for the same
+        // token replaces what it inherits (docs/operations/proxmox-token.md),
+        // so an entry without VM.Audit below a propagating grant is a real
+        // narrowing.
         assert_eq!(
             visibility_of(&[
                 ("/vms", &[("VM.Audit", true)]),
@@ -2456,20 +2563,14 @@ mod tests {
                 path: "/vms/200".to_owned()
             })
         );
-        assert_eq!(
-            visibility_of(&[("/vms", &[("VM.Audit", true)]), ("/vms/201", &[])]),
-            GuestVisibility::Incomplete(GuestVisibilityGap::GuestPathNarrowed {
-                path: "/vms/201".to_owned()
-            })
-        );
         // The permissions could not be read in full: unverified, not
-        // incomplete, and never verified.
+        // incomplete, and never not_disproved.
         assert_eq!(
             GuestVisibility::derive(
                 &RawPermissionsRead::Unreadable {
                     detail: "403".to_owned()
                 },
-                &[]
+                &RawGuestScan::default()
             ),
             GuestVisibility::Unverified(GuestVisibilityGap::PermissionsUnreadable)
         );
@@ -2480,27 +2581,32 @@ mod tests {
                     truncated: true,
                     ..RawTokenPermissions::default()
                 }),
-                &[]
+                &RawGuestScan::default()
             ),
             GuestVisibility::Unverified(GuestVisibilityGap::PermissionsTruncated)
         );
-        // The wording names the remedy.
+        // The wording names the remedy, and the best state says what it is not.
         assert!(visibility_of(&[]).text().contains("grant VM.Audit on /vms"));
+        let best = visibility_of(&[("/vms", &[("VM.Audit", true)])]).text();
         assert!(
-            visibility_of(&[("/vms", &[("VM.Audit", true)])])
-                .text()
-                .contains("NoAccess")
+            best.contains("not proof that every guest was seen"),
+            "{best}"
         );
+        assert!(best.contains("NoAccess"), "{best}");
     }
 
     #[test]
-    fn a_guest_pve_says_exists_outranks_a_clean_reading_of_the_permissions() {
-        let verified = RawPermissionsRead::Read(RawTokenPermissions {
+    fn the_vmid_cross_check_decides_between_the_permissions_and_the_listing() {
+        let clean = RawPermissionsRead::Read(RawTokenPermissions {
             paths: permissions(&[("/vms", &[("VM.Audit", true)])]),
             ..RawTokenPermissions::default()
         });
+        let hidden = RawGuestScan {
+            hidden_vmids: vec![100, 101],
+            ..RawGuestScan::default()
+        };
         assert_eq!(
-            GuestVisibility::derive(&verified, &[100, 101]),
+            GuestVisibility::derive(&clean, &hidden),
             GuestVisibility::Incomplete(GuestVisibilityGap::HiddenGuestsFound {
                 vmids: vec![100, 101]
             })
@@ -2511,14 +2617,24 @@ mod tests {
             detail: "403".to_owned(),
         };
         assert!(matches!(
-            GuestVisibility::derive(&unreadable, &[100]),
+            GuestVisibility::derive(&unreadable, &hidden),
             GuestVisibility::Incomplete(GuestVisibilityGap::HiddenGuestsFound { .. })
         ));
         // A permissions gap that has its own remedy keeps it.
         let none = RawPermissionsRead::Read(RawTokenPermissions::default());
         assert_eq!(
-            GuestVisibility::derive(&none, &[100]),
+            GuestVisibility::derive(&none, &hidden),
             GuestVisibility::Incomplete(GuestVisibilityGap::AuditNotGranted)
+        );
+        // A cross-check that could not run degrades only the visibility, to
+        // unverified with its own transient reason.
+        let failed = RawGuestScan {
+            cross_check_failed: true,
+            ..RawGuestScan::default()
+        };
+        assert_eq!(
+            GuestVisibility::derive(&clean, &failed),
+            GuestVisibility::Unverified(GuestVisibilityGap::CrossCheckUnavailable)
         );
         let text = GuestVisibilityGap::HiddenGuestsFound { vmids: vec![100] }.text();
         assert!(text.contains("guest 100 exists"), "{text}");
@@ -2527,6 +2643,11 @@ mod tests {
         }
         .text();
         assert!(text.contains("guests 100, 101 exist"), "{text}");
+        assert!(
+            GuestVisibilityGap::CrossCheckUnavailable
+                .text()
+                .contains("refresh again")
+        );
     }
 
     #[test]
@@ -2560,6 +2681,7 @@ mod tests {
             }],
             status: DeviceStatus::Available,
             note: None,
+            status_detail: None,
             created_at: 1,
             updated_at: 1,
         };
@@ -2591,6 +2713,7 @@ mod tests {
             }],
             status,
             note: None,
+            status_detail: None,
             created_at: 1,
             updated_at: 2,
         }

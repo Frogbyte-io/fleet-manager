@@ -19,8 +19,8 @@ use axum::{
     http::StatusCode,
 };
 use fleet_application::hardware_inventory::{
-    DeviceFilter, DeviceView, ExternalReference, HardwareInventory, RefreshReport, RefreshedDevice,
-    reason_text,
+    DeviceFilter, DeviceView, ExternalReference, GuestVisibility, GuestVisibilityGap,
+    HardwareInventory, RefreshReport, RefreshedDevice, reason_text,
 };
 use fleet_core::{
     CorrelationId, DeviceNodeEntry, DeviceStatus, ErrorCode, GuestTarget, HardwareReservation,
@@ -286,7 +286,15 @@ impl From<DeviceView> for HardwareDeviceDto {
             kind: view.device.kind.id().to_owned(),
             status: view.status.into(),
             reason: reason.map(Into::into),
-            reason_text: reason.map(|reason| reason_text(reason).to_owned()),
+            // A device that cannot be `available` because of an
+            // account-level cause carries it in words (#596); every other
+            // reason has its fixed text.
+            reason_text: reason.map(|reason| {
+                view.device
+                    .status_detail
+                    .clone()
+                    .unwrap_or_else(|| reason_text(reason).to_owned())
+            }),
             stale: view.stale,
             observed_at: view.observed_at,
             entries: view.device.entries.into_iter().map(Into::into).collect(),
@@ -347,27 +355,76 @@ pub struct HardwareGuestScanDto {
     pub truncated: bool,
 }
 
-/// Whether the token can be shown to audit every guest (#596). The guest scan
-/// sees only the guests the token may audit (PVE omits a guest without
-/// `VM.Audit` from the cluster listing), and PVE gives a mapping no
-/// exclusivity, so `available` means "no guest references it" only when
-/// the visibility is `verified`.
+/// What Fleet can say about guests the token cannot see (#596).
+#[derive(Clone, Copy, Debug, Serialize, ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum HardwareGuestVisibilityStateDto {
+    /// No evidence of a hidden guest. **Not proof that every guest was
+    /// seen**: PVE exposes nothing that proves it. The token holds
+    /// `VM.Audit` on `/vms` with propagation, no visible guest path narrows
+    /// it, and no guest PVE says exists below the cluster's next free VMID is
+    /// missing from the listing. An explicit `NoAccess` on one guest does not
+    /// show in the token's permissions, and a hidden guest above the next
+    /// free VMID is not looked for.
+    NotDisproved,
+    /// Evidence that some guests are not audited: the token's permissions
+    /// show a gap, or a hidden guest was found. No device of the account is
+    /// reported `available` and no attach is made.
+    Incomplete,
+    /// It could not be established (the permissions or the cross-check could
+    /// not be read in full, possibly for a transient reason). No device of
+    /// the account is reported `available` and no attach is made.
+    Unverified,
+}
+
+/// Why the guest visibility is not `not_disproved`.
+#[derive(Clone, Copy, Debug, Serialize, ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum HardwareGuestVisibilityReasonDto {
+    /// (`unverified`) The token's permissions could not be read.
+    PermissionsUnreadable,
+    /// (`unverified`) The token's permissions were cut at the provider's
+    /// bounds.
+    PermissionsTruncated,
+    /// (`unverified`) The VMID cross-check failed for a transient reason;
+    /// refresh again.
+    CrossCheckUnavailable,
+    /// (`incomplete`) `VM.Audit` does not propagate on `/vms`.
+    GuestAuditNotGranted,
+    /// (`incomplete`) A guest path in the permissions lacks `VM.Audit`.
+    GuestPathNarrowed,
+    /// (`incomplete`) PVE says guests exist that the listing omits.
+    HiddenGuestsFound,
+}
+
+impl From<&GuestVisibilityGap> for HardwareGuestVisibilityReasonDto {
+    fn from(gap: &GuestVisibilityGap) -> Self {
+        match gap {
+            GuestVisibilityGap::PermissionsUnreadable => Self::PermissionsUnreadable,
+            GuestVisibilityGap::PermissionsTruncated => Self::PermissionsTruncated,
+            GuestVisibilityGap::CrossCheckUnavailable => Self::CrossCheckUnavailable,
+            GuestVisibilityGap::AuditNotGranted => Self::GuestAuditNotGranted,
+            GuestVisibilityGap::GuestPathNarrowed { .. } => Self::GuestPathNarrowed,
+            GuestVisibilityGap::HiddenGuestsFound { .. } => Self::HiddenGuestsFound,
+        }
+    }
+}
+
+/// What Fleet can say about guests the token cannot see (#596). The guest
+/// scan sees only the guests the token may audit (PVE omits a guest without
+/// `VM.Audit` from the cluster listing) and PVE gives a mapping no
+/// exclusivity, so `available` is reported only while nothing shows a hidden
+/// guest. There is no state that means "every guest was seen".
 #[derive(Clone, Debug, Serialize, ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct HardwareGuestVisibilityDto {
-    /// `verified` (`VM.Audit` propagates from `/vms` or `/` and no visible
-    /// guest path narrows it), `incomplete` (the token's permissions show
-    /// that some guests are not audited) or `unverified` (the permissions
-    /// could not be read in full). Anything but `verified` means no device
-    /// of the account is reported `available` and no attach is made. An
-    /// explicit `NoAccess` on one guest does not show in the token's
-    /// permissions, so `verified` is as far as they tell.
-    pub state: String,
-    /// `permissions_unreadable`, `permissions_truncated`,
-    /// `guest_audit_not_granted` or `guest_path_narrowed`, unless
-    /// verified.
-    pub reason: Option<String>,
-    /// What the state rests on, and the remedy when it is not verified.
+    /// The state; anything but `not_disproved` means no device of the
+    /// account is reported `available` and no attach is made.
+    pub state: HardwareGuestVisibilityStateDto,
+    /// Why, unless `not_disproved`.
+    pub reason: Option<HardwareGuestVisibilityReasonDto>,
+    /// What the state rests on and does not cover, and the remedy when it is
+    /// not `not_disproved`.
     pub detail: String,
 }
 
@@ -386,8 +443,9 @@ pub struct HardwareRefreshDto {
     /// What the guest scan covered; `null` when the mapping list was not
     /// usable.
     pub guest_scan: Option<HardwareGuestScanDto>,
-    /// Whether the token can be shown to audit every guest, which `available`
+    /// What Fleet can say about guests the token cannot see, which `available`
     /// needs to be trustworthy; `null` when the mapping list was not usable.
+    /// Never "every guest was seen": the best state is `not_disproved`.
     pub guest_visibility: Option<HardwareGuestVisibilityDto>,
     /// The account's devices after the refresh, ordered by mapping id.
     pub devices: Vec<HardwareDeviceDto>,
@@ -415,8 +473,18 @@ impl From<RefreshReport> for HardwareRefreshDto {
             }),
             guest_visibility: report.guest_visibility.map(|visibility| {
                 HardwareGuestVisibilityDto {
-                    state: visibility.state().to_owned(),
-                    reason: visibility.gap().map(|gap| gap.id().to_owned()),
+                    state: match visibility {
+                        GuestVisibility::NotDisproved => {
+                            HardwareGuestVisibilityStateDto::NotDisproved
+                        }
+                        GuestVisibility::Incomplete(_) => {
+                            HardwareGuestVisibilityStateDto::Incomplete
+                        }
+                        GuestVisibility::Unverified(_) => {
+                            HardwareGuestVisibilityStateDto::Unverified
+                        }
+                    },
+                    reason: visibility.gap().map(Into::into),
                     detail: visibility.text(),
                 }
             }),

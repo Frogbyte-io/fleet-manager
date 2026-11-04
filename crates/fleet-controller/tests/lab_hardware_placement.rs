@@ -81,6 +81,7 @@ impl Fixture {
                         last_seen_at: seen_at,
                     }],
                     status: DeviceStatus::Available,
+                    status_detail: None,
                 },
                 NOW,
             )

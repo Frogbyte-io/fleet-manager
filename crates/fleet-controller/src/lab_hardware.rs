@@ -1675,16 +1675,17 @@ impl LabHardwareSaga {
         // The scan sees only the guests the token may audit: PVE omits a guest
         // without `VM.Audit` from the cluster listing, so `listed == read`
         // proves nothing about a guest the token cannot see, and PVE gives a
-        // mapping no exclusivity (#596). Unless the token's permissions show
-        // `VM.Audit` on every guest, a device that another guest drives would
-        // read available, so no attach is made.
+        // mapping no exclusivity (#596). Unless nothing shows a hidden guest
+        // (`not_disproved`, which is not proof that none exists), a device
+        // that another guest drives would read available, so no attach is
+        // made.
         match &report.guest_visibility {
-            Some(visibility) if visibility.is_verified() => {}
+            Some(visibility) if visibility.is_not_disproved() => {}
             other => {
                 return Err(refused(
                     "hardware_guests_unverifiable",
                     format!(
-                        "Fleet cannot verify that every guest is visible to its token ({}: {}), so a guest it cannot see may drive {mapping}; grant VM.Audit on /vms to the Fleet user and token (docs/operations/hardware.md)",
+                        "Fleet cannot rule out a guest its token cannot see that drives {mapping} ({}: {}); the token needs VM.Audit on /vms (docs/operations/hardware.md); lease again if the reason is cross_check_unavailable",
                         other
                             .as_ref()
                             .map_or("not assessed", |visibility| visibility.state()),
