@@ -22,6 +22,7 @@ pub mod frogenv;
 pub mod gateway;
 pub mod git_credentials;
 pub mod hardware_observer;
+pub mod hardware_reconciler;
 pub mod hardware_reservation_store;
 pub mod image_secrets;
 pub mod images_exec;

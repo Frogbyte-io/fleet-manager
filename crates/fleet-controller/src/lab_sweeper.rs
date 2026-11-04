@@ -18,6 +18,9 @@
 //!    a guest it cannot attribute.
 //! 5. deletes Lab artifacts past their retention deadline (FM-721), when
 //!    the artifact store is composed.
+//! 6. runs the hardware reconciler's periodic pass (FM-1124), when one is
+//!    composed; it paces and backs itself off, and its startup pass runs
+//!    once before the first tick.
 //!
 //! The rules (what is stuck, what is owned, what is due) live in
 //! `fleet_application::lab`; this module only reads rows, applies them, and
@@ -184,6 +187,7 @@ pub struct LabSweeper {
     events: Option<Arc<fleet_application::events::EventHub>>,
     inventory: Option<Arc<dyn LabGuestInventory>>,
     artifacts: Option<Arc<fleet_application::lab_artifacts::LabArtifacts>>,
+    hardware: Option<Arc<crate::hardware_reconciler::HardwareReconciler>>,
     /// Orphans already reported by this process, so each is audited once.
     reported: Mutex<HashSet<(String, u32)>>,
 }
@@ -207,6 +211,7 @@ impl LabSweeper {
             events: None,
             inventory: None,
             artifacts: None,
+            hardware: None,
             reported: Mutex::new(HashSet::new()),
         }
     }
@@ -232,6 +237,17 @@ impl LabSweeper {
         artifacts: Arc<fleet_application::lab_artifacts::LabArtifacts>,
     ) -> Self {
         self.artifacts = Some(artifacts);
+        self
+    }
+
+    /// Runs the hardware reconciler (FM-1124): a startup pass before the
+    /// first tick and a periodic pass from every tick that finds one due.
+    #[must_use]
+    pub fn with_hardware_reconciler(
+        mut self,
+        reconciler: Arc<crate::hardware_reconciler::HardwareReconciler>,
+    ) -> Self {
+        self.hardware = Some(reconciler);
         self
     }
 
@@ -495,6 +511,19 @@ impl LabSweeper {
                     .push(format!("sweeping expired artifacts: {error}")),
             }
         }
+
+        // 6. Hardware reconciliation (FM-1124). It paces itself (a pass is
+        // due every few minutes, or after its backoff) and its failures
+        // never stall the steps above.
+        if let Some(reconciler) = &self.hardware
+            && let Some(pass) = reconciler.tick(now).await
+        {
+            report.failures.extend(
+                pass.failures
+                    .into_iter()
+                    .map(|failure| format!("hardware reconciler: {failure}")),
+            );
+        }
         Ok(report)
     }
 
@@ -572,6 +601,19 @@ impl LabSweeper {
         shutdown: impl std::future::Future<Output = ()>,
     ) {
         tokio::pin!(shutdown);
+        // The hardware reconciler's startup pass: what a crash left behind
+        // is converged before the first interval passes.
+        if let Some(reconciler) = &self.hardware {
+            let now = fleet_core::SystemClock::now_unix_millis();
+            tokio::select! {
+                () = &mut shutdown => return,
+                pass = reconciler.startup(now) => {
+                    for failure in &pass.failures {
+                        eprintln!("hardware reconciler: {failure}; retrying on the next pass");
+                    }
+                }
+            }
+        }
         loop {
             tokio::select! {
                 () = &mut shutdown => break,

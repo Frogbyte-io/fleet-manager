@@ -1643,6 +1643,66 @@ fn run_serve(mut config: fleet_config::ControllerConfig) -> ExitCode {
                     )
                     .with_persistent(persistent_guests.clone()),
                 ));
+                // FM-1124: the hardware reconciler converges reservations and
+                // guests after crashes and manual changes, at startup and on
+                // the sweeper's ticks.
+                let reconciler_accounts: std::sync::Arc<
+                    dyn fleet_application::proxmox::ProxmoxAccountPort,
+                > = std::sync::Arc::new(fleet_storage_sqlite::ProxmoxAccountRepository::new(
+                    store.pool().clone(),
+                ));
+                let reconciler_credentials: std::sync::Arc<
+                    dyn fleet_application::proxmox::ProxmoxCredentialStore,
+                > = std::sync::Arc::new(
+                    fleet_controller::proxmox_store::SecretBackedProxmoxCredentials::new(
+                        secrets.clone(),
+                    ),
+                );
+                let reconciler_store: std::sync::Arc<
+                    dyn fleet_application::hardware::HardwareStore,
+                > = std::sync::Arc::new(fleet_storage_sqlite::HardwareRepository::new(
+                    store.pool().clone(),
+                ));
+                let reconciler_audit: std::sync::Arc<
+                    dyn fleet_application::operation::AuditPort,
+                > = std::sync::Arc::new(fleet_storage_sqlite::AuditSink::new(
+                    store.pool().clone(),
+                ));
+                let reconciler_client =
+                    fleet_provider_proxmox::ProxmoxClient::new(pve_transport.clone());
+                sweeper = sweeper.with_hardware_reconciler(std::sync::Arc::new(
+                    fleet_controller::hardware_reconciler::HardwareReconciler::new(
+                        reconciler_accounts.clone(),
+                        reconciler_credentials.clone(),
+                        reconciler_client.clone(),
+                        reconciler_store.clone(),
+                        std::sync::Arc::new(
+                            fleet_application::hardware_reservation::HardwareReservations::new(
+                                std::sync::Arc::new(
+                                    fleet_controller::hardware_reservation_store::SqliteHardwareReservations::new(
+                                        store.pool().clone(),
+                                    ),
+                                ),
+                                reconciler_audit.clone(),
+                            ),
+                        ),
+                        std::sync::Arc::new(
+                            fleet_application::hardware_inventory::HardwareInventory::new(
+                                reconciler_accounts,
+                                reconciler_credentials,
+                                reconciler_store,
+                                fleet_controller::hardware_observer::shared(reconciler_client),
+                                reconciler_audit.clone(),
+                            ),
+                        ),
+                        reconciler_audit,
+                        std::sync::Arc::new(
+                            fleet_controller::hardware_reconciler::SqliteReconcilerRecords::new(
+                                store.pool().clone(),
+                            ),
+                        ),
+                    ),
+                ));
             }
             let interval = std::time::Duration::from_secs(config.lab_sweep_interval_seconds);
             tokio::spawn(std::sync::Arc::new(sweeper).run(interval, async move {
