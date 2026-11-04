@@ -2149,6 +2149,99 @@
         }
       }
     },
+    "/api/v1/hardware/reservations/{reservationId}/override-release": {
+      "post": {
+        "tags": [
+          "hardware"
+        ],
+        "summary": "Frees a hardware reservation without verifying the guest: the elevated\noperator override for a reservation stuck in `attach_unknown`,\n`detach_failed` or `detaching` that nothing else resolves. Authorized as\n`hardware.override-release` on the reservation (no delegated Lab\ncredential holds it) and requires `confirmUnverified: true`. The audit\nintent, carrying the row's state and `usbN` slot and recording that Fleet\ndid not verify the guest, is written before the release and is required.\nIt changes Fleet's records only: it never calls Proxmox and removes\nnothing from the guest. Idempotent: a reservation that is already released\nanswers `already_released`.",
+        "description": "# Errors\n\nReturns the public error envelope on refusal, a missing confirmation, an\nunknown reservation, an unwired surface, or a failed audit write (nothing\nis released then).",
+        "operationId": "overrideReleaseHardwareReservation",
+        "parameters": [
+          {
+            "name": "reservationId",
+            "in": "path",
+            "description": "The reservation's id.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/OverrideReleaseRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "The reservation was released, or already was (`outcome`). `previous` is the row before this call; `guestVerified` is always false.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Resource_HardwareOverrideReleaseDto"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "`confirmUnverified` was not `true`; nothing was changed.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The caller may not override a reservation (`hardware.override-release`, never delegated to Lab credentials).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "The reservation does not exist.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "The controller's storage or audit sink failed; nothing was released.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The hardware surface is not wired.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/images/build-addresses": {
       "get": {
         "tags": [
@@ -18049,6 +18142,47 @@
           }
         }
       },
+      "HardwareOverrideOutcomeDto": {
+        "type": "string",
+        "description": "What an override release did.",
+        "enum": [
+          "released",
+          "already_released"
+        ]
+      },
+      "HardwareOverrideReleaseDto": {
+        "type": "object",
+        "description": "The answer of an override release.",
+        "required": [
+          "reservationId",
+          "deviceId",
+          "outcome",
+          "previous",
+          "guestVerified"
+        ],
+        "properties": {
+          "deviceId": {
+            "type": "string",
+            "description": "The device it held."
+          },
+          "guestVerified": {
+            "type": "boolean",
+            "description": "Always `false`: an override never reads the guest. A device that is\nstill attached reads `externally_attached` at the next refresh."
+          },
+          "outcome": {
+            "$ref": "#/components/schemas/HardwareOverrideOutcomeDto",
+            "description": "Whether this call released it or it already was."
+          },
+          "previous": {
+            "$ref": "#/components/schemas/HardwareHolderDto",
+            "description": "The reservation as it was before this call: its state and `usbN` slot\n(the release clears the slot), the owner and the guest. The audit\nintent recorded the same."
+          },
+          "reservationId": {
+            "type": "string",
+            "description": "The reservation's id."
+          }
+        }
+      },
       "HardwareRefreshDto": {
         "type": "object",
         "description": "The outcome of one refresh.",
@@ -20438,6 +20572,16 @@
           "failed",
           "cancelled"
         ]
+      },
+      "OverrideReleaseRequest": {
+        "type": "object",
+        "description": "The override-release request.",
+        "properties": {
+          "confirmUnverified": {
+            "type": "boolean",
+            "description": "Must be `true`: the caller confirms that this frees the reservation\nwithout Fleet verifying the guest, so the device may still be\nattached. Absent or `false` is refused and nothing is changed."
+          }
+        }
       },
       "PageInfo": {
         "type": "object",
@@ -26257,6 +26401,48 @@
                 "type": "integer",
                 "format": "int64",
                 "description": "When the account last changed (epoch millis)."
+              }
+            }
+          }
+        }
+      },
+      "Resource_HardwareOverrideReleaseDto": {
+        "type": "object",
+        "description": "A single resource.\n\nThe payload is nested under `data` so that later top-level fields are an\nadditive change rather than a breaking one.",
+        "required": [
+          "data"
+        ],
+        "properties": {
+          "data": {
+            "type": "object",
+            "description": "The answer of an override release.",
+            "required": [
+              "reservationId",
+              "deviceId",
+              "outcome",
+              "previous",
+              "guestVerified"
+            ],
+            "properties": {
+              "deviceId": {
+                "type": "string",
+                "description": "The device it held."
+              },
+              "guestVerified": {
+                "type": "boolean",
+                "description": "Always `false`: an override never reads the guest. A device that is\nstill attached reads `externally_attached` at the next refresh."
+              },
+              "outcome": {
+                "$ref": "#/components/schemas/HardwareOverrideOutcomeDto",
+                "description": "Whether this call released it or it already was."
+              },
+              "previous": {
+                "$ref": "#/components/schemas/HardwareHolderDto",
+                "description": "The reservation as it was before this call: its state and `usbN` slot\n(the release clears the slot), the owner and the guest. The audit\nintent recorded the same."
+              },
+              "reservationId": {
+                "type": "string",
+                "description": "The reservation's id."
               }
             }
           }

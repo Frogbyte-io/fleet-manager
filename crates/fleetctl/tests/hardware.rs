@@ -2,7 +2,8 @@
 //! `--output json` is the controller's answer unchanged: `hardware list`
 //! prints the API's page and `hardware refresh` the API's `data`, both
 //! checked against a real controller over a scripted Proxmox VE and against
-//! the checked-in `OpenAPI` document.
+//! the checked-in `OpenAPI` document. `hardware override-release` (FM-1124)
+//! needs its confirmation flag before anything is sent.
 
 #[path = "../../fleet-api/tests/support/hardware_pve.rs"]
 mod hardware_pve;
@@ -68,6 +69,73 @@ fn the_grammar_covers_list_and_refresh() {
             .output,
         fleetctl::Output::Text
     );
+}
+
+#[test]
+fn the_grammar_covers_override_release_and_demands_its_confirmation() {
+    assert_eq!(
+        action(&[
+            "hardware",
+            "override-release",
+            "res-1",
+            "--confirm-unverified"
+        ]),
+        HardwareAction::OverrideRelease {
+            reservation: "res-1".to_owned()
+        }
+    );
+    // The flag may come first, and `--output` is accepted.
+    assert_eq!(
+        action(&[
+            "hardware",
+            "override-release",
+            "res-1",
+            "--output",
+            "json",
+            "--confirm-unverified"
+        ]),
+        HardwareAction::OverrideRelease {
+            reservation: "res-1".to_owned()
+        }
+    );
+    // Without the confirmation nothing is sent: the refusal says why.
+    let error = fleetctl::parse(&args(&["hardware", "override-release", "res-1"]))
+        .unwrap_err()
+        .message;
+    assert!(error.contains("--confirm-unverified"), "{error}");
+    assert!(
+        error.contains("without Fleet verifying the guest"),
+        "{error}"
+    );
+    for words in [
+        vec!["hardware", "override-release"],
+        vec!["hardware", "override-release", "--confirm-unverified"],
+        vec![
+            "hardware",
+            "override-release",
+            "res-1",
+            "--confirm-unverified",
+            "--account",
+            "acc-1",
+        ],
+        vec![
+            "hardware",
+            "override-release",
+            "res-1",
+            "res-2",
+            "--confirm-unverified",
+        ],
+        vec![
+            "hardware",
+            "refresh",
+            "--account",
+            "acc-1",
+            "--confirm-unverified",
+        ],
+        vec!["hardware", "list", "--confirm-unverified"],
+    ] {
+        assert!(fleetctl::parse(&args(&words)).is_err(), "{words:?}");
+    }
 }
 
 #[test]
@@ -281,4 +349,181 @@ async fn a_refusal_from_the_controller_is_an_error_not_an_empty_list() {
         "{error}"
     );
     assert!(world.pve.calls().is_empty());
+}
+
+/// Puts the device `mapping`'s reservation in `attach_unknown` with a slot,
+/// as a crash between the write and its record leaves it.
+async fn stuck_reservation(world: &World, account: &str, mapping: &str) -> String {
+    use fleet_application::hardware::{HardwareStore as _, NewHardwareReservation};
+    use fleet_core::{GuestTarget, HardwareReservationState as State, ReservationOwnerKind};
+    let repository = fleet_storage_sqlite::HardwareRepository::new(world.pool.clone());
+    let device = repository
+        .device_by_mapping(account, mapping)
+        .await
+        .unwrap()
+        .expect("the device is inventoried");
+    let id = "res-stuck-1".to_owned();
+    repository
+        .insert_reservation(
+            &NewHardwareReservation {
+                id: id.clone(),
+                device_id: device.id,
+                owner_kind: ReservationOwnerKind::Lease,
+                owner_id: "lease-1".to_owned(),
+                guest: None,
+            },
+            1,
+        )
+        .await
+        .unwrap();
+    let target = GuestTarget {
+        account_id: account.to_owned(),
+        node: "pve".to_owned(),
+        vmid: 9100,
+        usb_slot: Some(1),
+    };
+    repository
+        .transition_reservation(&id, State::Held, State::Attaching, Some(&target), 2)
+        .await
+        .unwrap();
+    repository
+        .transition_reservation(
+            &id,
+            State::Attaching,
+            State::AttachUnknown,
+            Some(&target),
+            3,
+        )
+        .await
+        .unwrap();
+    id
+}
+
+#[tokio::test]
+async fn override_release_json_is_the_api_data_and_the_text_says_fleet_did_not_verify() {
+    let world = World::start(ScriptedPve::standard()).await;
+    let account = world.account(true).await;
+    cli(&world, &["hardware", "refresh", "--account", &account])
+        .await
+        .unwrap();
+    let id = stuck_reservation(&world, &account, "fm-g").await;
+    world.pve.clear_calls();
+
+    // Without the flag the CLI refuses and sends nothing.
+    let refused = cli(&world, &["hardware", "override-release", &id])
+        .await
+        .unwrap_err();
+    assert!(refused.contains("--confirm-unverified"), "{refused}");
+    let state: String = sqlx::query_scalar("SELECT state FROM hardware_reservations WHERE id = ?1")
+        .bind(&id)
+        .fetch_one(&world.pool)
+        .await
+        .unwrap();
+    assert_eq!(state, "attach_unknown");
+
+    // With it: the API's data, in the documented shape.
+    let printed = cli(
+        &world,
+        &[
+            "--output",
+            "json",
+            "hardware",
+            "override-release",
+            &id,
+            "--confirm-unverified",
+        ],
+    )
+    .await
+    .expect("an override release");
+    let printed: Value = serde_json::from_str(&printed).expect("JSON");
+    openapi_shape::assert_matches_schema(
+        &openapi_shape::spec(),
+        "HardwareOverrideReleaseDto",
+        &printed,
+    );
+    assert_eq!(printed["outcome"], "released");
+    assert_eq!(printed["previous"]["state"], "attach_unknown");
+    assert_eq!(printed["previous"]["guest"]["usbSlot"], 1);
+    assert_eq!(printed["guestVerified"], false);
+    // It changed Fleet's record and called nothing on Proxmox.
+    assert!(world.pve.calls().is_empty(), "{:?}", world.pve.calls());
+    let (state, slot): (String, Option<i64>) =
+        sqlx::query_as("SELECT state, usb_slot FROM hardware_reservations WHERE id = ?1")
+            .bind(&id)
+            .fetch_one(&world.pool)
+            .await
+            .unwrap();
+    assert_eq!((state.as_str(), slot), ("released", None));
+
+    // A repeat is the same command with the same exit and an honest text.
+    let again = cli(
+        &world,
+        &["hardware", "override-release", &id, "--confirm-unverified"],
+    )
+    .await
+    .expect("a repeat succeeds");
+    assert!(again.contains("already released"), "{again}");
+    assert!(again.contains("did not verify the guest"), "{again}");
+    // The text of a first release names what it freed.
+    let second = stuck_reservation_again(&world, &account).await;
+    let text = cli(
+        &world,
+        &[
+            "hardware",
+            "override-release",
+            &second,
+            "--confirm-unverified",
+        ],
+    )
+    .await
+    .unwrap();
+    assert!(text.contains("it was attach_unknown, usb1"), "{text}");
+    assert!(text.contains("did not verify the guest"), "{text}");
+}
+
+/// A second stuck reservation on another device, for the text form.
+async fn stuck_reservation_again(world: &World, account: &str) -> String {
+    use fleet_application::hardware::{HardwareStore as _, NewHardwareReservation};
+    use fleet_core::{GuestTarget, HardwareReservationState as State, ReservationOwnerKind};
+    let repository = fleet_storage_sqlite::HardwareRepository::new(world.pool.clone());
+    let device = repository
+        .device_by_mapping(account, "fm-a")
+        .await
+        .unwrap()
+        .unwrap();
+    let id = "res-stuck-2".to_owned();
+    repository
+        .insert_reservation(
+            &NewHardwareReservation {
+                id: id.clone(),
+                device_id: device.id,
+                owner_kind: ReservationOwnerKind::Lease,
+                owner_id: "lease-2".to_owned(),
+                guest: None,
+            },
+            1,
+        )
+        .await
+        .unwrap();
+    let target = GuestTarget {
+        account_id: account.to_owned(),
+        node: "pve".to_owned(),
+        vmid: 9101,
+        usb_slot: Some(1),
+    };
+    repository
+        .transition_reservation(&id, State::Held, State::Attaching, Some(&target), 2)
+        .await
+        .unwrap();
+    repository
+        .transition_reservation(
+            &id,
+            State::Attaching,
+            State::AttachUnknown,
+            Some(&target),
+            3,
+        )
+        .await
+        .unwrap();
+    id
 }

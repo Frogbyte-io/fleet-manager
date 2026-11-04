@@ -339,9 +339,10 @@ fleetctl --output json hardware refresh --account <account-id>
   (`node`, `vendorId`, `productId`, `usbpath`), `holder` (`ownerKind`,
   `ownerId`, `state`) when a lease holds it, and `reason` and `reasonText`
   when the status is `unsupported`.
-- `hardware refresh` reads Proxmox and records what it saw. Nothing refreshes
-  on a schedule yet, so run it before a lease that needs hardware, and again
-  when a device is `stale`. It changes nothing on Proxmox. It needs
+- `hardware refresh` reads Proxmox and records what it saw. The controller
+  also refreshes on its own about every ten minutes, so run it before a lease
+  that needs hardware when you have just changed something, and again when a
+  device is `stale`. It changes nothing on Proxmox. It needs
   `hardware.refresh`, and `hardware list` needs `hardware.read`; if either is
   denied, say so and stop.
 - `status` is `available` (you can request it), `reserved` (a lease holds it;

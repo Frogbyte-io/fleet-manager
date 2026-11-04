@@ -32,8 +32,9 @@ use crate::authz::{Decision, Permission};
 use crate::hardware::HardwareStoreError;
 use crate::operation::AuditPort;
 
-/// The catalog id of the elevated override release (ADR 0019 decision 9).
-/// The catalog entry itself lands with the API that exposes the override.
+/// The catalog id of the elevated override release (ADR 0019 decision 9):
+/// [`Permission::HardwareOverrideRelease`], exposed by the operator route
+/// (`crate::hardware_override`).
 pub const OVERRIDE_RELEASE_ACTION: &str = "hardware.override-release";
 
 /// A request to reserve one device for one owner.

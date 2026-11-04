@@ -162,6 +162,9 @@ fn the_named_refusals_of_the_issue_are_refused() {
         // hosts, refresh sends the account's token to Proxmox
         (Permission::HardwareRead, None),
         (Permission::HardwareRefresh, Some("account-1")),
+        // freeing a stuck reservation without verifying the guest is an
+        // operator's act (FM-1124), never a Lab credential's
+        (Permission::HardwareOverrideRelease, Some("reservation-1")),
         (Permission::TailnetConfig, None),
         (Permission::SourceActivate, None),
         (Permission::SourceSettings, None),

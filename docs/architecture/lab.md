@@ -373,15 +373,20 @@ The provision then fails at the `usb_attach` step with the reason (`hardware_att
 
 **Not measured.** What PVE does with a pending detach once the guest stops, and deleting a pending-only leftover from a *running* guest, were not measured by FM-S11; the saga reads every result back and never assumes either. The tests run against a fake PVE that follows the spike's recordings, not against real hardware (FM-1133).
 
+### The reconciler and the operator override (FM-1124)
+
+`fleet_controller::hardware_reconciler` converges reservations and Proxmox after crashes and manual changes. It runs once at startup and then from the Lab sweeper's ticks (one registration in the sweeper), compares each live reservation with its owner (the lease or machine row) and a read of its recorded guest (both config views, one cluster listing per account), and **repairs only what Fleet attached**: the exact `mapping=<id>` value in the slot a reservation recorded, for a row whose attach Fleet wrote or attempted. The owner decides who acts: a provision in flight, a releasing lease (the cleanup's, which retries with backoff), a ready lease and an existing machine are left alone; a released or `cleanup_failed` lease, a lease that failed without a guest and a machine that is gone are the reconciler's. Releases come only from a confirmed absence (a full read of the guest showing no reference), or from Fleet's own delete followed by a confirming read; a refused, failed or pending detach keeps the row, and a guest that is absent, unreadable or a template is a finding, never a release. A row that only recorded its attach (`attaching`, or `attach_unknown` with no slot) is never adopted or deleted for. Everything else (an entry on a foreign guest, in another slot or with options Fleet does not write) reaches the inventory (`externally_attached`, `quarantined`) and the audit trail as a finding, and is never adopted or deleted. It is idempotent and bounded per pass (rows, guest reads, a per-row doubling backoff, a backed-off schedule after a failed pass); an account with no inventoried device costs nothing. The operations guide lists each outcome ([The hardware reconciler](../operations/lab.md#the-hardware-reconciler)).
+
+What it cannot resolve falls to the operator: the elevated, audited override release (`hardware.override-release`; `POST /hardware/reservations/{id}/override-release`, `fleetctl hardware override-release`). It needs an explicit confirmation that Fleet did not verify the guest, records a required audit intent (the row's previous state and slot, `guest_verified: false`) before it releases, never calls Proxmox, is idempotent, and is not delegated to Lab credentials ([the runbook](../operations/lab.md#a-device-that-cannot-be-detached)).
+
 ### On the API
 
 `POST /lab/templates` and `PUT /lab/templates/{id}` accept `hardware` (a repeat of the whole draft, like every other field: omitting it clears it); templates and published versions return it when they declare any. `GET /lab/leases/{id}` returns `hardware` for a lease whose version declares any: each entry has its `kind`, `mapping` and the lease's live `reservation` (`id`, `deviceId`, `state`, `usbSlot`), which is null until placement reserves the device and again after it is released. A lease whose version declares none has no `hardware` key.
 
 ### What is still to come
 
-- A reconciler that compares reservation, Proxmox config, host inventory and lease state (FM-1124), mid-run hotplug (FM-1126), and persistent machines (FM-1125).
+- Mid-run hotplug (FM-1126) and persistent machines (FM-1125).
 - Queueing: a busy device fails the lease request.
-- Manual override is elevated and audited (`hardware.override-release`).
 - The hardware-in-the-loop runbook and live validation (FM-1133). Until the real hardware has been exercised end to end, the "exclusive" claim rests on the reservation store's guarantees and tests, not on a hardware run.
 
 ## Failure-injection acceptance

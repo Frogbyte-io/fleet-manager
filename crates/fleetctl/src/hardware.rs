@@ -9,6 +9,15 @@
 //!   account's token and records what it saw. It is an authorized, audited
 //!   mutation of Fleet's records; it changes nothing on Proxmox.
 //!
+//! - `hardware override-release <reservation-id> --confirm-unverified
+//!   [--output json|text]` posts
+//!   `POST /api/v1/hardware/reservations/{id}/override-release`: the
+//!   elevated, audited release of a reservation stuck in `attach_unknown`,
+//!   `detach_failed` or `detaching`, for an operator who has checked the
+//!   guest. It frees Fleet's record only and never calls Proxmox. The flag
+//!   is required and says Fleet did not verify the guest; without it nothing
+//!   is sent.
+//!
 //! The controller decides every status and reason; with `--output json` this
 //! adapter prints the controller's answer unchanged, so `hardware list` is
 //! the API's page and `hardware refresh` is the API's `data`.
@@ -34,16 +43,35 @@ pub enum HardwareAction {
         /// The Proxmox account.
         account: String,
     },
+    /// Free a stuck reservation without Fleet verifying the guest.
+    OverrideRelease {
+        /// The reservation to release.
+        reservation: String,
+    },
 }
 
-/// Parses `hardware list|refresh ...`.
+/// Parses `hardware list|refresh|override-release ...`.
+#[allow(clippy::too_many_lines)]
 pub(crate) fn parse(rest: &[&str], output: &mut Output) -> Result<Command, CliError> {
     let Some((verb, flags)) = rest.split_first() else {
         return Err(CliError { message: usage() });
     };
-    if !matches!(*verb, "list" | "refresh") {
+    if !matches!(*verb, "list" | "refresh" | "override-release") {
         return Err(CliError { message: usage() });
     }
+    let mut flags = flags;
+    let mut reservation = None;
+    if *verb == "override-release" {
+        // The reservation id is the one positional argument.
+        let Some((id, tail)) = flags.split_first().filter(|(id, _)| !id.starts_with("--")) else {
+            return Err(CliError {
+                message: "hardware override-release needs a reservation id".to_owned(),
+            });
+        };
+        reservation = Some((*id).to_owned());
+        flags = tail;
+    }
+    let mut confirmed = false;
     let mut account = None;
     let mut limit = None;
     let mut cursor = None;
@@ -60,7 +88,8 @@ pub(crate) fn parse(rest: &[&str], output: &mut Output) -> Result<Command, CliEr
                 })
         };
         match (*verb, flag) {
-            (_, "--account") => account = Some(value("account")?.to_owned()),
+            ("override-release", "--confirm-unverified") => confirmed = true,
+            ("list" | "refresh", "--account") => account = Some(value("account")?.to_owned()),
             ("list", "--cursor") => cursor = Some(value("cursor")?.to_owned()),
             ("list", "--limit") => {
                 let raw = value("limit")?;
@@ -92,6 +121,16 @@ pub(crate) fn parse(rest: &[&str], output: &mut Output) -> Result<Command, CliEr
             limit,
             cursor,
         },
+        "override-release" => {
+            if !confirmed {
+                return Err(CliError {
+                    message: "hardware override-release frees the reservation without Fleet verifying the guest, so the device may still be attached; check the guest, then pass --confirm-unverified".to_owned(),
+                });
+            }
+            HardwareAction::OverrideRelease {
+                reservation: reservation.unwrap_or_default(),
+            }
+        }
         _ => HardwareAction::Refresh {
             account: account.ok_or_else(|| CliError {
                 message: "hardware refresh needs --account <account-id>".to_owned(),
@@ -132,12 +171,21 @@ pub(crate) fn request(action: &HardwareAction) -> RequestShape {
             Vec::new(),
             Some(json!({ "accountId": account })),
         ),
+        HardwareAction::OverrideRelease { reservation } => (
+            reqwest::Method::POST,
+            format!("/api/v1/hardware/reservations/{reservation}/override-release"),
+            Vec::new(),
+            Some(json!({ "confirmUnverified": true })),
+        ),
     }
 }
 
-/// Renders an answer as human text: the list page or the refresh report.
+/// Renders an answer as human text: the list page, the refresh report or the
+/// override release.
 pub(crate) fn render(payload: &Value) -> String {
-    if payload.get("items").is_some() {
+    if payload.get("previous").is_some() {
+        render_override(payload)
+    } else if payload.get("items").is_some() {
         render_devices(
             payload["items"].as_array().map_or(&[][..], Vec::as_slice),
             payload,
@@ -305,4 +353,25 @@ fn render_refresh(report: &Value) -> String {
         }
     }
     lines.join("\n")
+}
+
+fn render_override(answer: &Value) -> String {
+    let previous = &answer["previous"];
+    let slot = previous["guest"]["usbSlot"]
+        .as_u64()
+        .map_or_else(|| "no slot".to_owned(), |slot| format!("usb{slot}"));
+    let head = if answer["outcome"].as_str() == Some("already_released") {
+        "already released: nothing changed".to_owned()
+    } else {
+        format!(
+            "released reservation {} (it was {}, {slot})",
+            text(&answer["reservationId"]),
+            text(&previous["state"])
+        )
+    };
+    [
+        head,
+        "Fleet did not verify the guest and removed nothing from it; run `fleetctl hardware refresh` to see whether the device is still attached".to_owned(),
+    ]
+    .join("\n")
 }

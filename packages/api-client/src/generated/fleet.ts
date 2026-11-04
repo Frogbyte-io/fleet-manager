@@ -2928,6 +2928,40 @@ export interface HardwareGuestScanDto {
 }
 
 /**
+ * What an override release did.
+ */
+export type HardwareOverrideOutcomeDto = typeof HardwareOverrideOutcomeDto[keyof typeof HardwareOverrideOutcomeDto];
+
+
+export const HardwareOverrideOutcomeDto = {
+  released: 'released',
+  already_released: 'already_released',
+} as const;
+
+/**
+ * The answer of an override release.
+ */
+export interface HardwareOverrideReleaseDto {
+  /** The device it held. */
+  deviceId: string;
+  /**
+     * Always `false`: an override never reads the guest. A device that is
+     * still attached reads `externally_attached` at the next refresh.
+     */
+  guestVerified: boolean;
+  /** Whether this call released it or it already was. */
+  outcome: HardwareOverrideOutcomeDto;
+  /**
+     * The reservation as it was before this call: its state and `usbN` slot
+     * (the release clears the slot), the owner and the guest. The audit
+     * intent recorded the same.
+     */
+  previous: HardwareHolderDto;
+  /** The reservation's id. */
+  reservationId: string;
+}
+
+/**
  * Whether the account could be inventoried.
  */
 export interface HardwareSupportDto {
@@ -4096,6 +4130,18 @@ export interface OperationAccepted {
   operationId: string;
   /** The operation's state at the time the response was written. */
   status: OperationStatus;
+}
+
+/**
+ * The override-release request.
+ */
+export interface OverrideReleaseRequest {
+  /**
+     * Must be `true`: the caller confirms that this frees the reservation
+     * without Fleet verifying the guest, so the device may still be
+     * attached. Absent or `false` is refused and nothing is changed.
+     */
+  confirmUnverified?: boolean;
 }
 
 /**
@@ -7434,6 +7480,40 @@ export type ResourceExternalAccountDtoData = {
 export interface ResourceExternalAccountDto {
   /** One external provider account. The token is never here. */
   data: ResourceExternalAccountDtoData;
+}
+
+/**
+ * The answer of an override release.
+ */
+export type ResourceHardwareOverrideReleaseDtoData = {
+  /** The device it held. */
+  deviceId: string;
+  /**
+     * Always `false`: an override never reads the guest. A device that is
+     * still attached reads `externally_attached` at the next refresh.
+     */
+  guestVerified: boolean;
+  /** Whether this call released it or it already was. */
+  outcome: HardwareOverrideOutcomeDto;
+  /**
+     * The reservation as it was before this call: its state and `usbN` slot
+     * (the release clears the slot), the owner and the guest. The audit
+     * intent recorded the same.
+     */
+  previous: HardwareHolderDto;
+  /** The reservation's id. */
+  reservationId: string;
+};
+
+/**
+ * A single resource.
+ *
+ * The payload is nested under `data` so that later top-level fields are an
+ * additive change rather than a breaking one.
+ */
+export interface ResourceHardwareOverrideReleaseDto {
+  /** The answer of an override release. */
+  data: ResourceHardwareOverrideReleaseDtoData;
 }
 
 /**
@@ -13346,6 +13426,97 @@ const res = await fetch(getRefreshHardwareUrl(),
 
   const data: refreshHardwareResponse['data'] = body ? JSON.parse(body) : {}
   return { data, status: res.status, headers: res.headers } as refreshHardwareResponse
+}
+
+
+
+export type overrideReleaseHardwareReservationResponse200 = {
+  data: ResourceHardwareOverrideReleaseDto
+  status: 200
+}
+
+export type overrideReleaseHardwareReservationResponse400 = {
+  data: ApiError
+  status: 400
+}
+
+export type overrideReleaseHardwareReservationResponse403 = {
+  data: ApiError
+  status: 403
+}
+
+export type overrideReleaseHardwareReservationResponse404 = {
+  data: ApiError
+  status: 404
+}
+
+export type overrideReleaseHardwareReservationResponse500 = {
+  data: ApiError
+  status: 500
+}
+
+export type overrideReleaseHardwareReservationResponse503 = {
+  data: ApiError
+  status: 503
+}
+
+export type overrideReleaseHardwareReservationResponseSuccess = (overrideReleaseHardwareReservationResponse200) & {
+  headers: Headers;
+};
+export type overrideReleaseHardwareReservationResponseError = (overrideReleaseHardwareReservationResponse400 | overrideReleaseHardwareReservationResponse403 | overrideReleaseHardwareReservationResponse404 | overrideReleaseHardwareReservationResponse500 | overrideReleaseHardwareReservationResponse503) & {
+  headers: Headers;
+};
+
+export type overrideReleaseHardwareReservationResponse = (overrideReleaseHardwareReservationResponseSuccess | overrideReleaseHardwareReservationResponseError)
+
+export const getOverrideReleaseHardwareReservationUrl = (reservationId: string,) => {
+
+
+
+
+  return `/api/v1/hardware/reservations/${reservationId}/override-release`
+}
+
+/**
+ * # Errors
+ *
+ * Returns the public error envelope on refusal, a missing confirmation, an
+ * unknown reservation, an unwired surface, or a failed audit write (nothing
+ * is released then).
+ * @summary Frees a hardware reservation without verifying the guest: the elevated
+operator override for a reservation stuck in `attach_unknown`,
+`detach_failed` or `detaching` that nothing else resolves. Authorized as
+`hardware.override-release` on the reservation (no delegated Lab
+credential holds it) and requires `confirmUnverified: true`. The audit
+intent, carrying the row's state and `usbN` slot and recording that Fleet
+did not verify the guest, is written before the release and is required.
+It changes Fleet's records only: it never calls Proxmox and removes
+nothing from the guest. Idempotent: a reservation that is already released
+answers `already_released`.
+ */
+export const overrideReleaseHardwareReservation = async (reservationId: string,
+    overrideReleaseRequest: OverrideReleaseRequest, options?: RequestInit): Promise<overrideReleaseHardwareReservationResponse> => {
+
+    const getHeaders = (h?: NonNullable<RequestInit['headers']>): Record<string, string | readonly string[]> => {
+    if (!h) return {};
+    if (h instanceof Headers) return Object.fromEntries(h.entries());
+    if (Array.isArray(h)) return Object.fromEntries(h);
+    return h;
+  };
+const res = await fetch(getOverrideReleaseHardwareReservationUrl(reservationId),
+  {
+    ...options,
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...getHeaders(options?.headers) },
+    body: JSON.stringify(overrideReleaseRequest)
+  }
+)
+
+
+  const body = [204, 205, 304].includes(res.status) ? null : await res.text();
+
+  const data: overrideReleaseHardwareReservationResponse['data'] = body ? JSON.parse(body) : {}
+  return { data, status: res.status, headers: res.headers } as overrideReleaseHardwareReservationResponse
 }
 
 
