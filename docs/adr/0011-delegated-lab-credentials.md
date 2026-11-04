@@ -59,6 +59,7 @@ Allowed for a credential principal:
 | `lab.exec.read` | Status of a detached command whose lease the caller owns (#394); another owner's handle is not found |
 | `lab.artifacts` | Collect from own lease; download of own artifacts |
 | `lab.artifacts.read` | List and read metadata of own artifacts |
+| `lab.hardware.attach`, `lab.hardware.detach` | Mid-run hotplug of a USB device the caller's own lease reserved (FM-1126, ADR 0019); the resource is the lease id, the use case applies owner scope, and only a device the lease reserved up front is touched |
 | `operation.create` | Only for the kinds a Lab route queues for the caller: `lab.provision`, `lab.exec`, `lab.exec_detach`, `lab.collect`, `lab.cleanup` |
 | `operation.read` | One operation, only when it belongs to the caller's own lease. Listing is refused |
 

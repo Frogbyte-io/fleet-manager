@@ -49,6 +49,9 @@ pub enum UsbStep {
     /// `GET /cluster/nextid` (the provision's VMID step, after placement
     /// reserved the devices and before the clone).
     NextId,
+    /// `GET /cluster/resources` (the guest's live node, read by a detach
+    /// between its read of the reservation and its first move).
+    Resources,
 }
 
 /// What happens at a scripted step.
@@ -511,13 +514,18 @@ impl UsbHost {
             }
             (PveHttpMethod::Get, ["cluster", "resources"]) => {
                 self.record(line);
-                let mut state = self.state.lock().unwrap();
-                if state.fail_resources > 0 {
-                    state.fail_resources -= 1;
-                    return Some(Self::error(
-                        500,
-                        &json!({"data": null, "message": "internal error (injected)"}),
-                    ));
+                {
+                    let mut state = self.state.lock().unwrap();
+                    if state.fail_resources > 0 {
+                        state.fail_resources -= 1;
+                        return Some(Self::error(
+                            500,
+                            &json!({"data": null, "message": "internal error (injected)"}),
+                        ));
+                    }
+                }
+                if let Some(response) = self.fault(UsbStep::Resources, true).await {
+                    return Some(response);
                 }
                 None
             }

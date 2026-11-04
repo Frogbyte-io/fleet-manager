@@ -25,6 +25,7 @@ pub mod images;
 pub mod lab;
 pub mod lab_artifacts;
 pub mod lab_exec_detach;
+pub mod lab_hardware_hotplug;
 pub mod lab_placement;
 pub mod lab_pool;
 pub mod lab_put;

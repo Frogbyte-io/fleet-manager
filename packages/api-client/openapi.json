@@ -4440,6 +4440,222 @@
         }
       }
     },
+    "/api/v1/lab/leases/{leaseId}/hardware/attach": {
+      "post": {
+        "tags": [
+          "lab"
+        ],
+        "summary": "Attaches a device the lease reserved to the lease's running guest: a\ndigest-conditional write of the mapping into a free `usbN` slot, read back\nbefore it is reported. Only the lease's holder (or an administrator) may\nact, only for a device the lease reserved, and only on a ready lease. An\nattach PVE would leave pending (the guest's `hotplug` option lacks `usb`)\nis removed again and refused as `hardware_attach_pending`: it is never\nreported as attached. The attach is audited before the write.",
+        "description": "# Errors\n\nReturns the public error envelope on refusal, an unknown lease (or\nanother owner's), a lease that is not ready, a device the lease did not\nreserve, a failed verification of the device, or a failed write.",
+        "operationId": "attachLabLeaseHardware",
+        "parameters": [
+          {
+            "name": "leaseId",
+            "in": "path",
+            "description": "The lease's identity.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AttachLabHardwareRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "The device is on the guest and the read-back confirmed it (`attached`), or the reservation already said so (`already_attached`).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Resource_LabHardwareHotplugDto"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The mapping id is malformed.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The caller may not hotplug hardware on Lab leases (`lab.hardware.attach`).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "The lease does not exist (or is another owner's).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Refused, with the reason as the error code: `lease_not_ready`, `lease_has_no_guest`, `hardware_not_reserved` (not a device this lease reserved), `hardware_not_detached`, `hardware_in_progress`, `hardware_attach_unknown`, `hardware_detach_unconfirmed`, `hardware_attach_pending` (PVE would keep the attach pending until the guest restarts; nothing is attached and the entry was removed), `hardware_externally_attached`, `hardware_fingerprint_changed`, `hardware_missing`, `hardware_no_free_slot`, `hardware_attach_failed`, `hardware_attach_unrecorded` and the other `hardware_*` verification reasons.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "A backend port failed.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Lab hardware hotplug is not wired.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/lab/leases/{leaseId}/hardware/detach": {
+      "post": {
+        "tags": [
+          "lab"
+        ],
+        "summary": "Detaches a device the lease reserved from the lease's running guest: the\nrecorded `usbN` entry is deleted only when it holds exactly what Fleet\nwrote, and every `usbN` entry is read back before the answer. The lease\nkeeps the device reserved (it can attach it again) unless the request\nsets `release`, which gives it up after the read-back confirmed it is\ngone. A removal PVE leaves pending (the guest's `hotplug` option lacks\n`usb`) answers `detach_pending` with the device still attached. Cleanup\nstill detaches whatever the lease holds before it decides the guest's\nfate. Audited before the delete.",
+        "description": "# Errors\n\nReturns the public error envelope on refusal, an unknown lease (or\nanother owner's), a lease that is not ready, a device the lease did not\nreserve, or a detach that failed or could not be confirmed (the\nreservation stays with the lease and its cleanup retries).",
+        "operationId": "detachLabLeaseHardware",
+        "parameters": [
+          {
+            "name": "leaseId",
+            "in": "path",
+            "description": "The lease's identity.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/DetachLabHardwareRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "The device is off the guest and the read-back confirmed it (`detached`), or it already was (`already_detached`).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Resource_LabHardwareHotplugDto"
+                }
+              }
+            }
+          },
+          "202": {
+            "description": "PVE stored the removal but the guest keeps the device until it restarts (`detach_pending`): the device is still attached.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Resource_LabHardwareHotplugDto"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The mapping id is malformed.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The caller may not hotplug hardware on Lab leases (`lab.hardware.detach`).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "The lease does not exist (or is another owner's).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Refused, with the reason as the error code: `lease_not_ready`, `lease_has_no_guest`, `hardware_not_reserved` (not a device this lease reserved), `hardware_in_progress`, `hardware_attach_unknown`, `hardware_detach_failed` (PVE refused, the entry is not one Fleet wrote, or the read-back could not confirm it; the lease's cleanup retries) and `hardware_guest_mismatch`.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "A backend port failed.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Lab hardware hotplug is not wired.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/lab/leases/{leaseId}/provision": {
       "post": {
         "tags": [
@@ -14322,6 +14538,20 @@
           }
         }
       },
+      "AttachLabHardwareRequest": {
+        "type": "object",
+        "description": "Which device to attach to the lease's running guest.",
+        "required": [
+          "mapping"
+        ],
+        "properties": {
+          "mapping": {
+            "type": "string",
+            "description": "The Proxmox USB resource mapping id of a device the lease reserved\n(the mapping its template declared)."
+          }
+        },
+        "additionalProperties": false
+      },
       "AuditEventDto": {
         "type": "object",
         "description": "One audit event, containing validated metadata and no raw request payload.",
@@ -16559,6 +16789,24 @@
           }
         }
       },
+      "DetachLabHardwareRequest": {
+        "type": "object",
+        "description": "Which device to detach from the lease's running guest.",
+        "required": [
+          "mapping"
+        ],
+        "properties": {
+          "mapping": {
+            "type": "string",
+            "description": "The Proxmox USB resource mapping id of a device the lease reserved."
+          },
+          "release": {
+            "type": "boolean",
+            "description": "Also give the device up once the read-back confirms it is off the\nguest. By default the lease keeps it reserved until the lease is\nreleased, so it can be attached again."
+          }
+        },
+        "additionalProperties": false
+      },
       "DetachedExecStartedDto": {
         "type": "object",
         "description": "A started detached command.",
@@ -18678,6 +18926,56 @@
           }
         },
         "additionalProperties": false
+      },
+      "LabHardwareHotplugDto": {
+        "type": "object",
+        "description": "What a hotplug request came to.",
+        "required": [
+          "leaseId",
+          "mapping",
+          "outcome",
+          "onGuest",
+          "reservationId",
+          "reservationState",
+          "released"
+        ],
+        "properties": {
+          "leaseId": {
+            "type": "string",
+            "description": "The lease."
+          },
+          "mapping": {
+            "type": "string",
+            "description": "The mapping id."
+          },
+          "onGuest": {
+            "type": "boolean",
+            "description": "Whether the guest has the device once the request is answered."
+          },
+          "outcome": {
+            "type": "string",
+            "description": "`attached` and `already_attached` (the guest has the device),\n`detached` and `already_detached` (it does not), or `detach_pending`:\nPVE stored the removal but the guest keeps the device until it\nrestarts (its `hotplug` option lacks `usb`), so the device is still\nattached and the reservation stays `detaching`. An attach PVE would\nleave pending is refused instead (`hardware_attach_pending`); it is\nnever reported as attached."
+          },
+          "released": {
+            "type": "boolean",
+            "description": "Whether the request released the reservation."
+          },
+          "reservationId": {
+            "type": "string",
+            "description": "The lease's reservation of the device."
+          },
+          "reservationState": {
+            "type": "string",
+            "description": "The reservation's state after the request: `attached`, `held` (the\nlease keeps a detached device), `detaching` (a pending detach) or\n`released`."
+          },
+          "usbSlot": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The `usbN` slot the guest holds the device in, when it does."
+          }
+        }
       },
       "LabPoolDrainDto": {
         "type": "object",
@@ -26772,6 +27070,65 @@
                 "format": "int64",
                 "description": "The size in bytes.",
                 "minimum": 0
+              }
+            }
+          }
+        }
+      },
+      "Resource_LabHardwareHotplugDto": {
+        "type": "object",
+        "description": "A single resource.\n\nThe payload is nested under `data` so that later top-level fields are an\nadditive change rather than a breaking one.",
+        "required": [
+          "data"
+        ],
+        "properties": {
+          "data": {
+            "type": "object",
+            "description": "What a hotplug request came to.",
+            "required": [
+              "leaseId",
+              "mapping",
+              "outcome",
+              "onGuest",
+              "reservationId",
+              "reservationState",
+              "released"
+            ],
+            "properties": {
+              "leaseId": {
+                "type": "string",
+                "description": "The lease."
+              },
+              "mapping": {
+                "type": "string",
+                "description": "The mapping id."
+              },
+              "onGuest": {
+                "type": "boolean",
+                "description": "Whether the guest has the device once the request is answered."
+              },
+              "outcome": {
+                "type": "string",
+                "description": "`attached` and `already_attached` (the guest has the device),\n`detached` and `already_detached` (it does not), or `detach_pending`:\nPVE stored the removal but the guest keeps the device until it\nrestarts (its `hotplug` option lacks `usb`), so the device is still\nattached and the reservation stays `detaching`. An attach PVE would\nleave pending is refused instead (`hardware_attach_pending`); it is\nnever reported as attached."
+              },
+              "released": {
+                "type": "boolean",
+                "description": "Whether the request released the reservation."
+              },
+              "reservationId": {
+                "type": "string",
+                "description": "The lease's reservation of the device."
+              },
+              "reservationState": {
+                "type": "string",
+                "description": "The reservation's state after the request: `attached`, `held` (the\nlease keeps a detached device), `detaching` (a pending detach) or\n`released`."
+              },
+              "usbSlot": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "description": "The `usbN` slot the guest holds the device in, when it does."
               }
             }
           }

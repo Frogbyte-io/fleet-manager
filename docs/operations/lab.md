@@ -705,6 +705,7 @@ Refusals fail the provision operation with a reason:
 | `hardware_lease_ended` | The lease was released, expired or compensated while its device was being attached. Nothing was written, or what was written was detached again | Lease again |
 | `hardware_attach_pending` | The guest is running and its `hotplug` option lacks `usb`, so PVE would only apply the device at the next restart; Fleet removed the entry and does not call that attached | Add `usb` to the guest's `hotplug` option |
 | `hardware_attach_unknown` | The outcome of the attach write could not be determined (a lost answer). The reservation is `attach_unknown`; the lease's cleanup reads the guest, removes the entry and releases | None while cleanup runs; if cleanup ends `cleanup_failed`, see below |
+| `lease_not_ready`, `lease_has_no_guest`, `hardware_in_progress`, `hardware_detach_failed`, `hardware_not_detached` | Refusals of a mid-run `lab hardware attach` or `detach` (see [Mid-run hotplug](#mid-run-hotplug)): the lease is not `ready`, has no recorded guest, the device is being attached by another step, a detach was refused or unconfirmed, or the device is not detached | See [Mid-run hotplug](#mid-run-hotplug) |
 | `hardware_not_allocatable`, `hardware_owner_finished` | A reservation was refused for a status that should have allowed it, or the owner no longer counts | Refresh the inventory and retry |
 
 **USB hardware.** A template may declare USB devices, which placement reserves with the capacity; the refusals above name the constraint that failed. See [USB hardware](#usb-hardware) for setup, the inventory commands, attach and detach, and what is not covered yet.
@@ -763,6 +764,23 @@ A reservation stays `attach_unknown`, `detach_failed` or `detaching` when Fleet 
 **The override also works on a reservation whose lease is provisioning or ready** (and on one held by a machine that exists): it is not limited to ended owners, and it never asks whether the owner still wants the device. What it does there: the reservation row is released at once, so the device is free for another lease while the lease still believes it holds it. A provisioning lease's attach step then refuses (`hardware_not_reserved`) and the provision fails; a ready lease keeps running with whatever is on its guest, and its cleanup later finds no live reservation, so it detaches nothing and moves on to destroy, revert or keep the guest. Use it on a live lease only when you mean to take the device away from it.
 
 Things the reconciler and the override will not do: delete a `usbN` entry Fleet did not write, adopt a manual attachment, treat a guest it cannot see as detached, or move a device to another guest.
+
+#### Mid-run hotplug
+
+*(FM-1126.)* On a `ready` lease the holder, or an administrator, can detach a device the lease reserved from the running guest and attach it again, during a test:
+
+```
+fleetctl lab hardware detach <lease-id> <mapping> [--release]
+fleetctl lab hardware attach <lease-id> <mapping>
+```
+
+They call `POST /api/v1/lab/leases/{id}/hardware/detach` and `.../attach` and need `lab.hardware.detach` and `lab.hardware.attach`, which a scoped CI identity may be granted (it then acts on its own leases only). They never reserve a device: only a device the lease declared and reserved up front can be used, and anything else is `hardware_not_reserved`. The write is the saga's: verified against the device's pinned fingerprint, conditional on the guest's config digest, and read back before the answer; both calls are audited before the write (`source=hotplug`).
+
+- **Detach** takes the entry Fleet wrote off the guest (an entry an operator changed is never deleted: `hardware_detach_failed`). The lease **keeps the device reserved** until the lease is released, so no other lease can take it and `lab hardware attach` puts it back; `--release` gives it up once the read-back confirms it is gone, after which this lease cannot attach it again. Cleanup still detaches whatever the lease holds before it decides the guest's fate; a detached device needs nothing and is released with the lease.
+- **`pending` is not done.** If the guest's `hotplug` option lacks `usb`, PVE accepts the change but applies it at the next restart. A detach then answers `detach_pending` (HTTP 202, exit status 2): the device is **still on the guest** and the reservation stays `detaching`; restart the guest (or add `usb` to `hotplug`) and run the detach again to confirm it. An attach is refused as `hardware_attach_pending` and the entry is removed again, so a restart cannot attach it.
+- **One request at a time per device.** Concurrent requests are serialised; the second sees what the first left (`already_attached`, `already_detached`).
+- **A lease that ends meanwhile** gets no write, or has the device detached again (`hardware_lease_ended`); the lease's own cleanup is unchanged.
+- **Not measured.** Whether deleting a pending-only leftover from a running guest succeeds, and what PVE does with a pending detach after the guest stops, were not measured by FM-S11; the saga reads every result back and never assumes either. A live run on the integration host with the SuperDrive test mappings is FM-1133.
 
 #### What you set up
 
@@ -924,6 +942,6 @@ Not yet guaranteed:
 
 ## Out of scope
 
-USB devices are attached only before a lease's guest starts (mid-run hotplug is FM-1126); see [USB hardware](#usb-hardware). PCI and GPU passthrough, whole USB controllers, queueing for a busy device, and Fleet-created mappings are not supported.
+USB devices are attached before a lease's guest starts and may be hotplugged on and off a running lease's guest, only the devices the lease reserved up front (a lease cannot reserve a device mid-run); see [USB hardware](#usb-hardware). PCI and GPU passthrough, whole USB controllers, queueing for a busy device, and Fleet-created mappings are not supported.
 
 Windows guests ([ADR 0015](../adr/0015-windows-lab-guest-transport.md), epic #396) are in scope for readiness, `lab exec` (synchronous, detached and interactive-session), `lab put` and `lab collect`, audio, and pools; see [Windows guests](#windows-guests) and [Pooled guests](#pooled-guests). Still unverified, and tracked in [#555](https://github.com/Frogbyte-io/fleet-manager/issues/555): activation across a snapshot rollback, clone SID uniqueness, and leases on the Cloudbase-Init re-generalized image. [#556](https://github.com/Frogbyte-io/fleet-manager/issues/556) tracks an automated test of the pool flow with a Windows template. ADR 0015 is still Proposed.

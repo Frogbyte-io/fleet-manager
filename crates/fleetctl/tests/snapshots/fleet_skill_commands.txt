@@ -84,6 +84,12 @@ fleetctl --output json hardware list --account <account-id>
   -> GET /api/v1/hardware/devices?accountId=account-id-example
 fleetctl --output json hardware refresh --account <account-id>
   -> POST /api/v1/hardware/refresh body {"accountId":"account-id-example"}
+fleetctl --output json lab hardware detach <lease-id> <mapping-id>
+  -> POST /api/v1/lab/leases/lease-id-example/hardware/detach body {"mapping":"mapping-id-example","release":false}
+fleetctl --output json lab hardware attach <lease-id> <mapping-id>
+  -> POST /api/v1/lab/leases/lease-id-example/hardware/attach body {"mapping":"mapping-id-example"}
+fleetctl --output json lab hardware detach <lease-id> <mapping-id> --release
+  -> POST /api/v1/lab/leases/lease-id-example/hardware/detach body {"mapping":"mapping-id-example","release":true}
 fleetctl --output json registry types
   -> GET /api/v1/registry/types
 fleetctl --output json registry find aptabase

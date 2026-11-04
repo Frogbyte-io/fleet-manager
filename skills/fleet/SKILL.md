@@ -324,8 +324,10 @@ fleetctl --output json lab release <lease-id>
 
 A Lab lease can be given a physical USB device. A person with Proxmox access
 creates a USB resource mapping for each device; Fleet only reads it. The
-mapping id (`mappingId`) is the device's name everywhere. You do not create,
-edit, attach, or detach devices.
+mapping id (`mappingId`) is the device's name everywhere. You do not create or
+edit mappings, and you cannot reserve a device mid-run; a lease holder may only
+detach, and attach again, a device its own lease reserved up front (see
+*Mid-run hotplug*).
 
 ```bash
 fleetctl --output json hardware list
@@ -396,6 +398,36 @@ destroy the guest or free the device yourself.
 | `hardware_fingerprint_changed`, `hardware_scan_incomplete`, `hardware_verify_failed` | The device moved or the cluster could not be read in full at the last check. Run `hardware refresh --account <account-id>` once and lease again once; otherwise tell the user |
 | `hardware_attach_failed`, `hardware_no_free_slot`, `hardware_attach_pending`, `hardware_lease_ended` | The write was refused or could not be applied; the message says why. Tell the user; do not retry in a loop |
 | `hardware_attach_unknown` | The outcome could not be determined; cleanup resolves it, or it needs an operator. Tell the user |
+
+**Mid-run hotplug.** On a `ready` lease the holder can take a reserved device
+off the running guest and put it back, for example to test an unplug. The
+lease keeps the device reserved until it is released, so another lease cannot
+take it meanwhile. Only a device the lease reserved up front can be used;
+this never reserves a new one.
+
+```bash
+fleetctl --output json lab hardware detach <lease-id> <mapping-id>
+fleetctl --output json lab hardware attach <lease-id> <mapping-id>
+fleetctl --output json lab hardware detach <lease-id> <mapping-id> --release
+```
+
+- The answer's `outcome` is `attached` or `already_attached` (`onGuest` is
+  true), `detached` or `already_detached` (false), or `detach_pending`. Read
+  `outcome`, not just the exit status: `detach_pending` exits with status 2
+  and means PVE keeps the device on the guest until it restarts (the guest's
+  `hotplug` option lacks `usb`), so the device is **still attached**; tell the
+  user, do not treat it as detached.
+- `--release` also gives the device up once it is confirmed off the guest.
+  Without it the lease keeps the device; release it only when the test no
+  longer needs it.
+- An attach PVE would leave pending is refused (`hardware_attach_pending`) and
+  nothing is attached. Other refusals are `lease_not_ready` (only a `ready`
+  lease), `hardware_not_reserved` (not a device this lease reserved),
+  `hardware_in_progress` (retry once), `hardware_detach_failed` and
+  `hardware_externally_attached` (someone changed the guest; tell the user,
+  never delete the entry yourself). Do not retry in a loop.
+- Releasing the lease still detaches whatever it holds before the guest is
+  destroyed.
 
 ## Registry
 

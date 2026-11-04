@@ -1553,6 +1553,33 @@ fn run_serve(mut config: fleet_config::ControllerConfig) -> ExitCode {
         let lab = lab.with_hardware(std::sync::Arc::new(
             fleet_storage_sqlite::HardwareRepository::new(store.pool().clone()),
         ));
+        // FM-1126: a lease holder hotplugs the devices its lease reserved
+        // into the running guest, through the same saga the provision and
+        // the cleanup use.
+        let lab = lab.with_hotplug(std::sync::Arc::new(
+            fleet_application::lab_hardware_hotplug::LabHardwareHotplug::new(
+                std::sync::Arc::new(fleet_storage_sqlite::LeaseRepository::new(
+                    store.pool().clone(),
+                )),
+                std::sync::Arc::new(fleet_storage_sqlite::LabRepository::new(
+                    store.pool().clone(),
+                )),
+                std::sync::Arc::new(fleet_controller::lab_hardware_hotplug::compose(
+                    store.pool(),
+                    match &secrets {
+                        Some(secrets) => std::sync::Arc::new(
+                            fleet_controller::proxmox_store::SecretBackedProxmoxCredentials::new(
+                                secrets.clone(),
+                            ),
+                        ),
+                        None => std::sync::Arc::new(
+                            fleet_controller::proxmox_store::AbsentProxmoxCredentials,
+                        ),
+                    },
+                    std::sync::Arc::new(fleet_provider_proxmox::ReqwestPveTransport::new()),
+                )),
+            ),
+        ));
         let lab = lab.with_pools(std::sync::Arc::new(
             fleet_application::lab_pool::LabPools::new(
                 std::sync::Arc::new(fleet_storage_sqlite::LabPoolRepository::new(
