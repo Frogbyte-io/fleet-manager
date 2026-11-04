@@ -355,6 +355,15 @@ fn run_serve(mut config: fleet_config::ControllerConfig) -> ExitCode {
                     .with_guest_links(std::sync::Arc::new(
                         fleet_storage_sqlite::GuestLinkRepository::new(store.pool().clone()),
                     ))
+                    // FM-1125: a marker whose guest holds a machine's USB
+                    // device is not unregistered.
+                    .with_hardware_gate(std::sync::Arc::new(
+                        fleet_application::machine_usb::StoreMachineHardwareGate::new(
+                            std::sync::Arc::new(fleet_storage_sqlite::HardwareRepository::new(
+                                store.pool().clone(),
+                            )),
+                        ),
+                    ))
                     .with_register_guard(std::sync::Arc::new(
                         fleet_controller::persistent_machines::ProxmoxRegisterGuard::new(
                             std::sync::Arc::new(fleet_storage_sqlite::ProxmoxAccountRepository::new(
@@ -1580,6 +1589,73 @@ fn run_serve(mut config: fleet_config::ControllerConfig) -> ExitCode {
                 )),
             ),
         ));
+        // FM-1125: a persistent machine reserves a device until it is
+        // explicitly detached. Needs the secret store (the Proxmox token and
+        // the registration guard's reads); without it the routes answer 503.
+        let lab = match &secrets {
+            Some(secrets) => {
+                let credentials: std::sync::Arc<
+                    dyn fleet_application::proxmox::ProxmoxCredentialStore,
+                > = std::sync::Arc::new(
+                    fleet_controller::proxmox_store::SecretBackedProxmoxCredentials::new(
+                        secrets.clone(),
+                    ),
+                );
+                let machine_records: std::sync::Arc<dyn fleet_application::machine::MachinePort> =
+                    std::sync::Arc::new(fleet_storage_sqlite::MachineRepository::new(
+                        store.pool().clone(),
+                    ));
+                let hardware: std::sync::Arc<dyn fleet_application::hardware::HardwareStore> =
+                    std::sync::Arc::new(fleet_storage_sqlite::HardwareRepository::new(
+                        store.pool().clone(),
+                    ));
+                let transport: std::sync::Arc<dyn fleet_provider_proxmox::PveTransport> =
+                    std::sync::Arc::new(fleet_provider_proxmox::ReqwestPveTransport::new());
+                lab.with_machine_usb(
+                    std::sync::Arc::new(fleet_application::machine_usb::MachineUsb::new(
+                        machine_records.clone(),
+                        std::sync::Arc::new(fleet_storage_sqlite::GuestLinkRepository::new(
+                            store.pool().clone(),
+                        )),
+                        persistent_guests.clone(),
+                        std::sync::Arc::new(
+                            fleet_controller::persistent_machines::ProxmoxRegisterGuard::new(
+                                std::sync::Arc::new(
+                                    fleet_storage_sqlite::ProxmoxAccountRepository::new(
+                                        store.pool().clone(),
+                                    ),
+                                ),
+                                credentials.clone(),
+                                fleet_provider_proxmox::ProxmoxClient::new(transport.clone()),
+                                std::sync::Arc::new(fleet_storage_sqlite::RecipeRepository::new(
+                                    store.pool().clone(),
+                                )),
+                            )
+                            .with_pool_members(std::sync::Arc::new(
+                                fleet_application::operation::PoolMembership(
+                                    std::sync::Arc::new(
+                                        fleet_storage_sqlite::LabPoolRepository::new(
+                                            store.pool().clone(),
+                                        ),
+                                    ),
+                                ),
+                            )),
+                        ),
+                        hardware.clone(),
+                        std::sync::Arc::new(fleet_controller::machine_usb::compose(
+                            store.pool(),
+                            credentials,
+                            transport,
+                            machine_records,
+                        )),
+                    )),
+                    std::sync::Arc::new(
+                        fleet_application::machine_usb::StoreMachineHardwareGate::new(hardware),
+                    ),
+                )
+            }
+            None => lab,
+        };
         let lab = lab.with_pools(std::sync::Arc::new(
             fleet_application::lab_pool::LabPools::new(
                 std::sync::Arc::new(fleet_storage_sqlite::LabPoolRepository::new(

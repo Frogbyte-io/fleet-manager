@@ -38,6 +38,7 @@ pub mod lab_ssh_keys;
 pub mod lab_sweeper;
 pub mod machine_access;
 pub mod machine_terminal;
+pub mod machine_usb;
 pub mod mise;
 pub mod node_crypto;
 pub mod onboard;
@@ -432,6 +433,13 @@ fn api_state(
         )
         .with_guest_links(std::sync::Arc::new(
             fleet_storage_sqlite::GuestLinkRepository::new(pool.clone()),
+        ))
+        // FM-1125: a machine that holds a USB device is detached before it
+        // is deleted.
+        .with_hardware_gate(std::sync::Arc::new(
+            fleet_application::machine_usb::StoreMachineHardwareGate::new(std::sync::Arc::new(
+                fleet_storage_sqlite::HardwareRepository::new(pool.clone()),
+            )),
         ));
         let system = ControllerSystemInfo { pool: pool.clone() };
         let audit = fleet_application::audit::AuditQueries::new(std::sync::Arc::new(

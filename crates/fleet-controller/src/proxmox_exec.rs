@@ -817,18 +817,33 @@ impl ProxmoxDestructiveExecutor {
                         })
                 });
                 if let Some(row) = held {
-                    complete_failure(
-                        operations,
-                        &operation.id,
-                        "hardware_attached",
-                        &format!(
+                    // A persistent machine's device is detached by its own
+                    // reviewed action; a Lab lease's by its cleanup.
+                    let message = if row.owner_kind == fleet_core::ReservationOwnerKind::Machine {
+                        let mapping = store
+                            .device(&row.device_id)
+                            .await
+                            .ok()
+                            .flatten()
+                            .map_or_else(|| "<mapping>".to_owned(), |device| device.mapping_id);
+                        format!(
+                            "VMID {} holds a USB device for machine {} (reservation {} is {}); detach it first with `fleetctl machines usb detach {} --mapping {mapping}`",
+                            payload.vmid,
+                            row.owner_id,
+                            row.id,
+                            row.state.id(),
+                            row.owner_id
+                        )
+                    } else {
+                        format!(
                             "VMID {} holds a USB device (reservation {} is {}); detach it first (a Lab lease's cleanup does, an operator confirms and releases it with hardware.override-release)",
                             payload.vmid,
                             row.id,
                             row.state.id()
-                        ),
-                    )
-                    .await?;
+                        )
+                    };
+                    complete_failure(operations, &operation.id, "hardware_attached", &message)
+                        .await?;
                     return Ok(true);
                 }
                 Ok(false)

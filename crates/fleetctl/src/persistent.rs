@@ -612,7 +612,7 @@ pub(crate) fn run_persistent_register(
 
 /// Asks for confirmation on a terminal. `--yes` skips it; without a terminal
 /// and without `--yes` the answer is no.
-fn confirm(yes: bool, question: &str) -> Result<(), CliError> {
+pub(crate) fn confirm(yes: bool, question: &str) -> Result<(), CliError> {
     use std::io::{BufRead as _, IsTerminal as _, Write as _};
     if yes {
         return Ok(());

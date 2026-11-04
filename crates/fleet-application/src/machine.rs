@@ -593,6 +593,7 @@ pub struct Machines {
     audit: Arc<dyn crate::operation::AuditPort>,
     guest_links: Option<Arc<dyn GuestLinkPort>>,
     keys: Option<Arc<dyn crate::machine_access::MachineKeyPort>>,
+    hardware: Option<Arc<dyn crate::machine_usb::MachineHardwareGate>>,
 }
 
 impl Machines {
@@ -604,7 +605,20 @@ impl Machines {
             audit,
             guest_links: None,
             keys: None,
+            hardware: None,
         }
+    }
+
+    /// Refuses to delete a machine that holds a USB device (FM-1125): the
+    /// reservation names the machine, so deleting it would leave a device on
+    /// a guest with nobody to detach it.
+    #[must_use]
+    pub fn with_hardware_gate(
+        mut self,
+        hardware: Arc<dyn crate::machine_usb::MachineHardwareGate>,
+    ) -> Self {
+        self.hardware = Some(hardware);
+        self
     }
 
     /// Deletes the keys and rotated passwords bound to a machine when the
@@ -1330,6 +1344,23 @@ impl Machines {
             },
         )
         .map_err(MachineUseCaseError::Denied)?;
+        // A machine that holds a USB device is not deleted: it is detached
+        // first, so the device is never left on a guest nobody answers for.
+        // A gate that cannot look fails closed.
+        if let Some(gate) = &self.hardware {
+            let holds =
+                gate.holds_of_machine(id)
+                    .await
+                    .map_err(|detail| MachineUseCaseError::Backend {
+                        context: "hardware_holds",
+                        detail,
+                    })?;
+            if let Some(hold) = holds.first() {
+                return Err(MachineUseCaseError::Conflict {
+                    detail: hold.refusal("delete the machine"),
+                });
+            }
+        }
         self.port
             .delete(id)
             .await

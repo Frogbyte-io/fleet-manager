@@ -1220,6 +1220,53 @@ fn destructive_permission(action: &str) -> fleet_application::authz::Permission 
     }
 }
 
+/// A destroy, snapshot revert or template conversion of a guest a persistent
+/// machine holds a USB device on is refused with the instruction to detach it
+/// first (FM-1125): the executor refuses it too, but only when the operation
+/// runs. A gate that cannot look fails closed.
+async fn refuse_machine_hardware(
+    state: &crate::operations::ApiState,
+    action: &str,
+    account_id: &str,
+    vmid: u32,
+    correlation_id: CorrelationId,
+) -> Result<(), ApiErrorResponse> {
+    if !matches!(action, "destroy" | "snapshot-revert" | "template") {
+        return Ok(());
+    }
+    let Some(gate) = state.lab.as_ref().and_then(|lab| lab.machine_hardware()) else {
+        return Ok(());
+    };
+    let holds = gate.holds_on_guest(account_id, vmid).await.map_err(|_| {
+        hardware_held_error(
+            "hardware_unreadable",
+            "the hardware reservations could not be read, so the guest is not changed; try again",
+            correlation_id,
+        )
+    })?;
+    match holds.first() {
+        Some(hold) => Err(hardware_held_error(
+            "hardware_attached",
+            &hold.refusal(&format!("{action} the guest")),
+            correlation_id,
+        )),
+        None => Ok(()),
+    }
+}
+
+fn hardware_held_error(
+    code: &str,
+    message: &str,
+    correlation_id: CorrelationId,
+) -> ApiErrorResponse {
+    let public = PublicError::new(
+        ErrorCode::from_str(code).expect("the literal is valid error code syntax"),
+        message.to_owned(),
+        RetryClass::Never,
+    );
+    ApiError::new(&public, correlation_id).with_status(StatusCode::CONFLICT)
+}
+
 /// Destroying a created persistent machine needs the reviewed
 /// `confirmPersistent` parameter. It is checked when the review and the run
 /// are made, so the operator learns at once, not when the worker fails the
@@ -1232,6 +1279,7 @@ async fn require_persistent_confirmation(
     params: &serde_json::Value,
     correlation_id: CorrelationId,
 ) -> Result<(), ApiErrorResponse> {
+    refuse_machine_hardware(state, action, account_id, vmid, correlation_id).await?;
     if action != "destroy" {
         return Ok(());
     }

@@ -9199,6 +9199,428 @@
         }
       }
     },
+    "/api/v1/machines/{machineId}/usb/attach": {
+      "post": {
+        "tags": [
+          "machines"
+        ],
+        "summary": "Attaches a reviewed device to the machine's guest and reserves it for the\nmachine until it is explicitly detached: a digest-conditional write of the\nmapping into a free `usbN` slot, read back before it is reported. The\ndevice is reserved first, fail fast (`hardware_busy`, never queued), and\nverified against the pinned fingerprint. An attach PVE would leave pending\n(the running guest's `hotplug` option lacks `usb`) is removed again and\nrefused as `hardware_attach_pending`: it is never reported as attached.\nAudited before the write.",
+        "description": "# Errors\n\nReturns the public error envelope on refusal, a review token that does\nnot match, an unknown machine, an ineligible guest, a device another owner\nholds, a failed verification of the device, or a failed write.",
+        "operationId": "attachMachineUsb",
+        "parameters": [
+          {
+            "name": "machineId",
+            "in": "path",
+            "description": "The machine's identity.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ExecuteMachineUsbRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "The device is on the guest and the read-back confirmed it (`attached`), or the reservation already said so (`already_attached`).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Resource_MachineUsbDto"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The mapping id is malformed, or the review token does not match.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The caller may not attach hardware to machines (`machines.usb.attach`).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "The machine does not exist.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Refused, with the reason as the error code: every review refusal, and `hardware_busy`, `hardware_in_progress`, `hardware_attach_unknown`, `hardware_detach_unconfirmed`, `hardware_guest_mismatch`, `hardware_attach_pending` (PVE would keep the attach pending until the guest restarts; nothing is attached and the entry was removed), `hardware_externally_attached`, `hardware_fingerprint_changed`, `hardware_missing`, `hardware_no_free_slot`, `hardware_attach_failed`, `hardware_attach_unrecorded` and the other `hardware_*` verification reasons.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "A backend port failed.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Machine USB is not wired.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/machines/{machineId}/usb/attach/review": {
+      "post": {
+        "tags": [
+          "machines"
+        ],
+        "summary": "Reviews attaching a USB device to a persistent machine: the machine must\nbe linked to a QEMU guest that carries a ready persistent marker (not a\nLab clone, template, image artifact or pool member), and the device must\nbe inventoried and not held by another owner. Answers the guest the\nattach will write to and the token that binds the attach call to this\nreview. Nothing is written.",
+        "description": "# Errors\n\nReturns the public error envelope on refusal, an unknown machine, a\nmachine without an eligible persistent guest, an unknown device or a\ndevice another owner holds (`hardware_busy`).",
+        "operationId": "reviewMachineUsbAttach",
+        "parameters": [
+          {
+            "name": "machineId",
+            "in": "path",
+            "description": "The machine's identity.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ReviewMachineUsbRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "The review record; present its token to the attach call.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Resource_MachineUsbReviewDto"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The mapping id is malformed.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The caller may not attach hardware to machines (`machines.usb.attach`).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "The machine does not exist.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Refused, with the reason as the error code: `machine_has_no_guest`, `machine_guest_not_qemu`, `machine_not_persistent`, `machine_not_ready`, `machine_guest_mismatch`, `guest_not_eligible` (a Lab clone, template, image artifact or pool member), `hardware_unknown` and `hardware_busy` (another owner holds the device; nothing is queued).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "A backend port failed.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Machine USB is not wired.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/machines/{machineId}/usb/detach": {
+      "post": {
+        "tags": [
+          "machines"
+        ],
+        "summary": "Detaches a reviewed device from the guest the machine's reservation\nrecorded and releases the reservation after the read-back confirmed the\ndevice is gone. The recorded `usbN` entry is deleted only when it holds\nexactly what Fleet wrote, and every `usbN` entry is read back before the\nanswer. A removal PVE leaves pending (the guest's `hotplug` option lacks\n`usb`) answers `detach_pending` with the device still attached and the\nreservation still held; repeat the detach once the guest restarted.\nAudited before the delete.",
+        "description": "# Errors\n\nReturns the public error envelope on refusal, a review token that does\nnot match, an unknown machine, a device the machine does not hold, or a\ndetach that failed or could not be confirmed (the machine keeps the\nreservation).",
+        "operationId": "detachMachineUsb",
+        "parameters": [
+          {
+            "name": "machineId",
+            "in": "path",
+            "description": "The machine's identity.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ExecuteMachineUsbRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "The device is off the guest, the read-back confirmed it and the reservation is released (`detached`), or it already was (`already_detached`).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Resource_MachineUsbDto"
+                }
+              }
+            }
+          },
+          "202": {
+            "description": "PVE stored the removal but the guest keeps the device until it restarts (`detach_pending`): the device is still attached and still reserved by the machine.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Resource_MachineUsbDto"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The mapping id is malformed, or the review token does not match.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The caller may not detach hardware from machines (`machines.usb.detach`).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "The machine does not exist.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Refused, with the reason as the error code: `hardware_not_reserved`, `hardware_attach_unknown`, `hardware_detach_failed` (PVE refused, the entry is not one Fleet wrote, or the read-back could not confirm it; the machine keeps the reservation) and `hardware_detach_unconfirmed`.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "A backend port failed.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Machine USB is not wired.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/machines/{machineId}/usb/detach/review": {
+      "post": {
+        "tags": [
+          "machines"
+        ],
+        "summary": "Reviews detaching a USB device from a persistent machine: the machine must\nhold the device. The answer names the reservation and the guest and slot\nit records, and the token that binds the detach call to this review.\nNothing is written.",
+        "description": "# Errors\n\nReturns the public error envelope on refusal, an unknown machine, or a\ndevice the machine does not hold (`hardware_not_reserved`).",
+        "operationId": "reviewMachineUsbDetach",
+        "parameters": [
+          {
+            "name": "machineId",
+            "in": "path",
+            "description": "The machine's identity.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ReviewMachineUsbRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "The review record; present its token to the detach call.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Resource_MachineUsbReviewDto"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The mapping id is malformed.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The caller may not detach hardware from machines (`machines.usb.detach`).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "The machine does not exist.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The machine does not hold the device (`hardware_not_reserved`).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "A backend port failed.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Machine USB is not wired.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/meta": {
       "get": {
         "tags": [
@@ -17670,6 +18092,25 @@
           }
         }
       },
+      "ExecuteMachineUsbRequest": {
+        "type": "object",
+        "description": "Which device to attach or detach, and the review it was reviewed in.",
+        "required": [
+          "mapping",
+          "reviewToken"
+        ],
+        "properties": {
+          "mapping": {
+            "type": "string",
+            "description": "The Proxmox USB resource mapping id of the device."
+          },
+          "reviewToken": {
+            "type": "string",
+            "description": "The token the review answered; it binds this call to the reviewed\nmachine, device and guest."
+          }
+        },
+        "additionalProperties": false
+      },
       "ExtendLeaseRequest": {
         "type": "object",
         "description": "The requested ready-TTL extension.",
@@ -20203,6 +20644,170 @@
           "requestId": {
             "type": "string",
             "description": "The action request that asked for it."
+          }
+        }
+      },
+      "MachineUsbDto": {
+        "type": "object",
+        "description": "What an attach or detach came to.",
+        "required": [
+          "machineId",
+          "mapping",
+          "outcome",
+          "onGuest",
+          "reservationId",
+          "reservationState",
+          "released"
+        ],
+        "properties": {
+          "machineId": {
+            "type": "string",
+            "description": "The machine."
+          },
+          "mapping": {
+            "type": "string",
+            "description": "The mapping id."
+          },
+          "onGuest": {
+            "type": "boolean",
+            "description": "Whether the guest has the device once the request is answered."
+          },
+          "outcome": {
+            "type": "string",
+            "description": "`attached` and `already_attached` (the guest has the device),\n`detached` and `already_detached` (it does not), or `detach_pending`:\nPVE stored the removal but the guest keeps the device until it\nrestarts (its `hotplug` option lacks `usb`), so the device is still\nattached and the reservation stays `detaching`. An attach PVE would\nleave pending is refused instead (`hardware_attach_pending`); it is\nnever reported as attached."
+          },
+          "released": {
+            "type": "boolean",
+            "description": "Whether the request released the reservation."
+          },
+          "reservationId": {
+            "type": "string",
+            "description": "The machine's reservation of the device."
+          },
+          "reservationState": {
+            "type": "string",
+            "description": "The reservation's state after the request: `attached`, `detaching`\n(a pending detach) or `released`."
+          },
+          "usbSlot": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The `usbN` slot the guest holds the device in, when it does."
+          }
+        }
+      },
+      "MachineUsbGuestDto": {
+        "type": "object",
+        "description": "The guest an attach writes to, as the review found it live.",
+        "required": [
+          "accountId",
+          "node",
+          "vmid",
+          "name"
+        ],
+        "properties": {
+          "accountId": {
+            "type": "string",
+            "description": "The Proxmox account."
+          },
+          "name": {
+            "type": "string",
+            "description": "The guest's name."
+          },
+          "node": {
+            "type": "string",
+            "description": "The node the guest is on."
+          },
+          "vmid": {
+            "type": "integer",
+            "format": "int32",
+            "description": "The guest's VMID.",
+            "minimum": 0
+          }
+        }
+      },
+      "MachineUsbReservationDto": {
+        "type": "object",
+        "description": "The machine's reservation of the device, when it has one.",
+        "required": [
+          "id",
+          "state"
+        ],
+        "properties": {
+          "guestVmid": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "The VMID of the guest it records, when it does.",
+            "minimum": 0
+          },
+          "id": {
+            "type": "string",
+            "description": "The reservation."
+          },
+          "state": {
+            "type": "string",
+            "description": "Its state: `held`, `attaching`, `attached`, `detaching`,\n`attach_unknown` or `detach_failed`."
+          },
+          "usbSlot": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The `usbN` slot it records, when it does."
+          }
+        }
+      },
+      "MachineUsbReviewDto": {
+        "type": "object",
+        "description": "What a review found, and the token that binds the execute call to it.",
+        "required": [
+          "reviewToken",
+          "action",
+          "machineId",
+          "mapping"
+        ],
+        "properties": {
+          "action": {
+            "type": "string",
+            "description": "`attach` or `detach`."
+          },
+          "guest": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/MachineUsbGuestDto",
+                "description": "The guest an attach writes to (a detach acts on the reservation's\nguest and names none)."
+              }
+            ]
+          },
+          "machineId": {
+            "type": "string",
+            "description": "The machine."
+          },
+          "mapping": {
+            "type": "string",
+            "description": "The mapping id."
+          },
+          "reservation": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/MachineUsbReservationDto",
+                "description": "The machine's reservation of the device, when it has one."
+              }
+            ]
+          },
+          "reviewToken": {
+            "type": "string",
+            "description": "The token the execute call must present."
           }
         }
       },
@@ -27948,6 +28553,124 @@
           }
         }
       },
+      "Resource_MachineUsbDto": {
+        "type": "object",
+        "description": "A single resource.\n\nThe payload is nested under `data` so that later top-level fields are an\nadditive change rather than a breaking one.",
+        "required": [
+          "data"
+        ],
+        "properties": {
+          "data": {
+            "type": "object",
+            "description": "What an attach or detach came to.",
+            "required": [
+              "machineId",
+              "mapping",
+              "outcome",
+              "onGuest",
+              "reservationId",
+              "reservationState",
+              "released"
+            ],
+            "properties": {
+              "machineId": {
+                "type": "string",
+                "description": "The machine."
+              },
+              "mapping": {
+                "type": "string",
+                "description": "The mapping id."
+              },
+              "onGuest": {
+                "type": "boolean",
+                "description": "Whether the guest has the device once the request is answered."
+              },
+              "outcome": {
+                "type": "string",
+                "description": "`attached` and `already_attached` (the guest has the device),\n`detached` and `already_detached` (it does not), or `detach_pending`:\nPVE stored the removal but the guest keeps the device until it\nrestarts (its `hotplug` option lacks `usb`), so the device is still\nattached and the reservation stays `detaching`. An attach PVE would\nleave pending is refused instead (`hardware_attach_pending`); it is\nnever reported as attached."
+              },
+              "released": {
+                "type": "boolean",
+                "description": "Whether the request released the reservation."
+              },
+              "reservationId": {
+                "type": "string",
+                "description": "The machine's reservation of the device."
+              },
+              "reservationState": {
+                "type": "string",
+                "description": "The reservation's state after the request: `attached`, `detaching`\n(a pending detach) or `released`."
+              },
+              "usbSlot": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "description": "The `usbN` slot the guest holds the device in, when it does."
+              }
+            }
+          }
+        }
+      },
+      "Resource_MachineUsbReviewDto": {
+        "type": "object",
+        "description": "A single resource.\n\nThe payload is nested under `data` so that later top-level fields are an\nadditive change rather than a breaking one.",
+        "required": [
+          "data"
+        ],
+        "properties": {
+          "data": {
+            "type": "object",
+            "description": "What a review found, and the token that binds the execute call to it.",
+            "required": [
+              "reviewToken",
+              "action",
+              "machineId",
+              "mapping"
+            ],
+            "properties": {
+              "action": {
+                "type": "string",
+                "description": "`attach` or `detach`."
+              },
+              "guest": {
+                "oneOf": [
+                  {
+                    "type": "null"
+                  },
+                  {
+                    "$ref": "#/components/schemas/MachineUsbGuestDto",
+                    "description": "The guest an attach writes to (a detach acts on the reservation's\nguest and names none)."
+                  }
+                ]
+              },
+              "machineId": {
+                "type": "string",
+                "description": "The machine."
+              },
+              "mapping": {
+                "type": "string",
+                "description": "The mapping id."
+              },
+              "reservation": {
+                "oneOf": [
+                  {
+                    "type": "null"
+                  },
+                  {
+                    "$ref": "#/components/schemas/MachineUsbReservationDto",
+                    "description": "The machine's reservation of the device, when it has one."
+                  }
+                ]
+              },
+              "reviewToken": {
+                "type": "string",
+                "description": "The token the execute call must present."
+              }
+            }
+          }
+        }
+      },
       "Resource_Meta": {
         "type": "object",
         "description": "A single resource.\n\nThe payload is nested under `data` so that later top-level fields are an\nadditive change rather than a breaking one.",
@@ -29807,6 +30530,20 @@
             "description": "The machine to create: account, promoted image version, name, optional\nplacement and hardware, tags, description, `onboot`, `protection`\n(default on), the guest OS, the bootstrap login, the host-key trust,\nthe SSH credential choice (`generate`, `reference` or `publicKey`),\nan optional login user, the Windows options (administrator password\npolicy and activation) and the deadline. It holds references and\npublic keys only, never a secret value."
           }
         }
+      },
+      "ReviewMachineUsbRequest": {
+        "type": "object",
+        "description": "Which device to review.",
+        "required": [
+          "mapping"
+        ],
+        "properties": {
+          "mapping": {
+            "type": "string",
+            "description": "The Proxmox USB resource mapping id of the device."
+          }
+        },
+        "additionalProperties": false
       },
       "ReviewProxmoxOperationRequest": {
         "type": "object",
