@@ -403,7 +403,7 @@ destroy the guest or free the device yourself.
 | `reason` (attach step) | What you do |
 | --- | --- |
 | `hardware_fingerprint_changed`, `hardware_scan_incomplete`, `hardware_verify_failed` | The device moved or the cluster could not be read in full at the last check. Run `hardware refresh --account <account-id>` once and lease again once; otherwise tell the user |
-| `hardware_guests_unverifiable` | Fleet cannot show that its Proxmox token can see every guest, so a device might already be in use on a guest it cannot see. Nothing was written. If the message says `cross_check_unavailable` the check failed transiently: run `hardware refresh --account <account-id>` and lease again once. Otherwise tell the user that the operator must grant the Fleet credential `VM.Audit` on every guest, and do not retry |
+| `hardware_guests_unverifiable` | Fleet cannot show that its Proxmox token can see every guest, so a device might already be in use on a guest it cannot see. Nothing was written. If the message says `cross_check_unavailable` the check failed transiently, so run `hardware refresh --account <account-id>` and lease again once. Otherwise tell the user that the operator must grant the Fleet credential `VM.Audit` on every guest, and do not retry |
 | `hardware_attach_failed`, `hardware_no_free_slot`, `hardware_attach_pending`, `hardware_lease_ended` | The write was refused or could not be applied; the message says why. Tell the user; do not retry in a loop |
 | `hardware_attach_unknown` | The outcome could not be determined; cleanup resolves it, or it needs an operator. Tell the user |
 
