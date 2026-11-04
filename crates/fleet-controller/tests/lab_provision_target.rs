@@ -1104,6 +1104,16 @@ impl Harness {
     /// A requested lease with its linked, freshly created record.
     async fn record(&self) -> (String, ProvisionRecord) {
         let now = fleet_core::SystemClock::now_unix_millis();
+        // Each run has a fake cluster of its own, so a guest an earlier run
+        // reserved or cloned is gone with its cluster: those leases are over.
+        // Only a released lease frees the VMID its record names (#592).
+        sqlx::query(
+            "UPDATE lab_leases SET state = 'released' WHERE id IN \
+             (SELECT lease_id FROM lab_provisions WHERE vmid IS NOT NULL AND lease_id IS NOT NULL)",
+        )
+        .execute(&self.pool)
+        .await
+        .unwrap();
         let lease = self
             .leases
             .create(
