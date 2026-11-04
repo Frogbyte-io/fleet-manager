@@ -747,6 +747,9 @@ fn run_serve(mut config: fleet_config::ControllerConfig) -> ExitCode {
                         .with_image_artifacts(std::sync::Arc::new(
                             fleet_storage_sqlite::RecipeRepository::new(store.pool().clone()),
                         ))
+                        .with_hardware_guard(std::sync::Arc::new(
+                            fleet_storage_sqlite::HardwareRepository::new(store.pool().clone()),
+                        ))
                         .with_pool_members(std::sync::Arc::new(
                             fleet_application::operation::PoolMembership(std::sync::Arc::new(
                                 fleet_storage_sqlite::LabPoolRepository::new(store.pool().clone()),
@@ -901,6 +904,54 @@ fn run_serve(mut config: fleet_config::ControllerConfig) -> ExitCode {
                         fleet_application::hardware_inventory::DEFAULT_OBSERVATION_MAX_AGE_MS,
                     ),
                 );
+                // FM-1123: the saga that attaches the reserved devices to the
+                // clone before it starts and detaches them in cleanup,
+                // re-observing through the same inventory the API reads.
+                let lab_device_saga = {
+                    let hardware_store: std::sync::Arc<
+                        dyn fleet_application::hardware::HardwareStore,
+                    > = std::sync::Arc::new(fleet_storage_sqlite::HardwareRepository::new(
+                        store.pool().clone(),
+                    ));
+                    let saga_audit: std::sync::Arc<dyn fleet_application::operation::AuditPort> =
+                        std::sync::Arc::new(fleet_storage_sqlite::AuditSink::new(
+                            store.pool().clone(),
+                        ));
+                    let saga_client =
+                        fleet_provider_proxmox::ProxmoxClient::new(pve_transport.clone());
+                    std::sync::Arc::new(fleet_controller::lab_hardware::LabHardwareSaga::new(
+                        lab_accounts.clone(),
+                        lab_credentials.clone(),
+                        saga_client.clone(),
+                        hardware_store.clone(),
+                        std::sync::Arc::new(
+                            fleet_application::hardware_reservation::HardwareReservations::new(
+                                std::sync::Arc::new(
+                                    fleet_controller::hardware_reservation_store::SqliteHardwareReservations::new(
+                                        store.pool().clone(),
+                                    ),
+                                ),
+                                saga_audit.clone(),
+                            ),
+                        ),
+                        std::sync::Arc::new(
+                            fleet_application::hardware_inventory::HardwareInventory::new(
+                                lab_accounts.clone(),
+                                lab_credentials.clone(),
+                                hardware_store,
+                                fleet_controller::hardware_observer::shared(saga_client),
+                                saga_audit.clone(),
+                            ),
+                        ),
+                        saga_audit,
+                        lab_leases.clone(),
+                        std::sync::Arc::new(
+                            fleet_controller::lab_hardware::SqliteFingerprintPins::new(
+                                store.pool().clone(),
+                            ),
+                        ),
+                    ))
+                };
                 let lab_placement_policy = fleet_application::lab_placement::PlacementPolicy {
                     memory_overcommit: config.lab_placement.memory_overcommit,
                     cpu_overcommit: config.lab_placement.cpu_overcommit,
@@ -926,6 +977,9 @@ fn run_serve(mut config: fleet_config::ControllerConfig) -> ExitCode {
                     )
                     .with_image_artifacts(std::sync::Arc::new(
                         fleet_storage_sqlite::RecipeRepository::new(store.pool().clone()),
+                    ))
+                    .with_hardware_guard(std::sync::Arc::new(
+                        fleet_storage_sqlite::HardwareRepository::new(store.pool().clone()),
                     ))
                     .with_pool_members(std::sync::Arc::new(
                         fleet_application::operation::PoolMembership(std::sync::Arc::new(
@@ -972,6 +1026,7 @@ fn run_serve(mut config: fleet_config::ControllerConfig) -> ExitCode {
                     )
                     .with_reservations(lab_capacity.clone())
                     .with_devices(lab_devices.clone())
+                    .with_device_saga(lab_device_saga.clone())
                     .with_pools(
                         lab_pools.clone(),
                         lab_pool_guests.clone(),
@@ -1053,6 +1108,7 @@ fn run_serve(mut config: fleet_config::ControllerConfig) -> ExitCode {
                                 lab_placement_policy,
                             )
                             .with_device_placement(lab_devices)
+                            .with_device_saga(lab_device_saga)
                             .with_pools(lab_pools)
                             .with_login_keys(lab_login_keys.clone()),
                         ),

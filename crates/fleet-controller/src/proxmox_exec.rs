@@ -444,6 +444,7 @@ pub struct ProxmoxDestructiveExecutor {
     pool_members: Option<Arc<dyn fleet_application::operation::PoolMemberLookup>>,
     persistent: Option<Arc<dyn fleet_application::persistent::PersistentGuestPort>>,
     audit: Option<Arc<dyn fleet_application::operation::AuditPort>>,
+    hardware: Option<Arc<dyn fleet_application::hardware::HardwareStore>>,
 }
 
 impl ProxmoxDestructiveExecutor {
@@ -461,6 +462,7 @@ impl ProxmoxDestructiveExecutor {
             links: None,
             artifacts: None,
             pool_members: None,
+            hardware: None,
             persistent: None,
             audit: None,
         }
@@ -604,6 +606,80 @@ impl ProxmoxDestructiveExecutor {
         self
     }
 
+    /// Supplies the hardware reservations (FM-1123, ADR 0019 decision 5): a
+    /// destroy, snapshot revert or template conversion of a guest that holds
+    /// a reserved device (a reservation that is not merely `held`) is
+    /// refused until the Lab saga or an operator has detached it, because a
+    /// revert restores the snapshot's `usbN` set, a template's clones inherit
+    /// it, and a destroy would free a device nobody confirmed. Without it
+    /// the executor does not check, so every production construction site
+    /// must supply it.
+    #[must_use]
+    pub fn with_hardware_guard(
+        mut self,
+        hardware: Arc<dyn fleet_application::hardware::HardwareStore>,
+    ) -> Self {
+        self.hardware = Some(hardware);
+        self
+    }
+
+    /// Refuses (by completing the operation as failed) a destroy, revert or
+    /// template conversion of a guest a live, attached or unconfirmed
+    /// hardware reservation references. Answers whether the operation ended
+    /// here.
+    async fn refuse_held_hardware(
+        &self,
+        operations: &Operations,
+        operation: &Operation,
+        payload: &DestructivePayload,
+    ) -> Result<bool, String> {
+        let Some(store) = &self.hardware else {
+            return Ok(false);
+        };
+        if !matches!(
+            operation.kind.as_str(),
+            "proxmox.guest.destroy" | "proxmox.guest.snapshot-revert" | "proxmox.guest.template"
+        ) {
+            return Ok(false);
+        }
+        match store.list_live_reservations().await {
+            Ok(rows) => {
+                let held = rows.iter().find(|row| {
+                    row.state != fleet_core::HardwareReservationState::Held
+                        && row.guest.as_ref().is_some_and(|guest| {
+                            guest.account_id == payload.account_id && guest.vmid == payload.vmid
+                        })
+                });
+                if let Some(row) = held {
+                    complete_failure(
+                        operations,
+                        &operation.id,
+                        "hardware_attached",
+                        &format!(
+                            "VMID {} holds a USB device (reservation {} is {}); detach it first (a Lab lease's cleanup does, an operator confirms and releases it with hardware.override-release)",
+                            payload.vmid,
+                            row.id,
+                            row.state.id()
+                        ),
+                    )
+                    .await?;
+                    return Ok(true);
+                }
+                Ok(false)
+            }
+            Err(error) => {
+                complete_failure(
+                    operations,
+                    &operation.id,
+                    "hardware_unreadable",
+                    &format!("the hardware reservations could not be read: {error}"),
+                )
+                .await?;
+                Ok(true)
+            }
+        }
+    }
+
     /// The pool the target belongs to, when it is a member. A membership
     /// that cannot be read is an error: the caller fails closed.
     async fn pool_of_target(&self, payload: &DestructivePayload) -> Result<Option<String>, String> {
@@ -685,6 +761,12 @@ impl OperationExecutor for ProxmoxDestructiveExecutor {
         let payload: DestructivePayload = payload(operation)?;
         if self
             .refuse_pool_member(operations, operation, &payload)
+            .await?
+        {
+            return Ok(());
+        }
+        if self
+            .refuse_held_hardware(operations, operation, &payload)
             .await?
         {
             return Ok(());
@@ -2689,6 +2771,9 @@ pub struct ProvisionExecutor {
     /// Reserves the physical devices a template declares (FM-1121). Not to
     /// be confused with the CPU, memory, and disk "hardware" step above.
     devices: Option<Arc<fleet_application::lab_placement::HardwarePlacement>>,
+    /// Attaches the devices placement reserved, before the guest starts
+    /// (FM-1123).
+    device_saga: Option<Arc<crate::lab_hardware::LabHardwareSaga>>,
 }
 
 /// The placement and capacity reservation parts (FM-715).
@@ -2778,6 +2863,7 @@ impl ProvisionExecutor {
             persistent: None,
             login_keys: None,
             devices: None,
+            device_saga: None,
         }
     }
 
@@ -2793,6 +2879,17 @@ impl ProvisionExecutor {
         devices: Arc<fleet_application::lab_placement::HardwarePlacement>,
     ) -> Self {
         self.devices = Some(devices);
+        self
+    }
+
+    /// Enables the attach of the devices a lease reserved (FM-1123): after
+    /// the clone's hardware step and before the start, each device is
+    /// re-observed, verified against its fingerprint, and attached to the
+    /// clone, with compensation. Without it a lease whose template declares
+    /// hardware reserves the devices but attaches nothing.
+    #[must_use]
+    pub fn with_device_saga(mut self, saga: Arc<crate::lab_hardware::LabHardwareSaga>) -> Self {
+        self.device_saga = Some(saga);
         self
     }
 
@@ -4359,6 +4456,45 @@ impl ProvisionExecutor {
             .map_err(|refusal| Refusal::new(refusal.reason(), refusal.to_string())))
     }
 
+    /// Attaches the devices the lease reserved to its clone (FM-1123; the
+    /// work is [`crate::lab_hardware::LabHardwareSaga`]'s). The outer error
+    /// is an infrastructure failure; the inner one a classified refusal.
+    #[allow(clippy::too_many_arguments)]
+    async fn attach_devices(
+        &self,
+        operations: &Operations,
+        operation_id: &str,
+        lease_id: &str,
+        account_id: &str,
+        node: &str,
+        vmid: u32,
+        content: &fleet_core::LabTemplateContent,
+    ) -> Result<Result<(), Refusal>, String> {
+        let Some(saga) = &self.device_saga else {
+            return Ok(Ok(()));
+        };
+        match saga
+            .attach_for_lease(
+                operations,
+                &crate::lab_hardware::LeaseGuest {
+                    lease_id,
+                    account_id,
+                    node,
+                    vmid,
+                    operation_id,
+                },
+                &content.hardware,
+            )
+            .await
+        {
+            Ok(()) => Ok(Ok(())),
+            Err(crate::lab_hardware::AttachFailure::Refused { reason, detail }) => {
+                Ok(Err(Refusal::new(reason, detail)))
+            }
+            Err(crate::lab_hardware::AttachFailure::Infrastructure(detail)) => Err(detail),
+        }
+    }
+
     /// Reserves the physical devices the template declares for the record's
     /// lease (FM-1121), on `node`, the node the clone runs on. Nothing here
     /// calls Proxmox: the attach is the saga's. A template that declares
@@ -4410,6 +4546,17 @@ impl ProvisionExecutor {
             )
             .await
             .map_err(|error| format!("the hardware reservation failed: {error}"))?;
+        // FM-1123: the fingerprint each device has now is what the attach
+        // verifies against, minutes later, whatever a refresh records between.
+        if outcome.is_ok()
+            && let Some(saga) = &self.device_saga
+        {
+            saga.pin_fingerprints(lease_id, account_id, node, &content.hardware)
+                .await
+                .map_err(|error| {
+                    format!("the device fingerprints could not be recorded: {error}")
+                })?;
+        }
         Ok(match outcome {
             Ok(_) => Ok(()),
             Err(refusal) => {
@@ -5068,6 +5215,33 @@ impl ProvisionExecutor {
         {
             return self
                 .fail_at(operations, &operation.id, &record.id, "ssh_key", &refusal)
+                .await;
+        }
+
+        // Step 1e (FM-1123): the devices the lease reserved are attached to
+        // the clone, verified, before anything starts it. A pool member never
+        // gets here with hardware (refused above).
+        if pooled.is_none()
+            && let Err(refusal) = self
+                .attach_devices(
+                    operations,
+                    &operation.id,
+                    &lease_id,
+                    &account_id,
+                    &node,
+                    vmid,
+                    &version.content,
+                )
+                .await?
+        {
+            return self
+                .fail_at(
+                    operations,
+                    &operation.id,
+                    &record.id,
+                    crate::lab_hardware::ATTACH_STEP,
+                    &refusal,
+                )
                 .await;
         }
 

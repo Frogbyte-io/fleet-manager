@@ -379,13 +379,22 @@ twice.
 | `hardware_externally_attached`, `hardware_quarantined` | Someone else's guest has it, or an attach or detach failed. Tell the user; do not try to free it |
 | `hardware_pool_unsupported` | The version is pooled; hardware does not work with a pool. Choose another version |
 
-**Not yet end to end:** until the attach saga ships, a lease with hardware only
-reserves the device. `lab status <lease-id>` shows it in `hardware[]` with
-`reservation.state` `held` and `usbSlot` null, and the guest does not have the
-device. Do not read `held` as attached and do not run a test that needs the
-device; report that the attach is not available yet. Once the saga ships, the
-lease attaches the device before the guest starts. Destroy the lease as usual; its
-cleanup releases the reservation.
+**End to end.** A lease with hardware is `ready` only after the device is
+attached to its guest: `lab status <lease-id>` shows it in `hardware[]` with
+`reservation.state` `attached` and `usbSlot` set. `held` means reserved and not
+yet attached (the lease is still provisioning, or it failed before the attach).
+If the attach fails the provision fails at the `usb_attach` step with a reason
+in `errorJson` (below), the guest is never started, and the lease cleans itself
+up. Destroy the lease as usual: its cleanup detaches the device first. If the
+cleanup cannot confirm the detach (the device is quarantined, the lease sits in
+cleanup retry), the guest is kept on purpose: tell the user, and do not try to
+destroy the guest or free the device yourself.
+
+| `reason` (attach step) | What you do |
+| --- | --- |
+| `hardware_fingerprint_changed`, `hardware_scan_incomplete`, `hardware_verify_failed` | The device moved or the cluster could not be read in full at the last check. Run `hardware refresh --account <account-id>` once and lease again once; otherwise tell the user |
+| `hardware_attach_failed`, `hardware_no_free_slot`, `hardware_attach_pending`, `hardware_lease_ended` | The write was refused or could not be applied; the message says why. Tell the user; do not retry in a loop |
+| `hardware_attach_unknown` | The outcome could not be determined; cleanup resolves it, or it needs an operator. Tell the user |
 
 ## Registry
 
