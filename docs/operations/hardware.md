@@ -1,6 +1,6 @@
 # Hardware-in-the-loop runbook: USB devices in Lab leases
 
-Status: **draft, written before any live run** (FM-1133, [#577](https://github.com/Frogbyte-io/fleet-manager/issues/577)). **No live run has happened.** Every behaviour below comes from the code, the fake-PVE test suites, the merged pull-request descriptions, and the FM-S11 measurements in [`docs/research/proxmox-usb.md`](../research/proxmox-usb.md). Nothing here has been exercised against real hardware through Fleet. The recorded run belongs in [`docs/planning/m11-acceptance.md`](../planning/m11-acceptance.md), which is a blank template until that run exists; what is still unmeasured is listed there.
+Status: **partly validated on real hardware, 2026-11-04** (FM-1133, [#577](https://github.com/Frogbyte-io/fleet-manager/issues/577)). One live run on the integration host exercised steps 1 to 4, the reserve and attach of step 6, the detach-before-destroy of step 8, the unknown-mapping variant F1 and the narrowed-grant question of step 3. It stopped at a Lab guest that never reported an address, so steps 7 and 10, the other failure variants, step 12 and step 13 have **not** been run. Text marked **Measured** below comes from that run; everything not so marked still comes from the code, the fake-PVE test suites, the merged pull-request descriptions and the FM-S11 measurements in [`docs/research/proxmox-usb.md`](../research/proxmox-usb.md). The record, with what is still unmeasured, is [`docs/planning/m11-acceptance.md`](../planning/m11-acceptance.md).
 
 This is the operator's end-to-end walk through the USB workflow: create the Proxmox mapping, let Fleet list it, lease a guest that declares it, run a test, clean up, then the failure, hotplug, contention and recovery variants. The reference material stays where it is: the design is [ADR 0019](../adr/0019-usb-device-allocation.md) and the [M11 plan](../planning/m11-usb-hardware.md); the refusal table, the reconciler and the override-release runbook are in [Lab operations, USB hardware](lab.md#usb-hardware); the token role is in [proxmox-token.md](proxmox-token.md). This page does not repeat them; it sequences them and says what to look for at each step.
 
@@ -15,8 +15,8 @@ The only live devices for this work are the two SuperDrive test mappings on the 
 
 (The Verbatim mapping `fm-test-verbatim` also exists, but this runbook does not need it.)
 
-- **The Decker mapping (`decker`) and VM 200 are never touched.** No template, lease, hotplug request, override or manual command in this runbook names either. The Decker is attached to VM 200 by hand for Dot X work and must stay so. Fleet will show it as `externally_attached`; the runbook only *looks* at that (step 11).
-- **Reading is not touching, but say it out loud.** `fleetctl hardware refresh` reads every guest config in the account's cluster, VM 200's included, through the Fleet token, and writes nothing to Proxmox. That read is what makes the Decker show as `externally_attached`. If even a config read of VM 200 is unacceptable for a given run, do not refresh that account until the maintainer says so.
+- **The Decker mapping (`decker`) and VM 200 are never touched.** No template, lease, hotplug request, override or manual command in this runbook names either. The Decker is attached to VM 200 by hand for Dot X work and must stay so. Fleet shows it as `externally_attached` **only if the Fleet token can audit that guest**; the runbook only *looks* at that (step 11). **Measured:** with the integration host's test token, which has an explicit `NoAccess` ACL on VM 200, the Decker reads `available`, because the guest is invisible to the token ([#596](https://github.com/Frogbyte-io/fleet-manager/issues/596)).
+- **Reading is not touching, but say it out loud.** `fleetctl hardware refresh` reads every guest config the token can audit, and writes nothing to Proxmox. If the token can see VM 200, that read is what makes the Decker show as `externally_attached`. If even a config read of VM 200 is unacceptable for a given run, do not refresh that account until the maintainer says so, or keep the token blind to it with a `NoAccess` ACL and accept that the Decker then reads `available`.
 - **Physical host only after authorization.** The nested test cluster's `node-a` has an unresolved address conflict with VM 200 (its fixed address is leased to VM 200 on the host; see [What was not measured](../research/proxmox-usb.md#what-was-not-measured)). Do not start it for this work. The live run uses the physical host, and only after the maintainer has authorized it. Record the authorization in the acceptance document's header before step 1. Until then everything below is a plan.
 - **Sanitize everything you record.** No real serials (the PVE API returns none anyway), hostnames, IP addresses, MAC addresses, tokens or certificate fingerprints. Use the placeholders below.
 
@@ -53,11 +53,14 @@ It does **not** prove anything about persistent machines (FM-1125 is separate), 
 ## Before you start
 
 1. **Maintainer authorization** for the physical host is recorded (see above).
-2. **Fleet controller** is a build that includes the saga, the reconciler, the override release and the hotplug routes (FM-1123, FM-1124, FM-1126). Confirm `fleetctl hardware --help` and `fleetctl lab hardware --help` print usage. Do not deploy hardware templates to a controller without them: a crash in the milliseconds between a PVE write and its record leaves a row only the override release or a maintainer can clear.
+2. **Fleet controller** is a build that includes the saga, the reconciler, the override release and the hotplug routes (FM-1123, FM-1124, FM-1126). Confirm `fleetctl hardware --help` and `fleetctl lab hardware --help` print usage. Do not deploy hardware templates to a controller without them: a crash in the milliseconds between a PVE write and its record leaves a row only the override release or a maintainer can clear. A run does not need the production controller: **measured**, an isolated controller works against the physical host with `FLEET_LISTEN=127.0.0.1:<port> FLEET_DATA_DIR=<empty temp dir> FLEET_MASTER_KEY_FILE=<0600 file containing "1 <64 hex characters>"> FLEET_WEB_DIST=<a dir with an index.html> fleet-controller serve` and `fleetctl --url http://127.0.0.1:<port>`. Without Packer's build (see item 3), the image must be seeded in that controller's store while it is stopped, as `crates/fleet-controller/tests/lab_failure_injection.rs` does for the Lab live scenarios; the live run did so for template 7000 and recorded it as a deviation in the acceptance document.
 3. **A trusted Fleet Proxmox account** for the integration host exists and has the Lab tier working (an ordinary `lab create` without hardware succeeds). `fleetctl --output json proxmox accounts` shows it with a confirmed fingerprint.
 4. **A Lab image whose guest has USB support.** The acceptance template used for FM-S11 had a cloud kernel with no USB drivers; the spike installed the stock `linux-image-amd64` and `usbutils` on its throwaway guest so `lsusb` could show the device. The test in step 7 needs the same: a guest kernel with USB host drivers and `usbutils` (`lsusb`). Build or choose such an image first. This is an assumption the run has to confirm, not something measured for Fleet's Lab images.
 5. **The guest's `hotplug` option includes `usb`** (the Proxmox default is `network,disk,usb`). Steps 7 to 10 assume it; the variant in step 9 changes it on purpose.
 6. **No guest references either test mapping.** Check by hand in Proxmox (read only) that neither `fm-test-superdrive-a` nor `-b` appears in any guest's `usbN` entry. If one does, Fleet will (correctly) show it `externally_attached` and refuse it.
+7. **A plain lease reaches `ready` first.** Run `lab create <version-id>` for a template **without** `hardware` and confirm the guest gets an address and the lease is `ready` before any hardware lease. **Measured:** the first hardware lease of the live run, on a guest cloned from the integration host's template 7000, failed after the full readiness deadline at step `guest_ip` (`never_ready`), the guest never having reported an address; the device had been attached and was detached again correctly, but nothing after the attach could be tested. Do not spend a device lease on an image you have not proven.
+8. **Know which VMID Lab will take.** Lab takes each clone's VMID from `GET /cluster/nextid`. **Measured:** the integration host sets no `next-id` range, so the clone got VMID 102 (the lowest free number), not a scratch range. Either set the range (`pvesh set /cluster/options --next-id lower=<n>,upper=<m>`, see [the VMID ranges](lab.md#vmid-ranges)) or accept that the clone lands on the lowest free number, and make sure the token's ACLs cover (and protect) every VMID that can occur.
+9. **Know which guests the token can see.** Fleet only knows a device is attached to a guest it can audit. A guest hidden from the token by a `NoAccess` ACL (or by a missing `VM.Audit`) is not in the scan, and the scan still reads complete; a device attached there reads `available` ([#596](https://github.com/Frogbyte-io/fleet-manager/issues/596)). For the run to mean anything, the token must be able to audit every guest that could reference a test mapping. Also check what the token holds on guests created after it was set up: **measured**, the test token held `PVEVMAdmin` on five later guests (the Windows fixtures and a runner) until `NoAccess` was added.
 
 ## 1. Read-only pre-flight
 
@@ -67,7 +70,9 @@ fleetctl --output json proxmox privileges <account-id>
 fleetctl --output json hardware list --account <account-id>
 ```
 
-Expect: the account is trusted; `privileges` shows the `usb.read-mappings`, `usb.attach-*` and `usb.detach-*` opt-in checks and is expected, before step 3, to report them missing (see [Verify with `fleetctl proxmox privileges`](proxmox-token.md#verify-with-fleetctl-proxmox-privileges)); `hardware list` is empty or lists only devices from an earlier refresh. An empty list means nothing has been refreshed, not that there are no devices. These three commands change nothing.
+Expect: the account is trusted; `privileges` shows the opt-in checks `usb.read-mappings`, `usb.attach-guest`, `usb.attach-mapping`, `usb.detach-guest` and `usb.detach-mapping` (the `requirement` field; their `capability` is `read.usb-mappings`, `usb.attach` and `usb.detach`); `hardware list` is empty or lists only devices from an earlier refresh. An empty list means nothing has been refreshed, not that there are no devices. These three commands change nothing. See [Verify with `fleetctl proxmox privileges`](proxmox-token.md#verify-with-fleetctl-proxmox-privileges).
+
+**Measured**, before step 3, with a token that has `PVEAuditor` on `/` and `PVEVMAdmin` on `/vms`: `usb.read-mappings` is `granted` (it is part of `PVEAuditor`), `usb.attach-guest` and `usb.detach-guest` are `granted` (`PVEVMAdmin` holds `VM.Config.HWType`), and `usb.attach-mapping` and `usb.detach-mapping` are `missing` (`Mapping.Use`). They are `required: false`, so the `lab` tier still reads `granted`: do not take a green tier as proof the devices are usable. A first `hardware refresh` in that state reads every mapping `unsupported` with `token_lacks_mapping_use`, as the table in step 4 says.
 
 Record the output in the acceptance document (sanitized).
 
@@ -97,7 +102,7 @@ Notes, all from FM-S11:
   An empty `errors` list for both mappings means the device is present at that port and matches. `usb device '<bus-port>' not found` or `'id' does not match` means fix the mapping now, before Fleet reads it.
 - One entry per node per mapping. Two entries for one node are accepted and refused at attach.
 - The mapping id becomes `usbN: mapping=<id>`: letters, digits, `-`, `_`, `.`, 1 to 64 characters.
-- The `pvesh` form above is the documented API path, but it was not re-run for this draft. If the flags differ on your PVE version, use the web UI.
+- The `pvesh create` form above is the documented API path, but no run has executed it (the live run found the test mappings already created, in the FM-S11 spike). If the flags differ on your PVE version, use the web UI. **Measured:** `pvesh get /cluster/mapping/usb --check-node <node>` works as written and, for the three test mappings and the Decker's, answered `errors: []` while the devices sat at their ports.
 
 Record the mapping definitions (ids and `node=…,id=…,path=…` with the ports as placeholders) and the `check-node` output.
 
@@ -114,12 +119,15 @@ for who in "--users fleet@pve" "--tokens fleet@pve!fleet"; do
 done
 ```
 
-Decisions for the maintainer, because the safe choice is not measured:
+Decisions for the maintainer:
 
-- **`/mapping/usb` grants `Mapping.Use` on every mapping, the Decker's included.** Fleet's code never writes `decker`, and no template here names it, but the token could attach it. Narrowing the grant to `/mapping/usb/fm-test-superdrive-a` and `…-b` would keep the Decker out of the token's reach, but [proxmox-token.md](proxmox-token.md) says narrowing is **not measured** for `?check-node=`, which Fleet uses for presence: the devices may read `unsupported` (`usb_inventory_unreadable`). `Mapping.Audit` on `/mapping/usb` is still needed to list mappings at all. Either decide to accept the broad grant for the run, or try the narrow one first and record what Fleet reports. Do not guess; write the choice and the result into the acceptance document.
-- **`VM.Config.HWType` only on the Lab clone-target VMIDs.** Do not grant it on `/pool/<pool>` if VM 200 is in that pool, and never on VM 200.
+- **`/mapping/usb` grants `Mapping.Use` on every mapping, the Decker's included.** Fleet's code never writes `decker`, and no template here names it, but the token could attach it. The narrow alternative is `pveum acl modify /mapping/usb/fm-test-superdrive-a --roles FleetUsb ...` and the same for `…-b`, with no entry on `/mapping/usb`.
+  - **Measured (2026-11-04): the narrow grant works.** With only the two per-mapping entries (user and token), `GET /cluster/mapping/usb?check-node=<node>` still answered `200` with every mapping and an empty `errors` list, and `fleetctl hardware refresh` reported the account `supported` with no warning (no `usb_inventory_unreadable`): the two test mappings read `available`, and the Decker and the Verbatim mapping read `unsupported` with `token_lacks_mapping_use`, which keeps the Decker out of the token's reach. `proxmox privileges` showed `usb.attach-mapping` and `usb.detach-mapping` granted on exactly the two mapping paths.
+  - **The condition:** in that run `Mapping.Audit` came from `PVEAuditor` on `/`, which the token has, so listing and `?check-node=` did not depend on `FleetUsb` at all. A token whose only `Mapping.Audit` is per mapping was not measured; FM-S11 showed the list then shows only that mapping.
+  - The integration host keeps the **broad** grant, the maintainer's choice, although the narrow one measured fine.
+- **`VM.Config.HWType` only on the Lab clone-target VMIDs**, where the token's base role does not already hold it. (**Measured:** the test token's `PVEVMAdmin` on `/vms` includes `VM.Config.HWType`, so no per-VMID `FleetUsb` entry was needed.) Do not grant it on `/pool/<pool>` if VM 200 is in that pool, and never on VM 200.
 
-After granting, re-run `fleetctl --output json proxmox privileges <account-id>`; the USB checks should now pass for the guests you granted.
+After granting, re-run `fleetctl --output json proxmox privileges <account-id>`; the USB checks should now pass for the guests you granted. **Measured:** all five USB checks read `granted` after the broad grant. To undo a grant: `pveum acl delete /mapping/usb --roles FleetUsb --users <user> --tokens <token>`; the role itself would be removed with `pveum role delete FleetUsb` (not run).
 
 ## 4. Fleet lists the devices
 
@@ -144,11 +152,13 @@ Expect, for the two test mappings, `status: available`, `stale: false`, one `ent
 
 The same list is on the console's Hardware page; its tones are in [DESIGN.md](../../DESIGN.md#hardware-conventions). The controller also refreshes accounts that have devices on a schedule (default every 600 s), so devices rarely stay stale; refresh yourself right before a lease when you have just changed a mapping, a cable or a guest.
 
-Also expected: the `decker` mapping appears in the list as `externally_attached`, with a refresh observation naming VM 200. That is the "left alone" case; see step 11. It is only observed here.
+**Measured:** the refresh answers `devices[]` (each with `mappingId`, `status`, `reason`, `reasonText`, `stale`, `entries[]`, `holder`, `observation.externalReferences` and `observation.notes`), plus `guestScan` (`listed`, `read`, `truncated`, `unreadable`), `support` and `warnings`. After the grant, all four mappings on the integration host read `available`, `stale: false`, with `vendorId` `05ac` / `productId` `1500` and the mapped `usbpath` for the SuperDrives, and `manufacturer` and `product` `null` (the node inventory needs `Sys.Modify` on `/` and is not read). A mapping with an id-only entry (the Verbatim and the Decker) carries the note "the entry for node <node> is id-only (<vendor:product>); identical devices cannot be excluded without the node USB inventory", which is not a refusal. `hardware list` prints a trailing line "a list reads Fleet's own records; refresh to observe Proxmox again" in text mode.
+
+Also: the `decker` mapping appears in the list. **Do not expect `externally_attached` for it unless the token can audit the guest that holds it.** Measured with the integration host's token (which cannot see that guest), it reads `available`, with `observation.externalReferences: []` and `guestScan.listed` counting only the visible guests. Treat `available` as "no guest the token can see references it", never as "free" (step 11 and [#596](https://github.com/Frogbyte-io/fleet-manager/issues/596)). It is only observed here.
 
 ## 5. A template that declares the device
 
-A Lab template (and each published version) has an optional `hardware` list of up to four `{ "kind": "usb", "mapping": "<id>" }`, each mapping named once. `fleetctl lab template-create` has **no** hardware flag, and neither does `lab create`. Create the draft through the API with the fields the CLI sends plus `hardware`, then publish with the CLI. Add whatever `Authorization` header your controller requires (the form used in [the registry workflow](../guides/registry-workflow.md) is `-H "Authorization: Bearer $FLEET_TOKEN"`; not confirmed for this endpoint):
+A Lab template (and each published version) has an optional `hardware` list of up to four `{ "kind": "usb", "mapping": "<id>" }`, each mapping named once. `fleetctl lab template-create` has **no** hardware flag, and neither does `lab create`. Create the draft through the API with the fields the CLI sends plus `hardware`, then publish with the CLI. Add whatever `Authorization` header your controller requires (the form used in [the registry workflow](../guides/registry-workflow.md) is `-H "Authorization: Bearer $FLEET_TOKEN"`; **measured:** the trusted-LAN controller of the live run needed none). The response wraps the template in `data`. The live run also sent `"bootstrapProjectId": null`, `"readinessCommand": null` and `"sshUser": "root"` (the fields the repository's own live harness sends); whether the shorter body below is accepted without them was not tested:
 
 ```sh
 curl -fsS -X POST "$FLEET_URL/api/v1/lab/templates" \
@@ -161,9 +171,9 @@ curl -fsS -X POST "$FLEET_URL/api/v1/lab/templates" \
     "readinessProbe": "guest_agent", "readinessDeadlineSeconds": 600,
     "ttlSeconds": 3600, "cleanup": "destroy",
     "hardware": [{ "kind": "usb", "mapping": "fm-test-superdrive-a" }]
-  }' | jq -r .id                                            # the template id
+  }' | jq -r .data.id                                       # the template id
 
-fleetctl --output json lab publish <template-id> | jq -r .id   # the version id
+fleetctl --output json lab publish <template-id> | jq -r .id   # the version id (`<template-id>@<digest-prefix>`)
 ```
 
 Make a second template, `lab-usb-b`, the same way with `fm-test-superdrive-b`. Later steps need one template per device. A `PUT /api/v1/lab/templates/{id}` replaces the whole draft, so repeat `hardware` or it is cleared. `fleetctl --output json lab templates` shows `hardware` on each version that has any.
@@ -191,6 +201,8 @@ Expect:
 
 If the provision fails instead, it fails at the `usb_attach` step with a `reason` in the operation's `errorJson` and the guest is never started; see [When a device is refused](lab.md#when-a-device-is-refused) and the failure variants below.
 
+**Measured (2026-11-04):** the reserve and the attach worked on real hardware: from `lab create` to `hardware_attached` took about nine seconds (a manual `hardware refresh` first; then `hardware_reserved` and `lab_capacity_reserved` at creation, the saga's own `hardware_refresh_started` / `hardware_refreshed` after the clone, `hardware_attach_requested`, `hardware_attached` one second later), and Proxmox started the guest with the mapping in its config. That lease then **failed at `guest_ip`** (`never_ready`, after the full 600 s readiness deadline) because the guest never reported an address, which is an image problem and not a hardware one: see "Before you start", item 7. `lab status` then reported `state: releasing`, `provisionState: never_ready`, `failedStep: guest_ip`, and `hardware[].reservation: null` (the failed lease's cleanup had already detached and released the device). The expectations above about `ready`, `hardware[0].reservation.state` `attached` and `hardware list` showing the holder were therefore **not observed**.
+
 ## 7. Test: the guest sees the device
 
 ```sh
@@ -216,7 +228,7 @@ Cleanup detaches every device the lease holds before it decides the guest's fate
 fleetctl --output json audit list --action lab.provision --limit 100
 ```
 
-and look for `hardware_reserved`, `hardware_attach_requested`, `hardware_attached`, `hardware_detach_requested`, `hardware_detached` and `hardware_released` for this lease. (The filter value is the action the saga files under; if your controller files them under another action, list without `--action` and filter with `jq`.)
+and look for `hardware_reserved`, `hardware_attach_requested`, `hardware_attached`, `hardware_detach_requested`, `hardware_detached` and `hardware_released` for this lease. **Measured:** `lab.provision` is the right action for them (the scheduled and manual refreshes are under `hardware.refresh`); the events carry only `event` and `node` in the listing, and several come as an opening and a closing event (for example `hardware_attached`, then `hardware_attached` again with `outcome` `failed` or `succeeded`). The order recorded on a failed lease's cleanup was `hardware_detach_requested`, `hardware_released`, `hardware_detached`, then the creation of the `proxmox.guest.destroy` operation, so the detach did precede the destroy, and `hardware_released` came **before** `hardware_detached`, not after it. The whole cleanup took about five seconds.
 
 ## 9. Failure variants
 
@@ -227,6 +239,8 @@ Run each as its own recorded case. After each, return to a clean state (device `
 Create a draft template that declares a mapping id that does not exist (for example `fm-test-does-not-exist`), publish it and lease it.
 
 Expect: the provision fails at placement, before any allocation (no VMID, no clone), with reason `hardware_unknown` and a message that names the account and tells the operator to create the mapping and refresh. No device is touched, so this is the cheapest variant. Find the reason with `fleetctl --output json operations list`, then `operations get <id>` (`errorJson`), and the lease's `failedStep` in `lab status`.
+
+**Measured (2026-11-04), as documented:** the lease ended `failed` with `vmid: null` and `hardware[0].reservation: null`; `lab_placement_refused` with `reason: hardware_unknown` was audited (an opening and a closing event); no clone, no VMID and no guest appeared; `errorJson` read `hardware fm-test-does-not-exist is not in the inventory of account <account-id>; an operator creates the Proxmox USB mapping and refreshes the inventory (fleetctl hardware refresh --account <account-id>)` with `reason: hardware_unknown`. One detail: `lab status` reports `failedStep: clone` and `provisionState: never_ready` for this placement refusal, which reads oddly for a lease that never cloned; go by the operation's `errorJson`.
 
 ### F2. Missing device (the cable)
 
@@ -297,7 +311,7 @@ fleetctl --output json hardware list --account <account-id> | jq '.items[] | sel
 fleetctl hardware list
 ```
 
-Expect `status` `externally_attached`, no `holder`, and the refresh's observation naming the guest that references it (VM 200, which you will see in the output, so sanitize it). Fleet does not adopt, detach or allocate it, and has no command to; nothing in this runbook issues a write against it. The step is the observation and nothing else. If any step ever seems to need `decker` or VM 200 to change, stop.
+Expect `status` `externally_attached`, no `holder`, and the refresh's observation naming the guest that references it (VM 200, which you will see in the output, so sanitize it) **if the token can audit VM 200**. **Measured (2026-11-04): with the integration host's test token it does not.** That token has a `NoAccess` ACL on VM 200 (as on every guest that is not Fleet's), so the guest is omitted from the cluster listing, the refresh's `guestScan` counted only the guests the token can see (`listed: 1, read: 1, truncated: false`), and the `decker` device read `available`, with `observation.externalReferences: []`. This step cannot pass as written with that token, and the same is true of any device attached to a guest the token cannot audit ([#596](https://github.com/Frogbyte-io/fleet-manager/issues/596)). To show `externally_attached` for the Decker the maintainer would have to give the token read access (`VM.Audit`) on VM 200, which the run did not do; use the scratch-guest case below to show the behaviour instead. Do not treat `available` for a mapping that something else may hold as free. Fleet does not adopt, detach or allocate it, and has no command to; nothing in this runbook issues a write against it. The step is the observation and nothing else. If any step ever seems to need `decker` or VM 200 to change, stop.
 
 **A SuperDrive on a scratch guest (the same behaviour, on a device you may touch).** The maintainer designates `<scratch-vmid>`: a throwaway guest, not VM 200, not a Fleet-managed machine. Its config is written by hand; it does not need to be started.
 
@@ -388,8 +402,10 @@ For every step, in [`m11-acceptance.md`](../planning/m11-acceptance.md): the com
 - Lease, reservation and device ids are Fleet's own UUIDs and may be kept, or replaced by `<lease-id>` style placeholders if you prefer.
 - Screenshots of the Hardware page need the same review (the repository is public) and follow AGENTS.md for GUI evidence.
 
-When something is not as documented, record it as measured and say which document it contradicts; do not fix the document inside the run.
+When something is not as documented, record it as measured and say which document it contradicts. (The run of 2026-11-04 was asked to correct this runbook in the same change; the measurements are in the acceptance document.)
 
 ## Commands used in this runbook
 
-All of these exist in `fleetctl` today (checked against `crates/fleetctl` and `skills/fleet/SKILL.md`): `proxmox accounts`, `proxmox privileges <account-id>`, `hardware list [--account]`, `hardware refresh --account`, `hardware override-release <reservation-id> --confirm-unverified`, `lab templates`, `lab publish`, `lab create <version-id> --purpose --account --wait --timeout`, `lab status`, `lab exec --wait -- <command>`, `lab hardware attach|detach <lease-id> <mapping> [--release]`, `lab destroy --wait`, `lab cleanup-retry --wait`, `operations list|get`, `audit list --action --limit`. Not in `fleetctl`: creating a template with `hardware` (the API call in step 5), and every Proxmox-side step (`pvesh`, `pveum`, `qm`, the web UI), which are Proxmox commands and were not run for this draft.
+All of these exist in `fleetctl` today (checked against `crates/fleetctl` and `skills/fleet/SKILL.md`): `proxmox accounts`, `proxmox privileges <account-id>`, `hardware list [--account]`, `hardware refresh --account`, `hardware override-release <reservation-id> --confirm-unverified`, `lab templates`, `lab publish`, `lab create <version-id> --purpose --account --wait --timeout`, `lab status`, `lab exec --wait -- <command>`, `lab hardware attach|detach <lease-id> <mapping> [--release]`, `lab destroy --wait`, `lab cleanup-retry --wait`, `operations list|get`, `audit list --action --limit`. Not in `fleetctl`: creating a template with `hardware` (the API call in step 5), and every Proxmox-side step (`pvesh`, `pveum`, `qm`, the web UI), which are Proxmox commands. The live run executed `pveum role add`, `pveum acl modify` and `pveum acl delete` (step 3) and read-only `pvesh get` and `qm list`; it did not run `pvesh create` for a mapping or any `qm set`.
+
+Account setup, as the live run did it (not part of the numbered steps): `fleetctl proxmox create --name <name> --host <host> --port 8006 --token-id <id> < secret-file`, then `fleetctl proxmox observe <account-id>`, then `fleetctl proxmox confirm <account-id> --fingerprint <SHA256>`. **Measured:** `confirm` is refused (`400`, "observe the host's fingerprint first; confirm pins only what the probe saw") until `observe` has run.
