@@ -243,7 +243,7 @@ fn review_or_error(
         (status = 400, description = "The mapping id is malformed.", body = crate::error::ApiError),
         (status = 403, description = "The caller may not attach hardware to machines (`machines.usb.attach`).", body = crate::error::ApiError),
         (status = 404, description = "The machine does not exist.", body = crate::error::ApiError),
-        (status = 409, description = "Refused, with the reason as the error code: `machine_has_no_guest`, `machine_guest_not_qemu`, `machine_not_persistent`, `machine_not_ready`, `machine_guest_mismatch`, `guest_not_eligible` (a Lab clone, template, image artifact or pool member), `hardware_unknown` and `hardware_busy` (another owner holds the device; nothing is queued).", body = crate::error::ApiError),
+        (status = 409, description = "Refused, with the reason as the error code: `machine_has_no_guest`, `machine_guest_not_qemu`, `machine_not_persistent`, `machine_not_ready`, `machine_guest_mismatch` (the guest's marker names no machine or another one), `guest_not_eligible` (a Lab clone, template, image artifact or pool member), `hardware_unknown` and `hardware_busy` (another owner holds the device; nothing is queued).", body = crate::error::ApiError),
         (status = 500, description = "A backend port failed.", body = crate::error::ApiError),
         (status = 503, description = "Machine USB is not wired.", body = crate::error::ApiError),
     )
@@ -301,7 +301,7 @@ pub async fn review_machine_usb_attach(
         (status = 400, description = "The mapping id is malformed, or the review token does not match.", body = crate::error::ApiError),
         (status = 403, description = "The caller may not attach hardware to machines (`machines.usb.attach`).", body = crate::error::ApiError),
         (status = 404, description = "The machine does not exist.", body = crate::error::ApiError),
-        (status = 409, description = "Refused, with the reason as the error code: every review refusal, and `hardware_busy`, `hardware_in_progress`, `hardware_attach_unknown`, `hardware_detach_unconfirmed`, `hardware_guest_mismatch`, `hardware_attach_pending` (PVE would keep the attach pending until the guest restarts; nothing is attached and the entry was removed), `hardware_externally_attached`, `hardware_fingerprint_changed`, `hardware_missing`, `hardware_no_free_slot`, `hardware_attach_failed`, `hardware_attach_unrecorded` and the other `hardware_*` verification reasons.", body = crate::error::ApiError),
+        (status = 409, description = "Refused, with the reason as the error code: every review refusal, and `hardware_busy`, `hardware_guest_busy` (a destroy, revert, template or clone is running on the guest), `hardware_in_progress`, `hardware_attach_unknown`, `hardware_detach_unconfirmed`, `hardware_guest_mismatch`, `hardware_attach_pending` (PVE would keep the attach pending until the guest restarts; nothing is attached and the entry was removed), `hardware_externally_attached`, `hardware_fingerprint_changed`, `hardware_missing`, `hardware_no_free_slot`, `hardware_attach_failed`, `hardware_attach_unrecorded` and the other `hardware_*` verification reasons.", body = crate::error::ApiError),
         (status = 500, description = "A backend port failed.", body = crate::error::ApiError),
         (status = 503, description = "Machine USB is not wired.", body = crate::error::ApiError),
     )
@@ -415,7 +415,7 @@ pub async fn review_machine_usb_detach(
         (status = 400, description = "The mapping id is malformed, or the review token does not match.", body = crate::error::ApiError),
         (status = 403, description = "The caller may not detach hardware from machines (`machines.usb.detach`).", body = crate::error::ApiError),
         (status = 404, description = "The machine does not exist.", body = crate::error::ApiError),
-        (status = 409, description = "Refused, with the reason as the error code: `hardware_not_reserved`, `hardware_attach_unknown`, `hardware_detach_failed` (PVE refused, the entry is not one Fleet wrote, or the read-back could not confirm it; the machine keeps the reservation) and `hardware_detach_unconfirmed`.", body = crate::error::ApiError),
+        (status = 409, description = "Refused, with the reason as the error code: `hardware_not_reserved`, `hardware_ambiguous` (the machine holds that mapping id in several accounts), `hardware_attach_unknown`, `hardware_detach_failed` (PVE refused, the entry is not one Fleet wrote, or the read-back could not confirm it; the machine keeps the reservation) and `hardware_detach_unconfirmed`.", body = crate::error::ApiError),
         (status = 500, description = "A backend port failed.", body = crate::error::ApiError),
         (status = 503, description = "Machine USB is not wired.", body = crate::error::ApiError),
     )

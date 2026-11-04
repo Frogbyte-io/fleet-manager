@@ -754,6 +754,7 @@ async fn the_guest_cannot_be_destroyed_reverted_or_templated_while_its_machine_h
         ("destroy", json!({ "confirmPersistent": true })),
         ("snapshot-revert", json!({ "snapshot": "baseline" })),
         ("template", json!({})),
+        ("clone", json!({ "newId": 9300, "name": "copy" })),
     ] {
         for step in ["review", "run"] {
             let (status, answer) = harness
@@ -830,4 +831,29 @@ async fn a_registered_marker_is_not_unregistered_while_its_machine_holds_a_devic
         .call(&path, json!({ "reviewToken": review_token }))
         .await;
     assert_eq!(status, StatusCode::NO_CONTENT, "{answer}");
+}
+
+#[tokio::test]
+async fn a_gate_that_cannot_read_the_reservations_fails_closed() {
+    let harness = Harness::new(Arc::new(Permit)).await;
+    sqlx::query("ALTER TABLE hardware_reservations RENAME TO hardware_reservations_gone")
+        .execute(&harness.pool)
+        .await
+        .unwrap();
+    for action in ["destroy", "snapshot-revert", "template", "clone"] {
+        let params = match action {
+            "destroy" => json!({ "confirmPersistent": true }),
+            "snapshot-revert" => json!({ "snapshot": "baseline" }),
+            "clone" => json!({ "newId": 9300, "name": "copy" }),
+            _ => json!({}),
+        };
+        let (status, answer) = harness
+            .call(
+                &format!("/proxmox/accounts/{ACCOUNT}/guests/{VMID}/{action}/review"),
+                json!({ "node": "pve", "params": params }),
+            )
+            .await;
+        assert_eq!(status, StatusCode::CONFLICT, "{action}: {answer}");
+        assert_eq!(answer["code"], "hardware_unreadable", "{action}");
+    }
 }

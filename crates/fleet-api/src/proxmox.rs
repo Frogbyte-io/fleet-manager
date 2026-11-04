@@ -1231,7 +1231,7 @@ async fn refuse_machine_hardware(
     vmid: u32,
     correlation_id: CorrelationId,
 ) -> Result<(), ApiErrorResponse> {
-    if !matches!(action, "destroy" | "snapshot-revert" | "template") {
+    if !matches!(action, "destroy" | "snapshot-revert" | "template" | "clone") {
         return Ok(());
     }
     let Some(gate) = state.lab.as_ref().and_then(|lab| lab.machine_hardware()) else {

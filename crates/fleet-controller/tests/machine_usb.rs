@@ -48,6 +48,7 @@ use fleet_application::persistent::{
 use fleet_application::proxmox::{
     CredentialStoreError, NewProxmoxAccount, ProxmoxAccountPort, ProxmoxCredentialStore,
 };
+use fleet_controller::guest_locks::GuestLocks;
 use fleet_controller::hardware_reconciler::{HardwareReconciler, SqliteReconcilerRecords};
 use fleet_controller::hardware_reservation_store::SqliteHardwareReservations;
 use fleet_controller::lab_hardware::{LabHardwareSaga, SqliteFingerprintPins};
@@ -109,13 +110,37 @@ impl Authorizer for AllowAll {
     }
 }
 
-/// Allows only the listed catalog actions.
+/// Allows only the listed catalog actions, and, when `machine` is set, only
+/// on that machine (the resource of both actions is the machine id).
 #[derive(Debug)]
-struct Allow(&'static [&'static str]);
+struct Allow {
+    actions: &'static [&'static str],
+    machine: Option<String>,
+}
+
+impl Allow {
+    fn any(actions: &'static [&'static str]) -> Self {
+        Self {
+            actions,
+            machine: None,
+        }
+    }
+
+    fn only(actions: &'static [&'static str], machine: &str) -> Self {
+        Self {
+            actions,
+            machine: Some(machine.to_owned()),
+        }
+    }
+}
 
 impl Authorizer for Allow {
     fn decide(&self, request: AccessRequest<'_>) -> Decision {
-        if self.0.contains(&request.action.id()) {
+        let scoped = self
+            .machine
+            .as_deref()
+            .is_none_or(|machine| request.resource == Some(machine));
+        if scoped && self.actions.contains(&request.action.id()) {
             Decision::allow()
         } else {
             Decision::deny(ReasonId::UnknownPrincipal)
@@ -289,6 +314,7 @@ struct Controller {
     hardware: Arc<dyn HardwareStore>,
     reservations: Arc<HardwareReservations>,
     reconciler: Arc<HardwareReconciler>,
+    guest_locks: Arc<GuestLocks>,
     machines: Arc<MachineRepository>,
     markers: Arc<PersistentGuestRepository>,
     links: Arc<GuestLinkRepository>,
@@ -343,11 +369,13 @@ impl Controller {
             Arc::new(LeaseRepository::new(pool.clone())),
             Arc::new(SqliteFingerprintPins::new(pool.clone())),
         ));
+        let guest_locks = GuestLocks::new();
         let port = Arc::new(MachineUsbHost::new(
             saga,
             hardware.clone(),
             reservations.clone(),
             machines.clone(),
+            guest_locks.clone(),
         ));
         let links = Arc::new(GuestLinkRepository::new(pool.clone()));
         let markers = Arc::new(PersistentGuestRepository::new(pool.clone()));
@@ -371,6 +399,7 @@ impl Controller {
             hardware,
             reservations,
             reconciler,
+            guest_locks,
             machines,
             markers,
             links,
@@ -940,7 +969,7 @@ async fn only_an_authorized_principal_acts_and_a_denied_one_changes_nothing() {
     let machine = controller.persistent("persist-a", GUEST_A).await;
 
     // Nothing allowed: neither the review nor the execute call is let in.
-    let nobody = Allow(&[]);
+    let nobody = Allow::any(&[]);
     assert!(denied(
         &controller
             .review_attach_as(&nobody, "someone", &machine, READER_A)
@@ -960,7 +989,7 @@ async fn only_an_authorized_principal_acts_and_a_denied_one_changes_nothing() {
             .unwrap_err()
     ));
     // The Lab's hotplug entries do not open a machine's hardware.
-    let lab_only = Allow(&[
+    let lab_only = Allow::any(&[
         "lab.hardware.attach",
         "lab.hardware.detach",
         "machine.update",
@@ -995,7 +1024,7 @@ async fn only_an_authorized_principal_acts_and_a_denied_one_changes_nothing() {
 
     // The attach and detach entries are separate: allowing one does not
     // allow the other, and the audit names the principal that acted.
-    let attach_only = Allow(&["machines.usb.attach"]);
+    let attach_only = Allow::any(&["machines.usb.attach"]);
     controller
         .attach_as(&attach_only, "alice", &machine, READER_A)
         .await
@@ -1011,7 +1040,7 @@ async fn only_an_authorized_principal_acts_and_a_denied_one_changes_nothing() {
         controller.audit_actions("hardware_attach_requested").await,
         vec![("alice".to_owned(), "machines.usb.attach".to_owned())]
     );
-    let detach_only = Allow(&["machines.usb.detach"]);
+    let detach_only = Allow::any(&["machines.usb.detach"]);
     assert!(denied(
         &controller
             .attach_as(&detach_only, "bob", &machine, READER_A)
@@ -1658,9 +1687,11 @@ async fn deleting_the_machine_or_unregistering_its_marker_is_refused_while_it_ho
     let audit: Arc<dyn AuditPort> = Arc::new(AuditSink::new(controller.pool.clone()));
     let gate: Arc<dyn MachineHardwareGate> =
         Arc::new(StoreMachineHardwareGate::new(controller.hardware.clone()));
+    // The plain use case over the machine repository: the repository itself
+    // refuses to delete a machine that holds a device, so a construction that
+    // wires nothing else still fails closed.
     let machines = Machines::new(controller.machines.clone(), audit.clone())
-        .with_guest_links(controller.links.clone())
-        .with_hardware_gate(gate.clone());
+        .with_guest_links(controller.links.clone());
 
     // Delete: refused, with the instruction to detach first.
     let error = machines
@@ -1785,14 +1816,15 @@ async fn the_guest_cannot_be_destroyed_reverted_or_templated_while_the_machine_h
         ProxmoxClient::new(world.usb.transport()),
     )
     .with_image_artifacts(Arc::new(Artifacts))
-    .with_hardware_guard(controller.hardware.clone());
+    .with_hardware_guard(controller.hardware.clone())
+    .with_guest_locks(controller.guest_locks.clone());
     let run = |kind: &'static str| {
         let payload = serde_json::json!({
             "accountId": controller.account_id,
             "node": TEMPLATE_NODE,
             "vmid": GUEST_A,
             "timeoutSeconds": 60,
-            "params": {"snapshot": "baseline", "purge": true},
+            "params": {"snapshot": "baseline", "purge": true, "newId": 9200, "name": "copy"},
         })
         .to_string();
         let operations = &operations;
@@ -1815,6 +1847,7 @@ async fn the_guest_cannot_be_destroyed_reverted_or_templated_while_the_machine_h
         "proxmox.guest.destroy",
         "proxmox.guest.snapshot-revert",
         "proxmox.guest.template",
+        "proxmox.guest.clone",
     ] {
         let child = run(kind).await;
         assert_eq!(child.state, "failed", "{kind}");
@@ -2143,6 +2176,7 @@ async fn the_controllers_own_composition_attaches_and_detaches() {
         Arc::new(OneSecret),
         world.usb.transport(),
         controller.machines.clone(),
+        controller.guest_locks.clone(),
     );
     let accounts: Arc<dyn ProxmoxAccountPort> =
         Arc::new(ProxmoxAccountRepository::new(controller.pool.clone()));
@@ -2184,5 +2218,540 @@ async fn the_controllers_own_composition_attaches_and_detaches() {
         .await
         .unwrap();
     assert_eq!(detached.result, HotplugResult::Detached);
+    assert_eq!(controller.states().await, vec!["released"]);
+}
+
+// ---------------------------------------------------------------------
+// Review round: exclusion with destructive operations, the clone gate, the
+// marker rule, accounts, state-aware messages and visible give-back failures.
+// ---------------------------------------------------------------------
+
+/// A destructive executor that shares the machine port's guest locks, as
+/// `main` composes it.
+fn destroyer_of(
+    world: &World,
+    controller: &Controller,
+) -> (Arc<Operations>, Arc<ProxmoxDestructiveExecutor>) {
+    let audit: Arc<dyn AuditPort> = Arc::new(AuditSink::new(controller.pool.clone()));
+    let operations = Arc::new(Operations::new(
+        Arc::new(OperationRepository::new(controller.pool.clone())),
+        audit,
+    ));
+    let accounts: Arc<dyn ProxmoxAccountPort> =
+        Arc::new(ProxmoxAccountRepository::new(controller.pool.clone()));
+    let credentials: Arc<dyn ProxmoxCredentialStore> = Arc::new(OneSecret);
+    let executor = Arc::new(
+        ProxmoxDestructiveExecutor::new(
+            accounts,
+            credentials,
+            ProxmoxClient::new(world.usb.transport()),
+        )
+        .with_image_artifacts(Arc::new(Artifacts))
+        .with_hardware_guard(controller.hardware.clone())
+        .with_guest_locks(controller.guest_locks.clone()),
+    );
+    (operations, executor)
+}
+
+/// Runs one reviewed destructive operation on `vmid` to its end.
+async fn run_kind(
+    operations: Arc<Operations>,
+    executor: Arc<ProxmoxDestructiveExecutor>,
+    account_id: String,
+    kind: &'static str,
+    vmid: u32,
+) -> fleet_application::operation::Operation {
+    let payload = serde_json::json!({
+        "accountId": account_id,
+        "node": TEMPLATE_NODE,
+        "vmid": vmid,
+        "timeoutSeconds": 60,
+        "params": {"snapshot": "baseline", "purge": true, "newId": 9200, "name": "copy"},
+    })
+    .to_string();
+    fleet_controller::lab_pool::run_reviewed_child(
+        &operations,
+        executor.as_ref(),
+        kind,
+        payload,
+        format!("race-{kind}-{vmid}-{}", now()),
+        "machine-usb-race",
+        std::time::Duration::from_secs(30),
+    )
+    .await
+    .unwrap()
+}
+
+#[tokio::test]
+async fn an_attach_is_refused_while_a_destructive_operation_holds_the_guest() {
+    let (world, controller) = ready_controller().await;
+    let machine = controller.persistent("persist-a", GUEST_A).await;
+    let held = controller
+        .guest_locks
+        .lock(&controller.account_id, GUEST_A)
+        .await;
+
+    let error = controller.attach(&machine, READER_A).await.unwrap_err();
+
+    assert_eq!(refused_reason(&error), "hardware_guest_busy");
+    assert!(world.usb.writes().is_empty());
+    assert!(
+        controller.rows().await.is_empty(),
+        "nothing was reserved: the attach does not wait"
+    );
+    drop(held);
+    controller.attach(&machine, READER_A).await.unwrap();
+}
+
+#[tokio::test]
+async fn an_attach_during_a_destroy_or_clone_is_refused_and_the_operation_wins() {
+    for kind in ["proxmox.guest.destroy", "proxmox.guest.clone"] {
+        let (world, controller) = ready_controller().await;
+        let machine = controller.persistent("persist-a", GUEST_A).await;
+        let controller = Arc::new(controller);
+        let (operations, executor) = destroyer_of(&world, &controller);
+        // The operation is running (it listed the cluster, under the guest's
+        // lock) when an attach for the same guest arrives.
+        let seen: Arc<Mutex<Option<Result<MachineUsbOutcome, HotplugError>>>> = Arc::default();
+        let hook: usb_pve::Hook = {
+            let controller = controller.clone();
+            let machine = machine.clone();
+            let seen = seen.clone();
+            Arc::new(move || {
+                let controller = controller.clone();
+                let machine = machine.clone();
+                let seen = seen.clone();
+                Box::pin(async move {
+                    let result = controller.attach(&machine, READER_A).await;
+                    *seen.lock().unwrap() = Some(result);
+                })
+            })
+        };
+        world
+            .usb
+            .inject(UsbStep::Resources, UsbFault::Hook(hook), 1);
+
+        let child = run_kind(
+            operations,
+            executor,
+            controller.account_id.clone(),
+            kind,
+            GUEST_A,
+        )
+        .await;
+
+        assert_eq!(child.state, "succeeded", "{kind}: {:?}", child.error_json);
+        let attach = seen.lock().unwrap().take().expect("the attach ran");
+        assert_eq!(
+            refused_reason(&attach.unwrap_err()),
+            "hardware_guest_busy",
+            "{kind}"
+        );
+        assert!(
+            world.usb.writes().is_empty(),
+            "{kind}: nothing was written into the guest"
+        );
+        assert!(controller.rows().await.is_empty(), "{kind}");
+    }
+}
+
+#[tokio::test]
+async fn a_destroy_or_revert_waits_for_an_attach_in_flight_and_then_refuses() {
+    for kind in ["proxmox.guest.destroy", "proxmox.guest.snapshot-revert"] {
+        let (world, controller) = ready_controller().await;
+        let machine = controller.persistent("persist-a", GUEST_A).await;
+        let (operations, executor) = destroyer_of(&world, &controller);
+        let account = controller.account_id.clone();
+        let started: Arc<Mutex<Option<tokio::task::JoinHandle<_>>>> = Arc::default();
+        let finished_early = Arc::new(std::sync::atomic::AtomicBool::new(true));
+        // The operation is queued while the attach is about to write. It
+        // must not get past the lock (and so not finish) until the attach is
+        // done, and then it sees the attached row.
+        let hook: usb_pve::Hook = {
+            let started = started.clone();
+            let finished_early = finished_early.clone();
+            Arc::new(move || {
+                let started = started.clone();
+                let finished_early = finished_early.clone();
+                let operations = operations.clone();
+                let executor = executor.clone();
+                let account = account.clone();
+                Box::pin(async move {
+                    let handle =
+                        tokio::spawn(run_kind(operations, executor, account, kind, GUEST_A));
+                    tokio::time::sleep(std::time::Duration::from_millis(400)).await;
+                    finished_early.store(handle.is_finished(), std::sync::atomic::Ordering::SeqCst);
+                    *started.lock().unwrap() = Some(handle);
+                })
+            })
+        };
+        world.usb.inject(UsbStep::Attach, UsbFault::Hook(hook), 1);
+
+        let attached = controller.attach(&machine, READER_A).await.unwrap();
+
+        assert_eq!(attached.result, HotplugResult::Attached, "{kind}");
+        let handle = started
+            .lock()
+            .unwrap()
+            .take()
+            .expect("the operation started");
+        assert!(
+            !finished_early.load(std::sync::atomic::Ordering::SeqCst),
+            "{kind}: the operation went past the guest's lock while the attach was in flight"
+        );
+        let child = handle.await.unwrap();
+        assert_eq!(child.state, "failed", "{kind}");
+        let error: serde_json::Value =
+            serde_json::from_str(child.error_json.as_deref().unwrap()).unwrap();
+        assert_eq!(error["reason"], "hardware_attached", "{kind}");
+        assert!(world.pve.lab_guests().contains_key(&GUEST_A), "{kind}");
+        assert_eq!(world.usb.count(|line| line.starts_with("Delete ")), 0);
+        assert_eq!(world.usb.stored(GUEST_A), stored(&[(0, READER_A)]));
+        assert_eq!(controller.states().await, vec!["attached"], "{kind}");
+    }
+}
+
+#[tokio::test]
+async fn the_attach_vs_destroy_gate_is_refused_state_aware_and_agrees_with_the_api() {
+    let (world, controller) = ready_controller().await;
+    let machine = controller.persistent("persist-a", GUEST_A).await;
+    controller.attach(&machine, READER_A).await.unwrap();
+    let (operations, executor) = destroyer_of(&world, &controller);
+
+    // An unknown outcome: the detach is refused too, so the message names the
+    // elevated override, not "detach it first".
+    sqlx::query("UPDATE hardware_reservations SET state = 'attach_unknown'")
+        .execute(&controller.pool)
+        .await
+        .unwrap();
+    let child = run_kind(
+        operations.clone(),
+        executor.clone(),
+        controller.account_id.clone(),
+        "proxmox.guest.destroy",
+        GUEST_A,
+    )
+    .await;
+    let error: serde_json::Value =
+        serde_json::from_str(child.error_json.as_deref().unwrap()).unwrap();
+    let detail = error["detail"].as_str().unwrap();
+    assert!(detail.contains("override-release"), "{detail}");
+    assert!(detail.contains("refused"), "{detail}");
+    let gate = StoreMachineHardwareGate::new(controller.hardware.clone());
+    let holds = gate
+        .holds_on_guest(&controller.account_id, GUEST_A)
+        .await
+        .unwrap();
+    assert!(
+        holds[0]
+            .refusal("destroy the guest")
+            .contains("override-release")
+    );
+
+    // A failed detach is retried; a pending one waits for the restart.
+    sqlx::query("UPDATE hardware_reservations SET state = 'detach_failed'")
+        .execute(&controller.pool)
+        .await
+        .unwrap();
+    let holds = gate
+        .holds_on_guest(&controller.account_id, GUEST_A)
+        .await
+        .unwrap();
+    let text = holds[0].refusal("destroy the guest");
+    assert!(text.contains("machines usb detach"), "{text}");
+    assert!(text.contains("override-release"), "{text}");
+
+    // A row that holds nothing on the guest (`held`, even with the guest
+    // recorded) blocks neither the API's gate nor the executor, so they agree.
+    sqlx::query("UPDATE hardware_reservations SET state = 'held', usb_slot = NULL")
+        .execute(&controller.pool)
+        .await
+        .unwrap();
+    assert!(
+        gate.holds_on_guest(&controller.account_id, GUEST_A)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(
+        gate.holds_of_machine(&machine).await.unwrap().len(),
+        1,
+        "the machine itself still owns a live row"
+    );
+    let child = run_kind(
+        operations,
+        executor,
+        controller.account_id.clone(),
+        "proxmox.guest.destroy",
+        GUEST_A,
+    )
+    .await;
+    assert_eq!(child.state, "succeeded", "{:?}", child.error_json);
+}
+
+#[tokio::test]
+async fn a_marker_that_names_no_machine_is_not_shown_to_be_this_machines_guest() {
+    let (world, controller) = ready_controller().await;
+    let machine = controller.machine("registered-box").await;
+    controller.link(&machine, GUEST_A, "qemu").await;
+    controller
+        .mark_as(
+            None,
+            GUEST_A,
+            "persist-a",
+            "registered",
+            PersistentState::Ready,
+        )
+        .await;
+
+    let error = controller.attach(&machine, READER_A).await.unwrap_err();
+
+    assert_eq!(refused_reason(&error), "machine_guest_mismatch");
+    assert!(
+        refused_detail(&error).contains("names no machine"),
+        "{error:?}"
+    );
+    assert_nothing_changed(&world, &controller).await;
+}
+
+#[tokio::test]
+async fn a_relinked_machine_cannot_attach_over_its_old_guest_and_a_detach_acts_on_the_recorded_one()
+{
+    let (world, controller) = ready_controller().await;
+    let machine = controller.persistent("persist-a", GUEST_A).await;
+    controller.attach(&machine, READER_A).await.unwrap();
+    // The machine's marker and link move to another persistent guest. (The
+    // routes cannot do this while a device is held; the records are changed
+    // directly, as a repair or a bad edit would.)
+    controller.relink(&machine, GUEST_D).await;
+    sqlx::query("UPDATE persistent_guests SET vmid = ?1, name = 'persist-d' WHERE machine_id = ?2")
+        .bind(i64::from(GUEST_D))
+        .bind(&machine)
+        .execute(&controller.pool)
+        .await
+        .unwrap();
+
+    // The reservation records the old guest: an attach does not report it
+    // attached to the new one.
+    let error = controller.attach(&machine, READER_A).await.unwrap_err();
+    assert_eq!(refused_reason(&error), "hardware_guest_mismatch");
+    assert!(
+        refused_detail(&error).contains("detach it first"),
+        "{error:?}"
+    );
+    assert_eq!(world.usb.writes().len(), 1);
+
+    // The detach acts on the recorded guest, whatever the link says now.
+    let done = controller.detach(&machine, READER_A).await.unwrap();
+    assert_eq!(done.result, HotplugResult::Detached);
+    assert!(world.usb.stored(GUEST_A).is_empty());
+    assert_eq!(
+        world.usb.writes(),
+        vec![
+            "attach usb0=mapping=fm-test-reader-a".to_owned(),
+            "detach usb0".to_owned()
+        ]
+    );
+    // And the machine attaches to its new guest now.
+    controller.attach(&machine, READER_A).await.unwrap();
+    assert_eq!(world.usb.stored(GUEST_D), stored(&[(0, READER_A)]));
+}
+
+#[tokio::test]
+async fn an_attach_while_a_detach_is_pending_is_refused_as_unconfirmed() {
+    let (world, controller) = ready_controller().await;
+    let machine = controller.persistent("persist-a", GUEST_A).await;
+    world.start(GUEST_A).await;
+    controller.attach(&machine, READER_A).await.unwrap();
+    world.usb.set_hotplug_usb(GUEST_A, false);
+    let pending = controller.detach(&machine, READER_A).await.unwrap();
+    assert_eq!(pending.result, HotplugResult::DetachPending);
+    let writes = world.usb.writes().len();
+
+    let error = controller.attach(&machine, READER_A).await.unwrap_err();
+
+    assert_eq!(refused_reason(&error), "hardware_detach_unconfirmed");
+    assert_eq!(world.usb.writes().len(), writes);
+    assert_eq!(controller.states().await, vec!["detaching"]);
+}
+
+#[tokio::test]
+async fn a_mapping_id_is_looked_up_in_the_account_of_the_machines_guest() {
+    let (world, controller) = ready_controller().await;
+    let machine = controller.persistent("persist-a", GUEST_A).await;
+    controller.attach(&machine, READER_A).await.unwrap();
+    // A second Proxmox account has a device of the same mapping id; the
+    // machine holds it too (a held row), and gets a guest link in that account.
+    sqlx::query(
+        "INSERT INTO proxmox_accounts (id, name, host, port, token_id, created_at) \
+         VALUES ('acct-b', 'acct-b', 'pve-b.example.test', 8006, 'fleet@pve!lab', 1)",
+    )
+    .execute(&controller.pool)
+    .await
+    .unwrap();
+    let device_b = controller
+        .hardware
+        .upsert_device(
+            &fleet_application::hardware::DeviceObservation {
+                id: "device-b".to_owned(),
+                account_id: "acct-b".to_owned(),
+                mapping_id: READER_A.to_owned(),
+                kind: fleet_core::HardwareKind::Usb,
+                entries: Vec::new(),
+                status: DeviceStatus::Available,
+            },
+            now(),
+        )
+        .await
+        .unwrap();
+    let in_b = controller
+        .hardware
+        .insert_reservation(
+            &fleet_application::hardware::NewHardwareReservation {
+                id: "reservation-b".to_owned(),
+                device_id: device_b.id,
+                owner_kind: ReservationOwnerKind::Machine,
+                owner_id: machine.clone(),
+                guest: None,
+            },
+            now(),
+        )
+        .await
+        .unwrap();
+    let mine = principal(PRINCIPAL);
+    let review_for = |case: Arc<MachineUsb>, machine: String| async move {
+        case.review_detach(&AllowAll, &principal(PRINCIPAL), &machine, READER_A)
+            .await
+    };
+    let link_b = |controller: &Controller, machine: String| {
+        let links = controller.links.clone();
+        async move {
+            links.unlink(&machine).await.unwrap();
+            links
+                .confirm(
+                    &machine,
+                    &GuestLink {
+                        account_id: "acct-b".to_owned(),
+                        guest_kind: "qemu".to_owned(),
+                        node: TEMPLATE_NODE.to_owned(),
+                        vmid: 9300,
+                    },
+                )
+                .await
+                .unwrap();
+        }
+    };
+
+    // Linked in account A: A's attached reservation.
+    let review = review_for(controller.usb_case.clone(), machine.clone())
+        .await
+        .unwrap();
+    assert_eq!(review.reservation.unwrap().state, State::Attached);
+    // Relinked into account B: B's reservation is the one meant.
+    link_b(&controller, machine.clone()).await;
+    let review = review_for(controller.usb_case.clone(), machine.clone())
+        .await
+        .unwrap();
+    assert_eq!(review.reservation.unwrap().id, in_b.id);
+    // B's released: the machine's only reservation of that id is A's, which
+    // stays detachable from the relinked machine, acting on its own guest.
+    controller
+        .hardware
+        .force_release_reservation(&in_b.id, now())
+        .await
+        .unwrap();
+    let review = review_for(controller.usb_case.clone(), machine.clone())
+        .await
+        .unwrap();
+    let reserved = review.reservation.expect("A's reservation");
+    assert_eq!(reserved.state, State::Attached);
+    assert_eq!(
+        reserved.guest.map(|guest| (guest.account_id, guest.vmid)),
+        Some((controller.account_id.clone(), GUEST_A))
+    );
+    // With no link at all and a reservation in each account the id is
+    // ambiguous and refused.
+    controller
+        .hardware
+        .insert_reservation(
+            &fleet_application::hardware::NewHardwareReservation {
+                id: "reservation-b2".to_owned(),
+                device_id: "device-b".to_owned(),
+                owner_kind: ReservationOwnerKind::Machine,
+                owner_id: machine.clone(),
+                guest: None,
+            },
+            now(),
+        )
+        .await
+        .unwrap();
+    controller.links.unlink(&machine).await.unwrap();
+    let error = controller
+        .usb_case
+        .review_detach(&AllowAll, &mine, &machine, READER_A)
+        .await
+        .unwrap_err();
+    assert_eq!(refused_reason(&error), "hardware_ambiguous");
+    assert_eq!(world.usb.writes().len(), 1);
+}
+
+#[tokio::test]
+async fn authorization_is_scoped_to_the_machine() {
+    let (world, controller) = ready_controller().await;
+    let first = controller.persistent("persist-a", GUEST_A).await;
+    let second = controller.persistent("persist-b", GUEST_B).await;
+    let only_first = Allow::only(&["machines.usb.attach", "machines.usb.detach"], &first);
+
+    let error = controller
+        .attach_as(&only_first, "alice", &second, READER_A)
+        .await
+        .unwrap_err();
+    assert!(denied(&error), "{error:?}");
+    assert!(world.usb.writes().is_empty());
+    controller
+        .attach_as(&only_first, "alice", &first, READER_A)
+        .await
+        .unwrap();
+    let error = controller
+        .detach_as(&only_first, "alice", &second, READER_A)
+        .await
+        .unwrap_err();
+    assert!(denied(&error), "{error:?}");
+    assert_eq!(controller.states().await, vec!["attached"]);
+}
+
+#[tokio::test]
+async fn a_give_back_that_fails_is_reported_and_the_row_stays_visible() {
+    let (world, controller) = ready_controller().await;
+    let machine = controller.persistent("persist-a", GUEST_A).await;
+    // The audit intent is refused (nothing is written) and the release of the
+    // row the request made fails too.
+    *world.refuse_event.lock().unwrap() = Some("hardware_attach_requested".to_owned());
+    sqlx::query(
+        "CREATE TRIGGER stop_release BEFORE UPDATE OF state ON hardware_reservations \
+         WHEN NEW.state = 'released' BEGIN SELECT RAISE(ABORT, 'blocked'); END",
+    )
+    .execute(&controller.pool)
+    .await
+    .unwrap();
+
+    let error = controller.attach(&machine, READER_A).await.unwrap_err();
+
+    let HotplugError::Backend { detail } = &error else {
+        panic!("expected the backend failure, got {error:?}");
+    };
+    assert!(detail.contains("could not be released"), "{detail}");
+    assert!(detail.contains("machines usb detach"), "{detail}");
+    assert!(world.usb.writes().is_empty());
+    assert_eq!(controller.states().await, vec!["held"]);
+
+    // The state is visible and the detach gives the device back.
+    sqlx::query("DROP TRIGGER stop_release")
+        .execute(&controller.pool)
+        .await
+        .unwrap();
+    *world.refuse_event.lock().unwrap() = None;
+    let done = controller.detach(&machine, READER_A).await.unwrap();
+    assert!(done.released);
     assert_eq!(controller.states().await, vec!["released"]);
 }

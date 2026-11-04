@@ -132,6 +132,10 @@ pub struct MachineUsbRequest {
     /// The guest of an attach. A detach acts on the guest the reservation
     /// recorded and carries none.
     pub guest: Option<MachineGuestRef>,
+    /// The Proxmox account of the machine's current guest link, when it has
+    /// one. A detach prefers the reservation in this account (a mapping id is
+    /// only unique within an account).
+    pub account_id: Option<String>,
 }
 
 /// What a request came to. A refusal is [`HotplugError::Refused`], never an
@@ -219,18 +223,54 @@ pub struct MachineHold {
 impl MachineHold {
     /// The sentence that tells a caller what to do, for an operation that
     /// would lose the device (`what`: "delete the machine", "destroy the
-    /// guest", ...).
+    /// guest", ...). It depends on the reservation's state: a detach reads
+    /// the guest and resolves most of them, but an `attach_unknown` row is
+    /// refused by the detach (Fleet cannot show it wrote what the guest
+    /// shows), and a stuck one needs the operator's override.
     #[must_use]
     pub fn refusal(&self, what: &str) -> String {
         format!(
-            "cannot {what}: machine {} holds USB device {} (reservation {} is {}); detach it first with `fleetctl machines usb detach {} --mapping {}`",
+            "cannot {what}: machine {} holds USB device {} (reservation {} is {}); {}",
             self.machine_id,
             self.mapping_id.as_deref().unwrap_or("(unknown mapping)"),
             self.reservation_id,
             self.state.id(),
-            self.machine_id,
-            self.mapping_id.as_deref().unwrap_or("<mapping>"),
+            hold_instruction(
+                self.state,
+                &self.machine_id,
+                self.mapping_id.as_deref().unwrap_or("<mapping>"),
+                &self.reservation_id
+            )
         )
+    }
+}
+
+/// What to do about a machine's live reservation, by its state. A detach
+/// resolves `attached`, `detaching`, `detach_failed` (retried), `attaching`
+/// (it reads the guest) and `held`; it is refused for `attach_unknown`, which
+/// only the elevated override frees once an operator has read the guest.
+#[must_use]
+pub fn hold_instruction(
+    state: HardwareReservationState,
+    machine_id: &str,
+    mapping: &str,
+    reservation_id: &str,
+) -> String {
+    let detach = format!("`fleetctl machines usb detach {machine_id} --mapping {mapping}`");
+    let override_release = format!(
+        "`fleetctl hardware override-release {reservation_id} --confirm-unverified` (elevated: only after reading the guest)"
+    );
+    match state {
+        HardwareReservationState::AttachUnknown => format!(
+            "the detach is refused in this state because Fleet cannot show it wrote what the guest shows; read the guest, remove the entry if it is yours, then free the reservation with {override_release}"
+        ),
+        HardwareReservationState::DetachFailed => format!(
+            "the last detach failed; fix the cause and run {detach} again, or, once you have confirmed the guest is clear, free it with {override_release}"
+        ),
+        HardwareReservationState::Detaching => format!(
+            "a detach is pending until the guest restarts; restart it and run {detach} again"
+        ),
+        _ => format!("detach it first with {detach}"),
     }
 }
 
@@ -245,8 +285,9 @@ pub trait MachineHardwareGate: fmt::Debug + Send + Sync {
     /// then (a guard that cannot look fails closed).
     async fn holds_of_machine(&self, machine_id: &str) -> Result<Vec<MachineHold>, String>;
 
-    /// The live reservations a persistent machine owns that record this
-    /// guest, in any state.
+    /// The live reservations a persistent machine owns that hold something on
+    /// this guest: every state but `held`, which records no `usbN` slot and
+    /// holds nothing on a guest (the destroy executor's rule too).
     ///
     /// # Errors
     ///
@@ -314,6 +355,7 @@ impl MachineHardwareGate for StoreMachineHardwareGate {
         let mut holds = Vec::new();
         for row in rows {
             if row.owner_kind == ReservationOwnerKind::Machine
+                && row.state != HardwareReservationState::Held
                 && row
                     .guest
                     .as_ref()
@@ -382,6 +424,65 @@ pub fn detach_payload(machine_id: &str, mapping_id: &str) -> (String, String) {
     .to_string();
     let token = review_token_for(DETACH_KIND, &payload);
     (payload, token)
+}
+
+/// The machine's live reservation of `mapping_id` and its device.
+///
+/// A mapping id is only unique within a Proxmox account, so the account
+/// narrows the match. With `strict` (an attach, which names the account of the
+/// machine's guest) only that account's device counts. Without it (a detach)
+/// the reservation in `account_id` is preferred, and when there is none the
+/// machine's only reservation of that mapping id is used wherever it is: a
+/// device must stay detachable after the machine was relinked to a guest in
+/// another account. Several reservations of one mapping id in different
+/// accounts, none of them in the preferred one, are ambiguous and refused.
+///
+/// # Errors
+///
+/// Fails when the store cannot be read, or the match is ambiguous.
+pub async fn find_machine_hold(
+    store: &dyn HardwareStore,
+    machine_id: &str,
+    mapping_id: &str,
+    account_id: Option<&str>,
+    strict: bool,
+) -> Result<Option<(HardwareDevice, HardwareReservation)>, HotplugError> {
+    let rows = store
+        .live_reservations_for_owner(ReservationOwnerKind::Machine, machine_id)
+        .await
+        .map_err(|error| backend(error.to_string()))?;
+    let mut matches = Vec::new();
+    for row in rows {
+        let device = store
+            .device(&row.device_id)
+            .await
+            .map_err(|error| backend(error.to_string()))?;
+        if let Some(device) = device
+            && device.mapping_id == mapping_id
+        {
+            matches.push((device, row));
+        }
+    }
+    if strict && let Some(account) = account_id {
+        matches.retain(|(device, _)| device.account_id == account);
+    }
+    if let Some(account) = account_id
+        && let Some(position) = matches
+            .iter()
+            .position(|(device, _)| device.account_id == account)
+    {
+        return Ok(Some(matches.swap_remove(position)));
+    }
+    match matches.len() {
+        0 => Ok(None),
+        1 => Ok(matches.pop()),
+        _ => Err(HotplugError::refused(
+            "hardware_ambiguous",
+            format!(
+                "machine {machine_id} holds a device named {mapping_id} in more than one Proxmox account and none is in the account of its guest link; relink the machine to the guest of the one you mean"
+            ),
+        )),
+    }
 }
 
 impl MachineUsb {
@@ -532,43 +633,46 @@ impl MachineUsb {
             ));
         }
         match marker.machine_id.as_deref() {
-            Some(owner) if owner != machine_id => Err(HotplugError::refused(
+            Some(owner) if owner == machine_id => Ok(()),
+            Some(owner) => Err(HotplugError::refused(
                 "machine_guest_mismatch",
                 format!(
                     "the persistent guest {} belongs to machine {owner}, not to machine {machine_id}",
                     marker.name
                 ),
             )),
-            _ => Ok(()),
+            None => Err(HotplugError::refused(
+                "machine_guest_mismatch",
+                format!(
+                    "the persistent marker of {} names no machine, so it is not shown to be machine {machine_id}'s guest; unregister it and register it again with `fleetctl machines persistent register --machine {machine_id}`",
+                    marker.name
+                ),
+            )),
         }
     }
 
-    /// The machine's live reservation of the mapping, when it has one.
+    /// The machine's live reservation of the mapping, when it has one. See
+    /// [`find_machine_hold`] for how the account narrows it.
     async fn reservation_of(
         &self,
         machine_id: &str,
         mapping_id: &str,
+        account_id: Option<&str>,
+        strict: bool,
     ) -> Result<Option<ReviewedReservation>, HotplugError> {
-        let rows = self
-            .hardware
-            .live_reservations_for_owner(ReservationOwnerKind::Machine, machine_id)
-            .await
-            .map_err(|error| backend(error.to_string()))?;
-        for row in rows {
-            let device = self
-                .hardware
-                .device(&row.device_id)
-                .await
-                .map_err(|error| backend(error.to_string()))?;
-            if device.is_some_and(|device| device.mapping_id == mapping_id) {
-                return Ok(Some(ReviewedReservation {
-                    id: row.id,
-                    state: row.state,
-                    guest: row.guest,
-                }));
-            }
-        }
-        Ok(None)
+        Ok(find_machine_hold(
+            self.hardware.as_ref(),
+            machine_id,
+            mapping_id,
+            account_id,
+            strict,
+        )
+        .await?
+        .map(|(_, row)| ReviewedReservation {
+            id: row.id,
+            state: row.state,
+            guest: row.guest,
+        }))
     }
 
     /// The device of an attach, and a fail-fast look at who holds it. The
@@ -633,7 +737,9 @@ impl MachineUsb {
         let (guest, _) = self
             .check_attach(authorizer, principal, machine_id, mapping_id)
             .await?;
-        let reservation = self.reservation_of(machine_id, mapping_id).await?;
+        let reservation = self
+            .reservation_of(machine_id, mapping_id, Some(&guest.account_id), true)
+            .await?;
         let (_, review_token) =
             attach_payload(machine_id, mapping_id, &guest.account_id, guest.vmid);
         Ok(MachineUsbReview {
@@ -704,6 +810,7 @@ impl MachineUsb {
                 machine_id: machine_id.to_owned(),
                 mapping_id: mapping_id.to_owned(),
                 action: MachineUsbAction::Attach,
+                account_id: Some(guest.account_id.clone()),
                 guest: Some(guest),
             })
             .await
@@ -715,18 +822,29 @@ impl MachineUsb {
         principal: &ActingPrincipal,
         machine_id: &str,
         mapping_id: &str,
-    ) -> Result<ReviewedReservation, HotplugError> {
+    ) -> Result<(ReviewedReservation, Option<String>), HotplugError> {
         Self::authorize(authorizer, principal, MachineUsbAction::Detach, machine_id)?;
         validate_mapping_id(mapping_id)?;
         self.require_machine(machine_id).await?;
-        self.reservation_of(machine_id, mapping_id)
+        // The account of the machine's current guest link, if it has one,
+        // picks among reservations of one mapping id; a detach never needs
+        // the link (the reservation records its own guest).
+        let account = self
+            .links
+            .get(machine_id)
+            .await
+            .map_err(|failure| backend(failure.to_string()))?
+            .map(|link| link.account_id);
+        let reservation = self
+            .reservation_of(machine_id, mapping_id, account.as_deref(), false)
             .await?
             .ok_or_else(|| {
                 HotplugError::refused(
                     "hardware_not_reserved",
                     format!("{mapping_id} is not reserved by machine {machine_id}; there is nothing to detach"),
                 )
-            })
+            })?;
+        Ok((reservation, account))
     }
 
     /// Reviews a detach: the machine must hold the device. The answer names
@@ -743,7 +861,7 @@ impl MachineUsb {
         machine_id: &str,
         mapping_id: &str,
     ) -> Result<MachineUsbReview, HotplugError> {
-        let reservation = self
+        let (reservation, _) = self
             .check_detach(authorizer, principal, machine_id, mapping_id)
             .await?;
         let (_, review_token) = detach_payload(machine_id, mapping_id);
@@ -782,7 +900,8 @@ impl MachineUsb {
                 detail: "the review token does not match this machine and device; review the detach first".to_owned(),
             });
         }
-        self.check_detach(authorizer, principal, machine_id, mapping_id)
+        let (_, account_id) = self
+            .check_detach(authorizer, principal, machine_id, mapping_id)
             .await?;
         self.port
             .carry_out(&MachineUsbRequest {
@@ -791,6 +910,7 @@ impl MachineUsb {
                 mapping_id: mapping_id.to_owned(),
                 action: MachineUsbAction::Detach,
                 guest: None,
+                account_id,
             })
             .await
     }
@@ -831,6 +951,29 @@ mod tests {
             detach_payload("m-1", "reader-a").1,
             detach_payload("m-1", "reader-b").1
         );
+    }
+
+    #[test]
+    fn the_instruction_depends_on_what_the_detach_can_do_in_that_state() {
+        use HardwareReservationState as S;
+        let say = |state| hold_instruction(state, "m-1", "reader-a", "r-1");
+        for state in [S::Held, S::Attaching, S::Attached] {
+            let text = say(state);
+            assert!(
+                text.contains("machines usb detach m-1 --mapping reader-a"),
+                "{text}"
+            );
+            assert!(!text.contains("override-release"), "{text}");
+        }
+        // A pending detach waits for the guest; a failed one is retried, with
+        // the override only for an operator who checked the guest.
+        assert!(say(S::Detaching).contains("restart"));
+        let failed = say(S::DetachFailed);
+        assert!(failed.contains("machines usb detach") && failed.contains("override-release r-1"));
+        // The detach is refused for an unknown attach: only the override.
+        let unknown = say(S::AttachUnknown);
+        assert!(unknown.contains("refused") && unknown.contains("override-release r-1"));
+        assert!(!unknown.contains("detach it first"));
     }
 
     #[test]

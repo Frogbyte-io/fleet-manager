@@ -62,12 +62,14 @@ use fleet_application::hardware_reservation::{
 use fleet_application::lab_hardware_hotplug::{HotplugError, HotplugResult};
 use fleet_application::machine::MachinePort;
 use fleet_application::machine_usb::{
-    MachineUsbAction, MachineUsbOutcome, MachineUsbPort, MachineUsbRequest,
+    MachineUsbAction, MachineUsbOutcome, MachineUsbPort, MachineUsbRequest, find_machine_hold,
+    hold_instruction,
 };
 use fleet_core::{
     HardwareDevice, HardwareReservation, HardwareReservationState as State, ReservationOwnerKind,
 };
 
+use crate::guest_locks::GuestLocks;
 use crate::lab_hardware::{AttachFailure, DetachResult, LabHardwareSaga, LeaseGuest};
 
 /// The saga's audit `source` fact for a request made through this module.
@@ -83,6 +85,7 @@ pub fn compose(
     credentials: Arc<dyn fleet_application::proxmox::ProxmoxCredentialStore>,
     transport: Arc<dyn fleet_provider_proxmox::PveTransport>,
     machines: Arc<dyn MachinePort>,
+    guest_locks: Arc<GuestLocks>,
 ) -> MachineUsbHost {
     use fleet_application::hardware_inventory::HardwareInventory;
     use fleet_application::operation::AuditPort;
@@ -119,7 +122,7 @@ pub fn compose(
             pool.clone(),
         )),
     );
-    MachineUsbHost::new(Arc::new(saga), store, reservations, machines)
+    MachineUsbHost::new(Arc::new(saga), store, reservations, machines, guest_locks)
 }
 
 type DeviceLocks = StdMutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>;
@@ -136,18 +139,21 @@ struct Inner {
     store: Arc<dyn HardwareStore>,
     reservations: Arc<HardwareReservations>,
     machines: Arc<dyn MachinePort>,
+    guest_locks: Arc<GuestLocks>,
     locks: DeviceLocks,
 }
 
 impl MachineUsbHost {
     /// Composes the port over the saga, the hardware store, the reservation
-    /// use cases and the machine records.
+    /// use cases, the machine records and the per-guest locks it shares with
+    /// the destructive executor.
     #[must_use]
     pub fn new(
         saga: Arc<LabHardwareSaga>,
         store: Arc<dyn HardwareStore>,
         reservations: Arc<HardwareReservations>,
         machines: Arc<dyn MachinePort>,
+        guest_locks: Arc<GuestLocks>,
     ) -> Self {
         Self {
             inner: Arc::new(Inner {
@@ -155,6 +161,7 @@ impl MachineUsbHost {
                 store,
                 reservations,
                 machines,
+                guest_locks,
                 locks: StdMutex::new(HashMap::new()),
             }),
         }
@@ -329,6 +336,21 @@ impl Inner {
             .ok_or_else(|| HotplugError::Invalid {
                 detail: "an attach names the machine's guest".to_owned(),
             })?;
+        // A destructive operation on the guest (destroy, revert, template,
+        // clone) holds the guest's lock for as long as it runs: the attach
+        // does not wait for it, it is refused, so a device is never written
+        // into a guest that is about to go. The lock is held to the end of
+        // the attach, which the executor in turn waits for before it checks
+        // the reservations.
+        let Some(_guest_guard) = self.guest_locks.try_lock(&guest.account_id, guest.vmid) else {
+            return Err(HotplugError::refused(
+                "hardware_guest_busy",
+                format!(
+                    "a destructive operation (destroy, snapshot revert, template or clone) is running on guest qemu/{}; nothing was attached, try again when it has finished",
+                    guest.vmid
+                ),
+            ));
+        };
         // Reserve in the database first, under the lock: a repeat returns the
         // machine's own row in whatever state the saga took it to, another
         // owner's row is `hardware_busy`.
@@ -370,8 +392,21 @@ impl Inner {
                             .await
                     }
                     Err(failure) => {
-                        self.give_back_unattached(request, &row.id).await;
-                        Err(from_failure(failure))
+                        let note = self.give_back_unattached(request, &row.id).await;
+                        Err(match (from_failure(failure), note) {
+                            (HotplugError::Refused { reason, detail }, Some(note)) => {
+                                HotplugError::Refused {
+                                    reason,
+                                    detail: format!("{detail}; {note}"),
+                                }
+                            }
+                            (HotplugError::Backend { detail }, Some(note)) => {
+                                HotplugError::Backend {
+                                    detail: format!("{detail}; {note}"),
+                                }
+                            }
+                            (error, _) => error,
+                        })
                     }
                 }
             }
@@ -385,8 +420,14 @@ impl Inner {
             State::AttachUnknown => Err(HotplugError::refused(
                 "hardware_attach_unknown",
                 format!(
-                    "the reservation for {} is attach_unknown: an earlier write may or may not have reached the guest. Read the guest, remove the entry if it is yours, then free the reservation with hardware.override-release",
-                    request.mapping_id
+                    "the reservation for {} is attach_unknown: an earlier write may or may not have reached the guest; {}",
+                    request.mapping_id,
+                    hold_instruction(
+                        State::AttachUnknown,
+                        &request.machine_id,
+                        &request.mapping_id,
+                        &row.id
+                    )
                 ),
             )),
             State::Detaching | State::DetachFailed => Err(HotplugError::refused(
@@ -406,24 +447,42 @@ impl Inner {
     /// After a failed attach: the row, when it is back in `held` with nothing
     /// recorded on a guest, holds nothing, so it is released (the machine did
     /// not get the device). A row in any other state is left for the detach.
-    async fn give_back_unattached(&self, request: &MachineUsbRequest, id: &str) {
-        let Ok(Some(row)) = self.store.reservation(id).await else {
-            return;
+    /// A release that cannot be made is not swallowed: the answer says the
+    /// row stays `held` by the machine and how to give it back, and the state
+    /// stays visible in the reservation list.
+    async fn give_back_unattached(&self, request: &MachineUsbRequest, id: &str) -> Option<String> {
+        let row = match self.store.reservation(id).await {
+            Ok(Some(row)) => row,
+            Ok(None) => return None,
+            Err(error) => {
+                return Some(format!(
+                    "the reservation {id} could not be read to give it back ({error}); it may stay held by the machine: run `fleetctl machines usb detach {} --mapping {}`",
+                    request.machine_id, request.mapping_id
+                ));
+            }
         };
         let slotless = row
             .guest
             .as_ref()
             .is_none_or(|guest| guest.usb_slot.is_none());
-        if row.state == State::Held && slotless {
-            let _ = self
-                .reservations
-                .release_under(
-                    &context(request),
-                    Permission::MachineUsbAttach.id(),
-                    &row.id,
-                    now(),
-                )
-                .await;
+        if row.state != State::Held || !slotless {
+            return None;
+        }
+        match self
+            .reservations
+            .release_under(
+                &context(request),
+                Permission::MachineUsbAttach.id(),
+                &row.id,
+                now(),
+            )
+            .await
+        {
+            Ok(_) => None,
+            Err(error) => Some(format!(
+                "the reservation {id} could not be released ({error}) and stays held by the machine; run `fleetctl machines usb detach {} --mapping {}` to give the device back",
+                request.machine_id, request.mapping_id
+            )),
         }
     }
 
@@ -438,29 +497,22 @@ impl Inner {
         outcome
     }
 
-    /// The device of the machine's live reservation for the mapping.
+    /// The device of the machine's live reservation for the mapping (the
+    /// account of its current guest link picks among several; see
+    /// [`find_machine_hold`]).
     async fn held_device(
         &self,
         request: &MachineUsbRequest,
     ) -> Result<(HardwareDevice, HardwareReservation), HotplugError> {
-        let rows = self
-            .store
-            .live_reservations_for_owner(ReservationOwnerKind::Machine, &request.machine_id)
-            .await
-            .map_err(|error| backend(&error))?;
-        for row in rows {
-            let device = self
-                .store
-                .device(&row.device_id)
-                .await
-                .map_err(|error| backend(&error))?;
-            if let Some(device) = device
-                && device.mapping_id == request.mapping_id
-            {
-                return Ok((device, row));
-            }
-        }
-        Err(not_reserved(request))
+        find_machine_hold(
+            self.store.as_ref(),
+            &request.machine_id,
+            &request.mapping_id,
+            request.account_id.as_deref(),
+            false,
+        )
+        .await?
+        .ok_or_else(|| not_reserved(request))
     }
 
     async fn detach_locked(
@@ -540,8 +592,14 @@ impl Inner {
             State::AttachUnknown => Err(HotplugError::refused(
                 "hardware_attach_unknown",
                 format!(
-                    "the reservation for {} is attach_unknown: an earlier write may or may not have reached the guest, so Fleet deletes nothing. Read the guest, remove the entry if it is yours, then free the reservation with hardware.override-release",
-                    request.mapping_id
+                    "the reservation for {} is attach_unknown: an earlier write may or may not have reached the guest, so Fleet deletes nothing; {}",
+                    request.mapping_id,
+                    hold_instruction(
+                        State::AttachUnknown,
+                        &request.machine_id,
+                        &request.mapping_id,
+                        &row.id
+                    )
                 ),
             )),
             State::Released => Err(not_reserved(request)),

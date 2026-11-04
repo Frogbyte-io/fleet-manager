@@ -467,6 +467,7 @@ pub struct ProxmoxDestructiveExecutor {
     persistent: Option<Arc<dyn fleet_application::persistent::PersistentGuestPort>>,
     audit: Option<Arc<dyn fleet_application::operation::AuditPort>>,
     hardware: Option<Arc<dyn fleet_application::hardware::HardwareStore>>,
+    guest_locks: Option<Arc<crate::guest_locks::GuestLocks>>,
 }
 
 impl ProxmoxDestructiveExecutor {
@@ -485,9 +486,24 @@ impl ProxmoxDestructiveExecutor {
             artifacts: None,
             pool_members: None,
             hardware: None,
+            guest_locks: None,
             persistent: None,
             audit: None,
         }
+    }
+
+    /// Supplies the per-guest locks shared with the persistent machines' USB
+    /// attach (FM-1125). With them, a destroy, snapshot revert, template
+    /// conversion or clone holds its guest's lock from its first check to the
+    /// end, so a device attach cannot slip in between the hardware check and
+    /// the work: the attach is refused while the operation runs, and the
+    /// operation sees what an attach left. Without them the executor checks
+    /// the reservations only, so every production construction site must
+    /// supply them.
+    #[must_use]
+    pub fn with_guest_locks(mut self, locks: Arc<crate::guest_locks::GuestLocks>) -> Self {
+        self.guest_locks = Some(locks);
+        self
     }
 
     /// Supplies the persistent marker store (#489). With it, destroying a
@@ -804,7 +820,10 @@ impl ProxmoxDestructiveExecutor {
         };
         if !matches!(
             operation.kind.as_str(),
-            "proxmox.guest.destroy" | "proxmox.guest.snapshot-revert" | "proxmox.guest.template"
+            "proxmox.guest.destroy"
+                | "proxmox.guest.snapshot-revert"
+                | "proxmox.guest.template"
+                | "proxmox.guest.clone"
         ) {
             return Ok(false);
         }
@@ -827,12 +846,17 @@ impl ProxmoxDestructiveExecutor {
                             .flatten()
                             .map_or_else(|| "<mapping>".to_owned(), |device| device.mapping_id);
                         format!(
-                            "VMID {} holds a USB device for machine {} (reservation {} is {}); detach it first with `fleetctl machines usb detach {} --mapping {mapping}`",
+                            "VMID {} holds a USB device for machine {} (reservation {} is {}); {}",
                             payload.vmid,
                             row.owner_id,
                             row.id,
                             row.state.id(),
-                            row.owner_id
+                            fleet_application::machine_usb::hold_instruction(
+                                row.state,
+                                &row.owner_id,
+                                &mapping,
+                                &row.id
+                            )
                         )
                     } else {
                         format!(
@@ -935,10 +959,38 @@ impl ProxmoxDestructiveExecutor {
     }
 }
 
+/// The kinds that hold the guest's lock while they run (see
+/// [`ProxmoxDestructiveExecutor::with_guest_locks`]).
+const GUEST_LOCKED_KINDS: [&str; 4] = [
+    "proxmox.guest.destroy",
+    "proxmox.guest.snapshot-revert",
+    "proxmox.guest.template",
+    "proxmox.guest.clone",
+];
+
 #[async_trait::async_trait]
 impl OperationExecutor for ProxmoxDestructiveExecutor {
-    #[allow(clippy::too_many_lines)]
     async fn execute(&self, operations: &Operations, operation: &Operation) -> Result<(), String> {
+        // Wait for the guest's lock (an attach in flight finishes first, and
+        // the hardware check below sees its row), and hold it to the end.
+        let _guard = match &self.guest_locks {
+            Some(locks) if GUEST_LOCKED_KINDS.contains(&operation.kind.as_str()) => {
+                let parsed: DestructivePayload = payload(operation)?;
+                Some(locks.lock(&parsed.account_id, parsed.vmid).await)
+            }
+            _ => None,
+        };
+        self.execute_inner(operations, operation).await
+    }
+}
+
+impl ProxmoxDestructiveExecutor {
+    #[allow(clippy::too_many_lines)]
+    async fn execute_inner(
+        &self,
+        operations: &Operations,
+        operation: &Operation,
+    ) -> Result<(), String> {
         let payload: DestructivePayload = payload(operation)?;
         if self
             .refuse_pool_member(operations, operation, &payload)
@@ -1049,6 +1101,14 @@ impl OperationExecutor for ProxmoxDestructiveExecutor {
                         &refusal.detail,
                     )
                     .await;
+                }
+                // The stop took time: look at the reservations again right
+                // before the protection is lifted and the delete is made.
+                if self
+                    .refuse_held_hardware(operations, operation, &payload)
+                    .await?
+                {
+                    return Ok(());
                 }
                 let remaining = deadline
                     .checked_sub(started.elapsed())
@@ -1198,6 +1258,14 @@ impl OperationExecutor for ProxmoxDestructiveExecutor {
                     .and_then(serde_json::Value::as_str)
                     .ok_or("the reviewed parameters carry no snapshot name")?;
                 validate_snapshot_name(name)?;
+                // Immediately before the rollback, which replaces the guest's
+                // `usbN` set.
+                if self
+                    .refuse_held_hardware(operations, operation, &payload)
+                    .await?
+                {
+                    return Ok(());
+                }
                 self.run_to_terminal(
                     operations,
                     &operation.id,
@@ -1292,6 +1360,14 @@ impl OperationExecutor for ProxmoxDestructiveExecutor {
                     )
                     .await;
                 }
+                // A clone inherits the source's `usbN` entries: not while a
+                // machine holds a device on it.
+                if self
+                    .refuse_held_hardware(operations, operation, &payload)
+                    .await?
+                {
+                    return Ok(());
+                }
                 self.run_to_terminal(
                     operations,
                     &operation.id,
@@ -1333,6 +1409,14 @@ impl OperationExecutor for ProxmoxDestructiveExecutor {
                     return self
                         .finish_noop(operations, &operation.id, "already a template".to_owned())
                         .await;
+                }
+                // Immediately before the conversion (its clones inherit the
+                // guest's `usbN` entries).
+                if self
+                    .refuse_held_hardware(operations, operation, &payload)
+                    .await?
+                {
+                    return Ok(());
                 }
                 self.run_to_terminal(
                     operations,

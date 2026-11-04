@@ -21,6 +21,7 @@ pub mod external_accounts_store;
 pub mod frogenv;
 pub mod gateway;
 pub mod git_credentials;
+pub mod guest_locks;
 pub mod hardware_observer;
 pub mod hardware_reconciler;
 pub mod hardware_reservation_store;
@@ -433,13 +434,6 @@ fn api_state(
         )
         .with_guest_links(std::sync::Arc::new(
             fleet_storage_sqlite::GuestLinkRepository::new(pool.clone()),
-        ))
-        // FM-1125: a machine that holds a USB device is detached before it
-        // is deleted.
-        .with_hardware_gate(std::sync::Arc::new(
-            fleet_application::machine_usb::StoreMachineHardwareGate::new(std::sync::Arc::new(
-                fleet_storage_sqlite::HardwareRepository::new(pool.clone()),
-            )),
         ));
         let system = ControllerSystemInfo { pool: pool.clone() };
         let audit = fleet_application::audit::AuditQueries::new(std::sync::Arc::new(

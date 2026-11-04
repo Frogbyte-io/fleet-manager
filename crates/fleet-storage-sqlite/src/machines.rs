@@ -363,12 +363,38 @@ impl MachinePort for MachineRepository {
     }
 
     async fn delete(&self, id: &str) -> Result<(), PortFailure> {
-        let deleted = sqlx::query("DELETE FROM machines WHERE id = ?1")
+        // A machine that holds a USB device (a live hardware reservation it
+        // owns, FM-1125) is not deleted, whoever asks: the reservation names
+        // the machine, and deleting it would leave a device on a guest nobody
+        // answers for. One statement, so the check and the delete cannot
+        // interleave with a reservation.
+        let deleted = sqlx::query(
+            "DELETE FROM machines WHERE id = ?1 AND NOT EXISTS ( \
+             SELECT 1 FROM hardware_reservations \
+             WHERE owner_kind = 'machine' AND owner_id = ?1 AND state <> 'released')",
+        )
+        .bind(id)
+        .execute(&self.pool)
+        .await
+        .map_err(|error| backend("delete", &error))?;
+        if deleted.rows_affected() == 0 {
+            let held: Option<(String, String, String)> = sqlx::query_as(
+                "SELECT r.id, r.state, COALESCE(d.mapping_id, '<mapping>') \
+                 FROM hardware_reservations r LEFT JOIN hardware_devices d ON d.id = r.device_id \
+                 WHERE r.owner_kind = 'machine' AND r.owner_id = ?1 AND r.state <> 'released' \
+                 ORDER BY r.created_at LIMIT 1",
+            )
             .bind(id)
-            .execute(&self.pool)
+            .fetch_optional(&self.pool)
             .await
             .map_err(|error| backend("delete", &error))?;
-        if deleted.rows_affected() == 0 {
+            if let Some((reservation, state, mapping)) = held {
+                return Err(PortFailure::Conflict {
+                    detail: format!(
+                        "cannot delete the machine: it holds USB device {mapping} (reservation {reservation} is {state}); detach it first with `fleetctl machines usb detach {id} --mapping {mapping}` (a stuck reservation is freed with `fleetctl hardware override-release {reservation}`)"
+                    ),
+                });
+            }
             return Err(PortFailure::NotFound {
                 what: format!("machine {id:?}"),
             });

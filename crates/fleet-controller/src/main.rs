@@ -305,6 +305,9 @@ fn run_serve(mut config: fleet_config::ControllerConfig) -> ExitCode {
         });
         // #489: the persistent marker, and the product-key store the
         // creation executor reads.
+        // FM-1125: one registry of per-guest locks, so a destructive operation
+        // and a machine's device attach on the same guest exclude each other.
+        let guest_locks = fleet_controller::guest_locks::GuestLocks::new();
         let persistent_guests: std::sync::Arc<
             dyn fleet_application::persistent::PersistentGuestPort,
         > = std::sync::Arc::new(fleet_storage_sqlite::PersistentGuestRepository::new(
@@ -759,6 +762,7 @@ fn run_serve(mut config: fleet_config::ControllerConfig) -> ExitCode {
                         .with_hardware_guard(std::sync::Arc::new(
                             fleet_storage_sqlite::HardwareRepository::new(store.pool().clone()),
                         ))
+                        .with_guest_locks(guest_locks.clone())
                         .with_pool_members(std::sync::Arc::new(
                             fleet_application::operation::PoolMembership(std::sync::Arc::new(
                                 fleet_storage_sqlite::LabPoolRepository::new(store.pool().clone()),
@@ -990,6 +994,7 @@ fn run_serve(mut config: fleet_config::ControllerConfig) -> ExitCode {
                     .with_hardware_guard(std::sync::Arc::new(
                         fleet_storage_sqlite::HardwareRepository::new(store.pool().clone()),
                     ))
+                    .with_guest_locks(guest_locks.clone())
                     .with_pool_members(std::sync::Arc::new(
                         fleet_application::operation::PoolMembership(std::sync::Arc::new(
                             fleet_storage_sqlite::LabPoolRepository::new(store.pool().clone()),
@@ -1647,6 +1652,7 @@ fn run_serve(mut config: fleet_config::ControllerConfig) -> ExitCode {
                             credentials,
                             transport,
                             machine_records,
+                            guest_locks.clone(),
                         )),
                     )),
                     std::sync::Arc::new(
