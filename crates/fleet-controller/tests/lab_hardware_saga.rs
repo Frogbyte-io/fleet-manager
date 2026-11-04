@@ -2336,51 +2336,55 @@ async fn a_reservation_without_a_pin_is_pinned_at_its_first_attach() {
 
 #[tokio::test]
 async fn cleanup_takes_a_row_that_became_attached_while_it_ran() {
-    // The template declares A only; B is reserved for the lease afterwards by
-    // hand, `held` when cleanup first reads the lease's rows.
+    // The template declares A only. While cleanup detaches A, a provision that
+    // was still running reserves B for the lease, attaches it and records it:
+    // the row did not exist when cleanup first read the lease's rows (a row
+    // that is `held` then is released by cleanup, which is #591's rule), and
+    // is `attached` on its next read.
     let world = World::new(&[READER_A]).await;
     let controller = Controller::start(&world).await;
     let (lease, _) = ready_lease(&world, &controller).await;
     let record = controller.record(&lease).await;
     let vmid = record.vmid.unwrap();
-    controller
-        .placement
-        .reserve(
-            PRINCIPAL,
-            &HardwareDemand {
-                lease_id: &lease,
-                account_id: &world.account_id,
-                clone_node: TEMPLATE_NODE,
-                declared: &[usb(READER_B)],
-                operation_id: None,
-            },
-            now(),
-        )
-        .await
-        .unwrap()
-        .expect("the second device is reserved");
-    let second: String = sqlx::query_scalar(
-        "SELECT r.id FROM hardware_reservations r JOIN hardware_devices d ON d.id = r.device_id \
-         WHERE d.mapping_id = ?1",
-    )
-    .bind(READER_B)
-    .fetch_one(&controller.pool)
-    .await
-    .unwrap();
-    // The second device's entry is on the guest, and while cleanup detaches
-    // the first, a provision that was still writing records it: its row is
-    // `attached` on cleanup's next read.
+    // The second device's entry is on the guest.
     world.usb.set_slot(vmid, 1, "mapping=fm-test-reader-b");
     let pool = controller.pool.clone();
     let account = world.account_id.clone();
+    let placement = controller.placement.clone();
+    let lease_id = lease.clone();
     world.usb.inject(
         UsbStep::Detach,
         UsbFault::Hook(Arc::new(move || {
             let store = HardwareRepository::new(pool.clone());
             let account = account.clone();
-            let second = second.clone();
+            let placement = placement.clone();
+            let lease_id = lease_id.clone();
+            let pool = pool.clone();
             Box::pin(async move {
                 use fleet_application::hardware::HardwareStore as _;
+                placement
+                    .reserve(
+                        PRINCIPAL,
+                        &HardwareDemand {
+                            lease_id: &lease_id,
+                            account_id: &account,
+                            clone_node: TEMPLATE_NODE,
+                            declared: &[usb(READER_B)],
+                            operation_id: None,
+                        },
+                        now(),
+                    )
+                    .await
+                    .unwrap()
+                    .expect("the second device is reserved");
+                let second: String = sqlx::query_scalar(
+                    "SELECT r.id FROM hardware_reservations r \
+                     JOIN hardware_devices d ON d.id = r.device_id WHERE d.mapping_id = ?1",
+                )
+                .bind(READER_B)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
                 let target = fleet_core::GuestTarget {
                     account_id: account,
                     node: TEMPLATE_NODE.to_owned(),

@@ -899,7 +899,7 @@ impl LabHardwareSaga {
                 vmid: guest.vmid,
                 usb_slot: Some(predicted),
             };
-            let moved = self
+            let moved = match self
                 .store
                 .transition_reservation(
                     &reservation.id,
@@ -909,7 +909,37 @@ impl LabHardwareSaga {
                     now(),
                 )
                 .await
-                .map_err(|error| infra(&error))?;
+            {
+                Ok(moved) => moved,
+                // The lease's cleanup released the row first (the lease
+                // ended after the caller's lease check): nothing was written
+                // and nothing is left to undo. This compare-and-set is what
+                // keeps an attach from reaching a guest the cleanup is
+                // about to destroy.
+                Err(HardwareStoreError::IllegalTransition {
+                    actual: State::Released,
+                    ..
+                }) => {
+                    let _ = self
+                        .event(
+                            "hardware_attach_failed",
+                            device,
+                            &reservation,
+                            guest.operation_id,
+                            &[
+                                ("outcome", "released".to_owned()),
+                                ("reason", "hardware_lease_ended".to_owned()),
+                            ],
+                            false,
+                        )
+                        .await;
+                    return Err(refused(
+                        "hardware_lease_ended",
+                        "the lease ended before the device was written; its reservation was already released",
+                    ));
+                }
+                Err(error) => return Err(infra(&error)),
+            };
             (moved, Some(slot_name(predicted)))
         };
 
@@ -1968,10 +1998,21 @@ impl LabHardwareSaga {
     /// Detaches every device the lease holds and releases it, before the
     /// guest's fate (destroy, revert, keep). Idempotent: a released row is
     /// not live, a `detaching` row is continued, a `detach_failed` row is
-    /// retried. Rows that never attached (`held`) are left to the lease's
-    /// own release. The live rows are read again after each pass, so a row
+    /// retried. The live rows are read again after each pass, so a row
     /// that became attached while cleanup ran (a provision still writing) is
     /// taken too.
+    ///
+    /// A row that holds nothing on the guest (`held`, no slot recorded) is
+    /// released here, first, instead of being left for the release after the
+    /// guest's fate. A mid-run hotplug attach whose lease check passed before
+    /// the lease ended may still be about to move such a row to `attaching`,
+    /// and the row's compare-and-set decides who wins. If the release wins,
+    /// that attach finds a released row and is refused before it writes
+    /// (it never reaches a guest cleanup is about to destroy). If the attach
+    /// wins, the release loses and the row, now `attaching`, is detached like
+    /// any other row before the guest's fate. Either way no row is left for
+    /// the destroy to orphan as `attach_unknown`. A release that fails for
+    /// any other reason fails the detach: the guest is kept until it works.
     ///
     /// # Errors
     ///
@@ -1998,18 +2039,37 @@ impl LabHardwareSaga {
                 .map_err(|error| {
                     unconfirmed(format!("the lease's hardware is unreadable: {error}"), None)
                 })?;
-            let todo: Vec<HardwareReservation> = live
+            let mut todo: Vec<HardwareReservation> = live
                 .into_iter()
-                .filter(|row| {
-                    !(row.state == State::Held
-                        && row.guest.as_ref().is_none_or(|g| g.usb_slot.is_none()))
-                })
                 .filter(|row| seen.insert(row.id.clone()))
                 .collect();
             if todo.is_empty() {
                 break;
             }
+            // Rows that hold nothing go first: the sooner they are released,
+            // the sooner a straddling hotplug attach is refused.
+            todo.sort_by_key(|row| !Self::holds_nothing(row));
             for row in todo {
+                let row = if Self::holds_nothing(&row) {
+                    match self.claim_unattached(&row, operation_id).await {
+                        Ok(None) => continue,
+                        // A hotplug attach moved the row first: it is
+                        // detached below like any other attaching row.
+                        Ok(Some(moved)) => moved,
+                        Err(error) => {
+                            if let Some(target) = &row.guest {
+                                guest.get_or_insert((target.node.clone(), target.vmid));
+                            }
+                            problems.push(format!(
+                                "reservation {} holds nothing but could not be released: {error}",
+                                row.id
+                            ));
+                            continue;
+                        }
+                    }
+                } else {
+                    row
+                };
                 let Some(target) = row.guest.clone() else {
                     problems.push(format!(
                         "reservation {} is {} with no guest recorded",
@@ -2098,6 +2158,45 @@ impl LabHardwareSaga {
                 guest,
             ))
         }
+    }
+
+    /// A row that holds nothing on any guest: `held`, with no `usbN` slot
+    /// recorded. It was never attached, or a confirmed detach put it back.
+    fn holds_nothing(row: &HardwareReservation) -> bool {
+        row.state == State::Held && row.guest.as_ref().is_none_or(|g| g.usb_slot.is_none())
+    }
+
+    /// Releases a row that holds nothing, through the store's compare-and-set,
+    /// so that a hotplug attach that is about to move it loses or wins
+    /// atomically (see [`Self::detach_for_lease`]). Answers `None` when the row
+    /// is released (by this call or by somebody else), and the row as it is now
+    /// when a writer moved it to a state that needs the detach path.
+    async fn claim_unattached(
+        &self,
+        row: &HardwareReservation,
+        operation_id: Option<&str>,
+    ) -> Result<Option<HardwareReservation>, HardwareStoreError> {
+        let mut current = row.clone();
+        // A request of the lease's holder can put a row back to `held` (an
+        // attach that wrote nothing); a few rounds are enough for a lease
+        // whose cleanup is running.
+        for _ in 0..DETACH_PASSES {
+            match self.release_row(operation_id, &current.id).await {
+                Ok(()) => return Ok(None),
+                Err(HardwareStoreError::IllegalTransition { .. }) => {
+                    match self.store.reservation(&current.id).await? {
+                        None => return Ok(None),
+                        Some(fresh) if fresh.state == State::Released => return Ok(None),
+                        Some(fresh) if Self::holds_nothing(&fresh) => current = fresh,
+                        Some(fresh) => return Ok(Some(fresh)),
+                    }
+                }
+                Err(error) => return Err(error),
+            }
+        }
+        Err(HardwareStoreError::Backend(
+            "the reservation kept changing while it was released".to_owned(),
+        ))
     }
 
     /// Continues a detach whose row another writer moved first: a released

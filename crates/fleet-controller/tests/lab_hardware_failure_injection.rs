@@ -1135,25 +1135,14 @@ async fn hotplug_cleanup_and_the_reconciler_racing_on_one_device_converge_to_not
             "round {round}: {:?}",
             world.usb.double_assignments()
         );
-        // One interleaving is a known bug of the saga, reported with this
-        // suite (see `a_hotplug_attach_straddling_the_cleanup_...` below): the
-        // holder's attach moves the row after the cleanup skipped it as
-        // `held`, finds the lease over, and cannot read the guest the cleanup
-        // is destroying, so the row ends `attach_unknown` on a released lease.
-        // Nothing is assigned (the guest is gone) and the device is visibly
-        // quarantined; only the exact shape is tolerated here, and the
-        // documented override clears it.
-        if rig.lease(&lease).await.state == LeaseState::Released
-            && let Some(stuck) = rig
-                .live_rows()
-                .await
-                .into_iter()
-                .find(|row| row.state == "attach_unknown")
-        {
-            assert_eq!(stuck.slot, None, "round {round}");
-            assert!(world.pve.lab_guests().is_empty(), "round {round}");
-            assert_eq!(rig.device_status(READER_A).await, DeviceStatus::Quarantined);
-            rig.override_release(&stuck.id).await.expect("override");
+        // No tolerated shape: a released lease holds no live row, whatever
+        // the hotplug attach did around its cleanup (#591).
+        if rig.lease(&lease).await.state == LeaseState::Released {
+            assert!(
+                rig.live_rows().await.is_empty(),
+                "round {round}: a released lease holds a row: {}",
+                rig.dump(&world).await
+            );
         }
         rig.assert_invariants(&world, Level::Safety, "after the race")
             .await;
@@ -1650,14 +1639,42 @@ fn gate(
     })
 }
 
-/// The interleaving of the race test above, made deterministic. A lease has
-/// detached its device mid-run (the row is `held`). The holder's attach
-/// request, whose lease check passed, is paused right before it moves the row.
-/// The lease is released and its cleanup, having skipped the `held` row (it
-/// never attached), reaches the destroy. The attach then moves the row
-/// `held -> attaching`, finds the lease over, and waits to read the guest back
-/// to undo itself until the cleanup has destroyed the guest.
-async fn straddling_attach() -> (World, std::sync::Arc<Rig>, String) {
+/// Where the holder's hotplug attach is when the lease's cleanup runs. Every
+/// variant starts the same way: the lease detached its device mid-run (the row
+/// is `held`), and the lease is released while the holder's attach request,
+/// whose lease check passed just before, is in flight. The attach goes on once
+/// the cleanup has destroyed the guest, which is the worst case for it: the
+/// guest it would read back to undo itself is gone.
+#[derive(Clone, Copy, Debug)]
+enum Straddle {
+    /// The attach moves the row only after the cleanup finished: the cleanup
+    /// found the row `held` and the guest is gone.
+    After,
+    /// The attach moves the row after the cleanup read it as `held` and right
+    /// before the cleanup releases it (the issue's interleaving).
+    During,
+    /// The attach moved the row before the cleanup read the lease's rows, then
+    /// stalls until the guest is gone.
+    Before,
+}
+
+const STRADDLES: [Straddle; 3] = [Straddle::After, Straddle::During, Straddle::Before];
+
+struct Straddled {
+    world: World,
+    rig: std::sync::Arc<Rig>,
+    lease: String,
+    /// What the attach answered.
+    attach: Result<
+        fleet_application::lab_hardware_hotplug::HotplugOutcome,
+        fleet_application::lab_hardware_hotplug::HotplugError,
+    >,
+    /// The writes that had landed before the attach and the cleanup began.
+    writes_before: Vec<String>,
+}
+
+/// The interleaving of the race test above, made deterministic.
+async fn straddling_attach(how: Straddle) -> Straddled {
     use std::sync::Arc;
     use tokio::sync::Notify;
 
@@ -1668,52 +1685,71 @@ async fn straddling_attach() -> (World, std::sync::Arc<Rig>, String) {
         .await
         .expect("the holder detaches");
     assert_eq!(rig.states().await, vec!["held"]);
+    let writes_before = world.usb.writes();
 
-    let attach_paused = Arc::new(Notify::new());
-    let cleanup_skipped = Arc::new(Notify::new());
+    let reached = Arc::new(Notify::new());
     let guest_destroyed = Arc::new(Notify::new());
-    // The attach waits right before it moves the row ...
-    world.chaos.run_at(
-        Point::Transition(State::Held, State::Attaching),
-        When::Before,
-        gate(Some(attach_paused.clone()), Some(cleanup_skipped.clone())),
-    );
-    // ... and, right after it moved the row (and before it checks the lease
-    // and reads the guest back to undo itself), waits for the guest to be
-    // destroyed.
-    world.chaos.run_at(
-        Point::Transition(State::Held, State::Attaching),
-        When::After,
-        gate(None, Some(guest_destroyed.clone())),
-    );
+    let moving = Point::Transition(State::Held, State::Attaching);
+    match how {
+        Straddle::After => {
+            world.chaos.run_at(
+                moving,
+                When::Before,
+                gate(Some(reached.clone()), Some(guest_destroyed.clone())),
+            );
+        }
+        Straddle::During => {
+            let cleanup_at_release = Arc::new(Notify::new());
+            let attach_moved = Arc::new(Notify::new());
+            // The attach waits right before it moves the row, until the
+            // cleanup is about to release it ...
+            world.chaos.run_at(
+                moving,
+                When::Before,
+                gate(Some(reached.clone()), Some(cleanup_at_release.clone())),
+            );
+            // ... the cleanup waits right before that release, until the
+            // attach moved the row ...
+            world.chaos.run_at(
+                Point::Release,
+                When::Before,
+                gate(Some(cleanup_at_release), Some(attach_moved.clone())),
+            );
+            // ... and the attach, once it moved the row (and before it checks
+            // the lease and reads the guest back), waits for the destroy.
+            world.chaos.run_at(
+                moving,
+                When::After,
+                gate(Some(attach_moved), Some(guest_destroyed.clone())),
+            );
+        }
+        Straddle::Before => {
+            world.chaos.run_at(
+                moving,
+                When::After,
+                gate(Some(reached.clone()), Some(guest_destroyed.clone())),
+            );
+        }
+    }
     let attach = {
         let rig = rig.clone();
         let lease = lease.clone();
         tokio::spawn(async move { rig.raw_attach(&lease, vmid, READER_A).await })
     };
-    if tokio::time::timeout(std::time::Duration::from_secs(10), attach_paused.notified())
-        .await
-        .is_err()
-    {
-        panic!(
-            "the attach never reached its pause: {:?}",
-            tokio::time::timeout(std::time::Duration::from_secs(1), attach).await
-        );
+    let reached = tokio::time::timeout(std::time::Duration::from_secs(10), reached.notified());
+    if reached.await.is_err() {
+        panic!("the attach never reached its pause ({how:?})");
     }
 
-    // The lease ends; its cleanup reaches the destroy having skipped the
-    // `held` row, and lets the attach go on.
+    // The lease ends and its cleanup runs to the end.
     rig.release(&lease).await;
-    world.usb.inject(
-        UsbStep::Resources,
-        UsbFault::Hook(gate(Some(cleanup_skipped), None)),
-        1,
-    );
     // Whoever is watching tells the attach once the guest is gone.
     let watcher = {
         let world_pve = world.pve.clone();
         tokio::spawn(async move {
-            while world_pve.lab_guests().contains_key(&vmid) {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+            while world_pve.lab_guests().contains_key(&vmid) && std::time::Instant::now() < deadline
+            {
                 tokio::time::sleep(std::time::Duration::from_millis(1)).await;
             }
             guest_destroyed.notify_one();
@@ -1721,45 +1757,159 @@ async fn straddling_attach() -> (World, std::sync::Arc<Rig>, String) {
     };
     rig.drain(&world).await.done();
     watcher.await.unwrap();
-    let _ = tokio::time::timeout(std::time::Duration::from_secs(10), attach)
+    let attach = tokio::time::timeout(std::time::Duration::from_secs(10), attach)
         .await
         .expect("the attach finishes once the guest is gone")
         .unwrap();
-    (world, rig, lease)
+    Straddled {
+        world,
+        rig,
+        lease,
+        attach,
+        writes_before,
+    }
+}
+
+fn refusal(
+    attach: &Result<
+        fleet_application::lab_hardware_hotplug::HotplugOutcome,
+        fleet_application::lab_hardware_hotplug::HotplugError,
+    >,
+) -> Option<String> {
+    match attach {
+        Err(fleet_application::lab_hardware_hotplug::HotplugError::Refused { reason, .. }) => {
+            Some(reason.clone())
+        }
+        _ => None,
+    }
 }
 
 #[tokio::test]
-async fn a_hotplug_attach_straddling_the_cleanup_leaves_a_visible_quarantined_row_not_an_assigned_device()
- {
-    // What happens today, asserted exactly so it cannot get worse: nothing is
-    // assigned (the guest is destroyed), the device is quarantined and the
-    // row names its lease, and the operator's override is the way out.
-    let (world, rig, lease) = straddling_attach().await;
-    assert_eq!(rig.lease(&lease).await.state, LeaseState::Released);
-    let Some(row) = rig.live_row_of(READER_A).await else {
-        panic!("the row is stranded: {}", rig.dump(&world).await);
-    };
-    assert_eq!((row.state.as_str(), row.slot), ("attach_unknown", None));
-    assert!(world.pve.lab_guests().is_empty());
-    assert_eq!(rig.device_status(READER_A).await, DeviceStatus::Quarantined);
-    assert!(world.usb.double_assignments().is_empty());
-    // The reconciler does not clear it either: an absent guest is not proof
-    // of detach.
-    rig.converge(&world, now() + HOUR_MS).await;
-    assert!(rig.live_row_of(READER_A).await.is_some());
-    rig.override_release(&row.id).await.expect("override");
-    rig.refresh_inventory().await;
-    assert_eq!(rig.device_status(READER_A).await, DeviceStatus::Available);
-    rig.assert_nothing(&world, &lease, "after the override")
-        .await;
+async fn a_hotplug_attach_that_straddles_the_cleanup_never_writes_and_leaves_no_row() {
+    // Asserted exactly, per interleaving: the attach never writes (so there is
+    // nothing to undo on a guest that is about to go), and the lease's row is
+    // released, not left `attach_unknown` on a released lease.
+    for how in STRADDLES {
+        let Straddled {
+            world,
+            rig,
+            lease,
+            attach,
+            writes_before,
+        } = straddling_attach(how).await;
+        let label = format!("{how:?}");
+        assert_eq!(
+            rig.lease(&lease).await.state,
+            LeaseState::Released,
+            "{label}"
+        );
+        assert!(
+            attach.is_err(),
+            "{label}: a lease that ended gets no attach: {attach:?}"
+        );
+        if matches!(how, Straddle::After) {
+            // The compare-and-set found the row released by the cleanup: a
+            // clean refusal, and the audit trail says why.
+            assert_eq!(
+                refusal(&attach).as_deref(),
+                Some("hardware_lease_ended"),
+                "{label}: {attach:?}"
+            );
+        }
+        assert_eq!(rig.states().await, vec!["released"], "{label}");
+        assert!(rig.live_row_of(READER_A).await.is_none(), "{label}");
+        assert_eq!(world.usb.writes(), writes_before, "{label}: no write");
+        assert!(world.pve.lab_guests().is_empty(), "{label}");
+        assert!(world.usb.double_assignments().is_empty(), "{label}");
+        assert!(world.usb.destroyed_holding().is_empty(), "{label}");
+        // Nothing for the reconciler or an operator to do.
+        rig.refresh_inventory().await;
+        assert_eq!(
+            rig.device_status(READER_A).await,
+            DeviceStatus::Available,
+            "{label}"
+        );
+        rig.assert_invariants(&world, Level::Quiescent, &label)
+            .await;
+    }
 }
 
 #[tokio::test]
-#[ignore = "bug: a mid-run hotplug attach whose request straddles the lease's cleanup strands its reservation `attach_unknown` on a Released lease (cleanup skips `held` rows in detach_for_lease and releases them only after the destroy; the attach's rollback cannot read the destroyed guest), and the reconciler never clears it; see the PR description"]
 async fn a_released_lease_holds_no_reservation_even_when_a_hotplug_attach_straddles_its_cleanup() {
-    let (world, rig, lease) = straddling_attach().await;
+    for how in STRADDLES {
+        let Straddled {
+            world, rig, lease, ..
+        } = straddling_attach(how).await;
+        rig.converge(&world, now() + HOUR_MS).await;
+        rig.assert_nothing(&world, &lease, &format!("a straddling attach ({how:?})"))
+            .await;
+    }
+}
+
+#[tokio::test]
+async fn an_attach_whose_write_was_lost_on_a_live_guest_is_never_released_while_the_guest_may_hold_it()
+ {
+    // The converse of the straddle: here the write really happened. The holder
+    // detached (the row is `held`), the attach's write lands and its answer is
+    // lost, so the row is `attach_unknown` with a slot while the guest is
+    // alive and holds the device. Nothing may release that row on a guess: not
+    // the lease's cleanup (whose detach is refused), not the reconciler, not
+    // the release of the lease. Only a confirmed detach does.
+    let world = World::new(&[READER_A]).await;
+    let rig = Rig::start(&world).await;
+    let (lease, vmid) = rig.ready_lease(&world).await;
+    rig.hotplug_detach(&lease, READER_A, false)
+        .await
+        .expect("the holder detaches");
+    assert!(world.usb.stored(vmid).is_empty());
+
+    world.usb.inject(UsbStep::Attach, UsbFault::Lost, 1);
+    let attach = rig.hotplug_attach(&lease, READER_A).await;
+    assert!(attach.is_err(), "{attach:?}");
+    let row = rig.live_row_of(READER_A).await.expect("the row is live");
+    assert_eq!(row.state, "attach_unknown", "{}", rig.dump(&world).await);
+    assert!(row.slot.is_some(), "the attempted slot is recorded");
+    assert_eq!(
+        world.usb.stored(vmid),
+        stored(&[(0, READER_A)]),
+        "the write landed"
+    );
+
+    // The lease ends while the role cannot delete the entry.
+    world.usb.inject(UsbStep::Detach, UsbFault::Forbidden, 500);
+    rig.release(&lease).await;
     rig.converge(&world, now() + HOUR_MS).await;
-    rig.assert_nothing(&world, &lease, "a straddling attach")
+    assert_eq!(
+        rig.lease(&lease).await.state,
+        LeaseState::CleanupFailed,
+        "{}",
+        rig.dump(&world).await
+    );
+    let row = rig
+        .live_row_of(READER_A)
+        .await
+        .expect("an uncertain write on a live guest is never released");
+    assert!(
+        matches!(row.state.as_str(), "attach_unknown" | "detach_failed"),
+        "{row:?}"
+    );
+    assert!(
+        world.pve.lab_guests().contains_key(&vmid),
+        "the guest that may hold the device is kept"
+    );
+    assert_eq!(world.usb.stored(vmid), stored(&[(0, READER_A)]));
+    assert_ne!(rig.device_status(READER_A).await, DeviceStatus::Available);
+    assert!(world.usb.double_assignments().is_empty());
+    assert!(world.usb.destroyed_holding().is_empty());
+    rig.assert_invariants(&world, Level::Safety, "an uncertain write")
+        .await;
+
+    // The role is back: the cleanup removes the entry it can now prove is
+    // Fleet's, and only then is the row released.
+    world.usb.clear();
+    rig.retry_cleanup(&lease).await;
+    rig.converge(&world, now() + 20 * HOUR_MS).await;
+    rig.assert_nothing(&world, &lease, "after the detach is confirmed")
         .await;
 }
 
