@@ -158,6 +158,11 @@ pub struct Chaos {
     /// While set, the hardware components' audit sink refuses everything
     /// (required intents and best-effort outcomes alike).
     pub audit_down: AtomicBool,
+    /// While set, a VMID reservation that another record holds is granted
+    /// anyway: the holder check an earlier controller had, which looked at no
+    /// record that had left `provisioning` (#592). It rebuilds the databases
+    /// that controller wrote.
+    pub blind_vmid_holders: AtomicBool,
     refused_events: Mutex<Vec<String>>,
     hooks: Mutex<Vec<(Point, When, crate::usb_pve::Hook)>>,
     started: std::time::Instant,
@@ -179,6 +184,7 @@ impl Chaos {
             faults,
             script: Mutex::new(Vec::new()),
             audit_down: AtomicBool::new(false),
+            blind_vmid_holders: AtomicBool::new(false),
             refused_events: Mutex::new(Vec::new()),
             hooks: Mutex::new(Vec::new()),
             started: std::time::Instant::now(),
@@ -514,7 +520,20 @@ impl ProvisionPort for Interruptible {
         node: &str,
         vmid: u32,
     ) -> Result<CloneTargetReservation, String> {
-        self.inner.reserve_clone_target(record_id, node, vmid).await
+        let outcome = self
+            .inner
+            .reserve_clone_target(record_id, node, vmid)
+            .await?;
+        if matches!(outcome, CloneTargetReservation::HeldBy { .. })
+            && self.chaos.blind_vmid_holders.load(Ordering::SeqCst)
+        {
+            let mut record = ProvisionPort::get(self.inner.as_ref(), record_id).await?;
+            record.node = Some(node.to_owned());
+            record.vmid = Some(vmid);
+            ProvisionPort::update(self.inner.as_ref(), &record).await?;
+            return Ok(CloneTargetReservation::Reserved(record));
+        }
+        Ok(outcome)
     }
 }
 

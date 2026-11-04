@@ -141,6 +141,158 @@ async fn a_started_clone_or_finished_record_cannot_reserve() {
     assert!(error.contains("not found"), "{error}");
 }
 
+/// A lease with its provision record attached.
+async fn lease_with_record(
+    labs: &LabRepository,
+    leases: &fleet_storage_sqlite::LeaseRepository,
+) -> (String, fleet_application::lab::ProvisionRecord) {
+    use fleet_application::lab::{LeasePort as _, NewLease};
+    let lease = leases
+        .create(
+            &NewLease {
+                template_version_id: "template-1@digest".to_owned(),
+                purpose: "vmid".to_owned(),
+                project_id: None,
+                cleanup: fleet_core::CleanupStrategy::Destroy,
+                ttl_seconds: 3_600,
+            },
+            "tester",
+            NOW,
+        )
+        .await
+        .expect("the lease must be created");
+    let record = labs
+        .create(
+            &NewProvision {
+                template_version_id: "template-1@digest".to_owned(),
+                lease_id: Some(lease.id.clone()),
+                idempotency_key: None,
+                readiness_deadline_at: None,
+            },
+            NOW,
+        )
+        .await
+        .expect("the record must be created");
+    leases
+        .attach_provision(&lease.id, &record.id)
+        .await
+        .expect("the record must attach");
+    (lease.id, record)
+}
+
+async fn set_lease_state(
+    leases: &fleet_storage_sqlite::LeaseRepository,
+    lease_id: &str,
+    state: fleet_core::LeaseState,
+) {
+    use fleet_application::lab::LeasePort as _;
+    let mut lease = leases.get(lease_id).await.unwrap();
+    lease.state = state;
+    leases.update(&lease).await.unwrap();
+}
+
+/// #592: a provision that failed after it reserved its VMID, before any clone,
+/// keeps the VMID on its record and leaves nothing in the cluster for
+/// `/cluster/nextid` to see, so a second lease is offered the same number. The
+/// failed record still owns it until its lease is released: handing it over
+/// would let the first lease's late cleanup aim at the second one's guest.
+#[tokio::test]
+async fn a_failed_record_awaiting_cleanup_holds_its_vmid_until_its_lease_is_released() {
+    use fleet_core::LeaseState;
+    let (_dir, store) = setup().await;
+    let labs = LabRepository::new(store.pool().clone());
+    let leases = fleet_storage_sqlite::LeaseRepository::new(store.pool().clone());
+    let (first_lease, first) = lease_with_record(&labs, &leases).await;
+    let (_, second) = lease_with_record(&labs, &leases).await;
+    reserved(
+        labs.reserve_clone_target(&first.id, "pve", 9000)
+            .await
+            .unwrap(),
+    );
+    // The first provision fails: the record is finished, the VMID kept.
+    let mut failed = labs.get(&first.id).await.unwrap();
+    failed.state = GuestState::NeverReady;
+    labs.update(&failed).await.unwrap();
+
+    // Every state of the lease short of released still owes the cleanup (or
+    // owes an operator's), so the VMID stays with the first record.
+    for state in [
+        LeaseState::Failed,
+        LeaseState::Releasing,
+        LeaseState::CleanupFailed,
+    ] {
+        set_lease_state(&leases, &first_lease, state).await;
+        assert_eq!(
+            labs.reserve_clone_target(&second.id, "pve", 9000)
+                .await
+                .unwrap(),
+            CloneTargetReservation::HeldBy {
+                record_id: first.id.clone()
+            },
+            "{state:?}"
+        );
+        assert_eq!(labs.get(&second.id).await.unwrap().vmid, None, "{state:?}");
+    }
+    // Another VMID is not held.
+    let other = reserved(
+        labs.reserve_clone_target(&second.id, "pve", 9001)
+            .await
+            .unwrap(),
+    );
+    assert_eq!(other.vmid, Some(9001));
+    let (_, third) = lease_with_record(&labs, &leases).await;
+
+    // The release confirms the cleanup: the VMID is free to reserve again.
+    set_lease_state(&leases, &first_lease, LeaseState::Released).await;
+    let taken = reserved(
+        labs.reserve_clone_target(&third.id, "pve", 9000)
+            .await
+            .unwrap(),
+    );
+    assert_eq!(taken.vmid, Some(9000));
+}
+
+/// A failed record that never reserved a VMID holds nothing, nor does one
+/// that started a clone (its guest is in the cluster, which `/cluster/nextid`
+/// reads). A record with no lease holds its VMID only while it provisions: see
+/// the test above.
+#[tokio::test]
+async fn a_failed_record_without_a_vmid_or_with_a_clone_holds_nothing() {
+    let (_dir, store) = setup().await;
+    let labs = LabRepository::new(store.pool().clone());
+    let leases = fleet_storage_sqlite::LeaseRepository::new(store.pool().clone());
+    let (_, no_vmid) = lease_with_record(&labs, &leases).await;
+    let mut failed = labs.get(&no_vmid.id).await.unwrap();
+    failed.state = GuestState::NeverReady;
+    labs.update(&failed).await.unwrap();
+    let (_, second) = lease_with_record(&labs, &leases).await;
+    let taken = reserved(
+        labs.reserve_clone_target(&second.id, "pve", 9000)
+            .await
+            .unwrap(),
+    );
+    assert_eq!(taken.vmid, Some(9000));
+    // A failed record that started a clone keeps its VMID, but the clone's
+    // guest is what holds the number in the cluster.
+    let (_, cloned) = lease_with_record(&labs, &leases).await;
+    let mut started = reserved(
+        labs.reserve_clone_target(&cloned.id, "pve", 9001)
+            .await
+            .unwrap(),
+    );
+    started.clone_upid =
+        Some("UPID:pve:0015523F:0C6DF532:6AAFE1EC:qmclone:120:fleet@pve!lab:".to_owned());
+    started.state = GuestState::NeverReady;
+    labs.update(&started).await.unwrap();
+    let (_, fourth) = lease_with_record(&labs, &leases).await;
+    let taken = reserved(
+        labs.reserve_clone_target(&fourth.id, "pve", 9001)
+            .await
+            .unwrap(),
+    );
+    assert_eq!(taken.vmid, Some(9001));
+}
+
 async fn build(
     operations: &OperationRepository,
     version_id: &str,

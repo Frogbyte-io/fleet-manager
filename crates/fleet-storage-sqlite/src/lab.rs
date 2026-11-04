@@ -608,9 +608,23 @@ impl ProvisionPort for LabRepository {
             // An existing reservation is kept: a re-run resumes with it.
             return Ok(CloneTargetReservation::Reserved(record));
         }
+        // A record holds its VMID while its saga runs and, after it has left
+        // `provisioning`, while it may still own a number nothing in the
+        // cluster shows: a record that never started a clone (a failure keeps
+        // the reserved VMID on the record) until its lease is `released`,
+        // which confirms the cleanup (or that nothing was allocated). Without
+        // that, `/cluster/nextid` offers the number again, a second lease
+        // becomes ready on it, and the first lease's late cleanup aims at the
+        // second one's guest. A record that started a clone has a guest the
+        // cluster reports, so `/cluster/nextid` skips its VMID, and the
+        // destroy's own identity check covers a guest removed behind its back.
         let holder: Option<String> = sqlx::query_scalar(
-            "SELECT id FROM lab_provisions WHERE vmid = ?1 AND id != ?2 AND state = 'provisioning' \
-             ORDER BY created_at, id LIMIT 1",
+            "SELECT p.id FROM lab_provisions p WHERE p.vmid = ?1 AND p.id != ?2 AND ( \
+                 p.state = 'provisioning' \
+                 OR (p.clone_upid IS NULL AND EXISTS ( \
+                     SELECT 1 FROM lab_leases l WHERE l.id = p.lease_id AND l.state != 'released' \
+                 )) \
+             ) ORDER BY p.created_at, p.id LIMIT 1",
         )
         .bind(i64::from(vmid))
         .bind(record_id)

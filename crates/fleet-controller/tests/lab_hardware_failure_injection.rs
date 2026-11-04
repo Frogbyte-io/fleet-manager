@@ -1525,7 +1525,7 @@ async fn a_guest_deleted_by_hand_while_it_held_a_device_fails_closed_and_the_ove
 }
 
 // ---------------------------------------------------------------------
-// A failed provision whose cleanup runs late (found by this suite).
+// A failed provision whose cleanup runs late (found by this suite, #592).
 //
 // This is not a hardware rule, but it decides whether a lease's guest (and
 // the device attached to it) survives another lease's failure.
@@ -1533,22 +1533,34 @@ async fn a_guest_deleted_by_hand_while_it_held_a_device_fails_closed_and_the_ove
 
 /// A provision that fails after it reserved its VMID and before its clone
 /// existed (here PVE refuses the clone call) keeps that VMID on its record.
-/// Its cleanup is the sweeper's, which runs on its own schedule. Before it
-/// does, a second provision asks the cluster for the next free VMID, gets the
-/// same one (nothing is there), and the reservation's holder check, which only
-/// looks at `provisioning` records, lets it have it. The second provision
-/// becomes ready on that VMID. Only then does the first one's cleanup run.
+/// Nothing is at the VMID, so `/cluster/nextid` keeps offering it. Its cleanup
+/// is the sweeper's, which runs on its own schedule; before it does, a second
+/// provision gets the same number.
+///
+/// The reservation's holder check now refuses that (see
+/// `a_failed_provisions_vmid_is_not_handed_to_another_lease_before_its_cleanup`).
+/// A database an earlier controller wrote has the other outcome, and the
+/// cleanup's own check is what protects the second lease's guest there, so this
+/// builds that state by blinding the holder check: the second provision
+/// becomes ready on the VMID, and only then does the first one's cleanup run.
+/// Answers the rig, the failed lease and the ready one.
 async fn failed_provision_then_late_cleanup(
     world: &World,
     failing_template: usize,
     next_template: usize,
 ) -> (Rig, String, String) {
+    use std::sync::atomic::Ordering;
     let rig = Rig::start(world).await;
     rig.refresh_inventory().await;
     let failed = rig.request_lease_of(&world.version(failing_template)).await;
     let next = rig.request_lease_of(&world.version(next_template)).await;
     world.faults.inject(Step::Clone, Fault::Forbidden, 1);
+    world.chaos.blind_vmid_holders.store(true, Ordering::SeqCst);
     rig.drain(world).await.done();
+    world
+        .chaos
+        .blind_vmid_holders
+        .store(false, Ordering::SeqCst);
     assert_eq!(
         rig.lease(&next).await.state,
         LeaseState::Ready,
@@ -1565,12 +1577,11 @@ async fn failed_provision_then_late_cleanup(
 }
 
 #[tokio::test]
-#[ignore = "bug: a provision that failed after reserving its VMID, before any clone, keeps the VMID on its record; once another lease clones into that VMID, the failed one's cleanup destroys the other lease's guest (the reservation's holder check ignores non-provisioning records and the destroy does not check the guest's fm-lab name); see the PR description"]
 async fn a_failed_provisions_late_cleanup_must_not_destroy_another_leases_guest() {
     // Neither lease holds a device, so nothing but the guest's name would
     // protect the ready lease's running guest.
     let world = World::with_templates(&[&[], &[]]).await;
-    let (rig, _failed, next) = failed_provision_then_late_cleanup(&world, 0, 1).await;
+    let (rig, failed, next) = failed_provision_then_late_cleanup(&world, 0, 1).await;
     rig.converge(&world, now() + HOUR_MS).await;
     let record = rig.record(&next).await;
     assert_eq!(rig.lease(&next).await.state, LeaseState::Ready);
@@ -1583,23 +1594,66 @@ async fn a_failed_provisions_late_cleanup_must_not_destroy_another_leases_guest(
         "the ready lease's guest is still there: {}",
         rig.dump(&world).await
     );
+    // The failed lease never cloned anything: its cleanup finds nothing to
+    // destroy and releases, instead of retrying against a guest it never
+    // owned.
+    assert_eq!(rig.lease(&failed).await.state, LeaseState::Released);
+    rig.assert_invariants(&world, Level::Quiescent, "a late cleanup")
+        .await;
 }
 
 #[tokio::test]
-async fn a_device_attached_guest_survives_a_late_cleanup_of_the_same_vmid_because_the_destroy_is_refused()
- {
+async fn a_failed_provisions_vmid_is_not_handed_to_another_lease_before_its_cleanup() {
+    // Both provisions ask for the next free VMID and get the same one (nothing
+    // is there). The first fails after reserving it, before any clone. The
+    // second is refused the number while the first's lease is unreleased,
+    // rather than becoming ready on a VMID the first one's cleanup will aim at.
+    let world = World::with_templates(&[&[], &[]]).await;
+    let rig = Rig::start(&world).await;
+    rig.refresh_inventory().await;
+    let failed = rig.request_lease_of(&world.version(0)).await;
+    let next = rig.request_lease_of(&world.version(1)).await;
+    world.faults.inject(Step::Clone, Fault::Forbidden, 1);
+    rig.drain(&world).await.done();
+    assert_ne!(rig.lease(&failed).await.state, LeaseState::Ready);
+    assert!(rig.record(&failed).await.vmid.is_some());
+    assert_eq!(
+        rig.lease(&next).await.state,
+        LeaseState::Failed,
+        "{}",
+        rig.dump(&world).await
+    );
+    assert_eq!(rig.record(&next).await.vmid, None, "it took no VMID");
+    assert!(world.pve.lab_guests().is_empty());
+
+    // The failed lease's cleanup releases it; the number is free again and a
+    // later lease gets it.
+    rig.converge(&world, now() + HOUR_MS).await;
+    assert_eq!(rig.lease(&failed).await.state, LeaseState::Released);
+    let later = rig.request_lease_of(&world.version(1)).await;
+    rig.drain(&world).await.done();
+    assert_eq!(rig.lease(&later).await.state, LeaseState::Ready);
+    let record = rig.record(&later).await;
+    assert_eq!(record.vmid, rig.record(&failed).await.vmid);
+    rig.converge(&world, now() + 2 * HOUR_MS).await;
+    assert_eq!(rig.lease(&later).await.state, LeaseState::Ready);
+    assert!(world.pve.lab_guests().contains_key(&record.vmid.unwrap()));
+}
+
+#[tokio::test]
+async fn a_device_attached_guest_survives_a_late_cleanup_of_the_same_vmid() {
     // The second lease holds a device. The failed one's cleanup still aims at
-    // its VMID, but the reviewed destroy refuses a guest a reservation is
-    // attached to: the ready lease is untouched and its device stays
-    // attached. The failed lease, which never owned that guest, ends
-    // `cleanup_failed`, naming it (the same bug, contained by the hardware
-    // guard).
+    // its VMID, but it never cloned and the guest there is not its own: it
+    // destroys nothing, so the ready lease is untouched and its device stays
+    // attached. The failed lease, which owned no guest, is released (before
+    // #592 it ended `cleanup_failed`, naming a guest it never owned, with the
+    // hardware destroy guard the only thing between it and the guest).
     let world = World::with_templates(&[&[], &[READER_B]]).await;
     let (rig, failed, next) = failed_provision_then_late_cleanup(&world, 0, 1).await;
     rig.converge(&world, now() + HOUR_MS).await;
     let record = rig.record(&next).await;
     assert_eq!(rig.lease(&next).await.state, LeaseState::Ready);
-    assert_eq!(rig.lease(&failed).await.state, LeaseState::CleanupFailed);
+    assert_eq!(rig.lease(&failed).await.state, LeaseState::Released);
     assert!(world.pve.lab_guests().contains_key(&record.vmid.unwrap()));
     assert_eq!(
         world.usb.stored(record.vmid.unwrap()),
@@ -1609,8 +1663,7 @@ async fn a_device_attached_guest_survives_a_late_cleanup_of_the_same_vmid_becaus
     assert_eq!(world.usb.count(|line| line.starts_with("Delete ")), 0);
     rig.assert_invariants(&world, Level::Quiescent, "a late cleanup")
         .await;
-    // The ready lease still releases to nothing; the failed lease's stuck
-    // cleanup is the operator's.
+    // The ready lease still releases to nothing.
     rig.release(&next).await;
     rig.converge(&world, now() + 2 * HOUR_MS).await;
     assert_eq!(rig.lease(&next).await.state, LeaseState::Released);

@@ -368,6 +368,26 @@ pub struct DestructivePayload {
     pub params: serde_json::Value,
 }
 
+impl DestructivePayload {
+    /// The Fleet name the guest must carry for a Lab cleanup's destroy
+    /// (`expectedName` in the reviewed parameters); `None` for an operator's
+    /// destroy, which names its target by VMID alone.
+    fn expected_name(&self) -> Option<&str> {
+        self.params
+            .get("expectedName")
+            .and_then(serde_json::Value::as_str)
+    }
+
+    /// Whether the record behind a Lab cleanup's destroy never started a
+    /// clone (`neverCloned`).
+    fn never_cloned(&self) -> bool {
+        self.params
+            .get("neverCloned")
+            .and_then(serde_json::Value::as_bool)
+            == Some(true)
+    }
+}
+
 /// Decodes and validates an operation's payload.
 fn payload<T: serde::de::DeserializeOwned>(operation: &Operation) -> Result<T, String> {
     serde_json::from_str(
@@ -623,6 +643,126 @@ impl ProxmoxDestructiveExecutor {
         self
     }
 
+    /// Lab cleanup's destroy names the guest it owns (`expectedName`, the
+    /// record's `fm-lab-<record>`): a recorded VMID alone does not prove the
+    /// guest now at it is the record's, because a VMID that nothing in the
+    /// cluster holds is handed out again (#592). Before anything is stopped
+    /// or deleted, the live guest must carry that name.
+    ///
+    /// - The same name: the destroy goes on.
+    /// - Another name (or a non-QEMU guest): the guest is another owner's.
+    ///   The destroy is refused (`identity_mismatch`), unless the record
+    ///   never started a clone (`neverCloned`), where there was never a guest
+    ///   of the record's to destroy: the operation then succeeds without
+    ///   touching it (`notOwned`).
+    /// - No name yet (PVE reports `VM <vmid>` while a clone runs): the guest
+    ///   cannot be verified, so the destroy is refused (`identity_unverified`)
+    ///   and a later attempt decides.
+    /// - No guest: a record that never cloned has nothing to destroy and the
+    ///   operation succeeds without a delete; otherwise the destroy goes on
+    ///   and treats the absent guest as done.
+    ///
+    /// A destroy that names no guest (an operator's) is not checked. Answers
+    /// whether the operation ended here.
+    async fn refuse_foreign_guest(
+        &self,
+        operations: &Operations,
+        operation: &Operation,
+        payload: &DestructivePayload,
+    ) -> Result<bool, String> {
+        if operation.kind != "proxmox.guest.destroy" {
+            return Ok(false);
+        }
+        let Some(expected) = payload.expected_name() else {
+            return Ok(false);
+        };
+        let never_cloned = payload.never_cloned();
+        let (account, secret) = self.bound(&payload.account_id).await?;
+        let request = self.request(&account, &secret);
+        let resources = self
+            .client
+            .list_guest_resources(request)
+            .await
+            .map_err(|error| format!("the resource listing failed: {error}"))?;
+        let Some(guest) = resources
+            .iter()
+            .find(|resource| resource.vmid == Some(payload.vmid))
+        else {
+            if never_cloned {
+                self.finish_not_owned(
+                    operations,
+                    &operation.id,
+                    format!(
+                        "VMID {} holds no guest and this record never cloned one",
+                        payload.vmid
+                    ),
+                )
+                .await?;
+                return Ok(true);
+            }
+            return Ok(false);
+        };
+        if guest.kind == "qemu" && guest.name.as_deref() == Some(expected) {
+            return Ok(false);
+        }
+        let placeholder = format!("VM {}", payload.vmid);
+        if guest.kind == "qemu" && guest.name.as_deref().is_none_or(|name| name == placeholder) {
+            complete_failure(
+                operations,
+                &operation.id,
+                "identity_unverified",
+                &format!(
+                    "qemu/{} carries no name yet, so it cannot be verified as {expected}; nothing was stopped or deleted, retry once it is named",
+                    payload.vmid
+                ),
+            )
+            .await?;
+            return Ok(true);
+        }
+        let held = format!(
+            "VMID {} now holds a {} named {}, not {expected}",
+            payload.vmid,
+            guest.kind,
+            guest.name.as_deref().unwrap_or("nothing")
+        );
+        if never_cloned {
+            self.finish_not_owned(
+                operations,
+                &operation.id,
+                format!("{held}; this record never cloned a guest, so there is nothing to destroy"),
+            )
+            .await?;
+            return Ok(true);
+        }
+        complete_failure(
+            operations,
+            &operation.id,
+            "identity_mismatch",
+            &format!("{held}; it is another owner's guest, so nothing was stopped or deleted"),
+        )
+        .await?;
+        Ok(true)
+    }
+
+    /// Completes a destroy that found nothing of the record's to destroy.
+    async fn finish_not_owned(
+        &self,
+        operations: &Operations,
+        operation_id: &str,
+        note: String,
+    ) -> Result<(), String> {
+        operations
+            .complete(
+                operation_id,
+                "succeeded",
+                Some(&serde_json::json!({ "noop": note, "notOwned": true }).to_string()),
+                None,
+            )
+            .await
+            .map(|_| ())
+            .map_err(|error| error.to_string())
+    }
+
     /// Refuses (by completing the operation as failed) a destroy, revert or
     /// template conversion of a guest a live, attached or unconfirmed
     /// hardware reservation references. Answers whether the operation ended
@@ -761,6 +901,12 @@ impl OperationExecutor for ProxmoxDestructiveExecutor {
         let payload: DestructivePayload = payload(operation)?;
         if self
             .refuse_pool_member(operations, operation, &payload)
+            .await?
+        {
+            return Ok(());
+        }
+        if self
+            .refuse_foreign_guest(operations, operation, &payload)
             .await?
         {
             return Ok(());
@@ -1332,6 +1478,20 @@ impl ProxmoxDestructiveExecutor {
         let is_template = resources.iter().any(|resource| {
             resource.vmid == Some(payload.vmid) && resource.kind == "qemu-template"
         });
+        // The guest named at the start must still be the one at the VMID.
+        if let Some(expected) = payload.expected_name()
+            && let Some(guest) = resources
+                .iter()
+                .find(|resource| resource.vmid == Some(payload.vmid))
+            && !(guest.kind == "qemu" && guest.name.as_deref() == Some(expected))
+        {
+            return Err(format!(
+                "identity_mismatch: VMID {} no longer holds {expected} (now a {} named {}); no delete was submitted",
+                payload.vmid,
+                guest.kind,
+                guest.name.as_deref().unwrap_or("nothing")
+            ));
+        }
         if operations
             .cancel_requested(&operation.id)
             .await
@@ -5851,6 +6011,8 @@ mod destroy_tests {
         task_error: bool,
         stop_error: bool,
         stop_running: bool,
+        /// The live guest's name; none reports it unnamed.
+        name: Mutex<Option<String>>,
         seen: Mutex<Vec<String>>,
         cancel_on_recheck: Mutex<Option<(Arc<Operations>, String)>>,
     }
@@ -5887,7 +6049,7 @@ mod destroy_tests {
                 if self.absent {
                     json!({"data":[]})
                 } else {
-                    json!({"data":[{"id":"qemu/101","type":"qemu","vmid":101,"node":"pve","status":"running","template":u8::from(self.template || (self.template_after_stop.load(std::sync::atomic::Ordering::Relaxed) && self.seen.lock().unwrap().iter().any(|path| path.ends_with("/status/stop"))))}]})
+                    json!({"data":[{"id":"qemu/101","type":"qemu","vmid":101,"node":"pve","name":self.name.lock().unwrap().clone(),"status":"running","template":u8::from(self.template || (self.template_after_stop.load(std::sync::atomic::Ordering::Relaxed) && self.seen.lock().unwrap().iter().any(|path| path.ends_with("/status/stop"))))}]})
                 }
             } else if path.ends_with("/status/stop") {
                 assert_eq!(request.method, PveHttpMethod::Post);
@@ -6028,6 +6190,7 @@ mod destroy_tests {
                 task_error,
                 stop_error,
                 stop_running,
+                name: Mutex::new(None),
                 seen: Mutex::new(vec![]),
                 cancel_on_recheck: Mutex::new(None),
             });
@@ -6046,6 +6209,11 @@ mod destroy_tests {
                 links,
                 transport,
             }
+        }
+        /// The same harness whose live guest carries `name`.
+        fn with_guest_name(self, name: &str) -> Self {
+            *self.transport.name.lock().unwrap() = Some(name.to_owned());
+            self
         }
         /// The same harness with the executor's pool membership lookup set.
         fn with_members(self, members: Arc<Members>) -> Self {
@@ -6409,5 +6577,123 @@ mod destroy_tests {
                     .any(|p| p.contains("?purge="))
             );
         }
+    }
+    /// The paths the executor called that stop or delete the guest.
+    fn mutations(h: &Harness) -> Vec<String> {
+        h.transport
+            .seen
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|path| path.ends_with("/status/stop") || path.contains("?purge="))
+            .cloned()
+            .collect()
+    }
+    fn lab_destroy(never_cloned: bool) -> Value {
+        json!({"purge": false, "expectedName": "fm-lab-rec1", "neverCloned": never_cloned})
+    }
+    /// #592: a Lab cleanup's destroy of the record's own guest (by its Fleet
+    /// name) is stopped and deleted as before.
+    #[tokio::test]
+    async fn a_destroy_of_the_records_own_guest_goes_ahead() {
+        for never_cloned in [false, true] {
+            let h = Harness::new(false, false, false, false, false, false)
+                .await
+                .with_guest_name("fm-lab-rec1");
+            let done = h
+                .run_kind("proxmox.guest.destroy", lab_destroy(never_cloned))
+                .await;
+            assert_eq!(done.state, "succeeded", "never cloned: {never_cloned}");
+            assert_eq!(
+                mutations(&h).len(),
+                2,
+                "the guest was stopped and deleted: {:?}",
+                mutations(&h)
+            );
+        }
+    }
+    /// #592: a guest that does not carry the record's name is another
+    /// owner's. A record that cloned one is refused before anything is
+    /// stopped or deleted.
+    #[tokio::test]
+    async fn a_destroy_of_a_guest_with_another_name_is_refused_before_any_stop() {
+        for name in ["fm-lab-rec2", "web-1"] {
+            let h = Harness::new(false, false, false, false, false, false)
+                .await
+                .with_guest_name(name);
+            let done = h
+                .run_kind("proxmox.guest.destroy", lab_destroy(false))
+                .await;
+            assert_eq!(done.state, "failed", "{name}");
+            assert_eq!(Harness::error_reason(&done), "identity_mismatch", "{name}");
+            assert!(
+                done.error_json
+                    .as_deref()
+                    .unwrap_or_default()
+                    .contains(name),
+                "the refusal names the guest: {:?}",
+                done.error_json
+            );
+            assert!(mutations(&h).is_empty(), "{name}: {:?}", mutations(&h));
+        }
+    }
+    /// #592: a record that never started a clone has no guest of its own, so
+    /// another owner's guest at its VMID is nothing to destroy: the operation
+    /// succeeds, marked `notOwned`, and touches nothing. So does an empty VMID.
+    #[tokio::test]
+    async fn a_destroy_for_a_record_that_never_cloned_leaves_another_guest_alone() {
+        for (absent, name) in [(false, Some("fm-lab-rec2")), (true, None)] {
+            let h = Harness::new(false, false, absent, false, false, false).await;
+            let h = match name {
+                Some(name) => h.with_guest_name(name),
+                None => h,
+            };
+            let done = h.run_kind("proxmox.guest.destroy", lab_destroy(true)).await;
+            assert_eq!(done.state, "succeeded", "{name:?}");
+            let result: Value = serde_json::from_str(done.result_json.as_deref().unwrap()).unwrap();
+            assert_eq!(result["notOwned"], json!(true), "{name:?}");
+            assert!(mutations(&h).is_empty(), "{name:?}: {:?}", mutations(&h));
+        }
+    }
+    /// #592: a guest with no name yet (PVE reports `VM <vmid>` while a clone
+    /// runs) cannot be verified as the record's: refused, never deleted, for a
+    /// record that cloned and for one that did not (its clone may have landed
+    /// before its task was recorded).
+    #[tokio::test]
+    async fn a_destroy_of_an_unnamed_guest_is_refused_as_unverified() {
+        for never_cloned in [false, true] {
+            let h = Harness::new(false, false, false, false, false, false).await;
+            let done = h
+                .run_kind("proxmox.guest.destroy", lab_destroy(never_cloned))
+                .await;
+            assert_eq!(done.state, "failed", "never cloned: {never_cloned}");
+            assert_eq!(
+                Harness::error_reason(&done),
+                "identity_unverified",
+                "never cloned: {never_cloned}"
+            );
+            assert!(mutations(&h).is_empty());
+        }
+    }
+    /// #592: a record that did clone, whose guest is gone, still ends the
+    /// destroy as before (the delete finds nothing and counts as done).
+    #[tokio::test]
+    async fn a_destroy_for_a_record_that_cloned_treats_an_absent_guest_as_done() {
+        let h = Harness::new(false, false, true, false, false, false).await;
+        let done = h
+            .run_kind("proxmox.guest.destroy", lab_destroy(false))
+            .await;
+        assert_eq!(done.state, "succeeded");
+    }
+    /// An operator's destroy names no guest: the name is not checked.
+    #[tokio::test]
+    async fn an_operators_destroy_does_not_check_the_name() {
+        let h = Harness::new(false, false, false, false, false, false)
+            .await
+            .with_guest_name("web-1");
+        let done = h
+            .run_kind("proxmox.guest.destroy", json!({"purge": false}))
+            .await;
+        assert_eq!(done.state, "succeeded");
     }
 }

@@ -313,13 +313,22 @@ impl LabCleanupExecutor {
         account_id: &str,
         node: &str,
         vmid: u32,
+        record: &fleet_application::lab::ProvisionRecord,
     ) -> Result<Operation, String> {
+        // The destroy names the guest this record owns (#592): the recorded
+        // VMID alone does not say who holds the VMID now, so the executor
+        // refuses any guest that is not `fm-lab-<record>`, and a record that
+        // never started a clone has nothing of its own to destroy.
         let payload = serde_json::json!({
             "accountId": account_id,
             "node": node,
             "vmid": vmid,
             "timeoutSeconds": DESTROY_TIMEOUT_SECONDS,
-            "params": { "purge": true },
+            "params": {
+                "purge": true,
+                "expectedName": format!("fm-lab-{}", record.id),
+                "neverCloned": record.clone_upid.is_none(),
+            },
         })
         .to_string();
         // The controller reviews its own cleanup: the token is computed
@@ -763,7 +772,7 @@ impl LabCleanupExecutor {
             }
         }
         let child = match self
-            .destroy(operations, &lease, &account_id, &node, vmid)
+            .destroy(operations, &lease, &account_id, &node, vmid, &record)
             .await
         {
             Ok(child) => child,
@@ -783,6 +792,19 @@ impl LabCleanupExecutor {
                     &format!("the destroy ended {}: {reason}", child.state),
                     guest,
                 )
+                .await;
+        }
+        // The destroy found nothing of this record's at the VMID (it never
+        // cloned, and the VMID is another owner's or empty): the lease owned
+        // no guest, so its release owes nothing.
+        let not_owned = child
+            .result_json
+            .as_deref()
+            .and_then(|raw| serde_json::from_str::<serde_json::Value>(raw).ok())
+            .is_some_and(|result| result["notOwned"].as_bool() == Some(true));
+        if not_owned {
+            return self
+                .release(operations, operation, lease, Released::NothingAllocated)
                 .await;
         }
         if let Some(machine_id) = &record.machine_id
