@@ -333,6 +333,258 @@ async fn a_token_without_the_opt_in_role_reports_the_reason_not_an_empty_invento
     );
 }
 
+/// The standard token with its `/vms` entries replaced (#596).
+fn token_with_vms(vms: &Value) -> Value {
+    let mut map = json!({
+        "/mapping/usb": {"Mapping.Audit": 1},
+        "/mapping/usb/fm-a": {"Mapping.Use": 0},
+        "/mapping/usb/fm-b": {"Mapping.Use": 0},
+        "/mapping/usb/fm-c": {"Mapping.Use": 0},
+        "/mapping/usb/fm-d": {"Mapping.Use": 0},
+        "/mapping/usb/fm-e": {"Mapping.Use": 0},
+        "/mapping/usb/fm-g": {"Mapping.Use": 0},
+    });
+    for (path, privileges) in vms.as_object().expect("an object") {
+        map[path] = privileges.clone();
+    }
+    map
+}
+
+#[tokio::test]
+async fn a_token_that_audits_every_guest_reports_guest_visibility_verified() {
+    let world = World::start(ScriptedPve::standard()).await;
+    let account = world.account(true).await;
+    let (status, body) = refresh(&world, &account).await;
+    assert_eq!(status, 200, "{body}");
+    let visibility = &body["data"]["guestVisibility"];
+    assert_eq!(visibility["state"], "verified", "{visibility}");
+    assert_eq!(visibility["reason"], Value::Null);
+    assert!(
+        visibility["detail"].as_str().unwrap().contains("NoAccess"),
+        "verified says what it cannot rule out: {visibility}"
+    );
+    assert_eq!(device(&body["data"], "fm-a")["status"], "available");
+    let spec = openapi_shape::spec();
+    openapi_shape::assert_matches_schema(&spec, "HardwareRefreshDto", &body["data"]);
+}
+
+#[tokio::test]
+async fn a_token_without_vm_audit_on_the_guests_reads_nothing_available_and_says_so() {
+    // The Decker case (#596): a guest the token cannot audit is omitted from
+    // the cluster listing, so `guestScan` reads complete. Here the token
+    // lacks VM.Audit above the guests; the listing still names three guests
+    // (the fake host does not filter), and the scan is complete.
+    let pve = ScriptedPve::standard();
+    pve.data(
+        "/api2/json/access/permissions",
+        &token_with_vms(&json!({"/vms": {"VM.Config.HWType": 1}})),
+    );
+    let world = World::start(pve).await;
+    let account = world.account(true).await;
+    let (status, body) = refresh(&world, &account).await;
+    assert_eq!(status, 200, "{body}");
+    let report = &body["data"];
+    assert_eq!(report["support"]["state"], "supported");
+    assert_eq!(
+        report["guestScan"],
+        json!({"listed": 3, "read": 3, "unreadable": 0, "truncated": false}),
+        "the scan itself reads complete"
+    );
+    let visibility = &report["guestVisibility"];
+    assert_eq!(visibility["state"], "incomplete", "{visibility}");
+    assert_eq!(visibility["reason"], "guest_audit_not_granted");
+    assert!(
+        visibility["detail"]
+            .as_str()
+            .unwrap()
+            .contains("grant VM.Audit on /vms"),
+        "{visibility}"
+    );
+    // No device reads available; the reason reuses the existing vocabulary
+    // and the per-device note names the account-level cause.
+    for mapping in ["fm-a", "fm-g"] {
+        let device = device(report, mapping);
+        assert_eq!(device["status"], "unsupported", "{mapping}: {device}");
+        assert_eq!(device["reason"], "usb_inventory_unreadable");
+        assert!(
+            device["reasonText"]
+                .as_str()
+                .unwrap()
+                .contains("audit every guest"),
+            "{device}"
+        );
+        assert!(
+            device["observation"]["notes"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|note| note
+                    .as_str()
+                    .unwrap()
+                    .contains("guest visibility is not verified")),
+            "{device}"
+        );
+    }
+    // A reference the scan did see still reads externally attached.
+    assert_eq!(device(report, "fm-b")["status"], "externally_attached");
+    assert!(
+        report["warnings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|warning| warning
+                .as_str()
+                .unwrap()
+                .contains("guest visibility is incomplete")),
+        "{report}"
+    );
+    let spec = openapi_shape::spec();
+    openapi_shape::assert_matches_schema(&spec, "HardwareRefreshDto", report);
+    // The list (no Proxmox call) shows the same status and reason: the gap
+    // is stored, not only reported once.
+    let (_, listed) = world.raw("GET", "/api/v1/hardware/devices", None).await;
+    let a = device(&listed, "fm-a");
+    assert_eq!(a["status"], "unsupported");
+    assert_eq!(a["reason"], "usb_inventory_unreadable");
+    assert!(
+        a["reasonText"]
+            .as_str()
+            .unwrap()
+            .contains("VM.Audit on /vms"),
+        "{a}"
+    );
+}
+
+#[tokio::test]
+async fn a_guest_path_without_vm_audit_and_unreadable_permissions_are_named_gaps() {
+    let pve = ScriptedPve::standard();
+    pve.data(
+        "/api2/json/access/permissions",
+        &token_with_vms(&json!({
+            "/vms": {"VM.Audit": 1, "VM.Config.HWType": 1},
+            "/vms/200": {"VM.PowerMgmt": 1}
+        })),
+    );
+    // A concrete guest path in the map makes the provider ask whether that
+    // VMID is in use (any caller may: 400 when it exists).
+    pve.route(
+        "/api2/json/cluster/nextid?vmid=200",
+        400,
+        r#"{"data":null,"errors":{"vmid":"VM 200 already exists"}}"#,
+    );
+    let world = World::start(pve.clone()).await;
+    let account = world.account(true).await;
+    let (_, body) = refresh(&world, &account).await;
+    let visibility = &body["data"]["guestVisibility"];
+    assert_eq!(visibility["state"], "incomplete", "{visibility}");
+    assert_eq!(visibility["reason"], "guest_path_narrowed");
+    assert!(visibility["detail"].as_str().unwrap().contains("/vms/200"));
+    assert_eq!(device(&body["data"], "fm-a")["status"], "unsupported");
+
+    // The read of the token's own permissions refused: unverified.
+    pve.route(
+        "/api2/json/access/permissions",
+        403,
+        r#"{"data":null,"message":"Permission check failed (/, Sys.Audit)\n"}"#,
+    );
+    let (_, body) = refresh(&world, &account).await;
+    let visibility = &body["data"]["guestVisibility"];
+    assert_eq!(visibility["state"], "unverified", "{visibility}");
+    assert_eq!(visibility["reason"], "permissions_unreadable");
+    assert_eq!(device(&body["data"], "fm-a")["status"], "unsupported");
+}
+
+#[tokio::test]
+async fn guests_pve_says_exist_below_the_next_free_vmid_but_the_listing_omits_are_found() {
+    // The issue's live case: the token's permissions read clean (VM.Audit
+    // propagating from /vms; NoAccess ACLs on guests are not shown), the
+    // listing names only the guests it may audit, but the next free VMID is
+    // 102, so 100 and 101 exist: guests the token cannot see. `nextid` and
+    // `nextid?vmid=` answer for any caller.
+    let pve = ScriptedPve::standard();
+    pve.data(
+        "/api2/json/access/permissions",
+        &token_with_vms(&json!({"/vms": {"VM.Audit": 1, "VM.Config.HWType": 1}})),
+    );
+    pve.data("/api2/json/cluster/nextid", &json!("102"));
+    for vmid in [100, 101] {
+        pve.route(
+            &format!("/api2/json/cluster/nextid?vmid={vmid}"),
+            400,
+            &format!(r#"{{"data":null,"errors":{{"vmid":"VM {vmid} already exists"}}}}"#),
+        );
+    }
+    let world = World::start(pve).await;
+    let account = world.account(true).await;
+    let (status, body) = refresh(&world, &account).await;
+    assert_eq!(status, 200, "{body}");
+    let report = &body["data"];
+    let visibility = &report["guestVisibility"];
+    assert_eq!(visibility["state"], "incomplete", "{visibility}");
+    assert_eq!(visibility["reason"], "hidden_guests_found");
+    let detail = visibility["detail"].as_str().unwrap();
+    assert!(detail.contains("100, 101"), "{detail}");
+    assert_eq!(device(report, "fm-a")["status"], "unsupported");
+    assert_eq!(device(report, "fm-a")["reason"], "usb_inventory_unreadable");
+    // A visible reference still stands.
+    assert_eq!(device(report, "fm-b")["status"], "externally_attached");
+    let spec = openapi_shape::spec();
+    openapi_shape::assert_matches_schema(&spec, "HardwareRefreshDto", report);
+}
+
+#[tokio::test]
+async fn a_raised_next_id_lower_bound_is_not_mistaken_for_hidden_guests() {
+    // `nextid` answers 900 because the operator set `next-id lower=900`: the
+    // first unnamed VMID below it is free, which proves nothing, so the
+    // search stops and the account stays verified.
+    let pve = ScriptedPve::standard();
+    pve.data("/api2/json/cluster/nextid", &json!("900"));
+    pve.data("/api2/json/cluster/nextid?vmid=100", &json!("100"));
+    let world = World::start(pve.clone()).await;
+    let account = world.account(true).await;
+    let (_, body) = refresh(&world, &account).await;
+    assert_eq!(body["data"]["guestVisibility"]["state"], "verified");
+    assert_eq!(device(&body["data"], "fm-a")["status"], "available");
+    let probes = pve
+        .calls()
+        .iter()
+        .filter(|call| call.contains("nextid?vmid="))
+        .count();
+    assert_eq!(probes, 1, "the first free VMID ends the search");
+}
+
+#[tokio::test]
+async fn an_explicit_noaccess_on_one_guest_is_invisible_in_the_permissions_and_is_the_known_limit()
+{
+    // What this check cannot do (#596, docs/operations/proxmox-token.md): PVE
+    // omits a path whose effective privileges are empty, so a token with
+    // VM.Audit propagating from `/vms` and a `NoAccess` ACL on one guest
+    // answers exactly like a token with no such ACL. The hidden guest is
+    // absent from the listing too, so the device it holds reads available
+    // and the visibility reads verified (when its VMID is below the next
+    // free one, `nextid` still exposes it: see the test above). This test
+    // pins the limit so the docs stay true; it is not a feature.
+    let pve = ScriptedPve::standard();
+    pve.data(
+        "/api2/json/access/permissions",
+        &token_with_vms(&json!({"/vms": {"VM.Audit": 1, "VM.Config.HWType": 1}})),
+    );
+    // The protected guest 300 holds fm-g by hand and is not in the listing.
+    pve.data(
+        "/api2/json/cluster/resources",
+        &json!([
+            {"id": "node/pve", "type": "node", "node": "pve", "status": "online"},
+            {"id": "qemu/9000", "type": "qemu", "node": "pve", "vmid": 9000, "name": "base", "template": 1, "status": "stopped"}
+        ]),
+    );
+    let world = World::start(pve).await;
+    let account = world.account(true).await;
+    let (_, body) = refresh(&world, &account).await;
+    let report = &body["data"];
+    assert_eq!(report["guestVisibility"]["state"], "verified");
+    assert_eq!(device(report, "fm-g")["status"], "available");
+}
+
 #[tokio::test]
 async fn without_mapping_audit_the_empty_list_is_no_mapping_audit_and_no_device_is_lost() {
     let pve = ScriptedPve::standard();

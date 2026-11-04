@@ -7,7 +7,9 @@
 //! intersection with its user. The listed paths are the top-level roots
 //! (`/`, `/access`, `/nodes`, `/pool`, `/sdn`, `/storage`, `/vms`, …), every
 //! path named in an ACL, and every pool member (`/vms/{id}`,
-//! `/storage/{id}`); paths without any privilege are omitted. The method
+//! `/storage/{id}`); PVE omits paths without any privilege (so an explicit
+//! `NoAccess` on one guest is indistinguishable from a guest nobody
+//! mentioned; an empty entry, if one is ever sent, is kept). The method
 //! is identical on PVE 8.x and 9.x (`PVE/API2/AccessControl.pm`
 //! `permissions`, `PVE/RPCEnvironment.pm` `get_effective_permissions`).
 //!
@@ -282,9 +284,11 @@ pub fn normalize_token_permissions(
             };
             kept.insert(privilege.clone(), propagate);
         }
-        if !kept.is_empty() {
-            result.paths.insert(path.clone(), kept);
-        }
+        // PVE omits a path without privileges, so an empty entry is not
+        // expected. When one arrives anyway it is kept as an empty map: the
+        // path is then visibly one the token holds nothing on (a hidden
+        // guest, #596), instead of looking like a path nobody mentioned.
+        result.paths.insert(path.clone(), kept);
     }
     if result.truncated {
         warn(
@@ -391,6 +395,17 @@ mod tests {
         }
         let error = normalize_token_permissions("9.0.0".to_owned(), &json!([])).unwrap_err();
         assert!(matches!(error, PveApiError::InvalidPayload { .. }));
+    }
+
+    #[test]
+    fn an_empty_path_entry_is_kept_as_a_path_the_token_holds_nothing_on() {
+        // PVE omits such a path, so this is not expected; if one arrives it
+        // is visible (a hidden guest, #596) instead of looking unmentioned.
+        let data = json!({"/vms": {"VM.Audit": 1}, "/vms/200": {}, "/vms/201": null});
+        let result = normalize_token_permissions("9.2.2".to_owned(), &data).unwrap();
+        assert!(result.paths["/vms/200"].is_empty());
+        assert!(!result.paths.contains_key("/vms/201"));
+        assert!(result.warnings.is_empty(), "{:?}", result.warnings);
     }
 
     #[test]

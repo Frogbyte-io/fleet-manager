@@ -342,8 +342,33 @@ pub struct HardwareGuestScanDto {
     /// Whether the bound dropped guests. A scan with unreadable or dropped
     /// guests is incomplete: a device that would be available is reported
     /// `unsupported` (`usb_inventory_unreadable`) instead, since a guest may reference it
-    /// that was not read.
+    /// that was not read. The scan is also not enough on its own: it sees only
+    /// the guests the token may audit (see `guestVisibility`).
     pub truncated: bool,
+}
+
+/// Whether the token can be shown to audit every guest (#596). The guest scan
+/// sees only the guests the token may audit (PVE omits a guest without
+/// `VM.Audit` from the cluster listing), and PVE gives a mapping no
+/// exclusivity, so `available` means "no guest references it" only when
+/// the visibility is `verified`.
+#[derive(Clone, Debug, Serialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct HardwareGuestVisibilityDto {
+    /// `verified` (`VM.Audit` propagates from `/vms` or `/` and no visible
+    /// guest path narrows it), `incomplete` (the token's permissions show
+    /// that some guests are not audited) or `unverified` (the permissions
+    /// could not be read in full). Anything but `verified` means no device
+    /// of the account is reported `available` and no attach is made. An
+    /// explicit `NoAccess` on one guest does not show in the token's
+    /// permissions, so `verified` is as far as they tell.
+    pub state: String,
+    /// `permissions_unreadable`, `permissions_truncated`,
+    /// `guest_audit_not_granted` or `guest_path_narrowed`, unless
+    /// verified.
+    pub reason: Option<String>,
+    /// What the state rests on, and the remedy when it is not verified.
+    pub detail: String,
 }
 
 /// The outcome of one refresh.
@@ -361,6 +386,9 @@ pub struct HardwareRefreshDto {
     /// What the guest scan covered; `null` when the mapping list was not
     /// usable.
     pub guest_scan: Option<HardwareGuestScanDto>,
+    /// Whether the token can be shown to audit every guest, which `available`
+    /// needs to be trustworthy; `null` when the mapping list was not usable.
+    pub guest_visibility: Option<HardwareGuestVisibilityDto>,
     /// The account's devices after the refresh, ordered by mapping id.
     pub devices: Vec<HardwareDeviceDto>,
     /// Warnings, bounded.
@@ -384,6 +412,13 @@ impl From<RefreshReport> for HardwareRefreshDto {
                 read: scan.read,
                 unreadable: scan.unreadable,
                 truncated: scan.truncated,
+            }),
+            guest_visibility: report.guest_visibility.map(|visibility| {
+                HardwareGuestVisibilityDto {
+                    state: visibility.state().to_owned(),
+                    reason: visibility.gap().map(|gap| gap.id().to_owned()),
+                    detail: visibility.text(),
+                }
             }),
             devices: report.devices.into_iter().map(Into::into).collect(),
             warnings: report.warnings,

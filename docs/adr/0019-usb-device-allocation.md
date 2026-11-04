@@ -42,6 +42,10 @@ Measured on PVE 9.2.2 and 8.4.0; evidence in [docs/research/proxmox-usb.md](../r
 7. **Snapshot revert and clones propagate `usbN`.** Rollback restores the snapshot's set, and a clone or template clone inherits it. Lab provisioning clears inherited `usbN` it does not own after the clone, and cleanup re-reads the guest config after a revert; a base template must not carry device entries.
 8. **Raw `host=` is root-only** (`only root can set 'usbN' config for real devices`), so mappings are not just preferred but the only token path.
 
+## Amendments (#596, 2026-11-04)
+
+9. **Decisions 6 and 8 need every guest to be visible, and the token decides that.** The scan reads guest configs through the account's token, and PVE omits a guest without `VM.Audit` from every listing, so a guest the token cannot audit holds a device invisibly. A refresh therefore also establishes `guestVisibility`: `verified` only when the token's own permissions show `VM.Audit` propagating from `/vms` (or `/`) and no guest path narrowing it and no guest PVE says exists is missing from the listing (`GET /cluster/nextid` answers for any caller); `incomplete` when they show a gap; `unverified` when they cannot be read in full. Unless it is `verified`, no device of the account is `available` (it is `unsupported` with `usb_inventory_unreadable`, reusing the reason vocabulary) and the attach saga refuses with `hardware_guests_unverifiable` before it writes. `VM.Audit` on every guest is a documented hard requirement of the opt-in USB role, and `usb.audit-all-guests` is its row in `fleetctl proxmox privileges`. An explicit `NoAccess` on one guest is not visible in `GET /access/permissions` (PVE omits paths without privileges), so `verified` means "as far as the token's permissions and the VMID cross-check tell", not "every guest was seen".
+
 ## Rejected
 
 - `host=vendor:product` or `host=bus-port` as Fleet's identity: ambiguous with identical devices, and unstable across replug.

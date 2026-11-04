@@ -265,6 +265,30 @@ mapping into a second running guest also succeeded. PVE refuses none of this; **
 reservation is the only exclusivity.** What the two guests then see when both drive the
 device was not measured and should be treated as undefined.
 
+### Guests the token cannot audit (#596)
+
+PVE's lack of exclusivity makes the guest scan the whole of Fleet's "nothing else
+holds this device" check, and the scan sees only guests the token may audit.
+Read from the pve-manager and pve-access-control sources and the repository's
+recordings, **not measured on a live host for this note**; the live observation
+that raised it (a device on a guest the token had a `NoAccess` ACL on read
+`available`, with the scan complete) is in
+[the M11 acceptance record](../planning/m11-acceptance.md):
+
+| Question | Answer |
+|---|---|
+| Does `GET /cluster/resources` (or `GET /nodes/{node}/qemu`) name a guest the token cannot audit? | No: a guest appears only with `VM.Audit` on `/vms/{vmid}`. The listing is clean, not flagged. |
+| Does `GET /access/permissions` show a `NoAccess` guest path as an empty entry? | Not expected: PVE leaves out every path on which the token holds no privilege, so a `NoAccess` guest answers like a guest nobody mentioned. Fleet keeps an empty entry as a denial if PVE ever sends one. |
+| Can the token's `VM.Audit` on `/vms` be read from it? | Yes: the effective map carries `/vms` (and `/`) with each privilege and its propagate flag. `VM.Audit` with propagation on `/vms` or `/` is the grant that covers every guest, including later ones; a guest-scoped or pool-scoped grant does not. A concrete `/vms/{id}` entry without `VM.Audit` is an explicit narrowing and is visible. |
+| Is there a cheap guest count to compare with? | No. The listing, the per-node lists and the ACL listing are filtered or refused for the token, and no node or cluster status carries a guest count. |
+| Is there anything unfiltered? | `GET /cluster/nextid` and `?vmid=<id>` (`user => 'all'`): the lowest free VMID, or `400` "already exists". Below the next free VMID every ID is in use (at the default lower bound of 100), so an in-use VMID the listing did not name is proof of a guest the token cannot see. It finds guests, never rules them out, and a raised `next-id` lower bound ends the search at the first free ID it probes. |
+
+Fleet therefore requires `VM.Audit` on `/vms` with propagation for any account that
+drives USB devices, reports `guestVisibility` from the permissions and the VMID
+cross-check, shows no device `available` unless it is `verified`, and refuses the
+attach otherwise (`hardware_guests_unverifiable`). What stays undetectable: an
+explicit `NoAccess` on a guest whose VMID is above the cluster's next free one.
+
 ## 6. Snapshot, rollback, clone, template
 
 All on 9.2.2 (`t1-` to `t9-`) and, for snapshot and clone, 8.4.0 (`s8-`):

@@ -2942,7 +2942,8 @@ export interface HardwareGuestScanDto {
      * Whether the bound dropped guests. A scan with unreadable or dropped
      * guests is incomplete: a device that would be available is reported
      * `unsupported` (`usb_inventory_unreadable`) instead, since a guest may reference it
-     * that was not read.
+     * that was not read. The scan is also not enough on its own: it sees only
+     * the guests the token may audit (see `guestVisibility`).
      */
   truncated: boolean;
   /**
@@ -2950,6 +2951,35 @@ export interface HardwareGuestScanDto {
      * @minimum 0
      */
   unreadable: number;
+}
+
+/**
+ * Whether the token can be shown to audit every guest (#596). The guest scan
+ * sees only the guests the token may audit (PVE omits a guest without
+ * `VM.Audit` from the cluster listing), and PVE gives a mapping no
+ * exclusivity, so `available` means "no guest references it" only when
+ * the visibility is `verified`.
+ */
+export interface HardwareGuestVisibilityDto {
+  /** What the state rests on, and the remedy when it is not verified. */
+  detail: string;
+  /**
+     * `permissions_unreadable`, `permissions_truncated`,
+     * `guest_audit_not_granted` or `guest_path_narrowed`, unless
+     * verified.
+     * @nullable
+     */
+  reason?: string | null;
+  /**
+     * `verified` (`VM.Audit` propagates from `/vms` or `/` and no visible
+     * guest path narrows it), `incomplete` (the token's permissions show
+     * that some guests are not audited) or `unverified` (the permissions
+     * could not be read in full). Anything but `verified` means no device
+     * of the account is reported `available` and no attach is made. An
+     * explicit `NoAccess` on one guest does not show in the token's
+     * permissions, so `verified` is as far as they tell.
+     */
+  state: string;
 }
 
 /**
@@ -3018,6 +3048,7 @@ export interface HardwareRefreshDto {
   /** The account's devices after the refresh, ordered by mapping id. */
   devices: HardwareDeviceDto[];
   guestScan?: null | HardwareGuestScanDto;
+  guestVisibility?: null | HardwareGuestVisibilityDto;
   /** When the observation was taken (epoch milliseconds). */
   observedAt: number;
   /**
@@ -7587,6 +7618,7 @@ export type ResourceHardwareRefreshDtoData = {
   /** The account's devices after the refresh, ordered by mapping id. */
   devices: HardwareDeviceDto[];
   guestScan?: null | HardwareGuestScanDto;
+  guestVisibility?: null | HardwareGuestVisibilityDto;
   /** When the observation was taken (epoch milliseconds). */
   observedAt: number;
   /**

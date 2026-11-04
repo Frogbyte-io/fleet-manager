@@ -2634,6 +2634,34 @@ impl ProxmoxClient {
         })
     }
 
+    /// Whether a VMID is in use anywhere in the cluster
+    /// (`GET /cluster/nextid?vmid=<id>`): `200` when it is free, `400` when
+    /// it exists. Unlike the guest listing it does not depend on the
+    /// caller's `VM.Audit` (`user => 'all'`), so it is the one read that
+    /// can prove a guest exists that the token cannot see (#596). Meant for
+    /// valid VMIDs (at least 100).
+    ///
+    /// # Errors
+    ///
+    /// Fails with [`PveApiError`] for any other outcome, including a refusal
+    /// or an unreachable host.
+    pub async fn vmid_in_use(
+        &self,
+        request: PveHttpRequest,
+        vmid: u32,
+    ) -> Result<bool, PveApiError> {
+        let nextid_request = PveHttpRequest {
+            path: format!("/api2/json/cluster/nextid?vmid={vmid}"),
+            method: PveHttpMethod::Get,
+            ..request
+        };
+        match self.call(nextid_request).await {
+            Ok(_) => Ok(false),
+            Err(PveApiError::Http { status: 400, .. }) => Ok(true),
+            Err(error) => Err(error),
+        }
+    }
+
     /// The few facts of one QEMU guest's current config
     /// (`GET /nodes/{node}/qemu/{vmid}/config`) that the Lab executor
     /// checks before it changes a fresh clone (issue #290). Needs

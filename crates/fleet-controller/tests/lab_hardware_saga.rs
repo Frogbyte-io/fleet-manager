@@ -57,13 +57,14 @@ use fleet_controller::proxmox_exec::{
 };
 use fleet_core::{
     CleanupStrategy, DeviceStatus, HardwareKind, LabHardware, LabTemplateContent, Lease,
-    LeaseState, ReadinessProbe,
+    LeaseState, ReadinessProbe, UnsupportedReason,
 };
 use fleet_provider_proxmox::ProxmoxClient;
 use fleet_storage_sqlite::{
     AuditSink, HardwareRepository, LabRepository, LeaseRepository, MachineRepository,
     OperationRepository, ProjectRepository, ProxmoxAccountRepository, Store,
 };
+use serde_json::{Value, json};
 use usb_pve::{UsbFault, UsbHost, UsbStep};
 
 const PRINCIPAL: &str = fleet_auth::LAN_PRINCIPAL_ID;
@@ -1859,6 +1860,130 @@ async fn an_unreadable_guest_config_at_the_re_observation_refuses_before_any_wri
     assert_eq!(controller.drain(&world).await, Run::Done(2));
     assert_attach_failed(&world, &controller, &lease, "hardware_scan_incomplete").await;
     assert!(world.usb.writes().is_empty());
+}
+
+/// The token's permissions as the fake PVE reports them, with the opt-in
+/// role and the given `/vms` entries.
+fn permissions_with(vms: Value) -> Value {
+    let mut map = json!({"/mapping/usb": {"Mapping.Audit": 1, "Mapping.Use": 1}});
+    for (path, privileges) in vms.as_object().expect("an object") {
+        map[path] = privileges.clone();
+    }
+    map
+}
+
+#[tokio::test]
+async fn a_token_that_cannot_audit_every_guest_is_refused_at_the_re_observation_before_any_write() {
+    // #596: a guest the token cannot audit is omitted from the cluster
+    // listing, so the guest scan reads complete while a device it drives
+    // would read available. Placement saw an `available` device; by the
+    // re-observation the token's `VM.Audit` on the guests is gone.
+    for (label, vms) in [
+        (
+            "no VM.Audit on /vms",
+            json!({"/vms": {"VM.Config.HWType": 1}}),
+        ),
+        (
+            "VM.Audit that does not propagate",
+            json!({"/vms": {"VM.Audit": 0, "VM.Config.HWType": 1}}),
+        ),
+        (
+            "a guest path narrowed below VM.Audit",
+            json!({
+                "/vms": {"VM.Audit": 1, "VM.Config.HWType": 1},
+                "/vms/200": {"VM.PowerMgmt": 1}
+            }),
+        ),
+        (
+            "a guest path with nothing at all",
+            json!({"/vms": {"VM.Audit": 1, "VM.Config.HWType": 1}, "/vms/200": {}}),
+        ),
+    ] {
+        let world = World::new(&[READER_A]).await;
+        let controller = Controller::start(&world).await;
+        controller.refresh_inventory().await;
+        assert_eq!(
+            controller.device_view(READER_A).await,
+            DeviceStatus::Available
+        );
+        world.usb.set_permissions(200, permissions_with(vms));
+        let lease = controller.request_lease().await;
+        assert_eq!(controller.drain(&world).await, Run::Done(2), "{label}");
+        assert_attach_failed(&world, &controller, &lease, "hardware_guests_unverifiable").await;
+        assert!(world.usb.writes().is_empty(), "{label}");
+    }
+}
+
+#[tokio::test]
+async fn a_guest_pve_says_exists_but_the_token_cannot_list_refuses_even_with_a_full_audit_grant() {
+    // The Decker case with a token that holds VM.Audit on `/vms` and a
+    // NoAccess ACL on one guest: the permissions read clean, but PVE answers
+    // `nextid?vmid=100` with "already exists" for a guest the listing does
+    // not name (the next free VMID is far above it).
+    let world = World::new(&[READER_A]).await;
+    let controller = Controller::start(&world).await;
+    controller.refresh_inventory().await;
+    assert_eq!(
+        controller.device_view(READER_A).await,
+        DeviceStatus::Available
+    );
+    world.usb.hide_guest(100);
+    let lease = controller.request_lease().await;
+    assert_eq!(controller.drain(&world).await, Run::Done(2));
+    assert_attach_failed(&world, &controller, &lease, "hardware_guests_unverifiable").await;
+    assert!(world.usb.writes().is_empty());
+}
+
+#[tokio::test]
+async fn permissions_that_cannot_be_read_at_the_re_observation_refuse_the_attach_too() {
+    // Unverified is not verified: when the read of the token's own
+    // permissions fails, Fleet cannot tell whether it audits every guest.
+    let world = World::new(&[READER_A]).await;
+    let controller = Controller::start(&world).await;
+    controller.refresh_inventory().await;
+    world.usb.set_permissions(403, json!(null));
+    let lease = controller.request_lease().await;
+    assert_eq!(controller.drain(&world).await, Run::Done(2));
+    assert_attach_failed(&world, &controller, &lease, "hardware_guests_unverifiable").await;
+    assert!(world.usb.writes().is_empty());
+}
+
+#[tokio::test]
+async fn a_token_that_audits_every_guest_attaches_as_before() {
+    // The control for the refusals above: with `VM.Audit` propagating from
+    // `/vms` nothing is refused for visibility.
+    let world = World::new(&[READER_A]).await;
+    let controller = Controller::start(&world).await;
+    controller.refresh_inventory().await;
+    world.usb.set_permissions(
+        200,
+        permissions_with(json!({"/vms": {"VM.Audit": 1, "VM.Config.HWType": 1}})),
+    );
+    let lease = controller.request_lease().await;
+    assert_eq!(controller.drain(&world).await, Run::Done(1));
+    assert_eq!(controller.lease(&lease).await.state, LeaseState::Ready);
+    assert_eq!(world.usb.writes().len(), 1, "{:?}", world.usb.writes());
+}
+
+#[tokio::test]
+async fn a_refresh_with_a_visibility_gap_makes_the_device_unallocatable_before_the_saga() {
+    // The standing signal: once a refresh records the gap, no device of the
+    // account reads available, so placement refuses the lease up front.
+    let world = World::new(&[READER_A]).await;
+    let controller = Controller::start(&world).await;
+    world.usb.set_permissions(
+        200,
+        permissions_with(json!({"/vms": {"VM.Config.HWType": 1}})),
+    );
+    controller.refresh_inventory().await;
+    assert_eq!(
+        controller.device_view(READER_A).await,
+        DeviceStatus::Unsupported(UnsupportedReason::UsbInventoryUnreadable)
+    );
+    let lease = controller.request_lease().await;
+    controller.drain(&world).await;
+    assert!(world.usb.writes().is_empty());
+    assert_ne!(controller.failure_reason(&lease).await, "");
 }
 
 #[tokio::test]

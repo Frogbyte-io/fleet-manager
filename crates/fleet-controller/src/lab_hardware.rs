@@ -1672,6 +1672,30 @@ impl LabHardwareSaga {
                 ),
             ));
         }
+        // The scan sees only the guests the token may audit: PVE omits a guest
+        // without `VM.Audit` from the cluster listing, so `listed == read`
+        // proves nothing about a guest the token cannot see, and PVE gives a
+        // mapping no exclusivity (#596). Unless the token's permissions show
+        // `VM.Audit` on every guest, a device that another guest drives would
+        // read available, so no attach is made.
+        match &report.guest_visibility {
+            Some(visibility) if visibility.is_verified() => {}
+            other => {
+                return Err(refused(
+                    "hardware_guests_unverifiable",
+                    format!(
+                        "Fleet cannot verify that every guest is visible to its token ({}: {}), so a guest it cannot see may drive {mapping}; grant VM.Audit on /vms to the Fleet user and token (docs/operations/hardware.md)",
+                        other
+                            .as_ref()
+                            .map_or("not assessed", |visibility| visibility.state()),
+                        other
+                            .as_ref()
+                            .and_then(|visibility| visibility.gap())
+                            .map_or("no assessment", |gap| gap.id()),
+                    ),
+                ));
+            }
+        }
         // `available` for a reserved device is kept on an incomplete guest
         // scan (the reservation is what excludes a second holder), so the
         // scan's completeness is checked here: a guest that was not read may

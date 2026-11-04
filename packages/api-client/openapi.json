@@ -18312,12 +18312,37 @@
           },
           "truncated": {
             "type": "boolean",
-            "description": "Whether the bound dropped guests. A scan with unreadable or dropped\nguests is incomplete: a device that would be available is reported\n`unsupported` (`usb_inventory_unreadable`) instead, since a guest may reference it\nthat was not read."
+            "description": "Whether the bound dropped guests. A scan with unreadable or dropped\nguests is incomplete: a device that would be available is reported\n`unsupported` (`usb_inventory_unreadable`) instead, since a guest may reference it\nthat was not read. The scan is also not enough on its own: it sees only\nthe guests the token may audit (see `guestVisibility`)."
           },
           "unreadable": {
             "type": "integer",
             "description": "How many could not be read.",
             "minimum": 0
+          }
+        }
+      },
+      "HardwareGuestVisibilityDto": {
+        "type": "object",
+        "description": "Whether the token can be shown to audit every guest (#596). The guest scan\nsees only the guests the token may audit (PVE omits a guest without\n`VM.Audit` from the cluster listing), and PVE gives a mapping no\nexclusivity, so `available` means \"no guest references it\" only when\nthe visibility is `verified`.",
+        "required": [
+          "state",
+          "detail"
+        ],
+        "properties": {
+          "detail": {
+            "type": "string",
+            "description": "What the state rests on, and the remedy when it is not verified."
+          },
+          "reason": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "`permissions_unreadable`, `permissions_truncated`,\n`guest_audit_not_granted` or `guest_path_narrowed`, unless\nverified."
+          },
+          "state": {
+            "type": "string",
+            "description": "`verified` (`VM.Audit` propagates from `/vms` or `/` and no visible\nguest path narrows it), `incomplete` (the token's permissions show\nthat some guests are not audited) or `unverified` (the permissions\ncould not be read in full). Anything but `verified` means no device\nof the account is reported `available` and no attach is made. An\nexplicit `NoAccess` on one guest does not show in the token's\npermissions, so `verified` is as far as they tell."
           }
         }
       },
@@ -18461,6 +18486,17 @@
               {
                 "$ref": "#/components/schemas/HardwareGuestScanDto",
                 "description": "What the guest scan covered; `null` when the mapping list was not\nusable."
+              }
+            ]
+          },
+          "guestVisibility": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/HardwareGuestVisibilityDto",
+                "description": "Whether the token can be shown to audit every guest, which `available`\nneeds to be trustworthy; `null` when the mapping list was not usable."
               }
             ]
           },
@@ -26783,6 +26819,17 @@
                   {
                     "$ref": "#/components/schemas/HardwareGuestScanDto",
                     "description": "What the guest scan covered; `null` when the mapping list was not\nusable."
+                  }
+                ]
+              },
+              "guestVisibility": {
+                "oneOf": [
+                  {
+                    "type": "null"
+                  },
+                  {
+                    "$ref": "#/components/schemas/HardwareGuestVisibilityDto",
+                    "description": "Whether the token can be shown to audit every guest, which `available`\nneeds to be trustworthy; `null` when the mapping list was not usable."
                   }
                 ]
               },

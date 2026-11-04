@@ -44,8 +44,10 @@ fn the_table_has_no_usb_row_the_provider_does_not_declare() {
         .iter()
         .filter(|entry| entry.id.starts_with("usb."))
     {
-        if entry.id == "usb.read-mappings" {
-            // The listing is a read the inventory makes, not an attach call.
+        if entry.id == "usb.read-mappings" || entry.id == "usb.audit-all-guests" {
+            // The listing and the guest scan are reads the inventory makes
+            // (the second is the precondition for calling a device
+            // available, #596), not attach calls.
             continue;
         }
         assert!(

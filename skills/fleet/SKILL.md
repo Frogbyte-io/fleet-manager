@@ -353,7 +353,12 @@ fleetctl --output json hardware refresh --account <account-id>
   seen recently: `stale` is true), `unsupported` (read `reason`, for example
   `token_lacks_mapping_use` means the Fleet token lacks the opt-in `FleetUsb`
   Proxmox role), or `quarantined` (a failed attach or detach needs an
-  operator). Only `available` can be requested.
+  operator). Only `available` can be requested. `available` means no guest
+  the Fleet token can see references the device, and it is shown only while
+  `hardware refresh` reports `guestVisibility` `verified`; when it is
+  `incomplete` or `unverified` no device is `available` and the refresh says
+  why (the token needs `VM.Audit` on every guest). That is an operator fix:
+  report it, do not work around it.
 
 To use a device, lease a template version that declares it. The template's
 `hardware` is a list (up to four) of `{"kind": "usb", "mapping": "<mapping-id>"}`,
@@ -396,6 +401,7 @@ destroy the guest or free the device yourself.
 | `reason` (attach step) | What you do |
 | --- | --- |
 | `hardware_fingerprint_changed`, `hardware_scan_incomplete`, `hardware_verify_failed` | The device moved or the cluster could not be read in full at the last check. Run `hardware refresh --account <account-id>` once and lease again once; otherwise tell the user |
+| `hardware_guests_unverifiable` | Fleet cannot show that its Proxmox token can see every guest, so a device might already be in use on a guest it cannot see. Nothing was written. Tell the user: the operator must grant the Fleet token `VM.Audit` on every guest. Do not retry |
 | `hardware_attach_failed`, `hardware_no_free_slot`, `hardware_attach_pending`, `hardware_lease_ended` | The write was refused or could not be applied; the message says why. Tell the user; do not retry in a loop |
 | `hardware_attach_unknown` | The outcome could not be determined; cleanup resolves it, or it needs an operator. Tell the user |
 

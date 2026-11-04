@@ -16,9 +16,10 @@ use fleet_application::hardware::{
     DeviceObservation, HardwareStore, HardwareStoreError, NewHardwareReservation,
 };
 use fleet_application::hardware_inventory::{
-    AccountReason, AccountSupport, DeviceFilter, HardwareInventory, HardwareObservePort,
-    RawGuestReference, RawGuestScan, RawHardwareObservation, RawMapEntry, RawMapping,
-    RawMappingsRead, RawNode, RawNodeCheck, RawPermissionsRead, ReferencePending, view,
+    AccountReason, AccountSupport, DeviceFilter, GuestVisibility, GuestVisibilityGap,
+    HardwareInventory, HardwareObservePort, RawGuestReference, RawGuestScan,
+    RawHardwareObservation, RawMapEntry, RawMapping, RawMappingsRead, RawNode, RawNodeCheck,
+    RawPermissionsRead, ReferencePending, view,
 };
 use fleet_application::operation::AuditPort;
 use fleet_application::proxmox::privileges::{EffectivePermissions, RawTokenPermissions};
@@ -485,7 +486,10 @@ fn token(use_on: &[&str]) -> RawPermissionsRead {
     );
     entries.insert(
         "/vms".to_owned(),
-        BTreeMap::from([("VM.Config.HWType".to_owned(), true)]),
+        BTreeMap::from([
+            ("VM.Audit".to_owned(), true),
+            ("VM.Config.HWType".to_owned(), true),
+        ]),
     );
     for id in use_on {
         entries.insert(
@@ -549,6 +553,7 @@ fn observation(
             guests_read: 3,
             guests_unreadable: 0,
             truncated: false,
+            hidden_vmids: Vec::new(),
         },
         permissions,
         warnings: Vec::new(),
@@ -730,8 +735,23 @@ async fn unreadable_permissions_derive_no_token_reason_and_say_so() {
     };
     let rig = rig(answer);
     let report = refresh(&rig).await;
-    assert_eq!(status_of(&report, "m-available"), DeviceStatus::Available);
-    assert_eq!(status_of(&report, "m-nouse"), DeviceStatus::Available);
+    // No token reason is derived, but nothing can be called available either:
+    // without the token's permissions Fleet cannot tell whether it audits
+    // every guest (#596).
+    assert_eq!(
+        status_of(&report, "m-available"),
+        DeviceStatus::Unsupported(UnsupportedReason::UsbInventoryUnreadable)
+    );
+    assert_eq!(
+        status_of(&report, "m-nouse"),
+        DeviceStatus::Unsupported(UnsupportedReason::UsbInventoryUnreadable)
+    );
+    assert_eq!(
+        report.guest_visibility,
+        Some(GuestVisibility::Unverified(
+            GuestVisibilityGap::PermissionsUnreadable
+        ))
+    );
     assert!(
         report
             .warnings
@@ -739,6 +759,179 @@ async fn unreadable_permissions_derive_no_token_reason_and_say_so() {
             .any(|warning| warning.contains("permissions could not be read")),
         "{:?}",
         report.warnings
+    );
+}
+
+/// The `every_status` observation with the token's `/vms` replaced.
+fn with_vms(vms: &[(&str, &[(&str, bool)])]) -> Rig {
+    let mut answer = every_status();
+    let RawPermissionsRead::Read(read) = &mut answer.permissions else {
+        panic!("a readable token");
+    };
+    read.paths.retain(|path, _| !path.starts_with("/vms"));
+    read.paths.extend(paths(vms));
+    rig(answer)
+}
+
+#[tokio::test]
+async fn a_token_that_audits_every_guest_is_verified_and_a_device_can_be_available() {
+    let rig = rig(every_status());
+    let report = refresh(&rig).await;
+    assert_eq!(report.guest_visibility, Some(GuestVisibility::Verified));
+    assert_eq!(status_of(&report, "m-available"), DeviceStatus::Available);
+    let available = report
+        .devices
+        .iter()
+        .find(|device| device.view.device.mapping_id == "m-available")
+        .unwrap();
+    assert!(
+        available
+            .notes
+            .iter()
+            .all(|note| !note.contains("guest visibility")),
+        "{:?}",
+        available.notes
+    );
+    assert!(
+        report
+            .warnings
+            .iter()
+            .all(|warning| !warning.contains("guest visibility")),
+        "{:?}",
+        report.warnings
+    );
+}
+
+#[tokio::test]
+async fn a_token_without_vm_audit_on_the_guests_reads_no_device_available_and_says_why() {
+    // The Decker case (#596): the token has HWType but no VM.Audit above the
+    // guests, so a guest it cannot see may hold a device. The scan itself
+    // reads complete (the listing never named the hidden guest).
+    let rig = with_vms(&[("/vms", &[("VM.Config.HWType", true)])]);
+    let report = refresh(&rig).await;
+    let scan = report.guest_scan.as_ref().unwrap();
+    assert_eq!(scan.unreadable, 0);
+    assert!(!scan.truncated);
+    assert_eq!(
+        report.guest_visibility,
+        Some(GuestVisibility::Incomplete(
+            GuestVisibilityGap::AuditNotGranted
+        ))
+    );
+    assert_eq!(report.support, AccountSupport::Supported);
+    for id in ["m-available", "m-lease"] {
+        assert_eq!(
+            status_of(&report, id),
+            DeviceStatus::Unsupported(UnsupportedReason::UsbInventoryUnreadable),
+            "{id}"
+        );
+        let device = report
+            .devices
+            .iter()
+            .find(|device| device.view.device.mapping_id == id)
+            .unwrap();
+        assert!(
+            device
+                .notes
+                .iter()
+                .any(|note| note.contains("guest visibility is not verified")),
+            "{:?}",
+            device.notes
+        );
+    }
+    // A reference the scan did see still stands, and a device that is
+    // simply not there is still missing: the gap makes `available` untrusted,
+    // nothing else.
+    assert_eq!(
+        status_of(&report, "m-external"),
+        DeviceStatus::ExternallyAttached
+    );
+    assert_eq!(status_of(&report, "m-missing"), DeviceStatus::Missing);
+    assert!(
+        report.warnings.iter().any(|warning| {
+            warning.contains("guest visibility is incomplete")
+                && warning.contains("guest_audit_not_granted")
+        }),
+        "{:?}",
+        report.warnings
+    );
+    // It is stored, so a list shows it without a Proxmox call.
+    let stored = rig.store.list_devices(ACCOUNT).await.unwrap();
+    assert!(
+        stored
+            .iter()
+            .all(|device| device.status != DeviceStatus::Available)
+    );
+}
+
+#[tokio::test]
+async fn a_guest_pve_says_exists_but_the_listing_omits_makes_the_account_incomplete() {
+    // The permissions read clean (a NoAccess guest is not in them), but PVE
+    // says VMIDs 100 and 101 exist and the listing did not name them.
+    let mut answer = every_status();
+    answer.guests.hidden_vmids = vec![100, 101];
+    let rig = rig(answer);
+    let report = refresh(&rig).await;
+    assert_eq!(
+        report.guest_visibility,
+        Some(GuestVisibility::Incomplete(
+            GuestVisibilityGap::HiddenGuestsFound {
+                vmids: vec![100, 101]
+            }
+        ))
+    );
+    assert_eq!(
+        status_of(&report, "m-available"),
+        DeviceStatus::Unsupported(UnsupportedReason::UsbInventoryUnreadable)
+    );
+    let device = report
+        .devices
+        .iter()
+        .find(|device| device.view.device.mapping_id == "m-available")
+        .unwrap();
+    assert!(
+        device
+            .notes
+            .iter()
+            .any(|note| note.contains("100, 101 exist")),
+        "{:?}",
+        device.notes
+    );
+}
+
+#[tokio::test]
+async fn a_guest_path_without_vm_audit_is_an_explicit_gap_naming_the_path() {
+    let rig = with_vms(&[
+        ("/vms", &[("VM.Audit", true), ("VM.Config.HWType", true)]),
+        ("/vms/200", &[("VM.PowerMgmt", true)]),
+    ]);
+    let report = refresh(&rig).await;
+    assert_eq!(
+        report.guest_visibility,
+        Some(GuestVisibility::Incomplete(
+            GuestVisibilityGap::GuestPathNarrowed {
+                path: "/vms/200".to_owned()
+            }
+        ))
+    );
+    assert_eq!(
+        status_of(&report, "m-available"),
+        DeviceStatus::Unsupported(UnsupportedReason::UsbInventoryUnreadable)
+    );
+    // The same token with an empty entry for a guest, as PVE would show a
+    // path the token holds nothing on if it listed one.
+    let rig = with_vms(&[
+        ("/vms", &[("VM.Audit", true), ("VM.Config.HWType", true)]),
+        ("/vms/201", &[]),
+    ]);
+    let report = refresh(&rig).await;
+    assert_eq!(
+        report.guest_visibility,
+        Some(GuestVisibility::Incomplete(
+            GuestVisibilityGap::GuestPathNarrowed {
+                path: "/vms/201".to_owned()
+            }
+        ))
     );
 }
 
@@ -1041,7 +1234,7 @@ async fn a_partial_mapping_audit_never_prunes_the_mappings_it_cannot_see() {
                     "/mapping/usb/m-available",
                     &[("Mapping.Audit", false), ("Mapping.Use", false)],
                 ),
-                ("/vms", &[("VM.Config.HWType", true)]),
+                ("/vms", &[("VM.Audit", true), ("VM.Config.HWType", true)]),
             ]),
             ..RawTokenPermissions::default()
         }),
@@ -1599,8 +1792,21 @@ async fn a_truncated_permissions_map_derives_nothing_from_what_it_lacks() {
     *rig.observer.answer.lock().unwrap() = Ok(answer);
     let report = refresh(&rig).await;
     assert_eq!(report.support, AccountSupport::Supported);
-    assert_eq!(status_of(&report, "m-available"), DeviceStatus::Available);
-    assert_eq!(status_of(&report, "m-nouse"), DeviceStatus::Available);
+    // Not read in full, so not verified: nothing is available (#596).
+    assert_eq!(
+        report.guest_visibility,
+        Some(GuestVisibility::Unverified(
+            GuestVisibilityGap::PermissionsTruncated
+        ))
+    );
+    assert_eq!(
+        status_of(&report, "m-available"),
+        DeviceStatus::Unsupported(UnsupportedReason::UsbInventoryUnreadable)
+    );
+    assert_eq!(
+        status_of(&report, "m-nouse"),
+        DeviceStatus::Unsupported(UnsupportedReason::UsbInventoryUnreadable)
+    );
 
     // Not truncated, the same map is a token without the privileges.
     let mut answer = every_status();

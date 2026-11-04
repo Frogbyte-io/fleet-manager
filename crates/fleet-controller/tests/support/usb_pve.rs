@@ -133,6 +133,12 @@ struct UsbState {
     writes: Vec<String>,
     /// Whether the node's USB inventory is readable (it needs `Sys.Modify`).
     permissions_read: bool,
+    /// What `GET /access/permissions` answers instead of the standard grant
+    /// (status and `data`), when set (#596).
+    permissions_override: Option<(u16, Value)>,
+    /// Guests PVE has that the token cannot audit (#596): absent from the
+    /// listing, yet `GET /cluster/nextid?vmid=` says they exist.
+    hidden_guests: BTreeSet<u32>,
     /// How many of the next `GET /cluster/resources` fail (500).
     fail_resources: u32,
     /// How many of the next config reads of a guest fail (500), by VMID.
@@ -231,6 +237,18 @@ impl UsbHost {
             .applied
             .insert(slot, value.to_owned());
         Self::guest_in(&mut state, vmid).revision += 1;
+    }
+
+    /// A guest the token cannot audit holds VMID `vmid`: the listing omits it
+    /// and `nextid?vmid=` still says it exists (#596).
+    pub fn hide_guest(&self, vmid: u32) {
+        self.state.lock().unwrap().hidden_guests.insert(vmid);
+    }
+
+    /// Replaces the token's effective permissions (`GET /access/permissions`)
+    /// with `data` at `status`; a 403 makes the read itself fail (#596).
+    pub fn set_permissions(&self, status: u16, data: Value) {
+        self.state.lock().unwrap().permissions_override = Some((status, data));
     }
 
     /// The next `times` `GET /cluster/resources` fail with a 500.
@@ -633,6 +651,25 @@ impl UsbHost {
             }
             (PveHttpMethod::Get, ["cluster", "nextid"]) => {
                 self.record(line);
+                if let Some(requested) = query
+                    .split('&')
+                    .find_map(|pair| pair.strip_prefix("vmid="))
+                    .and_then(|vmid| vmid.parse::<u32>().ok())
+                    && self
+                        .state
+                        .lock()
+                        .unwrap()
+                        .hidden_guests
+                        .contains(&requested)
+                {
+                    return Some(Self::error(
+                        400,
+                        &json!({
+                            "data": null,
+                            "errors": {"vmid": format!("VM {requested} already exists")}
+                        }),
+                    ));
+                }
                 if let Some(response) = self.fault(UsbStep::NextId, true).await {
                     return Some(response);
                 }
@@ -641,6 +678,17 @@ impl UsbHost {
             (PveHttpMethod::Get, ["access", "permissions"]) => {
                 self.record(line);
                 self.assert_pinned(request);
+                let overridden = self.state.lock().unwrap().permissions_override.clone();
+                if let Some((status, data)) = overridden {
+                    return Some(if status == 200 {
+                        Self::ok(&data)
+                    } else {
+                        Self::error(
+                            status,
+                            &json!({"data": null, "message": "Permission check failed (/, Sys.Audit)\n"}),
+                        )
+                    });
+                }
                 Some(Self::ok(&json!({
                     "/mapping/usb": {"Mapping.Audit": 1, "Mapping.Use": 1},
                     "/vms": {"VM.Audit": 1, "VM.Config.HWType": 1}

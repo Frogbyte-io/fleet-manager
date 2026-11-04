@@ -18,6 +18,14 @@
 //!    ([`MAX_SCANNED_GUESTS`]), concurrent, and tolerant: a guest that cannot
 //!    be read is counted, never fatal.
 //!
+//!    The listing omits every guest the token cannot audit, so a clean scan
+//!    proves nothing about those. One cross-check exists (#596):
+//!    `GET /cluster/nextid` and `GET /cluster/nextid?vmid=<id>` answer for any
+//!    caller, whatever its `VM.Audit`. Every VMID below the cluster's next
+//!    free one that the listing did not name, and PVE says is in use, is a
+//!    guest the token cannot see ([`find_hidden_guests`]). It can only find
+//!    guests, never rule them out.
+//!
 //! Provider shapes are translated here into the application's own
 //! (`fleet_application::hardware_inventory`).
 
@@ -42,6 +50,16 @@ use crate::proxmox_store::{map_api_error, pinned_request};
 /// The most guests whose config one refresh reads. A bigger cluster is
 /// reported as truncated rather than read without bound.
 pub const MAX_SCANNED_GUESTS: usize = 512;
+
+/// The most VMIDs probed for a hidden guest in one refresh (`nextid?vmid=`
+/// requests, one after the other).
+const MAX_HIDDEN_PROBES: usize = 16;
+
+/// The most hidden VMIDs one refresh reports.
+const MAX_HIDDEN_REPORTED: usize = 8;
+
+/// The lowest VMID PVE hands out.
+const FIRST_VMID: u32 = 100;
 
 /// The most nodes one refresh checks.
 pub const MAX_CHECKED_NODES: usize = 16;
@@ -217,6 +235,46 @@ async fn observe_node(
     )
 }
 
+/// Finds guests that exist although the listing did not name them.
+///
+/// `first_free` is `GET /cluster/nextid` read *before* the listing, so a
+/// guest created in between can only add to the listing, never to the
+/// suspects. PVE hands out the lowest free VMID at or above the cluster's
+/// `next-id` lower bound (default 100, not readable without `Sys.Audit` on
+/// `/`), so a VMID below `first_free` is used only if the bound is 100. The
+/// probe `nextid?vmid=` settles each unnamed VMID: `400` means it exists
+/// (hidden from the token), and the first free one means the lower bound is
+/// higher than that and nothing below it says anything, so the search
+/// stops. Positive evidence only: no result never means "none".
+async fn find_hidden_guests(
+    client: &ProxmoxClient,
+    account: &ProxmoxAccount,
+    secret: &SensitiveString,
+    first_free: Option<u32>,
+    listed: &BTreeSet<u32>,
+) -> Vec<u32> {
+    let Some(first_free) = first_free else {
+        return Vec::new();
+    };
+    let mut hidden = Vec::new();
+    let candidates = (FIRST_VMID..first_free).filter(|vmid| !listed.contains(vmid));
+    for vmid in candidates.take(MAX_HIDDEN_PROBES) {
+        let Ok(request) = pinned_request(account, secret, "/api2/json/version") else {
+            break;
+        };
+        match client.vmid_in_use(request, vmid).await {
+            Ok(true) => {
+                hidden.push(vmid);
+                if hidden.len() >= MAX_HIDDEN_REPORTED {
+                    break;
+                }
+            }
+            Ok(false) | Err(_) => break,
+        }
+    }
+    hidden
+}
+
 async fn scan_guests(
     client: &ProxmoxClient,
     account: &ProxmoxAccount,
@@ -224,15 +282,24 @@ async fn scan_guests(
     warnings: &mut Vec<String>,
 ) -> RawGuestScan {
     let mut scan = RawGuestScan::default();
+    // Before the listing, see `find_hidden_guests`.
+    let first_free = match pinned_request(account, secret, "/api2/json/version") {
+        Ok(request) => client.next_vmid(request).await.ok(),
+        Err(_) => None,
+    };
     let listed = match pinned_request(account, secret, "/api2/json/cluster/resources") {
         Ok(request) => client.list_guest_resources(request).await,
         Err(error) => Err(PveApiError::InvalidPayload {
             detail: error.to_string(),
         }),
     };
+    let mut named: BTreeSet<u32> = BTreeSet::new();
     let guests = match listed {
         Ok(resources) => resources
             .into_iter()
+            .inspect(|resource| {
+                named.extend(resource.vmid);
+            })
             .filter(|resource| matches!(resource.kind.as_str(), "qemu" | "qemu-template"))
             .filter_map(|resource| {
                 Some((
@@ -330,6 +397,7 @@ async fn scan_guests(
             failures - MAX_GUEST_WARNINGS
         ));
     }
+    scan.hidden_vmids = find_hidden_guests(client, account, secret, first_free, &named).await;
     scan.references.sort_by(|left, right| {
         (&left.node, left.vmid, &left.slot).cmp(&(&right.node, right.vmid, &right.slot))
     });
