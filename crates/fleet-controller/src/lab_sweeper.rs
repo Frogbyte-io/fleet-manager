@@ -594,7 +594,11 @@ impl LabSweeper {
     /// rows. A failed tick is logged and retried on the next one. Each tick
     /// transitions lease rows (expiry and compensation), records audit
     /// intents, publishes `lease.changed`, and queues cleanup operations; it
-    /// never runs Proxmox work itself, so it never blocks the worker.
+    /// never runs Lab Proxmox work itself, so it never blocks the worker. The
+    /// one exception is the hardware reconciler (FM-1124), when composed: it
+    /// reads guest configs and deletes only Fleet's own USB entry, on its
+    /// own schedule and bounds, and its startup pass runs before the first
+    /// interval.
     pub async fn run(
         self: Arc<Self>,
         interval: Duration,
