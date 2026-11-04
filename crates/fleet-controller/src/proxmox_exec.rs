@@ -4481,7 +4481,7 @@ impl ProvisionExecutor {
                     account_id,
                     node,
                     vmid,
-                    operation_id,
+                    operation_id: Some(operation_id),
                 },
                 &content.hardware,
             )

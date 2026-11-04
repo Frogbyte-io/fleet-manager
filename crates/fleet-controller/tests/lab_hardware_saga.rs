@@ -1420,7 +1420,7 @@ async fn an_operators_identical_entry_after_a_crash_before_the_write_is_never_ad
         account_id: &world.account_id,
         node: TEMPLATE_NODE,
         vmid: record.vmid.unwrap(),
-        operation_id: &operation.id,
+        operation_id: Some(&operation.id),
     };
     // The resumed attach does not take the entry for its own.
     let result = controller
@@ -1459,7 +1459,7 @@ async fn a_resumed_attach_with_no_entry_on_the_guest_writes_it_and_a_repeat_chan
         account_id: &world.account_id,
         node: TEMPLATE_NODE,
         vmid,
-        operation_id: &operation.id,
+        operation_id: Some(&operation.id),
     };
     assert_eq!(controller.states().await, vec!["attaching"]);
     controller
@@ -1706,7 +1706,7 @@ async fn an_attach_that_pends_on_a_running_guest_is_removed_never_recorded_as_at
                 account_id: &world.account_id,
                 node: TEMPLATE_NODE,
                 vmid,
-                operation_id: &operation.id,
+                operation_id: Some(&operation.id),
             },
             &[usb(READER_A)],
         )
@@ -1935,7 +1935,7 @@ async fn an_attach_unknown_row_is_left_to_cleanup_and_never_written_over() {
                 account_id: &world.account_id,
                 node: TEMPLATE_NODE,
                 vmid: record.vmid.unwrap(),
-                operation_id: &operation.id,
+                operation_id: Some(&operation.id),
             },
             &[usb(READER_A)],
         )
