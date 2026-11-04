@@ -1204,6 +1204,7 @@ pub struct PersistentMachines {
     register_guard: Option<Arc<dyn RegisterGuard>>,
     machines: Option<Arc<dyn crate::machine::MachinePort>>,
     guest_links: Option<Arc<dyn crate::machine::GuestLinkPort>>,
+    hardware: Option<Arc<dyn crate::machine_usb::MachineHardwareGate>>,
     audit: Arc<dyn crate::operation::AuditPort>,
 }
 
@@ -1234,7 +1235,45 @@ impl PersistentMachines {
             register_guard: None,
             machines: None,
             guest_links: None,
+            hardware: None,
             audit,
+        }
+    }
+
+    /// Refuses to unregister a marker whose guest holds a persistent
+    /// machine's USB device (FM-1125): the marker is what keeps Lab away from
+    /// the guest while a reservation names it.
+    #[must_use]
+    pub fn with_hardware_gate(
+        mut self,
+        hardware: Arc<dyn crate::machine_usb::MachineHardwareGate>,
+    ) -> Self {
+        self.hardware = Some(hardware);
+        self
+    }
+
+    /// Refuses when a machine holds a device on this guest, or the marker's
+    /// own machine holds one anywhere. A gate that cannot look fails closed.
+    async fn refuse_held_hardware(
+        &self,
+        marker: &PersistentGuest,
+        what: &str,
+    ) -> Result<(), LabUseCaseError> {
+        let Some(gate) = &self.hardware else {
+            return Ok(());
+        };
+        let mut holds = gate
+            .holds_on_guest(&marker.account_id, marker.vmid)
+            .await
+            .map_err(backend)?;
+        if let Some(machine_id) = &marker.machine_id {
+            holds.extend(gate.holds_of_machine(machine_id).await.map_err(backend)?);
+        }
+        match holds.first() {
+            Some(hold) => Err(LabUseCaseError::Conflict {
+                detail: hold.refusal(what),
+            }),
+            None => Ok(()),
         }
     }
 
@@ -1667,6 +1706,8 @@ impl PersistentMachines {
         )
         .map_err(LabUseCaseError::Denied)?;
         let marker = self.registered_marker(account_id, vmid).await?;
+        self.refuse_held_hardware(&marker, "unregister the machine")
+            .await?;
         let (_, token) = Self::unregister_payload(account_id, vmid);
         Ok((marker, token))
     }
@@ -1705,6 +1746,8 @@ impl PersistentMachines {
             ));
         }
         let marker = self.registered_marker(account_id, vmid).await?;
+        self.refuse_held_hardware(&marker, "unregister the machine")
+            .await?;
         self.audit_marker(
             principal,
             "persistent_guest_unregistered",

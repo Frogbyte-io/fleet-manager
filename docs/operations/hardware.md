@@ -48,7 +48,7 @@ It shows, on real hardware and through Fleet, that:
 6. Two leases cannot hold the same device; a second request fails with `hardware_busy` and names the holder.
 7. The failure and recovery paths behave as documented.
 
-It does **not** prove anything about persistent machines (FM-1125 is separate), queueing (there is none), pooled templates with hardware (refused), the Decker, migration, or anything the acceptance document lists as unmeasured.
+It does **not** prove anything about persistent machines (`fleetctl machines usb`, FM-1125, see [persistent machines](persistent-machines.md#usb-devices-machines-usb): tested against a fake Proxmox only, not part of this run), queueing (there is none), pooled templates with hardware (refused), the Decker, migration, or anything the acceptance document lists as unmeasured.
 
 ## Before you start
 

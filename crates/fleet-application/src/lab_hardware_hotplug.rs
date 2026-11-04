@@ -394,7 +394,7 @@ impl LabHardwareHotplug {
 /// The mapping id is written into a property string, so it is checked here
 /// as strictly as the provider does: letters, digits, `-`, `_` and `.`,
 /// starting with a letter.
-fn validate_mapping_id(id: &str) -> Result<(), HotplugError> {
+pub(crate) fn validate_mapping_id(id: &str) -> Result<(), HotplugError> {
     let valid = id.len() <= MAX_MAPPING_ID_CHARS
         && id.chars().next().is_some_and(|c| c.is_ascii_alphabetic())
         && id

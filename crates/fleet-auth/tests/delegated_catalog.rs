@@ -141,6 +141,11 @@ fn the_named_refusals_of_the_issue_are_refused() {
         // persistent VM creation and guest config (#489): never a Lab credential
         (Permission::MachineProvision, None),
         (Permission::ProxmoxGuestConfig, None),
+        // a persistent machine's USB devices (FM-1125): a privileged change to a
+        // long-lived guest, never a Lab credential (the lease-bound
+        // `lab.hardware.*` rows are the hotplug a lease holder gets)
+        (Permission::MachineUsbAttach, Some("machine-1")),
+        (Permission::MachineUsbDetach, Some("machine-1")),
         // secrets
         (Permission::SecretRead, Some("secret-1")),
         (Permission::SecretWrite, None),
