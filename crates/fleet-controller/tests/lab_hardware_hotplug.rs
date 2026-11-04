@@ -40,7 +40,8 @@ use fleet_application::lab::{
     LabTemplateVersion, LeasePort, NewLabTemplate, NewLease, ProvisionPort, ProvisionRecord,
 };
 use fleet_application::lab_hardware_hotplug::{
-    HotplugError, HotplugOutcome, HotplugResult, LabHardwareHotplug,
+    HotplugAction, HotplugError, HotplugOutcome, HotplugPort as _, HotplugRequest, HotplugResult,
+    LabHardwareHotplug, LeaseGuestRef,
 };
 use fleet_application::lab_placement::{HardwareDemand, HardwarePlacement};
 use fleet_application::operation::{AuditPort, NewOperation, Operation, Operations};
@@ -438,6 +439,7 @@ struct Controller {
     inventory: Arc<HardwareInventory>,
     placement: Arc<HardwarePlacement>,
     hotplug: Arc<LabHardwareHotplug>,
+    port: Arc<LabHotplug>,
     account_id: String,
     version_id: String,
 }
@@ -490,10 +492,11 @@ impl Controller {
             leases.clone(),
             Arc::new(SqliteFingerprintPins::new(pool.clone())),
         ));
+        let port = Arc::new(LabHotplug::new(saga.clone(), store_port.clone()));
         let hotplug = Arc::new(LabHardwareHotplug::new(
             leases.clone(),
             labs.clone(),
-            Arc::new(LabHotplug::new(saga.clone(), store_port.clone())),
+            port.clone(),
         ));
         let destroyer = Arc::new(
             ProxmoxDestructiveExecutor::new(accounts.clone(), credentials.clone(), client.clone())
@@ -559,6 +562,7 @@ impl Controller {
             inventory,
             placement,
             hotplug,
+            port,
             account_id: world.account_id.clone(),
             version_id: world.version_id.clone(),
         }
@@ -888,6 +892,72 @@ impl Controller {
                     .expect("the cleanup is queued");
             })
         })
+    }
+
+    /// A detach straight through the port: the request of a holder whose
+    /// lease check passed just before the lease was released (the use case
+    /// would refuse it now).
+    fn raw_detach_hook(
+        &self,
+        lease_id: &str,
+        vmid: u32,
+        mapping: &str,
+        release: bool,
+    ) -> usb_pve::Hook {
+        let port = self.port.clone();
+        let request = HotplugRequest {
+            principal_id: PRINCIPAL.to_owned(),
+            lease_id: lease_id.to_owned(),
+            mapping_id: mapping.to_owned(),
+            guest: LeaseGuestRef {
+                account_id: self.account_id.clone(),
+                node: TEMPLATE_NODE.to_owned(),
+                vmid,
+            },
+            action: HotplugAction::Detach { release },
+        };
+        Arc::new(move || {
+            let port = port.clone();
+            let request = request.clone();
+            Box::pin(async move {
+                port.carry_out(&request)
+                    .await
+                    .expect("the holder's detach goes through");
+            })
+        })
+    }
+
+    /// The id of the lease's one live reservation.
+    async fn reservation_id(&self, lease_id: &str) -> String {
+        sqlx::query_scalar(
+            "SELECT id FROM hardware_reservations WHERE owner_id = ?1 AND state <> 'released'",
+        )
+        .bind(lease_id)
+        .fetch_one(&self.pool)
+        .await
+        .unwrap()
+    }
+
+    /// Moves the lease's reservation along the state machine, as another
+    /// step of the saga would.
+    async fn move_row(&self, lease_id: &str, from: State, to: State, slot: Option<u8>) {
+        let id = self.reservation_id(lease_id).await;
+        let record = self.record(lease_id).await;
+        HardwareRepository::new(self.pool.clone())
+            .transition_reservation(
+                &id,
+                from,
+                to,
+                Some(&fleet_core::GuestTarget {
+                    account_id: self.account_id.clone(),
+                    node: record.node.clone().unwrap(),
+                    vmid: record.vmid.unwrap(),
+                    usb_slot: slot,
+                }),
+                now(),
+            )
+            .await
+            .unwrap();
     }
 
     /// The (actor, action) of every audited intent of an event.
@@ -1765,4 +1835,372 @@ async fn a_refused_detach_intent_blocks_the_delete_and_a_retry_completes_it() {
         only_row(&controller).await,
         ("held".to_owned(), None, Some(i64::from(vmid)))
     );
+}
+
+// ---------------------------------------------------------------------
+// Review round: what a request reports, what it audits, and the races.
+// ---------------------------------------------------------------------
+
+#[tokio::test]
+async fn a_released_device_reports_no_slot_and_the_release_is_filed_under_the_callers_action() {
+    let world = World::new(&[READER_A]).await;
+    let controller = Controller::start(&world).await;
+    let (lease, _) = ready_lease(&world, &controller).await;
+
+    let outcome = controller.detach(&lease, READER_A, true).await.unwrap();
+
+    assert_eq!(outcome.reservation_state, State::Released);
+    // The store keeps the slot on a released row; the device is not on the
+    // guest, so the answer says no slot.
+    assert_eq!(outcome.usb_slot, None);
+    assert_eq!(
+        controller.audit_actors("hardware_released").await,
+        vec![(PRINCIPAL.to_owned(), "lab.hardware.detach".to_owned())]
+    );
+
+    // The same for the release of an already detached device.
+    let world = World::new(&[READER_A]).await;
+    let controller = Controller::start(&world).await;
+    let (lease, _) = ready_lease(&world, &controller).await;
+    controller.detach(&lease, READER_A, false).await.unwrap();
+    let outcome = controller.detach(&lease, READER_A, true).await.unwrap();
+    assert_eq!(outcome.result, HotplugResult::AlreadyDetached);
+    assert_eq!(outcome.usb_slot, None);
+    assert_eq!(
+        controller.audit_actors("hardware_released").await,
+        vec![(PRINCIPAL.to_owned(), "lab.hardware.detach".to_owned())]
+    );
+    // The lease's own cleanup keeps filing releases under the provision.
+    let world = World::new(&[READER_A]).await;
+    let controller = Controller::start(&world).await;
+    let (lease, _) = ready_lease(&world, &controller).await;
+    controller.release(&lease).await;
+    assert_eq!(controller.drain(&world).await, Run::Done(1));
+    assert_eq!(
+        controller.audit_actors("hardware_released").await,
+        vec![(PRINCIPAL.to_owned(), "lab.provision".to_owned())]
+    );
+}
+
+#[tokio::test]
+async fn releasing_a_detached_device_reads_the_guest_first() {
+    let world = World::new(&[READER_A]).await;
+    let controller = Controller::start(&world).await;
+    let (lease, vmid) = ready_lease(&world, &controller).await;
+    controller.detach(&lease, READER_A, false).await.unwrap();
+
+    // Somebody attached the mapping to the guest meanwhile: the lease keeps
+    // the reservation and says why.
+    world.usb.set_slot(vmid, 3, "mapping=fm-test-reader-a");
+    let reason = refusal(controller.detach(&lease, READER_A, true).await);
+    assert_eq!(reason, "hardware_detach_unconfirmed");
+    assert_eq!(
+        only_row(&controller).await,
+        ("held".to_owned(), None, Some(i64::from(vmid)))
+    );
+    assert_eq!(world.usb.applied(vmid), stored(&[slot(3, READER_A)]));
+    world.usb.clear_slot(vmid, 3);
+
+    // A guest that cannot be read in full keeps the row too.
+    world.usb.fail_next_config(vmid, 20);
+    let reason = refusal(controller.detach(&lease, READER_A, true).await);
+    assert_eq!(reason, "hardware_detach_unconfirmed");
+    assert_eq!(controller.states().await, vec!["held"]);
+    world.usb.fail_next_config(vmid, 0);
+
+    // Read in full and clear, it is released.
+    let outcome = controller.detach(&lease, READER_A, true).await.unwrap();
+    assert!(outcome.released);
+    assert_eq!(controller.states().await, vec!["released"]);
+}
+
+#[tokio::test]
+async fn a_rollback_reports_the_state_it_left_and_a_refused_intent_leaves_the_entry_pending() {
+    let world = World::new(&[READER_A]).await;
+    let controller = Controller::start(&world).await;
+    let (lease, vmid) = ready_lease(&world, &controller).await;
+    controller.detach(&lease, READER_A, false).await.unwrap();
+    world.usb.set_hotplug_usb(vmid, false);
+
+    // The pending attach is rolled back and the lease holds the device: the
+    // event says `held`, not `released`.
+    assert_eq!(
+        refusal(controller.attach(&lease, READER_A).await),
+        "hardware_attach_pending"
+    );
+    let failed = controller.audit_metadata("hardware_attach_failed").await;
+    assert_eq!(failed.len(), 1, "{failed:?}");
+    assert!(failed[0].contains("\"outcome\":\"held\""), "{failed:?}");
+    assert_eq!(controller.states().await, vec!["held"]);
+
+    // With the detach intent refused, the rollback cannot delete the pending
+    // entry: it stays, the row is `detach_failed`, and the event says unknown.
+    *world.refuse_event.lock().unwrap() = Some("hardware_detach_requested".to_owned());
+    assert_eq!(
+        refusal(controller.attach(&lease, READER_A).await),
+        "hardware_attach_pending"
+    );
+    assert_eq!(world.usb.stored(vmid), stored(&[slot(0, READER_A)]));
+    assert!(world.usb.applied(vmid).is_empty());
+    assert_eq!(
+        only_row(&controller).await,
+        ("detach_failed".to_owned(), Some(0), Some(i64::from(vmid)))
+    );
+    let failed = controller.audit_metadata("hardware_attach_failed").await;
+    assert!(failed[1].contains("\"outcome\":\"unknown\""), "{failed:?}");
+    // Nothing was reported attached.
+    assert_eq!(controller.audit_events("hardware_attached").await, 1);
+}
+
+#[tokio::test]
+async fn a_hotplug_detach_racing_the_lease_release_does_not_burn_a_cleanup_attempt() {
+    for release in [false, true] {
+        let world = World::new(&[READER_A]).await;
+        let controller = Controller::start(&world).await;
+        let (lease, vmid) = ready_lease(&world, &controller).await;
+        // The holder's detach passed its lease check, then the lease was
+        // released; cleanup has read the row `attached` and, before its own
+        // move, the holder's detach moves it (kept, or released).
+        controller.release(&lease).await;
+        world.usb.inject(
+            UsbStep::Resources,
+            UsbFault::Hook(controller.raw_detach_hook(&lease, vmid, READER_A, release)),
+            1,
+        );
+
+        assert_eq!(controller.drain(&world).await, Run::Done(1));
+
+        assert_released(&world, &controller, &lease).await;
+        assert_eq!(
+            controller.lease(&lease).await.cleanup_attempts,
+            0,
+            "release={release}: the lost race was not an unconfirmed detach"
+        );
+        assert_eq!(
+            world.usb.writes(),
+            writes(&[ATTACH_A, DETACH_0]),
+            "release={release}: one detach"
+        );
+    }
+}
+
+#[tokio::test]
+async fn refusals_that_would_name_other_guests_or_devices_say_only_that_it_changed() {
+    // Another guest references the mapping.
+    let world = World::new(&[READER_A]).await;
+    let controller = Controller::start(&world).await;
+    let (lease, _) = ready_lease(&world, &controller).await;
+    controller.detach(&lease, READER_A, false).await.unwrap();
+    world.usb.create_guest(9500, "someone-elses").await;
+    world.usb.set_slot(9500, 0, "mapping=fm-test-reader-a");
+    let Err(HotplugError::Refused { reason, detail }) = controller.attach(&lease, READER_A).await
+    else {
+        panic!("expected a refusal");
+    };
+    assert_eq!(reason, "hardware_externally_attached");
+    assert!(
+        !detail.contains("9500") && !detail.contains("qemu/") && !detail.contains("usb0"),
+        "{detail}"
+    );
+    // The audit trail keeps what was found.
+    let audit = controller.audit_metadata("hardware_refused").await;
+    assert_eq!(audit.len(), 1, "{audit:?}");
+    assert!(audit[0].contains("9500"), "{audit:?}");
+    assert!(
+        audit[0].contains("hardware_externally_attached"),
+        "{audit:?}"
+    );
+    assert_eq!(
+        controller.audit_actors("hardware_refused").await,
+        vec![(PRINCIPAL.to_owned(), "lab.hardware.attach".to_owned())]
+    );
+
+    // The device is on another port than when it was reserved.
+    let world = World::new(&[READER_A]).await;
+    let controller = Controller::start(&world).await;
+    let (lease, _) = ready_lease(&world, &controller).await;
+    controller.detach(&lease, READER_A, false).await.unwrap();
+    world
+        .usb
+        .set_entries(READER_A, &["node=pve-b,id=aaaa:0001,path=1-9"]);
+    let Err(HotplugError::Refused { reason, detail }) = controller.attach(&lease, READER_A).await
+    else {
+        panic!("expected a refusal");
+    };
+    assert_eq!(reason, "hardware_fingerprint_changed");
+    assert!(
+        !detail.contains("aaaa") && !detail.contains("1-9") && !detail.contains("1-1"),
+        "{detail}"
+    );
+    let audit = controller.audit_metadata("hardware_refused").await;
+    assert!(audit[0].contains("1-9"), "{audit:?}");
+    assert_eq!(world.usb.writes(), writes(&[ATTACH_A, DETACH_0]));
+    assert_eq!(controller.states().await, vec!["held"]);
+}
+
+#[tokio::test]
+async fn a_guest_that_moved_since_the_records_were_made_is_still_the_leases_guest() {
+    let world = World::new(&[READER_A]).await;
+    let controller = Controller::start(&world).await;
+    let (lease, vmid) = ready_lease(&world, &controller).await;
+    // The provision record names a node the guest has since left (the
+    // cluster says where it is now). The detach records the live node on the
+    // row, so the row and the provision record now disagree about the node.
+    let mut record = controller.record(&lease).await;
+    record.node = Some("pve-old".to_owned());
+    ProvisionPort::update(controller.labs.as_ref(), &record)
+        .await
+        .unwrap();
+    controller.detach(&lease, READER_A, false).await.unwrap();
+    let row_node: String = sqlx::query_scalar("SELECT guest_node FROM hardware_reservations")
+        .fetch_one(&controller.pool)
+        .await
+        .unwrap();
+    assert_ne!(row_node, "pve-old", "the row records the live node");
+
+    let attached = controller.attach(&lease, READER_A).await.unwrap();
+    assert_eq!(attached.result, HotplugResult::Attached);
+    assert_eq!(world.usb.applied(vmid), stored(&[slot(0, READER_A)]));
+
+    // And the detach finds it through the cluster too.
+    sqlx::query("UPDATE hardware_reservations SET guest_node = 'pve-old'")
+        .execute(&controller.pool)
+        .await
+        .unwrap();
+    let detached = controller.detach(&lease, READER_A, false).await.unwrap();
+    assert_eq!(detached.result, HotplugResult::Detached);
+    assert!(world.usb.applied(vmid).is_empty());
+}
+
+#[tokio::test]
+async fn a_reservation_recording_another_guest_is_never_touched() {
+    let world = World::new(&[READER_A]).await;
+    let controller = Controller::start(&world).await;
+    let (lease, vmid) = ready_lease(&world, &controller).await;
+    sqlx::query("UPDATE hardware_reservations SET guest_vmid = guest_vmid + 1")
+        .execute(&controller.pool)
+        .await
+        .unwrap();
+    let before = world.usb.writes();
+
+    assert_eq!(
+        refusal(controller.detach(&lease, READER_A, false).await),
+        "hardware_guest_mismatch"
+    );
+    assert_eq!(world.usb.applied(vmid), stored(&[slot(0, READER_A)]));
+
+    // The same for an attach of a held row.
+    sqlx::query("UPDATE hardware_reservations SET guest_vmid = ?1")
+        .bind(i64::from(vmid))
+        .execute(&controller.pool)
+        .await
+        .unwrap();
+    controller.detach(&lease, READER_A, false).await.unwrap();
+    sqlx::query("UPDATE hardware_reservations SET guest_vmid = guest_vmid + 1")
+        .execute(&controller.pool)
+        .await
+        .unwrap();
+    assert_eq!(
+        refusal(controller.attach(&lease, READER_A).await),
+        "hardware_guest_mismatch"
+    );
+    assert_eq!(
+        world.usb.writes().len(),
+        before.len() + 1,
+        "only the detach"
+    );
+}
+
+#[tokio::test]
+async fn a_row_another_step_is_working_on_is_not_attached_or_detached_over() {
+    let world = World::new(&[READER_A]).await;
+    let controller = Controller::start(&world).await;
+    let (lease, _) = ready_lease(&world, &controller).await;
+    controller.detach(&lease, READER_A, false).await.unwrap();
+    let before = world.usb.writes();
+
+    // Another step started an attach.
+    controller
+        .move_row(&lease, State::Held, State::Attaching, Some(0))
+        .await;
+    assert_eq!(
+        refusal(controller.attach(&lease, READER_A).await),
+        "hardware_in_progress"
+    );
+    assert_eq!(
+        refusal(controller.detach(&lease, READER_A, false).await),
+        "hardware_in_progress"
+    );
+
+    // Its outcome is unknown: cleanup resolves it by reading the guest.
+    controller
+        .move_row(&lease, State::Attaching, State::AttachUnknown, Some(0))
+        .await;
+    assert_eq!(
+        refusal(controller.attach(&lease, READER_A).await),
+        "hardware_attach_unknown"
+    );
+    assert_eq!(
+        refusal(controller.detach(&lease, READER_A, true).await),
+        "hardware_attach_unknown"
+    );
+    assert_eq!(world.usb.writes(), before);
+}
+
+#[tokio::test]
+async fn an_attach_over_a_failed_detach_is_refused_until_the_detach_is_confirmed() {
+    let world = World::new(&[READER_A]).await;
+    let controller = Controller::start(&world).await;
+    let (lease, vmid) = ready_lease(&world, &controller).await;
+    world
+        .usb
+        .set_slot(vmid, 0, "mapping=fm-test-reader-a,usb3=1");
+    assert_eq!(
+        refusal(controller.detach(&lease, READER_A, false).await),
+        "hardware_detach_failed"
+    );
+    assert_eq!(controller.states().await, vec!["detach_failed"]);
+
+    assert_eq!(
+        refusal(controller.attach(&lease, READER_A).await),
+        "hardware_detach_unconfirmed"
+    );
+    assert_eq!(world.usb.writes(), writes(&[ATTACH_A]));
+}
+
+#[tokio::test]
+async fn an_expired_lease_and_a_lease_without_a_recorded_guest_cannot_hotplug() {
+    let world = World::new(&[READER_A]).await;
+    let controller = Controller::start(&world).await;
+    let (lease, _) = ready_lease(&world, &controller).await;
+    let before = world.usb.writes();
+
+    // No recorded account: there is nothing to hotplug into.
+    let mut record = controller.record(&lease).await;
+    let account = record.account_id.take();
+    ProvisionPort::update(controller.labs.as_ref(), &record)
+        .await
+        .unwrap();
+    assert_eq!(
+        refusal(controller.detach(&lease, READER_A, false).await),
+        "lease_has_no_guest"
+    );
+    record.account_id = account;
+    ProvisionPort::update(controller.labs.as_ref(), &record)
+        .await
+        .unwrap();
+
+    // Past its TTL: the lease's cleanup owns the device now.
+    let mut expired = controller.lease(&lease).await;
+    expired.expires_at = Some(now() - 1);
+    controller.leases.update(&expired).await.unwrap();
+    assert_eq!(
+        refusal(controller.attach(&lease, READER_A).await),
+        "lease_not_ready"
+    );
+    assert_eq!(
+        refusal(controller.detach(&lease, READER_A, true).await),
+        "lease_not_ready"
+    );
+    assert_eq!(world.usb.writes(), before);
 }

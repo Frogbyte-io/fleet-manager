@@ -291,7 +291,13 @@ impl Inner {
             result,
             reservation_id: row.id.clone(),
             reservation_state: row.state,
-            usb_slot: row.guest.as_ref().and_then(|guest| guest.usb_slot),
+            // The slot the guest holds the device in. A flow release keeps the
+            // slot on the released row, so a device that is not on the guest
+            // reports none.
+            usb_slot: result
+                .on_guest()
+                .then(|| row.guest.as_ref().and_then(|guest| guest.usb_slot))
+                .flatten(),
             released: row.state == State::Released,
         })
     }
@@ -393,9 +399,23 @@ impl Inner {
             // slot, so there is nothing to remove.
             State::Held => {
                 if release {
-                    saga.hotplug_release_held(&row)
+                    let guest = LeaseGuest {
+                        lease_id: &request.lease_id,
+                        account_id: &request.guest.account_id,
+                        node: &request.guest.node,
+                        vmid: request.guest.vmid,
+                        operation_id: None,
+                    };
+                    saga.hotplug_release_held(&guest, device, &row)
                         .await
-                        .map_err(|error| backend(&error))?;
+                        .map_err(|failure| match failure {
+                            AttachFailure::Refused { reason, detail } => {
+                                HotplugError::refused(reason, detail)
+                            }
+                            AttachFailure::Infrastructure(detail) => {
+                                HotplugError::Backend { detail }
+                            }
+                        })?;
                 }
                 self.outcome(request, &row.id, HotplugResult::AlreadyDetached)
                     .await

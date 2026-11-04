@@ -349,6 +349,8 @@ async fn a_detach_forwards_the_release_flag_and_a_pending_removal_is_accepted_no
     assert_eq!(answer["data"]["outcome"], "detached");
     assert_eq!(answer["data"]["onGuest"], false);
     assert_eq!(answer["data"]["released"], true);
+    // A device that is not on the guest holds no slot.
+    assert!(answer["data"]["usbSlot"].is_null(), "{answer}");
     // The default keeps the device reserved by the lease.
     let (status, _) = post(&state, "tester", &detach_path(&lease), &body(MAPPING)).await;
     assert_eq!(status, StatusCode::OK);
