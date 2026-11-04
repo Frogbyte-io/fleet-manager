@@ -252,12 +252,50 @@ async fn a_failed_record_awaiting_cleanup_holds_its_vmid_until_its_lease_is_rele
     assert_eq!(taken.vmid, Some(9000));
 }
 
-/// A failed record that never reserved a VMID holds nothing, nor does one
-/// that started a clone (its guest is in the cluster, which `/cluster/nextid`
-/// reads). A record with no lease holds its VMID only while it provisions: see
-/// the test above.
+/// #592: a clone task that fails makes PVE remove the target's config, so a
+/// failed record that did start a clone can leave nothing at its VMID either.
+/// It holds the VMID like one that never cloned, until its lease is released.
 #[tokio::test]
-async fn a_failed_record_without_a_vmid_or_with_a_clone_holds_nothing() {
+async fn a_failed_record_whose_clone_task_failed_holds_its_vmid_until_its_lease_is_released() {
+    use fleet_core::LeaseState;
+    let (_dir, store) = setup().await;
+    let labs = LabRepository::new(store.pool().clone());
+    let leases = fleet_storage_sqlite::LeaseRepository::new(store.pool().clone());
+    let (first_lease, first) = lease_with_record(&labs, &leases).await;
+    let (_, second) = lease_with_record(&labs, &leases).await;
+    reserved(
+        labs.reserve_clone_target(&first.id, "pve", 9000)
+            .await
+            .unwrap(),
+    );
+    let mut failed = labs.get(&first.id).await.unwrap();
+    failed.clone_upid =
+        Some("UPID:pve:0015523F:0C6DF532:6AAFE1EC:qmclone:120:fleet@pve!lab:".to_owned());
+    failed.state = GuestState::NeverReady;
+    failed.failed_step = Some("clone".to_owned());
+    labs.update(&failed).await.unwrap();
+    set_lease_state(&leases, &first_lease, LeaseState::Failed).await;
+
+    assert_eq!(
+        labs.reserve_clone_target(&second.id, "pve", 9000)
+            .await
+            .unwrap(),
+        CloneTargetReservation::HeldBy {
+            record_id: first.id.clone()
+        }
+    );
+    set_lease_state(&leases, &first_lease, LeaseState::Released).await;
+    let taken = reserved(
+        labs.reserve_clone_target(&second.id, "pve", 9000)
+            .await
+            .unwrap(),
+    );
+    assert_eq!(taken.vmid, Some(9000));
+}
+
+/// A failed record that never reserved a VMID holds nothing.
+#[tokio::test]
+async fn a_failed_record_without_a_vmid_holds_nothing() {
     let (_dir, store) = setup().await;
     let labs = LabRepository::new(store.pool().clone());
     let leases = fleet_storage_sqlite::LeaseRepository::new(store.pool().clone());
@@ -272,25 +310,82 @@ async fn a_failed_record_without_a_vmid_or_with_a_clone_holds_nothing() {
             .unwrap(),
     );
     assert_eq!(taken.vmid, Some(9000));
-    // A failed record that started a clone keeps its VMID, but the clone's
-    // guest is what holds the number in the cluster.
-    let (_, cloned) = lease_with_record(&labs, &leases).await;
-    let mut started = reserved(
-        labs.reserve_clone_target(&cloned.id, "pve", 9001)
+}
+
+/// A VMID belongs to one Proxmox account's cluster: a record stuck on one
+/// account never blocks the same number on another, while a record from before
+/// the account was recorded holds it against every account.
+#[tokio::test]
+async fn a_stuck_record_holds_its_vmid_against_its_own_account_only() {
+    use fleet_core::LeaseState;
+    let (_dir, store) = setup().await;
+    let labs = LabRepository::new(store.pool().clone());
+    let leases = fleet_storage_sqlite::LeaseRepository::new(store.pool().clone());
+    let (stuck_lease, stuck) = lease_with_record(&labs, &leases).await;
+    reserved(
+        labs.reserve_clone_target(&stuck.id, "pve", 9000)
             .await
             .unwrap(),
     );
-    started.clone_upid =
-        Some("UPID:pve:0015523F:0C6DF532:6AAFE1EC:qmclone:120:fleet@pve!lab:".to_owned());
-    started.state = GuestState::NeverReady;
-    labs.update(&started).await.unwrap();
-    let (_, fourth) = lease_with_record(&labs, &leases).await;
-    let taken = reserved(
-        labs.reserve_clone_target(&fourth.id, "pve", 9001)
+    let mut record = labs.get(&stuck.id).await.unwrap();
+    record.state = GuestState::NeverReady;
+    record.account_id = Some("account-a".to_owned());
+    labs.update(&record).await.unwrap();
+    set_lease_state(&leases, &stuck_lease, LeaseState::CleanupFailed).await;
+
+    let on = |account: Option<&'static str>| {
+        let labs = &labs;
+        let leases = &leases;
+        async move {
+            let (_, candidate) = lease_with_record(labs, leases).await;
+            let mut candidate = labs.get(&candidate.id).await.unwrap();
+            candidate.account_id = account.map(str::to_owned);
+            labs.update(&candidate).await.unwrap();
+            labs.reserve_clone_target(&candidate.id, "pve", 9000)
+                .await
+                .unwrap()
+        }
+    };
+    assert_eq!(
+        on(Some("account-a")).await,
+        CloneTargetReservation::HeldBy {
+            record_id: stuck.id.clone()
+        },
+        "the same account"
+    );
+    assert_eq!(
+        on(None).await,
+        CloneTargetReservation::HeldBy {
+            record_id: stuck.id.clone()
+        },
+        "a record with no account is held against"
+    );
+    let other = reserved(on(Some("account-b")).await);
+    assert_eq!(other.vmid, Some(9000), "another account's cluster");
+
+    // A holder with no recorded account holds against every account.
+    let (old_lease, old) = lease_with_record(&labs, &leases).await;
+    reserved(
+        labs.reserve_clone_target(&old.id, "pve", 9100)
             .await
             .unwrap(),
     );
-    assert_eq!(taken.vmid, Some(9001));
+    let mut record = labs.get(&old.id).await.unwrap();
+    record.state = GuestState::NeverReady;
+    labs.update(&record).await.unwrap();
+    set_lease_state(&leases, &old_lease, LeaseState::Failed).await;
+    let (_, asking) = lease_with_record(&labs, &leases).await;
+    let mut asking = labs.get(&asking.id).await.unwrap();
+    asking.account_id = Some("account-b".to_owned());
+    labs.update(&asking).await.unwrap();
+    assert_eq!(
+        labs.reserve_clone_target(&asking.id, "pve", 9100)
+            .await
+            .unwrap(),
+        CloneTargetReservation::HeldBy {
+            record_id: old.id.clone()
+        }
+    );
 }
 
 async fn build(

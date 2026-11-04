@@ -609,25 +609,30 @@ impl ProvisionPort for LabRepository {
             return Ok(CloneTargetReservation::Reserved(record));
         }
         // A record holds its VMID while its saga runs and, after it has left
-        // `provisioning`, while it may still own a number nothing in the
-        // cluster shows: a record that never started a clone (a failure keeps
-        // the reserved VMID on the record) until its lease is `released`,
-        // which confirms the cleanup (or that nothing was allocated). Without
-        // that, `/cluster/nextid` offers the number again, a second lease
-        // becomes ready on it, and the first lease's late cleanup aims at the
-        // second one's guest. A record that started a clone has a guest the
-        // cluster reports, so `/cluster/nextid` skips its VMID, and the
-        // destroy's own identity check covers a guest removed behind its back.
+        // `provisioning`, until its lease is `released`, which confirms the
+        // cleanup (the destroy, or that nothing was allocated). A failed
+        // provision keeps the VMID it reserved on its record whether or not a
+        // clone ever put a guest there (a refused clone call, or a clone task
+        // that failed and made PVE remove the target's config), and an empty
+        // VMID is what `/cluster/nextid` offers again. Without the hold a
+        // second lease becomes ready on the number and the first lease's late
+        // cleanup aims at the second one's guest.
+        //
+        // A VMID belongs to one Proxmox account's cluster: a record of another
+        // account never holds it. A record with no account (from before the
+        // account was recorded) holds it against every account.
         let holder: Option<String> = sqlx::query_scalar(
-            "SELECT p.id FROM lab_provisions p WHERE p.vmid = ?1 AND p.id != ?2 AND ( \
+            "SELECT p.id FROM lab_provisions p WHERE p.vmid = ?1 AND p.id != ?2 \
+               AND (p.account_id IS NULL OR ?3 IS NULL OR p.account_id = ?3) AND ( \
                  p.state = 'provisioning' \
-                 OR (p.clone_upid IS NULL AND EXISTS ( \
+                 OR EXISTS ( \
                      SELECT 1 FROM lab_leases l WHERE l.id = p.lease_id AND l.state != 'released' \
-                 )) \
+                 ) \
              ) ORDER BY p.created_at, p.id LIMIT 1",
         )
         .bind(i64::from(vmid))
         .bind(record_id)
+        .bind(&record.account_id)
         .fetch_optional(&mut *transaction)
         .await
         .map_err(|error| format!("read VMID holder failed: {error}"))?;

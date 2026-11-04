@@ -30,6 +30,8 @@ use fleet_storage_sqlite::{
 #[derive(Debug, Default)]
 struct Destroyer {
     fail: bool,
+    /// The result a succeeded child records (default `{}`).
+    result: Option<&'static str>,
     ran: Mutex<Vec<serde_json::Value>>,
 }
 
@@ -46,7 +48,12 @@ impl OperationExecutor for Destroyer {
             ("succeeded", None)
         };
         operations
-            .complete(&operation.id, state, Some("{}"), error)
+            .complete(
+                &operation.id,
+                state,
+                Some(self.result.unwrap_or("{}")),
+                error,
+            )
             .await
             .map(|_| ())
             .map_err(|error| error.to_string())
@@ -748,6 +755,101 @@ async fn the_lab_owned_machine_goes_with_a_destroyed_guest_and_stays_otherwise()
         harness.machine_exists(&machine).await,
         "a failed destroy keeps the machine of the guest that still exists"
     );
+}
+
+// #592: the destroy names the guest the record owns --------------------------
+
+impl Harness {
+    /// Gives the lease's record a clone task and, when asked, a failed step.
+    async fn mark_record(&self, lease_id: &str, clone_started: bool, failed_step: Option<&str>) {
+        let lease = self.leases.get(lease_id).await.unwrap();
+        let mut record =
+            ProvisionPort::get(self.labs.as_ref(), lease.provision_id.as_deref().unwrap())
+                .await
+                .unwrap();
+        record.clone_upid = clone_started
+            .then(|| "UPID:pve:0015523F:0C6DF532:6AAFE1EC:qmclone:120:fleet@pve!lab:".to_owned());
+        record.failed_step = failed_step.map(str::to_owned);
+        ProvisionPort::update(self.labs.as_ref(), &record)
+            .await
+            .unwrap();
+    }
+
+    async fn record_id(&self, lease_id: &str) -> String {
+        self.leases
+            .get(lease_id)
+            .await
+            .unwrap()
+            .provision_id
+            .unwrap()
+    }
+}
+
+#[tokio::test]
+async fn the_destroy_names_the_records_own_guest_and_whether_one_was_confirmed() {
+    let harness = Harness::new().await;
+    // (clone started, failed step, guest unconfirmed)
+    for (clone_started, failed_step, unconfirmed, vmid) in [
+        (false, None, true, 9020),
+        (true, None, false, 9021),
+        (true, Some("clone"), true, 9022),
+        (true, Some("hardware"), false, 9023),
+    ] {
+        let lease = harness
+            .releasing(
+                CleanupStrategy::Destroy,
+                Some(("pve-b", vmid, Some("account-1"))),
+            )
+            .await;
+        harness
+            .mark_record(&lease, clone_started, failed_step)
+            .await;
+        let record = harness.record_id(&lease).await;
+        let destroyer = Arc::new(Destroyer::default());
+        let (state, _, after) = harness.run(&lease, &destroyer).await;
+        assert_eq!(state, "succeeded");
+        assert_eq!(after.state, LeaseState::Released);
+        let ran = destroyer.ran.lock().unwrap().clone();
+        assert_eq!(
+            ran[0]["params"]["expectedName"],
+            format!("fm-lab-{record}"),
+            "{clone_started} {failed_step:?}"
+        );
+        assert_eq!(
+            ran[0]["params"]["guestUnconfirmed"], unconfirmed,
+            "{clone_started} {failed_step:?}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn a_destroy_that_found_nothing_of_the_records_releases_it_and_removes_its_machine() {
+    let harness = Harness::new().await;
+    // The destroy executor answers `notOwned`: another owner's guest sits at
+    // the VMID. The lease owned no guest, so it is released owing nothing, and
+    // a Lab-owned machine record it holds goes with it.
+    let lease = harness
+        .releasing(
+            CleanupStrategy::Destroy,
+            Some(("pve-b", 9030, Some("account-1"))),
+        )
+        .await;
+    let machine = harness.link_machine(&lease).await;
+    let destroyer = Arc::new(Destroyer {
+        result: Some(r#"{"noop":"another guest","notOwned":true}"#),
+        ..Destroyer::default()
+    });
+    let (state, _, after) = harness.run(&lease, &destroyer).await;
+    assert_eq!(state, "succeeded");
+    assert_eq!(after.state, LeaseState::Released);
+    assert!(!harness.machine_exists(&machine).await);
+    let released: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM operations WHERE kind = 'lab.cleanup' AND result_json LIKE '%nothing_allocated%'",
+    )
+    .fetch_one(&harness.pool)
+    .await
+    .unwrap();
+    assert_eq!(released, 1, "the release owes nothing");
 }
 
 // FM-1121: the devices a lease reserved go with it ---------------------------

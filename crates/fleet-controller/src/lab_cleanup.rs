@@ -317,8 +317,10 @@ impl LabCleanupExecutor {
     ) -> Result<Operation, String> {
         // The destroy names the guest this record owns (#592): the recorded
         // VMID alone does not say who holds the VMID now, so the executor
-        // refuses any guest that is not `fm-lab-<record>`, and a record that
-        // never started a clone has nothing of its own to destroy.
+        // refuses any guest that is not `fm-lab-<record>`. A record that never
+        // started a clone, or whose clone step failed (PVE then removes the
+        // target's config), has no confirmed guest, so another owner's guest at
+        // its VMID is nothing of its own to destroy.
         let payload = serde_json::json!({
             "accountId": account_id,
             "node": node,
@@ -327,7 +329,8 @@ impl LabCleanupExecutor {
             "params": {
                 "purge": true,
                 "expectedName": format!("fm-lab-{}", record.id),
-                "neverCloned": record.clone_upid.is_none(),
+                "guestUnconfirmed": record.clone_upid.is_none()
+                    || record.failed_step.as_deref() == Some("clone"),
             },
         })
         .to_string();
@@ -794,9 +797,19 @@ impl LabCleanupExecutor {
                 )
                 .await;
         }
-        // The destroy found nothing of this record's at the VMID (it never
-        // cloned, and the VMID is another owner's or empty): the lease owned
-        // no guest, so its release owes nothing.
+        // A Lab-owned machine record goes with the lease even when the destroy
+        // found nothing of the record's (a drained pool member's lease can
+        // hold one without a clone of its own).
+        if let Some(machine_id) = &record.machine_id
+            && let Err(detail) = self.remove_machine(machine_id).await
+        {
+            return self
+                .fail_attempt(operations, operation, lease, &detail, guest)
+                .await;
+        }
+        // The destroy found nothing of this record's at the VMID (no guest of
+        // its own was confirmed, and the VMID is another owner's or empty): the
+        // lease owned no guest, so its release owes nothing.
         let not_owned = child
             .result_json
             .as_deref()
@@ -805,13 +818,6 @@ impl LabCleanupExecutor {
         if not_owned {
             return self
                 .release(operations, operation, lease, Released::NothingAllocated)
-                .await;
-        }
-        if let Some(machine_id) = &record.machine_id
-            && let Err(detail) = self.remove_machine(machine_id).await
-        {
-            return self
-                .fail_attempt(operations, operation, lease, &detail, guest)
                 .await;
         }
         self.release(operations, operation, lease, Released::Destroyed)

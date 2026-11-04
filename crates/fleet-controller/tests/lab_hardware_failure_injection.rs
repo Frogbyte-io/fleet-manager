@@ -1549,12 +1549,25 @@ async fn failed_provision_then_late_cleanup(
     failing_template: usize,
     next_template: usize,
 ) -> (Rig, String, String) {
+    failed_clone_then_late_cleanup(world, failing_template, next_template, Fault::Forbidden).await
+}
+
+/// The same, for a clone that fails with `fault` at the clone step: `Forbidden`
+/// refuses the call before any task exists, `TaskError` starts the clone task
+/// and ends it in an error (PVE then removes the target's config, so the record
+/// carries a clone task and nothing sits at its VMID).
+async fn failed_clone_then_late_cleanup(
+    world: &World,
+    failing_template: usize,
+    next_template: usize,
+    fault: Fault,
+) -> (Rig, String, String) {
     use std::sync::atomic::Ordering;
     let rig = Rig::start(world).await;
     rig.refresh_inventory().await;
     let failed = rig.request_lease_of(&world.version(failing_template)).await;
     let next = rig.request_lease_of(&world.version(next_template)).await;
-    world.faults.inject(Step::Clone, Fault::Forbidden, 1);
+    world.faults.inject(Step::Clone, fault, 1);
     world.chaos.blind_vmid_holders.store(true, Ordering::SeqCst);
     rig.drain(world).await.done();
     world
@@ -1638,6 +1651,76 @@ async fn a_failed_provisions_vmid_is_not_handed_to_another_lease_before_its_clea
     rig.converge(&world, now() + 2 * HOUR_MS).await;
     assert_eq!(rig.lease(&later).await.state, LeaseState::Ready);
     assert!(world.pve.lab_guests().contains_key(&record.vmid.unwrap()));
+    rig.assert_invariants(&world, Level::Quiescent, "a handed-over VMID")
+        .await;
+}
+
+/// A clone task that fails (PVE removes the target's config, nothing sits at
+/// the VMID) leaves the record with a clone task, a VMID and no guest. Its
+/// VMID is held like any failed record's: the second lease is refused it, and
+/// takes it once the first lease's cleanup has run.
+#[tokio::test]
+async fn a_failed_clone_tasks_vmid_is_not_handed_to_another_lease_before_its_cleanup() {
+    let world = World::with_templates(&[&[], &[]]).await;
+    let rig = Rig::start(&world).await;
+    rig.refresh_inventory().await;
+    let failed = rig.request_lease_of(&world.version(0)).await;
+    let next = rig.request_lease_of(&world.version(1)).await;
+    world.faults.inject(Step::Clone, Fault::TaskError, 1);
+    rig.drain(&world).await.done();
+    let record = rig.record(&failed).await;
+    assert!(record.clone_upid.is_some(), "the clone task was started");
+    assert_eq!(record.failed_step.as_deref(), Some("clone"));
+    assert!(record.vmid.is_some());
+    assert_eq!(
+        rig.lease(&next).await.state,
+        LeaseState::Failed,
+        "{}",
+        rig.dump(&world).await
+    );
+    assert_eq!(rig.record(&next).await.vmid, None, "it took no VMID");
+
+    rig.converge(&world, now() + HOUR_MS).await;
+    assert_eq!(rig.lease(&failed).await.state, LeaseState::Released);
+    let later = rig.request_lease_of(&world.version(1)).await;
+    rig.drain(&world).await.done();
+    assert_eq!(rig.lease(&later).await.state, LeaseState::Ready);
+    assert_eq!(rig.record(&later).await.vmid, record.vmid);
+    rig.converge(&world, now() + 2 * HOUR_MS).await;
+    assert_eq!(rig.lease(&later).await.state, LeaseState::Ready);
+    rig.assert_invariants(&world, Level::Quiescent, "a failed clone task")
+        .await;
+}
+
+/// The same A/B as the first test, for a clone task that failed, on a database
+/// where the second lease did get the VMID: A's cleanup expects its own guest
+/// (it started a clone), finds the second lease's, and must neither destroy it
+/// nor retry forever against it.
+#[tokio::test]
+async fn a_failed_clone_tasks_late_cleanup_must_not_destroy_another_leases_guest() {
+    let world = World::with_templates(&[&[], &[]]).await;
+    let (rig, failed, next) = failed_clone_then_late_cleanup(&world, 0, 1, Fault::TaskError).await;
+    assert!(rig.record(&failed).await.clone_upid.is_some());
+    rig.converge(&world, now() + HOUR_MS).await;
+    let record = rig.record(&next).await;
+    assert_eq!(rig.lease(&next).await.state, LeaseState::Ready);
+    assert!(
+        world
+            .pve
+            .lab_guests()
+            .get(&record.vmid.unwrap())
+            .is_some_and(|guest| guest.name == format!("fm-lab-{}", record.id)),
+        "the ready lease's guest is still there: {}",
+        rig.dump(&world).await
+    );
+    assert_eq!(
+        rig.lease(&failed).await.state,
+        LeaseState::Released,
+        "{}",
+        rig.dump(&world).await
+    );
+    rig.assert_invariants(&world, Level::Quiescent, "a late cleanup")
+        .await;
 }
 
 #[tokio::test]
