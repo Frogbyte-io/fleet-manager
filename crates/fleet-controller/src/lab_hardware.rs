@@ -1760,7 +1760,7 @@ impl LabHardwareSaga {
                 return Err(refused(
                     "hardware_guests_unverifiable",
                     format!(
-                        "Fleet cannot rule out a guest its token cannot see that drives {mapping} ({}: {}); the token needs VM.Audit on /vms (docs/operations/hardware.md); lease again if the reason is cross_check_unavailable",
+                        "Fleet cannot rule out a guest its token cannot see that drives {mapping} ({}: {}); the token needs VM.Audit on /vms (docs/operations/hardware.md); try again if the reason is cross_check_unavailable",
                         other
                             .as_ref()
                             .map_or("not assessed", |visibility| visibility.state()),

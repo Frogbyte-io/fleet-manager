@@ -385,7 +385,7 @@ twice.
 | `hardware_busy` | Another lease holds it (the message names it). Wait for that lease to end, or ask its owner; do not retry in a loop |
 | `hardware_stale`, `hardware_missing` | Run `hardware refresh --account <account-id>` once and retry once; if it is still `missing`, tell the user to check the cable and port |
 | `hardware_unknown`, `hardware_no_node_entry`, `hardware_wrong_node` | The mapping is not in the inventory, has no node entry, or is not on the node Lab clones on. Refresh once; otherwise this needs an operator (the message says what to change) |
-| `hardware_unsupported` | The message gives the reason (for example the token lacks `Mapping.Use`). Tell the user |
+| `hardware_unsupported` | The message gives the reason (for example the token lacks `Mapping.Use`, or Fleet cannot show that its Proxmox credential sees every guest). Tell the user |
 | `hardware_externally_attached`, `hardware_quarantined` | Someone else's guest has it, or an attach or detach failed. Tell the user; do not try to free it |
 | `hardware_pool_unsupported` | The version is pooled; hardware does not work with a pool. Choose another version |
 
@@ -403,7 +403,7 @@ destroy the guest or free the device yourself.
 | `reason` (attach step) | What you do |
 | --- | --- |
 | `hardware_fingerprint_changed`, `hardware_scan_incomplete`, `hardware_verify_failed` | The device moved or the cluster could not be read in full at the last check. Run `hardware refresh --account <account-id>` once and lease again once; otherwise tell the user |
-| `hardware_guests_unverifiable` | Fleet cannot show that its Proxmox token can see every guest, so a device might already be in use on a guest it cannot see. Nothing was written. If the message says `cross_check_unavailable` the check failed transiently, so run `hardware refresh --account <account-id>` and lease again once. Otherwise tell the user that the operator must grant the Fleet credential `VM.Audit` on every guest, and do not retry |
+| `hardware_guests_unverifiable` | Fleet cannot show that its Proxmox token can see every guest, so a device might already be in use on a guest it cannot see. It also refuses a persistent machine's USB attach (`machines usb attach`). Nothing was written. If the message says `cross_check_unavailable` the check failed transiently, so run `hardware refresh --account <account-id>` and lease again once. Otherwise tell the user that the operator must grant the Fleet credential `VM.Audit` on every guest, and do not retry |
 | `hardware_attach_failed`, `hardware_no_free_slot`, `hardware_attach_pending`, `hardware_lease_ended` | The write was refused or could not be applied; the message says why. Tell the user; do not retry in a loop |
 | `hardware_attach_unknown` | The outcome could not be determined; cleanup resolves it, or it needs an operator. Tell the user |
 
