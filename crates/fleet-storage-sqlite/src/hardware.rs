@@ -100,14 +100,14 @@ impl HardwareRepository {
     ) -> Result<Option<HardwareDevice>, HardwareStoreError> {
         let (sql, first, second) = match key {
             DeviceKey::Id(id) => (
-                "SELECT id, account_id, mapping_id, kind, status, unsupported_reason, note, \
-                 created_at, updated_at FROM hardware_devices WHERE id = ?1",
+                "SELECT id, account_id, mapping_id, kind, status, unsupported_reason, status_detail, \
+                 note, created_at, updated_at FROM hardware_devices WHERE id = ?1",
                 id,
                 None,
             ),
             DeviceKey::Mapping(account, mapping) => (
-                "SELECT id, account_id, mapping_id, kind, status, unsupported_reason, note, \
-                 created_at, updated_at FROM hardware_devices \
+                "SELECT id, account_id, mapping_id, kind, status, unsupported_reason, status_detail, \
+                 note, created_at, updated_at FROM hardware_devices \
                  WHERE account_id = ?1 AND mapping_id = ?2",
                 account,
                 Some(mapping),
@@ -154,6 +154,7 @@ impl HardwareRepository {
             kind: HardwareKind::from_id(&kind).map_err(corrupt)?,
             entries,
             status: DeviceStatus::from_parts(&status, reason.as_deref()).map_err(corrupt)?,
+            status_detail: row.get("status_detail"),
             note: row.get("note"),
             created_at: row.get("created_at"),
             updated_at: row.get("updated_at"),
@@ -265,7 +266,7 @@ impl HardwareStore for HardwareRepository {
         let id = if let Some(id) = existing {
             sqlx::query(
                 "UPDATE hardware_devices SET kind = ?2, status = ?3, unsupported_reason = ?4, \
-                 updated_at = ?5 WHERE id = ?1",
+                 status_detail = ?6, updated_at = ?5 WHERE id = ?1",
             )
             .bind(&id)
             .bind(observation.kind.id())
@@ -277,6 +278,7 @@ impl HardwareStore for HardwareRepository {
                     .map(fleet_core::UnsupportedReason::id),
             )
             .bind(now)
+            .bind(&observation.status_detail)
             .execute(&mut *tx)
             .await
             .map_err(|error| backend("update hardware device", &error))?;
@@ -284,16 +286,22 @@ impl HardwareStore for HardwareRepository {
         } else {
             sqlx::query(
                 "INSERT INTO hardware_devices \
-                 (id, account_id, mapping_id, kind, status, unsupported_reason, created_at, updated_at) \
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?7)",
+                 (id, account_id, mapping_id, kind, status, unsupported_reason, status_detail, \
+                 created_at, updated_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?8, ?7, ?7)",
             )
             .bind(&observation.id)
             .bind(&observation.account_id)
             .bind(&observation.mapping_id)
             .bind(observation.kind.id())
             .bind(observation.status.id())
-            .bind(observation.status.reason().map(fleet_core::UnsupportedReason::id))
+            .bind(
+                observation
+                    .status
+                    .reason()
+                    .map(fleet_core::UnsupportedReason::id),
+            )
             .bind(now)
+            .bind(&observation.status_detail)
             .execute(&mut *tx)
             .await
             .map_err(|error| {
@@ -386,8 +394,8 @@ impl HardwareStore for HardwareRepository {
     ) -> Result<(), HardwareStoreError> {
         refuse_reserved(status)?;
         let done = sqlx::query(
-            "UPDATE hardware_devices SET status = ?2, unsupported_reason = ?3, updated_at = ?4 \
-             WHERE id = ?1",
+            "UPDATE hardware_devices SET status = ?2, unsupported_reason = ?3, \
+             status_detail = NULL, updated_at = ?4 WHERE id = ?1",
         )
         .bind(id)
         .bind(status.id())

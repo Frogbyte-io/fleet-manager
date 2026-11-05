@@ -18753,7 +18753,7 @@
           },
           "truncated": {
             "type": "boolean",
-            "description": "Whether the bound dropped guests. A scan with unreadable or dropped\nguests is incomplete: a device that would be available is reported\n`unsupported` (`usb_inventory_unreadable`) instead, since a guest may reference it\nthat was not read."
+            "description": "Whether the bound dropped guests. A scan with unreadable or dropped\nguests is incomplete: a device that would be available is reported\n`unsupported` (`usb_inventory_unreadable`) instead, since a guest may reference it\nthat was not read. The scan is also not enough on its own: it sees only\nthe guests the token may audit (see `guestVisibility`)."
           },
           "unreadable": {
             "type": "integer",
@@ -18761,6 +18761,56 @@
             "minimum": 0
           }
         }
+      },
+      "HardwareGuestVisibilityDto": {
+        "type": "object",
+        "description": "What Fleet can say about guests the token cannot see (#596). The guest\nscan sees only the guests the token may audit (PVE omits a guest without\n`VM.Audit` from the cluster listing) and PVE gives a mapping no\nexclusivity, so `available` is reported only while nothing shows a hidden\nguest. There is no state that means \"every guest was seen\".",
+        "required": [
+          "state",
+          "detail"
+        ],
+        "properties": {
+          "detail": {
+            "type": "string",
+            "description": "What the state rests on and does not cover, and the remedy when it is\nnot `not_disproved`."
+          },
+          "reason": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/HardwareGuestVisibilityReasonDto",
+                "description": "Why, unless `not_disproved`."
+              }
+            ]
+          },
+          "state": {
+            "$ref": "#/components/schemas/HardwareGuestVisibilityStateDto",
+            "description": "The state; anything but `not_disproved` means no device of the\naccount is reported `available` and no attach is made."
+          }
+        }
+      },
+      "HardwareGuestVisibilityReasonDto": {
+        "type": "string",
+        "description": "Why the guest visibility is not `not_disproved`.",
+        "enum": [
+          "permissions_unreadable",
+          "permissions_truncated",
+          "cross_check_unavailable",
+          "guest_audit_not_granted",
+          "guest_path_narrowed",
+          "hidden_guests_found"
+        ]
+      },
+      "HardwareGuestVisibilityStateDto": {
+        "type": "string",
+        "description": "What Fleet can say about guests the token cannot see (#596).",
+        "enum": [
+          "not_disproved",
+          "incomplete",
+          "unverified"
+        ]
       },
       "HardwareHolderDto": {
         "type": "object",
@@ -18902,6 +18952,17 @@
               {
                 "$ref": "#/components/schemas/HardwareGuestScanDto",
                 "description": "What the guest scan covered; `null` when the mapping list was not\nusable."
+              }
+            ]
+          },
+          "guestVisibility": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/HardwareGuestVisibilityDto",
+                "description": "What Fleet can say about guests the token cannot see, which `available`\nneeds to be trustworthy; `null` when the mapping list was not usable.\nNever \"every guest was seen\": the best state is `not_disproved`."
               }
             ]
           },
@@ -27388,6 +27449,17 @@
                   {
                     "$ref": "#/components/schemas/HardwareGuestScanDto",
                     "description": "What the guest scan covered; `null` when the mapping list was not\nusable."
+                  }
+                ]
+              },
+              "guestVisibility": {
+                "oneOf": [
+                  {
+                    "type": "null"
+                  },
+                  {
+                    "$ref": "#/components/schemas/HardwareGuestVisibilityDto",
+                    "description": "What Fleet can say about guests the token cannot see, which `available`\nneeds to be trustworthy; `null` when the mapping list was not usable.\nNever \"every guest was seen\": the best state is `not_disproved`."
                   }
                 ]
               },

@@ -335,6 +335,7 @@ async fn a_lease_reads_the_devices_it_asked_for_and_the_reservation_that_holds_t
                     last_seen_at: NOW,
                 }],
                 status: DeviceStatus::Available,
+                status_detail: None,
             },
             NOW,
         )

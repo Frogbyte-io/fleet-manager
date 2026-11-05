@@ -43,6 +43,7 @@ fn observation(id: &str, mapping: &str) -> DeviceObservation {
         kind: HardwareKind::Usb,
         entries: vec![entry("pve1")],
         status: DeviceStatus::Available,
+        status_detail: None,
     }
 }
 
@@ -112,6 +113,37 @@ async fn devices_round_trip_with_entries_status_and_note() {
         repo.set_device_status("nope", DeviceStatus::Missing, NOW)
             .await,
         Err(HardwareStoreError::NotFound)
+    );
+}
+
+#[tokio::test]
+async fn a_cause_bearing_status_detail_is_kept_with_the_device_and_cleared_with_the_status() {
+    // #596: reason text for an account-level cause, not a new reason.
+    let (_dir, store) = setup().await;
+    let repo = HardwareRepository::new(store.pool().clone());
+    let mut observed = observation("dev-1", "reader");
+    observed.status = DeviceStatus::Unsupported(UnsupportedReason::UsbInventoryUnreadable);
+    observed.status_detail = Some("guest visibility is incomplete".to_owned());
+    let created = repo.upsert_device(&observed, NOW).await.unwrap();
+    assert_eq!(
+        created.status_detail.as_deref(),
+        Some("guest visibility is incomplete")
+    );
+    // A refresh that no longer has the cause replaces it with nothing.
+    observed.status = DeviceStatus::Available;
+    observed.status_detail = None;
+    let refreshed = repo.upsert_device(&observed, NOW + 1).await.unwrap();
+    assert_eq!(refreshed.status_detail, None);
+    // A status written on its own clears a stale text.
+    observed.status = DeviceStatus::Unsupported(UnsupportedReason::UsbInventoryUnreadable);
+    observed.status_detail = Some("again".to_owned());
+    repo.upsert_device(&observed, NOW + 2).await.unwrap();
+    repo.set_device_status("dev-1", DeviceStatus::Missing, NOW + 3)
+        .await
+        .unwrap();
+    assert_eq!(
+        repo.device("dev-1").await.unwrap().unwrap().status_detail,
+        None
     );
 }
 

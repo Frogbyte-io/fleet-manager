@@ -221,6 +221,20 @@ async fn readonly_tokens_hold_only_audit_privileges_per_major() {
 }
 
 #[tokio::test]
+async fn a_vmid_probe_says_in_use_on_400_and_free_on_200_and_fails_on_anything_else() {
+    // `nextid?vmid=` answers for any caller, whatever its VM.Audit, which is
+    // what lets Fleet find a guest the listing omits (#596).
+    let client = ProxmoxClient::new(PermissionsTransport::new("pve9", 200, "{}"));
+    assert!(client.vmid_in_use(request(), 101).await.unwrap());
+    assert!(!client.vmid_in_use(request(), 150).await.unwrap());
+    let failing = ProxmoxClient::new(PermissionsTransport::new("pve9-nextid-fails", 200, "{}"));
+    assert!(matches!(
+        failing.vmid_in_use(request(), 101).await,
+        Err(PveApiError::Http { status: 500, .. })
+    ));
+}
+
+#[tokio::test]
 async fn a_privilege_separated_token_without_acls_reads_an_empty_map() {
     for (family, body) in [
         (

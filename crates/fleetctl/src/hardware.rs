@@ -333,6 +333,32 @@ fn render_refresh(report: &Value) -> String {
             }
         ));
     }
+    if let Some(visibility) = report
+        .get("guestVisibility")
+        .filter(|visibility| !visibility.is_null())
+    {
+        let state = text(&visibility["state"]);
+        lines.push(format!("guest visibility: {state}"));
+        // `not_disproved` is "no evidence of a hidden guest", never "every
+        // guest was seen", and says so; anything else carries the remedy,
+        // because no device reads available then.
+        let detail = text(&visibility["detail"]);
+        if visibility["state"].as_str() == Some("not_disproved") {
+            lines.push(
+                "  no evidence of a hidden guest (not proof that every guest was seen)".to_owned(),
+            );
+            lines.push(format!("  {detail}"));
+        } else {
+            lines.push(format!(
+                "  {}: {detail}",
+                visibility["reason"].as_str().unwrap_or("not established")
+            ));
+            lines.push(
+                "  no device of this account is reported available and none can be attached while that holds"
+                    .to_owned(),
+            );
+        }
+    }
     let devices = report["devices"].as_array().map_or(&[][..], Vec::as_slice);
     if devices.is_empty() {
         lines.push("(no devices)".to_owned());

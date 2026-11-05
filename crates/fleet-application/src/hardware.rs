@@ -32,6 +32,9 @@ pub struct DeviceObservation {
     pub entries: Vec<DeviceNodeEntry>,
     /// The derived status.
     pub status: DeviceStatus,
+    /// A cause-bearing text for an `unsupported` status (see
+    /// `HardwareDevice::status_detail`); `None` clears the stored one.
+    pub status_detail: Option<String>,
 }
 
 /// A reservation to insert in the `held` state.

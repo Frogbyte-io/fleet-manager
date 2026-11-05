@@ -1317,6 +1317,85 @@ async fn an_unknown_or_missing_device_is_refused_and_reserves_nothing() {
     controller.attach(&machine, READER_A).await.unwrap();
 }
 
+/// The token's permissions as the fake PVE reports them (#596).
+fn permissions_with(vms: serde_json::Value) -> serde_json::Value {
+    let mut map = serde_json::json!({"/mapping/usb": {"Mapping.Audit": 1, "Mapping.Use": 1}});
+    for (path, privileges) in vms.as_object().expect("an object") {
+        map[path] = privileges.clone();
+    }
+    map
+}
+
+#[tokio::test]
+async fn a_machine_attach_refuses_when_the_token_cannot_be_shown_to_audit_every_guest() {
+    // The machine path reuses the saga's verify, so the refusal covers it:
+    // placement saw an available device, and by the re-observation the token
+    // cannot be shown to audit every guest (#596). Nothing is written and the
+    // reservation is released.
+    for (label, setup) in [
+        ("no VM.Audit on /vms", 0),
+        ("permissions unreadable", 1),
+        ("a hidden guest PVE says exists", 2),
+    ] {
+        let (world, controller) = ready_controller().await;
+        let machine = controller.persistent("persist-a", GUEST_A).await;
+        match setup {
+            0 => world.usb.set_permissions(
+                200,
+                permissions_with(serde_json::json!({"/vms": {"VM.Config.HWType": 1}})),
+            ),
+            1 => world.usb.set_permissions(403, serde_json::Value::Null),
+            _ => world.usb.hide_guest(fake_pve::FIRST_LAB_VMID - 1),
+        }
+
+        let error = controller.attach(&machine, READER_A).await.unwrap_err();
+
+        assert_eq!(
+            refused_reason(&error),
+            "hardware_guests_unverifiable",
+            "{label}"
+        );
+        let detail = refused_detail(&error);
+        assert!(detail.contains("VM.Audit on /vms"), "{label}: {detail}");
+        assert!(detail.contains("try again"), "{label}: {detail}");
+        assert!(world.usb.writes().is_empty(), "{label}");
+        // The reservation taken before the verify is released again.
+        assert_eq!(controller.live().await, 0, "{label}");
+    }
+}
+
+#[tokio::test]
+async fn a_machine_attach_is_refused_up_front_once_a_refresh_recorded_the_gap() {
+    let (world, controller) = ready_controller().await;
+    let machine = controller.persistent("persist-a", GUEST_A).await;
+    world.usb.set_permissions(
+        200,
+        permissions_with(serde_json::json!({"/vms": {"VM.Config.HWType": 1}})),
+    );
+    controller.refresh_inventory().await;
+    assert_eq!(
+        controller.status(READER_A).await,
+        DeviceStatus::Unsupported(fleet_core::UnsupportedReason::UsbInventoryUnreadable)
+    );
+
+    let error = controller.attach(&machine, READER_A).await.unwrap_err();
+
+    assert_eq!(refused_reason(&error), "hardware_unsupported");
+    assert_nothing_changed(&world, &controller).await;
+}
+
+#[tokio::test]
+async fn a_machine_attach_with_no_evidence_of_a_hidden_guest_goes_through() {
+    let (world, controller) = ready_controller().await;
+    let machine = controller.persistent("persist-a", GUEST_A).await;
+    world.usb.set_permissions(
+        200,
+        permissions_with(serde_json::json!({"/vms": {"VM.Audit": 1, "VM.Config.HWType": 1}})),
+    );
+    let outcome = controller.attach(&machine, READER_A).await.unwrap();
+    assert_eq!(outcome.result, HotplugResult::Attached);
+}
+
 #[tokio::test]
 async fn a_device_another_owner_holds_is_busy_and_nothing_queues() {
     let (world, controller) = ready_controller().await;
@@ -2599,6 +2678,7 @@ async fn a_mapping_id_is_looked_up_in_the_account_of_the_machines_guest() {
                 kind: fleet_core::HardwareKind::Usb,
                 entries: Vec::new(),
                 status: DeviceStatus::Available,
+                status_detail: None,
             },
             now(),
         )

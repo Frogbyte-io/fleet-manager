@@ -192,6 +192,10 @@ pub struct HardwareDevice {
     pub entries: Vec<DeviceNodeEntry>,
     /// The derived status.
     pub status: DeviceStatus,
+    /// Why the device is `unsupported`, in words, when the fixed text of its
+    /// reason is not specific enough (an account-level cause such as a token
+    /// that cannot be shown to audit every guest). Reason text, not a reason.
+    pub status_detail: Option<String>,
     /// An operator note.
     pub note: Option<String>,
     /// When the row was created (epoch milliseconds).

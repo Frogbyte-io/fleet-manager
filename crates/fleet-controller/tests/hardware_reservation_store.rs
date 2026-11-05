@@ -62,6 +62,7 @@ impl Fixture {
                         last_seen_at: NOW,
                     }],
                     status,
+                    status_detail: None,
                 },
                 NOW,
             )

@@ -2955,7 +2955,8 @@ export interface HardwareGuestScanDto {
      * Whether the bound dropped guests. A scan with unreadable or dropped
      * guests is incomplete: a device that would be available is reported
      * `unsupported` (`usb_inventory_unreadable`) instead, since a guest may reference it
-     * that was not read.
+     * that was not read. The scan is also not enough on its own: it sees only
+     * the guests the token may audit (see `guestVisibility`).
      */
   truncated: boolean;
   /**
@@ -2963,6 +2964,54 @@ export interface HardwareGuestScanDto {
      * @minimum 0
      */
   unreadable: number;
+}
+
+/**
+ * Why the guest visibility is not `not_disproved`.
+ */
+export type HardwareGuestVisibilityReasonDto = typeof HardwareGuestVisibilityReasonDto[keyof typeof HardwareGuestVisibilityReasonDto];
+
+
+export const HardwareGuestVisibilityReasonDto = {
+  permissions_unreadable: 'permissions_unreadable',
+  permissions_truncated: 'permissions_truncated',
+  cross_check_unavailable: 'cross_check_unavailable',
+  guest_audit_not_granted: 'guest_audit_not_granted',
+  guest_path_narrowed: 'guest_path_narrowed',
+  hidden_guests_found: 'hidden_guests_found',
+} as const;
+
+/**
+ * What Fleet can say about guests the token cannot see (#596).
+ */
+export type HardwareGuestVisibilityStateDto = typeof HardwareGuestVisibilityStateDto[keyof typeof HardwareGuestVisibilityStateDto];
+
+
+export const HardwareGuestVisibilityStateDto = {
+  not_disproved: 'not_disproved',
+  incomplete: 'incomplete',
+  unverified: 'unverified',
+} as const;
+
+/**
+ * What Fleet can say about guests the token cannot see (#596). The guest
+ * scan sees only the guests the token may audit (PVE omits a guest without
+ * `VM.Audit` from the cluster listing) and PVE gives a mapping no
+ * exclusivity, so `available` is reported only while nothing shows a hidden
+ * guest. There is no state that means "every guest was seen".
+ */
+export interface HardwareGuestVisibilityDto {
+  /**
+     * What the state rests on and does not cover, and the remedy when it is
+     * not `not_disproved`.
+     */
+  detail: string;
+  reason?: null | HardwareGuestVisibilityReasonDto;
+  /**
+     * The state; anything but `not_disproved` means no device of the
+     * account is reported `available` and no attach is made.
+     */
+  state: HardwareGuestVisibilityStateDto;
 }
 
 /**
@@ -3031,6 +3080,7 @@ export interface HardwareRefreshDto {
   /** The account's devices after the refresh, ordered by mapping id. */
   devices: HardwareDeviceDto[];
   guestScan?: null | HardwareGuestScanDto;
+  guestVisibility?: null | HardwareGuestVisibilityDto;
   /** When the observation was taken (epoch milliseconds). */
   observedAt: number;
   /**
@@ -7693,6 +7743,7 @@ export type ResourceHardwareRefreshDtoData = {
   /** The account's devices after the refresh, ordered by mapping id. */
   devices: HardwareDeviceDto[];
   guestScan?: null | HardwareGuestScanDto;
+  guestVisibility?: null | HardwareGuestVisibilityDto;
   /** When the observation was taken (epoch milliseconds). */
   observedAt: number;
   /**

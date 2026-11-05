@@ -7,7 +7,9 @@
 //! intersection with its user. The listed paths are the top-level roots
 //! (`/`, `/access`, `/nodes`, `/pool`, `/sdn`, `/storage`, `/vms`, …), every
 //! path named in an ACL, and every pool member (`/vms/{id}`,
-//! `/storage/{id}`); paths without any privilege are omitted. The method
+//! `/storage/{id}`); PVE omits paths without any privilege, so an explicit
+//! `NoAccess` on one guest is indistinguishable from a guest nobody
+//! mentioned (#596). The method
 //! is identical on PVE 8.x and 9.x (`PVE/API2/AccessControl.pm`
 //! `permissions`, `PVE/RPCEnvironment.pm` `get_effective_permissions`).
 //!

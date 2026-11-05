@@ -309,6 +309,14 @@ async fn the_text_output_names_the_status_the_reason_and_the_holder_of_each_devi
         refreshed.contains("guest scan: 3 listed, 3 read, 0 unreadable"),
         "{refreshed}"
     );
+    assert!(
+        refreshed.contains("guest visibility: not_disproved"),
+        "{refreshed}"
+    );
+    assert!(
+        refreshed.contains("not proof that every guest was seen"),
+        "{refreshed}"
+    );
     let line = |text: &str, mapping: &str| {
         text.lines()
             .find(|line| line.starts_with(mapping))
@@ -334,6 +342,75 @@ async fn the_text_output_names_the_status_the_reason_and_the_holder_of_each_devi
     let listed = cli(&world, &["hardware", "list"]).await.unwrap();
     assert!(line(&listed, "fm-c").contains("missing"));
     assert!(listed.contains("reads Fleet's own records"), "{listed}");
+}
+
+#[tokio::test]
+async fn an_account_whose_guests_cannot_all_be_audited_says_so_and_lists_nothing_available() {
+    // #596: a token without VM.Audit on /vms cannot see every guest, so the
+    // refresh names the gap and the remedy, and no device reads available in
+    // the refresh or in the list.
+    let pve = ScriptedPve::standard();
+    pve.data(
+        "/api2/json/access/permissions",
+        &json!({
+            "/mapping/usb": {"Mapping.Audit": 1},
+            "/mapping/usb/fm-a": {"Mapping.Use": 0},
+            "/mapping/usb/fm-g": {"Mapping.Use": 0},
+            "/vms": {"VM.Config.HWType": 1}
+        }),
+    );
+    let world = World::start(pve).await;
+    let account = world.account(true).await;
+    let refreshed = cli(&world, &["hardware", "refresh", "--account", &account])
+        .await
+        .unwrap();
+    assert!(
+        refreshed.contains("guest visibility: incomplete"),
+        "{refreshed}"
+    );
+    assert!(
+        refreshed.contains("guest_audit_not_granted: "),
+        "{refreshed}"
+    );
+    assert!(refreshed.contains("grant VM.Audit on /vms"), "{refreshed}");
+    assert!(
+        refreshed.contains("none can be attached while that holds"),
+        "{refreshed}"
+    );
+    let row = |text: &str, mapping: &str| {
+        text.lines()
+            .find(|line| line.starts_with(mapping))
+            .unwrap_or_else(|| panic!("no row for {mapping} in\n{text}"))
+            .to_owned()
+    };
+    for text in [
+        &refreshed,
+        &cli(&world, &["hardware", "list"]).await.unwrap(),
+    ] {
+        assert!(
+            row(text, "fm-a").contains("unsupported (usb_inventory_unreadable)"),
+            "{text}"
+        );
+        assert!(!row(text, "fm-g").contains("available"), "{text}");
+        assert!(text.contains("guest_audit_not_granted"), "{text}");
+    }
+    // The JSON carries the same state for scripts.
+    let json = cli(
+        &world,
+        &[
+            "--output",
+            "json",
+            "hardware",
+            "refresh",
+            "--account",
+            &account,
+        ],
+    )
+    .await
+    .unwrap();
+    let json: Value = serde_json::from_str(&json).unwrap();
+    assert_eq!(json["guestVisibility"]["state"], "incomplete");
+    assert_eq!(json["guestVisibility"]["reason"], "guest_audit_not_granted");
 }
 
 #[tokio::test]
