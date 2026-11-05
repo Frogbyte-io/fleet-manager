@@ -309,6 +309,16 @@ pub enum Permission {
     /// keeping it reserved or giving it up (FM-1126). The resource is the
     /// lease id. Lease-bound like [`Permission::LabHardwareAttach`].
     LabHardwareDetach,
+    /// Attach a USB device to a persistent machine's guest and reserve it for
+    /// the machine until it is explicitly detached (FM-1125, ADR 0019). The
+    /// resource is the machine id. A privileged mutation of a guest through
+    /// a reviewed, payload-bound route; never delegated to Lab credentials.
+    MachineUsbAttach,
+    /// Detach a USB device from a persistent machine's guest and release the
+    /// machine's reservation (FM-1125). The resource is the machine id.
+    /// Reviewed and payload-bound like [`Permission::MachineUsbAttach`];
+    /// never delegated to Lab credentials.
+    MachineUsbDetach,
 }
 
 impl Permission {
@@ -400,6 +410,8 @@ impl Permission {
         Permission::HardwareOverrideRelease,
         Permission::LabHardwareAttach,
         Permission::LabHardwareDetach,
+        Permission::MachineUsbAttach,
+        Permission::MachineUsbDetach,
     ];
 
     /// The stable action id, as recorded in decisions and audit events.
@@ -490,6 +502,8 @@ impl Permission {
             Permission::HardwareOverrideRelease => "hardware.override-release",
             Permission::LabHardwareAttach => "lab.hardware.attach",
             Permission::LabHardwareDetach => "lab.hardware.detach",
+            Permission::MachineUsbAttach => "machines.usb.attach",
+            Permission::MachineUsbDetach => "machines.usb.detach",
         }
     }
 
@@ -582,6 +596,8 @@ impl Permission {
             | Permission::HardwareOverrideRelease
             | Permission::LabHardwareAttach
             | Permission::LabHardwareDetach
+            | Permission::MachineUsbAttach
+            | Permission::MachineUsbDetach
             | Permission::RegistryObserve => true,
         }
     }
@@ -675,6 +691,8 @@ impl Permission {
             | Permission::HardwareOverrideRelease
             | Permission::LabHardwareAttach
             | Permission::LabHardwareDetach
+            | Permission::MachineUsbAttach
+            | Permission::MachineUsbDetach
             | Permission::ActionDeny => true,
         }
     }

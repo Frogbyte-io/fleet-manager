@@ -397,9 +397,19 @@ A lease declares its devices up front and holds them for its life; during a test
 
 `POST /lab/templates` and `PUT /lab/templates/{id}` accept `hardware` (a repeat of the whole draft, like every other field: omitting it clears it); templates and published versions return it when they declare any. `GET /lab/leases/{id}` returns `hardware` for a lease whose version declares any: each entry has its `kind`, `mapping` and the lease's live `reservation` (`id`, `deviceId`, `state`, `usbSlot`), which is null until placement reserves the device and again after it is released. A lease whose version declares none has no `hardware` key.
 
+### Persistent machines (FM-1125)
+
+A persistent machine reserves a device through its own reviewed actions, `POST /machines/{id}/usb/attach/review`, `.../attach`, `.../detach/review` and `.../detach` (`fleetctl machines usb attach|detach`), over the same saga building blocks (`fleet_controller::machine_usb` over `lab_hardware`; the use case, `fleet_application::machine_usb`, owns authorization, the review token and the machine checks). The owner is the machine (`owner_kind = machine`), so a lease's cleanup never sees the row and the reconciler leaves a live machine's rows alone. Differences from the lease path:
+
+- **Reviewed and payload-bound.** `machines.usb.attach` / `machines.usb.detach`, resource = the machine id, never delegated to Lab credentials. A review checks everything and answers a token over the action, machine, mapping and (attach) the guest; the execute call recomputes it from the machine's current guest link.
+- **Only a persistent machine's guest.** A QEMU guest linked to the machine, with a `ready` persistent marker that names this machine and still guards it, and the registration's live checks (not a template, promoted image artifact, Lab clone or pool member, no reserved tag). A detach does not re-check the guest: it acts on the guest and slot the reservation recorded, so a device can always be given back.
+- **Reserve, then write; fail fast.** The reservation transaction decides who holds the device (`hardware_busy` names the holder, nothing queues); a request that wrote nothing releases the row it created. A confirmed detach (every `usbN` read back) is the only thing that releases an attached device. Pending is never attached (an attach is removed again, `hardware_attach_pending`; a detach answers `detach_pending`).
+- **Serialised per device**, in process, with the row's compare-and-set as the backstop.
+- **Resume from the row.** `attaching` is resolved by a detach that reads the guest (nothing there: released; the mapping there: `attach_unknown` with no slot, which nothing deletes); `attach_unknown` is an operator's (`hardware.override-release`), because a machine has no cleanup to resolve it.
+- **Lifecycle gates.** The reviewed destroy, snapshot revert, template and clone routes refuse a guest a machine holds a device on (at the API, and in the executor at the start and again right before the delete, rollback, conversion or clone), and the persistent unregister refuses while the machine holds one; the machine repository refuses to delete a machine that owns a live reservation, so it fails closed for any caller. The refusals say what to do in the reservation's state. A destructive operation and a machine's attach on one guest exclude each other through one per-guest lock (`fleet_controller::guest_locks`): the operation waits for an attach in flight, an attach is refused (`hardware_guest_busy`) while an operation runs.
+
 ### What is still to come
 
-- Persistent machines (FM-1125).
 - Queueing: a busy device fails the lease request.
 - The hardware-in-the-loop runbook and live validation (FM-1133). Until the real hardware has been exercised end to end, the "exclusive" claim rests on the reservation store's guarantees and tests, not on a hardware run.
 

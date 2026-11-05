@@ -32,6 +32,7 @@ pub mod lab_put;
 pub mod machine;
 pub mod machine_access;
 pub mod machine_terminal;
+pub mod machine_usb;
 pub mod node;
 pub mod observed;
 pub mod observed_assembly;

@@ -450,13 +450,15 @@ impl HardwareReservations {
     }
 }
 
-/// The permission an owner's hardware events are filed under until the
-/// hardware catalog entries exist: the capacity events use the Lab
-/// provisioning permission, so a lease's hardware does too.
+/// The permission an owner's hardware events are filed under by default: the
+/// capacity events use the Lab provisioning permission, so a lease's hardware
+/// does too, and a persistent machine's reservation is made by its reviewed
+/// attach (`machines.usb.attach`). A release the caller asked for is filed
+/// under the action the caller was authorized for ([`HardwareReservations::release_under`]).
 fn owner_action(owner_kind: ReservationOwnerKind) -> &'static str {
     match owner_kind {
         ReservationOwnerKind::Lease => Permission::LabProvision.id(),
-        ReservationOwnerKind::Machine => Permission::MachineUpdate.id(),
+        ReservationOwnerKind::Machine => Permission::MachineUsbAttach.id(),
     }
 }
 

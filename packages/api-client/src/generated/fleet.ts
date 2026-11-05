@@ -2602,6 +2602,19 @@ export interface ExecLeaseRequest {
 }
 
 /**
+ * Which device to attach or detach, and the review it was reviewed in.
+ */
+export interface ExecuteMachineUsbRequest {
+  /** The Proxmox USB resource mapping id of the device. */
+  mapping: string;
+  /**
+     * The token the review answered; it binds this call to the reviewed
+     * machine, device and guest.
+     */
+  reviewToken: string;
+}
+
+/**
  * The requested ready-TTL extension.
  */
 export interface ExtendLeaseRequest {
@@ -3964,6 +3977,99 @@ export interface MachineFileDto {
      * @minimum 0
      */
   sizeBytes: number;
+}
+
+/**
+ * What an attach or detach came to.
+ */
+export interface MachineUsbDto {
+  /** The machine. */
+  machineId: string;
+  /** The mapping id. */
+  mapping: string;
+  /** Whether the guest has the device once the request is answered. */
+  onGuest: boolean;
+  /**
+     * `attached` and `already_attached` (the guest has the device),
+     * `detached` and `already_detached` (it does not), or `detach_pending`:
+     * PVE stored the removal but the guest keeps the device until it
+     * restarts (its `hotplug` option lacks `usb`), so the device is still
+     * attached and the reservation stays `detaching`. An attach PVE would
+     * leave pending is refused instead (`hardware_attach_pending`); it is
+     * never reported as attached.
+     */
+  outcome: string;
+  /** Whether the request released the reservation. */
+  released: boolean;
+  /** The machine's reservation of the device. */
+  reservationId: string;
+  /**
+     * The reservation's state after the request: `attached`, `detaching`
+     * (a pending detach) or `released`.
+     */
+  reservationState: string;
+  /**
+     * The `usbN` slot the guest holds the device in, when it does.
+     * @nullable
+     */
+  usbSlot?: string | null;
+}
+
+/**
+ * The guest an attach writes to, as the review found it live.
+ */
+export interface MachineUsbGuestDto {
+  /** The Proxmox account. */
+  accountId: string;
+  /** The guest's name. */
+  name: string;
+  /** The node the guest is on. */
+  node: string;
+  /**
+     * The guest's VMID.
+     * @minimum 0
+     */
+  vmid: number;
+}
+
+/**
+ * The machine's reservation of the device, when it has one.
+ */
+export interface MachineUsbReservationDto {
+  /**
+     * The VMID of the guest it records, when it does.
+     * @minimum 0
+     * @nullable
+     */
+  guestVmid?: number | null;
+  /** The reservation. */
+  id: string;
+  /**
+     * Its state: `held`, `attaching`, `attached`, `detaching`,
+     * `attach_unknown` or `detach_failed`.
+     */
+  state: string;
+  /**
+     * The `usbN` slot it records, when it does.
+     * @nullable
+     */
+  usbSlot?: string | null;
+}
+
+/**
+ * What a review found, and the token that binds the execute call to it.
+ */
+export interface MachineUsbReviewDto {
+  /** `attach` or `detach`. */
+  action: string;
+  guest?: null | MachineUsbGuestDto;
+  /** The machine. */
+  machineId: string;
+  /** The mapping id. */
+  mapping: string;
+  reservation?: null | MachineUsbReservationDto;
+  /** The token the execute call must present. */
+  reviewToken: string;
 }
 
 /**
@@ -8356,6 +8462,80 @@ export interface ResourceMachineFileDto {
 }
 
 /**
+ * What an attach or detach came to.
+ */
+export type ResourceMachineUsbDtoData = {
+  /** The machine. */
+  machineId: string;
+  /** The mapping id. */
+  mapping: string;
+  /** Whether the guest has the device once the request is answered. */
+  onGuest: boolean;
+  /**
+     * `attached` and `already_attached` (the guest has the device),
+     * `detached` and `already_detached` (it does not), or `detach_pending`:
+     * PVE stored the removal but the guest keeps the device until it
+     * restarts (its `hotplug` option lacks `usb`), so the device is still
+     * attached and the reservation stays `detaching`. An attach PVE would
+     * leave pending is refused instead (`hardware_attach_pending`); it is
+     * never reported as attached.
+     */
+  outcome: string;
+  /** Whether the request released the reservation. */
+  released: boolean;
+  /** The machine's reservation of the device. */
+  reservationId: string;
+  /**
+     * The reservation's state after the request: `attached`, `detaching`
+     * (a pending detach) or `released`.
+     */
+  reservationState: string;
+  /**
+     * The `usbN` slot the guest holds the device in, when it does.
+     * @nullable
+     */
+  usbSlot?: string | null;
+};
+
+/**
+ * A single resource.
+ *
+ * The payload is nested under `data` so that later top-level fields are an
+ * additive change rather than a breaking one.
+ */
+export interface ResourceMachineUsbDto {
+  /** What an attach or detach came to. */
+  data: ResourceMachineUsbDtoData;
+}
+
+/**
+ * What a review found, and the token that binds the execute call to it.
+ */
+export type ResourceMachineUsbReviewDtoData = {
+  /** `attach` or `detach`. */
+  action: string;
+  guest?: null | MachineUsbGuestDto;
+  /** The machine. */
+  machineId: string;
+  /** The mapping id. */
+  mapping: string;
+  reservation?: null | MachineUsbReservationDto;
+  /** The token the execute call must present. */
+  reviewToken: string;
+};
+
+/**
+ * A single resource.
+ *
+ * The payload is nested under `data` so that later top-level fields are an
+ * additive change rather than a breaking one.
+ */
+export interface ResourceMachineUsbReviewDto {
+  /** What a review found, and the token that binds the execute call to it. */
+  data: ResourceMachineUsbReviewDtoData;
+}
+
+/**
  * Non-authoritative description of the API this controller serves.
  */
 export type ResourceMetaData = {
@@ -9897,6 +10077,14 @@ export interface ReviewMachineCreateRequest {
      * public keys only, never a secret value.
      */
   spec: ReviewMachineCreateRequestSpec;
+}
+
+/**
+ * Which device to review.
+ */
+export interface ReviewMachineUsbRequest {
+  /** The Proxmox USB resource mapping id of the device. */
+  mapping: string;
 }
 
 /**
@@ -20366,6 +20554,381 @@ const res = await fetch(getCreateMachineTerminalSessionUrl(machineId),
 
   const data: createMachineTerminalSessionResponse['data'] = body ? JSON.parse(body) : {}
   return { data, status: res.status, headers: res.headers } as createMachineTerminalSessionResponse
+}
+
+
+
+export type attachMachineUsbResponse200 = {
+  data: ResourceMachineUsbDto
+  status: 200
+}
+
+export type attachMachineUsbResponse400 = {
+  data: ApiError
+  status: 400
+}
+
+export type attachMachineUsbResponse403 = {
+  data: ApiError
+  status: 403
+}
+
+export type attachMachineUsbResponse404 = {
+  data: ApiError
+  status: 404
+}
+
+export type attachMachineUsbResponse409 = {
+  data: ApiError
+  status: 409
+}
+
+export type attachMachineUsbResponse500 = {
+  data: ApiError
+  status: 500
+}
+
+export type attachMachineUsbResponse503 = {
+  data: ApiError
+  status: 503
+}
+
+export type attachMachineUsbResponseSuccess = (attachMachineUsbResponse200) & {
+  headers: Headers;
+};
+export type attachMachineUsbResponseError = (attachMachineUsbResponse400 | attachMachineUsbResponse403 | attachMachineUsbResponse404 | attachMachineUsbResponse409 | attachMachineUsbResponse500 | attachMachineUsbResponse503) & {
+  headers: Headers;
+};
+
+export type attachMachineUsbResponse = (attachMachineUsbResponseSuccess | attachMachineUsbResponseError)
+
+export const getAttachMachineUsbUrl = (machineId: string,) => {
+
+
+
+
+  return `/api/v1/machines/${machineId}/usb/attach`
+}
+
+/**
+ * # Errors
+ *
+ * Returns the public error envelope on refusal, a review token that does
+ * not match, an unknown machine, an ineligible guest, a device another owner
+ * holds, a failed verification of the device, or a failed write.
+ * @summary Attaches a reviewed device to the machine's guest and reserves it for the
+machine until it is explicitly detached: a digest-conditional write of the
+mapping into a free `usbN` slot, read back before it is reported. The
+device is reserved first, fail fast (`hardware_busy`, never queued), and
+verified against the pinned fingerprint. An attach PVE would leave pending
+(the running guest's `hotplug` option lacks `usb`) is removed again and
+refused as `hardware_attach_pending`: it is never reported as attached.
+Audited before the write.
+ */
+export const attachMachineUsb = async (machineId: string,
+    executeMachineUsbRequest: ExecuteMachineUsbRequest, options?: RequestInit): Promise<attachMachineUsbResponse> => {
+
+    const getHeaders = (h?: NonNullable<RequestInit['headers']>): Record<string, string | readonly string[]> => {
+    if (!h) return {};
+    if (h instanceof Headers) return Object.fromEntries(h.entries());
+    if (Array.isArray(h)) return Object.fromEntries(h);
+    return h;
+  };
+const res = await fetch(getAttachMachineUsbUrl(machineId),
+  {
+    ...options,
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...getHeaders(options?.headers) },
+    body: JSON.stringify(executeMachineUsbRequest)
+  }
+)
+
+
+  const body = [204, 205, 304].includes(res.status) ? null : await res.text();
+
+  const data: attachMachineUsbResponse['data'] = body ? JSON.parse(body) : {}
+  return { data, status: res.status, headers: res.headers } as attachMachineUsbResponse
+}
+
+
+
+export type reviewMachineUsbAttachResponse200 = {
+  data: ResourceMachineUsbReviewDto
+  status: 200
+}
+
+export type reviewMachineUsbAttachResponse400 = {
+  data: ApiError
+  status: 400
+}
+
+export type reviewMachineUsbAttachResponse403 = {
+  data: ApiError
+  status: 403
+}
+
+export type reviewMachineUsbAttachResponse404 = {
+  data: ApiError
+  status: 404
+}
+
+export type reviewMachineUsbAttachResponse409 = {
+  data: ApiError
+  status: 409
+}
+
+export type reviewMachineUsbAttachResponse500 = {
+  data: ApiError
+  status: 500
+}
+
+export type reviewMachineUsbAttachResponse503 = {
+  data: ApiError
+  status: 503
+}
+
+export type reviewMachineUsbAttachResponseSuccess = (reviewMachineUsbAttachResponse200) & {
+  headers: Headers;
+};
+export type reviewMachineUsbAttachResponseError = (reviewMachineUsbAttachResponse400 | reviewMachineUsbAttachResponse403 | reviewMachineUsbAttachResponse404 | reviewMachineUsbAttachResponse409 | reviewMachineUsbAttachResponse500 | reviewMachineUsbAttachResponse503) & {
+  headers: Headers;
+};
+
+export type reviewMachineUsbAttachResponse = (reviewMachineUsbAttachResponseSuccess | reviewMachineUsbAttachResponseError)
+
+export const getReviewMachineUsbAttachUrl = (machineId: string,) => {
+
+
+
+
+  return `/api/v1/machines/${machineId}/usb/attach/review`
+}
+
+/**
+ * # Errors
+ *
+ * Returns the public error envelope on refusal, an unknown machine, a
+ * machine without an eligible persistent guest, an unknown device or a
+ * device another owner holds (`hardware_busy`).
+ * @summary Reviews attaching a USB device to a persistent machine: the machine must
+be linked to a QEMU guest that carries a ready persistent marker (not a
+Lab clone, template, image artifact or pool member), and the device must
+be inventoried and not held by another owner. Answers the guest the
+attach will write to and the token that binds the attach call to this
+review. Nothing is written.
+ */
+export const reviewMachineUsbAttach = async (machineId: string,
+    reviewMachineUsbRequest: ReviewMachineUsbRequest, options?: RequestInit): Promise<reviewMachineUsbAttachResponse> => {
+
+    const getHeaders = (h?: NonNullable<RequestInit['headers']>): Record<string, string | readonly string[]> => {
+    if (!h) return {};
+    if (h instanceof Headers) return Object.fromEntries(h.entries());
+    if (Array.isArray(h)) return Object.fromEntries(h);
+    return h;
+  };
+const res = await fetch(getReviewMachineUsbAttachUrl(machineId),
+  {
+    ...options,
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...getHeaders(options?.headers) },
+    body: JSON.stringify(reviewMachineUsbRequest)
+  }
+)
+
+
+  const body = [204, 205, 304].includes(res.status) ? null : await res.text();
+
+  const data: reviewMachineUsbAttachResponse['data'] = body ? JSON.parse(body) : {}
+  return { data, status: res.status, headers: res.headers } as reviewMachineUsbAttachResponse
+}
+
+
+
+export type detachMachineUsbResponse200 = {
+  data: ResourceMachineUsbDto
+  status: 200
+}
+
+export type detachMachineUsbResponse202 = {
+  data: ResourceMachineUsbDto
+  status: 202
+}
+
+export type detachMachineUsbResponse400 = {
+  data: ApiError
+  status: 400
+}
+
+export type detachMachineUsbResponse403 = {
+  data: ApiError
+  status: 403
+}
+
+export type detachMachineUsbResponse404 = {
+  data: ApiError
+  status: 404
+}
+
+export type detachMachineUsbResponse409 = {
+  data: ApiError
+  status: 409
+}
+
+export type detachMachineUsbResponse500 = {
+  data: ApiError
+  status: 500
+}
+
+export type detachMachineUsbResponse503 = {
+  data: ApiError
+  status: 503
+}
+
+export type detachMachineUsbResponseSuccess = (detachMachineUsbResponse200 | detachMachineUsbResponse202) & {
+  headers: Headers;
+};
+export type detachMachineUsbResponseError = (detachMachineUsbResponse400 | detachMachineUsbResponse403 | detachMachineUsbResponse404 | detachMachineUsbResponse409 | detachMachineUsbResponse500 | detachMachineUsbResponse503) & {
+  headers: Headers;
+};
+
+export type detachMachineUsbResponse = (detachMachineUsbResponseSuccess | detachMachineUsbResponseError)
+
+export const getDetachMachineUsbUrl = (machineId: string,) => {
+
+
+
+
+  return `/api/v1/machines/${machineId}/usb/detach`
+}
+
+/**
+ * # Errors
+ *
+ * Returns the public error envelope on refusal, a review token that does
+ * not match, an unknown machine, a device the machine does not hold, or a
+ * detach that failed or could not be confirmed (the machine keeps the
+ * reservation).
+ * @summary Detaches a reviewed device from the guest the machine's reservation
+recorded and releases the reservation after the read-back confirmed the
+device is gone. The recorded `usbN` entry is deleted only when it holds
+exactly what Fleet wrote, and every `usbN` entry is read back before the
+answer. A removal PVE leaves pending (the guest's `hotplug` option lacks
+`usb`) answers `detach_pending` with the device still attached and the
+reservation still held; repeat the detach once the guest restarted.
+Audited before the delete.
+ */
+export const detachMachineUsb = async (machineId: string,
+    executeMachineUsbRequest: ExecuteMachineUsbRequest, options?: RequestInit): Promise<detachMachineUsbResponse> => {
+
+    const getHeaders = (h?: NonNullable<RequestInit['headers']>): Record<string, string | readonly string[]> => {
+    if (!h) return {};
+    if (h instanceof Headers) return Object.fromEntries(h.entries());
+    if (Array.isArray(h)) return Object.fromEntries(h);
+    return h;
+  };
+const res = await fetch(getDetachMachineUsbUrl(machineId),
+  {
+    ...options,
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...getHeaders(options?.headers) },
+    body: JSON.stringify(executeMachineUsbRequest)
+  }
+)
+
+
+  const body = [204, 205, 304].includes(res.status) ? null : await res.text();
+
+  const data: detachMachineUsbResponse['data'] = body ? JSON.parse(body) : {}
+  return { data, status: res.status, headers: res.headers } as detachMachineUsbResponse
+}
+
+
+
+export type reviewMachineUsbDetachResponse200 = {
+  data: ResourceMachineUsbReviewDto
+  status: 200
+}
+
+export type reviewMachineUsbDetachResponse400 = {
+  data: ApiError
+  status: 400
+}
+
+export type reviewMachineUsbDetachResponse403 = {
+  data: ApiError
+  status: 403
+}
+
+export type reviewMachineUsbDetachResponse404 = {
+  data: ApiError
+  status: 404
+}
+
+export type reviewMachineUsbDetachResponse409 = {
+  data: ApiError
+  status: 409
+}
+
+export type reviewMachineUsbDetachResponse500 = {
+  data: ApiError
+  status: 500
+}
+
+export type reviewMachineUsbDetachResponse503 = {
+  data: ApiError
+  status: 503
+}
+
+export type reviewMachineUsbDetachResponseSuccess = (reviewMachineUsbDetachResponse200) & {
+  headers: Headers;
+};
+export type reviewMachineUsbDetachResponseError = (reviewMachineUsbDetachResponse400 | reviewMachineUsbDetachResponse403 | reviewMachineUsbDetachResponse404 | reviewMachineUsbDetachResponse409 | reviewMachineUsbDetachResponse500 | reviewMachineUsbDetachResponse503) & {
+  headers: Headers;
+};
+
+export type reviewMachineUsbDetachResponse = (reviewMachineUsbDetachResponseSuccess | reviewMachineUsbDetachResponseError)
+
+export const getReviewMachineUsbDetachUrl = (machineId: string,) => {
+
+
+
+
+  return `/api/v1/machines/${machineId}/usb/detach/review`
+}
+
+/**
+ * # Errors
+ *
+ * Returns the public error envelope on refusal, an unknown machine, or a
+ * device the machine does not hold (`hardware_not_reserved`).
+ * @summary Reviews detaching a USB device from a persistent machine: the machine must
+hold the device. The answer names the reservation and the guest and slot
+it records, and the token that binds the detach call to this review.
+Nothing is written.
+ */
+export const reviewMachineUsbDetach = async (machineId: string,
+    reviewMachineUsbRequest: ReviewMachineUsbRequest, options?: RequestInit): Promise<reviewMachineUsbDetachResponse> => {
+
+    const getHeaders = (h?: NonNullable<RequestInit['headers']>): Record<string, string | readonly string[]> => {
+    if (!h) return {};
+    if (h instanceof Headers) return Object.fromEntries(h.entries());
+    if (Array.isArray(h)) return Object.fromEntries(h);
+    return h;
+  };
+const res = await fetch(getReviewMachineUsbDetachUrl(machineId),
+  {
+    ...options,
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...getHeaders(options?.headers) },
+    body: JSON.stringify(reviewMachineUsbRequest)
+  }
+)
+
+
+  const body = [204, 205, 304].includes(res.status) ? null : await res.text();
+
+  const data: reviewMachineUsbDetachResponse['data'] = body ? JSON.parse(body) : {}
+  return { data, status: res.status, headers: res.headers } as reviewMachineUsbDetachResponse
 }
 
 

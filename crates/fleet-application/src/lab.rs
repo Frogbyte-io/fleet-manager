@@ -1086,6 +1086,8 @@ pub struct Lab {
     reservations: Option<Arc<dyn crate::lab_placement::CapacityReservationPort>>,
     hardware: Option<Arc<dyn crate::hardware::HardwareStore>>,
     hotplug: Option<Arc<crate::lab_hardware_hotplug::LabHardwareHotplug>>,
+    machine_usb: Option<Arc<crate::machine_usb::MachineUsb>>,
+    machine_hardware: Option<Arc<dyn crate::machine_usb::MachineHardwareGate>>,
 }
 
 /// One device a lease asked for through its template version, and the
@@ -1127,6 +1129,8 @@ impl Lab {
             reservations: None,
             hardware: None,
             hotplug: None,
+            machine_usb: None,
+            machine_hardware: None,
         }
     }
 
@@ -1299,6 +1303,34 @@ impl Lab {
     #[must_use]
     pub fn hotplug(&self) -> Option<&Arc<crate::lab_hardware_hotplug::LabHardwareHotplug>> {
         self.hotplug.as_ref()
+    }
+
+    /// Serves the persistent machines' USB attach and detach use cases
+    /// (FM-1125) and the lifecycle gate beside the Lab surface, as the
+    /// hotplug use cases are.
+    #[must_use]
+    pub fn with_machine_usb(
+        mut self,
+        usb: Arc<crate::machine_usb::MachineUsb>,
+        gate: Arc<dyn crate::machine_usb::MachineHardwareGate>,
+    ) -> Self {
+        self.machine_usb = Some(usb);
+        self.machine_hardware = Some(gate);
+        self
+    }
+
+    /// The persistent machines' USB use cases, when the controller composed
+    /// them.
+    #[must_use]
+    pub fn machine_usb(&self) -> Option<&Arc<crate::machine_usb::MachineUsb>> {
+        self.machine_usb.as_ref()
+    }
+
+    /// What a persistent machine holds, for the guards that refuse to lose a
+    /// device, when the controller composed it.
+    #[must_use]
+    pub fn machine_hardware(&self) -> Option<&Arc<dyn crate::machine_usb::MachineHardwareGate>> {
+        self.machine_hardware.as_ref()
     }
 
     /// Serves the Lab put use cases (#393) beside the Lab surface.

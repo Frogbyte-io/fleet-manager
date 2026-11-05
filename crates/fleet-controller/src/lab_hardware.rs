@@ -65,6 +65,13 @@
 //! being released ([`Disposition::KeepHeld`]), the acting principal and the
 //! `lab.hardware.*` action are the audited ones ([`LabHardwareSaga::acting_as`])
 //! and no provision operation is there to cancel.
+//!
+//! **Persistent machines (FM-1125).** `machine_usb` drives the same building
+//! blocks for a machine's reservations ([`LabHardwareSaga::acting_for_machine`]):
+//! the owner counts while the machine exists, the refusals and audit facts
+//! name a machine, and a caller who is an administrator is told what the
+//! verify found. A `proven` flag keeps a machine's interrupted attach
+//! (`attaching`) from ever deleting an entry the row cannot show Fleet wrote.
 
 use std::collections::BTreeSet;
 use std::sync::Arc;
@@ -77,6 +84,7 @@ use fleet_application::hardware::{HardwareStore, HardwareStoreError};
 use fleet_application::hardware_inventory::{AccountSupport, HardwareInventory, reason_text};
 use fleet_application::hardware_reservation::{AuditContext, HardwareReservations};
 use fleet_application::lab::LeasePort;
+use fleet_application::machine::MachinePort;
 use fleet_application::operation::{AuditPort, Operations};
 use fleet_application::proxmox::{ProxmoxAccountPort, ProxmoxCredentialStore};
 use fleet_core::{
@@ -284,6 +292,10 @@ struct Actor {
     /// Set on a step that is not the lease's own provision or cleanup, and
     /// recorded as the `source` fact.
     source: Option<&'static str>,
+    /// Set when the reservations are a persistent machine's (FM-1125): the
+    /// owner then counts while the machine exists, and the words and facts
+    /// name a machine, not a lease.
+    machines: Option<Arc<dyn MachinePort>>,
 }
 
 /// The Lab hardware saga.
@@ -402,6 +414,7 @@ impl LabHardwareSaga {
                 id: fleet_auth::LAN_PRINCIPAL_ID.to_owned(),
                 action: Permission::LabProvision.id(),
                 source: None,
+                machines: None,
             },
         }
     }
@@ -421,8 +434,60 @@ impl LabHardwareSaga {
                 id: principal_id.to_owned(),
                 action: action.id(),
                 source: Some(source),
+                machines: None,
             },
             ..self.clone()
+        }
+    }
+
+    /// The same saga for a persistent machine's reservations (FM-1125): its
+    /// audited steps are attributed to `principal_id` under `action` and
+    /// tagged with `source`, the owner counts while the machine exists in
+    /// `machines`, and the refusals and facts name a machine. The building
+    /// blocks are the lease path's own.
+    #[must_use]
+    pub(crate) fn acting_for_machine(
+        &self,
+        principal_id: &str,
+        action: Permission,
+        source: &'static str,
+        machines: Arc<dyn MachinePort>,
+    ) -> Self {
+        Self {
+            actor: Actor {
+                id: principal_id.to_owned(),
+                action: action.id(),
+                source: Some(source),
+                machines: Some(machines),
+            },
+            ..self.clone()
+        }
+    }
+
+    /// What an owner of these reservations is called in a message.
+    fn owner_word(&self) -> &'static str {
+        if self.actor.machines.is_some() {
+            "machine"
+        } else {
+            "lease"
+        }
+    }
+
+    /// The fact key an owner's id is recorded under.
+    fn owner_fact(&self) -> &'static str {
+        if self.actor.machines.is_some() {
+            "machine_id"
+        } else {
+            "lease_id"
+        }
+    }
+
+    /// Who resolves a reservation whose attach outcome is unknown.
+    fn unknown_resolver(&self) -> &'static str {
+        if self.actor.machines.is_some() {
+            "an operator (read the guest, then hardware.override-release)"
+        } else {
+            "the lease's cleanup"
         }
     }
 
@@ -613,6 +678,14 @@ impl LabHardwareSaga {
     /// ready. An unreadable lease counts (the write is not refused on a
     /// guess; the post-write check and cleanup cover the race).
     pub(crate) async fn lease_counts(&self, lease_id: &str) -> bool {
+        // A machine counts while it exists. An unreadable machine counts, as
+        // an unreadable lease does.
+        if let Some(machines) = &self.actor.machines {
+            return !matches!(
+                machines.get(lease_id).await,
+                Err(fleet_application::operation::PortFailure::NotFound { .. })
+            );
+        }
         match self.leases.get(lease_id).await {
             Ok(lease) => matches!(
                 lease.state,
@@ -1433,7 +1506,8 @@ impl LabHardwareSaga {
                     "{detail}; the guest holds nothing Fleet wrote and the reservation was released"
                 ),
                 Disposition::KeepHeld => format!(
-                    "{detail}; the guest holds nothing Fleet wrote and the lease still holds the device"
+                    "{detail}; the guest holds nothing Fleet wrote and the {} still holds the device",
+                    self.owner_word()
                 ),
             },
         ))
@@ -1531,7 +1605,8 @@ impl LabHardwareSaga {
         Err(refused(
             reason,
             format!(
-                "{detail}; the reservation is attach_unknown and the lease's cleanup resolves it"
+                "{detail}; the reservation is attach_unknown and {} resolves it",
+                self.unknown_resolver()
             ),
         ))
     }
@@ -1737,7 +1812,10 @@ impl LabHardwareSaga {
         {
             return Err(refused(
                 "hardware_reservation_lost",
-                format!("hardware {mapping} is no longer held by this lease's reservation"),
+                format!(
+                    "hardware {mapping} is no longer held by this {}'s reservation",
+                    self.owner_word()
+                ),
             ));
         }
         match found.view.device.status {
@@ -1782,8 +1860,11 @@ impl LabHardwareSaga {
             return Err(refused(
                 "hardware_externally_attached",
                 format!(
-                    "hardware {mapping} is referenced by qemu/{} on {} ({}), a guest other than this lease's",
-                    external.vmid, external.node, external.slot
+                    "hardware {mapping} is referenced by qemu/{} on {} ({}), a guest other than this {}'s",
+                    external.vmid,
+                    external.node,
+                    external.slot,
+                    self.owner_word()
                 ),
             ));
         }
@@ -1893,8 +1974,12 @@ impl LabHardwareSaga {
         // The caller sees a refusal's reason and a generic detail: what the
         // verify found (another guest's VMID, a device's ids and port) is for
         // the audit trail, not for a lease-bound credential.
+        // A persistent machine's caller is an administrator (the machine
+        // routes are never delegated), so it is told what the verify found.
         match result {
-            Err(AttachFailure::Refused { reason, detail }) if is_revealing(reason) => {
+            Err(AttachFailure::Refused { reason, detail })
+                if is_revealing(reason) && self.actor.machines.is_none() =>
+            {
                 let _ = self
                     .event(
                         "hardware_refused",
@@ -1948,13 +2033,18 @@ impl LabHardwareSaga {
             Ok(request) => request,
             Err(detail) => return Ok(DetachResult::Failed(bounded(&detail))),
         };
+        // A row that only started its attach (`attaching`: a persistent
+        // machine's interrupted attach) proves nothing about an entry the
+        // guest shows, so it is never deleted (the lease path never gets
+        // here with such a row).
+        let proven = reservation.state != State::Attaching;
         self.detach_reservation(
             &request,
             reservation,
             device,
             None,
             lease_id,
-            true,
+            proven,
             if release {
                 Disposition::Release
             } else {
@@ -1998,9 +2088,10 @@ impl LabHardwareSaga {
                 return Err(refused(
                     "hardware_detach_unconfirmed",
                     format!(
-                        "the guest references {} in {}; the lease keeps the reservation (detach it first)",
+                        "the guest references {} in {}; the {} keeps the reservation (detach it first)",
                         device.mapping_id,
-                        held.join(", ")
+                        held.join(", "),
+                        self.owner_word()
                     ),
                 ));
             }
@@ -2008,7 +2099,8 @@ impl LabHardwareSaga {
                 return Err(refused(
                     "hardware_detach_unconfirmed",
                     format!(
-                        "the guest could not be read in full ({read}); the lease keeps the reservation"
+                        "the guest could not be read in full ({read}); the {} keeps the reservation",
+                        self.owner_word()
                     ),
                 ));
             }
@@ -2391,7 +2483,7 @@ impl LabHardwareSaga {
                 ("node", node.clone()),
                 ("guest_vmid", recorded.vmid.to_string()),
                 ("usb_slot", slot.clone()),
-                ("lease_id", lease_id.to_owned()),
+                (self.owner_fact(), lease_id.to_owned()),
             ];
             all.extend(extra.iter().cloned());
             all
