@@ -67,7 +67,7 @@ Then let only your own devices reach those ports. Tag the controller host (`tag:
 }
 ```
 
-This narrows who can reach the controller to you. Every process on your devices still can, and still acts as administrator. Never publish the controller on the Internet.
+Tagging a machine replaces its user ownership in Tailscale, so rules that matched it as one of your devices (Tailscale SSH, for example) need the tag added. This narrows who can reach the controller to you and the pilot machines. Every process on your devices still can, and still acts as administrator. Never publish the controller on the Internet.
 
 ### Optional: Tailscale Serve identity mode
 
