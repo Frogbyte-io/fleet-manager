@@ -423,6 +423,7 @@ M0 Foundation
   M1-M4 + M6 + M7 APIs -> M9 Fleet Console v2 + fleet-wide skills
   M4 desired state + M9 console -> M10 Registry + running services + action broker
   M6 + M7 Lab + persistent machines -> M11 USB hardware allocation
+  M2 onboarding + M3 skills + ADR 0015/0017 + fleetctl URL/binaries (#614, #615) -> M12 Windows workstations
 ```
 
 The critical path is M0 → M1 → M2 → M3 for the complete Developer Fleet release, then M6 plus the Packer/image-version slice of M7 for the first Lab release. Full M4 GitOps and Docker are not Lab prerequisites. Tailscale discovery is optional. Agents use skills and `fleetctl`; MCP is not on the roadmap.
