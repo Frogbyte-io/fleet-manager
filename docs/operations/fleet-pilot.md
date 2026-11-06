@@ -28,18 +28,23 @@ Examples use placeholders: the controller is `controller.example.ts.net`, the pi
   fleetctl desired activate <commit-sha> <content-digest> --wait
   ```
 
-This guide's commands carry no `--url`. `fleetctl` takes the controller URL from the first of these that is set:
+The commands below carry no global `--url` (the prerequisite check above passes it because no URL is configured yet). `fleetctl` takes the controller URL from the first of these that is set:
 
 1. `--url <controller>` on the command line;
 2. the `FLEET_URL` environment variable;
-3. `url` in the config file `$XDG_CONFIG_HOME/fleet/config.toml`, or `~/.config/fleet/config.toml` when `XDG_CONFIG_HOME` is unset (`%APPDATA%\fleet\config.toml` on Windows);
+3. `url` in the config file `$XDG_CONFIG_HOME/fleet/config.toml`, or `~/.config/fleet/config.toml` when `XDG_CONFIG_HOME` is unset or not an absolute path (`%APPDATA%\fleet\config.toml` on Windows);
 4. the default, `http://127.0.0.1:8080`.
 
 Set it once on your own workstation:
 
 ```sh
-mkdir -p ~/.config/fleet
-printf 'url = "http://controller.example.ts.net:8080"\n' > ~/.config/fleet/config.toml
+# The directory fleetctl reads: an absolute XDG_CONFIG_HOME, otherwise ~/.config.
+case "${XDG_CONFIG_HOME:-}" in
+  /*) fleet_config="$XDG_CONFIG_HOME/fleet" ;;
+  *) fleet_config="$HOME/.config/fleet" ;;
+esac
+mkdir -p "$fleet_config"
+printf 'url = "http://controller.example.ts.net:8080"\n' > "$fleet_config/config.toml"
 fleetctl --output json system   # client.urlSource is "config"
 ```
 
@@ -189,8 +194,13 @@ Copy the `fleetctl` binary you built (see the prerequisites) to the pilot machin
 
 ```sh
 install -D -m 0755 /tmp/fleetctl ~/.local/bin/fleetctl && rm /tmp/fleetctl
-mkdir -p ~/.config/fleet
-printf 'url = "http://controller.example.ts.net:8080"\n' > ~/.config/fleet/config.toml
+# The directory fleetctl reads: an absolute XDG_CONFIG_HOME, otherwise ~/.config.
+case "${XDG_CONFIG_HOME:-}" in
+  /*) fleet_config="$XDG_CONFIG_HOME/fleet" ;;
+  *) fleet_config="$HOME/.config/fleet" ;;
+esac
+mkdir -p "$fleet_config"
+printf 'url = "http://controller.example.ts.net:8080"\n' > "$fleet_config/config.toml"
 fleetctl --output json system
 ```
 

@@ -236,6 +236,22 @@ fn a_bad_ambient_url_fails_naming_its_source_but_help_still_works() {
         .collect();
     let invocation = fleetctl::parse_with_environment(&args, &environment).unwrap();
     assert!(matches!(invocation.command, fleetctl::Command::Help { .. }));
+
+    // An explicit --url is the caller's own argument: it is checked even
+    // for help, and its error names --url, not the ambient source.
+    let args: Vec<String> = [
+        "--url",
+        "http://user:pw@flag:1",
+        "machines",
+        "list",
+        "--help",
+    ]
+    .iter()
+    .map(ToString::to_string)
+    .collect();
+    let error = fleetctl::parse_with_environment(&args, &environment).unwrap_err();
+    assert!(error.message.starts_with("--url "), "{error}");
+    assert!(!error.message.contains("pw@"), "{error}");
 }
 
 #[test]

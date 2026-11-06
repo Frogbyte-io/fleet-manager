@@ -23,6 +23,7 @@ fn run(dir: &Path, path_prefix: Option<&Path>, stdin: Option<&str>, args: &[&str
         // Hermetic: no ambient controller URL from the developer's login.
         .env_remove("FLEET_URL")
         .env("XDG_CONFIG_HOME", dir)
+        .env("APPDATA", dir)
         .args(args)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -565,6 +566,7 @@ fn publish_pull_request_mode_without_gh_prints_the_compare_url() {
         .env("PATH", &bin)
         .env_remove("FLEET_URL")
         .env("XDG_CONFIG_HOME", &work)
+        .env("APPDATA", &work)
         .args([
             "--output",
             "json",

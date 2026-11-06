@@ -1319,9 +1319,14 @@ pub fn parse_with_environment(
     let words: Vec<&str> = rest.iter().map(String::as_str).collect();
     if let Some(text) = help_text(&words) {
         // Help never reaches the controller, so a broken FLEET_URL or
-        // config file must not stand between the caller and the usage.
-        let (url, url_source) = controller_url::resolve(url_flag.as_deref(), environment)
-            .unwrap_or_else(|_| (DEFAULT_URL.to_owned(), controller_url::UrlSource::Default));
+        // config file must not stand between the caller and the usage. An
+        // explicit --url is the caller's own argument and is still checked.
+        let (url, url_source) = if url_flag.is_some() {
+            controller_url::resolve(url_flag.as_deref(), environment)?
+        } else {
+            controller_url::resolve(None, environment)
+                .unwrap_or_else(|_| (DEFAULT_URL.to_owned(), controller_url::UrlSource::Default))
+        };
         return Ok(Invocation {
             url,
             url_source,

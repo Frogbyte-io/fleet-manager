@@ -39,8 +39,9 @@ fleetctl --output json system
 ```
 
 `fleetctl` finds the controller by itself: `--url`, then the `FLEET_URL`
-environment variable, then `url` in `~/.config/fleet/config.toml`
-(`%APPDATA%\fleet\config.toml` on Windows), then `http://127.0.0.1:8080`. Do not
+environment variable, then `url` in `$XDG_CONFIG_HOME/fleet/config.toml` (or
+`~/.config/fleet/config.toml` when `XDG_CONFIG_HOME` is unset or relative;
+`%APPDATA%\fleet\config.toml` on Windows), then `http://127.0.0.1:8080`. Do not
 add `--url` unless the user names a different controller. `system` reports
 which source was used in `client.urlSource` (`flag`, `env`, `config`, or
 `default`), together with the controller's version, storage health, operation
