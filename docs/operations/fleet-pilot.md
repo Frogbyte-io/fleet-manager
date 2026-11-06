@@ -204,7 +204,22 @@ Reads come from the controller's active revision. Edits (`registry set`, `relate
   ```
 
   Use the skill id that `skills list` reports. If Fleet Git still assigns the skill, add a `SkillPreset` with an empty `deployTo` for it, or the machine shows drift again.
-- **Revoke `fleetd`.** Use the machine page's Connections tab in the console (**Revoke node**). `fleetctl` has no revoke command yet. Then remove the service on the machine, as `deploy/fleetd/uninstall.sh --purge` does:
+- **Revoke `fleetd`** if you keep the machine but want its node gone. This revokes the node identity with every credential and session, as the console's Connections tab (**Revoke node**) does; `fleetd` cannot connect again until it is enrolled again:
+
+  ```sh
+  fleetctl --output json nodes revoke <machine-id> --yes
+  ```
+
+- **Remove the machine.** `machines remove` reviews first, then removes the machine record with its endpoints, facts, node identity, recorded skill installs, project checkouts and Skills Manager snapshot. It revokes the keys Fleet holds for the machine and unpins the machine's SSH host keys, unless another machine or an onboarding draft uses the same host. The audit trail and finished operations stay. Add `--uninstall` to run `deploy/fleetd/uninstall.sh --purge` over SSH first; if the uninstall fails, the machine is not removed. Without it, nothing on the machine is touched:
+
+  ```sh
+  fleetctl --output json machines remove <machine-id> --review-only
+  fleetctl --output json machines remove <machine-id> --uninstall --endpoint <endpoint-id> --yes
+  ```
+
+  The review lists anything that blocks the removal, with what to do: a Lab lease (destroy the lease; its cleanup removes the machine), a persistent marker (`machines persistent unregister`, or the reviewed destroy for a VM Fleet created), a USB device the machine holds (`machines usb detach`), or an operation that has not finished. Removing needs `machine.delete`, which no delegated credential has.
+
+  Without `--uninstall`, remove the service on the machine yourself, as `deploy/fleetd/uninstall.sh --purge` does:
 
   ```sh
   sudo systemctl disable --now fleetd
@@ -213,8 +228,8 @@ Reads come from the controller's active revision. Edits (`registry set`, `relate
   sudo rm -rf /var/lib/fleetd
   ```
 
-  The `fleet` system account stays; remove it with `sudo userdel fleet` if you want.
-- **Cut agentless access.** Remove the controller's key from the login's `~/.ssh/authorized_keys`, and clear any stored endpoint credential (`fleetctl machines endpoint-auth clear <machine-id> <endpoint-id>`; see [machine access](machine-access.md#revoke-access)). The machine record stays in the inventory: there is no machine delete yet.
+  The `fleet` system account stays either way; remove it with `sudo userdel fleet` if you want.
+- **Cut agentless access.** Remove the controller's key from the login's `~/.ssh/authorized_keys`. For a machine you keep, also clear any stored endpoint credential (`fleetctl machines endpoint-auth clear <machine-id> <endpoint-id>`; see [machine access](machine-access.md#revoke-access)); `machines remove` revokes the machine's own stored keys itself.
 - **Remove Skills Manager** if Fleet installed it: delete `~/.local/bin/skills-manager-cli`. Its library and agent skill directories belong to Skills Manager, so remove skills through it first.
 - **Roll back a Fleet Git change**: `fleetctl desired rollback <commit-sha> <content-digest> --wait`.
 

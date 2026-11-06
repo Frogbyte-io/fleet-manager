@@ -3980,6 +3980,181 @@ export interface MachineFileDto {
 }
 
 /**
+ * Something that refuses the removal, and what to do about it.
+ */
+export interface RemovalBlockerDto {
+  /** The refusal and what to do. */
+  detail: string;
+  /** The holding record. */
+  id: string;
+  /**
+     * `lab_provision`, `persistent_marker`, `hardware_reservation` or
+     * `active_operation`.
+     */
+  kind: string;
+  /** Its state. */
+  state: string;
+}
+
+/**
+ * One endpoint of the machine.
+ */
+export interface RemovalEndpointDto {
+  /**
+     * The SSH host, for an SSH endpoint.
+     * @nullable
+     */
+  host?: string | null;
+  /** The endpoint. */
+  id: string;
+  /** `ssh` or `fleetd`. */
+  kind: string;
+}
+
+/**
+ * The records a removal deletes (and the collected files it keeps).
+ */
+export interface RemovalFootprintDto {
+  /**
+     * Capability facts.
+     * @minimum 0
+     */
+  capabilities: number;
+  /**
+     * Recorded catalog skill installs.
+     * @minimum 0
+     */
+  catalogSkillInstalls: number;
+  /**
+     * Collected files, kept until their retention pass.
+     * @minimum 0
+     */
+  collectedFilesKept: number;
+  /**
+     * Stored default endpoint authentication records.
+     * @minimum 0
+     */
+  endpointAuth: number;
+  /**
+     * Endpoints.
+     * @minimum 0
+     */
+  endpoints: number;
+  /**
+     * Confirmed Proxmox guest links (0 or 1).
+     * @minimum 0
+     */
+  guestLink: number;
+  /**
+     * Inventory snapshots.
+     * @minimum 0
+     */
+  inventorySnapshots: number;
+  /**
+     * Node credentials, sessions and enrollment tokens.
+     * @minimum 0
+     */
+  nodeCredentials: number;
+  /**
+     * Node identity records (0 or 1).
+     * @minimum 0
+     */
+  nodeIdentity: number;
+  /**
+     * Project checkout observations.
+     * @minimum 0
+     */
+  projectCheckouts: number;
+  /**
+     * Skills Manager snapshots (0 or 1).
+     * @minimum 0
+     */
+  skillsSnapshot: number;
+  /**
+     * Tag and group memberships.
+     * @minimum 0
+     */
+  tagsAndGroups: number;
+}
+
+/**
+ * The fleetd uninstall a removal runs first.
+ */
+export interface MachineUninstallDto {
+  auth?: null | EndpointAuthDto;
+  /** The machine's SSH endpoint the uninstall runs over. */
+  endpointId: string;
+}
+
+/**
+ * What a removal would do, and the token that binds the removal to it.
+ */
+export interface MachineRemovalReviewDto {
+  /** What refuses the removal now, each with what to do. */
+  blockers: RemovalBlockerDto[];
+  /** Its endpoints. */
+  endpoints: RemovalEndpointDto[];
+  /** What is deleted. */
+  footprint: RemovalFootprintDto;
+  /**
+     * The hosts whose pins stay because another machine or an onboarding
+     * draft uses them.
+     */
+  keptHosts: string[];
+  /** The machine. */
+  machineId: string;
+  /** Its name. */
+  name: string;
+  /**
+     * The node identity's status (`active` or `revoked`), when it has one;
+     * the identity is deleted with the machine.
+     * @nullable
+     */
+  nodeIdentity?: string | null;
+  /**
+     * The token the removal must present; null while `blockers` is not
+     * empty.
+     * @nullable
+     */
+  reviewToken?: string | null;
+  uninstall?: null | MachineUninstallDto;
+  /** The hosts whose pinned SSH host keys are removed. */
+  unpinHosts: string[];
+}
+
+/**
+ * What a removal did.
+ */
+export interface MachineRemovedDto {
+  /** What was deleted. */
+  footprint: RemovalFootprintDto;
+  /** The hosts whose pins stayed because they are shared. */
+  keptHosts: string[];
+  /** The removed machine. */
+  machineId: string;
+  /** Its name. */
+  name: string;
+  /** Whether a node identity was deleted with the machine. */
+  nodeIdentityRemoved: boolean;
+  /** Always true: the machine record is gone. */
+  removed: boolean;
+  /**
+     * The uninstall's last line of output, when it ran.
+     * @nullable
+     */
+  uninstallSummary?: string | null;
+  /** Whether fleetd was uninstalled first. */
+  uninstalled: boolean;
+  /**
+     * The hosts whose pins could not be removed; remove them from the
+     * controller's known-hosts file by hand.
+     */
+  unpinFailedHosts: string[];
+  /** The hosts whose pinned keys were removed. */
+  unpinnedHosts: string[];
+}
+
+/**
  * What an attach or detach came to.
  */
 export interface MachineUsbDto {
@@ -6976,6 +7151,15 @@ export interface ReleaseLeaseRequest {
 }
 
 /**
+ * What to remove, and the review it was reviewed in.
+ */
+export interface RemoveMachineRequest {
+  /** The token the review answered. */
+  reviewToken: string;
+  uninstall?: null | MachineUninstallDto;
+}
+
+/**
  * What abandoning a marker will do, and the token that binds it.
  */
 export type ResourceAbandonReviewDtoData = {
@@ -8459,6 +8643,96 @@ export type ResourceMachineFileDtoData = {
 export interface ResourceMachineFileDto {
   /** One file collected from a machine. */
   data: ResourceMachineFileDtoData;
+}
+
+/**
+ * What a removal would do, and the token that binds the removal to it.
+ */
+export type ResourceMachineRemovalReviewDtoData = {
+  /** What refuses the removal now, each with what to do. */
+  blockers: RemovalBlockerDto[];
+  /** Its endpoints. */
+  endpoints: RemovalEndpointDto[];
+  /** What is deleted. */
+  footprint: RemovalFootprintDto;
+  /**
+     * The hosts whose pins stay because another machine or an onboarding
+     * draft uses them.
+     */
+  keptHosts: string[];
+  /** The machine. */
+  machineId: string;
+  /** Its name. */
+  name: string;
+  /**
+     * The node identity's status (`active` or `revoked`), when it has one;
+     * the identity is deleted with the machine.
+     * @nullable
+     */
+  nodeIdentity?: string | null;
+  /**
+     * The token the removal must present; null while `blockers` is not
+     * empty.
+     * @nullable
+     */
+  reviewToken?: string | null;
+  uninstall?: null | MachineUninstallDto;
+  /** The hosts whose pinned SSH host keys are removed. */
+  unpinHosts: string[];
+};
+
+/**
+ * A single resource.
+ *
+ * The payload is nested under `data` so that later top-level fields are an
+ * additive change rather than a breaking one.
+ */
+export interface ResourceMachineRemovalReviewDto {
+  /** What a removal would do, and the token that binds the removal to it. */
+  data: ResourceMachineRemovalReviewDtoData;
+}
+
+/**
+ * What a removal did.
+ */
+export type ResourceMachineRemovedDtoData = {
+  /** What was deleted. */
+  footprint: RemovalFootprintDto;
+  /** The hosts whose pins stayed because they are shared. */
+  keptHosts: string[];
+  /** The removed machine. */
+  machineId: string;
+  /** Its name. */
+  name: string;
+  /** Whether a node identity was deleted with the machine. */
+  nodeIdentityRemoved: boolean;
+  /** Always true: the machine record is gone. */
+  removed: boolean;
+  /**
+     * The uninstall's last line of output, when it ran.
+     * @nullable
+     */
+  uninstallSummary?: string | null;
+  /** Whether fleetd was uninstalled first. */
+  uninstalled: boolean;
+  /**
+     * The hosts whose pins could not be removed; remove them from the
+     * controller's known-hosts file by hand.
+     */
+  unpinFailedHosts: string[];
+  /** The hosts whose pinned keys were removed. */
+  unpinnedHosts: string[];
+};
+
+/**
+ * A single resource.
+ *
+ * The payload is nested under `data` so that later top-level fields are an
+ * additive change rather than a breaking one.
+ */
+export interface ResourceMachineRemovedDto {
+  /** What a removal did. */
+  data: ResourceMachineRemovedDtoData;
 }
 
 /**
@@ -10077,6 +10351,13 @@ export interface ReviewMachineCreateRequest {
      * public keys only, never a secret value.
      */
   spec: ReviewMachineCreateRequestSpec;
+}
+
+/**
+ * What to review.
+ */
+export interface ReviewMachineRemovalRequest {
+  uninstall?: null | MachineUninstallDto;
 }
 
 /**
@@ -20328,6 +20609,190 @@ const res = await fetch(getApplyMachinePlanUrl(machineId,planId),
 
   const data: applyMachinePlanResponse['data'] = body ? JSON.parse(body) : {}
   return { data, status: res.status, headers: res.headers } as applyMachinePlanResponse
+}
+
+
+
+export type removeMachineResponse200 = {
+  data: ResourceMachineRemovedDto
+  status: 200
+}
+
+export type removeMachineResponse400 = {
+  data: ApiError
+  status: 400
+}
+
+export type removeMachineResponse403 = {
+  data: ApiError
+  status: 403
+}
+
+export type removeMachineResponse404 = {
+  data: ApiError
+  status: 404
+}
+
+export type removeMachineResponse409 = {
+  data: ApiError
+  status: 409
+}
+
+export type removeMachineResponse500 = {
+  data: ApiError
+  status: 500
+}
+
+export type removeMachineResponse502 = {
+  data: ApiError
+  status: 502
+}
+
+export type removeMachineResponse503 = {
+  data: ApiError
+  status: 503
+}
+
+export type removeMachineResponseSuccess = (removeMachineResponse200) & {
+  headers: Headers;
+};
+export type removeMachineResponseError = (removeMachineResponse400 | removeMachineResponse403 | removeMachineResponse404 | removeMachineResponse409 | removeMachineResponse500 | removeMachineResponse502 | removeMachineResponse503) & {
+  headers: Headers;
+};
+
+export type removeMachineResponse = (removeMachineResponseSuccess | removeMachineResponseError)
+
+export const getRemoveMachineUrl = (machineId: string,) => {
+
+
+
+
+  return `/api/v1/machines/${machineId}/remove`
+}
+
+/**
+ * # Errors
+ *
+ * Returns the public error envelope on refusal, a review token that does
+ * not match, a hold, or a failed uninstall.
+ * @summary Removes a reviewed machine. Every hold is checked again; then, when
+asked, the fleetd uninstall runs over SSH (`uninstall.sh --purge`) and a
+failure leaves the machine registered; then the record and every fact
+about it are deleted, the keys bound to it are revoked, and the pinned
+host keys of hosts nobody else uses are removed. The audit trail,
+finished operations and collected files stay. Without an uninstall,
+nothing on the machine is touched. Audited.
+ */
+export const removeMachine = async (machineId: string,
+    removeMachineRequest: RemoveMachineRequest, options?: RequestInit): Promise<removeMachineResponse> => {
+
+    const getHeaders = (h?: NonNullable<RequestInit['headers']>): Record<string, string | readonly string[]> => {
+    if (!h) return {};
+    if (h instanceof Headers) return Object.fromEntries(h.entries());
+    if (Array.isArray(h)) return Object.fromEntries(h);
+    return h;
+  };
+const res = await fetch(getRemoveMachineUrl(machineId),
+  {
+    ...options,
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...getHeaders(options?.headers) },
+    body: JSON.stringify(removeMachineRequest)
+  }
+)
+
+
+  const body = [204, 205, 304].includes(res.status) ? null : await res.text();
+
+  const data: removeMachineResponse['data'] = body ? JSON.parse(body) : {}
+  return { data, status: res.status, headers: res.headers } as removeMachineResponse
+}
+
+
+
+export type reviewMachineRemovalResponse200 = {
+  data: ResourceMachineRemovalReviewDto
+  status: 200
+}
+
+export type reviewMachineRemovalResponse400 = {
+  data: ApiError
+  status: 400
+}
+
+export type reviewMachineRemovalResponse403 = {
+  data: ApiError
+  status: 403
+}
+
+export type reviewMachineRemovalResponse404 = {
+  data: ApiError
+  status: 404
+}
+
+export type reviewMachineRemovalResponse500 = {
+  data: ApiError
+  status: 500
+}
+
+export type reviewMachineRemovalResponse503 = {
+  data: ApiError
+  status: 503
+}
+
+export type reviewMachineRemovalResponseSuccess = (reviewMachineRemovalResponse200) & {
+  headers: Headers;
+};
+export type reviewMachineRemovalResponseError = (reviewMachineRemovalResponse400 | reviewMachineRemovalResponse403 | reviewMachineRemovalResponse404 | reviewMachineRemovalResponse500 | reviewMachineRemovalResponse503) & {
+  headers: Headers;
+};
+
+export type reviewMachineRemovalResponse = (reviewMachineRemovalResponseSuccess | reviewMachineRemovalResponseError)
+
+export const getReviewMachineRemovalUrl = (machineId: string,) => {
+
+
+
+
+  return `/api/v1/machines/${machineId}/remove/review`
+}
+
+/**
+ * # Errors
+ *
+ * Returns the public error envelope on refusal, an unknown machine, or an
+ * uninstall endpoint that is not one of the machine's SSH endpoints.
+ * @summary Reviews removing a machine: what is deleted (endpoints, facts, node
+identity, project checkouts, Skills Manager snapshot, recorded skill
+installs, guest link), which pinned host keys are removed and which stay
+because another machine or an onboarding draft shares the host, the
+fleetd uninstall when asked for, and every record that refuses the
+removal now (a Lab provision, a persistent marker, a USB reservation, an
+unfinished operation), each with what to do. Nothing is written.
+ */
+export const reviewMachineRemoval = async (machineId: string,
+    reviewMachineRemovalRequest: ReviewMachineRemovalRequest, options?: RequestInit): Promise<reviewMachineRemovalResponse> => {
+
+    const getHeaders = (h?: NonNullable<RequestInit['headers']>): Record<string, string | readonly string[]> => {
+    if (!h) return {};
+    if (h instanceof Headers) return Object.fromEntries(h.entries());
+    if (Array.isArray(h)) return Object.fromEntries(h);
+    return h;
+  };
+const res = await fetch(getReviewMachineRemovalUrl(machineId),
+  {
+    ...options,
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...getHeaders(options?.headers) },
+    body: JSON.stringify(reviewMachineRemovalRequest)
+  }
+)
+
+
+  const body = [204, 205, 304].includes(res.status) ? null : await res.text();
+
+  const data: reviewMachineRemovalResponse['data'] = body ? JSON.parse(body) : {}
+  return { data, status: res.status, headers: res.headers } as reviewMachineRemovalResponse
 }
 
 

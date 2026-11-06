@@ -1928,6 +1928,26 @@ fn run_serve(mut config: fleet_config::ControllerConfig) -> ExitCode {
                 let _ = poller_shutdown_rx.await;
             }))
         });
+        // #616: removing a machine. It composes with the node services (the
+        // removal deletes the node identity with the machine) over the same
+        // store and SSH work directory, and revokes the machine's bound keys
+        // when the secret store is open.
+        let mut services = services;
+        if let Some(services) = services.as_mut() {
+            let keys: Option<std::sync::Arc<dyn fleet_application::machine_access::MachineKeyPort>> =
+                machine_keys.clone().map(|keys| {
+                    keys as std::sync::Arc<dyn fleet_application::machine_access::MachineKeyPort>
+                });
+            match fleet_controller::machine_remove::compose(
+                store.pool(),
+                config.data_dir.join("ssh"),
+                keys,
+                ssh_auth_resolver.clone(),
+            ) {
+                Ok(removal) => services.machine_removal = Some(std::sync::Arc::new(removal)),
+                Err(error) => eprintln!("warning: machine removal unavailable: {error}"),
+            }
+        }
         let served = serve_with_events(
             settings,
             pool,

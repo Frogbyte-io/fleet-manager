@@ -166,6 +166,30 @@ use `--review-only` first when unsure. A failed creation keeps the VM and names
 the `step` that failed; re-running the same command resumes it. Destroying a
 persistent VM is a separate, confirmed act by the user.
 
+### Removing a machine
+
+Do not remove a machine or revoke its node unless the user asked you to.
+Removal deletes the machine from Fleet: its record, endpoints, facts, node
+identity, recorded skill installs and stored keys. It cannot be undone; the
+machine has to be onboarded again. When asked, review first and show the user
+what the review says:
+
+```bash
+fleetctl --output json machines remove <machine-id> --review-only
+fleetctl --output json machines remove <machine-id> --yes
+fleetctl --output json nodes revoke <machine-id> --yes
+```
+
+The review answers `unpinHosts` (pinned host keys that go), `keptHosts`
+(shared with another machine, so they stay), `footprint` (what is deleted) and
+`blockers`. A non-empty `blockers` list means the removal is refused; each
+entry's `detail` says what to do (destroy a Lab lease, unregister a persistent
+VM, detach a USB device, or wait for an operation). Report it to the user; do
+not clear blockers yourself. Without `--uninstall` nothing on the machine is
+touched; `--uninstall --endpoint <endpoint-id>` also removes fleetd over SSH
+first, and a failed uninstall leaves the machine. `nodes revoke` keeps the
+machine and only stops its fleetd from connecting.
+
 ## Projects
 
 ```bash

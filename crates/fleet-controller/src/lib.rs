@@ -38,6 +38,7 @@ pub mod lab_put_store;
 pub mod lab_ssh_keys;
 pub mod lab_sweeper;
 pub mod machine_access;
+pub mod machine_remove;
 pub mod machine_terminal;
 pub mod machine_usb;
 pub mod mise;
@@ -124,6 +125,9 @@ pub struct NodeServices {
     /// The site-template use cases (FM-1035); set with the lifecycle use
     /// cases, absent otherwise.
     pub site_templates: Option<Arc<fleet_application::site_templates::SiteTemplates>>,
+    /// The machine removal use case (#616); set by the binary once the
+    /// store and SSH work directory are ready, absent otherwise.
+    pub machine_removal: Option<Arc<fleet_application::machine_remove::MachineRemoval>>,
 }
 
 fn event_hub_for_services(
@@ -194,6 +198,7 @@ pub fn compose_node_services_with_events(
         coolify_lifecycle: None,
         coolify_settings: None,
         site_templates: None,
+        machine_removal: None,
         nodes,
         gateway,
         events,
@@ -736,6 +741,7 @@ fn build_router_for_caller(
     let coolify_lifecycle = services.and_then(|services| services.coolify_lifecycle.clone());
     let coolify_settings = services.and_then(|services| services.coolify_settings.clone());
     let site_templates = services.and_then(|services| services.site_templates.clone());
+    let machine_removal = services.and_then(|services| services.machine_removal.clone());
     let mut api_router = fleet_api::router(api_state.clone());
     if let (Some(pool), Some(machines)) = (audit_db.as_ref(), api_state.machines.as_ref()) {
         // The running-services surface (FM-1031), same shape: cached
@@ -775,6 +781,10 @@ fn build_router_for_caller(
     if let Some(dns) = dns {
         // The DNS surface (FM-1042) takes its use cases the same way.
         api_router = api_router.layer(axum::Extension(dns));
+    }
+    if let Some(machine_removal) = machine_removal {
+        // Machine removal (#616) takes its use case the same way.
+        api_router = api_router.layer(axum::Extension(machine_removal));
     }
     let shell = shell(settings).fallback(api_router);
     let web_index = std::fs::read(settings.web_dist.join("index.html"))
