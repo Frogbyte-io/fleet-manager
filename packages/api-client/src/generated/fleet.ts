@@ -600,6 +600,17 @@ export interface AssociatedGuestDto {
 }
 
 /**
+ * Which device to attach to the lease's running guest.
+ */
+export interface AttachLabHardwareRequest {
+  /**
+     * The Proxmox USB resource mapping id of a device the lease reserved
+     * (the mapping its template declared).
+     */
+  mapping: string;
+}
+
+/**
  * One audit event, containing validated metadata and no raw request payload.
  */
 export interface AuditEventDto {
@@ -1944,6 +1955,20 @@ export interface DesiredStatusDto {
 }
 
 /**
+ * Which device to detach from the lease's running guest.
+ */
+export interface DetachLabHardwareRequest {
+  /** The Proxmox USB resource mapping id of a device the lease reserved. */
+  mapping: string;
+  /**
+     * Also give the device up once the read-back confirms it is off the
+     * guest. By default the lease keeps it reserved until the lease is
+     * released, so it can be attached again.
+     */
+  release?: boolean;
+}
+
+/**
  * The public operation resource. The application type is the transport
  * truth; this type is the documented shape, kept one `From` away so the two
  * cannot drift silently.
@@ -2577,6 +2602,19 @@ export interface ExecLeaseRequest {
 }
 
 /**
+ * Which device to attach or detach, and the review it was reviewed in.
+ */
+export interface ExecuteMachineUsbRequest {
+  /** The Proxmox USB resource mapping id of the device. */
+  mapping: string;
+  /**
+     * The token the review answered; it binds this call to the reviewed
+     * machine, device and guest.
+     */
+  reviewToken: string;
+}
+
+/**
  * The requested ready-TTL extension.
  */
 export interface ExtendLeaseRequest {
@@ -2699,6 +2737,362 @@ export type FrogenvAuthDto = {
   path: string;
   type: 'identityFile';
 };
+
+/**
+ * What one node last observed for a device. There is no serial: the PVE
+ * node inventory does not return one.
+ */
+export interface HardwareEntryDto {
+  /**
+     * When the device was last seen on this node (epoch milliseconds; `0`
+     * when never).
+     */
+  lastSeenAt: number;
+  /**
+     * The manufacturer string, when the node inventory was readable.
+     * @nullable
+     */
+  manufacturer?: string | null;
+  /** The PVE node. */
+  node: string;
+  /**
+     * The product string, when the node inventory was readable.
+     * @nullable
+     */
+  product?: string | null;
+  /** The USB product id (four hex digits). */
+  productId: string;
+  /**
+     * The bus-port path of the mapping or of the device seen, such as `1-10`.
+     * @nullable
+     */
+  usbpath?: string | null;
+  /** The USB vendor id (four hex digits). */
+  vendorId: string;
+}
+
+/**
+ * The guest a reservation targets.
+ */
+export interface HardwareGuestDto {
+  /** The Proxmox account. */
+  accountId: string;
+  /** The guest's node. */
+  node: string;
+  /**
+     * The `usbN` slot, once known.
+     * @minimum 0
+     * @nullable
+     */
+  usbSlot?: number | null;
+  /**
+     * The guest's VMID.
+     * @minimum 0
+     */
+  vmid: number;
+}
+
+/**
+ * The live reservation that holds a device.
+ */
+export interface HardwareHolderDto {
+  guest?: null | HardwareGuestDto;
+  /** The owner's id. */
+  ownerId: string;
+  /** `lease` or `machine`. */
+  ownerKind: string;
+  /** The reservation's id. */
+  reservationId: string;
+  /** When the reservation was made (epoch milliseconds). */
+  reservedAt: number;
+  /**
+     * The reservation's state (`held`, `attaching`, `attached`, `detaching`,
+     * `attach_unknown`, `detach_failed`).
+     */
+  state: string;
+}
+
+/**
+ * A guest that references a device and is not the reservation's own guest.
+ */
+export interface HardwareExternalReferenceDto {
+  /**
+     * The guest's name, when known.
+     * @nullable
+     */
+  guestName?: string | null;
+  /** The guest's node. */
+  node: string;
+  /**
+     * `add` or `remove` when only one of the stored and applied configs of
+     * a running guest has the entry.
+     * @nullable
+     */
+  pending?: string | null;
+  /** The `usbN` slot. */
+  slot: string;
+  /**
+     * Whether the guest is a template (it holds no device; its clones
+     * inherit the entry).
+     */
+  template: boolean;
+  /**
+     * The guest's VMID.
+     * @minimum 0
+     */
+  vmid: number;
+}
+
+/**
+ * What a refresh observed beyond the stored record. Present in the refresh
+ * answer; `null` in the list, which makes no Proxmox call.
+ */
+export interface HardwareObservationDto {
+  /** The guests that reference the mapping. */
+  externalReferences: HardwareExternalReferenceDto[];
+  /**
+     * Explanatory notes (the finding behind `missing`, an id-only entry
+     * that cannot be told apart, a partly read mapping).
+     */
+  notes: string[];
+}
+
+/**
+ * Why an `unsupported` device cannot be allocated.
+ */
+export type HardwareUnsupportedReasonDto = typeof HardwareUnsupportedReasonDto[keyof typeof HardwareUnsupportedReasonDto];
+
+
+export const HardwareUnsupportedReasonDto = {
+  no_node_entry: 'no_node_entry',
+  ambiguous_mapping: 'ambiguous_mapping',
+  token_lacks_mapping_use: 'token_lacks_mapping_use',
+  token_lacks_guest_hwtype: 'token_lacks_guest_hwtype',
+  pve_too_old: 'pve_too_old',
+  usb_inventory_unreadable: 'usb_inventory_unreadable',
+} as const;
+
+/**
+ * A device's status. `unsupported` always carries a `reason`.
+ */
+export type HardwareStatusDto = typeof HardwareStatusDto[keyof typeof HardwareStatusDto];
+
+
+export const HardwareStatusDto = {
+  available: 'available',
+  reserved: 'reserved',
+  externally_attached: 'externally_attached',
+  missing: 'missing',
+  unsupported: 'unsupported',
+  quarantined: 'quarantined',
+} as const;
+
+/**
+ * One inventoried device: a PVE USB resource mapping.
+ */
+export interface HardwareDeviceDto {
+  /** The Proxmox account whose cluster owns the mapping. */
+  accountId: string;
+  /** When the record was created (epoch milliseconds). */
+  createdAt: number;
+  /** The per-node entries. */
+  entries: HardwareEntryDto[];
+  holder?: null | HardwareHolderDto;
+  /** The Fleet id. */
+  id: string;
+  /** The device kind (`usb`). */
+  kind: string;
+  /** The PVE resource mapping id; this is the device's identity. */
+  mappingId: string;
+  /**
+     * The operator's note.
+     * @nullable
+     */
+  note?: string | null;
+  observation?: null | HardwareObservationDto;
+  /**
+     * When the device was last seen on any node (epoch milliseconds; `0`
+     * when it never was, which also reads as stale). For a device with no
+     * entry it is when the record last changed.
+     */
+  observedAt: number;
+  reason?: null | HardwareUnsupportedReasonDto;
+  /**
+     * The reason in words, when `status` is `unsupported`.
+     * @nullable
+     */
+  reasonText?: string | null;
+  /**
+     * Whether the device was last seen longer ago than the controller's
+     * bound (a device that was never seen is stale).
+     */
+  stale: boolean;
+  /**
+     * The status to act on: a live reservation decides `reserved` and
+     * `quarantined`, and an available device whose observation is stale
+     * reads `missing`.
+     */
+  status: HardwareStatusDto;
+  /** When the record last changed (epoch milliseconds). */
+  updatedAt: number;
+}
+
+/**
+ * What the guest scan covered.
+ */
+export interface HardwareGuestScanDto {
+  /**
+     * How many QEMU guests the cluster listed.
+     * @minimum 0
+     */
+  listed: number;
+  /**
+     * How many configs were read.
+     * @minimum 0
+     */
+  read: number;
+  /**
+     * Whether the bound dropped guests. A scan with unreadable or dropped
+     * guests is incomplete: a device that would be available is reported
+     * `unsupported` (`usb_inventory_unreadable`) instead, since a guest may reference it
+     * that was not read. The scan is also not enough on its own: it sees only
+     * the guests the token may audit (see `guestVisibility`).
+     */
+  truncated: boolean;
+  /**
+     * How many could not be read.
+     * @minimum 0
+     */
+  unreadable: number;
+}
+
+/**
+ * Why the guest visibility is not `not_disproved`.
+ */
+export type HardwareGuestVisibilityReasonDto = typeof HardwareGuestVisibilityReasonDto[keyof typeof HardwareGuestVisibilityReasonDto];
+
+
+export const HardwareGuestVisibilityReasonDto = {
+  permissions_unreadable: 'permissions_unreadable',
+  permissions_truncated: 'permissions_truncated',
+  cross_check_unavailable: 'cross_check_unavailable',
+  guest_audit_not_granted: 'guest_audit_not_granted',
+  guest_path_narrowed: 'guest_path_narrowed',
+  hidden_guests_found: 'hidden_guests_found',
+} as const;
+
+/**
+ * What Fleet can say about guests the token cannot see (#596).
+ */
+export type HardwareGuestVisibilityStateDto = typeof HardwareGuestVisibilityStateDto[keyof typeof HardwareGuestVisibilityStateDto];
+
+
+export const HardwareGuestVisibilityStateDto = {
+  not_disproved: 'not_disproved',
+  incomplete: 'incomplete',
+  unverified: 'unverified',
+} as const;
+
+/**
+ * What Fleet can say about guests the token cannot see (#596). The guest
+ * scan sees only the guests the token may audit (PVE omits a guest without
+ * `VM.Audit` from the cluster listing) and PVE gives a mapping no
+ * exclusivity, so `available` is reported only while nothing shows a hidden
+ * guest. There is no state that means "every guest was seen".
+ */
+export interface HardwareGuestVisibilityDto {
+  /**
+     * What the state rests on and does not cover, and the remedy when it is
+     * not `not_disproved`.
+     */
+  detail: string;
+  reason?: null | HardwareGuestVisibilityReasonDto;
+  /**
+     * The state; anything but `not_disproved` means no device of the
+     * account is reported `available` and no attach is made.
+     */
+  state: HardwareGuestVisibilityStateDto;
+}
+
+/**
+ * What an override release did.
+ */
+export type HardwareOverrideOutcomeDto = typeof HardwareOverrideOutcomeDto[keyof typeof HardwareOverrideOutcomeDto];
+
+
+export const HardwareOverrideOutcomeDto = {
+  released: 'released',
+  already_released: 'already_released',
+} as const;
+
+/**
+ * The answer of an override release.
+ */
+export interface HardwareOverrideReleaseDto {
+  /** The device it held. */
+  deviceId: string;
+  /**
+     * Always `false`: an override never reads the guest. A device that is
+     * still attached reads `externally_attached` at the next refresh.
+     */
+  guestVerified: boolean;
+  /** Whether this call released it or it already was. */
+  outcome: HardwareOverrideOutcomeDto;
+  /**
+     * The reservation as it was before this call: its state and `usbN` slot
+     * (the release clears the slot), the owner and the guest. The audit
+     * intent recorded the same.
+     */
+  previous: HardwareHolderDto;
+  /** The reservation's id. */
+  reservationId: string;
+}
+
+/**
+ * Whether the account could be inventoried.
+ */
+export interface HardwareSupportDto {
+  /**
+     * The reason in words, unless supported.
+     * @nullable
+     */
+  detail?: string | null;
+  /**
+     * `pve_too_old`, `no_mapping_audit`, `permissions_unreadable` or
+     * `mapping_list_unreadable`, unless
+     * supported.
+     * @nullable
+     */
+  reason?: string | null;
+  /**
+     * `supported`, `unsupported` (the account cannot be inventoried) or
+     * `unverified` (the list could not be verified; no device was changed).
+     */
+  state: string;
+}
+
+/**
+ * The outcome of one refresh.
+ */
+export interface HardwareRefreshDto {
+  /** The account refreshed. */
+  accountId: string;
+  /** The account's devices after the refresh, ordered by mapping id. */
+  devices: HardwareDeviceDto[];
+  guestScan?: null | HardwareGuestScanDto;
+  guestVisibility?: null | HardwareGuestVisibilityDto;
+  /** When the observation was taken (epoch milliseconds). */
+  observedAt: number;
+  /**
+     * The PVE version, when it could be read.
+     * @nullable
+     */
+  pveVersion?: string | null;
+  /** Whether the account could be inventoried. */
+  support: HardwareSupportDto;
+  /** Warnings, bounded. */
+  warnings: string[];
+}
 
 /**
  * A concrete output template identity.
@@ -2896,6 +3290,57 @@ export interface LabAudioDto {
 }
 
 /**
+ * One physical device a template asks for: the operator-created Proxmox
+ * resource mapping that names it (ADR 0019).
+ */
+export interface LabHardwareDto {
+  /** The device kind: `usb`. */
+  kind: string;
+  /**
+     * The Proxmox USB resource mapping id (letters, digits, `-`, `_` and
+     * `.`; at most 64 characters).
+     */
+  mapping: string;
+}
+
+/**
+ * What a hotplug request came to.
+ */
+export interface LabHardwareHotplugDto {
+  /** The lease. */
+  leaseId: string;
+  /** The mapping id. */
+  mapping: string;
+  /** Whether the guest has the device once the request is answered. */
+  onGuest: boolean;
+  /**
+     * `attached` and `already_attached` (the guest has the device),
+     * `detached` and `already_detached` (it does not), or `detach_pending`:
+     * PVE stored the removal but the guest keeps the device until it
+     * restarts (its `hotplug` option lacks `usb`), so the device is still
+     * attached and the reservation stays `detaching`. An attach PVE would
+     * leave pending is refused instead (`hardware_attach_pending`); it is
+     * never reported as attached.
+     */
+  outcome: string;
+  /** Whether the request released the reservation. */
+  released: boolean;
+  /** The lease's reservation of the device. */
+  reservationId: string;
+  /**
+     * The reservation's state after the request: `attached`, `held` (the
+     * lease keeps a detached device), `detaching` (a pending detach) or
+     * `released`.
+     */
+  reservationState: string;
+  /**
+     * The `usbN` slot the guest holds the device in, when it does.
+     * @nullable
+     */
+  usbSlot?: string | null;
+}
+
+/**
  * What a drain did.
  */
 export interface LabPoolDrainDto {
@@ -3002,6 +3447,11 @@ export interface LabTemplateContentDto {
   diskGib: number;
   /** The guest's operating system: `linux` or `windows`. */
   guestOs: string;
+  /**
+     * The devices every lease from this version reserves; absent when it
+     * asks for none.
+     */
+  hardware?: LabHardwareDto[];
   /** The pinned image version id. */
   imageVersionId: string;
   /**
@@ -3078,6 +3528,11 @@ export interface LabTemplateDto {
   diskGib: number;
   /** The guest's operating system: `linux` or `windows`. */
   guestOs: string;
+  /**
+     * The devices every lease from this template reserves; absent when it
+     * asks for none.
+     */
+  hardware?: LabHardwareDto[];
   /** The draft's identity. */
   id: string;
   /** The pinned image version id. */
@@ -3209,6 +3664,42 @@ export interface LeaseDto {
 }
 
 /**
+ * A lease's reservation of one device. The attach and detach of the device
+ * to the lease's guest move it through these states.
+ */
+export interface LeaseHardwareReservationDto {
+  /** When the device was reserved (epoch milliseconds). */
+  createdAt: number;
+  /** The inventoried device's identity (`fleetctl hardware list`). */
+  deviceId: string;
+  /** The reservation's identity. */
+  id: string;
+  /**
+     * The reservation state: `held`, `attaching`, `attached`, `detaching`,
+     * `attach_unknown` or `detach_failed`.
+     */
+  state: string;
+  /**
+     * The `usbN` slot the device occupies on the guest, once attached.
+     * @minimum 0
+     * @nullable
+     */
+  usbSlot?: number | null;
+}
+
+/**
+ * One device a lease asked for and the reservation that holds it for the
+ * lease.
+ */
+export interface LeaseHardwareDto {
+  /** The device kind: `usb`. */
+  kind: string;
+  /** The Proxmox USB resource mapping id the template declared. */
+  mapping: string;
+  reservation?: null | LeaseHardwareReservationDto;
+}
+
+/**
  * A lease's capacity reservation: what it holds on a node.
  */
 export interface LeaseReservationDto {
@@ -3257,6 +3748,13 @@ export type LeaseDetailDto = LeaseDto & ({
      * @nullable
      */
   failedStep?: string | null;
+  /**
+     * The physical devices the lease asked for through its template
+     * version, each with the reservation that holds it (FM-1121). Absent
+     * for a lease whose version asks for none, so such a lease reads as it
+     * always did.
+     */
+  hardware?: LeaseHardwareDto[];
   /**
      * The Lab-owned Fleet machine the guest was registered as.
      * @nullable
@@ -3479,6 +3977,99 @@ export interface MachineFileDto {
      * @minimum 0
      */
   sizeBytes: number;
+}
+
+/**
+ * What an attach or detach came to.
+ */
+export interface MachineUsbDto {
+  /** The machine. */
+  machineId: string;
+  /** The mapping id. */
+  mapping: string;
+  /** Whether the guest has the device once the request is answered. */
+  onGuest: boolean;
+  /**
+     * `attached` and `already_attached` (the guest has the device),
+     * `detached` and `already_detached` (it does not), or `detach_pending`:
+     * PVE stored the removal but the guest keeps the device until it
+     * restarts (its `hotplug` option lacks `usb`), so the device is still
+     * attached and the reservation stays `detaching`. An attach PVE would
+     * leave pending is refused instead (`hardware_attach_pending`); it is
+     * never reported as attached.
+     */
+  outcome: string;
+  /** Whether the request released the reservation. */
+  released: boolean;
+  /** The machine's reservation of the device. */
+  reservationId: string;
+  /**
+     * The reservation's state after the request: `attached`, `detaching`
+     * (a pending detach) or `released`.
+     */
+  reservationState: string;
+  /**
+     * The `usbN` slot the guest holds the device in, when it does.
+     * @nullable
+     */
+  usbSlot?: string | null;
+}
+
+/**
+ * The guest an attach writes to, as the review found it live.
+ */
+export interface MachineUsbGuestDto {
+  /** The Proxmox account. */
+  accountId: string;
+  /** The guest's name. */
+  name: string;
+  /** The node the guest is on. */
+  node: string;
+  /**
+     * The guest's VMID.
+     * @minimum 0
+     */
+  vmid: number;
+}
+
+/**
+ * The machine's reservation of the device, when it has one.
+ */
+export interface MachineUsbReservationDto {
+  /**
+     * The VMID of the guest it records, when it does.
+     * @minimum 0
+     * @nullable
+     */
+  guestVmid?: number | null;
+  /** The reservation. */
+  id: string;
+  /**
+     * Its state: `held`, `attaching`, `attached`, `detaching`,
+     * `attach_unknown` or `detach_failed`.
+     */
+  state: string;
+  /**
+     * The `usbN` slot it records, when it does.
+     * @nullable
+     */
+  usbSlot?: string | null;
+}
+
+/**
+ * What a review found, and the token that binds the execute call to it.
+ */
+export interface MachineUsbReviewDto {
+  /** `attach` or `detach`. */
+  action: string;
+  guest?: null | MachineUsbGuestDto;
+  /** The machine. */
+  machineId: string;
+  /** The mapping id. */
+  mapping: string;
+  reservation?: null | MachineUsbReservationDto;
+  /** The token the execute call must present. */
+  reviewToken: string;
 }
 
 /**
@@ -3757,6 +4348,18 @@ export interface OperationAccepted {
   operationId: string;
   /** The operation's state at the time the response was written. */
   status: OperationStatus;
+}
+
+/**
+ * The override-release request.
+ */
+export interface OverrideReleaseRequest {
+  /**
+     * Must be `true`: the caller confirms that this frees the reservation
+     * without Fleet verifying the guest, so the device may still be
+     * attached. Absent or `false` is refused and nothing is changed.
+     */
+  confirmUnverified?: boolean;
 }
 
 /**
@@ -4256,6 +4859,69 @@ export interface PageExternalAccountDto {
 }
 
 /**
+ * One inventoried device: a PVE USB resource mapping.
+ */
+export type PageHardwareDeviceDtoItemsItem = {
+  /** The Proxmox account whose cluster owns the mapping. */
+  accountId: string;
+  /** When the record was created (epoch milliseconds). */
+  createdAt: number;
+  /** The per-node entries. */
+  entries: HardwareEntryDto[];
+  holder?: null | HardwareHolderDto;
+  /** The Fleet id. */
+  id: string;
+  /** The device kind (`usb`). */
+  kind: string;
+  /** The PVE resource mapping id; this is the device's identity. */
+  mappingId: string;
+  /**
+     * The operator's note.
+     * @nullable
+     */
+  note?: string | null;
+  observation?: null | HardwareObservationDto;
+  /**
+     * When the device was last seen on any node (epoch milliseconds; `0`
+     * when it never was, which also reads as stale). For a device with no
+     * entry it is when the record last changed.
+     */
+  observedAt: number;
+  reason?: null | HardwareUnsupportedReasonDto;
+  /**
+     * The reason in words, when `status` is `unsupported`.
+     * @nullable
+     */
+  reasonText?: string | null;
+  /**
+     * Whether the device was last seen longer ago than the controller's
+     * bound (a device that was never seen is stale).
+     */
+  stale: boolean;
+  /**
+     * The status to act on: a live reservation decides `reserved` and
+     * `quarantined`, and an available device whose observation is stale
+     * reads `missing`.
+     */
+  status: HardwareStatusDto;
+  /** When the record last changed (epoch milliseconds). */
+  updatedAt: number;
+};
+
+/**
+ * A page of resources.
+ *
+ * The concrete schema for a list endpoint appears when that endpoint does;
+ * [`PageInfo`] is the part of the shape that is fixed for every one of them.
+ */
+export interface PageHardwareDeviceDto {
+  /** The items on this page, in the endpoint's documented order. */
+  items: PageHardwareDeviceDtoItemsItem[];
+  /** Where this page sits in the result set. */
+  page: PageInfo;
+}
+
+/**
  * Safe build provenance and outcome; credentials and work paths are excluded.
  */
 export type PageImageBuildDtoItemsItem = {
@@ -4468,6 +5134,11 @@ export type PageLabTemplateDtoItemsItem = {
   diskGib: number;
   /** The guest's operating system: `linux` or `windows`. */
   guestOs: string;
+  /**
+     * The devices every lease from this template reserves; absent when it
+     * asks for none.
+     */
+  hardware?: LabHardwareDto[];
   /** The draft's identity. */
   id: string;
   /** The pinned image version id. */
@@ -5978,6 +6649,14 @@ export interface RecordCheckoutsRequest {
 }
 
 /**
+ * The refresh request.
+ */
+export interface RefreshHardwareRequest {
+  /** The Proxmox account to refresh. */
+  accountId: string;
+}
+
+/**
  * The body of the register review and register calls.
  */
 export interface RegisterGuestRequest {
@@ -7022,6 +7701,74 @@ export interface ResourceExternalAccountDto {
 }
 
 /**
+ * The answer of an override release.
+ */
+export type ResourceHardwareOverrideReleaseDtoData = {
+  /** The device it held. */
+  deviceId: string;
+  /**
+     * Always `false`: an override never reads the guest. A device that is
+     * still attached reads `externally_attached` at the next refresh.
+     */
+  guestVerified: boolean;
+  /** Whether this call released it or it already was. */
+  outcome: HardwareOverrideOutcomeDto;
+  /**
+     * The reservation as it was before this call: its state and `usbN` slot
+     * (the release clears the slot), the owner and the guest. The audit
+     * intent recorded the same.
+     */
+  previous: HardwareHolderDto;
+  /** The reservation's id. */
+  reservationId: string;
+};
+
+/**
+ * A single resource.
+ *
+ * The payload is nested under `data` so that later top-level fields are an
+ * additive change rather than a breaking one.
+ */
+export interface ResourceHardwareOverrideReleaseDto {
+  /** The answer of an override release. */
+  data: ResourceHardwareOverrideReleaseDtoData;
+}
+
+/**
+ * The outcome of one refresh.
+ */
+export type ResourceHardwareRefreshDtoData = {
+  /** The account refreshed. */
+  accountId: string;
+  /** The account's devices after the refresh, ordered by mapping id. */
+  devices: HardwareDeviceDto[];
+  guestScan?: null | HardwareGuestScanDto;
+  guestVisibility?: null | HardwareGuestVisibilityDto;
+  /** When the observation was taken (epoch milliseconds). */
+  observedAt: number;
+  /**
+     * The PVE version, when it could be read.
+     * @nullable
+     */
+  pveVersion?: string | null;
+  /** Whether the account could be inventoried. */
+  support: HardwareSupportDto;
+  /** Warnings, bounded. */
+  warnings: string[];
+};
+
+/**
+ * A single resource.
+ *
+ * The payload is nested under `data` so that later top-level fields are an
+ * additive change rather than a breaking one.
+ */
+export interface ResourceHardwareRefreshDto {
+  /** The outcome of one refresh. */
+  data: ResourceHardwareRefreshDtoData;
+}
+
+/**
  * Safe build provenance and outcome; credentials and work paths are excluded.
  */
 export type ResourceImageBuildDtoData = {
@@ -7186,6 +7933,54 @@ export interface ResourceLabArtifactDto {
 }
 
 /**
+ * What a hotplug request came to.
+ */
+export type ResourceLabHardwareHotplugDtoData = {
+  /** The lease. */
+  leaseId: string;
+  /** The mapping id. */
+  mapping: string;
+  /** Whether the guest has the device once the request is answered. */
+  onGuest: boolean;
+  /**
+     * `attached` and `already_attached` (the guest has the device),
+     * `detached` and `already_detached` (it does not), or `detach_pending`:
+     * PVE stored the removal but the guest keeps the device until it
+     * restarts (its `hotplug` option lacks `usb`), so the device is still
+     * attached and the reservation stays `detaching`. An attach PVE would
+     * leave pending is refused instead (`hardware_attach_pending`); it is
+     * never reported as attached.
+     */
+  outcome: string;
+  /** Whether the request released the reservation. */
+  released: boolean;
+  /** The lease's reservation of the device. */
+  reservationId: string;
+  /**
+     * The reservation's state after the request: `attached`, `held` (the
+     * lease keeps a detached device), `detaching` (a pending detach) or
+     * `released`.
+     */
+  reservationState: string;
+  /**
+     * The `usbN` slot the guest holds the device in, when it does.
+     * @nullable
+     */
+  usbSlot?: string | null;
+};
+
+/**
+ * A single resource.
+ *
+ * The payload is nested under `data` so that later top-level fields are an
+ * additive change rather than a breaking one.
+ */
+export interface ResourceLabHardwareHotplugDto {
+  /** What a hotplug request came to. */
+  data: ResourceLabHardwareHotplugDtoData;
+}
+
+/**
  * What a drain did.
  */
 export type ResourceLabPoolDrainDtoData = {
@@ -7276,6 +8071,11 @@ export type ResourceLabTemplateDtoData = {
   diskGib: number;
   /** The guest's operating system: `linux` or `windows`. */
   guestOs: string;
+  /**
+     * The devices every lease from this template reserves; absent when it
+     * asks for none.
+     */
+  hardware?: LabHardwareDto[];
   /** The draft's identity. */
   id: string;
   /** The pinned image version id. */
@@ -7395,6 +8195,13 @@ export type ResourceLeaseDetailDtoData = LeaseDto & ({
      * @nullable
      */
   failedStep?: string | null;
+  /**
+     * The physical devices the lease asked for through its template
+     * version, each with the reservation that holds it (FM-1121). Absent
+     * for a lease whose version asks for none, so such a lease reads as it
+     * always did.
+     */
+  hardware?: LeaseHardwareDto[];
   /**
      * The Lab-owned Fleet machine the guest was registered as.
      * @nullable
@@ -7652,6 +8459,80 @@ export type ResourceMachineFileDtoData = {
 export interface ResourceMachineFileDto {
   /** One file collected from a machine. */
   data: ResourceMachineFileDtoData;
+}
+
+/**
+ * What an attach or detach came to.
+ */
+export type ResourceMachineUsbDtoData = {
+  /** The machine. */
+  machineId: string;
+  /** The mapping id. */
+  mapping: string;
+  /** Whether the guest has the device once the request is answered. */
+  onGuest: boolean;
+  /**
+     * `attached` and `already_attached` (the guest has the device),
+     * `detached` and `already_detached` (it does not), or `detach_pending`:
+     * PVE stored the removal but the guest keeps the device until it
+     * restarts (its `hotplug` option lacks `usb`), so the device is still
+     * attached and the reservation stays `detaching`. An attach PVE would
+     * leave pending is refused instead (`hardware_attach_pending`); it is
+     * never reported as attached.
+     */
+  outcome: string;
+  /** Whether the request released the reservation. */
+  released: boolean;
+  /** The machine's reservation of the device. */
+  reservationId: string;
+  /**
+     * The reservation's state after the request: `attached`, `detaching`
+     * (a pending detach) or `released`.
+     */
+  reservationState: string;
+  /**
+     * The `usbN` slot the guest holds the device in, when it does.
+     * @nullable
+     */
+  usbSlot?: string | null;
+};
+
+/**
+ * A single resource.
+ *
+ * The payload is nested under `data` so that later top-level fields are an
+ * additive change rather than a breaking one.
+ */
+export interface ResourceMachineUsbDto {
+  /** What an attach or detach came to. */
+  data: ResourceMachineUsbDtoData;
+}
+
+/**
+ * What a review found, and the token that binds the execute call to it.
+ */
+export type ResourceMachineUsbReviewDtoData = {
+  /** `attach` or `detach`. */
+  action: string;
+  guest?: null | MachineUsbGuestDto;
+  /** The machine. */
+  machineId: string;
+  /** The mapping id. */
+  mapping: string;
+  reservation?: null | MachineUsbReservationDto;
+  /** The token the execute call must present. */
+  reviewToken: string;
+};
+
+/**
+ * A single resource.
+ *
+ * The payload is nested under `data` so that later top-level fields are an
+ * additive change rather than a breaking one.
+ */
+export interface ResourceMachineUsbReviewDto {
+  /** What a review found, and the token that binds the execute call to it. */
+  data: ResourceMachineUsbReviewDtoData;
 }
 
 /**
@@ -9199,6 +10080,14 @@ export interface ReviewMachineCreateRequest {
 }
 
 /**
+ * Which device to review.
+ */
+export interface ReviewMachineUsbRequest {
+  /** The Proxmox USB resource mapping id of the device. */
+  mapping: string;
+}
+
+/**
  * The destructive-review request.
  */
 export interface ReviewProxmoxOperationRequest {
@@ -9257,6 +10146,12 @@ export interface SaveLabTemplateRequest {
   diskGib: number;
   /** The guest's operating system: `linux` (the default) or `windows`. */
   guestOs?: string;
+  /**
+     * The physical devices every lease from this template reserves: one
+     * entry per operator-created Proxmox USB mapping (at most four). Absent
+     * or empty asks for none.
+     */
+  hardware?: LabHardwareDto[];
   /** The pinned image version id. */
   imageVersionId: string;
   /**
@@ -10297,6 +11192,22 @@ kind?: ExternalProviderKindDto;
 limit?: number;
 /**
  * The opaque cursor: the last account id of the previous page.
+ */
+cursor?: string;
+};
+
+export type ListHardwareDevicesParams = {
+/**
+ * Only this account's devices.
+ */
+accountId?: string;
+/**
+ * The maximum number of devices to return.
+ * @minimum 0
+ */
+limit?: number;
+/**
+ * The opaque cursor: the last device id of the previous page.
  */
 cursor?: string;
 };
@@ -12694,6 +13605,271 @@ export const probeExternalAccount = async (accountId: string, options?: RequestI
 
 
 
+export type listHardwareDevicesResponse200 = {
+  data: PageHardwareDeviceDto
+  status: 200
+}
+
+export type listHardwareDevicesResponse400 = {
+  data: ApiError
+  status: 400
+}
+
+export type listHardwareDevicesResponse403 = {
+  data: ApiError
+  status: 403
+}
+
+export type listHardwareDevicesResponse404 = {
+  data: ApiError
+  status: 404
+}
+
+export type listHardwareDevicesResponse500 = {
+  data: ApiError
+  status: 500
+}
+
+export type listHardwareDevicesResponse503 = {
+  data: ApiError
+  status: 503
+}
+
+export type listHardwareDevicesResponseSuccess = (listHardwareDevicesResponse200) & {
+  headers: Headers;
+};
+export type listHardwareDevicesResponseError = (listHardwareDevicesResponse400 | listHardwareDevicesResponse403 | listHardwareDevicesResponse404 | listHardwareDevicesResponse500 | listHardwareDevicesResponse503) & {
+  headers: Headers;
+};
+
+export type listHardwareDevicesResponse = (listHardwareDevicesResponseSuccess | listHardwareDevicesResponseError)
+
+export const getListHardwareDevicesUrl = (params?: ListHardwareDevicesParams,) => {
+  const normalizedParams = new URLSearchParams();
+
+  Object.entries(params || {}).forEach(([key, value]) => {
+
+    if (value !== undefined) {
+      normalizedParams.append(key, value === null ? 'null' : String(value))
+    }
+  });
+
+  const stringifiedParams = normalizedParams.toString();
+
+  return stringifiedParams.length > 0 ? `/api/v1/hardware/devices?${stringifiedParams}` : `/api/v1/hardware/devices`
+}
+
+/**
+ * # Errors
+ *
+ * Returns the public error envelope on refusal, an unknown account, an
+ * unknown cursor, an unwired surface or a backend failure.
+ * @summary Lists the inventoried hardware devices with their status and the reason
+for it. A read of Fleet's own records: it makes no Proxmox call, so a
+device is as fresh as the last `POST /hardware/refresh` (`stale` says when
+that is too old to trust).
+ */
+export const listHardwareDevices = async (params?: ListHardwareDevicesParams, options?: RequestInit): Promise<listHardwareDevicesResponse> => {
+
+  const res = await fetch(getListHardwareDevicesUrl(params),
+  {
+    ...options,
+    method: 'GET'
+
+
+  }
+)
+
+
+  const body = [204, 205, 304].includes(res.status) ? null : await res.text();
+
+  const data: listHardwareDevicesResponse['data'] = body ? JSON.parse(body) : {}
+  return { data, status: res.status, headers: res.headers } as listHardwareDevicesResponse
+}
+
+
+
+export type refreshHardwareResponse200 = {
+  data: ResourceHardwareRefreshDto
+  status: 200
+}
+
+export type refreshHardwareResponse403 = {
+  data: ApiError
+  status: 403
+}
+
+export type refreshHardwareResponse404 = {
+  data: ApiError
+  status: 404
+}
+
+export type refreshHardwareResponse409 = {
+  data: ApiError
+  status: 409
+}
+
+export type refreshHardwareResponse500 = {
+  data: ApiError
+  status: 500
+}
+
+export type refreshHardwareResponse502 = {
+  data: ApiError
+  status: 502
+}
+
+export type refreshHardwareResponse503 = {
+  data: ApiError
+  status: 503
+}
+
+export type refreshHardwareResponseSuccess = (refreshHardwareResponse200) & {
+  headers: Headers;
+};
+export type refreshHardwareResponseError = (refreshHardwareResponse403 | refreshHardwareResponse404 | refreshHardwareResponse409 | refreshHardwareResponse500 | refreshHardwareResponse502 | refreshHardwareResponse503) & {
+  headers: Headers;
+};
+
+export type refreshHardwareResponse = (refreshHardwareResponseSuccess | refreshHardwareResponseError)
+
+export const getRefreshHardwareUrl = () => {
+
+
+
+
+  return `/api/v1/hardware/refresh`
+}
+
+/**
+ * # Errors
+ *
+ * Returns the public error envelope on refusal, an unknown or unconfirmed
+ * account, a missing token secret, an unwired surface, a failed audit write
+ * or a Proxmox failure that makes the observation meaningless.
+ * @summary Refreshes one account's hardware inventory: reads its USB mappings, the
+nodes they name, every guest config and the token's own permissions
+through the account's API token, and records the derived status of each
+mapping. An authorized, audited mutation (`hardware.refresh`); it changes
+nothing on Proxmox.
+ */
+export const refreshHardware = async (refreshHardwareRequest: RefreshHardwareRequest, options?: RequestInit): Promise<refreshHardwareResponse> => {
+
+    const getHeaders = (h?: NonNullable<RequestInit['headers']>): Record<string, string | readonly string[]> => {
+    if (!h) return {};
+    if (h instanceof Headers) return Object.fromEntries(h.entries());
+    if (Array.isArray(h)) return Object.fromEntries(h);
+    return h;
+  };
+const res = await fetch(getRefreshHardwareUrl(),
+  {
+    ...options,
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...getHeaders(options?.headers) },
+    body: JSON.stringify(refreshHardwareRequest)
+  }
+)
+
+
+  const body = [204, 205, 304].includes(res.status) ? null : await res.text();
+
+  const data: refreshHardwareResponse['data'] = body ? JSON.parse(body) : {}
+  return { data, status: res.status, headers: res.headers } as refreshHardwareResponse
+}
+
+
+
+export type overrideReleaseHardwareReservationResponse200 = {
+  data: ResourceHardwareOverrideReleaseDto
+  status: 200
+}
+
+export type overrideReleaseHardwareReservationResponse400 = {
+  data: ApiError
+  status: 400
+}
+
+export type overrideReleaseHardwareReservationResponse403 = {
+  data: ApiError
+  status: 403
+}
+
+export type overrideReleaseHardwareReservationResponse404 = {
+  data: ApiError
+  status: 404
+}
+
+export type overrideReleaseHardwareReservationResponse500 = {
+  data: ApiError
+  status: 500
+}
+
+export type overrideReleaseHardwareReservationResponse503 = {
+  data: ApiError
+  status: 503
+}
+
+export type overrideReleaseHardwareReservationResponseSuccess = (overrideReleaseHardwareReservationResponse200) & {
+  headers: Headers;
+};
+export type overrideReleaseHardwareReservationResponseError = (overrideReleaseHardwareReservationResponse400 | overrideReleaseHardwareReservationResponse403 | overrideReleaseHardwareReservationResponse404 | overrideReleaseHardwareReservationResponse500 | overrideReleaseHardwareReservationResponse503) & {
+  headers: Headers;
+};
+
+export type overrideReleaseHardwareReservationResponse = (overrideReleaseHardwareReservationResponseSuccess | overrideReleaseHardwareReservationResponseError)
+
+export const getOverrideReleaseHardwareReservationUrl = (reservationId: string,) => {
+
+
+
+
+  return `/api/v1/hardware/reservations/${reservationId}/override-release`
+}
+
+/**
+ * # Errors
+ *
+ * Returns the public error envelope on refusal, a missing confirmation, an
+ * unknown reservation, an unwired surface, or a failed audit write (nothing
+ * is released then).
+ * @summary Frees a hardware reservation without verifying the guest: the elevated
+operator override for a reservation stuck in `attach_unknown`,
+`detach_failed` or `detaching` that nothing else resolves. Authorized as
+`hardware.override-release` on the reservation (no delegated Lab
+credential holds it) and requires `confirmUnverified: true`. The audit
+intent, carrying the row's state and `usbN` slot and recording that Fleet
+did not verify the guest, is written before the release and is required.
+It changes Fleet's records only: it never calls Proxmox and removes
+nothing from the guest. Idempotent: a reservation that is already released
+answers `already_released`.
+ */
+export const overrideReleaseHardwareReservation = async (reservationId: string,
+    overrideReleaseRequest: OverrideReleaseRequest, options?: RequestInit): Promise<overrideReleaseHardwareReservationResponse> => {
+
+    const getHeaders = (h?: NonNullable<RequestInit['headers']>): Record<string, string | readonly string[]> => {
+    if (!h) return {};
+    if (h instanceof Headers) return Object.fromEntries(h.entries());
+    if (Array.isArray(h)) return Object.fromEntries(h);
+    return h;
+  };
+const res = await fetch(getOverrideReleaseHardwareReservationUrl(reservationId),
+  {
+    ...options,
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...getHeaders(options?.headers) },
+    body: JSON.stringify(overrideReleaseRequest)
+  }
+)
+
+
+  const body = [204, 205, 304].includes(res.status) ? null : await res.text();
+
+  const data: overrideReleaseHardwareReservationResponse['data'] = body ? JSON.parse(body) : {}
+  return { data, status: res.status, headers: res.headers } as overrideReleaseHardwareReservationResponse
+}
+
+
+
 export type listImageBuildAddressesResponse200 = {
   data: PageBuildAddressDto
   status: 200
@@ -14808,6 +15984,200 @@ const res = await fetch(getPutLabFileUrl(leaseId,params),
 
   const data: putLabFileResponse['data'] = body ? JSON.parse(body) : {}
   return { data, status: res.status, headers: res.headers } as putLabFileResponse
+}
+
+
+
+export type attachLabLeaseHardwareResponse200 = {
+  data: ResourceLabHardwareHotplugDto
+  status: 200
+}
+
+export type attachLabLeaseHardwareResponse400 = {
+  data: ApiError
+  status: 400
+}
+
+export type attachLabLeaseHardwareResponse403 = {
+  data: ApiError
+  status: 403
+}
+
+export type attachLabLeaseHardwareResponse404 = {
+  data: ApiError
+  status: 404
+}
+
+export type attachLabLeaseHardwareResponse409 = {
+  data: ApiError
+  status: 409
+}
+
+export type attachLabLeaseHardwareResponse500 = {
+  data: ApiError
+  status: 500
+}
+
+export type attachLabLeaseHardwareResponse503 = {
+  data: ApiError
+  status: 503
+}
+
+export type attachLabLeaseHardwareResponseSuccess = (attachLabLeaseHardwareResponse200) & {
+  headers: Headers;
+};
+export type attachLabLeaseHardwareResponseError = (attachLabLeaseHardwareResponse400 | attachLabLeaseHardwareResponse403 | attachLabLeaseHardwareResponse404 | attachLabLeaseHardwareResponse409 | attachLabLeaseHardwareResponse500 | attachLabLeaseHardwareResponse503) & {
+  headers: Headers;
+};
+
+export type attachLabLeaseHardwareResponse = (attachLabLeaseHardwareResponseSuccess | attachLabLeaseHardwareResponseError)
+
+export const getAttachLabLeaseHardwareUrl = (leaseId: string,) => {
+
+
+
+
+  return `/api/v1/lab/leases/${leaseId}/hardware/attach`
+}
+
+/**
+ * # Errors
+ *
+ * Returns the public error envelope on refusal, an unknown lease (or
+ * another owner's), a lease that is not ready, a device the lease did not
+ * reserve, a failed verification of the device, or a failed write.
+ * @summary Attaches a device the lease reserved to the lease's running guest: a
+digest-conditional write of the mapping into a free `usbN` slot, read back
+before it is reported. Only the lease's holder (or an administrator) may
+act, only for a device the lease reserved, and only on a ready lease. An
+attach PVE would leave pending (the guest's `hotplug` option lacks `usb`)
+is removed again and refused as `hardware_attach_pending`: it is never
+reported as attached. The attach is audited before the write.
+ */
+export const attachLabLeaseHardware = async (leaseId: string,
+    attachLabHardwareRequest: AttachLabHardwareRequest, options?: RequestInit): Promise<attachLabLeaseHardwareResponse> => {
+
+    const getHeaders = (h?: NonNullable<RequestInit['headers']>): Record<string, string | readonly string[]> => {
+    if (!h) return {};
+    if (h instanceof Headers) return Object.fromEntries(h.entries());
+    if (Array.isArray(h)) return Object.fromEntries(h);
+    return h;
+  };
+const res = await fetch(getAttachLabLeaseHardwareUrl(leaseId),
+  {
+    ...options,
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...getHeaders(options?.headers) },
+    body: JSON.stringify(attachLabHardwareRequest)
+  }
+)
+
+
+  const body = [204, 205, 304].includes(res.status) ? null : await res.text();
+
+  const data: attachLabLeaseHardwareResponse['data'] = body ? JSON.parse(body) : {}
+  return { data, status: res.status, headers: res.headers } as attachLabLeaseHardwareResponse
+}
+
+
+
+export type detachLabLeaseHardwareResponse200 = {
+  data: ResourceLabHardwareHotplugDto
+  status: 200
+}
+
+export type detachLabLeaseHardwareResponse202 = {
+  data: ResourceLabHardwareHotplugDto
+  status: 202
+}
+
+export type detachLabLeaseHardwareResponse400 = {
+  data: ApiError
+  status: 400
+}
+
+export type detachLabLeaseHardwareResponse403 = {
+  data: ApiError
+  status: 403
+}
+
+export type detachLabLeaseHardwareResponse404 = {
+  data: ApiError
+  status: 404
+}
+
+export type detachLabLeaseHardwareResponse409 = {
+  data: ApiError
+  status: 409
+}
+
+export type detachLabLeaseHardwareResponse500 = {
+  data: ApiError
+  status: 500
+}
+
+export type detachLabLeaseHardwareResponse503 = {
+  data: ApiError
+  status: 503
+}
+
+export type detachLabLeaseHardwareResponseSuccess = (detachLabLeaseHardwareResponse200 | detachLabLeaseHardwareResponse202) & {
+  headers: Headers;
+};
+export type detachLabLeaseHardwareResponseError = (detachLabLeaseHardwareResponse400 | detachLabLeaseHardwareResponse403 | detachLabLeaseHardwareResponse404 | detachLabLeaseHardwareResponse409 | detachLabLeaseHardwareResponse500 | detachLabLeaseHardwareResponse503) & {
+  headers: Headers;
+};
+
+export type detachLabLeaseHardwareResponse = (detachLabLeaseHardwareResponseSuccess | detachLabLeaseHardwareResponseError)
+
+export const getDetachLabLeaseHardwareUrl = (leaseId: string,) => {
+
+
+
+
+  return `/api/v1/lab/leases/${leaseId}/hardware/detach`
+}
+
+/**
+ * # Errors
+ *
+ * Returns the public error envelope on refusal, an unknown lease (or
+ * another owner's), a lease that is not ready, a device the lease did not
+ * reserve, or a detach that failed or could not be confirmed (the
+ * reservation stays with the lease and its cleanup retries).
+ * @summary Detaches a device the lease reserved from the lease's running guest: the
+recorded `usbN` entry is deleted only when it holds exactly what Fleet
+wrote, and every `usbN` entry is read back before the answer. The lease
+keeps the device reserved (it can attach it again) unless the request
+sets `release`, which gives it up after the read-back confirmed it is
+gone. A removal PVE leaves pending (the guest's `hotplug` option lacks
+`usb`) answers `detach_pending` with the device still attached. Cleanup
+still detaches whatever the lease holds before it decides the guest's
+fate. Audited before the delete.
+ */
+export const detachLabLeaseHardware = async (leaseId: string,
+    detachLabHardwareRequest: DetachLabHardwareRequest, options?: RequestInit): Promise<detachLabLeaseHardwareResponse> => {
+
+    const getHeaders = (h?: NonNullable<RequestInit['headers']>): Record<string, string | readonly string[]> => {
+    if (!h) return {};
+    if (h instanceof Headers) return Object.fromEntries(h.entries());
+    if (Array.isArray(h)) return Object.fromEntries(h);
+    return h;
+  };
+const res = await fetch(getDetachLabLeaseHardwareUrl(leaseId),
+  {
+    ...options,
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...getHeaders(options?.headers) },
+    body: JSON.stringify(detachLabHardwareRequest)
+  }
+)
+
+
+  const body = [204, 205, 304].includes(res.status) ? null : await res.text();
+
+  const data: detachLabLeaseHardwareResponse['data'] = body ? JSON.parse(body) : {}
+  return { data, status: res.status, headers: res.headers } as detachLabLeaseHardwareResponse
 }
 
 
@@ -19184,6 +20554,381 @@ const res = await fetch(getCreateMachineTerminalSessionUrl(machineId),
 
   const data: createMachineTerminalSessionResponse['data'] = body ? JSON.parse(body) : {}
   return { data, status: res.status, headers: res.headers } as createMachineTerminalSessionResponse
+}
+
+
+
+export type attachMachineUsbResponse200 = {
+  data: ResourceMachineUsbDto
+  status: 200
+}
+
+export type attachMachineUsbResponse400 = {
+  data: ApiError
+  status: 400
+}
+
+export type attachMachineUsbResponse403 = {
+  data: ApiError
+  status: 403
+}
+
+export type attachMachineUsbResponse404 = {
+  data: ApiError
+  status: 404
+}
+
+export type attachMachineUsbResponse409 = {
+  data: ApiError
+  status: 409
+}
+
+export type attachMachineUsbResponse500 = {
+  data: ApiError
+  status: 500
+}
+
+export type attachMachineUsbResponse503 = {
+  data: ApiError
+  status: 503
+}
+
+export type attachMachineUsbResponseSuccess = (attachMachineUsbResponse200) & {
+  headers: Headers;
+};
+export type attachMachineUsbResponseError = (attachMachineUsbResponse400 | attachMachineUsbResponse403 | attachMachineUsbResponse404 | attachMachineUsbResponse409 | attachMachineUsbResponse500 | attachMachineUsbResponse503) & {
+  headers: Headers;
+};
+
+export type attachMachineUsbResponse = (attachMachineUsbResponseSuccess | attachMachineUsbResponseError)
+
+export const getAttachMachineUsbUrl = (machineId: string,) => {
+
+
+
+
+  return `/api/v1/machines/${machineId}/usb/attach`
+}
+
+/**
+ * # Errors
+ *
+ * Returns the public error envelope on refusal, a review token that does
+ * not match, an unknown machine, an ineligible guest, a device another owner
+ * holds, a failed verification of the device, or a failed write.
+ * @summary Attaches a reviewed device to the machine's guest and reserves it for the
+machine until it is explicitly detached: a digest-conditional write of the
+mapping into a free `usbN` slot, read back before it is reported. The
+device is reserved first, fail fast (`hardware_busy`, never queued), and
+verified against the pinned fingerprint. An attach PVE would leave pending
+(the running guest's `hotplug` option lacks `usb`) is removed again and
+refused as `hardware_attach_pending`: it is never reported as attached.
+Audited before the write.
+ */
+export const attachMachineUsb = async (machineId: string,
+    executeMachineUsbRequest: ExecuteMachineUsbRequest, options?: RequestInit): Promise<attachMachineUsbResponse> => {
+
+    const getHeaders = (h?: NonNullable<RequestInit['headers']>): Record<string, string | readonly string[]> => {
+    if (!h) return {};
+    if (h instanceof Headers) return Object.fromEntries(h.entries());
+    if (Array.isArray(h)) return Object.fromEntries(h);
+    return h;
+  };
+const res = await fetch(getAttachMachineUsbUrl(machineId),
+  {
+    ...options,
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...getHeaders(options?.headers) },
+    body: JSON.stringify(executeMachineUsbRequest)
+  }
+)
+
+
+  const body = [204, 205, 304].includes(res.status) ? null : await res.text();
+
+  const data: attachMachineUsbResponse['data'] = body ? JSON.parse(body) : {}
+  return { data, status: res.status, headers: res.headers } as attachMachineUsbResponse
+}
+
+
+
+export type reviewMachineUsbAttachResponse200 = {
+  data: ResourceMachineUsbReviewDto
+  status: 200
+}
+
+export type reviewMachineUsbAttachResponse400 = {
+  data: ApiError
+  status: 400
+}
+
+export type reviewMachineUsbAttachResponse403 = {
+  data: ApiError
+  status: 403
+}
+
+export type reviewMachineUsbAttachResponse404 = {
+  data: ApiError
+  status: 404
+}
+
+export type reviewMachineUsbAttachResponse409 = {
+  data: ApiError
+  status: 409
+}
+
+export type reviewMachineUsbAttachResponse500 = {
+  data: ApiError
+  status: 500
+}
+
+export type reviewMachineUsbAttachResponse503 = {
+  data: ApiError
+  status: 503
+}
+
+export type reviewMachineUsbAttachResponseSuccess = (reviewMachineUsbAttachResponse200) & {
+  headers: Headers;
+};
+export type reviewMachineUsbAttachResponseError = (reviewMachineUsbAttachResponse400 | reviewMachineUsbAttachResponse403 | reviewMachineUsbAttachResponse404 | reviewMachineUsbAttachResponse409 | reviewMachineUsbAttachResponse500 | reviewMachineUsbAttachResponse503) & {
+  headers: Headers;
+};
+
+export type reviewMachineUsbAttachResponse = (reviewMachineUsbAttachResponseSuccess | reviewMachineUsbAttachResponseError)
+
+export const getReviewMachineUsbAttachUrl = (machineId: string,) => {
+
+
+
+
+  return `/api/v1/machines/${machineId}/usb/attach/review`
+}
+
+/**
+ * # Errors
+ *
+ * Returns the public error envelope on refusal, an unknown machine, a
+ * machine without an eligible persistent guest, an unknown device or a
+ * device another owner holds (`hardware_busy`).
+ * @summary Reviews attaching a USB device to a persistent machine: the machine must
+be linked to a QEMU guest that carries a ready persistent marker (not a
+Lab clone, template, image artifact or pool member), and the device must
+be inventoried and not held by another owner. Answers the guest the
+attach will write to and the token that binds the attach call to this
+review. Nothing is written.
+ */
+export const reviewMachineUsbAttach = async (machineId: string,
+    reviewMachineUsbRequest: ReviewMachineUsbRequest, options?: RequestInit): Promise<reviewMachineUsbAttachResponse> => {
+
+    const getHeaders = (h?: NonNullable<RequestInit['headers']>): Record<string, string | readonly string[]> => {
+    if (!h) return {};
+    if (h instanceof Headers) return Object.fromEntries(h.entries());
+    if (Array.isArray(h)) return Object.fromEntries(h);
+    return h;
+  };
+const res = await fetch(getReviewMachineUsbAttachUrl(machineId),
+  {
+    ...options,
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...getHeaders(options?.headers) },
+    body: JSON.stringify(reviewMachineUsbRequest)
+  }
+)
+
+
+  const body = [204, 205, 304].includes(res.status) ? null : await res.text();
+
+  const data: reviewMachineUsbAttachResponse['data'] = body ? JSON.parse(body) : {}
+  return { data, status: res.status, headers: res.headers } as reviewMachineUsbAttachResponse
+}
+
+
+
+export type detachMachineUsbResponse200 = {
+  data: ResourceMachineUsbDto
+  status: 200
+}
+
+export type detachMachineUsbResponse202 = {
+  data: ResourceMachineUsbDto
+  status: 202
+}
+
+export type detachMachineUsbResponse400 = {
+  data: ApiError
+  status: 400
+}
+
+export type detachMachineUsbResponse403 = {
+  data: ApiError
+  status: 403
+}
+
+export type detachMachineUsbResponse404 = {
+  data: ApiError
+  status: 404
+}
+
+export type detachMachineUsbResponse409 = {
+  data: ApiError
+  status: 409
+}
+
+export type detachMachineUsbResponse500 = {
+  data: ApiError
+  status: 500
+}
+
+export type detachMachineUsbResponse503 = {
+  data: ApiError
+  status: 503
+}
+
+export type detachMachineUsbResponseSuccess = (detachMachineUsbResponse200 | detachMachineUsbResponse202) & {
+  headers: Headers;
+};
+export type detachMachineUsbResponseError = (detachMachineUsbResponse400 | detachMachineUsbResponse403 | detachMachineUsbResponse404 | detachMachineUsbResponse409 | detachMachineUsbResponse500 | detachMachineUsbResponse503) & {
+  headers: Headers;
+};
+
+export type detachMachineUsbResponse = (detachMachineUsbResponseSuccess | detachMachineUsbResponseError)
+
+export const getDetachMachineUsbUrl = (machineId: string,) => {
+
+
+
+
+  return `/api/v1/machines/${machineId}/usb/detach`
+}
+
+/**
+ * # Errors
+ *
+ * Returns the public error envelope on refusal, a review token that does
+ * not match, an unknown machine, a device the machine does not hold, or a
+ * detach that failed or could not be confirmed (the machine keeps the
+ * reservation).
+ * @summary Detaches a reviewed device from the guest the machine's reservation
+recorded and releases the reservation after the read-back confirmed the
+device is gone. The recorded `usbN` entry is deleted only when it holds
+exactly what Fleet wrote, and every `usbN` entry is read back before the
+answer. A removal PVE leaves pending (the guest's `hotplug` option lacks
+`usb`) answers `detach_pending` with the device still attached and the
+reservation still held; repeat the detach once the guest restarted.
+Audited before the delete.
+ */
+export const detachMachineUsb = async (machineId: string,
+    executeMachineUsbRequest: ExecuteMachineUsbRequest, options?: RequestInit): Promise<detachMachineUsbResponse> => {
+
+    const getHeaders = (h?: NonNullable<RequestInit['headers']>): Record<string, string | readonly string[]> => {
+    if (!h) return {};
+    if (h instanceof Headers) return Object.fromEntries(h.entries());
+    if (Array.isArray(h)) return Object.fromEntries(h);
+    return h;
+  };
+const res = await fetch(getDetachMachineUsbUrl(machineId),
+  {
+    ...options,
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...getHeaders(options?.headers) },
+    body: JSON.stringify(executeMachineUsbRequest)
+  }
+)
+
+
+  const body = [204, 205, 304].includes(res.status) ? null : await res.text();
+
+  const data: detachMachineUsbResponse['data'] = body ? JSON.parse(body) : {}
+  return { data, status: res.status, headers: res.headers } as detachMachineUsbResponse
+}
+
+
+
+export type reviewMachineUsbDetachResponse200 = {
+  data: ResourceMachineUsbReviewDto
+  status: 200
+}
+
+export type reviewMachineUsbDetachResponse400 = {
+  data: ApiError
+  status: 400
+}
+
+export type reviewMachineUsbDetachResponse403 = {
+  data: ApiError
+  status: 403
+}
+
+export type reviewMachineUsbDetachResponse404 = {
+  data: ApiError
+  status: 404
+}
+
+export type reviewMachineUsbDetachResponse409 = {
+  data: ApiError
+  status: 409
+}
+
+export type reviewMachineUsbDetachResponse500 = {
+  data: ApiError
+  status: 500
+}
+
+export type reviewMachineUsbDetachResponse503 = {
+  data: ApiError
+  status: 503
+}
+
+export type reviewMachineUsbDetachResponseSuccess = (reviewMachineUsbDetachResponse200) & {
+  headers: Headers;
+};
+export type reviewMachineUsbDetachResponseError = (reviewMachineUsbDetachResponse400 | reviewMachineUsbDetachResponse403 | reviewMachineUsbDetachResponse404 | reviewMachineUsbDetachResponse409 | reviewMachineUsbDetachResponse500 | reviewMachineUsbDetachResponse503) & {
+  headers: Headers;
+};
+
+export type reviewMachineUsbDetachResponse = (reviewMachineUsbDetachResponseSuccess | reviewMachineUsbDetachResponseError)
+
+export const getReviewMachineUsbDetachUrl = (machineId: string,) => {
+
+
+
+
+  return `/api/v1/machines/${machineId}/usb/detach/review`
+}
+
+/**
+ * # Errors
+ *
+ * Returns the public error envelope on refusal, an unknown machine, or a
+ * device the machine does not hold (`hardware_not_reserved`).
+ * @summary Reviews detaching a USB device from a persistent machine: the machine must
+hold the device. The answer names the reservation and the guest and slot
+it records, and the token that binds the detach call to this review.
+Nothing is written.
+ */
+export const reviewMachineUsbDetach = async (machineId: string,
+    reviewMachineUsbRequest: ReviewMachineUsbRequest, options?: RequestInit): Promise<reviewMachineUsbDetachResponse> => {
+
+    const getHeaders = (h?: NonNullable<RequestInit['headers']>): Record<string, string | readonly string[]> => {
+    if (!h) return {};
+    if (h instanceof Headers) return Object.fromEntries(h.entries());
+    if (Array.isArray(h)) return Object.fromEntries(h);
+    return h;
+  };
+const res = await fetch(getReviewMachineUsbDetachUrl(machineId),
+  {
+    ...options,
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...getHeaders(options?.headers) },
+    body: JSON.stringify(reviewMachineUsbRequest)
+  }
+)
+
+
+  const body = [204, 205, 304].includes(res.status) ? null : await res.text();
+
+  const data: reviewMachineUsbDetachResponse['data'] = body ? JSON.parse(body) : {}
+  return { data, status: res.status, headers: res.headers } as reviewMachineUsbDetachResponse
 }
 
 

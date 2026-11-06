@@ -14,7 +14,7 @@ This section records decisions confirmed during the maintainer's current plan re
 - **One product ladder:** ship Developer Fleet as a complete first release, then build Fleet Lab on the proven controller, machine, project, provider, and operation foundations. Do not run them as competing product tracks.
 - **Initial deployment and trust:** the controller is hosted on Linux and exposed only on a trusted local network. The dashboard has no accounts or login initially; every LAN client can read and mutate. Application-layer authorization and audit remain mandatory, initially using a clearly identified `anonymous-lan-admin` principal so later authentication does not require handler rewrites.
 - **Human usage:** several people may view or operate the same web dashboard, but the product is optimized for one human controller at a time rather than concurrent multi-user collaboration.
-- **Windows scope:** Fleet need not run its controller on Windows. Initial Windows support is Proxmox VM lifecycle plus QEMU Guest Agent health/IP visibility. A Windows `fleetd`, in-guest inventory/exec, local broker, and project readiness are later work after the first Lab release.
+- **Windows scope:** Fleet need not run its controller on Windows. Initial Windows support is Proxmox VM lifecycle plus QEMU Guest Agent health/IP visibility. A Windows `fleetd`, in-guest inventory/exec, local broker, and project readiness are later work after the first Lab release. Update 2026-10-28: Windows Lab guests (readiness, exec, put/collect, audio, pools) have landed via OpenSSH ([operator guide](operations/lab.md#windows-guests)); activation across rollback, clone SID and leases on the re-generalized image remain open ([#555](https://github.com/Frogbyte-io/fleet-manager/issues/555), [#556](https://github.com/Frogbyte-io/fleet-manager/issues/556)); ADR 0015 is still Proposed.
 - **First Lab promise:** request a disposable Linux environment, prepare a project, execute commands, and guarantee TTL-driven cleanup. Rich scheduling, hardware passthrough, Windows guest readiness, and broad artifact workflows follow later.
 - **GitOps sequencing:** full desired-state/Git activation is not a prerequisite for the first Lab release. Lab takes only the minimal versioned bootstrap-profile and Lab-template contracts it needs; the broader M4 product proceeds independently afterward.
 - **Image production:** Fleet creates and maintains Proxmox VM templates through an image-build provider, with Packer as the first external CLI integration. Modern `.pkr.json` is the portable recipe format. Fleet offers a structured editor for supported Proxmox fields plus an advanced raw-JSON editor.
@@ -288,7 +288,7 @@ M6 can start after M2 and the M1 operation/security kernel, but Lab waits for M3
 
 ### M7 — Fleet Lab
 
-Status: complete (2026-10-09 — FM-700–FM-743 closed; the [FM-742 exit-gate evidence](https://github.com/Frogbyte-io/fleet-manager/issues/266) is recorded in [`docs/planning/m7-acceptance.md`](planning/m7-acceptance.md#evidence)). The USB/hardware sub-epic ([#16](https://github.com/Frogbyte-io/fleet-manager/issues/16)) and Windows in-guest support remain later sub-epics.
+Status: complete (2026-10-09 — FM-700–FM-743 closed; the [FM-742 exit-gate evidence](https://github.com/Frogbyte-io/fleet-manager/issues/266) is recorded in [`docs/planning/m7-acceptance.md`](planning/m7-acceptance.md#evidence)). The USB/hardware sub-epic ([#16](https://github.com/Frogbyte-io/fleet-manager/issues/16)) and Windows in-guest support remain later sub-epics. Windows Lab guests have since landed (epic #396, [operator guide](operations/lab.md#windows-guests); remaining: [#555](https://github.com/Frogbyte-io/fleet-manager/issues/555), [#556](https://github.com/Frogbyte-io/fleet-manager/issues/556); ADR 0015 still Proposed).
 
 Outcome: humans and agents can obtain, use, and release disposable Linux development/test environments without leaked VMs.
 
@@ -304,7 +304,7 @@ Operator runbook: [`docs/operations/lab.md`](operations/lab.md).
 - Destroy by default; revert for explicitly pooled guests; keep requires elevated permission and transfers the VM out of automatic cleanup.
 - `fleetctl lab create/status/exec/destroy --output json`, artifacts/log metadata, expiry sweeper, and cleanup reconciliation.
 - Fleet-provided skills that drive the JSON CLI for autonomous agent use; no MCP dependency or separate skill authority.
-- Later sub-epics: Windows in-guest management/readiness, rich artifact workflows, stable physical USB/GPU inventory, IOMMU/host validation, exclusive reservation, attach/detach compensation, and hardware-in-the-loop workflows.
+- Later sub-epics: Windows in-guest management/readiness, rich artifact workflows, stable physical USB/GPU inventory, IOMMU/host validation, exclusive reservation, attach/detach compensation, and hardware-in-the-loop workflows. Update: the Windows Lab guest part has landed (epic #396); see the status note above.
 
 Exit gate: a human or agent can request a disposable Linux environment from a manually promoted image version, prepare a project, execute commands, and release it or allow TTL expiry. Failure-injection tests at every lifecycle transition leave no unowned VM or capacity reservation, and expired leases clean up after controller restart.
 
@@ -367,6 +367,21 @@ Exit gate: an agent finds a domain or service with `fleetctl registry find`, rec
 
 M10 depends on M4 Fleet Git source fetch and activation, and on the M9 console. Registrar or vendor sync, Resend, and key provisioning into Frogenv are not part of it.
 
+### M11 — USB hardware inventory and exclusive allocation
+
+Status: planned (2026-10-30); not started. Detailed plan and issue breakdown: [planning/m11-usb-hardware.md](planning/m11-usb-hardware.md). Boundaries: [ADR 0019](adr/0019-usb-device-allocation.md). Epic: [#16](https://github.com/Frogbyte-io/fleet-manager/issues/16).
+
+Outcome: Lab leases and persistent machines can hold a physical USB device exclusively, attached before boot or hotplugged mid-run, with an honest inventory of what Fleet can and cannot allocate.
+
+- Devices are PVE USB resource mappings that operators create; Fleet reads them and never writes `host=`. Identical devices get path-based mappings.
+- A device is reserved in SQLite before any Proxmox call; attach and detach are sagas with compensation; detach precedes destroy, revert and return to a pool.
+- A busy device fails fast with `hardware_busy`; manually attached devices are `externally_attached` and never taken.
+- USB privileges live in an opt-in token role.
+
+Exit gate: on the integration host, a lease declares a test device, Fleet attaches it, a mid-run detach and re-attach works, cleanup detaches it, a competing lease is refused, and the failure-injection suite shows no device is ever held twice.
+
+M11 depends on M6 and M7 (Lab leases, placement, cleanup) and on persistent machines (ADR 0018). Queueing, device groups, Fleet-created mappings, and PCI passthrough are not part of it.
+
 ### Later — scale, convenience, and additional providers
 
 - Optional native desktop shell that consumes the public API and offers local editor/terminal handoff; no core logic.
@@ -394,13 +409,14 @@ M0 Foundation
        minimal profile/template contracts ----------+
   M1-M4 + M6 + M7 APIs -> M9 Fleet Console v2 + fleet-wide skills
   M4 desired state + M9 console -> M10 Registry + running services + action broker
+  M6 + M7 Lab + persistent machines -> M11 USB hardware allocation
 ```
 
 The critical path is M0 → M1 → M2 → M3 for the complete Developer Fleet release, then M6 plus the Packer/image-version slice of M7 for the first Lab release. Full M4 GitOps and Docker are not Lab prerequisites. Tailscale discovery is optional. Agents use skills and `fleetctl`; MCP is not on the roadmap.
 
 ## Recommended GitHub milestones and epic issues
 
-Use the milestone names M0–M10 above. Each epic should be a tracking issue containing only dependency/status checklists; implementation work remains in narrow linked issues.
+Use the milestone names M0–M11 above. Each epic should be a tracking issue containing only dependency/status checklists; implementation work remains in narrow linked issues.
 
 | Milestone | Recommended epics |
 |---|---|
@@ -415,6 +431,7 @@ Use the milestone names M0–M10 above. Each epic should be a tracking issue con
 | M8 | Optional authenticated deployment; agent/CI identity hardening and delegation; autonomous Lab/CI workflows; policy/audit administration |
 | M9 | Console foundation; fleet inventory console; fleet-wide skills; Lab and images console; settings/Proxmox/projects/audit/access |
 | M10 | Foundations (plan, ADR, provider accounts); Registry; domain and service views; running services (Coolify and Docker); agent action broker |
+| M11 | USB hardware: spike and provider reads; inventory and reservations; Lab attach, hotplug and cleanup; persistent machine attach; console, skill, and live validation |
 
 Issue-ready work for M0–M2 is in [planning/initial-issues.md](planning/initial-issues.md). Use its issue template for later milestones.
 
@@ -432,6 +449,8 @@ Issue-ready work for M0–M2 is in [planning/initial-issues.md](planning/initial
 | Build and promote a Proxmox image | M7 | Versioned `.pkr.json` recipe, immutable build record, validation evidence, manual promotion |
 | Inspect/manage a Windows VM | M6 | Proxmox lifecycle plus QEMU Guest Agent health/IP; in-guest management is later |
 | Hardware-in-the-loop Lab | M7 later sub-epic | Exclusive reservation and cleanup under failure |
+
+To pilot machine enrollment, fleet-wide skills, and the Registry on a few Linux developer machines before M8, follow [operations/fleet-pilot.md](operations/fleet-pilot.md).
 
 ## Risks and research gates
 

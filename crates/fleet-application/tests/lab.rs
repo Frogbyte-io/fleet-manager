@@ -60,6 +60,7 @@ fn content(name: &str, image_version_id: &str) -> LabTemplateContent {
         audio: None,
         guest_os: fleet_core::GuestOs::default(),
         interactive_user: None,
+        hardware: Vec::new(),
     }
 }
 

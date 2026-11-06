@@ -1,0 +1,17 @@
+{
+  "http_status": 500,
+  "pve_version": "9.2.2",
+  "recorded_with": "pvesh (root@pam), status and body reconstructed from the CLI",
+  "request": {
+    "method": "PUT",
+    "params": {
+      "digest": "8a15b3874beb8870d06165ed9c74a9ac953be365",
+      "usb1": "mapping=fm-test-superdrive-b"
+    },
+    "path": "/nodes/pve/qemu/9563/config"
+  },
+  "response": {
+    "message": "checksum mismatch (file change by other user?)"
+  },
+  "who": "root"
+}

@@ -1,0 +1,17 @@
+{
+  "http_status": 500,
+  "pve_version": "8.4.0",
+  "recorded_with": "curl over HTTPS with a temporary privilege-separated API token (real HTTP status and body)",
+  "request": {
+    "method": "PUT",
+    "params": {
+      "usb1": "host=1-1"
+    },
+    "path": "/nodes/pve8/qemu/9563/config"
+  },
+  "response": {
+    "errors": null,
+    "message": "only root can set 'usb1' config for real devices\n"
+  },
+  "who": "probe"
+}

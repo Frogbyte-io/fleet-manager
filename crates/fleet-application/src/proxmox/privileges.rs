@@ -114,6 +114,18 @@ pub enum PrivilegeScope {
     /// One bridge in an SDN zone: `/sdn/zones/{zone}/{bridge}` (VLAN tag
     /// paths below it count too).
     SdnBridge,
+    /// One USB resource mapping: `/mapping/usb/{mapping}` (FM-1111).
+    /// `/mapping/usb`, `/mapping` and `/` count with their propagating
+    /// privileges.
+    UsbMapping,
+    /// Every guest at once: `/vms` (#596). Only a *propagating* grant on
+    /// `/vms` itself counts (PVE lists `/vms` with what it inherits from
+    /// `/`, so a grant from `/` shows there, and a `NoAccess` on `/vms` that
+    /// leaves `/` granted does not), because a grant on one guest (or a pool
+    /// member) says nothing about the guests the token cannot see. A concrete
+    /// `/vms/{id}` entry never satisfies it, and one that lacks the
+    /// privilege makes the row not granted ([`guest_audit_coverage`]).
+    AllGuests,
 }
 
 impl PrivilegeScope {
@@ -128,11 +140,16 @@ impl PrivilegeScope {
             Self::Storage => "/storage/{storage}",
             Self::Pool => "/pool/{pool}",
             Self::SdnBridge => "/sdn/zones/{zone}/{bridge}",
+            Self::UsbMapping => "/mapping/usb/{mapping}",
+            Self::AllGuests => "/vms",
         }
     }
 
     /// How a path entry in the effective map relates to this scope.
     fn relation(self, path: &str) -> Option<Relation> {
+        if path == "/" && self == Self::AllGuests {
+            return None;
+        }
         if path == "/" {
             return Some(if self == Self::Root {
                 Relation::Exact
@@ -146,14 +163,14 @@ impl PrivilegeScope {
             | (Self::Guest | Self::NewGuest, ["vms", _])
             | (Self::Storage, ["storage", _])
             | (Self::Pool, ["pool", _, ..])
-            | (Self::SdnBridge, ["sdn", "zones", _, _, ..]) => Some(Relation::Exact),
+            | (Self::SdnBridge, ["sdn", "zones", _, _, ..])
+            | (Self::UsbMapping, ["mapping", "usb", _]) => Some(Relation::Exact),
             (Self::Node, ["nodes"])
-            | (Self::Guest | Self::NewGuest, ["vms"])
+            | (Self::Guest | Self::NewGuest | Self::AllGuests, ["vms"])
             | (Self::Storage, ["storage"])
             | (Self::Pool, ["pool"])
-            | (Self::SdnBridge, ["sdn"] | ["sdn", "zones"] | ["sdn", "zones", _]) => {
-                Some(Relation::Propagated)
-            }
+            | (Self::SdnBridge, ["sdn"] | ["sdn", "zones"] | ["sdn", "zones", _])
+            | (Self::UsbMapping, ["mapping"] | ["mapping", "usb"]) => Some(Relation::Propagated),
             (Self::Guest | Self::Storage, ["pool", _, ..]) => Some(Relation::PoolMember),
             _ => None,
         }
@@ -717,6 +734,18 @@ pub const PROXMOX_PRIVILEGE_TABLE: &[PrivilegeRequirement] = &[
         note: "When the Lab template declares a virtual audio device and the clone's audio0 differs, the executor sets audio0 in the same config write as cores and memory, on its own new guest (issue #398). qemu-server lists audio0 among the hardware-type options, which need VM.Config.HWType. Opt-in: only templates that declare audio use it, so it never gates the Lab tier; without it a provision of such a template fails at the hardware step naming the privilege. Nothing is written, and the privilege is not used, when the clone already matches or the template declares no audio.",
     },
     PrivilegeRequirement {
+        id: "lab.provision.cloud-init-login",
+        capability: "lab.provision",
+        tier: PrivilegeTier::Lab,
+        endpoint: "PUT /nodes/{node}/qemu/{vmid}/config",
+        majors: BOTH,
+        scope: PrivilegeScope::NewGuest,
+        privileges: &["VM.Config.Cloudinit"],
+        matching: PrivilegeMatch::All,
+        required: false,
+        note: "For a Windows Lab template, the executor writes ciuser and sshkeys (the controller's SSH public keys, never a private key) to the clone's cloud-init drive before its first boot, so Cloudbase-Init authorizes them on the re-generalized image (issue #561). qemu-server checks VM.Config.Cloudinit for those options. Opt-in: only Windows templates use it, so it never gates the Lab tier; without it a provision of such a template fails at the ssh_key step naming the privilege. Nothing is written when the clone already carries the user and keys.",
+    },
+    PrivilegeRequirement {
         id: "lab.provision.hardware-resize",
         capability: "lab.provision",
         tier: PrivilegeTier::Lab,
@@ -788,6 +817,85 @@ pub const PROXMOX_PRIVILEGE_TABLE: &[PrivilegeRequirement] = &[
         matching: PrivilegeMatch::All,
         required: true,
         note: "The VNC proxy (websocket=1) and its WebSocket check VM.Console on the guest; verified live on PVE 8.4 and 9.2 with an API token (PVEAuditor alone is refused with 403).",
+    },
+    // ── usb (opt-in, FM-1111) ───────────────────────────────────────────
+    // The `usb.attach-*` and `usb.detach-*` rows mirror the provider's own
+    // declaration (`USB_ATTACH_PRIVILEGES` in `fleet-provider-proxmox`), which
+    // a provider test compares against this table. Every row is opt-in: a
+    // token without the separate `FleetUsb` role keeps each tier it has, and
+    // the hardware inventory reports its devices `unsupported` with the
+    // reason instead (ADR 0019 decision 7, maintainer decision 6).
+    PrivilegeRequirement {
+        id: "usb.read-mappings",
+        capability: "read.usb-mappings",
+        tier: PrivilegeTier::Discover,
+        endpoint: "GET /cluster/mapping/usb",
+        majors: BOTH,
+        scope: PrivilegeScope::UsbMapping,
+        privileges: &["Mapping.Audit"],
+        matching: PrivilegeMatch::All,
+        required: false,
+        note: "Lists the USB resource mappings; without it PVE answers an empty 200, which looks like a cluster with no mappings. Part of PVEAuditor.",
+    },
+    PrivilegeRequirement {
+        id: "usb.attach-guest",
+        capability: "usb.attach",
+        tier: PrivilegeTier::Lab,
+        endpoint: "PUT /nodes/{node}/qemu/{vmid}/config (usbN=mapping=<id>)",
+        majors: BOTH,
+        scope: PrivilegeScope::Guest,
+        privileges: &["VM.Config.HWType"],
+        matching: PrivilegeMatch::All,
+        required: false,
+        note: "qemu-server lists usbN among the hardware-type options. Without any VM.Config.* privilege PVE refuses first, naming all of them.",
+    },
+    PrivilegeRequirement {
+        id: "usb.attach-mapping",
+        capability: "usb.attach",
+        tier: PrivilegeTier::Lab,
+        endpoint: "PUT /nodes/{node}/qemu/{vmid}/config (usbN=mapping=<id>)",
+        majors: BOTH,
+        scope: PrivilegeScope::UsbMapping,
+        privileges: &["Mapping.Use"],
+        matching: PrivilegeMatch::All,
+        required: false,
+        note: "Using a resource mapping is checked per mapping. Raw host= passthrough is root-only, so a token can attach only through a mapping.",
+    },
+    PrivilegeRequirement {
+        id: "usb.detach-guest",
+        capability: "usb.detach",
+        tier: PrivilegeTier::Lab,
+        endpoint: "PUT /nodes/{node}/qemu/{vmid}/config (delete=usbN)",
+        majors: BOTH,
+        scope: PrivilegeScope::Guest,
+        privileges: &["VM.Config.HWType"],
+        matching: PrivilegeMatch::All,
+        required: false,
+        note: "Removing a usbN entry is a hardware-type change like adding one.",
+    },
+    PrivilegeRequirement {
+        id: "usb.detach-mapping",
+        capability: "usb.detach",
+        tier: PrivilegeTier::Lab,
+        endpoint: "PUT /nodes/{node}/qemu/{vmid}/config (delete=usbN)",
+        majors: BOTH,
+        scope: PrivilegeScope::UsbMapping,
+        privileges: &["Mapping.Use"],
+        matching: PrivilegeMatch::All,
+        required: false,
+        note: "PVE checks the delete against the mapping the slot currently names, so the role must keep Mapping.Use for as long as a device is attached.",
+    },
+    PrivilegeRequirement {
+        id: "usb.audit-all-guests",
+        capability: "usb.exclusivity",
+        tier: PrivilegeTier::Lab,
+        endpoint: "GET /cluster/resources and GET /nodes/{node}/qemu/{vmid}/config",
+        majors: BOTH,
+        scope: PrivilegeScope::AllGuests,
+        privileges: &["VM.Audit"],
+        matching: PrivilegeMatch::All,
+        required: false,
+        note: "PVE gives a mapping no exclusivity, so Fleet can call a device available only if it can read every guest's config. A guest without VM.Audit is omitted from the cluster listing, so the scan cannot see it. Needs VM.Audit propagating on /vms (a grant on / shows there too), with no guest path narrowed below it; an explicit NoAccess on one guest is not visible in the token's permissions (#596).",
     },
 ];
 
@@ -921,6 +1029,65 @@ pub struct PrivilegeReport {
     pub observed_at: i64,
 }
 
+/// Whether the token's own permissions show that it can audit every guest
+/// (#596).
+///
+/// PVE gives a USB mapping no exclusivity, and `GET /cluster/resources` and
+/// the guest list silently omit a guest without `VM.Audit`, so a scan sees
+/// every guest only if the token holds `VM.Audit` on all of them. What the
+/// effective map can and cannot show:
+///
+/// - `VM.Audit` propagating on `/vms` is visible, and is the grant that
+///   covers every guest, including ones created later. PVE lists `/vms` with
+///   what it inherits from `/`, so a grant on `/` shows there; a grant on `/`
+///   with nothing (or no `VM.Audit`) on `/vms` is a propagating denial on
+///   `/vms` and does not count.
+/// - A concrete `/vms/{id}` entry that lacks `VM.Audit` is an explicit
+///   narrowing below that grant and is reported with its path. An entry
+///   with no privilege at all is kept by the provider when PVE sends one.
+/// - An explicit `NoAccess` on a guest is **not** visible: PVE omits a path
+///   whose effective privileges are empty, so the answer is the same as for
+///   a guest nobody mentioned. That is what [`GuestAuditCoverage::Unrestricted`]
+///   cannot rule out, and why it is "as far as the token's permissions
+///   tell".
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum GuestAuditCoverage {
+    /// `VM.Audit` propagates on `/vms` and no visible guest path narrows it.
+    Unrestricted,
+    /// `VM.Audit` does not propagate on `/vms`: only the guests
+    /// that carry their own grant (a pool member, a named VMID) can be
+    /// audited, and the rest are invisible to the token.
+    NotGranted,
+    /// A guest path lacks `VM.Audit`, so that guest is hidden although the
+    /// grant above it would cover it.
+    Restricted {
+        /// The first such path in path order, such as `/vms/200`.
+        path: String,
+    },
+}
+
+/// Derives [`GuestAuditCoverage`] from the token's effective permissions.
+#[must_use]
+pub fn guest_audit_coverage(permissions: &EffectivePermissions) -> GuestAuditCoverage {
+    let propagates = permissions
+        .get("/vms")
+        .and_then(|privileges| privileges.get("VM.Audit"))
+        == Some(&true);
+    if !propagates {
+        return GuestAuditCoverage::NotGranted;
+    }
+    permissions
+        .iter()
+        .filter(|(path, _)| {
+            path.strip_prefix("/vms/")
+                .is_some_and(|rest| !rest.is_empty() && !rest.contains('/'))
+        })
+        .find(|(_, privileges)| !privileges.contains_key("VM.Audit"))
+        .map_or(GuestAuditCoverage::Unrestricted, |(path, _)| {
+            GuestAuditCoverage::Restricted { path: path.clone() }
+        })
+}
+
 /// Evaluates one requirement against the effective map, treating every
 /// concrete `/vms/{id}` as a free clone target. A live report goes through
 /// [`evaluate_requirement_with_vmids`] instead.
@@ -1003,6 +1170,17 @@ pub fn evaluate_requirement_with_vmids(
         } else if best.as_ref().is_none_or(|best| held.len() > best.len()) {
             best = Some(held);
         }
+    }
+    if requirement.scope == PrivilegeScope::AllGuests
+        && !check.granted_on.is_empty()
+        && let GuestAuditCoverage::Restricted { path } = guest_audit_coverage(permissions)
+    {
+        // Granted above, narrowed below: the guest at `path` is invisible to
+        // the token, so the row is not granted.
+        check.status = PrivilegeStatus::Missing;
+        check.missing.clone_from(&check.privileges);
+        check.note = format!("{} Narrowed at {path}, where it is not held.", check.note);
+        return check;
     }
     if check.granted_on.is_empty() {
         check.status = PrivilegeStatus::Missing;
@@ -1450,14 +1628,215 @@ mod tests {
                 "VM.Config.Disk",
                 "VM.Config.HWType",
             ] {
+                // The opt-in USB rows (FM-1111) are the one exception: a
+                // persistent machine's guest exists, so attaching a device to
+                // it needs VM.Config.HWType on `/vms/{vmid}`; they are in the
+                // separate FleetUsb role and gate nothing.
                 assert!(
                     requirements_for_major(major)
                         .filter(|row| row.scope != PrivilegeScope::NewGuest)
+                        .filter(|row| !row.id.starts_with("usb."))
                         .all(|row| !row.privileges.contains(&privilege)),
                     "{major}.x: nothing outside the new guest needs {privilege}"
                 );
             }
         }
+    }
+
+    #[test]
+    fn the_windows_clone_login_privilege_is_opt_in_and_never_gates_the_lab_tier() {
+        // Issue #561: only Windows templates write the cloud-init login, so
+        // VM.Config.Cloudinit is reported on the new guest, never required.
+        for major in [8, 9] {
+            let row = requirements_for_major(major)
+                .find(|row| row.id == "lab.provision.cloud-init-login")
+                .unwrap();
+            assert_eq!(row.privileges, &["VM.Config.Cloudinit"]);
+            assert!(!row.required);
+            assert_eq!(row.tier, PrivilegeTier::Lab);
+            assert_eq!(row.scope, PrivilegeScope::NewGuest);
+            assert!(
+                requirements_for_major(major)
+                    .filter(|row| row.tier == PrivilegeTier::Lab && row.required)
+                    .all(|row| !row.privileges.contains(&"VM.Config.Cloudinit")),
+                "{major}.x: no required Lab row needs VM.Config.Cloudinit"
+            );
+        }
+    }
+
+    #[test]
+    fn the_usb_privileges_are_opt_in_and_never_gate_a_tier() {
+        // FM-1111, maintainer decision 6: Mapping.Use, Mapping.Audit and the
+        // guest hardware privilege live in a separate opt-in role.
+        for major in [8, 9] {
+            let usb: Vec<_> = requirements_for_major(major)
+                .filter(|row| row.id.starts_with("usb."))
+                .collect();
+            assert_eq!(usb.len(), 6, "{major}.x");
+            assert!(usb.iter().all(|row| !row.required));
+            // A token with every non-USB privilege stays granted on every
+            // tier, and the opt-in rows report as missing.
+            let mut permissions = EffectivePermissions::new();
+            for row in requirements_for_major(major).filter(|row| !row.id.starts_with("usb.")) {
+                let path = match row.scope {
+                    PrivilegeScope::Root => "/".to_owned(),
+                    PrivilegeScope::Node => "/nodes/pve".to_owned(),
+                    PrivilegeScope::Guest | PrivilegeScope::NewGuest => "/vms/9000".to_owned(),
+                    PrivilegeScope::Storage => "/storage/local".to_owned(),
+                    PrivilegeScope::Pool => "/pool/p".to_owned(),
+                    PrivilegeScope::SdnBridge => "/sdn/zones/z/vmbr0".to_owned(),
+                    PrivilegeScope::UsbMapping => "/mapping/usb/x".to_owned(),
+                    PrivilegeScope::AllGuests => "/vms".to_owned(),
+                };
+                let entry = permissions.entry(path).or_default();
+                for privilege in row.privileges {
+                    entry.insert((*privilege).to_owned(), true);
+                }
+            }
+            let tiers = evaluate_tiers(major, &permissions);
+            for tier in &tiers {
+                assert_eq!(tier.status, PrivilegeStatus::Granted, "{major}.x {tier:?}");
+            }
+            let missing: Vec<_> = tiers
+                .iter()
+                .flat_map(|tier| &tier.checks)
+                .filter(|check| check.requirement.starts_with("usb."))
+                .filter(|check| check.status == PrivilegeStatus::Missing)
+                .map(|check| check.requirement.as_str())
+                .collect();
+            assert!(missing.contains(&"usb.attach-mapping"), "{missing:?}");
+            assert!(missing.contains(&"usb.read-mappings"), "{missing:?}");
+        }
+    }
+
+    #[test]
+    fn the_all_guests_row_needs_propagating_audit_with_no_guest_path_narrowed() {
+        // #596: PVE gives a mapping no exclusivity and omits a guest without
+        // VM.Audit from every listing, so the opt-in exclusivity row is about
+        // every guest, not "somewhere in scope".
+        for major in [8, 9] {
+            let row = requirements_for_major(major)
+                .find(|row| row.id == "usb.audit-all-guests")
+                .unwrap();
+            assert!(!row.required);
+            assert_eq!(row.scope, PrivilegeScope::AllGuests);
+            assert_eq!(row.scope.template(), "/vms");
+            assert_eq!(row.privileges, &["VM.Audit"]);
+            let status = |entries: &[(&str, &[(&str, bool)])]| {
+                evaluate_requirement(row, &map(entries)).status
+            };
+            assert_eq!(
+                status(&[("/vms", &[("VM.Audit", true)])]),
+                PrivilegeStatus::Granted
+            );
+            // `/` alone does not: a propagating NoAccess on `/vms` leaves `/`
+            // granted and hides every guest, so `/vms` must carry it too.
+            assert_eq!(
+                status(&[("/", &[("VM.Audit", true)])]),
+                PrivilegeStatus::Missing
+            );
+            assert_eq!(
+                status(&[
+                    ("/", &[("VM.Audit", true)]),
+                    ("/vms", &[("VM.Audit", true)])
+                ]),
+                PrivilegeStatus::Granted
+            );
+            // A guest that holds its own grant (a pool member, a named VMID)
+            // proves nothing about the guests the token cannot see.
+            for entries in [
+                &[("/vms/101", &[("VM.Audit", true)][..])][..],
+                &[("/pool/fleet", &[("VM.Audit", true)][..])][..],
+                &[("/vms", &[("VM.Audit", false)][..])][..],
+                &[("/", &[("VM.Audit", false)][..])][..],
+                &[("/vms", &[("VM.PowerMgmt", true)][..])][..],
+                &[][..],
+            ] {
+                assert_eq!(status(entries), PrivilegeStatus::Missing, "{entries:?}");
+            }
+            // Granted above, narrowed on one guest: not granted, and the
+            // note names the path.
+            let narrowed = evaluate_requirement(
+                row,
+                &map(&[
+                    ("/vms", &[("VM.Audit", true)]),
+                    ("/vms/200", &[("VM.PowerMgmt", true)]),
+                ]),
+            );
+            assert_eq!(narrowed.status, PrivilegeStatus::Missing);
+            assert_eq!(narrowed.missing, ["VM.Audit"]);
+            assert!(narrowed.note.contains("/vms/200"), "{}", narrowed.note);
+            // A guest entry that keeps VM.Audit does not narrow it.
+            assert_eq!(
+                status(&[
+                    ("/vms", &[("VM.Audit", true)]),
+                    ("/vms/9000", &[("VM.Audit", true), ("VM.Clone", true)]),
+                ]),
+                PrivilegeStatus::Granted
+            );
+            // It is opt-in: with every required row held, no tier changes.
+            let tiers = evaluate_tiers(major, &map(&[]));
+            assert!(
+                tiers
+                    .iter()
+                    .flat_map(|tier| &tier.checks)
+                    .any(|check| check.requirement == "usb.audit-all-guests" && !check.required)
+            );
+        }
+    }
+
+    #[test]
+    fn guest_audit_coverage_separates_not_granted_from_narrowed() {
+        assert_eq!(
+            guest_audit_coverage(&map(&[("/vms", &[("VM.Audit", true)])])),
+            GuestAuditCoverage::Unrestricted
+        );
+        assert_eq!(
+            guest_audit_coverage(&map(&[])),
+            GuestAuditCoverage::NotGranted
+        );
+        // Nested paths below a guest are not guest paths.
+        assert_eq!(
+            guest_audit_coverage(&map(&[
+                ("/vms", &[("VM.Audit", true)]),
+                ("/vms/200/x", &[("VM.PowerMgmt", true)]),
+            ])),
+            GuestAuditCoverage::Unrestricted
+        );
+        // The first narrowed path in path order is named.
+        assert_eq!(
+            guest_audit_coverage(&map(&[
+                ("/vms", &[("VM.Audit", true)]),
+                ("/vms/300", &[]),
+                ("/vms/200", &[("VM.Clone", true)]),
+            ])),
+            GuestAuditCoverage::Restricted {
+                path: "/vms/200".to_owned()
+            }
+        );
+    }
+
+    #[test]
+    fn a_mapping_grant_counts_on_the_mapping_or_by_propagation_from_above() {
+        let row = requirements_for_major(9)
+            .find(|row| row.id == "usb.attach-mapping")
+            .unwrap();
+        let granted = |entries: &[(&str, &[(&str, bool)])]| {
+            evaluate_requirement(row, &map(entries)).status == PrivilegeStatus::Granted
+        };
+        assert!(granted(&[("/mapping/usb/dev", &[("Mapping.Use", false)])]));
+        assert!(granted(&[("/mapping/usb", &[("Mapping.Use", true)])]));
+        assert!(granted(&[("/mapping", &[("Mapping.Use", true)])]));
+        assert!(granted(&[("/", &[("Mapping.Use", true)])]));
+        // Only propagating privileges reach a mapping from above.
+        assert!(!granted(&[("/mapping/usb", &[("Mapping.Use", false)])]));
+        assert!(!granted(&[("/", &[("Mapping.Use", false)])]));
+        // Another family or another privilege never counts.
+        assert!(!granted(&[("/mapping/pci/dev", &[("Mapping.Use", true)])]));
+        assert!(!granted(&[(
+            "/mapping/usb/dev",
+            &[("Mapping.Audit", true)]
+        )]));
     }
 
     #[test]
@@ -1482,7 +1861,9 @@ mod tests {
             .iter()
             .flat_map(|r| r.privileges.iter().map(|p| (*p, true)))
             .collect();
-        let permissions = map(&[("/", &all)]);
+        // PVE lists `/vms` with what it inherits from `/` (the recorded
+        // read-only token has both), and the all-guests row reads `/vms`.
+        let permissions = map(&[("/", &all), ("/vms", &all)]);
         for major in SUPPORTED_PVE_MAJORS {
             let tiers = evaluate_tiers(major, &permissions);
             for entry in &tiers {

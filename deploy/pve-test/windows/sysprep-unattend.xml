@@ -21,6 +21,16 @@
           <Order>1</Order>
           <Path>powershell.exe -NoProfile -ExecutionPolicy Bypass -Command "Set-LocalUser -Name '@ADMIN_USER@' -Password (ConvertTo-SecureString (([guid]::NewGuid().ToString('N')) + 'aZ9!') -AsPlainText -Force)"</Path>
         </RunSynchronousCommand>
+        <!-- Cloudbase-Init (#535) runs in specialize with cloudbase-init-unattend.conf: it loads
+             the cloud-init drive and applies the computer name if the metadata carries one.
+             Proxmox's configdrive2 metadata has no hostname, so the random name from
+             ComputerName above stays. The trailing `exit 0` makes a clone without a cloud-init
+             drive (no metadata service) continue instead of failing specialize. The SSH key
+             injection runs later, from the Cloudbase-Init service, after OOBE. -->
+        <RunSynchronousCommand xmlns:wcm="http://schemas.microsoft.com/WMIConfig/2002/State" wcm:action="add">
+          <Order>2</Order>
+          <Path>cmd.exe /c ""C:\Program Files\Cloudbase Solutions\Cloudbase-Init\Python\Scripts\cloudbase-init.exe" --config-file "C:\Program Files\Cloudbase Solutions\Cloudbase-Init\conf\cloudbase-init-unattend.conf" &amp; exit 0"</Path>
+        </RunSynchronousCommand>
       </RunSynchronous>
     </component>
   </settings>

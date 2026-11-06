@@ -2899,6 +2899,7 @@ async fn project_linked_lab_router() -> (
                     audio: None,
                     guest_os: fleet_core::GuestOs::default(),
                     interactive_user: None,
+                    hardware: Vec::new(),
                 },
             },
             1,

@@ -4,6 +4,7 @@
 
 #![warn(missing_docs)]
 
+pub mod answer_media;
 pub mod apply;
 pub mod audit;
 pub mod authz;
@@ -15,17 +16,24 @@ pub mod credentials;
 pub mod dns;
 pub mod events;
 pub mod external_accounts;
+pub mod hardware;
+pub mod hardware_inventory;
+pub mod hardware_override;
+pub mod hardware_reservation;
 pub mod idempotency;
 pub mod images;
 pub mod lab;
 pub mod lab_artifacts;
 pub mod lab_exec_detach;
+pub mod lab_hardware_hotplug;
 pub mod lab_placement;
 pub mod lab_pool;
 pub mod lab_put;
 pub mod machine;
 pub mod machine_access;
+pub mod machine_setup;
 pub mod machine_terminal;
+pub mod machine_usb;
 pub mod node;
 pub mod observed;
 pub mod observed_assembly;

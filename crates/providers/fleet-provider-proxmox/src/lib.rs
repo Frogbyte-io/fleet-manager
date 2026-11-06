@@ -46,6 +46,9 @@ use rustls::{DigitallySignedStruct, SignatureScheme};
 use sha2::Digest;
 
 mod permissions;
+pub mod usb;
+pub mod usb_attach;
+pub mod usb_references;
 mod vnc;
 
 pub use vnc::{HANDSHAKE_TIMEOUT, MAX_MESSAGE_BYTES, PveSocket, PveVncProxy, vnc_auth_response};
@@ -226,6 +229,25 @@ pub trait PveTransport: fmt::Debug + Send + Sync {
         request: PveHttpRequest,
         body: Vec<u8>,
     ) -> Result<PveHttpResponse, PveTransportError>;
+
+    /// Executes one `multipart/form-data` upload (`POST` with the given
+    /// `Content-Type`, which carries the boundary).
+    ///
+    /// # Errors
+    ///
+    /// Fails with [`PveTransportError`]. The default (fixture transports)
+    /// cannot upload.
+    async fn execute_upload(
+        &self,
+        request: PveHttpRequest,
+        content_type: String,
+        body: Vec<u8>,
+    ) -> Result<PveHttpResponse, PveTransportError> {
+        let _ = (request, content_type, body);
+        Err(PveTransportError::Connect {
+            detail: "this transport cannot upload".to_owned(),
+        })
+    }
 
     /// Captures the host's leaf certificate without sending any request:
     /// the observe-only policy refuses the handshake after capture, and no
@@ -445,7 +467,18 @@ impl PveTransport for ReqwestPveTransport {
         request: PveHttpRequest,
         body: Vec<u8>,
     ) -> Result<PveHttpResponse, PveTransportError> {
-        self.execute_inner(request, Some(body)).await
+        self.execute_inner(request, Some(("application/json".to_owned(), body)))
+            .await
+    }
+
+    async fn execute_upload(
+        &self,
+        request: PveHttpRequest,
+        content_type: String,
+        body: Vec<u8>,
+    ) -> Result<PveHttpResponse, PveTransportError> {
+        self.execute_inner(request, Some((content_type, body)))
+            .await
     }
 
     async fn execute(&self, request: PveHttpRequest) -> Result<PveHttpResponse, PveTransportError> {
@@ -641,7 +674,7 @@ impl ReqwestPveTransport {
     async fn execute_inner(
         &self,
         request: PveHttpRequest,
-        body: Option<Vec<u8>>,
+        body: Option<(String, Vec<u8>)>,
     ) -> Result<PveHttpResponse, PveTransportError> {
         let policy = match &request.pinned_fingerprint {
             Some(pinned) => TlsPolicy::Pin(normalize_fingerprint(pinned)),
@@ -669,8 +702,8 @@ impl ReqwestPveTransport {
             ),
         );
         let request_builder = match body {
-            Some(bytes) => request_builder
-                .header("Content-Type", "application/json")
+            Some((content_type, bytes)) => request_builder
+                .header("Content-Type", content_type)
                 .body(bytes),
             None => request_builder,
         };
@@ -1460,6 +1493,7 @@ pub struct PveQemuConfigFlags {
 /// The hardware facts of a QEMU guest's config that Lab applies from its
 /// template to a fresh clone (issue #372).
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[allow(clippy::struct_excessive_bools)] // independent config facts, as PVE reports them
 pub struct PveQemuHardware {
     /// The guest's name, bounded.
     pub name: Option<String>,
@@ -1489,6 +1523,18 @@ pub struct PveQemuHardware {
     pub audio: Option<PveAudio>,
     /// Whether the config has an `audio0` this crate cannot read.
     pub audio_unreadable: bool,
+    /// The cloud-init user (`ciuser`), when the config sets one.
+    pub cloud_init_user: Option<String>,
+    /// The cloud-init public keys (`sshkeys`), percent-decoded, one per
+    /// line. Empty when the config sets none or the value is oversized.
+    /// Public keys only.
+    pub cloud_init_ssh_keys: Vec<String>,
+    /// Whether the guest has a cloud-init drive (a `…-cloudinit` volume on an
+    /// ide, sata or scsi slot), which Cloudbase-Init reads the login from.
+    pub has_cloud_init_drive: bool,
+    /// Whether `sshkeys` was too large to read (so `cloud_init_ssh_keys` is
+    /// empty although the guest has keys). A caller must not rewrite it.
+    pub cloud_init_ssh_keys_oversized: bool,
     /// The config digest, for a conditional update.
     pub digest: Option<String>,
 }
@@ -2357,6 +2403,34 @@ pub fn normalize_mac(candidate: &str) -> Option<String> {
     Some(normalized.into_iter().collect())
 }
 
+/// Whether `line` is one OpenSSH public key line without a comment:
+/// `<type> <base64>`, a known key type, bounded, no control characters.
+/// A private key block never matches.
+#[must_use]
+pub fn is_public_key_line(line: &str) -> bool {
+    let mut parts = line.split(' ');
+    let (Some(kind), Some(blob), None) = (parts.next(), parts.next(), parts.next()) else {
+        return false;
+    };
+    let known = matches!(
+        kind,
+        "ssh-ed25519"
+            | "ssh-rsa"
+            | "ecdsa-sha2-nistp256"
+            | "ecdsa-sha2-nistp384"
+            | "ecdsa-sha2-nistp521"
+            | "sk-ssh-ed25519@openssh.com"
+            | "sk-ecdsa-sha2-nistp256@openssh.com"
+    );
+    known
+        && !blob.is_empty()
+        && line.len() <= 4096
+        && !line.chars().any(char::is_control)
+        && blob
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'+' | b'/' | b'='))
+}
+
 fn urlencode(value: &str) -> String {
     use std::fmt::Write as _;
     let mut encoded = String::new();
@@ -2560,6 +2634,58 @@ impl ProxmoxClient {
         })
     }
 
+    /// The token's effective permissions without the per-VMID `nextid`
+    /// checks that [`ProxmoxSource::token_permissions`] makes for clone
+    /// targets. For a caller that only reads the map (the hardware refresh's
+    /// guest visibility, #596): a failing VMID probe cannot fail this read, so
+    /// a transient `nextid` error never hides a readable permission map.
+    ///
+    /// # Errors
+    ///
+    /// Fails with [`PveApiError`] when the version or the permissions cannot
+    /// be read.
+    pub async fn token_permissions_map(
+        &self,
+        request: PveHttpRequest,
+    ) -> Result<PveTokenPermissions, PveApiError> {
+        let version = self.read_version(&request).await?;
+        let permissions_request = PveHttpRequest {
+            path: "/api2/json/access/permissions".to_owned(),
+            method: PveHttpMethod::Get,
+            ..request
+        };
+        let data = self.call(permissions_request).await?;
+        normalize_token_permissions(version, &data)
+    }
+
+    /// Whether a VMID is in use anywhere in the cluster
+    /// (`GET /cluster/nextid?vmid=<id>`): `200` when it is free, `400` when
+    /// it exists. Unlike the guest listing it does not depend on the
+    /// caller's `VM.Audit` (`user => 'all'`), so it is the one read that
+    /// can prove a guest exists that the token cannot see (#596). Meant for
+    /// valid VMIDs (at least 100).
+    ///
+    /// # Errors
+    ///
+    /// Fails with [`PveApiError`] for any other outcome, including a refusal
+    /// or an unreachable host.
+    pub async fn vmid_in_use(
+        &self,
+        request: PveHttpRequest,
+        vmid: u32,
+    ) -> Result<bool, PveApiError> {
+        let nextid_request = PveHttpRequest {
+            path: format!("/api2/json/cluster/nextid?vmid={vmid}"),
+            method: PveHttpMethod::Get,
+            ..request
+        };
+        match self.call(nextid_request).await {
+            Ok(_) => Ok(false),
+            Err(PveApiError::Http { status: 400, .. }) => Ok(true),
+            Err(error) => Err(error),
+        }
+    }
+
     /// The few facts of one QEMU guest's current config
     /// (`GET /nodes/{node}/qemu/{vmid}/config`) that the Lab executor
     /// checks before it changes a fresh clone (issue #290). Needs
@@ -2727,6 +2853,64 @@ impl ProxmoxClient {
         if let Some(audio) = audio {
             body["audio0"] = serde_json::json!(audio.to_property());
         }
+        self.call_method_with_body(
+            request,
+            PveHttpMethod::Put,
+            &format!("/api2/json/nodes/{}/qemu/{vmid}/config", urlencode(node)),
+            &body,
+        )
+        .await
+        .map(|_| ())
+    }
+
+    /// Writes a guest's cloud-init login: `ciuser` and `sshkeys`
+    /// (`PUT /nodes/{node}/qemu/{vmid}/config`, synchronous; needs
+    /// `VM.Config.Cloudinit` on `/vms/{vmid}`), so Cloudbase-Init or
+    /// cloud-init installs the keys at the guest's first boot. Only public
+    /// keys are accepted: every entry must be one `type base64` line with
+    /// no whitespace inside. PVE takes `sshkeys` percent-encoded. Always
+    /// conditional on `digest` (from [`Self::qemu_hardware`]).
+    ///
+    /// # Errors
+    ///
+    /// Fails with [`PveApiError`], including PVE's refusal of a locked guest
+    /// or a stale digest, and `InvalidPayload` for no keys, an invalid user,
+    /// or an entry that is not a public key line.
+    pub async fn qemu_set_cloud_init_login(
+        &self,
+        request: PveHttpRequest,
+        node: &str,
+        vmid: u32,
+        user: &str,
+        public_keys: &[String],
+        digest: &str,
+    ) -> Result<(), PveApiError> {
+        let invalid = |detail: &str| PveApiError::InvalidPayload {
+            detail: detail.to_owned(),
+        };
+        if public_keys.is_empty() {
+            return Err(invalid("there is no SSH public key to set"));
+        }
+        if user.is_empty()
+            || user.len() > 64
+            || !user
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'-' | b'.'))
+        {
+            return Err(invalid("the cloud-init user name is not valid"));
+        }
+        let mut lines = Vec::with_capacity(public_keys.len());
+        for key in public_keys {
+            if !is_public_key_line(key) {
+                return Err(invalid("an SSH key entry is not a single public key line"));
+            }
+            lines.push(key.as_str());
+        }
+        let body = serde_json::json!({
+            "ciuser": user,
+            "sshkeys": urlencode(&lines.join("\n")),
+            "digest": digest,
+        });
         self.call_method_with_body(
             request,
             PveHttpMethod::Put,
@@ -3117,8 +3301,82 @@ fn parse_hardware(config: &serde_json::Value) -> Result<PveQemuHardware, String>
         boot_disk,
         audio,
         audio_unreadable,
+        // An unreadable or over-long `ciuser` is simply not the user Lab
+        // would set; it must not fail the whole hardware read.
+        cloud_init_user: bounded_str(config, "ciuser", MAX_ID_CHARS).ok().flatten(),
+        has_cloud_init_drive: object.iter().any(|(key, value)| {
+            let slot = key.trim_start_matches(|c: char| c.is_ascii_alphabetic());
+            (key.starts_with("ide") || key.starts_with("sata") || key.starts_with("scsi"))
+                && !slot.is_empty()
+                && slot.bytes().all(|b| b.is_ascii_digit())
+                && value.as_str().is_some_and(|text| {
+                    // The volume is `<storage>:vm-<id>-cloudinit` on block
+                    // storage, or `<storage>:<id>/vm-<id>-cloudinit.qcow2`
+                    // (`.raw`, `.vmdk`) on file storage; options follow the
+                    // comma.
+                    text.split(',').next().is_some_and(is_cloud_init_volume)
+                })
+        }),
+        cloud_init_ssh_keys: config
+            .get("sshkeys")
+            .and_then(serde_json::Value::as_str)
+            .filter(|encoded| encoded.len() <= MAX_SSH_KEYS_ENCODED)
+            .map(|encoded| {
+                percent_decode(encoded)
+                    .lines()
+                    .map(str::trim)
+                    .filter(|line| !line.is_empty())
+                    .map(str::to_owned)
+                    .collect()
+            })
+            .unwrap_or_default(),
+        cloud_init_ssh_keys_oversized: config
+            .get("sshkeys")
+            .and_then(serde_json::Value::as_str)
+            .is_some_and(|encoded| encoded.len() > MAX_SSH_KEYS_ENCODED),
         digest: bounded_str(config, "digest", 64)?,
     })
+}
+
+/// Whether a drive's volume id names a cloud-init disk: the last path
+/// component (after the storage's `:` and any `/`) is `vm-<id>-cloudinit`
+/// with an optional `.qcow2`, `.raw` or `.vmdk` suffix.
+fn is_cloud_init_volume(volume: &str) -> bool {
+    let name = volume.rsplit([':', '/']).next().unwrap_or_default();
+    let stem = [".qcow2", ".raw", ".vmdk"]
+        .iter()
+        .find_map(|suffix| name.strip_suffix(suffix))
+        .unwrap_or(name);
+    stem.strip_prefix("vm-")
+        .and_then(|rest| rest.strip_suffix("-cloudinit"))
+        .is_some_and(|id| !id.is_empty() && id.bytes().all(|b| b.is_ascii_digit()))
+}
+
+/// The most percent-encoded `sshkeys` text read from a config (about 8
+/// maximum-size keys); anything larger is not read, and the config reports
+/// it as oversized so a caller never overwrites it.
+const MAX_SSH_KEYS_ENCODED: usize = 32 * 1024;
+
+/// Decodes `%XX` escapes (PVE stores `sshkeys` percent-encoded). A malformed
+/// escape is kept literally, and invalid UTF-8 is replaced.
+fn percent_decode(value: &str) -> String {
+    let bytes = value.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut index = 0;
+    while index < bytes.len() {
+        if bytes[index] == b'%'
+            && let Some(pair) = bytes.get(index + 1..index + 3)
+            && let Ok(text) = std::str::from_utf8(pair)
+            && let Ok(byte) = u8::from_str_radix(text, 16)
+        {
+            out.push(byte);
+            index += 3;
+        } else {
+            out.push(bytes[index]);
+            index += 1;
+        }
+    }
+    String::from_utf8_lossy(&out).into_owned()
 }
 
 /// Reads a number that PVE may deliver as a JSON number or a string.

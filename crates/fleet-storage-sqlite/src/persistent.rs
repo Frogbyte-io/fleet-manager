@@ -207,6 +207,75 @@ impl PersistentGuestPort for PersistentGuestRepository {
         Ok(row.map(|row| owner_from(&row)))
     }
 
+    async fn record_answer_media(
+        &self,
+        account_id: &str,
+        vmid: u32,
+        file: &str,
+    ) -> Result<(), String> {
+        let done = sqlx::query(
+            "UPDATE persistent_guests SET answer_media = ?3 WHERE account_id = ?1 AND vmid = ?2",
+        )
+        .bind(account_id)
+        .bind(i64::from(vmid))
+        .bind(file)
+        .execute(&self.pool)
+        .await
+        .map_err(|error| format!("persistent guest answer media write failed: {error}"))?;
+        if done.rows_affected() == 0 {
+            return Err("the persistent guest is unknown".to_owned());
+        }
+        Ok(())
+    }
+
+    async fn clear_answer_media(&self, account_id: &str, vmid: u32) -> Result<(), String> {
+        sqlx::query(
+            "UPDATE persistent_guests SET answer_media = NULL WHERE account_id = ?1 AND vmid = ?2",
+        )
+        .bind(account_id)
+        .bind(i64::from(vmid))
+        .execute(&self.pool)
+        .await
+        .map(|_| ())
+        .map_err(|error| format!("persistent guest answer media clear failed: {error}"))
+    }
+
+    async fn answer_media_of(&self, account_id: &str, vmid: u32) -> Result<Option<String>, String> {
+        let row = sqlx::query(
+            "SELECT answer_media FROM persistent_guests \
+             WHERE account_id = ?1 AND vmid = ?2 AND answer_media IS NOT NULL",
+        )
+        .bind(account_id)
+        .bind(i64::from(vmid))
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(|error| format!("persistent guest answer media read failed: {error}"))?;
+        Ok(row.map(|row| row.get::<String, _>("answer_media")))
+    }
+
+    async fn answer_media_all(
+        &self,
+    ) -> Result<Vec<(String, u32, String, PersistentState)>, String> {
+        let rows = sqlx::query(
+            "SELECT account_id, vmid, state, answer_media FROM persistent_guests \
+             WHERE answer_media IS NOT NULL",
+        )
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|error| format!("persistent guest answer media read failed: {error}"))?;
+        Ok(rows
+            .iter()
+            .filter_map(|row| {
+                Some((
+                    row.get::<String, _>("account_id"),
+                    u32::try_from(row.get::<i64, _>("vmid")).ok()?,
+                    row.get::<String, _>("answer_media"),
+                    PersistentState::from_id(&row.get::<String, _>("state"))?,
+                ))
+            })
+            .collect())
+    }
+
     async fn remove(&self, account_id: &str, vmid: u32) -> Result<(), String> {
         sqlx::query("DELETE FROM persistent_guests WHERE account_id = ?1 AND vmid = ?2")
             .bind(account_id)

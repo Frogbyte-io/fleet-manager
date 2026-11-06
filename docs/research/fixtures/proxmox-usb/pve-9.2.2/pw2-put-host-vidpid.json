@@ -1,0 +1,17 @@
+{
+  "http_status": 500,
+  "pve_version": "9.2.2",
+  "recorded_with": "curl over HTTPS with a temporary privilege-separated API token (real HTTP status and body)",
+  "request": {
+    "method": "PUT",
+    "params": {
+      "usb2": "host=05ac:1500"
+    },
+    "path": "/nodes/pve/qemu/9563/config"
+  },
+  "response": {
+    "errors": null,
+    "message": "only root can set 'usb2' config for real devices\n"
+  },
+  "who": "probe"
+}

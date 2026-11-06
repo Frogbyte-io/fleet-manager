@@ -1,0 +1,15 @@
+{
+  "http_status": 200,
+  "pve_version": "9.2.2",
+  "pvesh_log": "update VM 9564: -usb0 mapping=fm-test-tmp-ambig",
+  "recorded_with": "pvesh (root@pam), status and body reconstructed from the CLI",
+  "request": {
+    "method": "PUT",
+    "params": {
+      "usb0": "mapping=fm-test-tmp-ambig"
+    },
+    "path": "/nodes/pve/qemu/9564/config"
+  },
+  "response": null,
+  "who": "root"
+}

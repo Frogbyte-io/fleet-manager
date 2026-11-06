@@ -36,6 +36,8 @@
       "execute_command": "powershell -NoProfile -ExecutionPolicy Bypass -File {{.Path}}",
       "remote_path": "C:/Windows/Temp/fleet-regeneralize.ps1",
       "expect_disconnect": true,
+      "skip_clean": true,
+      "pause_after": "6m",
       "inline": [
         "& 'C:\\ProgramData\\fleet\\generalize.ps1' -RemoveAuthorizedKeys"
       ]

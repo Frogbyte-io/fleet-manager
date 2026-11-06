@@ -416,6 +416,10 @@ pub struct AddedMachine {
     /// Existing machines that shared the draft's host and port. The add
     /// proceeded anyway: candidates warn, they do not merge.
     pub duplicates: Vec<DuplicateCandidate>,
+    /// What the setup follow-up did (#600), when a hook is composed. The
+    /// add succeeded either way.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub setup_follow_up: Option<crate::machine_setup::SetupFollowUp>,
 }
 
 /// A use-case rejection, mapped onto public API errors by the adapter.
@@ -473,6 +477,7 @@ pub struct Onboarding {
     trust: Arc<dyn OnboardTrustPort>,
     machines: Arc<Machines>,
     audit: Arc<dyn crate::operation::AuditPort>,
+    setup_hook: Option<Arc<dyn crate::machine_setup::MachineSetupPort>>,
 }
 
 impl Onboarding {
@@ -489,7 +494,19 @@ impl Onboarding {
             trust,
             machines,
             audit,
+            setup_hook: None,
         }
+    }
+
+    /// Runs `hook` after every successful [`Onboarding::add`], as the
+    /// caller (#600). The hook's outcome never fails the add.
+    #[must_use]
+    pub fn with_setup_hook(
+        mut self,
+        hook: Arc<dyn crate::machine_setup::MachineSetupPort>,
+    ) -> Self {
+        self.setup_hook = Some(hook);
+        self
     }
 
     /// Creates a draft. No network contact happens here; the address is
@@ -811,6 +828,7 @@ impl Onboarding {
     ///
     /// Fails on denial, an unknown draft, an unconfirmed or changed host
     /// key, or any machine-mutation failure.
+    #[allow(clippy::too_many_lines)]
     pub async fn add(
         &self,
         authorizer: &dyn Authorizer,
@@ -904,6 +922,24 @@ impl Onboarding {
         self.audit_draft(principal, &machine.id, "onboarding_completed", None)
             .await?;
 
+        // The setup follow-up runs as the caller, through the normal
+        // authorized, audited operation path. It is best effort: whatever it
+        // answers, the machine is registered and the add succeeds.
+        let setup_follow_up = self
+            .run_setup_hook(
+                authorizer,
+                principal,
+                crate::machine_setup::MachineSetup {
+                    machine_id: machine.id.clone(),
+                    endpoint_id,
+                    auth: draft.auth.clone(),
+                    trigger: format!("onboarding:{}", machine.id),
+                    correlation_id: None,
+                    kind: crate::machine_setup::SetupKind::Initial,
+                },
+            )
+            .await;
+
         // The response is the fresh read surface — registration, the
         // confirmed fingerprint, and the ingested facts included — not the
         // register call's pre-ingestion record.
@@ -915,7 +951,27 @@ impl Onboarding {
         Ok(AddedMachine {
             machine: machine_view,
             duplicates,
+            setup_follow_up,
         })
+    }
+
+    /// Runs the setup hook, when one is composed, and logs a follow-up that
+    /// could not be queued. Never fails: the add has already succeeded.
+    async fn run_setup_hook(
+        &self,
+        authorizer: &dyn Authorizer,
+        principal: &ActingPrincipal,
+        setup: crate::machine_setup::MachineSetup,
+    ) -> Option<crate::machine_setup::SetupFollowUp> {
+        let hook = self.setup_hook.as_ref()?;
+        let outcome = hook.machine_set_up(authorizer, &principal.id, &setup).await;
+        if let crate::machine_setup::SetupFollowUp::Failed { reason } = &outcome {
+            eprintln!(
+                "onboarding add {}: the setup follow-up was not queued: {reason}",
+                setup.machine_id
+            );
+        }
+        Some(outcome)
     }
 
     /// Whether the caller may see sensitive endpoint detail for one draft

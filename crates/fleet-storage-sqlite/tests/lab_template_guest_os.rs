@@ -84,6 +84,7 @@ async fn a_row_without_a_declared_guest_os_reads_as_linux_and_bad_values_are_ref
                 content: LabTemplateContent {
                     guest_os: GuestOs::default(),
                     interactive_user: None,
+                    hardware: Vec::new(),
                     ..content(GuestOs::Linux)
                 },
             },

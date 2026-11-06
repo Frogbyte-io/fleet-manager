@@ -96,6 +96,11 @@ pub struct LabCleanupExecutor {
     reservations: Option<Arc<dyn CapacityReservationPort>>,
     /// Pooled guests (FM-717).
     pools: Option<PoolCleanup>,
+    /// The physical devices a lease reserved (FM-1121).
+    devices: Option<Arc<fleet_application::lab_placement::HardwarePlacement>>,
+    /// Detaches the devices a lease attached, before the guest's fate
+    /// (FM-1123).
+    device_saga: Option<Arc<crate::lab_hardware::LabHardwareSaga>>,
 }
 
 impl LabCleanupExecutor {
@@ -116,7 +121,31 @@ impl LabCleanupExecutor {
             destroyer,
             reservations: None,
             pools: None,
+            devices: None,
+            device_saga: None,
         }
+    }
+
+    /// Detaches the devices a lease attached before its guest is destroyed,
+    /// reverted or kept (FM-1123, ADR 0019 decision 5). A device that cannot
+    /// be confirmed detached keeps the reservation and the lease in cleanup
+    /// retry, and the guest is left alone; a pooled member whose detach is
+    /// unconfirmed is quarantined.
+    #[must_use]
+    pub fn with_device_saga(mut self, saga: Arc<crate::lab_hardware::LabHardwareSaga>) -> Self {
+        self.device_saga = Some(saga);
+        self
+    }
+
+    /// Releases the devices a lease reserved but never attached when its
+    /// cleanup completes (FM-1121).
+    #[must_use]
+    pub fn with_devices(
+        mut self,
+        devices: Arc<fleet_application::lab_placement::HardwarePlacement>,
+    ) -> Self {
+        self.devices = Some(devices);
+        self
     }
 
     /// Reverts pooled leases' members instead of destroying them (FM-717).
@@ -208,6 +237,22 @@ impl LabCleanupExecutor {
             )
             .await;
         }
+        // FM-1121: the devices the lease reserved but never attached are
+        // released with it. A device that was attached, or whose attach or
+        // detach is unconfirmed, is not: the detach path (FM-1123) owns it,
+        // and the reservation store never releases it on the lease's word.
+        if let Some(devices) = &self.devices {
+            let _ = devices
+                .release_unattached(
+                    fleet_auth::LAN_PRINCIPAL_ID,
+                    &lease.id,
+                    // Named by the lease, not the operation: the operation's
+                    // outcome stays attached to its own intent.
+                    None,
+                    fleet_core::SystemClock::now_unix_millis(),
+                )
+                .await;
+        }
         let mut audited = vec![("outcome", outcome.to_owned())];
         audited.extend(facts.iter().cloned());
         self.audit(&lease.id, "lab_lease_released", &audited).await;
@@ -268,13 +313,25 @@ impl LabCleanupExecutor {
         account_id: &str,
         node: &str,
         vmid: u32,
+        record: &fleet_application::lab::ProvisionRecord,
     ) -> Result<Operation, String> {
+        // The destroy names the guest this record owns (#592): the recorded
+        // VMID alone does not say who holds the VMID now, so the executor
+        // refuses any guest that is not `fm-lab-<record>`. A record that never
+        // started a clone, or whose clone step failed (PVE then removes the
+        // target's config), has no confirmed guest, so another owner's guest at
+        // its VMID is nothing of its own to destroy.
         let payload = serde_json::json!({
             "accountId": account_id,
             "node": node,
             "vmid": vmid,
             "timeoutSeconds": DESTROY_TIMEOUT_SECONDS,
-            "params": { "purge": true },
+            "params": {
+                "purge": true,
+                "expectedName": format!("fm-lab-{}", record.id),
+                "guestUnconfirmed": record.clone_upid.is_none()
+                    || record.failed_step.as_deref() == Some("clone"),
+            },
         })
         .to_string();
         // The controller reviews its own cleanup: the token is computed
@@ -469,6 +526,48 @@ impl LabCleanupExecutor {
         .await
     }
 
+    /// A device could not be confirmed detached: the attempt fails and the
+    /// lease stays in cleanup retry. A pool member that may still hold the
+    /// device is quarantined at once, so it never returns to the pool.
+    async fn hardware_unconfirmed(
+        &self,
+        operations: &Operations,
+        operation: &Operation,
+        lease: fleet_core::Lease,
+        member: Option<&PoolMember>,
+        unconfirmed: crate::lab_hardware::DetachUnconfirmed,
+    ) -> Result<(), String> {
+        if let (Some(pools), Some(member)) = (&self.pools, member)
+            && pools
+                .pools
+                .quarantine_bound(
+                    &lease.id,
+                    &unconfirmed.detail,
+                    fleet_core::SystemClock::now_unix_millis(),
+                )
+                .await
+                .is_ok()
+        {
+            self.audit_member(
+                &member.pool_id,
+                operation,
+                "lab_pool_member_quarantined",
+                member.vmid,
+                &[
+                    ("leaseId", lease.id.clone()),
+                    ("reason", "hardware_detach_unconfirmed".to_owned()),
+                ],
+            )
+            .await;
+        }
+        let guest = unconfirmed
+            .guest
+            .clone()
+            .or_else(|| member.and_then(|member| member.node.clone().map(|n| (n, member.vmid))));
+        self.fail_attempt(operations, operation, lease, &unconfirmed.detail, guest)
+            .await
+    }
+
     /// Removes the Lab-owned machine record of the lease's provision, when
     /// it has one. Answers why it could not.
     async fn remove_lease_machine(&self, lease: &fleet_core::Lease) -> Option<String> {
@@ -571,6 +670,16 @@ impl OperationExecutor for LabCleanupExecutor {
             None => None,
         };
         let plan = cleanup_plan(lease.cleanup, member.is_some());
+        // FM-1123: devices come off the guest before anything decides its
+        // fate. A revert lease without a member is refused untouched.
+        if plan != CleanupPlan::NotPooled
+            && let Some(saga) = &self.device_saga
+            && let Err(unconfirmed) = saga.detach_for_lease(&lease.id, Some(&operation.id)).await
+        {
+            return self
+                .hardware_unconfirmed(operations, operation, lease, member.as_ref(), unconfirmed)
+                .await;
+        }
         match (plan, &self.pools, member) {
             (CleanupPlan::Keep, _, _) => {
                 self.release(operations, operation, lease, Released::Kept)
@@ -666,7 +775,7 @@ impl LabCleanupExecutor {
             }
         }
         let child = match self
-            .destroy(operations, &lease, &account_id, &node, vmid)
+            .destroy(operations, &lease, &account_id, &node, vmid, &record)
             .await
         {
             Ok(child) => child,
@@ -688,11 +797,27 @@ impl LabCleanupExecutor {
                 )
                 .await;
         }
+        // A Lab-owned machine record goes with the lease even when the destroy
+        // found nothing of the record's (a drained pool member's lease can
+        // hold one without a clone of its own).
         if let Some(machine_id) = &record.machine_id
             && let Err(detail) = self.remove_machine(machine_id).await
         {
             return self
                 .fail_attempt(operations, operation, lease, &detail, guest)
+                .await;
+        }
+        // The destroy found nothing of this record's at the VMID (no guest of
+        // its own was confirmed, and the VMID is another owner's or empty): the
+        // lease owned no guest, so its release owes nothing.
+        let not_owned = child
+            .result_json
+            .as_deref()
+            .and_then(|raw| serde_json::from_str::<serde_json::Value>(raw).ok())
+            .is_some_and(|result| result["notOwned"].as_bool() == Some(true));
+        if not_owned {
+            return self
+                .release(operations, operation, lease, Released::NothingAllocated)
                 .await;
         }
         self.release(operations, operation, lease, Released::Destroyed)

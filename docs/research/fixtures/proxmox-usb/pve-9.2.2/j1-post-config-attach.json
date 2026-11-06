@@ -1,0 +1,15 @@
+{
+  "http_status": 200,
+  "pve_version": "9.2.2",
+  "recorded_with": "pvesh (root@pam), status and body reconstructed from the CLI",
+  "request": {
+    "method": "POST",
+    "params": {
+      "usb0": "mapping=fm-test-superdrive-a"
+    },
+    "path": "/nodes/pve/qemu/9563/config"
+  },
+  "response": "UPID:pve:001849A2:0CA38F66:6AE45431:qmconfig:9563:root@pam:",
+  "task_log": "update VM 9563: -usb0 mapping=fm-test-superdrive-a\nUse of uninitialized value in pattern match (m//) at /usr/share/perl5/PVE/QemuServer.pm line 4769.",
+  "who": "root"
+}

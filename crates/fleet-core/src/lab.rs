@@ -338,6 +338,84 @@ impl LabAudio {
     }
 }
 
+/// The most hardware devices one Lab template may declare. A QEMU guest has
+/// five `usbN` slots ([`crate::USB_SLOT_COUNT`]); a template declares fewer so
+/// that a clone's own slots are never all spoken for.
+pub const MAX_LAB_HARDWARE: usize = 4;
+/// The longest PVE resource mapping id a template may name.
+pub const MAX_LAB_HARDWARE_MAPPING_LEN: usize = 64;
+
+/// One physical device a Lab template asks for (FM-1121, ADR 0019): the
+/// operator-created PVE resource mapping that names it. The mapping is the
+/// device's identity; Fleet never writes `host=` and never creates mappings.
+/// Groups or labels ("any Decker") are deferred.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct LabHardware {
+    /// The device kind; only `usb` exists.
+    pub kind: crate::HardwareKind,
+    /// The PVE USB resource mapping id.
+    pub mapping: String,
+}
+
+/// Whether `mapping` is a PVE resource mapping id Fleet accepts in a
+/// template: it ends up in `usbN=mapping=<id>` and in API paths, so it has no
+/// comma, `=`, `/`, or whitespace. PVE's own config-id rule is looser; this
+/// is the subset Fleet will carry.
+#[must_use]
+pub fn is_valid_hardware_mapping_id(mapping: &str) -> bool {
+    let mut bytes = mapping.bytes();
+    bytes
+        .next()
+        .is_some_and(|first| first.is_ascii_alphanumeric())
+        && mapping.len() <= MAX_LAB_HARDWARE_MAPPING_LEN
+        && bytes.all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
+}
+
+impl LabHardware {
+    /// Validates the declaration.
+    ///
+    /// # Errors
+    ///
+    /// Fails on a mapping id outside the accepted shape.
+    pub fn validate(&self) -> Result<(), String> {
+        if !is_valid_hardware_mapping_id(&self.mapping) {
+            return Err(format!(
+                "the hardware mapping id must be 1..={MAX_LAB_HARDWARE_MAPPING_LEN} characters: letters, digits, '-', '_' and '.', starting with a letter or digit"
+            ));
+        }
+        Ok(())
+    }
+}
+
+/// Validates a template's whole hardware declaration: each entry, at most
+/// [`MAX_LAB_HARDWARE`] of them, and no mapping twice (one device is one
+/// reservation, so a repeat could only be a mistake).
+///
+/// # Errors
+///
+/// Fails on a malformed entry, too many entries, or a repeated mapping.
+pub fn validate_lab_hardware(hardware: &[LabHardware]) -> Result<(), String> {
+    if hardware.len() > MAX_LAB_HARDWARE {
+        return Err(format!(
+            "a template declares at most {MAX_LAB_HARDWARE} hardware devices"
+        ));
+    }
+    for (index, device) in hardware.iter().enumerate() {
+        device.validate()?;
+        if hardware[..index]
+            .iter()
+            .any(|earlier| earlier.kind == device.kind && earlier.mapping == device.mapping)
+        {
+            return Err(format!(
+                "the hardware mapping {} is declared more than once",
+                device.mapping
+            ));
+        }
+    }
+    Ok(())
+}
+
 /// A Lab template's content: the pinned image version, runtime
 /// constraints, the bootstrap profile, and the policies.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -395,6 +473,11 @@ pub struct LabTemplateContent {
     /// operator keeps that user logged on (autologon).
     #[serde(default)]
     pub interactive_user: Option<String>,
+    /// The physical devices every lease from this template reserves
+    /// (FM-1121). Empty for a template that asks for none, which is also how
+    /// a template stored before the field existed reads.
+    #[serde(default)]
+    pub hardware: Vec<LabHardware>,
 }
 
 impl Default for LabTemplateContent {
@@ -419,6 +502,7 @@ impl Default for LabTemplateContent {
             audio: None,
             guest_os: GuestOs::default(),
             interactive_user: None,
+            hardware: Vec::new(),
         }
     }
 }
@@ -467,6 +551,7 @@ impl LabTemplateContent {
         if let Some(audio) = &self.audio {
             audio.validate()?;
         }
+        validate_lab_hardware(&self.hardware)?;
         if self.readiness_probe == ReadinessProbe::ProjectReady
             && self
                 .bootstrap_project_id
@@ -561,6 +646,7 @@ mod tests {
             audio: None,
             guest_os: GuestOs::Linux,
             interactive_user: None,
+            hardware: Vec::new(),
         }
     }
 
@@ -669,6 +755,81 @@ mod tests {
         stored.as_object_mut().unwrap().remove("audio");
         let back: LabTemplateContent = serde_json::from_value(stored).unwrap();
         assert!(back.audio.is_none());
+    }
+
+    fn usb(mapping: &str) -> LabHardware {
+        LabHardware {
+            kind: crate::HardwareKind::Usb,
+            mapping: mapping.to_owned(),
+        }
+    }
+
+    #[test]
+    fn hardware_is_optional_bounded_and_limited_to_plain_mapping_ids() {
+        let mut with = content();
+        assert!(with.hardware.is_empty());
+        assert!(with.validate().is_ok());
+        for mapping in ["fm-test-superdrive-a", "a", "Dev_1.rev-2", &"x".repeat(64)] {
+            with.hardware = vec![usb(mapping)];
+            assert!(with.validate().is_ok(), "{mapping}");
+        }
+        for mapping in [
+            "",
+            "-lead",
+            ".lead",
+            "_lead",
+            "has space",
+            "a,b",
+            "a=b",
+            "a/b",
+            "a\nb",
+            "usb0=mapping",
+            "é",
+            &"x".repeat(65),
+        ] {
+            with.hardware = vec![usb(mapping)];
+            assert!(with.validate().is_err(), "{mapping:?}");
+        }
+        // At most four devices, and none twice.
+        with.hardware = (0..MAX_LAB_HARDWARE)
+            .map(|n| usb(&format!("dev-{n}")))
+            .collect();
+        assert!(with.validate().is_ok());
+        with.hardware.push(usb("one-too-many"));
+        let refusal = with.validate().unwrap_err();
+        assert!(refusal.contains("at most 4"), "{refusal}");
+        with.hardware = vec![usb("dev-a"), usb("dev-b"), usb("dev-a")];
+        let refusal = with.validate().unwrap_err();
+        assert!(
+            refusal.contains("dev-a is declared more than once"),
+            "{refusal}"
+        );
+    }
+
+    #[test]
+    fn hardware_serializes_as_kind_and_mapping_and_old_content_reads_as_none() {
+        let mut with = content();
+        with.hardware = vec![usb("fm-test-verbatim")];
+        let json = serde_json::to_value(&with).unwrap();
+        assert_eq!(
+            json["hardware"],
+            serde_json::json!([{ "kind": "usb", "mapping": "fm-test-verbatim" }])
+        );
+        let back: LabTemplateContent = serde_json::from_value(json.clone()).unwrap();
+        assert_eq!(back, with);
+        // A published version stored before the field existed has none.
+        let mut stored = json;
+        stored.as_object_mut().unwrap().remove("hardware");
+        let back: LabTemplateContent = serde_json::from_value(stored).unwrap();
+        assert!(back.hardware.is_empty());
+        // An unknown kind or an extra key is refused, never ignored.
+        for entry in [
+            serde_json::json!({ "kind": "pci", "mapping": "gpu" }),
+            serde_json::json!({ "kind": "usb", "mapping": "a", "host": "05ac:1500" }),
+            serde_json::json!({ "kind": "usb" }),
+        ] {
+            assert!(serde_json::from_value::<LabHardware>(entry).is_err());
+        }
     }
 
     #[test]

@@ -41,6 +41,23 @@
 //! sweeper and leaves the manual sweep. A value that is not a whole number
 //! of seconds fails configuration loading.
 //!
+//! `FLEET_HARDWARE_REFRESH_INTERVAL_SECONDS` (TOML
+//! `hardware_refresh_interval_seconds`, default 600) is how often the hardware
+//! reconciler refreshes the USB inventory of each Proxmox account that has
+//! inventoried devices; `0` turns the scheduled refresh off, and a non-zero
+//! value must be at least 60. Each refresh reads the account's mappings,
+//! nodes and up to 512 guest configs. Above 900 seconds the inventory's
+//! observation bound makes devices read as stale between refreshes.
+//!
+//! `FLEET_SKILLS_MANAGER_AUTO_INSTALL` (TOML `skills_manager_auto_install`,
+//! default `true`) makes the controller queue a pinned, checksum-verified
+//! `skills.probe` after a successful `machine.install-fleetd` and after an
+//! SSH onboarding add (#600), so a machine Fleet sets up ends with the tested
+//! `skills-manager-cli`. The variable accepts `true`/`false` or `1`/`0`, in
+//! any case, like the other boolean settings; `false` (or `0`) turns the
+//! follow-up off, an empty value means unset, and any other value fails
+//! configuration loading.
+//!
 //! `FLEET_DESIRED_FETCH_INTERVAL_SECONDS` (TOML
 //! `desired_fetch_interval_seconds`, default `0` = off) makes the
 //! controller fetch the configured desired source's head periodically; a
@@ -54,6 +71,12 @@
 //! `lab_artifact_max_bytes`, default 64 MiB). Both numbers must be whole and
 //! positive. `lab put` uploads are capped by `FLEET_LAB_PUT_MAX_BYTES` (TOML
 //! `lab_put_max_bytes`, default 2 GiB).
+//!
+//! `FLEET_LAB_LOGIN_PUBLIC_KEY_FILE` (TOML `lab_login_public_key_file`, unset
+//! by default) names a `.pub` file whose single public key Lab writes to the
+//! cloud-init drive of a Windows clone (#561). Unset, Lab discovers the
+//! controller's ssh-agent and default key files instead. Only a path is kept
+//! here; the controller reads the file when it provisions.
 //!
 //! `FLEET_TAILSCALE_SERVE_LISTEN` is optional. When set, it must be a valid,
 //! nonzero loopback socket address distinct from `FLEET_LISTEN`; invalid
@@ -89,6 +112,16 @@ pub const TAILSCALE_SERVE_LISTEN_VAR: &str = "FLEET_TAILSCALE_SERVE_LISTEN";
 pub const LAB_SWEEP_INTERVAL_VAR: &str = "FLEET_LAB_SWEEP_INTERVAL_SECONDS";
 /// The default Lab sweeper interval (FM-716).
 pub const DEFAULT_LAB_SWEEP_INTERVAL_SECONDS: u64 = 60;
+/// Environment variable holding the scheduled hardware inventory refresh
+/// interval in seconds (`0` turns it off).
+pub const HARDWARE_REFRESH_INTERVAL_VAR: &str = "FLEET_HARDWARE_REFRESH_INTERVAL_SECONDS";
+/// The default scheduled hardware inventory refresh interval (FM-1124).
+pub const DEFAULT_HARDWARE_REFRESH_INTERVAL_SECONDS: u64 = 600;
+/// The shortest allowed non-zero hardware refresh interval, in seconds.
+pub const MIN_HARDWARE_REFRESH_INTERVAL_SECONDS: u64 = 60;
+/// Environment variable turning the Skills Manager follow-up install off
+/// (`false`) or on (`true`, the default) (#600).
+pub const SKILLS_MANAGER_AUTO_INSTALL_VAR: &str = "FLEET_SKILLS_MANAGER_AUTO_INSTALL";
 /// Environment variable holding the periodic desired-source fetch interval
 /// in seconds (`0`, the default, disables the periodic fetch).
 pub const DESIRED_FETCH_INTERVAL_VAR: &str = "FLEET_DESIRED_FETCH_INTERVAL_SECONDS";
@@ -117,6 +150,8 @@ pub const DEFAULT_LAB_ARTIFACT_RETENTION_SECONDS: u64 = 7 * 24 * 60 * 60;
 pub const DEFAULT_LAB_ARTIFACT_MAX_BYTES: u64 = 64 * 1024 * 1024;
 /// The environment variable that caps one file `lab put` uploads (#393).
 pub const LAB_PUT_MAX_BYTES_VAR: &str = "FLEET_LAB_PUT_MAX_BYTES";
+/// The environment variable naming the Lab login public key file (#561).
+pub const LAB_LOGIN_PUBLIC_KEY_FILE_VAR: &str = "FLEET_LAB_LOGIN_PUBLIC_KEY_FILE";
 /// The default cap on one `lab put` upload: 2 GiB, enough for packaged
 /// desktop installers.
 pub const DEFAULT_LAB_PUT_MAX_BYTES: u64 = 2 * 1024 * 1024 * 1024;
@@ -170,10 +205,18 @@ pub struct ControllerConfig {
     /// How often the Lab sweeper expires leases, queues due cleanups, and
     /// reconciles Lab guests, in seconds; `0` disables it.
     pub lab_sweep_interval_seconds: u64,
+    /// How often the hardware reconciler refreshes the USB inventory of each
+    /// account with inventoried devices, in seconds; `0` turns the scheduled
+    /// refresh off. A non-zero value must be at least
+    /// [`MIN_HARDWARE_REFRESH_INTERVAL_SECONDS`].
+    pub hardware_refresh_interval_seconds: u64,
     /// How often the controller fetches the configured desired source's
     /// head, in seconds; `0` (the default) disables the periodic fetch. A
     /// non-zero value must be at least [`MIN_DESIRED_FETCH_INTERVAL_SECONDS`].
     pub desired_fetch_interval_seconds: u64,
+    /// Whether the controller queues a pinned Skills Manager install after a
+    /// machine is set up (fleetd install or onboarding add). Default `true`.
+    pub skills_manager_auto_install: bool,
     /// Where Lab artifact bytes live (FM-721). The controller prepares it at
     /// startup and serves without Lab artifacts when it cannot.
     pub lab_artifacts_dir: PathBuf,
@@ -184,6 +227,8 @@ pub struct ControllerConfig {
     pub lab_artifact_max_bytes: u64,
     /// The largest file one `lab put` uploads, in bytes (#393).
     pub lab_put_max_bytes: u64,
+    /// The public key file Lab installs in Windows clones (#561), when set.
+    pub lab_login_public_key_file: Option<PathBuf>,
     /// The Lab placement policy (FM-715).
     pub lab_placement: LabPlacementConfig,
     /// The proxy image builds may use, when the operator opted in (#339).
@@ -349,7 +394,9 @@ struct ConfigFile {
     data_dir: Option<String>,
     master_key_file: Option<String>,
     lab_sweep_interval_seconds: Option<u64>,
+    hardware_refresh_interval_seconds: Option<u64>,
     desired_fetch_interval_seconds: Option<u64>,
+    skills_manager_auto_install: Option<bool>,
     lab_memory_overcommit: Option<f64>,
     lab_cpu_overcommit: Option<f64>,
     lab_capacity_max_age_seconds: Option<u64>,
@@ -357,6 +404,7 @@ struct ConfigFile {
     lab_artifact_retention_seconds: Option<u64>,
     lab_artifact_max_bytes: Option<u64>,
     lab_put_max_bytes: Option<u64>,
+    lab_login_public_key_file: Option<String>,
     image_build_proxy: Option<String>,
     image_build_no_proxy: Option<String>,
     image_build_address_pool: Option<String>,
@@ -403,6 +451,17 @@ pub enum ConfigError {
     /// of at least the minimum.
     DesiredFetchIntervalInvalid {
         /// The value that failed to parse or validate.
+        value: String,
+    },
+    /// The hardware refresh interval is not `0` or a whole number of
+    /// seconds of at least the minimum.
+    HardwareRefreshIntervalInvalid {
+        /// The value that failed to parse or validate.
+        value: String,
+    },
+    /// The Skills Manager auto-install switch is not `true` or `false`.
+    SkillsManagerAutoInstallInvalid {
+        /// The value that failed to parse.
         value: String,
     },
     /// The Lab sweeper interval is not a whole number of seconds.
@@ -523,6 +582,14 @@ impl fmt::Display for ConfigError {
                 f,
                 "{DESIRED_FETCH_INTERVAL_VAR} must be 0 (off) or a whole number of seconds of at least {MIN_DESIRED_FETCH_INTERVAL_SECONDS}, not {value:?}"
             ),
+            Self::HardwareRefreshIntervalInvalid { value } => write!(
+                f,
+                "{HARDWARE_REFRESH_INTERVAL_VAR} must be 0 (off) or a whole number of seconds of at least {MIN_HARDWARE_REFRESH_INTERVAL_SECONDS}, not {value:?}"
+            ),
+            Self::SkillsManagerAutoInstallInvalid { value } => write!(
+                f,
+                "{SKILLS_MANAGER_AUTO_INSTALL_VAR} must be true or false (or 1 or 0, any case), not {value:?}"
+            ),
             Self::LabSweepIntervalInvalid { value } => write!(
                 f,
                 "{LAB_SWEEP_INTERVAL_VAR} must be a whole number of seconds (0 disables the sweeper), not {value:?}"
@@ -605,12 +672,15 @@ pub fn load(
     let mut data_dir: Option<String> = None;
     let mut master_key_file: Option<String> = None;
     let mut lab_sweep_interval_seconds: Option<u64> = None;
+    let mut hardware_refresh_interval_seconds: Option<u64> = None;
     let mut desired_fetch_interval_seconds: Option<u64> = None;
+    let mut skills_manager_auto_install: Option<bool> = None;
     let mut lab_placement = LabPlacementConfig::default();
     let mut lab_artifacts_dir: Option<String> = None;
     let mut lab_artifact_retention_seconds: Option<u64> = None;
     let mut lab_artifact_max_bytes: Option<u64> = None;
     let mut lab_put_max_bytes: Option<u64> = None;
+    let mut lab_login_public_key_file: Option<String> = None;
     let mut image_build_proxy: Option<String> = None;
     let mut image_build_no_proxy: Option<String> = None;
     let mut address_pool = AddressPoolSettings::default();
@@ -635,7 +705,9 @@ pub fn load(
         data_dir = file.data_dir;
         master_key_file = file.master_key_file;
         lab_sweep_interval_seconds = file.lab_sweep_interval_seconds;
+        hardware_refresh_interval_seconds = file.hardware_refresh_interval_seconds;
         desired_fetch_interval_seconds = file.desired_fetch_interval_seconds;
+        skills_manager_auto_install = file.skills_manager_auto_install;
         if let Some(ratio) = file.lab_memory_overcommit {
             lab_placement.memory_overcommit = ratio;
         }
@@ -649,6 +721,7 @@ pub fn load(
         lab_artifact_retention_seconds = file.lab_artifact_retention_seconds;
         lab_artifact_max_bytes = file.lab_artifact_max_bytes;
         lab_put_max_bytes = file.lab_put_max_bytes;
+        lab_login_public_key_file = file.lab_login_public_key_file;
         image_build_proxy = file.image_build_proxy;
         image_build_no_proxy = file.image_build_no_proxy;
         address_pool = AddressPoolSettings {
@@ -665,12 +738,31 @@ pub fn load(
     web_dist = env(WEB_DIST_VAR).or(web_dist);
     data_dir = env(DATA_DIR_VAR).or(data_dir);
     master_key_file = env(MASTER_KEY_FILE_VAR).or(master_key_file);
+    lab_login_public_key_file = env(LAB_LOGIN_PUBLIC_KEY_FILE_VAR)
+        .filter(|value| !value.trim().is_empty())
+        .or(lab_login_public_key_file)
+        .filter(|value| !value.trim().is_empty());
     if let Some(raw) = env(LAB_SWEEP_INTERVAL_VAR) {
         lab_sweep_interval_seconds = Some(
             raw.trim()
                 .parse()
                 .map_err(|_| ConfigError::LabSweepIntervalInvalid { value: raw })?,
         );
+    }
+    if let Some(raw) = env(HARDWARE_REFRESH_INTERVAL_VAR) {
+        hardware_refresh_interval_seconds = Some(
+            raw.trim()
+                .parse()
+                .map_err(|_| ConfigError::HardwareRefreshIntervalInvalid { value: raw })?,
+        );
+    }
+    if let Some(value) = hardware_refresh_interval_seconds
+        && value != 0
+        && value < MIN_HARDWARE_REFRESH_INTERVAL_SECONDS
+    {
+        return Err(ConfigError::HardwareRefreshIntervalInvalid {
+            value: value.to_string(),
+        });
     }
     if let Some(raw) = env(DESIRED_FETCH_INTERVAL_VAR) {
         desired_fetch_interval_seconds = Some(
@@ -685,6 +777,14 @@ pub fn load(
     {
         return Err(ConfigError::DesiredFetchIntervalInvalid {
             value: value.to_string(),
+        });
+    }
+    // An empty value (a Compose `${VAR:-}` default) means unset.
+    if let Some(raw) = env(SKILLS_MANAGER_AUTO_INSTALL_VAR).filter(|raw| !raw.trim().is_empty()) {
+        skills_manager_auto_install = Some(match raw.trim().to_ascii_lowercase().as_str() {
+            "true" | "1" => true,
+            "false" | "0" => false,
+            _ => return Err(ConfigError::SkillsManagerAutoInstallInvalid { value: raw }),
         });
     }
     let lab_placement = layer_lab_placement(lab_placement, env)?;
@@ -736,11 +836,15 @@ pub fn load(
         lab_artifact_retention_seconds,
         lab_artifact_max_bytes,
         lab_put_max_bytes,
+        lab_login_public_key_file: lab_login_public_key_file.map(PathBuf::from),
         data_dir,
         master_key_file: master_key_file.map(PathBuf::from),
         lab_sweep_interval_seconds: lab_sweep_interval_seconds
             .unwrap_or(DEFAULT_LAB_SWEEP_INTERVAL_SECONDS),
+        hardware_refresh_interval_seconds: hardware_refresh_interval_seconds
+            .unwrap_or(DEFAULT_HARDWARE_REFRESH_INTERVAL_SECONDS),
         desired_fetch_interval_seconds: desired_fetch_interval_seconds.unwrap_or(0),
+        skills_manager_auto_install: skills_manager_auto_install.unwrap_or(true),
         lab_placement,
         image_build_proxy,
         image_build_address_pool,
@@ -1071,6 +1175,7 @@ impl ControllerConfig {
     /// shown, and no secret value can appear because this crate never reads
     /// file contents.
     #[must_use]
+    #[allow(clippy::too_many_lines)]
     pub fn summary(&self) -> String {
         let mut lines = vec![
             format!("listen = {}", self.listen),
@@ -1087,6 +1192,15 @@ impl ControllerConfig {
                 }
             ),
             format!(
+                "hardware_refresh_interval_seconds = {}{}",
+                self.hardware_refresh_interval_seconds,
+                if self.hardware_refresh_interval_seconds == 0 {
+                    " (off)"
+                } else {
+                    ""
+                }
+            ),
+            format!(
                 "desired_fetch_interval_seconds = {}{}",
                 self.desired_fetch_interval_seconds,
                 if self.desired_fetch_interval_seconds == 0 {
@@ -1095,6 +1209,10 @@ impl ControllerConfig {
                     ""
                 }
             ),
+            format!(
+                "skills_manager_auto_install = {}",
+                self.skills_manager_auto_install
+            ),
             format!("lab_artifacts_dir = {}", self.lab_artifacts_dir.display()),
             format!(
                 "lab_artifact_retention_seconds = {}",
@@ -1102,6 +1220,10 @@ impl ControllerConfig {
             ),
             format!("lab_artifact_max_bytes = {}", self.lab_artifact_max_bytes),
             format!("lab_put_max_bytes = {}", self.lab_put_max_bytes),
+            match &self.lab_login_public_key_file {
+                Some(path) => format!("lab_login_public_key_file = {}", path.display()),
+                None => "lab_login_public_key_file = <unset; Lab discovers agent keys>".to_owned(),
+            },
         ];
         if let Some(address) = self.tailscale_serve_listen {
             lines.push(format!("tailscale_serve_listen = {address}"));

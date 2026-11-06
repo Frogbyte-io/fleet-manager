@@ -15,6 +15,7 @@ import {
   Server,
   Settings,
   Shield,
+  Usb,
 } from '@lucide/vue'
 
 export interface NavItem {
@@ -40,6 +41,7 @@ export const NAV_GROUPS: NavGroup[] = [
     items: [
       { title: 'Fleet', to: '/fleet', icon: Server, available: true },
       { title: 'Proxmox', to: '/proxmox', icon: Shield, available: true },
+      { title: 'Hardware', to: '/hardware', icon: Usb, available: true },
       { title: 'Services', to: '/services', icon: Container, available: true },
       { title: 'Tailnet', to: '/tailnet', icon: Network, available: false },
       { title: 'Containers', to: '/containers', icon: Boxes, available: false },

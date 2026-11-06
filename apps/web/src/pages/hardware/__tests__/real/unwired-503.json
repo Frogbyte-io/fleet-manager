@@ -1,0 +1,6 @@
+{
+  "code": "machine_unavailable",
+  "correlationId": "01900000-0000-7000-8000-000000000000",
+  "message": "the Proxmox surface is not wired; the controller needs its database and secret store",
+  "retry": "backoff"
+}

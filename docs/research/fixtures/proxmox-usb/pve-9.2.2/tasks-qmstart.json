@@ -1,0 +1,109 @@
+{
+  "UPID:pve:00181C25:0C9FC6DE:6AE44A82:qmstart:9563:root@pam:": {
+    "log": [
+      "",
+      "TASK ERROR: Configuration file 'nodes/pve/qemu-server/9563.conf' does not exist"
+    ],
+    "status": "Configuration file 'nodes/pve/qemu-server/9563.conf' does not exist",
+    "type": "qmstart"
+  },
+  "UPID:pve:00181C8D:0C9FCC05:6AE44A8F:qmstart:9563:root@pam:": {
+    "log": [
+      "generating cloud-init ISO",
+      "TASK OK"
+    ],
+    "status": "OK",
+    "type": "qmstart"
+  },
+  "UPID:pve:00182015:0CA0253F:6AE44B73:qmstart:9563:root@pam:": {
+    "log": [
+      "generating cloud-init ISO",
+      "TASK OK"
+    ],
+    "status": "OK",
+    "type": "qmstart"
+  },
+  "UPID:pve:00182637:0CA0B189:6AE44CDA:qmstart:9563:root@pam:": {
+    "log": [
+      "generating cloud-init ISO",
+      "TASK OK"
+    ],
+    "status": "OK",
+    "type": "qmstart"
+  },
+  "UPID:pve:00182AB3:0CA10C00:6AE44DC2:qmstart:9563:root@pam:": {
+    "log": [
+      "generating cloud-init ISO",
+      "",
+      "TASK ERROR: USB device mapping not found for 'fm-test-tmp-nonode'"
+    ],
+    "status": "USB device mapping not found for 'fm-test-tmp-nonode'",
+    "type": "qmstart"
+  },
+  "UPID:pve:00182AED:0CA10E08:6AE44DC7:qmstart:9563:root@pam:": {
+    "log": [
+      "generating cloud-init ISO",
+      "",
+      "TASK ERROR: USB Mapping invalid (hardware probably changed): usb device '1-55' not found "
+    ],
+    "status": "USB Mapping invalid (hardware probably changed): usb device '1-55' not found ",
+    "type": "qmstart"
+  },
+  "UPID:pve:00182B12:0CA10FFC:6AE44DCC:qmstart:9563:root@pam:": {
+    "log": [
+      "generating cloud-init ISO",
+      "",
+      "TASK ERROR: USB device mapping not found for 'fm-test-does-not-exist'"
+    ],
+    "status": "USB device mapping not found for 'fm-test-does-not-exist'",
+    "type": "qmstart"
+  },
+  "UPID:pve:00182CF1:0CA12A62:6AE44E10:qmstart:9563:root@pam:": {
+    "log": [
+      "generating cloud-init ISO",
+      "TASK OK"
+    ],
+    "status": "OK",
+    "type": "qmstart"
+  },
+  "UPID:pve:00182ED7:0CA15EFF:6AE44E97:qmstart:9564:root@pam:": {
+    "log": [
+      "generating cloud-init ISO",
+      "TASK OK"
+    ],
+    "status": "OK",
+    "type": "qmstart"
+  },
+  "UPID:pve:00182F3A:0CA16039:6AE44E9A:qmstart:9564:root@pam:": {
+    "log": [
+      "",
+      "TASK ERROR: VM 9564 already running"
+    ],
+    "status": "VM 9564 already running",
+    "type": "qmstart"
+  },
+  "UPID:pve:0018358D:0CA1BF59:6AE44F8D:qmstart:9563:root@pam:": {
+    "log": [
+      "generating cloud-init ISO",
+      "TASK OK"
+    ],
+    "status": "OK",
+    "type": "qmstart"
+  },
+  "UPID:pve:00183CA2:0CA24CE0:6AE450F8:qmstart:9563:root@pam:": {
+    "log": [
+      "generating cloud-init ISO",
+      "TASK OK"
+    ],
+    "status": "OK",
+    "type": "qmstart"
+  },
+  "UPID:pve:00184763:0CA357E4:6AE453A3:qmstart:9563:root@pam:": {
+    "log": [
+      "generating cloud-init ISO",
+      "TASK OK"
+    ],
+    "status": "OK",
+    "type": "qmstart"
+  }
+}

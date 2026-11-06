@@ -1,0 +1,23 @@
+{
+  "http_status": 200,
+  "pve_version": "9.2.2",
+  "recorded_with": "pvesh (root@pam), status and body reconstructed from the CLI",
+  "request": {
+    "method": "GET",
+    "params": {},
+    "path": "/cluster/status"
+  },
+  "response": [
+    {
+      "id": "node/pve",
+      "ip": "192.0.2.1",
+      "level": "",
+      "local": 1,
+      "name": "pve",
+      "nodeid": 0,
+      "online": 1,
+      "type": "node"
+    }
+  ],
+  "who": "root"
+}

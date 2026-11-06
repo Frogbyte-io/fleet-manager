@@ -279,6 +279,46 @@ pub enum Permission {
     /// public lookups. The resource is `<type>/<key>` for one entry and
     /// absent for the whole sweep.
     RegistryObserve,
+    /// List and read the inventoried hardware devices (FM-1111, ADR 0019):
+    /// their mapping ids, status with its reason, and the holder of a
+    /// reservation. A read of Fleet's own records; it makes no Proxmox
+    /// call. Risky like [`Permission::ProxmoxRead`]: the inventory names
+    /// what hangs off the hosts and which guest holds it. Never delegated
+    /// to Lab credentials.
+    HardwareRead,
+    /// Refresh the hardware inventory of one Proxmox account (FM-1111): read
+    /// the account's USB mappings, node checks and every guest config through
+    /// its token, and record the derived device status. A mutation of
+    /// Fleet-side records that sends the account's token to the Proxmox
+    /// host; audited. The resource is the account id. Never delegated to
+    /// Lab credentials.
+    HardwareRefresh,
+    /// The elevated override release of one hardware reservation (ADR 0019
+    /// decision 9): frees a live reservation in any state without the detach
+    /// path and without Fleet verifying the guest, for an operator who has
+    /// confirmed the device is free or accepts that it is not. The resource
+    /// is the reservation id. Elevated: required audit intent first, never
+    /// delegated to Lab credentials.
+    HardwareOverrideRelease,
+    /// Attach a device a Lab lease reserved to the lease's running guest
+    /// (FM-1126, ADR 0019). The resource is the lease id. A privileged
+    /// mutation of a guest, lease-bound: a delegated credential may do it
+    /// only for its own leases, and only for devices the lease reserved.
+    LabHardwareAttach,
+    /// Detach a device a Lab lease reserved from the lease's running guest,
+    /// keeping it reserved or giving it up (FM-1126). The resource is the
+    /// lease id. Lease-bound like [`Permission::LabHardwareAttach`].
+    LabHardwareDetach,
+    /// Attach a USB device to a persistent machine's guest and reserve it for
+    /// the machine until it is explicitly detached (FM-1125, ADR 0019). The
+    /// resource is the machine id. A privileged mutation of a guest through
+    /// a reviewed, payload-bound route; never delegated to Lab credentials.
+    MachineUsbAttach,
+    /// Detach a USB device from a persistent machine's guest and release the
+    /// machine's reservation (FM-1125). The resource is the machine id.
+    /// Reviewed and payload-bound like [`Permission::MachineUsbAttach`];
+    /// never delegated to Lab credentials.
+    MachineUsbDetach,
 }
 
 impl Permission {
@@ -365,6 +405,13 @@ impl Permission {
         Permission::MachineCollect,
         Permission::ProxmoxGuestConfig,
         Permission::MachineProvision,
+        Permission::HardwareRead,
+        Permission::HardwareRefresh,
+        Permission::HardwareOverrideRelease,
+        Permission::LabHardwareAttach,
+        Permission::LabHardwareDetach,
+        Permission::MachineUsbAttach,
+        Permission::MachineUsbDetach,
     ];
 
     /// The stable action id, as recorded in decisions and audit events.
@@ -450,6 +497,13 @@ impl Permission {
             Permission::MachineCollect => "machines.collect",
             Permission::ProxmoxGuestConfig => "proxmox.guest.config",
             Permission::MachineProvision => "machines.provision",
+            Permission::HardwareRead => "hardware.read",
+            Permission::HardwareRefresh => "hardware.refresh",
+            Permission::HardwareOverrideRelease => "hardware.override-release",
+            Permission::LabHardwareAttach => "lab.hardware.attach",
+            Permission::LabHardwareDetach => "lab.hardware.detach",
+            Permission::MachineUsbAttach => "machines.usb.attach",
+            Permission::MachineUsbDetach => "machines.usb.detach",
         }
     }
 
@@ -537,6 +591,13 @@ impl Permission {
             | Permission::MachineCollect
             | Permission::ProxmoxGuestConfig
             | Permission::MachineProvision
+            | Permission::HardwareRead
+            | Permission::HardwareRefresh
+            | Permission::HardwareOverrideRelease
+            | Permission::LabHardwareAttach
+            | Permission::LabHardwareDetach
+            | Permission::MachineUsbAttach
+            | Permission::MachineUsbDetach
             | Permission::RegistryObserve => true,
         }
     }
@@ -584,6 +645,8 @@ impl Permission {
             | Permission::DnsRead
             | Permission::ProxmoxGuestConfig
             | Permission::MachineProvision
+            | Permission::HardwareRead
+            | Permission::HardwareRefresh
             | Permission::RegistryObserve => false,
             Permission::MachineReadSensitive
             | Permission::OperationCancel
@@ -625,6 +688,11 @@ impl Permission {
             | Permission::MachinePut
             | Permission::MachineTerminal
             | Permission::MachineCollect
+            | Permission::HardwareOverrideRelease
+            | Permission::LabHardwareAttach
+            | Permission::LabHardwareDetach
+            | Permission::MachineUsbAttach
+            | Permission::MachineUsbDetach
             | Permission::ActionDeny => true,
         }
     }

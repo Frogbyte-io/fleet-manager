@@ -1,0 +1,17 @@
+{
+  "http_status": 403,
+  "pve_version": "9.2.2",
+  "recorded_with": "curl over HTTPS with a temporary privilege-separated API token (real HTTP status and body)",
+  "request": {
+    "method": "PUT",
+    "params": {
+      "usb2": "mapping=fm-test-does-not-exist"
+    },
+    "path": "/nodes/pve/qemu/9563/config"
+  },
+  "response": {
+    "errors": null,
+    "message": "Permission check failed (/mapping/usb/fm-test-does-not-exist, Mapping.Use)\n"
+  },
+  "who": "probe"
+}

@@ -1,0 +1,26 @@
+{
+  "http_status": 200,
+  "pve_version": "9.2.2",
+  "recorded_with": "pvesh (root@pam), status and body reconstructed from the CLI",
+  "request": {
+    "method": "GET",
+    "params": {},
+    "path": "/nodes/pve/qemu/9563/snapshot"
+  },
+  "response": [
+    {
+      "description": "fm-s11",
+      "name": "s1",
+      "snaptime": 1793347374,
+      "vmstate": 0
+    },
+    {
+      "description": "You are here!",
+      "digest": "212b708e1ab67f83d32a06903ccbac34e0f9aac4",
+      "name": "current",
+      "parent": "s1",
+      "running": 1
+    }
+  ],
+  "who": "root"
+}

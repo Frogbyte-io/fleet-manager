@@ -331,11 +331,14 @@ fn validation_creates_the_state_directory() {
         data_dir: state.clone(),
         master_key_file: None,
         lab_sweep_interval_seconds: 60,
+        hardware_refresh_interval_seconds: 600,
+        skills_manager_auto_install: true,
         desired_fetch_interval_seconds: 0,
         lab_artifacts_dir: dir.path().join("lab-artifacts"),
         lab_artifact_retention_seconds: fleet_config::DEFAULT_LAB_ARTIFACT_RETENTION_SECONDS,
         lab_artifact_max_bytes: fleet_config::DEFAULT_LAB_ARTIFACT_MAX_BYTES,
         lab_put_max_bytes: fleet_config::DEFAULT_LAB_PUT_MAX_BYTES,
+        lab_login_public_key_file: None,
         tailscale_serve_listen: None,
         lab_placement: fleet_config::LabPlacementConfig::default(),
         image_build_proxy: None,
@@ -358,11 +361,14 @@ fn an_uncreatable_state_directory_fails_validation() {
         data_dir: blocker.join("state"),
         master_key_file: None,
         lab_sweep_interval_seconds: 60,
+        hardware_refresh_interval_seconds: 600,
+        skills_manager_auto_install: true,
         desired_fetch_interval_seconds: 0,
         lab_artifacts_dir: dir.path().join("lab-artifacts"),
         lab_artifact_retention_seconds: fleet_config::DEFAULT_LAB_ARTIFACT_RETENTION_SECONDS,
         lab_artifact_max_bytes: fleet_config::DEFAULT_LAB_ARTIFACT_MAX_BYTES,
         lab_put_max_bytes: fleet_config::DEFAULT_LAB_PUT_MAX_BYTES,
+        lab_login_public_key_file: None,
         tailscale_serve_listen: None,
         lab_placement: fleet_config::LabPlacementConfig::default(),
         image_build_proxy: None,
@@ -381,11 +387,14 @@ fn a_missing_master_key_file_fails_validation() {
         data_dir: dir.path().join("state"),
         master_key_file: Some(dir.path().join("absent_key")),
         lab_sweep_interval_seconds: 60,
+        hardware_refresh_interval_seconds: 600,
+        skills_manager_auto_install: true,
         desired_fetch_interval_seconds: 0,
         lab_artifacts_dir: dir.path().join("lab-artifacts"),
         lab_artifact_retention_seconds: fleet_config::DEFAULT_LAB_ARTIFACT_RETENTION_SECONDS,
         lab_artifact_max_bytes: fleet_config::DEFAULT_LAB_ARTIFACT_MAX_BYTES,
         lab_put_max_bytes: fleet_config::DEFAULT_LAB_PUT_MAX_BYTES,
+        lab_login_public_key_file: None,
         tailscale_serve_listen: None,
         lab_placement: fleet_config::LabPlacementConfig::default(),
         image_build_proxy: None,
@@ -404,11 +413,14 @@ fn a_directory_as_master_key_path_is_not_a_file() {
         data_dir: dir.path().join("state"),
         master_key_file: Some(dir.path().to_path_buf()),
         lab_sweep_interval_seconds: 60,
+        hardware_refresh_interval_seconds: 600,
+        skills_manager_auto_install: true,
         desired_fetch_interval_seconds: 0,
         lab_artifacts_dir: dir.path().join("lab-artifacts"),
         lab_artifact_retention_seconds: fleet_config::DEFAULT_LAB_ARTIFACT_RETENTION_SECONDS,
         lab_artifact_max_bytes: fleet_config::DEFAULT_LAB_ARTIFACT_MAX_BYTES,
         lab_put_max_bytes: fleet_config::DEFAULT_LAB_PUT_MAX_BYTES,
+        lab_login_public_key_file: None,
         tailscale_serve_listen: None,
         lab_placement: fleet_config::LabPlacementConfig::default(),
         image_build_proxy: None,
@@ -433,11 +445,14 @@ fn a_group_or_world_readable_master_key_file_is_unsafe() {
             data_dir: dir.path().join("state"),
             master_key_file: Some(key.clone()),
             lab_sweep_interval_seconds: 60,
+            hardware_refresh_interval_seconds: 600,
+            skills_manager_auto_install: true,
             desired_fetch_interval_seconds: 0,
             lab_artifacts_dir: dir.path().join("lab-artifacts"),
             lab_artifact_retention_seconds: fleet_config::DEFAULT_LAB_ARTIFACT_RETENTION_SECONDS,
             lab_artifact_max_bytes: fleet_config::DEFAULT_LAB_ARTIFACT_MAX_BYTES,
             lab_put_max_bytes: fleet_config::DEFAULT_LAB_PUT_MAX_BYTES,
+            lab_login_public_key_file: None,
             tailscale_serve_listen: None,
             lab_placement: fleet_config::LabPlacementConfig::default(),
             image_build_proxy: None,
@@ -460,11 +475,14 @@ fn a_group_or_world_readable_master_key_file_is_unsafe() {
         data_dir: dir.path().join("state"),
         master_key_file: Some(key),
         lab_sweep_interval_seconds: 60,
+        hardware_refresh_interval_seconds: 600,
+        skills_manager_auto_install: true,
         desired_fetch_interval_seconds: 0,
         lab_artifacts_dir: dir.path().join("lab-artifacts"),
         lab_artifact_retention_seconds: fleet_config::DEFAULT_LAB_ARTIFACT_RETENTION_SECONDS,
         lab_artifact_max_bytes: fleet_config::DEFAULT_LAB_ARTIFACT_MAX_BYTES,
         lab_put_max_bytes: fleet_config::DEFAULT_LAB_PUT_MAX_BYTES,
+        lab_login_public_key_file: None,
         tailscale_serve_listen: None,
         lab_placement: fleet_config::LabPlacementConfig::default(),
         image_build_proxy: None,
@@ -496,11 +514,14 @@ fn no_diagnostic_surface_contains_secret_material() {
         data_dir: dir.path().join("state"),
         master_key_file: Some(key.clone()),
         lab_sweep_interval_seconds: 60,
+        hardware_refresh_interval_seconds: 600,
+        skills_manager_auto_install: true,
         desired_fetch_interval_seconds: 0,
         lab_artifacts_dir: dir.path().join("lab-artifacts"),
         lab_artifact_retention_seconds: fleet_config::DEFAULT_LAB_ARTIFACT_RETENTION_SECONDS,
         lab_artifact_max_bytes: fleet_config::DEFAULT_LAB_ARTIFACT_MAX_BYTES,
         lab_put_max_bytes: fleet_config::DEFAULT_LAB_PUT_MAX_BYTES,
+        lab_login_public_key_file: None,
         tailscale_serve_listen: None,
         lab_placement: fleet_config::LabPlacementConfig::default(),
         image_build_proxy: None,
@@ -570,6 +591,125 @@ fn the_lab_sweep_interval_defaults_and_layers() {
     )
     .unwrap();
     assert_eq!(overridden.lab_sweep_interval_seconds, 15);
+}
+
+#[test]
+fn the_skills_manager_auto_install_defaults_on_and_can_be_turned_off() {
+    let config = fleet_config::load(None, &|_| None).unwrap();
+    assert!(config.skills_manager_auto_install);
+    assert!(
+        config
+            .summary()
+            .contains("skills_manager_auto_install = true")
+    );
+    let env = |value: &'static str| {
+        move |key: &str| {
+            (key == fleet_config::SKILLS_MANAGER_AUTO_INSTALL_VAR).then(|| value.to_owned())
+        }
+    };
+    for off in ["false", "FALSE", "0", " false "] {
+        assert!(
+            !fleet_config::load(None, &env(off))
+                .unwrap()
+                .skills_manager_auto_install,
+            "{off}"
+        );
+    }
+    // An empty value is unset, so the default holds.
+    assert!(
+        fleet_config::load(None, &env(""))
+            .unwrap()
+            .skills_manager_auto_install
+    );
+    for bad in ["no", "off", "yes please"] {
+        assert!(
+            matches!(
+                fleet_config::load(None, &env(bad)),
+                Err(fleet_config::ConfigError::SkillsManagerAutoInstallInvalid { .. })
+            ),
+            "{bad}"
+        );
+    }
+    // The file layer applies, and the environment overrides it.
+    let dir = tempfile::tempdir().unwrap();
+    let file = write_config(
+        dir.path(),
+        &format!("{VALID_FILE}skills_manager_auto_install = false\n"),
+    );
+    assert!(
+        !fleet_config::load(Some(&file), &none_env)
+            .unwrap()
+            .skills_manager_auto_install
+    );
+    assert!(
+        fleet_config::load(Some(&file), &env("true"))
+            .unwrap()
+            .skills_manager_auto_install
+    );
+}
+
+#[test]
+fn the_hardware_refresh_defaults_to_ten_minutes_can_be_off_and_has_a_floor() {
+    let config = fleet_config::load(None, &|_| None).unwrap();
+    assert_eq!(config.hardware_refresh_interval_seconds, 600);
+    assert!(
+        config
+            .summary()
+            .contains("hardware_refresh_interval_seconds = 600")
+    );
+    let env = |value: &'static str| {
+        move |key: &str| {
+            (key == fleet_config::HARDWARE_REFRESH_INTERVAL_VAR).then(|| value.to_owned())
+        }
+    };
+    let off = fleet_config::load(None, &env("0")).unwrap();
+    assert_eq!(off.hardware_refresh_interval_seconds, 0);
+    assert!(
+        off.summary()
+            .contains("hardware_refresh_interval_seconds = 0 (off)")
+    );
+    assert_eq!(
+        fleet_config::load(None, &env("60"))
+            .unwrap()
+            .hardware_refresh_interval_seconds,
+        60
+    );
+    for bad in ["59", "1", "soon", "-5", "1.5"] {
+        assert!(
+            matches!(
+                fleet_config::load(None, &env(bad)),
+                Err(fleet_config::ConfigError::HardwareRefreshIntervalInvalid { .. })
+            ),
+            "{bad}"
+        );
+    }
+    // The file layer applies, a too-short file value is refused, and the
+    // environment overrides the file.
+    let dir = tempfile::tempdir().unwrap();
+    let file = write_config(
+        dir.path(),
+        &format!("{VALID_FILE}hardware_refresh_interval_seconds = 900\n"),
+    );
+    assert_eq!(
+        fleet_config::load(Some(&file), &none_env)
+            .unwrap()
+            .hardware_refresh_interval_seconds,
+        900
+    );
+    assert_eq!(
+        fleet_config::load(Some(&file), &env("120"))
+            .unwrap()
+            .hardware_refresh_interval_seconds,
+        120
+    );
+    let short = write_config(
+        dir.path(),
+        &format!("{VALID_FILE}hardware_refresh_interval_seconds = 5\n"),
+    );
+    assert!(matches!(
+        fleet_config::load(Some(&short), &none_env),
+        Err(fleet_config::ConfigError::HardwareRefreshIntervalInvalid { .. })
+    ));
 }
 
 #[test]
@@ -724,11 +864,14 @@ fn validation_refuses_zero_lab_artifact_bounds() {
             data_dir: dir.path().join("state"),
             master_key_file: None,
             lab_sweep_interval_seconds: 60,
+            hardware_refresh_interval_seconds: 600,
+            skills_manager_auto_install: true,
             desired_fetch_interval_seconds: 0,
             lab_artifacts_dir: dir.path().join("lab-artifacts"),
             lab_artifact_retention_seconds: retention,
             lab_artifact_max_bytes: max_bytes,
             lab_put_max_bytes: fleet_config::DEFAULT_LAB_PUT_MAX_BYTES,
+            lab_login_public_key_file: None,
             tailscale_serve_listen: None,
             lab_placement: fleet_config::LabPlacementConfig::default(),
             image_build_proxy: None,
@@ -1056,4 +1199,46 @@ fn a_bad_or_partial_build_address_pool_fails_loading_without_echoing_values() {
             "{missing}"
         );
     }
+}
+
+#[test]
+fn the_lab_login_public_key_file_layers_file_then_environment_and_empty_is_unset() {
+    let dir = tempfile::tempdir().unwrap();
+    let none_env = env_of(&[]);
+    let file = write_config(dir.path(), VALID_FILE);
+    assert!(
+        fleet_config::load(Some(&file), &none_env)
+            .unwrap()
+            .lab_login_public_key_file
+            .is_none()
+    );
+    let with_key = write_config(
+        dir.path(),
+        &format!("{VALID_FILE}lab_login_public_key_file = \"/etc/fleet/lab.pub\"\n"),
+    );
+    assert_eq!(
+        fleet_config::load(Some(&with_key), &none_env)
+            .unwrap()
+            .lab_login_public_key_file,
+        Some(std::path::PathBuf::from("/etc/fleet/lab.pub"))
+    );
+    let overridden = fleet_config::load(
+        Some(&with_key),
+        &env_of(&[(fleet_config::LAB_LOGIN_PUBLIC_KEY_FILE_VAR, "/run/lab.pub")]),
+    )
+    .unwrap();
+    assert_eq!(
+        overridden.lab_login_public_key_file,
+        Some(std::path::PathBuf::from("/run/lab.pub"))
+    );
+    // A blank environment value is unset: the file's value stays.
+    let blank = fleet_config::load(
+        Some(&with_key),
+        &env_of(&[(fleet_config::LAB_LOGIN_PUBLIC_KEY_FILE_VAR, "  ")]),
+    )
+    .unwrap();
+    assert_eq!(
+        blank.lab_login_public_key_file,
+        Some(std::path::PathBuf::from("/etc/fleet/lab.pub"))
+    );
 }

@@ -368,6 +368,28 @@ pub struct DestructivePayload {
     pub params: serde_json::Value,
 }
 
+impl DestructivePayload {
+    /// The Fleet name the guest must carry for a Lab cleanup's destroy
+    /// (`expectedName` in the reviewed parameters); `None` for an operator's
+    /// destroy, which names its target by VMID alone.
+    fn expected_name(&self) -> Option<&str> {
+        self.params
+            .get("expectedName")
+            .and_then(serde_json::Value::as_str)
+    }
+
+    /// Whether no guest of the record's was ever confirmed (`guestUnconfirmed`):
+    /// the record never started a clone, or its clone step failed (a failed
+    /// clone task makes PVE remove the target's config). Another owner's guest
+    /// at its VMID is then nothing of the record's to destroy.
+    fn guest_unconfirmed(&self) -> bool {
+        self.params
+            .get("guestUnconfirmed")
+            .and_then(serde_json::Value::as_bool)
+            == Some(true)
+    }
+}
+
 /// Decodes and validates an operation's payload.
 fn payload<T: serde::de::DeserializeOwned>(operation: &Operation) -> Result<T, String> {
     serde_json::from_str(
@@ -444,6 +466,8 @@ pub struct ProxmoxDestructiveExecutor {
     pool_members: Option<Arc<dyn fleet_application::operation::PoolMemberLookup>>,
     persistent: Option<Arc<dyn fleet_application::persistent::PersistentGuestPort>>,
     audit: Option<Arc<dyn fleet_application::operation::AuditPort>>,
+    hardware: Option<Arc<dyn fleet_application::hardware::HardwareStore>>,
+    guest_locks: Option<Arc<crate::guest_locks::GuestLocks>>,
 }
 
 impl ProxmoxDestructiveExecutor {
@@ -461,9 +485,25 @@ impl ProxmoxDestructiveExecutor {
             links: None,
             artifacts: None,
             pool_members: None,
+            hardware: None,
+            guest_locks: None,
             persistent: None,
             audit: None,
         }
+    }
+
+    /// Supplies the per-guest locks shared with the persistent machines' USB
+    /// attach (FM-1125). With them, a destroy, snapshot revert, template
+    /// conversion or clone holds its guest's lock from its first check to the
+    /// end, so a device attach cannot slip in between the hardware check and
+    /// the work: the attach is refused while the operation runs, and the
+    /// operation sees what an attach left. Without them the executor checks
+    /// the reservations only, so every production construction site must
+    /// supply them.
+    #[must_use]
+    pub fn with_guest_locks(mut self, locks: Arc<crate::guest_locks::GuestLocks>) -> Self {
+        self.guest_locks = Some(locks);
+        self
     }
 
     /// Supplies the persistent marker store (#489). With it, destroying a
@@ -604,6 +644,247 @@ impl ProxmoxDestructiveExecutor {
         self
     }
 
+    /// Supplies the hardware reservations (FM-1123, ADR 0019 decision 5): a
+    /// destroy, snapshot revert or template conversion of a guest that holds
+    /// a reserved device (a reservation that is not merely `held`) is
+    /// refused until the Lab saga or an operator has detached it, because a
+    /// revert restores the snapshot's `usbN` set, a template's clones inherit
+    /// it, and a destroy would free a device nobody confirmed. Without it
+    /// the executor does not check, so every production construction site
+    /// must supply it.
+    #[must_use]
+    pub fn with_hardware_guard(
+        mut self,
+        hardware: Arc<dyn fleet_application::hardware::HardwareStore>,
+    ) -> Self {
+        self.hardware = Some(hardware);
+        self
+    }
+
+    /// Lab cleanup's destroy names the guest it owns (`expectedName`, the
+    /// record's `fm-lab-<record>`): a recorded VMID alone does not prove the
+    /// guest now at it is the record's, because a VMID that nothing in the
+    /// cluster holds is handed out again (#592). Before anything is stopped
+    /// or deleted, the live guest must carry that name.
+    ///
+    /// - The same name: the destroy goes on.
+    /// - Another name (or a non-QEMU guest): the guest is another owner's.
+    ///   The destroy is refused (`identity_mismatch`), unless no guest of the
+    ///   record's was ever confirmed (`guestUnconfirmed`: it never cloned, or
+    ///   its clone failed), where there is nothing of the record's to
+    ///   destroy: the operation then succeeds without touching the guest
+    ///   (`notOwned`).
+    /// - No name yet (PVE reports `VM <vmid>` while a clone runs): the guest
+    ///   cannot be verified, so the destroy is refused (`identity_unverified`)
+    ///   and a later attempt decides.
+    /// - No guest: with `guestUnconfirmed` there is nothing to destroy and the
+    ///   operation succeeds without a delete; otherwise the destroy goes on
+    ///   and treats the absent guest as done.
+    ///
+    /// A destroy that names no guest (an operator's) is not checked. Answers
+    /// whether the operation ended here.
+    async fn refuse_foreign_guest(
+        &self,
+        operations: &Operations,
+        operation: &Operation,
+        payload: &DestructivePayload,
+    ) -> Result<bool, String> {
+        if operation.kind != "proxmox.guest.destroy" {
+            return Ok(false);
+        }
+        let Some(expected) = payload.expected_name() else {
+            return Ok(false);
+        };
+        let unconfirmed = payload.guest_unconfirmed();
+        let (account, secret) = self.bound(&payload.account_id).await?;
+        let request = self.request(&account, &secret);
+        let resources = self
+            .client
+            .list_guest_resources(request)
+            .await
+            .map_err(|error| format!("the resource listing failed: {error}"))?;
+        let Some(guest) = resources
+            .iter()
+            .find(|resource| resource.vmid == Some(payload.vmid))
+        else {
+            if unconfirmed {
+                self.finish_not_owned(
+                    operations,
+                    &operation.id,
+                    format!(
+                        "VMID {} holds no guest and none of this record's was confirmed",
+                        payload.vmid
+                    ),
+                )
+                .await?;
+                return Ok(true);
+            }
+            return Ok(false);
+        };
+        if guest.kind == "qemu" && guest.name.as_deref() == Some(expected) {
+            return Ok(false);
+        }
+        let placeholder = format!("VM {}", payload.vmid);
+        if guest.kind == "qemu" && guest.name.as_deref().is_none_or(|name| name == placeholder) {
+            complete_failure(
+                operations,
+                &operation.id,
+                "identity_unverified",
+                &format!(
+                    "qemu/{} carries no name yet, so it cannot be verified as {expected}; nothing was stopped or deleted, retry once it is named",
+                    payload.vmid
+                ),
+            )
+            .await?;
+            return Ok(true);
+        }
+        let held = format!(
+            "VMID {} now holds a {} named {}, not {expected}",
+            payload.vmid,
+            guest.kind,
+            guest.name.as_deref().unwrap_or("nothing")
+        );
+        if unconfirmed {
+            self.finish_not_owned(
+                operations,
+                &operation.id,
+                format!("{held}; no guest of this record's was confirmed, so there is nothing to destroy"),
+            )
+            .await?;
+            return Ok(true);
+        }
+        complete_failure(
+            operations,
+            &operation.id,
+            "identity_mismatch",
+            &format!("{held}; it is another owner's guest, so nothing was stopped or deleted"),
+        )
+        .await?;
+        Ok(true)
+    }
+
+    /// The refusal for a live guest at the target that is not the one a Lab
+    /// cleanup's destroy names (`expectedName`); none for an operator's
+    /// destroy, an absent guest, or the named guest.
+    fn identity_refusal(
+        payload: &DestructivePayload,
+        guest: Option<&fleet_provider_proxmox::PveResource>,
+    ) -> Option<Refusal> {
+        let expected = payload.expected_name()?;
+        let guest = guest?;
+        if guest.kind == "qemu" && guest.name.as_deref() == Some(expected) {
+            return None;
+        }
+        Some(Refusal::new(
+            "identity_mismatch",
+            format!(
+                "VMID {} now holds a {} named {}, not {expected}; nothing was deleted",
+                payload.vmid,
+                guest.kind,
+                guest.name.as_deref().unwrap_or("nothing")
+            ),
+        ))
+    }
+
+    /// Completes a destroy that found nothing of the record's to destroy.
+    async fn finish_not_owned(
+        &self,
+        operations: &Operations,
+        operation_id: &str,
+        note: String,
+    ) -> Result<(), String> {
+        operations
+            .complete(
+                operation_id,
+                "succeeded",
+                Some(&serde_json::json!({ "noop": note, "notOwned": true }).to_string()),
+                None,
+            )
+            .await
+            .map(|_| ())
+            .map_err(|error| error.to_string())
+    }
+
+    /// Refuses (by completing the operation as failed) a destroy, revert or
+    /// template conversion of a guest a live, attached or unconfirmed
+    /// hardware reservation references. Answers whether the operation ended
+    /// here.
+    async fn refuse_held_hardware(
+        &self,
+        operations: &Operations,
+        operation: &Operation,
+        payload: &DestructivePayload,
+    ) -> Result<bool, String> {
+        let Some(store) = &self.hardware else {
+            return Ok(false);
+        };
+        if !matches!(
+            operation.kind.as_str(),
+            "proxmox.guest.destroy"
+                | "proxmox.guest.snapshot-revert"
+                | "proxmox.guest.template"
+                | "proxmox.guest.clone"
+        ) {
+            return Ok(false);
+        }
+        match store.list_live_reservations().await {
+            Ok(rows) => {
+                let held = rows.iter().find(|row| {
+                    row.state != fleet_core::HardwareReservationState::Held
+                        && row.guest.as_ref().is_some_and(|guest| {
+                            guest.account_id == payload.account_id && guest.vmid == payload.vmid
+                        })
+                });
+                if let Some(row) = held {
+                    // A persistent machine's device is detached by its own
+                    // reviewed action; a Lab lease's by its cleanup.
+                    let message = if row.owner_kind == fleet_core::ReservationOwnerKind::Machine {
+                        let mapping = store
+                            .device(&row.device_id)
+                            .await
+                            .ok()
+                            .flatten()
+                            .map_or_else(|| "<mapping>".to_owned(), |device| device.mapping_id);
+                        format!(
+                            "VMID {} holds a USB device for machine {} (reservation {} is {}); {}",
+                            payload.vmid,
+                            row.owner_id,
+                            row.id,
+                            row.state.id(),
+                            fleet_application::machine_usb::hold_instruction(
+                                row.state,
+                                &row.owner_id,
+                                &mapping,
+                                &row.id
+                            )
+                        )
+                    } else {
+                        format!(
+                            "VMID {} holds a USB device (reservation {} is {}); detach it first (a Lab lease's cleanup does, an operator confirms and releases it with hardware.override-release)",
+                            payload.vmid,
+                            row.id,
+                            row.state.id()
+                        )
+                    };
+                    complete_failure(operations, &operation.id, "hardware_attached", &message)
+                        .await?;
+                    return Ok(true);
+                }
+                Ok(false)
+            }
+            Err(error) => {
+                complete_failure(
+                    operations,
+                    &operation.id,
+                    "hardware_unreadable",
+                    &format!("the hardware reservations could not be read: {error}"),
+                )
+                .await?;
+                Ok(true)
+            }
+        }
+    }
+
     /// The pool the target belongs to, when it is a member. A membership
     /// that cannot be read is an error: the caller fails closed.
     async fn pool_of_target(&self, payload: &DestructivePayload) -> Result<Option<String>, String> {
@@ -678,13 +959,53 @@ impl ProxmoxDestructiveExecutor {
     }
 }
 
+/// The kinds that hold the guest's lock while they run (see
+/// [`ProxmoxDestructiveExecutor::with_guest_locks`]).
+const GUEST_LOCKED_KINDS: [&str; 4] = [
+    "proxmox.guest.destroy",
+    "proxmox.guest.snapshot-revert",
+    "proxmox.guest.template",
+    "proxmox.guest.clone",
+];
+
 #[async_trait::async_trait]
 impl OperationExecutor for ProxmoxDestructiveExecutor {
-    #[allow(clippy::too_many_lines)]
     async fn execute(&self, operations: &Operations, operation: &Operation) -> Result<(), String> {
+        // Wait for the guest's lock (an attach in flight finishes first, and
+        // the hardware check below sees its row), and hold it to the end.
+        let _guard = match &self.guest_locks {
+            Some(locks) if GUEST_LOCKED_KINDS.contains(&operation.kind.as_str()) => {
+                let parsed: DestructivePayload = payload(operation)?;
+                Some(locks.lock(&parsed.account_id, parsed.vmid).await)
+            }
+            _ => None,
+        };
+        self.execute_inner(operations, operation).await
+    }
+}
+
+impl ProxmoxDestructiveExecutor {
+    #[allow(clippy::too_many_lines)]
+    async fn execute_inner(
+        &self,
+        operations: &Operations,
+        operation: &Operation,
+    ) -> Result<(), String> {
         let payload: DestructivePayload = payload(operation)?;
         if self
             .refuse_pool_member(operations, operation, &payload)
+            .await?
+        {
+            return Ok(());
+        }
+        if self
+            .refuse_foreign_guest(operations, operation, &payload)
+            .await?
+        {
+            return Ok(());
+        }
+        if self
+            .refuse_held_hardware(operations, operation, &payload)
             .await?
         {
             return Ok(());
@@ -764,7 +1085,7 @@ impl OperationExecutor for ProxmoxDestructiveExecutor {
         let outcome: Result<(), String> = match kind {
             "proxmox.guest.destroy" => {
                 let started = std::time::Instant::now();
-                tokio::time::timeout(
+                let prepared = tokio::time::timeout(
                     deadline,
                     self.prepare_destroy(operations, operation, &payload, &request),
                 )
@@ -772,6 +1093,23 @@ impl OperationExecutor for ProxmoxDestructiveExecutor {
                 .map_err(|_| {
                     "the destroy stop/guard deadline expired; no delete was submitted".to_owned()
                 })??;
+                if let Err(refusal) = prepared {
+                    return complete_failure(
+                        operations,
+                        &operation.id,
+                        refusal.reason,
+                        &refusal.detail,
+                    )
+                    .await;
+                }
+                // The stop took time: look at the reservations again right
+                // before the protection is lifted and the delete is made.
+                if self
+                    .refuse_held_hardware(operations, operation, &payload)
+                    .await?
+                {
+                    return Ok(());
+                }
                 let remaining = deadline
                     .checked_sub(started.elapsed())
                     .ok_or("the destroy deadline expired")?;
@@ -920,6 +1258,14 @@ impl OperationExecutor for ProxmoxDestructiveExecutor {
                     .and_then(serde_json::Value::as_str)
                     .ok_or("the reviewed parameters carry no snapshot name")?;
                 validate_snapshot_name(name)?;
+                // Immediately before the rollback, which replaces the guest's
+                // `usbN` set.
+                if self
+                    .refuse_held_hardware(operations, operation, &payload)
+                    .await?
+                {
+                    return Ok(());
+                }
                 self.run_to_terminal(
                     operations,
                     &operation.id,
@@ -1014,6 +1360,14 @@ impl OperationExecutor for ProxmoxDestructiveExecutor {
                     )
                     .await;
                 }
+                // A clone inherits the source's `usbN` entries: not while a
+                // machine holds a device on it.
+                if self
+                    .refuse_held_hardware(operations, operation, &payload)
+                    .await?
+                {
+                    return Ok(());
+                }
                 self.run_to_terminal(
                     operations,
                     &operation.id,
@@ -1055,6 +1409,14 @@ impl OperationExecutor for ProxmoxDestructiveExecutor {
                     return self
                         .finish_noop(operations, &operation.id, "already a template".to_owned())
                         .await;
+                }
+                // Immediately before the conversion (its clones inherit the
+                // guest's `usbN` entries).
+                if self
+                    .refuse_held_hardware(operations, operation, &payload)
+                    .await?
+                {
+                    return Ok(());
                 }
                 self.run_to_terminal(
                     operations,
@@ -1149,7 +1511,7 @@ impl ProxmoxDestructiveExecutor {
         operation: &Operation,
         payload: &DestructivePayload,
         request: &fleet_provider_proxmox::PveHttpRequest,
-    ) -> Result<(), String> {
+    ) -> Result<Result<(), Refusal>, String> {
         let artifacts = self
             .artifacts
             .as_ref()
@@ -1171,6 +1533,11 @@ impl ProxmoxDestructiveExecutor {
             resource.is_some_and(|resource| resource.kind == "qemu-template"),
             &image_vmids,
         )?;
+        // Right before the stop, again: a guest swapped in since the first
+        // check is never stopped.
+        if let Some(refusal) = Self::identity_refusal(payload, resource) {
+            return Ok(Err(refusal));
+        }
         if let Some(resource) = resource {
             if resource.kind != "qemu" || resource.node.as_deref() != Some(payload.node.as_str()) {
                 return Err(
@@ -1250,6 +1617,15 @@ impl ProxmoxDestructiveExecutor {
         let is_template = resources.iter().any(|resource| {
             resource.vmid == Some(payload.vmid) && resource.kind == "qemu-template"
         });
+        // The guest named at the start must still be the one at the VMID.
+        if let Some(refusal) = Self::identity_refusal(
+            payload,
+            resources
+                .iter()
+                .find(|resource| resource.vmid == Some(payload.vmid)),
+        ) {
+            return Ok(Err(refusal));
+        }
         if operations
             .cancel_requested(&operation.id)
             .await
@@ -1266,7 +1642,8 @@ impl ProxmoxDestructiveExecutor {
                 payload.vmid
             ));
         }
-        fleet_application::lab::guard_destroy_target(payload.vmid, is_template, &image_vmids)
+        fleet_application::lab::guard_destroy_target(payload.vmid, is_template, &image_vmids)?;
+        Ok(Ok(()))
     }
 
     /// The trusted account and its resolved secret: the same explicit-trust
@@ -2182,6 +2559,50 @@ mod precondition_refusal_tests {
         assert!(last["script"].as_str().unwrap().contains("FleetLsa"));
     }
 
+    /// #561: the `ssh_exec` probe is a real login. An `ssh.exec` child that
+    /// failed (for example `Permission denied (publickey)`, exit 255) is not
+    /// ready; only a child that succeeded is. So a guest without the key
+    /// never reaches `ready` through this probe, and readiness fails at the
+    /// `ssh_exec` step at its deadline.
+    #[tokio::test]
+    async fn the_ssh_exec_probe_is_ready_only_when_the_login_and_command_succeed() {
+        use fleet_application::lab::LabReadinessPort as _;
+        let (readiness, probe, operations, _dir, _store) = probe_with(vec![Some(255), None]).await;
+        let record = record();
+        let parent = operations
+            .create(
+                &fleet_auth::LanAllowAllAuthorizer,
+                fleet_auth::LAN_PRINCIPAL_ID,
+                &fleet_application::operation::NewOperation {
+                    kind: "noop".to_owned(),
+                    idempotency_key: None,
+                    deadline_at: None,
+                    correlation_id: None,
+                    payload_json: None,
+                    review_token: None,
+                },
+            )
+            .await
+            .unwrap()
+            .id;
+        let wait = Duration::from_secs(30);
+        let try_once = || {
+            readiness.ssh_probe(
+                &operations,
+                &parent,
+                &record,
+                "Get-Service sshd",
+                fleet_core::GuestOs::Windows,
+                wait,
+            )
+        };
+        assert_eq!(try_once().await, Ok(false), "a denied login is not ready");
+        assert_eq!(try_once().await, Ok(true));
+        let payloads = probe.payloads.lock().unwrap().clone();
+        assert_eq!(payloads.len(), 2);
+        assert!(payloads.iter().all(|p| p["auth"]["type"] == "agent"));
+    }
+
     #[test]
     fn only_the_guests_precondition_refusal_stops_the_readiness_retry() {
         assert!(is_precondition_refusal(Some(
@@ -2639,6 +3060,15 @@ pub struct ProvisionExecutor {
     hardware_confirm_timeout: Duration,
     /// The persistent marker (#489): Lab cleanup never destroys such a guest.
     persistent: Option<Arc<dyn fleet_application::persistent::PersistentGuestPort>>,
+    /// The public keys written to a Windows clone's cloud-init drive before
+    /// its first boot (#561). Without a source nothing is written.
+    login_keys: Option<Arc<dyn crate::lab_ssh_keys::LabKeySource>>,
+    /// Reserves the physical devices a template declares (FM-1121). Not to
+    /// be confused with the CPU, memory, and disk "hardware" step above.
+    devices: Option<Arc<fleet_application::lab_placement::HardwarePlacement>>,
+    /// Attaches the devices placement reserved, before the guest starts
+    /// (FM-1123).
+    device_saga: Option<Arc<crate::lab_hardware::LabHardwareSaga>>,
 }
 
 /// The placement and capacity reservation parts (FM-715).
@@ -2680,6 +3110,7 @@ struct HardwareTarget<'a> {
     request: &'a fleet_provider_proxmox::PveHttpRequest,
     account_id: &'a str,
     record_id: &'a str,
+    lease_id: &'a str,
     node: &'a str,
     vmid: u32,
 }
@@ -2725,7 +3156,47 @@ impl ProvisionExecutor {
             hardware_task_timeout: HARDWARE_TASK_TIMEOUT,
             hardware_confirm_timeout: HARDWARE_CONFIRM_TIMEOUT,
             persistent: None,
+            login_keys: None,
+            devices: None,
+            device_saga: None,
         }
+    }
+
+    /// Enables the reservation of the physical devices a template declares
+    /// (FM-1121): placement reserves them for the lease, before capacity,
+    /// the VMID, and the clone, and a lease that fails without allocating a
+    /// guest releases them again. Without it a template that declares
+    /// hardware is refused (`hardware_unavailable`) rather than provisioned
+    /// with no reservation for its devices.
+    #[must_use]
+    pub fn with_device_placement(
+        mut self,
+        devices: Arc<fleet_application::lab_placement::HardwarePlacement>,
+    ) -> Self {
+        self.devices = Some(devices);
+        self
+    }
+
+    /// Enables the attach of the devices a lease reserved (FM-1123): after
+    /// the clone's hardware step and before the start, each device is
+    /// re-observed, verified against its fingerprint, and attached to the
+    /// clone, with compensation. Without it a lease whose template declares
+    /// hardware reserves the devices but attaches nothing.
+    #[must_use]
+    pub fn with_device_saga(mut self, saga: Arc<crate::lab_hardware::LabHardwareSaga>) -> Self {
+        self.device_saga = Some(saga);
+        self
+    }
+
+    /// Supplies the source of the SSH public keys Lab installs in a Windows
+    /// clone's cloud-init drive before its first boot (#561). A re-generalized
+    /// Windows image carries no authorized key, so without this a lease that
+    /// is `ready` cannot be logged in to. Linux images carry their key, and a
+    /// pool member's key is in its baseline snapshot, so neither is written.
+    #[must_use]
+    pub fn with_login_keys(mut self, keys: Arc<dyn crate::lab_ssh_keys::LabKeySource>) -> Self {
+        self.login_keys = Some(keys);
+        self
     }
 
     /// Supplies the persistent marker store (#489): the Lab cleanup guard
@@ -2796,9 +3267,9 @@ impl ProvisionExecutor {
     /// a held row whose lease is `failed` without a VMID, so a skipped or
     /// failed release here cannot strand capacity.
     async fn release_unallocated(&self, operation: &Operation) {
-        let Some(placement) = &self.placement else {
+        if self.placement.is_none() && self.devices.is_none() {
             return;
-        };
+        }
         let Some(lease_id) = operation
             .payload_json
             .as_deref()
@@ -2823,13 +3294,28 @@ impl ProvisionExecutor {
             None => false,
         };
         if !allocated {
-            let _ = release_reservation(
-                placement.reservations.as_ref(),
-                placement.audit.as_ref(),
-                &lease_id,
-                "failed_without_allocation",
-            )
-            .await;
+            if let Some(placement) = &self.placement {
+                let _ = release_reservation(
+                    placement.reservations.as_ref(),
+                    placement.audit.as_ref(),
+                    &lease_id,
+                    "failed_without_allocation",
+                )
+                .await;
+            }
+            // The devices the lease reserved are released the same way. Only
+            // a hold that never started an attach is: bookkeeping that the
+            // reservation store would do on the lease's word anyway.
+            if let Some(devices) = &self.devices {
+                let _ = devices
+                    .release_unattached(
+                        fleet_auth::LAN_PRINCIPAL_ID,
+                        &lease_id,
+                        None,
+                        fleet_core::SystemClock::now_unix_millis(),
+                    )
+                    .await;
+            }
         }
     }
 
@@ -2849,6 +3335,16 @@ impl ProvisionExecutor {
         audit: Arc<dyn fleet_application::operation::AuditPort>,
     ) -> Self {
         self.readiness = Some(readiness);
+        self.audit = Some(audit);
+        self
+    }
+
+    /// Supplies only the mutation audit sink (`with_readiness` supplies it
+    /// with the readiness ports). For tests that exercise provisioning steps
+    /// without readiness.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn with_audit(mut self, audit: Arc<dyn fleet_application::operation::AuditPort>) -> Self {
         self.audit = Some(audit);
         self
     }
@@ -3101,7 +3597,43 @@ impl ProvisionExecutor {
     /// record before the clone call, and records the clone's UPID. The
     /// outer error is an infrastructure failure; the inner one a
     /// classified refusal the operation completes with.
+    ///
+    /// The devices the template declares are reserved first (FM-1121). An
+    /// infrastructure failure (the outer error) ends the operation `failed`
+    /// only later, through the worker, when the lease is not yet failed, so
+    /// the compensation that runs after a refusal would find nothing to do:
+    /// the devices this step took are released here, on every error exit. A
+    /// resumed run reserves them again.
     async fn clone_into_reserved_target(
+        &self,
+        record: &fleet_application::lab::ProvisionRecord,
+        content: &fleet_core::LabTemplateContent,
+        account_id: &str,
+        operation_id: &str,
+        request: &fleet_provider_proxmox::PveHttpRequest,
+    ) -> Result<Result<(String, u32), Refusal>, String> {
+        let outcome = self
+            .clone_with_devices(record, content, account_id, operation_id, request)
+            .await;
+        if outcome.is_err()
+            && !content.hardware.is_empty()
+            && let (Some(devices), Some(lease_id)) = (&self.devices, record.lease_id.as_deref())
+        {
+            // Only holds that never started an attach: never anything
+            // attached, attaching or unknown. Best effort, like capacity's.
+            let _ = devices
+                .release_unattached(
+                    fleet_auth::LAN_PRINCIPAL_ID,
+                    lease_id,
+                    None,
+                    fleet_core::SystemClock::now_unix_millis(),
+                )
+                .await;
+        }
+        outcome
+    }
+
+    async fn clone_with_devices(
         &self,
         record: &fleet_application::lab::ProvisionRecord,
         content: &fleet_core::LabTemplateContent,
@@ -3162,6 +3694,15 @@ impl ProvisionExecutor {
 
         // The target: reserved and recorded before the clone call. A
         // record that already holds a reservation resumes with it.
+        // FM-1121: the devices the template declares are reserved first. The
+        // node is fixed (the template's), so a device on another node, or
+        // one that is busy or unusable, refuses before capacity is held.
+        if let Err(refusal) = self
+            .reserve_devices(record, content, &node, account_id, operation_id)
+            .await?
+        {
+            return Ok(Err(refusal));
+        }
         // FM-715: every pending clone (this function only runs before the
         // clone starts) holds the template's capacity on its node before a
         // VMID is taken or anything is cloned, including a record that
@@ -3220,7 +3761,7 @@ impl ProvisionExecutor {
                     return Ok(Err(Refusal::new(
                         "conflict",
                         format!(
-                            "VMID {candidate} is reserved by provision {record_id}, whose clone has not landed yet; retry once it has"
+                            "VMID {candidate} is still owned by provision {record_id} (it is provisioning, or its lease's cleanup has not run yet); request the lease again once that provision's lease is released"
                         ),
                     )));
                 }
@@ -3507,6 +4048,157 @@ impl ProvisionExecutor {
                 )));
             }
             tokio::time::sleep(POLL_INTERVAL).await;
+        }
+    }
+
+    /// Step 1d (#561): a Windows clone gets the controller's SSH public keys
+    /// and the template's SSH user in its cloud-init drive before its first
+    /// boot, so Cloudbase-Init authorizes them (the re-generalized image
+    /// carries no key). Only public keys are written. The write is
+    /// conditional on the digest of the config read that checked the guest
+    /// is this provision's clone, repeated only when the keys are missing
+    /// (a resume repeats nothing), and confirmed by reading the config again.
+    /// A controller with no key to install refuses here instead of booting a
+    /// guest nobody can log in to.
+    async fn install_clone_login(
+        &self,
+        operations: &Operations,
+        target: &HardwareTarget<'_>,
+        content: &fleet_core::LabTemplateContent,
+        source: &dyn crate::lab_ssh_keys::LabKeySource,
+    ) -> Result<Result<(), Refusal>, String> {
+        let (node, vmid) = (target.node, target.vmid);
+        let where_ = format!("{node}/qemu/{vmid}");
+        let name = format!("fm-lab-{}", target.record_id);
+        let refuse = |reason: &'static str, detail: String| Ok(Err(Refusal::new(reason, detail)));
+        let wanted = match source.public_keys().await {
+            Ok(keys) => keys,
+            Err(error) => return refuse(error.reason, error.detail),
+        };
+        let mut writes = 0_u32;
+        let mut retried = false;
+        loop {
+            if operations
+                .cancel_requested(target.operation_id)
+                .await
+                .map_err(|error| error.to_string())?
+            {
+                return refuse(
+                    "cancelled",
+                    format!(
+                        "cancelled while installing the SSH key in {where_}; the guest is retained for cleanup"
+                    ),
+                );
+            }
+            let hardware = match self.read_clone_hardware(target).await {
+                Ok(hardware) => hardware,
+                Err(refusal) => return Ok(Err(refusal)),
+            };
+            if hardware.template || hardware.name.as_deref() != Some(name.as_str()) {
+                return refuse(
+                    "conflict",
+                    format!(
+                        "{where_} is not this provision's clone; its cloud-init login is left unchanged"
+                    ),
+                );
+            }
+            if hardware.cloud_init_ssh_keys_oversized {
+                // Its keys cannot be read, so a merge would replace them.
+                return refuse(
+                    "ssh_key_failed",
+                    format!(
+                        "the clone {where_} carries cloud-init SSH keys too large to read, and writing the Lab key would replace them; shorten the image template's sshkeys or set them yourself"
+                    ),
+                );
+            }
+            if !hardware.has_cloud_init_drive {
+                return refuse(
+                    "no_cloud_init_drive",
+                    format!(
+                        "the clone {where_} has no cloud-init drive, so Cloudbase-Init has nowhere to read the SSH login from; add one to the image template (`qm set <vmid> --ide2 <storage>:cloudinit`, ostype win11, citype configdrive2) and rebuild the image"
+                    ),
+                );
+            }
+            // Image keys that carry a comment (or options) are reduced to
+            // `type blob` so they are kept, not dropped.
+            let existing = crate::lab_ssh_keys::normalize_public_keys(
+                &hardware.cloud_init_ssh_keys.join("\n"),
+            );
+            let user_ok = hardware.cloud_init_user.as_deref() == Some(content.ssh_user.as_str());
+            let keys_ok = wanted.iter().all(|key| existing.contains(key));
+            if user_ok && keys_ok {
+                return Ok(Ok(()));
+            }
+            if writes >= 2 {
+                return refuse(
+                    "ssh_key_failed",
+                    format!(
+                        "the clone {where_} does not report the SSH login after it was written; the guest is retained for cleanup"
+                    ),
+                );
+            }
+            let Some(digest) = hardware.digest.as_deref() else {
+                return refuse(
+                    "ssh_key_failed",
+                    format!(
+                        "the config of {where_} carries no digest, so its cloud-init login is not changed unconditionally"
+                    ),
+                );
+            };
+            // Keys the image already carried stay; ours are added.
+            let mut keys = existing;
+            for key in &wanted {
+                if !keys.contains(key) {
+                    keys.push(key.clone());
+                }
+            }
+            match self
+                .client
+                .qemu_set_cloud_init_login(
+                    target.request.clone(),
+                    node,
+                    vmid,
+                    &content.ssh_user,
+                    &keys,
+                    digest,
+                )
+                .await
+            {
+                Ok(()) => {
+                    writes += 1;
+                    if let Some(audit) = &self.audit {
+                        // Counts and names only: never key material.
+                        let _ = audit
+                            .record_intent(&fleet_application::lab_placement::reservation_audit(
+                                fleet_auth::LAN_PRINCIPAL_ID,
+                                target.lease_id,
+                                Some(target.operation_id),
+                                "lab_clone_login_written",
+                                &[
+                                    ("vmid", vmid.to_string()),
+                                    ("user", content.ssh_user.clone()),
+                                    ("keyCount", wanted.len().to_string()),
+                                ],
+                            ))
+                            .await;
+                    }
+                }
+                Err(fleet_provider_proxmox::PveApiError::Http { status, .. })
+                    if (500..600).contains(&status) && !std::mem::replace(&mut retried, true) => {}
+                Err(error) => {
+                    let cause = match &error {
+                        fleet_provider_proxmox::PveApiError::Auth
+                        | fleet_provider_proxmox::PveApiError::Forbidden { .. } => {
+                            format!("the token needs VM.Config.Cloudinit on /vms/{vmid} ({error})")
+                        }
+                        _ => format!("PVE refused it ({error})"),
+                    };
+                    return refuse(
+                        "ssh_key_failed",
+                        format!("the clone {where_} could not take the SSH login: {cause}"),
+                    );
+                }
+            }
         }
     }
 
@@ -4059,6 +4751,132 @@ impl ProvisionExecutor {
             .map_err(|refusal| Refusal::new(refusal.reason(), refusal.to_string())))
     }
 
+    /// Attaches the devices the lease reserved to its clone (FM-1123; the
+    /// work is [`crate::lab_hardware::LabHardwareSaga`]'s). The outer error
+    /// is an infrastructure failure; the inner one a classified refusal.
+    #[allow(clippy::too_many_arguments)]
+    async fn attach_devices(
+        &self,
+        operations: &Operations,
+        operation_id: &str,
+        lease_id: &str,
+        account_id: &str,
+        node: &str,
+        vmid: u32,
+        content: &fleet_core::LabTemplateContent,
+    ) -> Result<Result<(), Refusal>, String> {
+        let Some(saga) = &self.device_saga else {
+            return Ok(Ok(()));
+        };
+        match saga
+            .attach_for_lease(
+                operations,
+                &crate::lab_hardware::LeaseGuest {
+                    lease_id,
+                    account_id,
+                    node,
+                    vmid,
+                    operation_id: Some(operation_id),
+                },
+                &content.hardware,
+            )
+            .await
+        {
+            Ok(()) => Ok(Ok(())),
+            Err(crate::lab_hardware::AttachFailure::Refused { reason, detail }) => {
+                Ok(Err(Refusal::new(reason, detail)))
+            }
+            Err(crate::lab_hardware::AttachFailure::Infrastructure(detail)) => Err(detail),
+        }
+    }
+
+    /// Reserves the physical devices the template declares for the record's
+    /// lease (FM-1121), on `node`, the node the clone runs on. Nothing here
+    /// calls Proxmox: the attach is the saga's. A template that declares
+    /// none reserves nothing and is unchanged. A refusal is audited best
+    /// effort like capacity's; the store audits its own reservations and
+    /// refusals.
+    async fn reserve_devices(
+        &self,
+        record: &fleet_application::lab::ProvisionRecord,
+        content: &fleet_core::LabTemplateContent,
+        node: &str,
+        account_id: &str,
+        operation_id: &str,
+    ) -> Result<Result<(), Refusal>, String> {
+        if content.hardware.is_empty() {
+            return Ok(Ok(()));
+        }
+        let (Some(devices), Some(lease_id)) = (&self.devices, record.lease_id.as_deref()) else {
+            // A template that asks for hardware is not provisioned without
+            // a reservation for it: not through a standalone provision (no
+            // lease to own the reservation), and not by a controller that
+            // cannot reserve.
+            return Ok(Err(Refusal::new(
+                if self.devices.is_none() {
+                    "hardware_unavailable"
+                } else {
+                    "hardware_needs_lease"
+                },
+                if self.devices.is_none() {
+                    "this controller has no hardware reservation configured, so a template that declares hardware cannot be provisioned"
+                        .to_owned()
+                } else {
+                    "a template that declares hardware can only be provisioned through a lease, which owns the reservation"
+                        .to_owned()
+                },
+            )));
+        };
+        let outcome = devices
+            .reserve(
+                fleet_auth::LAN_PRINCIPAL_ID,
+                &fleet_application::lab_placement::HardwareDemand {
+                    lease_id,
+                    account_id,
+                    clone_node: node,
+                    declared: &content.hardware,
+                    operation_id: Some(operation_id),
+                },
+                fleet_core::SystemClock::now_unix_millis(),
+            )
+            .await
+            .map_err(|error| format!("the hardware reservation failed: {error}"))?;
+        // FM-1123: the fingerprint each device has now is what the attach
+        // verifies against, minutes later, whatever a refresh records between.
+        if outcome.is_ok()
+            && let Some(saga) = &self.device_saga
+        {
+            saga.pin_fingerprints(lease_id, account_id, node, &content.hardware)
+                .await
+                .map_err(|error| {
+                    format!("the device fingerprints could not be recorded: {error}")
+                })?;
+        }
+        Ok(match outcome {
+            Ok(_) => Ok(()),
+            Err(refusal) => {
+                if let Some(placement) = &self.placement {
+                    let mut facts = vec![
+                        ("node", node.to_owned()),
+                        ("reason", refusal.reason().to_owned()),
+                    ];
+                    facts.extend(refusal.hardware_audit_facts());
+                    let _ = placement
+                        .audit
+                        .record_intent(&fleet_application::lab_placement::reservation_audit(
+                            fleet_auth::LAN_PRINCIPAL_ID,
+                            lease_id,
+                            Some(operation_id),
+                            "lab_placement_refused",
+                            &facts,
+                        ))
+                        .await;
+                }
+                Err(Refusal::new(refusal.reason(), refusal.to_string()))
+            }
+        })
+    }
+
     /// Reserves the template's capacity on `node` for the record's lease in
     /// one transaction (FM-715). The node's capacity observation is
     /// refreshed first; when the refresh fails the stored observation
@@ -4427,6 +5245,19 @@ impl ProvisionExecutor {
             )
             .await;
         }
+        // FM-1121: a pool member is a prebuilt guest the operator owns, so a
+        // device cannot be reserved for the lease and attached before its
+        // boot. Leasing the member would hand the caller a guest with no
+        // reservation for what the template asks for.
+        if pool.is_some() && !version.content.hardware.is_empty() {
+            return complete_failure(
+                operations,
+                &operation.id,
+                "hardware_pool_unsupported",
+                "the template version declares hardware, which pooled leases do not support yet; lease it without a pool",
+            )
+            .await;
+        }
         let account_id = match pool
             .as_ref()
             .map(|pool| pool.account_id.clone())
@@ -4637,6 +5468,7 @@ impl ProvisionExecutor {
                         request: &request,
                         account_id: &account_id,
                         record_id: &record.id,
+                        lease_id: &lease_id,
                         node: &node,
                         vmid,
                     },
@@ -4647,6 +5479,64 @@ impl ProvisionExecutor {
         {
             return self
                 .fail_at(operations, &operation.id, &record.id, "hardware", &refusal)
+                .await;
+        }
+        // Step 1d (#561): a Windows clone's cloud-init drive gets the
+        // controller's SSH public keys before its first boot; the
+        // re-generalized image carries none. A pool member's key is in its
+        // baseline snapshot (the operator's guest), and Linux images carry
+        // theirs.
+        if pooled.is_none()
+            && record.state == fleet_core::GuestState::Provisioning
+            && version.content.guest_os == fleet_core::GuestOs::Windows
+            && let Some(keys) = &self.login_keys
+            && let Err(refusal) = self
+                .install_clone_login(
+                    operations,
+                    &HardwareTarget {
+                        operation_id: &operation.id,
+                        request: &request,
+                        account_id: &account_id,
+                        record_id: &record.id,
+                        lease_id: &lease_id,
+                        node: &node,
+                        vmid,
+                    },
+                    &version.content,
+                    keys.as_ref(),
+                )
+                .await
+                .unwrap_or_else(|detail| Err(Refusal::new("ssh_key_failed", detail)))
+        {
+            return self
+                .fail_at(operations, &operation.id, &record.id, "ssh_key", &refusal)
+                .await;
+        }
+
+        // Step 1e (FM-1123): the devices the lease reserved are attached to
+        // the clone, verified, before anything starts it. A pool member never
+        // gets here with hardware (refused above).
+        if pooled.is_none()
+            && let Err(refusal) = self
+                .attach_devices(
+                    operations,
+                    &operation.id,
+                    &lease_id,
+                    &account_id,
+                    &node,
+                    vmid,
+                    &version.content,
+                )
+                .await?
+        {
+            return self
+                .fail_at(
+                    operations,
+                    &operation.id,
+                    &record.id,
+                    crate::lab_hardware::ATTACH_STEP,
+                    &refusal,
+                )
                 .await;
         }
 
@@ -5256,8 +6146,29 @@ mod destroy_tests {
         task_error: bool,
         stop_error: bool,
         stop_running: bool,
+        /// The live guest's name; none reports it unnamed.
+        name: Mutex<Option<String>>,
+        /// From the n-th resource listing on, the guest carries this name: a
+        /// guest swapped in while the destroy runs.
+        swap: Mutex<Option<(usize, String)>>,
         seen: Mutex<Vec<String>>,
         cancel_on_recheck: Mutex<Option<(Arc<Operations>, String)>>,
+    }
+    impl Transport {
+        /// The live guest's name as of this resource listing.
+        fn guest_name(&self) -> Option<String> {
+            let listings = self
+                .seen
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|path| path.as_str() == "/api2/json/cluster/resources")
+                .count();
+            match self.swap.lock().unwrap().clone() {
+                Some((from, name)) if listings >= from => Some(name),
+                _ => self.name.lock().unwrap().clone(),
+            }
+        }
     }
     #[async_trait::async_trait]
     impl PveTransport for Transport {
@@ -5292,7 +6203,7 @@ mod destroy_tests {
                 if self.absent {
                     json!({"data":[]})
                 } else {
-                    json!({"data":[{"id":"qemu/101","type":"qemu","vmid":101,"node":"pve","status":"running","template":u8::from(self.template || (self.template_after_stop.load(std::sync::atomic::Ordering::Relaxed) && self.seen.lock().unwrap().iter().any(|path| path.ends_with("/status/stop"))))}]})
+                    json!({"data":[{"id":"qemu/101","type":"qemu","vmid":101,"node":"pve","name":self.guest_name(),"status":"running","template":u8::from(self.template || (self.template_after_stop.load(std::sync::atomic::Ordering::Relaxed) && self.seen.lock().unwrap().iter().any(|path| path.ends_with("/status/stop"))))}]})
                 }
             } else if path.ends_with("/status/stop") {
                 assert_eq!(request.method, PveHttpMethod::Post);
@@ -5433,6 +6344,8 @@ mod destroy_tests {
                 task_error,
                 stop_error,
                 stop_running,
+                name: Mutex::new(None),
+                swap: Mutex::new(None),
                 seen: Mutex::new(vec![]),
                 cancel_on_recheck: Mutex::new(None),
             });
@@ -5451,6 +6364,17 @@ mod destroy_tests {
                 links,
                 transport,
             }
+        }
+        /// The same harness whose live guest carries `name`.
+        fn with_guest_name(self, name: &str) -> Self {
+            *self.transport.name.lock().unwrap() = Some(name.to_owned());
+            self
+        }
+        /// The same harness whose guest is swapped for one named `name` from
+        /// the `from`-th resource listing on.
+        fn with_swap(self, from: usize, name: &str) -> Self {
+            *self.transport.swap.lock().unwrap() = Some((from, name.to_owned()));
+            self
         }
         /// The same harness with the executor's pool membership lookup set.
         fn with_members(self, members: Arc<Members>) -> Self {
@@ -5814,5 +6738,156 @@ mod destroy_tests {
                     .any(|p| p.contains("?purge="))
             );
         }
+    }
+    /// The paths the executor called that stop or delete the guest.
+    fn mutations(h: &Harness) -> Vec<String> {
+        h.transport
+            .seen
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|path| path.ends_with("/status/stop") || path.contains("?purge="))
+            .cloned()
+            .collect()
+    }
+    fn lab_destroy(unconfirmed: bool) -> Value {
+        json!({"purge": false, "expectedName": "fm-lab-rec1", "guestUnconfirmed": unconfirmed})
+    }
+    /// #592: a Lab cleanup's destroy of the record's own guest (by its Fleet
+    /// name) is stopped and deleted as before.
+    #[tokio::test]
+    async fn a_destroy_of_the_records_own_guest_goes_ahead() {
+        for unconfirmed in [false, true] {
+            let h = Harness::new(false, false, false, false, false, false)
+                .await
+                .with_guest_name("fm-lab-rec1");
+            let done = h
+                .run_kind("proxmox.guest.destroy", lab_destroy(unconfirmed))
+                .await;
+            assert_eq!(done.state, "succeeded", "never cloned: {unconfirmed}");
+            assert_eq!(
+                mutations(&h).len(),
+                2,
+                "the guest was stopped and deleted: {:?}",
+                mutations(&h)
+            );
+        }
+    }
+    /// #592: a guest that does not carry the record's name is another
+    /// owner's. A record that cloned one is refused before anything is
+    /// stopped or deleted.
+    #[tokio::test]
+    async fn a_destroy_of_a_guest_with_another_name_is_refused_before_any_stop() {
+        for name in ["fm-lab-rec2", "web-1"] {
+            let h = Harness::new(false, false, false, false, false, false)
+                .await
+                .with_guest_name(name);
+            let done = h
+                .run_kind("proxmox.guest.destroy", lab_destroy(false))
+                .await;
+            assert_eq!(done.state, "failed", "{name}");
+            assert_eq!(Harness::error_reason(&done), "identity_mismatch", "{name}");
+            assert!(
+                done.error_json
+                    .as_deref()
+                    .unwrap_or_default()
+                    .contains(name),
+                "the refusal names the guest: {:?}",
+                done.error_json
+            );
+            assert!(mutations(&h).is_empty(), "{name}: {:?}", mutations(&h));
+        }
+    }
+    /// #592: a record that never started a clone has no guest of its own, so
+    /// another owner's guest at its VMID is nothing to destroy: the operation
+    /// succeeds, marked `notOwned`, and touches nothing. So does an empty VMID.
+    #[tokio::test]
+    async fn a_destroy_for_a_record_that_unconfirmed_leaves_another_guest_alone() {
+        for (absent, name) in [(false, Some("fm-lab-rec2")), (true, None)] {
+            let h = Harness::new(false, false, absent, false, false, false).await;
+            let h = match name {
+                Some(name) => h.with_guest_name(name),
+                None => h,
+            };
+            let done = h.run_kind("proxmox.guest.destroy", lab_destroy(true)).await;
+            assert_eq!(done.state, "succeeded", "{name:?}");
+            let result: Value = serde_json::from_str(done.result_json.as_deref().unwrap()).unwrap();
+            assert_eq!(result["notOwned"], json!(true), "{name:?}");
+            assert!(mutations(&h).is_empty(), "{name:?}: {:?}", mutations(&h));
+        }
+    }
+    /// #592: a guest with no name yet (PVE reports `VM <vmid>` while a clone
+    /// runs) cannot be verified as the record's: refused, never deleted, for a
+    /// record that cloned and for one that did not (its clone may have landed
+    /// before its task was recorded).
+    #[tokio::test]
+    async fn a_destroy_of_an_unnamed_guest_is_refused_as_unverified() {
+        for unconfirmed in [false, true] {
+            let h = Harness::new(false, false, false, false, false, false).await;
+            let done = h
+                .run_kind("proxmox.guest.destroy", lab_destroy(unconfirmed))
+                .await;
+            assert_eq!(done.state, "failed", "never cloned: {unconfirmed}");
+            assert_eq!(
+                Harness::error_reason(&done),
+                "identity_unverified",
+                "never cloned: {unconfirmed}"
+            );
+            assert!(mutations(&h).is_empty());
+        }
+    }
+    /// #592: a record that did clone, whose guest is gone, still ends the
+    /// destroy as before (the delete finds nothing and counts as done).
+    #[tokio::test]
+    async fn a_destroy_for_a_record_that_cloned_treats_an_absent_guest_as_done() {
+        let h = Harness::new(false, false, true, false, false, false).await;
+        let done = h
+            .run_kind("proxmox.guest.destroy", lab_destroy(false))
+            .await;
+        assert_eq!(done.state, "succeeded");
+    }
+    /// #592: the identity is checked again right before the stop, so a guest
+    /// swapped in since the first check is never stopped; and again after the
+    /// stop, so one swapped in while it stopped is never deleted. Both end
+    /// with the same `identity_mismatch` reason as the first check.
+    #[tokio::test]
+    async fn a_guest_swapped_in_during_the_destroy_is_neither_stopped_nor_deleted() {
+        // Listing 1 is the first check, 2 the one before the stop, 3 after it.
+        for (from, stops) in [(2, 0), (3, 1)] {
+            let h = Harness::new(false, false, false, false, false, false)
+                .await
+                .with_guest_name("fm-lab-rec1")
+                .with_swap(from, "fm-lab-rec2");
+            let done = h
+                .run_kind("proxmox.guest.destroy", lab_destroy(false))
+                .await;
+            assert_eq!(done.state, "failed", "swapped at listing {from}");
+            assert_eq!(
+                Harness::error_reason(&done),
+                "identity_mismatch",
+                "swapped at listing {from}"
+            );
+            let mutations = mutations(&h);
+            assert_eq!(
+                mutations.len(),
+                stops,
+                "swapped at listing {from}: {mutations:?}"
+            );
+            assert!(
+                mutations.iter().all(|path| path.ends_with("/status/stop")),
+                "nothing was deleted: {mutations:?}"
+            );
+        }
+    }
+    /// An operator's destroy names no guest: the name is not checked.
+    #[tokio::test]
+    async fn an_operators_destroy_does_not_check_the_name() {
+        let h = Harness::new(false, false, false, false, false, false)
+            .await
+            .with_guest_name("web-1");
+        let done = h
+            .run_kind("proxmox.guest.destroy", json!({"purge": false}))
+            .await;
+        assert_eq!(done.state, "succeeded");
     }
 }

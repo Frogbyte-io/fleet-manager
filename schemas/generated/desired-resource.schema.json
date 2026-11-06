@@ -122,6 +122,38 @@
     ],
     "type": "object"
   },
+  "$defs:LabHardwareKind": {
+    "description": "The kind of a device a Lab template declares.",
+    "oneOf": [
+      {
+        "const": "usb",
+        "description": "A USB device attached through a Proxmox USB resource mapping.",
+        "type": "string"
+      }
+    ]
+  },
+  "$defs:LabHardwareSpec": {
+    "additionalProperties": false,
+    "description": "One device a Lab template asks for: the Proxmox resource mapping that\nnames it. The mapping is the device's identity; Fleet never writes\n`host=` and never creates mappings. Device groups are deferred.",
+    "properties": {
+      "kind": {
+        "$ref": "#/$defs:LabHardwareKind",
+        "description": "The device kind."
+      },
+      "mapping": {
+        "description": "The Proxmox USB resource mapping id: letters, digits, `-`, `_` and\n`.`, starting with a letter or digit.",
+        "maxLength": 64,
+        "minLength": 1,
+        "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*$",
+        "type": "string"
+      }
+    },
+    "required": [
+      "kind",
+      "mapping"
+    ],
+    "type": "object"
+  },
   "$defs:ProfileRequirement": {
     "description": "One profile requirement: a tool, skill, or capability the profile\nasks machines to satisfy. Set-valued with explicit deny semantics.",
     "oneOf": [
@@ -1053,6 +1085,15 @@
                   "integer",
                   "null"
                 ]
+              },
+              "hardware": {
+                "default": [],
+                "description": "The physical devices every lease from the template reserves\n(FM-1121, ADR 0019): one entry per operator-created Proxmox USB\nresource mapping, at most four, none twice. Omitted asks for none.",
+                "items": {
+                  "$ref": "#/$defs:LabHardwareSpec"
+                },
+                "maxItems": 4,
+                "type": "array"
               },
               "imageVersion": {
                 "default": null,

@@ -1,0 +1,46 @@
+{
+  "http_status": 200,
+  "pve_version": "8.4.0",
+  "recorded_with": "pvesh (root@pam), status and body reconstructed from the CLI",
+  "request": {
+    "method": "GET",
+    "params": {},
+    "path": "/cluster/mapping/usb"
+  },
+  "response": [
+    {
+      "digest": "ca6c0fd538f6a7970050d4f8b365a56afa779f39",
+      "id": "fm-test-tablet-id",
+      "map": [
+        "node=pve8,id=0627:0001"
+      ],
+      "type": "usb"
+    },
+    {
+      "digest": "ca6c0fd538f6a7970050d4f8b365a56afa779f39",
+      "id": "fm-test-badid",
+      "map": [
+        "node=pve8,id=0627:0002,path=1-1"
+      ],
+      "type": "usb"
+    },
+    {
+      "description": "FM-S11 PVE 8.4 shape test (QEMU USB tablet)",
+      "digest": "ca6c0fd538f6a7970050d4f8b365a56afa779f39",
+      "id": "fm-test-tablet-path",
+      "map": [
+        "node=pve8,id=0627:0001,path=1-1"
+      ],
+      "type": "usb"
+    },
+    {
+      "digest": "ca6c0fd538f6a7970050d4f8b365a56afa779f39",
+      "id": "fm-test-badpath",
+      "map": [
+        "node=pve8,id=0627:0001,path=1-9"
+      ],
+      "type": "usb"
+    }
+  ],
+  "who": "root"
+}

@@ -1,0 +1,16 @@
+{
+  "http_status": 200,
+  "pve_version": "8.4.0",
+  "recorded_with": "pvesh (root@pam), status and body reconstructed from the CLI",
+  "request": {
+    "method": "GET",
+    "params": {},
+    "path": "/version"
+  },
+  "response": {
+    "release": "8.4",
+    "repoid": "ec58e45e1bcdf2ac",
+    "version": "8.4.0"
+  },
+  "who": "root"
+}

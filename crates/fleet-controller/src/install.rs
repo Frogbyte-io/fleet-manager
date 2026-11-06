@@ -28,6 +28,15 @@
 //! acting on operations callers already created, and minting is part of that
 //! work — the use case's own authorization funnel and audit event record it.
 //! There is deliberately no path that skips the funnel.
+//!
+//! After a successful install the executor runs the machine-setup hook
+//! (#600) as the same trusted principal. A first or forced enrollment queues
+//! a pinned Skills Manager install through the authorized, audited operation
+//! path, correlated with the install; an upgrade queues only when the machine
+//! was never observed by Skills Manager (an earlier enrolling install failed
+//! before its follow-up). The result reports what it did as `skillsManager`.
+//! The hook is best effort and time-bounded: nothing it answers changes the
+//! install's success.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -36,7 +45,9 @@ use async_trait::async_trait;
 
 use fleet_application::authz::ActingPrincipal;
 use fleet_application::machine::MachinePort;
+use fleet_application::machine_setup::{MachineSetup, MachineSetupPort, SetupFollowUp, SetupKind};
 use fleet_application::node::Nodes;
+use fleet_application::onboarding::OnboardAuth;
 use fleet_application::operation::{Operation, Operations};
 use fleet_application::worker::OperationExecutor;
 use fleet_provider_ssh::{ExecutionLimiter, SshAuth, SshProvider};
@@ -61,6 +72,10 @@ pub const MAX_INSTALL_TIMEOUT: u64 = 900;
 /// How long the post-connect inventory verification waits for the node's
 /// facts.
 pub const INVENTORY_VERIFY_MILLIS: i64 = 120_000;
+
+/// The bound on the machine-setup follow-up (#600). It runs before the
+/// install records its success, so a stuck store cannot hold the install.
+pub const SETUP_HOOK_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// The bounded payload for the inventory command's result.
 pub const INVENTORY_RESULT_BYTES: u32 = 64 * 1024;
@@ -130,6 +145,9 @@ pub struct InstallExecutor {
     /// from here. Absent in most tests, which supply explicit artifacts.
     artifacts_dir: Option<std::path::PathBuf>,
     fallback: Arc<dyn OperationExecutor>,
+    /// The follow-up run after a successful install (#600); absent when the
+    /// controller setting turns it off.
+    setup_hook: Option<Arc<dyn MachineSetupPort>>,
 }
 
 impl InstallExecutor {
@@ -160,7 +178,86 @@ impl InstallExecutor {
             limiter,
             artifacts_dir,
             fallback,
+            setup_hook: None,
         }
+    }
+
+    /// Runs `hook` after a successful install that sets the machine up
+    /// (#600): a first or forced enrollment. After an upgrade over a live
+    /// identity the hook is told so ([`SetupKind::Upgrade`]) and queues only
+    /// when the machine has no Skills Manager observation at all, i.e. an
+    /// earlier enrolling install failed before its follow-up.
+    #[must_use]
+    pub fn with_setup_hook(mut self, hook: Arc<dyn MachineSetupPort>) -> Self {
+        self.setup_hook = Some(hook);
+        self
+    }
+
+    /// The setup follow-up for a successful install. Never fails the
+    /// install: a failure is logged and reported in the result. A first or
+    /// forced enrollment sets the machine up; an upgrade is passed as
+    /// [`SetupKind::Upgrade`], which queues only when the machine has never
+    /// been observed by Skills Manager, so a CLI the operator removed (an
+    /// `absent` observation) is not reinstalled. The hook is bounded by
+    /// [`SETUP_HOOK_TIMEOUT`], because it runs before the install records
+    /// its success.
+    async fn setup_follow_up(
+        &self,
+        operation: &Operation,
+        payload: &InstallPayload,
+        enrollment: Enrollment,
+    ) -> SetupFollowUp {
+        let Some(hook) = &self.setup_hook else {
+            return SetupFollowUp::Disabled;
+        };
+        let auth = match &payload.auth {
+            InstallAuth::Agent => OnboardAuth::Agent,
+            InstallAuth::IdentityFile { path } => OnboardAuth::IdentityFile { path: path.clone() },
+        };
+        let setup = MachineSetup {
+            machine_id: payload.machine_id.clone(),
+            endpoint_id: payload.endpoint_id.clone(),
+            auth,
+            trigger: operation.id.clone(),
+            correlation_id: Some(
+                operation
+                    .correlation_id
+                    .clone()
+                    .unwrap_or_else(|| operation.id.clone()),
+            ),
+            // An upgrade is not a new setup: the hook decides whether the
+            // earlier setup's follow-up is still owed.
+            kind: if enrollment == Enrollment::Upgrade {
+                SetupKind::Upgrade
+            } else {
+                SetupKind::Initial
+            },
+        };
+        let outcome = match tokio::time::timeout(
+            SETUP_HOOK_TIMEOUT,
+            hook.machine_set_up(
+                &fleet_auth::LanAllowAllAuthorizer,
+                fleet_auth::LAN_PRINCIPAL_ID,
+                &setup,
+            ),
+        )
+        .await
+        {
+            Ok(outcome) => outcome,
+            Err(_) => SetupFollowUp::Failed {
+                reason: format!(
+                    "the Skills Manager follow-up timed out after {}s and may not have been queued",
+                    SETUP_HOOK_TIMEOUT.as_secs()
+                ),
+            },
+        };
+        if let SetupFollowUp::Failed { reason } = &outcome {
+            eprintln!(
+                "install {}: the setup follow-up was not queued: {reason}",
+                operation.id
+            );
+        }
+        outcome
     }
 }
 
@@ -388,12 +485,14 @@ impl InstallExecutor {
             .await
         {
             Ok(facts) => {
+                let skills_manager = self.setup_follow_up(operation, &payload, enrollment).await;
                 let result_json = serde_json::json!({
                     "connected": true,
                     "machineId": payload.machine_id,
                     "controllerUrl": controller_url,
                     "artifact": artifact_name,
                     "inventoryFacts": facts,
+                    "skillsManager": skills_manager,
                 })
                 .to_string();
                 operations

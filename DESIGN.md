@@ -118,6 +118,57 @@ word (uppercase); color never carries meaning alone.
 | Action request | `denied` | `--fc-muted` | `DENIED` |
 | Action request | `expired` | `--fc-faint` | `EXPIRED` |
 | Action request risk | `approve`,`auto`,`deny` | `--fc-warn`,`--fc-muted`,`--fc-err` | `RISK <API word>` |
+| Hardware device | `available` | `--fc-ok` | `AVAILABLE` |
+| Hardware device | `reserved` | `--fc-info` | `RESERVED` |
+| Hardware device | `externally_attached`,`missing` | `--fc-warn` | `EXTERNALLY ATTACHED`, `MISSING` |
+| Hardware device | `unsupported` | `--fc-muted` | `UNSUPPORTED` |
+| Hardware device | `quarantined` | `--fc-err` | `QUARANTINED` |
+| Hardware device | unknown/other | `--fc-faint` | (API word, underscores as spaces) |
+| Hardware device freshness | `stale` is true | `--fc-warn` | `STALE` (a second chip beside the status chip) |
+| Hardware holder (reservation) | `attached` | `--fc-ok` | `ATTACHED` |
+| Hardware holder (reservation) | `held`,`attaching`,`detaching` | `--fc-info` | (API word, underscores as spaces) |
+| Hardware holder (reservation) | `attach_unknown`,`detach_failed` | `--fc-err` | `ATTACH UNKNOWN`, `DETACH FAILED` |
+| Hardware holder (reservation) | unknown/other | `--fc-faint` | (API word, underscores as spaces) |
+| Hardware refresh (account support) | `supported` | `--fc-ok` | `SUPPORTED` |
+| Hardware refresh (account support) | `unsupported`,`unverified`, any other | `--fc-warn` | (API word) |
+
+#### Hardware conventions
+
+The Hardware page (`apps/web/src/pages/hardware/`) shows what
+`fleetctl hardware list|refresh --output json` reports and decides nothing;
+the controller owns every status, reason and holder state (ADR 0019).
+
+- **Words.** A chip carries the API word with underscores shown as spaces
+  (`externally_attached` reads `EXTERNALLY ATTACHED`). The words are the
+  ones in `docs/operations/lab.md`; the console never invents one.
+- **Stale** is a second `--fc-warn` chip (`STALE`) beside the status chip,
+  never a replacement for it: the status is what the controller last
+  computed, `stale` says that observation is older than its bound (or the
+  device was never seen). The page header counts them as `N stale` in
+  `--fc-warn` text; the status summary row counts devices per status chip,
+  API order first, unknown statuses after.
+- **Reason.** An `unsupported` device (and any device that carries a
+  reason) shows an inset block with a 2px `--fc-line2` left border: the
+  reason code in mono 11px `--fc-muted` (`token_lacks_mapping_use`, as the
+  API spells it) over the controller's own explanation in 12px `--fc-ink`.
+  Without a `reasonText` the code is spelled out in words. The code is
+  never a chip and never recolors the status.
+- **Holder.** A reserved device shows an inset "Held by" block whose left
+  border is `--fc-info`, or `--fc-err` when the reservation is
+  `attach_unknown` or `detach_failed` (an outcome only the reconciler or an
+  operator resolves). The reservation state is a chip using the holder rows
+  above. Lease owners link to the Lab drawer, machine owners to their
+  machine.
+- **Refresh findings.** What a refresh found for one device (guests that
+  reference it, notes) sits in an inset block with a 2px `--fc-warn` left
+  border, and is dropped once the list reports a different status for the
+  device than the refresh did. Warnings of a refresh use the same border.
+- **Tone logic.** `externally_attached` and `missing` need attention but
+  nothing has failed (`--fc-warn`); `unsupported` is a standing property,
+  not an alarm (`--fc-muted`); `quarantined` means an attach or detach
+  already went wrong (`--fc-err`). The same word is `--fc-warn` for the Lab
+  guest fate `quarantined_in_pool`: tones are per source, so read the
+  source column.
 
 ### Connection badges
 

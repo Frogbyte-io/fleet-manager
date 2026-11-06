@@ -1,0 +1,17 @@
+{
+  "http_status": 200,
+  "pve_version": "9.2.2",
+  "recorded_with": "pvesh (root@pam), status and body reconstructed from the CLI",
+  "request": {
+    "method": "POST",
+    "params": {
+      "full": "0",
+      "name": "fm-s11-usb-from-tpl",
+      "newid": "9567"
+    },
+    "path": "/nodes/pve/qemu/9564/clone"
+  },
+  "response": "UPID:pve:0018353A:0CA1BD99:6AE44F89:qmclone:9564:root@pam:",
+  "task_log": "creating a clone of VM 9564 with ID 9567\ncreate full clone of drive ide2 (local-lvm:vm-9564-cloudinit)\n  Logical volume \"vm-9567-cloudinit\" created.\n  Logical volume pve/vm-9567-cloudinit changed.\nallocated target volume 'local-lvm:vm-9567-cloudinit'\ncreate linked clone of drive scsi0 (local-lvm:base-9564-disk-0)\n  Logical volume \"vm-9567-disk-0\" created.\n  Logical volume pve/vm-9567-disk-0 changed.",
+  "who": "root"
+}

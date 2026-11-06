@@ -89,6 +89,8 @@ FM-717 (pooled revert) is in PLAN scope but not on the exit-gate path. If it is 
 
 ## Deferred: USB and hardware sub-epic (#16)
 
+Planned as M11 in [m11-usb-hardware.md](m11-usb-hardware.md) with [ADR 0019](../adr/0019-usb-device-allocation.md) (Proposed); that plan's issue table supersedes the ordering below.
+
 No issues are filed for #16 yet. `docs/architecture/lab.md` says the first Lab release must omit USB unless a real hardware validation environment exists, and that it must not ship an untested "exclusive" claim. When a host with passthrough-capable USB hardware is available, file the issues against #16, in this order:
 
 1. USB inventory with stable identity (vendor/product/serial, physical port path) plus IOMMU/host validation with an explicit unsupported state — codex.

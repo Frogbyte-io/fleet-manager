@@ -23,14 +23,17 @@ mod envelope;
 mod error;
 pub mod external_accounts;
 pub mod frogenv;
+pub mod hardware;
 pub mod images;
 pub mod lab;
 pub mod lab_artifacts;
 pub mod lab_exec_detach;
+pub mod lab_hardware;
 pub mod lab_pools;
 pub mod lab_put;
 pub mod machine_access;
 pub mod machine_terminal;
+pub mod machine_usb;
 pub mod machines;
 mod meta;
 pub mod mise;
@@ -289,6 +292,24 @@ pub const API_BASE_PATH: &str = "/api/v1";
         proxmox_privileges::ProxmoxMissingPrivilegesDto,
         proxmox_privileges::ProxmoxPrivilegeTierDto,
         proxmox_privileges::ProxmoxPrivilegeStatusDto,
+        hardware::HardwareStatusDto,
+        hardware::HardwareUnsupportedReasonDto,
+        hardware::HardwareEntryDto,
+        hardware::HardwareGuestDto,
+        hardware::HardwareHolderDto,
+        hardware::HardwareExternalReferenceDto,
+        hardware::HardwareObservationDto,
+        hardware::HardwareDeviceDto,
+        hardware::HardwareSupportDto,
+        hardware::HardwareGuestScanDto,
+        hardware::HardwareGuestVisibilityDto,
+        hardware::HardwareGuestVisibilityStateDto,
+        hardware::HardwareGuestVisibilityReasonDto,
+        hardware::HardwareRefreshDto,
+        hardware::RefreshHardwareRequest,
+        hardware::OverrideReleaseRequest,
+        hardware::HardwareOverrideOutcomeDto,
+        hardware::HardwareOverrideReleaseDto,
         node::CreateEnrollmentTokenRequest,
         node::EnrollmentTokenCreatedDto,
         node::EnrollmentTokenDto,
@@ -347,6 +368,10 @@ pub const API_BASE_PATH: &str = "/api/v1";
         (
             name = "proxmox",
             description = "Proxmox accounts, TLS fingerprint trust, and cluster discovery. The token secret is write-only; discovery is locked until the host fingerprint is confirmed."
+        ),
+        (
+            name = "hardware",
+            description = "The USB hardware inventory (M11, ADR 0019): PVE USB resource mappings as devices with an explained status. Listing reads Fleet's own records; refresh reads Proxmox through the account's token and is an authorized, audited mutation of those records. Fleet never creates or edits a mapping."
         ),
         (
             name = "nodes",
@@ -487,6 +512,9 @@ pub fn api(state: Arc<operations::ApiState>) -> (Router, utoipa::openapi::OpenAp
                 .routes(routes!(proxmox::confirm_proxmox_fingerprint))
                 .routes(routes!(proxmox::discover_proxmox_cluster))
                 .routes(routes!(proxmox_privileges::get_proxmox_privileges))
+                .routes(routes!(hardware::list_hardware_devices))
+                .routes(routes!(hardware::refresh_hardware))
+                .routes(routes!(hardware::override_release_hardware_reservation))
                 .routes(routes!(proxmox_console::create_proxmox_console_session))
                 .routes(routes!(proxmox::list_proxmox_guests))
                 .routes(routes!(proxmox::observe_proxmox_guest))
@@ -552,6 +580,12 @@ pub fn api(state: Arc<operations::ApiState>) -> (Router, utoipa::openapi::OpenAp
                 .routes(routes!(lab::sweep_lab_leases))
                 .routes(routes!(lab_artifacts::collect_lab_artifacts))
                 .routes(routes!(lab_put::put_lab_file))
+                .routes(routes!(lab_hardware::attach_lab_lease_hardware))
+                .routes(routes!(lab_hardware::detach_lab_lease_hardware))
+                .routes(routes!(machine_usb::review_machine_usb_attach))
+                .routes(routes!(machine_usb::attach_machine_usb))
+                .routes(routes!(machine_usb::review_machine_usb_detach))
+                .routes(routes!(machine_usb::detach_machine_usb))
                 .routes(routes!(machine_access::store_machine_ssh_key))
                 .routes(routes!(
                     machine_access::get_machine_endpoint_auth,

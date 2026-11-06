@@ -1,0 +1,14 @@
+{
+  "http_status": 200,
+  "pve_version": "9.2.2",
+  "recorded_with": "curl over HTTPS with a temporary privilege-separated API token (real HTTP status and body)",
+  "request": {
+    "method": "PUT",
+    "params": {
+      "usb0": "mapping=fm-test-superdrive-b"
+    },
+    "path": "/nodes/pve/qemu/9563/config"
+  },
+  "response": null,
+  "who": "probe"
+}

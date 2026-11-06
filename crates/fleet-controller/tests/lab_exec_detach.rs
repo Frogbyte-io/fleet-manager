@@ -239,6 +239,7 @@ impl Fixture {
             audio: None,
             guest_os,
             interactive_user: interactive_user.map(str::to_owned),
+            hardware: Vec::new(),
         };
         let template: LabTemplate = LabTemplatePort::create(
             labs.as_ref(),

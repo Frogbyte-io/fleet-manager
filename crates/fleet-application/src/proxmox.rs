@@ -763,6 +763,12 @@ pub struct ProxmoxAccounts {
     /// The console sessions (FM-495), attached by
     /// [`ProxmoxAccounts::with_console`].
     console: Option<Arc<console::ConsoleState>>,
+    /// The hardware inventory (FM-1111), attached by
+    /// [`ProxmoxAccounts::with_hardware`].
+    hardware: Option<Arc<crate::hardware_inventory::HardwareInventory>>,
+    /// The hardware override release (FM-1124), attached by
+    /// [`ProxmoxAccounts::with_hardware_override`].
+    hardware_override: Option<Arc<crate::hardware_override::HardwareOverride>>,
 }
 
 impl ProxmoxAccounts {
@@ -789,7 +795,43 @@ impl ProxmoxAccounts {
             task_history: None,
             permissions: None,
             console: None,
+            hardware: None,
+            hardware_override: None,
         }
+    }
+
+    /// Attaches the hardware inventory (FM-1111), which the API reads
+    /// through [`Self::hardware`].
+    #[must_use]
+    pub fn with_hardware(
+        mut self,
+        hardware: Arc<crate::hardware_inventory::HardwareInventory>,
+    ) -> Self {
+        self.hardware = Some(hardware);
+        self
+    }
+
+    /// Attaches the hardware override release (FM-1124), which the API
+    /// reaches through [`Self::hardware_override`].
+    #[must_use]
+    pub fn with_hardware_override(
+        mut self,
+        hardware_override: Arc<crate::hardware_override::HardwareOverride>,
+    ) -> Self {
+        self.hardware_override = Some(hardware_override);
+        self
+    }
+
+    /// The hardware override release, when composed.
+    #[must_use]
+    pub fn hardware_override(&self) -> Option<&Arc<crate::hardware_override::HardwareOverride>> {
+        self.hardware_override.as_ref()
+    }
+
+    /// The hardware inventory, when composed.
+    #[must_use]
+    pub fn hardware(&self) -> Option<&Arc<crate::hardware_inventory::HardwareInventory>> {
+        self.hardware.as_ref()
     }
 
     /// Attaches the process event hub so notifications follow durable commits,

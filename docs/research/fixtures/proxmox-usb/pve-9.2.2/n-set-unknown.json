@@ -1,0 +1,15 @@
+{
+  "http_status": 200,
+  "pve_version": "9.2.2",
+  "pvesh_log": "update VM 9563: -usb0 mapping=fm-test-does-not-exist",
+  "recorded_with": "pvesh (root@pam), status and body reconstructed from the CLI",
+  "request": {
+    "method": "PUT",
+    "params": {
+      "usb0": "mapping=fm-test-does-not-exist"
+    },
+    "path": "/nodes/pve/qemu/9563/config"
+  },
+  "response": null,
+  "who": "root"
+}

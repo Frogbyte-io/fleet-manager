@@ -11,6 +11,7 @@ mod build_address;
 mod difference;
 mod error;
 mod external_account;
+mod hardware;
 mod id;
 mod image;
 mod lab;
@@ -43,6 +44,10 @@ pub use external_account::{
     ProbeReport, ProbeStatus, base_url_is_loopback, base_url_origin, bound_detail,
     normalize_base_url, validate_label, validate_notes, validate_scope_id,
 };
+pub use hardware::{
+    DeviceNodeEntry, DeviceStatus, GuestTarget, HardwareDevice, HardwareKind, HardwareReservation,
+    HardwareReservationState, ReservationOwnerKind, USB_SLOT_COUNT, UnsupportedReason,
+};
 pub use id::{CorrelationId, IdGenerator, ParseIdError, ResourceId, UuidV7Generator};
 
 /// Tailscale Serve identity header names that may be recorded as audit evidence.
@@ -59,8 +64,9 @@ pub use image::{
 };
 pub use lab::{
     CleanupStrategy, ExecSession, GuestOs, GuestState, LAB_AUDIO_DEVICES, LAB_AUDIO_DRIVERS,
-    LabAudio, LabTemplateContent, Lease, LeaseState, MAX_INTERACTIVE_USER_LEN,
-    MAX_LAB_LEASE_LIFETIME_MILLIS, ReadinessProbe, validate_interactive_user_name,
+    LabAudio, LabHardware, LabTemplateContent, Lease, LeaseState, MAX_INTERACTIVE_USER_LEN,
+    MAX_LAB_HARDWARE, MAX_LAB_LEASE_LIFETIME_MILLIS, ReadinessProbe, is_valid_hardware_mapping_id,
+    validate_interactive_user_name, validate_lab_hardware,
 };
 pub use machine::{
     CapabilityFact, CapabilityStatus, EndpointKind, MAX_CAPABILITY_FACTS, RESERVED_FACT_NAMESPACE,

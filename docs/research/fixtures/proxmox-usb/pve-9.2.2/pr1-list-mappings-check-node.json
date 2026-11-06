@@ -1,0 +1,92 @@
+{
+  "http_status": 200,
+  "pve_version": "9.2.2",
+  "recorded_with": "curl over HTTPS with a temporary privilege-separated API token (real HTTP status and body)",
+  "request": {
+    "method": "GET",
+    "params": {
+      "check-node": "pve"
+    },
+    "path": "/cluster/mapping/usb"
+  },
+  "response": [
+    {
+      "digest": "a874138744d80c8c5fd8c931d386d92ecd2d2da8",
+      "errors": [
+        {
+          "message": "No mapping for node pve.",
+          "severity": "warning"
+        }
+      ],
+      "id": "fm-test-tmp-nonode",
+      "map": [
+        "node=nowhere,id=05ac:1500"
+      ],
+      "type": "usb"
+    },
+    {
+      "digest": "a874138744d80c8c5fd8c931d386d92ecd2d2da8",
+      "errors": [],
+      "id": "fm-test-tmp-ambig",
+      "map": [
+        "node=pve,id=05ac:1500"
+      ],
+      "type": "usb"
+    },
+    {
+      "description": "Fleet M11 test: MacBook Air SuperDrive (port 1-7)",
+      "digest": "a874138744d80c8c5fd8c931d386d92ecd2d2da8",
+      "errors": [],
+      "id": "fm-test-superdrive-b",
+      "map": [
+        "node=pve,id=05ac:1500,path=1-7"
+      ],
+      "type": "usb"
+    },
+    {
+      "description": "Fleet M11 test: Verbatim 4K BD RW",
+      "digest": "a874138744d80c8c5fd8c931d386d92ecd2d2da8",
+      "errors": [],
+      "id": "fm-test-verbatim",
+      "map": [
+        "node=pve,id=18a5:0428"
+      ],
+      "type": "usb"
+    },
+    {
+      "description": "DotMatrixLabs Decker (Dot X testing)",
+      "digest": "a874138744d80c8c5fd8c931d386d92ecd2d2da8",
+      "errors": [],
+      "id": "decker",
+      "map": [
+        "node=pve,id=04d8:e626"
+      ],
+      "type": "usb"
+    },
+    {
+      "digest": "a874138744d80c8c5fd8c931d386d92ecd2d2da8",
+      "errors": [
+        {
+          "message": "Invalid configuration: usb device '1-55' not found\n",
+          "severity": "error"
+        }
+      ],
+      "id": "fm-test-tmp-absentpath",
+      "map": [
+        "node=pve,id=05ac:1500,path=1-55"
+      ],
+      "type": "usb"
+    },
+    {
+      "description": "Fleet M11 test: MacBook Air SuperDrive (port 1-10)",
+      "digest": "a874138744d80c8c5fd8c931d386d92ecd2d2da8",
+      "errors": [],
+      "id": "fm-test-superdrive-a",
+      "map": [
+        "node=pve,id=05ac:1500,path=1-10"
+      ],
+      "type": "usb"
+    }
+  ],
+  "who": "probe"
+}

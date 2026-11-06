@@ -1,0 +1,13 @@
+{
+  "http_status": 200,
+  "pve_version": "9.2.2",
+  "recorded_with": "pvesh (root@pam), status and body reconstructed from the CLI",
+  "request": {
+    "method": "POST",
+    "params": {},
+    "path": "/nodes/pve/qemu/9563/snapshot/s1/rollback"
+  },
+  "response": "UPID:pve:001832C3:0CA19E87:6AE44F39:qmrollback:9563:root@pam:",
+  "task_log": "Logical volume \"vm-9563-disk-0\" successfully removed.\n  Logical volume \"vm-9563-disk-0\" created.\n  Logical volume pve/vm-9563-disk-0 changed.",
+  "who": "root"
+}

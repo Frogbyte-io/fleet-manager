@@ -30,6 +30,8 @@ use fleet_storage_sqlite::{
 #[derive(Debug, Default)]
 struct Destroyer {
     fail: bool,
+    /// The result a succeeded child records (default `{}`).
+    result: Option<&'static str>,
     ran: Mutex<Vec<serde_json::Value>>,
 }
 
@@ -46,7 +48,12 @@ impl OperationExecutor for Destroyer {
             ("succeeded", None)
         };
         operations
-            .complete(&operation.id, state, Some("{}"), error)
+            .complete(
+                &operation.id,
+                state,
+                Some(self.result.unwrap_or("{}")),
+                error,
+            )
             .await
             .map(|_| ())
             .map_err(|error| error.to_string())
@@ -89,6 +96,7 @@ impl Harness {
             audio: None,
             guest_os: fleet_core::GuestOs::default(),
             interactive_user: None,
+            hardware: Vec::new(),
         };
         let template: LabTemplate = LabTemplatePort::create(
             labs.as_ref(),
@@ -191,6 +199,27 @@ impl Harness {
             destroyer,
         )
         .with_reservations(Arc::new(CapacityRepository::new(self.pool.clone())))
+        .with_devices(self.devices())
+    }
+
+    /// The hardware placement over the harness's database (FM-1121).
+    fn devices(&self) -> Arc<fleet_application::lab_placement::HardwarePlacement> {
+        Arc::new(fleet_application::lab_placement::HardwarePlacement::new(
+            Arc::new(fleet_storage_sqlite::HardwareRepository::new(
+                self.pool.clone(),
+            )),
+            Arc::new(
+                fleet_application::hardware_reservation::HardwareReservations::new(
+                    Arc::new(
+                        fleet_controller::hardware_reservation_store::SqliteHardwareReservations::new(
+                            self.pool.clone(),
+                        ),
+                    ),
+                    Arc::new(AuditSink::new(self.pool.clone())),
+                ),
+            ),
+            900_000,
+        ))
     }
 
     /// Gives the lease a held capacity reservation (FM-715).
@@ -726,4 +755,286 @@ async fn the_lab_owned_machine_goes_with_a_destroyed_guest_and_stays_otherwise()
         harness.machine_exists(&machine).await,
         "a failed destroy keeps the machine of the guest that still exists"
     );
+}
+
+// #592: the destroy names the guest the record owns --------------------------
+
+impl Harness {
+    /// Gives the lease's record a clone task and, when asked, a failed step.
+    async fn mark_record(&self, lease_id: &str, clone_started: bool, failed_step: Option<&str>) {
+        let lease = self.leases.get(lease_id).await.unwrap();
+        let mut record =
+            ProvisionPort::get(self.labs.as_ref(), lease.provision_id.as_deref().unwrap())
+                .await
+                .unwrap();
+        record.clone_upid = clone_started
+            .then(|| "UPID:pve:0015523F:0C6DF532:6AAFE1EC:qmclone:120:fleet@pve!lab:".to_owned());
+        record.failed_step = failed_step.map(str::to_owned);
+        ProvisionPort::update(self.labs.as_ref(), &record)
+            .await
+            .unwrap();
+    }
+
+    async fn record_id(&self, lease_id: &str) -> String {
+        self.leases
+            .get(lease_id)
+            .await
+            .unwrap()
+            .provision_id
+            .unwrap()
+    }
+}
+
+#[tokio::test]
+async fn the_destroy_names_the_records_own_guest_and_whether_one_was_confirmed() {
+    let harness = Harness::new().await;
+    // (clone started, failed step, guest unconfirmed)
+    for (clone_started, failed_step, unconfirmed, vmid) in [
+        (false, None, true, 9020),
+        (true, None, false, 9021),
+        (true, Some("clone"), true, 9022),
+        (true, Some("hardware"), false, 9023),
+    ] {
+        let lease = harness
+            .releasing(
+                CleanupStrategy::Destroy,
+                Some(("pve-b", vmid, Some("account-1"))),
+            )
+            .await;
+        harness
+            .mark_record(&lease, clone_started, failed_step)
+            .await;
+        let record = harness.record_id(&lease).await;
+        let destroyer = Arc::new(Destroyer::default());
+        let (state, _, after) = harness.run(&lease, &destroyer).await;
+        assert_eq!(state, "succeeded");
+        assert_eq!(after.state, LeaseState::Released);
+        let ran = destroyer.ran.lock().unwrap().clone();
+        assert_eq!(
+            ran[0]["params"]["expectedName"],
+            format!("fm-lab-{record}"),
+            "{clone_started} {failed_step:?}"
+        );
+        assert_eq!(
+            ran[0]["params"]["guestUnconfirmed"], unconfirmed,
+            "{clone_started} {failed_step:?}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn a_destroy_that_found_nothing_of_the_records_releases_it_and_removes_its_machine() {
+    let harness = Harness::new().await;
+    // The destroy executor answers `notOwned`: another owner's guest sits at
+    // the VMID. The lease owned no guest, so it is released owing nothing, and
+    // a Lab-owned machine record it holds goes with it.
+    let lease = harness
+        .releasing(
+            CleanupStrategy::Destroy,
+            Some(("pve-b", 9030, Some("account-1"))),
+        )
+        .await;
+    let machine = harness.link_machine(&lease).await;
+    let destroyer = Arc::new(Destroyer {
+        result: Some(r#"{"noop":"another guest","notOwned":true}"#),
+        ..Destroyer::default()
+    });
+    let (state, _, after) = harness.run(&lease, &destroyer).await;
+    assert_eq!(state, "succeeded");
+    assert_eq!(after.state, LeaseState::Released);
+    assert!(!harness.machine_exists(&machine).await);
+    let released: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM operations WHERE kind = 'lab.cleanup' AND result_json LIKE '%nothing_allocated%'",
+    )
+    .fetch_one(&harness.pool)
+    .await
+    .unwrap();
+    assert_eq!(released, 1, "the release owes nothing");
+}
+
+// FM-1121: the devices a lease reserved go with it ---------------------------
+
+mod hardware {
+    use super::*;
+    use fleet_application::hardware::{DeviceObservation, HardwareStore as _};
+    use fleet_application::lab_placement::HardwareDemand;
+    use fleet_core::{
+        DeviceNodeEntry, DeviceStatus, GuestTarget, HardwareKind,
+        HardwareReservationState as State, LabHardware, ReservationOwnerKind,
+    };
+    use fleet_storage_sqlite::HardwareRepository;
+
+    async fn device(harness: &Harness, mapping: &str) {
+        let now = fleet_core::SystemClock::now_unix_millis();
+        HardwareRepository::new(harness.pool.clone())
+            .upsert_device(
+                &DeviceObservation {
+                    id: format!("device-{mapping}"),
+                    account_id: "account-1".to_owned(),
+                    mapping_id: mapping.to_owned(),
+                    kind: HardwareKind::Usb,
+                    entries: vec![DeviceNodeEntry {
+                        node: "pve-b".to_owned(),
+                        vendor_id: "05ac".to_owned(),
+                        product_id: "1500".to_owned(),
+                        usbpath: Some("1-10".to_owned()),
+                        manufacturer: None,
+                        product: None,
+                        last_seen_at: now,
+                    }],
+                    status: DeviceStatus::Available,
+                    status_detail: None,
+                },
+                now,
+            )
+            .await
+            .unwrap();
+    }
+
+    async fn reserve(harness: &Harness, lease_id: &str, mappings: &[&str]) {
+        let declared: Vec<LabHardware> = mappings
+            .iter()
+            .map(|mapping| LabHardware {
+                kind: HardwareKind::Usb,
+                mapping: (*mapping).to_owned(),
+            })
+            .collect();
+        harness
+            .devices()
+            .reserve(
+                "tester",
+                &HardwareDemand {
+                    lease_id,
+                    account_id: "account-1",
+                    clone_node: "pve-b",
+                    declared: &declared,
+                    operation_id: None,
+                },
+                fleet_core::SystemClock::now_unix_millis(),
+            )
+            .await
+            .unwrap()
+            .unwrap();
+    }
+
+    async fn states(harness: &Harness, lease_id: &str) -> Vec<State> {
+        HardwareRepository::new(harness.pool.clone())
+            .live_reservations_for_owner(ReservationOwnerKind::Lease, lease_id)
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|row| row.state)
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn a_released_lease_releases_the_devices_it_never_attached() {
+        let harness = Harness::new().await;
+        device(&harness, "dev-a").await;
+        let lease = harness
+            .releasing(
+                CleanupStrategy::Destroy,
+                Some(("pve-b", 9020, Some("account-1"))),
+            )
+            .await;
+        reserve(&harness, &lease, &["dev-a"]).await;
+        assert_eq!(states(&harness, &lease).await, vec![State::Held]);
+
+        let (state, _, after) = harness.run(&lease, &Arc::new(Destroyer::default())).await;
+
+        assert_eq!(state, "succeeded");
+        assert_eq!(after.state, LeaseState::Released);
+        assert!(states(&harness, &lease).await.is_empty());
+        let device = HardwareRepository::new(harness.pool.clone())
+            .device("device-dev-a")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(device.status, DeviceStatus::Available);
+        assert_eq!(harness.audit_events("hardware_released").await, 1);
+    }
+
+    #[tokio::test]
+    async fn a_failing_destroy_keeps_the_devices_held_through_cleanup_failed() {
+        // The same rule as capacity: nothing is released while the guest is
+        // still there.
+        let harness = Harness::new().await;
+        device(&harness, "dev-a").await;
+        let lease = harness
+            .releasing(
+                CleanupStrategy::Destroy,
+                Some(("pve-b", 9021, Some("account-1"))),
+            )
+            .await;
+        reserve(&harness, &lease, &["dev-a"]).await;
+        let broken = Arc::new(Destroyer {
+            fail: true,
+            ..Destroyer::default()
+        });
+        for _ in 0..MAX_CLEANUP_ATTEMPTS {
+            let _ = harness.run(&lease, &broken).await;
+            assert_eq!(states(&harness, &lease).await, vec![State::Held]);
+        }
+        assert_eq!(
+            harness.leases.get(&lease).await.unwrap().state,
+            LeaseState::CleanupFailed
+        );
+    }
+
+    #[tokio::test]
+    async fn an_attached_device_is_never_released_on_the_leases_word() {
+        // Cleanup of the attached device is the detach path's (FM-1123); a
+        // release here would strand a device that is still on the guest.
+        let harness = Harness::new().await;
+        device(&harness, "dev-a").await;
+        device(&harness, "dev-b").await;
+        let lease = harness
+            .releasing(
+                CleanupStrategy::Destroy,
+                Some(("pve-b", 9022, Some("account-1"))),
+            )
+            .await;
+        reserve(&harness, &lease, &["dev-a", "dev-b"]).await;
+        let store = HardwareRepository::new(harness.pool.clone());
+        let rows = store
+            .live_reservations_for_owner(ReservationOwnerKind::Lease, &lease)
+            .await
+            .unwrap();
+        let attached = rows
+            .iter()
+            .find(|row| row.device_id == "device-dev-a")
+            .unwrap();
+        let guest = GuestTarget {
+            account_id: "account-1".to_owned(),
+            node: "pve-b".to_owned(),
+            vmid: 9022,
+            usb_slot: Some(0),
+        };
+        store
+            .transition_reservation(
+                &attached.id,
+                State::Held,
+                State::Attaching,
+                Some(&guest),
+                fleet_core::SystemClock::now_unix_millis(),
+            )
+            .await
+            .unwrap();
+        store
+            .transition_reservation(
+                &attached.id,
+                State::Attaching,
+                State::Attached,
+                None,
+                fleet_core::SystemClock::now_unix_millis(),
+            )
+            .await
+            .unwrap();
+
+        let (state, _, _) = harness.run(&lease, &Arc::new(Destroyer::default())).await;
+
+        assert_eq!(state, "succeeded");
+        // The never-attached hold went; the attached one stays.
+        assert_eq!(states(&harness, &lease).await, vec![State::Attached]);
+    }
 }

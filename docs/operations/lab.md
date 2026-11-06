@@ -197,6 +197,10 @@ Lab bootstrap does not use Frogenv. Its readiness workflow is `clone → verify`
 
 A template with `guestOs: windows` ([ADR 0015](../adr/0015-windows-lab-guest-transport.md), #441) is driven over OpenSSH Server in the image, through the same `fleet-provider-ssh` provider, host-key pinning, authorization and audit as a Linux guest. The image must have OpenSSH Server running, the controller key installed (`administrators_authorized_keys` with the ACL the ADR gives), and **Windows PowerShell 5.1 as `DefaultShell`** (`HKLM:\SOFTWARE\OpenSSH`, `DefaultShell` = `C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe`; Windows OpenSSH runs `powershell.exe -c <command>` for each session).
 
+**The login key on a Cloudbase-Init (re-generalized) image** ([#561](https://github.com/Frogbyte-io/fleet-manager/issues/561)). A re-generalized image deliberately carries no authorized key (`generalize.ps1 -RemoveAuthorizedKeys`), so for a clone of a `guestOs: windows` template Lab writes the SSH user (`ciuser`, the template's `--ssh-user`) and the controller's SSH **public** keys (`sshkeys`) to the clone's cloud-init drive before the first boot, and Cloudbase-Init installs them. **Set `FLEET_LAB_LOGIN_PUBLIC_KEY_FILE` (TOML `lab_login_public_key_file`) to the `.pub` file of the one key Lab authenticates with, and only that key is installed. This is the recommended setting.** Unset, Lab discovers the keys instead: the keys the controller's ssh-agent holds (`ssh-add -L`), then `$HOME/.ssh/id_*.pub` (the controller's `$HOME`, not the passwd entry; see [which keys the controller offers](#which-keys-the-controller-offers)), comments dropped. **With discovery, every key found becomes authorized on every Windows guest Lab clones**, including a personal key that happens to be in the agent. At startup the controller logs how many keys it would install and their `SHA256:` fingerprints (never the keys), so you can check. More than four candidates fail the provision at step `ssh_key` (`too_many_ssh_keys`) instead of being cut; set the explicit file. No key at all fails it at the same step (`no_ssh_key`) before the guest starts. A clone without a cloud-init drive fails there too (`no_cloud_init_drive`); add the drive to the image template. A token without `VM.Config.Cloudinit` on the clone targets fails it at the same step (`ssh_key_failed`, naming the privilege; the privilege is opt-in, reported but not part of the Lab tier). Keys the image already carried in its cloud-init drive stay (reduced to `type blob`). Nothing is written to a Linux guest (its image carries the key) or to a pool member (below). A private key is never read or sent.
+
+**Use the `ssh_exec` readiness probe for Windows templates** (`--readiness ssh_exec --readiness-command 'Get-Service sshd'`). `guest_agent` readiness (the default) needs only a guest-agent IPv4 and the host-key trust step: it never logs in, so a lease whose key is missing is still `ready` and the first `lab exec` fails with `Permission denied (publickey)`. That is what the [#555 run](windows-lab-fixture.md#fleet-controller-build-and-lab-leases-on-the-cloudbase-init-image-555) saw. The `ssh_exec` probe is a real login and command through the same path as `lab exec`; a denied login keeps retrying and fails the lease at step `ssh_exec` at the readiness deadline instead of reporting `ready`.
+
 What the controller sends, so you can reason about it:
 
 - The command string is one fixed bootstrap that contains **no caller data** (no command, path, environment value or argument; not even an encoded copy). It uses only characters no layer between sshd and PowerShell treats specially. Everything the caller controls goes on stdin as two ASCII lines (a base64 metadata blob, then the script as base64 of UTF-8), read as raw bytes with `[Console]::OpenStandardInput()`, so the guest's console code page never touches it.
@@ -598,6 +602,7 @@ Before you create a pool, prepare it:
    - Its VMID must not be a promoted image's template.
    - Take the baseline snapshot on it (`qm snapshot <vmid> baseline`). Every member must carry a snapshot with the same name.
    - Install the controller's SSH key and the QEMU guest agent before the snapshot, as for an image.
+   - **Windows members.** For a `guestOs: windows` template, boot each member past specialize (first logon reached, OpenSSH answering) before you take its baseline snapshot, so a rollback never lands in a half-specialized guest. If the image needs a retail key, enter it in the member only, with one key per member; never put a key in a template, recipe or Fleet. See the [Windows Lab fixture](windows-lab-fixture.md) for the fixture, licensing and activation details.
 3. Grant the account's token `VM.Audit` and `VM.Snapshot.Rollback` (or `VM.Snapshot`) on each member's `/vms/<vmid>`, plus `VM.PowerMgmt` to start it.
 
 Then create, fill, and check the pool:
@@ -682,8 +687,197 @@ Refusals fail the provision operation with a reason:
 | `insufficient_memory`, `insufficient_cpu` | The node lacks memory or cores after overcommit, usage, and held reservations | Release leases, free the node, or raise `FLEET_LAB_MEMORY_OVERCOMMIT` or `FLEET_LAB_CPU_OVERCOMMIT` |
 | `insufficient_disk` | The image's storage pool on the node lacks free space after held reservations (no overcommit applies). A running Lab guest's disk is in the observed used space and in its reservation, so it counts twice | Free space on that pool, or release leases that hold disk on it |
 | `reservation_mismatch` | The lease's held reservation is for another node, account, demand, or storage pool. This can happen when the template moved or a re-promotion changed the pinned build's pool | Release the lease and request a new one |
+| `hardware_unknown` | The template declares a USB mapping that is not in the inventory of the account the clone is made through | Have an operator create the Proxmox USB mapping, then `fleetctl hardware refresh --account <account-id>` |
+| `hardware_no_node_entry` | The mapping has no entry for any node | Add a node entry to the Proxmox mapping, then refresh |
+| `hardware_wrong_node` | The device is not on the node Lab clones on (the node that holds the pinned image's template): it has no entry there, or was seen recently only on another node. The message names both | Pin an image whose template is on the device's node, or give the mapping an entry for the template's node |
+| `hardware_unsupported` | The device cannot be allocated; the message carries the reason (for example the token lacks `Mapping.Use`) | Fix the cause the reason names, then refresh |
+| `hardware_missing` | The mapping exists but the device was not seen on its node | Check the cable and port, then refresh |
+| `hardware_externally_attached` | A guest Fleet did not attach already references the mapping. Fleet never adopts or detaches it | Detach it by hand, or leave the device to its owner |
+| `hardware_quarantined` | A failed or unknown attach or detach needs an operator or the reconciler | Wait one reconciler pass (it resolves what it can prove); otherwise follow [A device that cannot be detached](#a-device-that-cannot-be-detached) |
+| `hardware_stale` | The device was not seen on the node within the observation bound (15 minutes by default), so it is not reserved on that observation | `fleetctl hardware refresh --account <account-id>`, then retry |
+| `hardware_busy` | Another owner holds the device; the message names the holder. There is no queue: the request fails | Wait for the holder, or release its lease |
+| `hardware_pool_unsupported` | The template version declares hardware and is pooled; a pool member is a prebuilt guest that cannot take a device before it boots | Lease it without a pool |
+| `hardware_needs_lease`, `hardware_unavailable` | There is no lease to own the reservation, or this controller has no hardware placement configured | Provision through a lease; fix the controller composition |
+| `hardware_attach_failed`, `hardware_no_free_slot` | The attach step (after the clone, before the start) could not write the device: PVE refused it (the token needs `Mapping.Use` and `VM.Config.HWType`), the guest is locked, or every `usbN` slot is taken. The entry was read back absent and the reservation released | Fix the cause in the detail, then lease again |
+| `hardware_fingerprint_changed`, `hardware_stale`, `hardware_reservation_lost`, `hardware_verify_failed`, `hardware_scan_incomplete` | The re-observation right before the attach found the device on another port or with another id than when it was reserved (the fingerprint is pinned when placement reserves it), not seen, no longer reserved for the lease, or could not be observed; or not every guest config of the cluster could be read, so a guest may reference the device unseen | Check the cable and the mapping, `fleetctl hardware refresh --account <account-id>`, lease again |
+| `hardware_guests_unverifiable` | Fleet cannot rule out a guest its token cannot see, so one (a `NoAccess` ACL, no `VM.Audit` on `/vms`, a token scoped to a pool) may already drive the device, and PVE gives a mapping no exclusivity. The refresh's `guestVisibility` is `incomplete` or `unverified` (`cross_check_unavailable` is transient: lease again); nothing was written | Grant `VM.Audit` on `/vms` (propagating) to the Fleet user and token and remove any `NoAccess` on a guest ([the token guide](proxmox-token.md#5-acls), [hardware runbook](hardware.md), step 9), then `fleetctl hardware refresh --account <account-id>` and lease again. A persistent machine's USB attach (`fleetctl machines usb attach`) refuses with the same code and message ([persistent machines](persistent-machines.md)) |
+| `hardware_guest_mismatch`, `hardware_detach_unconfirmed`, `hardware_not_reserved` | The saga found the lease's reservation recording another guest, still detaching, or missing, and did not touch it | Release the lease; cleanup resolves the reservation, or an operator does (`hardware.override-release`) |
+| `hardware_attach_unrecorded` | The device was written but the reservation had been released meanwhile (cleanup ran against the guest first). Fleet deleted the entry it wrote again; if the failure says the entry is STILL on the guest, remove that `usbN` entry by hand | Lease again; check the guest if the entry remained |
+| `hardware_lease_ended` | The lease was released, expired or compensated while its device was being attached. Nothing was written, or what was written was detached again | Lease again |
+| `hardware_attach_pending` | The guest is running and its `hotplug` option lacks `usb`, so PVE would only apply the device at the next restart; Fleet removed the entry and does not call that attached | Add `usb` to the guest's `hotplug` option |
+| `hardware_attach_unknown` | The outcome of the attach write could not be determined (a lost answer). The reservation is `attach_unknown`; the lease's cleanup reads the guest, removes the entry and releases | None while cleanup runs; if cleanup ends `cleanup_failed`, see below |
+| `lease_not_ready`, `lease_has_no_guest`, `hardware_in_progress`, `hardware_detach_failed`, `hardware_not_detached` | Refusals of a mid-run `lab hardware attach` or `detach` (see [Mid-run hotplug](#mid-run-hotplug)): the lease is not `ready`, has no recorded guest, the device is being attached by another step, a detach was refused or unconfirmed, or the device is not detached | See [Mid-run hotplug](#mid-run-hotplug) |
+| `hardware_not_allocatable`, `hardware_owner_finished` | A reservation was refused for a status that should have allowed it, or the owner no longer counts | Refresh the inventory and retry |
+
+**USB hardware.** A template may declare USB devices, which placement reserves with the capacity; the refusals above name the constraint that failed. See [USB hardware](#usb-hardware) for setup, the inventory commands, attach and detach, and what is not covered yet.
 
 `FLEET_LAB_MEMORY_OVERCOMMIT` and `FLEET_LAB_CPU_OVERCOMMIT` (default `1.0`, at most 16) scale the node's total memory and CPU count; disk is never overcommitted. A lease's reservation stops counting once the lease is released, or failed without a guest. A lease in `cleanup_failed` keeps its reservation until `lab cleanup-retry` destroys the guest. [`docs/architecture/lab.md`](../architecture/lab.md) has the exact rule.
+
+### USB hardware
+
+A template can ask for a physical USB device. Fleet reserves the device for the lease, so no second lease can hold it, and attaches it to the lease's guest and takes it away again at cleanup. The design is [ADR 0019](../adr/0019-usb-device-allocation.md) and the [M11 plan](../planning/m11-usb-hardware.md); the Lab-side rules are in [`docs/architecture/lab.md`](../architecture/lab.md#later-usb-and-physical-resources).
+
+**Attach and detach (FM-1123).** A template may declare `hardware: [{ "kind": "usb", "mapping": "<id>" }]` (up to four). Placement reserves those devices for the lease with the capacity, and the refusals above name the constraint that failed. The lab saga then attaches each device to the clone after its hardware step and before it starts, and cleanup detaches it before the guest is destroyed, reverted or kept. The lease detail shows the reservation (`hardware[].reservation.state`, with `id`, `deviceId`, `usbSlot` and `createdAt`): `held` is reserved and not attached, `attached` has the device on the guest in `usbSlot`, and a lease is `ready` only when every device is `attached` and read back. Attach and detach are Proxmox writes, so the token needs the opt-in `FleetUsb` role (`Mapping.Use` on the mapping and `VM.Config.HWType` on the guest, for attach **and** detach); see [proxmox-token.md](proxmox-token.md). Hold-releases follow the capacity rules: a refused or failed-before-allocation lease releases its devices, and cleanup releases devices that were never attached.
+
+*A device that cannot be detached.* Cleanup does not destroy, revert or return a guest while a device is not confirmed off it, and the reviewed `proxmox.guest.destroy`, `snapshot-revert` and `template` routes refuse (`hardware_attached`) a guest a reservation holds a device on (a snapshot revert restores the snapshot's `usbN` set; a template's clones inherit it). A refused detach (for example the token lost `Mapping.Use`), a detach PVE could only store as pending (the guest's `hotplug` option lacks `usb`, so it applies at the next restart), or a guest the controller cannot read keeps the reservation (`detach_failed` or `detaching`, the device `quarantined` or `reserved` in `fleetctl hardware list`) and the lease in cleanup retry, with the backoff of any failed cleanup. Fix the cause (restore the role, restart the guest to apply the pending removal, or remove the entry by hand) and the next attempt confirms it and continues. After the last attempt the lease is `cleanup_failed` and names its guest; `lab cleanup-retry` runs it again. Only when you have confirmed the device is free (a guest removed by hand is not proof to Fleet, because the cluster listing omits guests the token cannot audit) does the elevated, audited override release free the reservation without the detach; the steps are under [A device that cannot be detached](#a-device-that-cannot-be-detached). Never delete a `usbN` entry Fleet did not write: Fleet leaves an entry in a slot that holds anything but its own value.
+
+#### The hardware reconciler
+
+A controller that dies between a Proxmox write and its record, a guest someone edits, or a lease that ends in a state its cleanup cannot finish leave the database and Proxmox disagreeing. The hardware reconciler (FM-1124) compares them. It runs once when the controller starts and then about every five minutes, **on its own task**: the Lab sweeper starts it beside its ticks and stops it with them, so a slow or unreachable Proxmox never delays lease expiry, compensation or cleanup scheduling (each pass also has a three-minute deadline, after which it is cut off, counts as failed and backs off; what it had already committed stands). It does nothing, reads nothing from Proxmox and writes nothing to the audit trail for an account that has no inventoried device, and `lab_sweep_interval_seconds: 0` turns it off with the sweeper.
+
+It **repairs only what Fleet attached** and **reports the rest**:
+
+| It finds | It does |
+| --- | --- |
+| A hold that never attached (`held`, no slot) whose lease is over (`released`, `cleanup_failed`, or `failed` without a guest) or whose machine is gone | Releases it (the reserve path already did this lazily; the reconciler does it without waiting for the next request) |
+| A reservation whose owner is over and whose guest shows **no** reference to the mapping in either config view | Releases it through `detaching`, with no write to the guest |
+| An `attached`, `detaching`, `detach_failed` or `attach_unknown` (with a slot) reservation whose owner is over, with exactly `mapping=<id>` in exactly the slot the reservation recorded | Deletes that entry (behind the required `hardware_detach_requested` audit intent), reads the guest back, and only then releases. A refused, failed or unconfirmed delete keeps the row (`detach_failed`, the device `quarantined`); a delete PVE keeps pending (the guest's `hotplug` lacks `usb`) leaves it `detaching` until a later pass reads it applied |
+| An entry the reservation did not record, in another slot, or in a slot that holds the mapping with options Fleet does not write (`mapping=<id>,usb3=1`) | Leaves it. It is a finding (`hardware_reconcile_finding`) and the row keeps the device |
+| A reservation that only recorded its attach (`attaching`, or `attach_unknown` with no slot) and an entry on the guest | Never adopts and never deletes it: nothing shows Fleet wrote it. An `attaching` row becomes `attach_unknown` (the device reads `quarantined`) and it is a finding. An operator removes the entry or overrides |
+| A reservation whose recorded guest is not in the cluster listing, cannot be read in full, or is a template | A finding, never a release: the listing omits guests the token cannot audit, so an absent guest is not proof of detach |
+| A guest that references the mapping while no reservation holds it | Nothing is written. The refresh marks the device `externally_attached`, and `hardware_externally_attached` is audited once per process and entry. A device a lease holds that a second guest also references is a `hardware_reconcile_finding` (`foreign_reference_to_held_device`) |
+
+A released reservation is **not examined**: the slot it recorded is kept as history by every ordinary release, so it says nothing about who wrote what is on the guest now, and a maintainer's own `qm set usb0 mapping=<id>` on a surviving guest must never be deleted by Fleet. The one write that can outlive its row (a write that landed after cleanup released the `attaching` row, which the saga then failed to remove; its failure says the entry is `STILL on the guest`, `hardware_attach_unrecorded`) therefore shows up as `externally_attached` at the next refresh: remove that entry by hand in Proxmox, then refresh.
+
+A lease that is provisioning, ready or releasing, and a machine that exists, own their rows: the reconciler leaves them alone, and the periodic pass leaves a row that changed in the last five minutes alone too (a step may be running; the startup pass has no such step to wait for). A releasing lease is the lease cleanup's, which retries with backoff and ends `cleanup_failed`, which is where the reconciler picks up.
+
+A pass is bounded: at most 256 live rows are inspected and 32 guests read (two config reads each), plus one cluster listing per account; the rest wait for the next pass. A row whose pass changed nothing (a refused or pending delete, a finding, an unreadable guest) is not looked at again for 10, 20, 40 minutes and so on up to an hour, for as long as it stays live, so a row that cannot be fixed costs one `hardware_detach_requested` intent per attempt at those intervals, not one per pass; a pass that cannot read its store or accounts, or overruns its deadline, backs the whole schedule off the same way. Every change is audited as `hardware_reconciled` with an `outcome` (`released_owner_finished`, `released_confirmed_absent`, `entry_removed_and_released`, `marked_attach_unknown`, ...); what it will not change is a `hardware_reconcile_finding` (`guest_absent`, `guest_unreadable`, `unproven_entry`, `ambiguous_entry`, `detach_pending`, `detach_failed`, ...), once per controller process and row. The events carry ids, nodes, VMIDs and slots only, under the `hardware.refresh` action.
+
+**Scheduled inventory refresh.** For the findings to reach the device status, the reconciler refreshes each account that has inventoried devices the first time it sees it after a start, after a pass that really changed a row, and every `hardware_refresh_interval_seconds` (`FLEET_HARDWARE_REFRESH_INTERVAL_SECONDS`; default 600, `0` turns the scheduled refresh off, a non-zero value must be at least 60). **Cost:** each refresh is the mapping list, a `check-node` per node, the token's permissions and up to 512 guest configs (two reads for a running guest), per account, with a bounded concurrency of eight. Above 900 seconds the inventory's observation bound makes devices read `stale` between refreshes, and a lease then needs a manual `hardware refresh` first. The scheduled refresh is quiet: it audits a failure (`hardware_refresh_failed`) and a device whose status changed since the last scheduled refresh (`hardware_status_changed` with `from_status` and `to_status`), but not `hardware_refresh_started` and `hardware_refreshed` every time; `fleetctl hardware refresh` and the API stay fully audited. Refreshes of one account never overlap, whoever asks (the API, the saga's re-observation, the reconciler): a later caller waits for the earlier one, then makes its own.
+
+#### A device that cannot be detached
+
+A reservation stays `attach_unknown`, `detach_failed` or `detaching` when Fleet cannot show the device is off the guest, and the lease behind it stays in cleanup retry (then `cleanup_failed`), the guest is not destroyed, and the device is `quarantined`. Nothing releases such a row on a guess. Work through it in this order:
+
+1. **See what Fleet sees.** `fleetctl --output json hardware list` shows the device's status and `holder` (the reservation's id, state and guest), and `fleetctl audit list --action hardware.refresh` shows the reconciler's `hardware_reconcile_finding` for it (`unproven_entry`, `guest_absent`, `detach_pending`, ...). Wait one reconciler pass first: it resolves a row whose guest shows nothing, and removes Fleet's own entry from a guest whose lease is over.
+2. **Look at the guest yourself.** In Proxmox, read the guest's `usbN` entries (both the stored and the running view). If the guest holds `mapping=<id>` that you are sure Fleet wrote, remove it; if it holds one you or another operator wrote, decide whether it should stay. If the finding was `detach_pending`, restart the guest so PVE applies the removal. If the guest no longer exists, check that it is really gone rather than hidden from the token. The next reconciler pass (or `fleetctl lab cleanup-retry <lease-id>` for a `cleanup_failed` lease) then confirms it and releases the row.
+3. **Only if Fleet cannot resolve it** (the guest was deleted by hand, the entry is yours and stays, the row is `attach_unknown` with no slot beside an entry you have decided about) free the reservation yourself. This is the elevated override release; it releases Fleet's record **without Fleet verifying the guest** and never calls Proxmox, so it removes nothing from the guest:
+
+   ```bash
+   fleetctl hardware override-release <reservation-id> --confirm-unverified
+   ```
+
+   The flag is required and says exactly that; without it the command sends nothing (the API answers 400 `invalid_request` to a missing or false `confirmUnverified`). `POST /api/v1/hardware/reservations/{reservationId}/override-release` with `{"confirmUnverified": true}` is the same call; it answers `outcome: released` with `previous` (the row's state, owner and `usbN` slot as they were) or `outcome: already_released` when a repeat finds nothing to do. It needs `hardware.override-release`, which an operator has and no delegated Lab credential does (403 `denied`).
+
+   It is audited before it is done: `hardware_override_release_requested` (action `hardware.override-release`) carries the reservation, device, mapping, owner, the **previous state and slot**, the guest's node and VMID, `guest_verified: false` and `confirmed: true`, and is required: if the audit sink refuses it, nothing is released. The store's `hardware_released` (outcome `override`) and a `hardware_override_released` event follow. A repeat is recorded as `hardware_override_release_noop`.
+4. **After an override**, run `fleetctl hardware refresh --account <account-id>`. A device still attached to a guest now reads `externally_attached` (Fleet never adopts or detaches it), and an absent one reads `available`. **A device that is still attached makes the next lease that asks for it fail with `hardware_externally_attached`** (placement refuses an `externally_attached` device) until someone detaches it from the guest by hand and refreshes. For a lease in cleanup retry or `cleanup_failed`, `fleetctl lab cleanup-retry <lease-id>` runs cleanup again, which finds no live reservation and proceeds to destroy, revert or keep the guest.
+
+**The override also works on a reservation whose lease is provisioning or ready** (and on one held by a machine that exists): it is not limited to ended owners, and it never asks whether the owner still wants the device. What it does there: the reservation row is released at once, so the device is free for another lease while the lease still believes it holds it. A provisioning lease's attach step then refuses (`hardware_not_reserved`) and the provision fails; a ready lease keeps running with whatever is on its guest, and its cleanup later finds no live reservation, so it detaches nothing and moves on to destroy, revert or keep the guest. Use it on a live lease only when you mean to take the device away from it.
+
+Things the reconciler and the override will not do: delete a `usbN` entry Fleet did not write, adopt a manual attachment, treat a guest it cannot see as detached, or move a device to another guest.
+
+#### Mid-run hotplug
+
+*(FM-1126.)* On a `ready` lease the holder, or an administrator, can detach a device the lease reserved from the running guest and attach it again, during a test:
+
+```
+fleetctl lab hardware detach <lease-id> <mapping> [--release]
+fleetctl lab hardware attach <lease-id> <mapping>
+```
+
+They call `POST /api/v1/lab/leases/{id}/hardware/detach` and `.../attach` and need `lab.hardware.detach` and `lab.hardware.attach`, which a scoped CI identity may be granted (it then acts on its own leases only). They never reserve a device: only a device the lease declared and reserved up front can be used, and anything else is `hardware_not_reserved`. The write is the saga's: verified against the device's pinned fingerprint, conditional on the guest's config digest, and read back before the answer; both calls are audited before the write (`source=hotplug`).
+
+- **Detach** takes the entry Fleet wrote off the guest (an entry an operator changed is never deleted: `hardware_detach_failed`). The lease **keeps the device reserved** until the lease is released, so no other lease can take it and `lab hardware attach` puts it back; `--release` gives it up once the read-back confirms it is gone, after which this lease cannot attach it again. Cleanup still detaches whatever the lease holds before it decides the guest's fate; a detached device needs nothing and is released with the lease.
+- **`pending` is not done.** If the guest's `hotplug` option lacks `usb`, PVE accepts the change but applies it at the next restart. A detach then answers `detach_pending` (HTTP 202, exit status 2): the device is **still on the guest** and the reservation stays `detaching`; restart the guest (or add `usb` to `hotplug`) and run the detach again to confirm it. An attach is refused as `hardware_attach_pending` and the entry is removed again, so a restart cannot attach it.
+- **One request at a time per device.** Concurrent requests are serialised; the second sees what the first left (`already_attached`, `already_detached`).
+- **A lease that ends meanwhile** gets no write, or has the device detached again (`hardware_lease_ended`); the lease's own cleanup is unchanged.
+- **Not measured.** Whether deleting a pending-only leftover from a running guest succeeds, and what PVE does with a pending detach after the guest stops, were not measured by FM-S11; the saga reads every result back and never assumes either. A live run on the integration host with the SuperDrive test mappings is FM-1133.
+
+#### What you set up
+
+- **The operator creates the Proxmox USB resource mapping.** Fleet only reads mappings. It never creates or edits one, never writes `host=`, and attaches only with `usbN: mapping=<id>`, so it needs no `Mapping.Modify`. The mapping id is the device's name in Fleet. Two identical devices need one path-based mapping per port (`node=<node>,id=<vendor:product>,path=<bus-port>`); the identity is then the port, so swapping cables swaps the devices.
+- **The token needs the opt-in `FleetUsb` role.** It holds `Mapping.Audit`, `Mapping.Use` and `VM.Config.HWType` and is not part of any base tier: see [the token guide](proxmox-token.md#5-acls). Without it Fleet does not guess; the device is `unsupported` with the reason (`token_lacks_mapping_use`, `token_lacks_guest_hwtype`, and for a token without `Mapping.Audit` the account itself reads `unsupported` on refresh). `Sys.Modify` on `/` is not requested.
+- **Lab clones on the node that holds the pinned image's template**, so the mapping needs an entry for that node (`hardware_wrong_node` otherwise).
+
+#### See what Fleet knows
+
+```sh
+fleetctl --output json proxmox accounts                      # the account ids
+fleetctl --output json hardware refresh --account <account-id>
+fleetctl --output json hardware list --account <account-id>
+fleetctl hardware list                                       # text table
+```
+
+`hardware list` reads Fleet's own records and calls nothing on Proxmox (`hardware.read`). `hardware refresh` reads the account's USB mappings, nodes, guest configs and token permissions from Proxmox and records each device's status (`hardware.refresh`, audited); it changes nothing on Proxmox. The controller's [hardware reconciler](#the-hardware-reconciler) refreshes every account that has inventoried devices when it starts, after it repairs something, and every `hardware_refresh_interval_seconds` (default 600; `0` turns it off), so a device is normally no more than that stale; run `refresh` yourself before a lease that declares hardware when you have just changed a mapping, a cable, or a guest. An empty list means nothing has been refreshed. The text table looks like this (the `--output json` form is the API's page, with `mappingId`, `status`, `reason`, `reasonText`, `stale`, `entries`, and `holder` per device):
+
+```text
+MAPPING                  STATUS                                       NODE/ID@PORT                   STALE  HOLDER
+fm-test-superdrive-a     available                                    pve-a/05ac:1500@1-4            -      -
+fm-test-superdrive-b     reserved                                     pve-a/05ac:1500@1-5            -      lease 01890f3e-9b4a-7cc2-98c3-d24e8f58f2ab (held)
+fm-test-verbatim         unsupported (token_lacks_mapping_use)        pve-a/18a5:0428                -      -
+  the token lacks Mapping.Use on the mapping (the opt-in FleetUsb role)
+fm-test-hub              externally_attached                          pve-a/0000:0001@1-7            -      -
+```
+
+There is no serial: Proxmox's mapping list does not return one, so Fleet shows vendor and product ids and the port.
+
+**The Fleet token must audit every guest (#596).** PVE gives a mapping no exclusivity, and the guest scan behind `externally_attached` sees only the guests the token may audit (a guest without `VM.Audit` is left out of the cluster listing, so the scan still reads complete). `fleetctl hardware refresh` therefore also reports `guestVisibility`: `not_disproved` (no evidence of a hidden guest: `VM.Audit` propagates on `/vms`, no guest path lacks it, and the `GET /cluster/nextid` cross-check found no guest the listing omits), `incomplete` (evidence of a gap: `guest_audit_not_granted`, `guest_path_narrowed`, `hidden_guests_found`) or `unverified` (could not be established: `permissions_unreadable`, `permissions_truncated`, `cross_check_unavailable`). Unless it is `not_disproved`, no device of the account reads `available`, each device's reason text says why, and a lease that declares hardware fails with `hardware_guests_unverifiable` before anything is written. **`not_disproved` is not proof that every guest was seen**: an explicit `NoAccess` on one guest is invisible in the permissions and is caught only when its VMID is below the cluster's next free one. The requirement, what is checked and what is not detectable are in [the token guide](proxmox-token.md#5-acls) and the [hardware runbook](hardware.md) (step 9).
+
+| `status` | Meaning | A lease can reserve it |
+| --- | --- | --- |
+| `available` | The mapping is valid, the device was seen on its node recently, and no guest **the token can audit** references it. It holds only while the account's `guestVisibility` is `not_disproved` (no evidence of a hidden guest; see below); otherwise a device that would be `available` reads `unsupported` (`usb_inventory_unreadable`, with the cause as its reason text) | Yes |
+| `reserved` | A live Fleet reservation holds it (`holder` names the lease) | No: `hardware_busy` |
+| `externally_attached` | A guest Fleet did not attach already references the mapping (`hardware refresh` prints which guest). Fleet never adopts or detaches it, and has no command to | No |
+| `missing` | The device was not seen on its node, or was not seen within the observation bound (15 minutes, not configurable yet; `stale` is then `true`) | No |
+| `unsupported` | It cannot be allocated; `reason` is one of `no_node_entry`, `ambiguous_mapping`, `token_lacks_mapping_use`, `token_lacks_guest_hwtype`, `pve_too_old`, `usb_inventory_unreadable` (also: not every guest config could be read, or the token cannot be shown to audit every guest), and `reasonText` says what to fix | No |
+| `quarantined` | A failed or unknown attach or detach needs an operator or the reconciler | No |
+
+#### Request a device in a template
+
+A template (and each published version) has an optional `hardware` list of up to four `{ "kind": "usb", "mapping": "<id>" }`, each mapping named once. `fleetctl lab template-create` has no hardware flag (adding one is outside this guide's scope), so create the template through `POST /api/v1/lab/templates` with the fields the CLI sends plus `hardware`. A `PUT` replaces the whole draft, so repeat `hardware` or it is cleared:
+
+```json
+{
+  "name": "lab-usb",
+  "description": "Disposable Ubuntu guest with a USB device",
+  "imageVersionId": "<version-id>",
+  "cores": 2,
+  "memoryMib": 2048,
+  "diskGib": 20,
+  "readinessProbe": "guest_agent",
+  "readinessDeadlineSeconds": 600,
+  "ttlSeconds": 3600,
+  "cleanup": "destroy",
+  "hardware": [{ "kind": "usb", "mapping": "fm-test-superdrive-a" }]
+}
+```
+
+The desired-state `LabTemplate` accepts the same list as `spec.hardware`. Then publish and lease as usual; the lease needs no hardware flag:
+
+```sh
+fleetctl --output json lab publish <template-id> | jq -r .id          # the version id
+fleetctl --output json hardware refresh --account <account-id>
+fleetctl --output json lab create <version-id> --purpose "usb smoke test" --account <account-id> --wait
+fleetctl --output json lab status <lease-id> | jq .hardware
+fleetctl --output json lab destroy <lease-id> --wait
+```
+
+`lab status` shows each declared device with the lease's live reservation. While the lease is provisioning, before the attach step, it reads like this, a reservation and no attachment:
+
+```json
+[{ "kind": "usb", "mapping": "fm-test-superdrive-a",
+   "reservation": { "id": "<reservation-id>", "deviceId": "<device-id>", "state": "held", "usbSlot": null, "createdAt": 1767225600000 } }]
+```
+
+A ready lease shows `"state": "attached"` with `usbSlot` set (`0` for the first free slot). `attach_unknown` and `detach_failed` mark an outcome that needs the lease's cleanup to resolve it, or an operator; `detaching` is a detach in flight or one PVE keeps pending until the guest restarts. A template without `hardware` behaves exactly as before. A pooled version cannot declare hardware (`hardware_pool_unsupported`).
+
+#### When a device is refused
+
+Placement checks every declared device before anything is allocated (no VMID, no capacity, no clone). A refusal fails the provision at once, is audited as `lab_placement_refused` with the mapping (and the holder), and shows in the operation's `errorJson` as `{"reason": ..., "detail": ...}`. The reasons, with what to do, are in the [Capacity](#capacity) table. The detail is the message:
+
+| `reason` | Message (`<...>` is filled in) |
+| --- | --- |
+| `hardware_busy` | `hardware <mapping> cannot be reserved: the device is reserved by lease <lease-id> (reservation <reservation-id>, <state>)` |
+| `hardware_stale` | `hardware <mapping> was not seen on node <node> within the last 900s; refusing to reserve it on a stale observation (refresh the inventory and retry)` |
+| `hardware_wrong_node` | `hardware <mapping> is present on node <a>, but the pinned image's template, and so Lab's clone, is on node <b> (Lab clones on the template's node); the template needs an image whose template is on <a> or the mapping an entry for <b>` (`is mapped only on` when it was not seen recently) |
+| `hardware_unknown` | `hardware <mapping> is not in the inventory of account <account-id>; an operator creates the Proxmox USB mapping and refreshes the inventory (fleetctl hardware refresh --account <account-id>)` |
+| `hardware_no_node_entry` | `hardware <mapping> has no entry for any node, so no node can host it; an operator adds a node entry to the Proxmox mapping and refreshes the inventory` |
+| `hardware_unsupported` | `hardware <mapping> is unsupported (<reason>): <what to fix>` |
+| `hardware_missing`, `hardware_externally_attached`, `hardware_quarantined` | `hardware <mapping> cannot be reserved: the device is <status> and cannot be reserved` |
+
+**There is no queue.** A device that is busy fails the request immediately with `hardware_busy` and names the holder; nothing waits and nothing is retried for you. Wait for the holder's lease to end (or release it), then request again. A hold whose lease is already over is freed by the next request, which must still find the device seen within the bound. Fleet never takes a device from a guest it did not attach.
+
+Reservations follow the capacity rules: a lease refused or failed before it allocated a guest releases its devices, and cleanup releases the devices that were never attached. A device that was attached, or whose attach or detach outcome is unknown, is not released on the lease's word; the saga's detach precedes every guest fate Lab decides, and the reviewed destroy, snapshot-revert and template routes refuse a guest that holds a device. Freeing a held reservation by hand is the elevated, audited override release (`fleetctl hardware override-release`); see [A device that cannot be detached](#a-device-that-cannot-be-detached).
 
 ### Artifacts and storage sizing
 
@@ -751,4 +945,6 @@ Not yet guaranteed:
 
 ## Out of scope
 
-USB, GPU, and other hardware-in-the-loop resources are a separate sub-epic. Windows guests are later work.
+USB devices are attached before a lease's guest starts and may be hotplugged on and off a running lease's guest, only the devices the lease reserved up front (a lease cannot reserve a device mid-run); see [USB hardware](#usb-hardware). PCI and GPU passthrough, whole USB controllers, queueing for a busy device, and Fleet-created mappings are not supported.
+
+Windows guests ([ADR 0015](../adr/0015-windows-lab-guest-transport.md), epic #396) are in scope for readiness, `lab exec` (synchronous, detached and interactive-session), `lab put` and `lab collect`, audio, and pools; see [Windows guests](#windows-guests) and [Pooled guests](#pooled-guests). Still unverified, and tracked in [#555](https://github.com/Frogbyte-io/fleet-manager/issues/555): activation across a snapshot rollback, clone SID uniqueness, and leases on the Cloudbase-Init re-generalized image. [#556](https://github.com/Frogbyte-io/fleet-manager/issues/556) tracks an automated test of the pool flow with a Windows template. ADR 0015 is still Proposed.

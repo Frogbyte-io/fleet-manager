@@ -1,0 +1,93 @@
+{
+  "http_status": 200,
+  "pve_version": "8.4.0",
+  "recorded_with": "pvesh (root@pam), status and body reconstructed from the CLI",
+  "request": {
+    "method": "GET",
+    "params": {},
+    "path": "/nodes/pve8/qemu/9563/pending"
+  },
+  "response": [
+    {
+      "key": "vga",
+      "value": "serial0"
+    },
+    {
+      "key": "cores",
+      "value": 1
+    },
+    {
+      "key": "ide2",
+      "value": "local-lvm:vm-9563-cloudinit,media=cdrom,size=4M"
+    },
+    {
+      "key": "memory",
+      "value": "1024"
+    },
+    {
+      "key": "ipconfig0",
+      "value": "ip=dhcp"
+    },
+    {
+      "key": "tags",
+      "value": "fm-s11-spike"
+    },
+    {
+      "key": "scsi0",
+      "value": "local-lvm:vm-9563-disk-0,size=3G"
+    },
+    {
+      "key": "scsihw",
+      "value": "virtio-scsi-pci"
+    },
+    {
+      "key": "net0",
+      "value": "virtio=BC:24:11:00:00:01,bridge=vmbr0"
+    },
+    {
+      "key": "agent",
+      "value": "enabled=1"
+    },
+    {
+      "key": "serial0",
+      "value": "socket"
+    },
+    {
+      "key": "boot",
+      "value": "order=scsi0"
+    },
+    {
+      "key": "meta",
+      "value": "creation-qemu=9.2.0,ctime=1790854295"
+    },
+    {
+      "key": "hotplug",
+      "value": "network,disk"
+    },
+    {
+      "key": "name",
+      "value": "fm-s11-usb-spike"
+    },
+    {
+      "key": "smbios1",
+      "value": "uuid=00000000-0000-4000-8000-000000000000"
+    },
+    {
+      "key": "vmgenid",
+      "value": "00000000-0000-4000-8000-000000000000"
+    },
+    {
+      "key": "digest",
+      "value": "5eaf168880fdc2b4d9c51a5cf29b6ab31f613387"
+    },
+    {
+      "key": "ostype",
+      "value": "l26"
+    },
+    {
+      "key": "usb0",
+      "pending": "mapping=fm-test-tablet-path"
+    }
+  ],
+  "who": "root"
+}

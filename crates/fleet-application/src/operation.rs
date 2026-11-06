@@ -39,7 +39,17 @@ enum CreateRoute {
     /// and never create its operation directly. Kinds that other dedicated
     /// routes own stay refused.
     Brokered,
+    /// The machine-setup follow-up (#600): the generic checks and
+    /// permissions apply in full, but only this route may use the
+    /// [`SETUP_FOLLOW_UP_IDEMPOTENCY_PREFIX`], and its audit names the
+    /// setup event that triggered it.
+    SetupFollowUp,
 }
+
+/// The idempotency-key prefix the machine-setup follow-up owns (#600). The
+/// generic surface refuses it, so a caller cannot occupy the key a setup
+/// follow-up will use; the rest of the key names the triggering setup event.
+pub const SETUP_FOLLOW_UP_IDEMPOTENCY_PREFIX: &str = "skills-manager-setup:";
 
 /// The idempotency-key prefix the broker owns. The generic surface refuses
 /// it, so a caller cannot occupy the key a request's operation will use.
@@ -989,6 +999,61 @@ impl Operations {
             .await
     }
 
+    /// Creates a machine-setup follow-up (#600): a `skills.probe` keyed by
+    /// [`SETUP_FOLLOW_UP_IDEMPOTENCY_PREFIX`] plus the triggering setup
+    /// event. Authorization, validation and the audit event are exactly the
+    /// generic route's; the audit metadata also names the trigger.
+    ///
+    /// # Errors
+    ///
+    /// Fails on another kind or key shape, denial, an invalid payload, or a
+    /// backend failure.
+    pub async fn create_setup_follow_up(
+        &self,
+        authorizer: &dyn Authorizer,
+        principal_id: &str,
+        new: &NewOperation,
+    ) -> Result<Operation, OperationUseCaseError> {
+        // The trigger is recorded as audit metadata after the row is
+        // inserted, so its bound is checked here, before anything persists.
+        let keyed = new
+            .idempotency_key
+            .as_deref()
+            .and_then(|key| key.strip_prefix(SETUP_FOLLOW_UP_IDEMPOTENCY_PREFIX))
+            .is_some_and(|trigger| {
+                !trigger.is_empty() && trigger.len() <= crate::audit::MAX_METADATA_VALUE_BYTES
+            });
+        if new.kind != "skills.probe" || !keyed {
+            return Err(OperationUseCaseError::Invalid {
+                detail: format!(
+                    "the setup follow-up route creates only skills.probe keyed by {SETUP_FOLLOW_UP_IDEMPOTENCY_PREFIX}<trigger>, with a trigger of at most {} bytes",
+                    crate::audit::MAX_METADATA_VALUE_BYTES
+                ),
+            });
+        }
+        // A setup follow-up is always a pinned install: an unpinned probe
+        // would only need `skills.read` and could occupy the reserved key
+        // without installing anything.
+        let pinned = new
+            .payload_json
+            .as_deref()
+            .and_then(|payload| serde_json::from_str::<serde_json::Value>(payload).ok())
+            .is_some_and(|payload| {
+                ["artifactUrl", "artifactSha256"].iter().all(|field| {
+                    payload[*field]
+                        .as_str()
+                        .is_some_and(|value| !value.trim().is_empty())
+                })
+            });
+        if !pinned {
+            return Err(OperationUseCaseError::Invalid {
+                detail: "the setup follow-up must pin a release: artifactUrl and artifactSha256 are required".to_owned(),
+            });
+        }
+        self.create_inner(authorizer, principal_id, new, CreateRoute::SetupFollowUp)
+            .await
+    }
+
     /// Creates the operation of a brokered action request. This is the
     /// broker's entry point: it is `pub` only because the broker's
     /// integration tests live in other crates, and nothing else should call
@@ -1424,6 +1489,18 @@ impl Operations {
                     ),
                 });
             }
+            if route != CreateRoute::SetupFollowUp
+                && new
+                    .idempotency_key
+                    .as_deref()
+                    .is_some_and(|key| key.starts_with(SETUP_FOLLOW_UP_IDEMPOTENCY_PREFIX))
+            {
+                return Err(OperationUseCaseError::Invalid {
+                    detail: format!(
+                        "idempotency keys starting with {SETUP_FOLLOW_UP_IDEMPOTENCY_PREFIX} are reserved"
+                    ),
+                });
+            }
         }
 
         if !CREATABLE_KINDS.contains(&new.kind.as_str()) {
@@ -1791,6 +1868,19 @@ impl Operations {
                 context: "create_audit",
                 detail: error.to_string(),
             })?;
+        if route == CreateRoute::SetupFollowUp
+            && let Some(trigger) = new
+                .idempotency_key
+                .as_deref()
+                .and_then(|key| key.strip_prefix(SETUP_FOLLOW_UP_IDEMPOTENCY_PREFIX))
+        {
+            metadata.insert("setup_trigger", trigger).map_err(|error| {
+                OperationUseCaseError::Backend {
+                    context: "create_audit",
+                    detail: error.to_string(),
+                }
+            })?;
+        }
         self.audit
             .record_intent(&crate::audit::AuditIntent {
                 actor: principal_id.to_owned(),

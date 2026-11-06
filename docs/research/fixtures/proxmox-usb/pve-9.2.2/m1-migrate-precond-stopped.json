@@ -1,0 +1,61 @@
+{
+  "http_status": 200,
+  "pve_version": "9.2.2",
+  "recorded_with": "pvesh (root@pam), status and body reconstructed from the CLI",
+  "request": {
+    "method": "GET",
+    "params": {},
+    "path": "/nodes/pve/qemu/9563/migrate"
+  },
+  "response": {
+    "allowed_nodes": [],
+    "has-dbus-vmstate": 1,
+    "local_disks": [
+      {
+        "cdrom": 1,
+        "drivename": "ide2",
+        "is_attached": 1,
+        "is_cloudinit": 1,
+        "is_tpmstate": 0,
+        "is_unused": 0,
+        "is_vmstate": 0,
+        "replicate": 1,
+        "shared": 0,
+        "size": 4194304,
+        "volid": "local-lvm:vm-9563-cloudinit"
+      },
+      {
+        "cdrom": 0,
+        "drivename": "scsi0",
+        "is_attached": 1,
+        "is_cloudinit": 0,
+        "is_tpmstate": 0,
+        "is_unused": 0,
+        "is_vmstate": 0,
+        "replicate": 1,
+        "shared": 0,
+        "size": 3221225472,
+        "volid": "local-lvm:vm-9563-disk-0"
+      }
+    ],
+    "local_resources": [
+      "usb1",
+      "usb0"
+    ],
+    "mapped-resource-info": {
+      "usb0": {
+        "name": "fm-test-superdrive-a"
+      },
+      "usb1": {
+        "name": "fm-test-verbatim"
+      }
+    },
+    "mapped-resources": [
+      "usb0",
+      "usb1"
+    ],
+    "not_allowed_nodes": {},
+    "running": 0
+  },
+  "who": "root"
+}
