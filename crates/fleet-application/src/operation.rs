@@ -2734,7 +2734,7 @@ mod catalog_rollout_authorization_tests {
                 "operator",
                 &install(serde_json::json!([
                     ["FLEETD_STATE_DIR", "/var/lib/fleetd"],
-                    ["FLEETD_SYSTEMCTL", "/bin/true"]
+                    ["FLEETD_SYSTEMCTL", "/usr/bin/systemctl"]
                 ])),
             )
             .await

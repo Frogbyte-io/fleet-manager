@@ -337,6 +337,21 @@ mod tests {
     /// Runs the shipped uninstall in a scratch layout with a `systemctl`
     /// stub that logs its arguments and exits `systemctl_exit`.
     fn run_uninstall(unit_present: bool, systemctl_exit: i32) -> (Option<i32>, String, String) {
+        // `is-active` answers like systemd: `active` (0) when everything
+        // succeeds, `inactive` (3) otherwise.
+        let active = if systemctl_exit == 0 {
+            ("active", 0)
+        } else {
+            ("inactive", 3)
+        };
+        run_uninstall_with(unit_present, systemctl_exit, active)
+    }
+
+    fn run_uninstall_with(
+        unit_present: bool,
+        systemctl_exit: i32,
+        (active_out, active_exit): (&str, i32),
+    ) -> (Option<i32>, String, String) {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path();
         let log = root.join("systemctl.log");
@@ -344,8 +359,8 @@ mod tests {
         std::fs::write(
             &stub,
             format!(
-                "#!/bin/sh\necho \"$*\" >> {}\nexit {systemctl_exit}\n",
-                log.display()
+                "#!/bin/sh\necho \"$*\" >> {log}\nif [ \"$1\" = is-active ]; then\n  [ -n \"{active_out}\" ] && echo \"{active_out}\"\n  exit {active_exit}\nfi\nexit {systemctl_exit}\n",
+                log = log.display()
             ),
         )
         .unwrap();
@@ -388,8 +403,14 @@ mod tests {
     fn run_purge(
         state: impl FnOnce(&std::path::Path) -> std::path::PathBuf,
     ) -> (Option<i32>, String, bool, tempfile::TempDir) {
-        let dir = tempfile::tempdir().unwrap();
+        // The purge refuses a state directory with a group- or
+        // world-writable ancestor, which /tmp is: work under $HOME instead.
+        let dir = tempfile::tempdir_in(std::env::var_os("HOME").expect("HOME is set")).unwrap();
         let root = dir.path();
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            std::fs::set_permissions(root, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
         let stub = root.join("systemctl");
         std::fs::write(&stub, "#!/bin/sh\nexit 0\n").unwrap();
         {
@@ -454,6 +475,59 @@ mod tests {
         assert!(stderr.contains("refusing to purge"), "{stderr}");
         assert!(unit_kept);
         assert!(std::path::Path::new("/var/lib").is_dir());
+    }
+
+    /// A real fleetd state directory at `path` (its parent must exist).
+    fn fleetd_state(path: &std::path::Path) {
+        std::fs::create_dir(path).unwrap();
+        std::fs::write(path.join("node.key"), "key").unwrap();
+    }
+
+    #[test]
+    fn a_trailing_slash_does_not_get_a_symlink_past_the_purge() {
+        let (code, stderr, unit_kept, dir) = run_purge(|root| {
+            fleetd_state(&root.join("real"));
+            std::os::unix::fs::symlink(root.join("real"), root.join("state")).unwrap();
+            format!("{}/state/", root.display()).into()
+        });
+        assert_ne!(code, Some(0), "{stderr}");
+        assert!(stderr.contains("symbolic link"), "{stderr}");
+        assert!(unit_kept);
+        assert!(dir.path().join("real/node.key").exists());
+    }
+
+    #[test]
+    fn a_purge_refuses_a_writable_or_symlinked_ancestor() {
+        let (code, stderr, unit_kept, dir) = run_purge(|root| {
+            let open = root.join("open");
+            std::fs::create_dir(&open).unwrap();
+            {
+                use std::os::unix::fs::PermissionsExt as _;
+                std::fs::set_permissions(&open, std::fs::Permissions::from_mode(0o777)).unwrap();
+            }
+            fleetd_state(&open.join("state"));
+            open.join("state")
+        });
+        assert_ne!(code, Some(0), "{stderr}");
+        assert!(stderr.contains("writable by group or others"), "{stderr}");
+        assert!(unit_kept);
+        assert!(dir.path().join("open/state/node.key").exists());
+
+        let (code, stderr, unit_kept, dir) = run_purge(|root| {
+            let parent = root.join("parent");
+            std::fs::create_dir(&parent).unwrap();
+            {
+                use std::os::unix::fs::PermissionsExt as _;
+                std::fs::set_permissions(&parent, std::fs::Permissions::from_mode(0o755)).unwrap();
+            }
+            fleetd_state(&parent.join("state"));
+            std::os::unix::fs::symlink(&parent, root.join("linked")).unwrap();
+            root.join("linked/state")
+        });
+        assert_ne!(code, Some(0), "{stderr}");
+        assert!(stderr.contains("is a symbolic link"), "{stderr}");
+        assert!(unit_kept);
+        assert!(dir.path().join("parent/state/node.key").exists());
     }
 
     #[test]
@@ -523,6 +597,20 @@ mod tests {
             );
         }
         assert!(foreign.join("data").exists());
+    }
+
+    #[test]
+    fn a_failed_is_active_query_stops_the_uninstall() {
+        // No answer at all (no systemd, no bus): not proof that it stopped.
+        let (code, stderr, _) = run_uninstall_with(false, 0, ("", 1));
+        assert_ne!(code, Some(0), "{stderr}");
+        assert!(stderr.contains("cannot tell whether"), "{stderr}");
+        assert!(stderr.contains("nothing was removed"), "{stderr}");
+        // `unknown` (no such unit) and `failed` count as stopped.
+        for state in ["unknown", "failed"] {
+            let (code, stderr, _) = run_uninstall_with(false, 0, (state, 3));
+            assert_eq!(code, Some(0), "{state}: {stderr}");
+        }
     }
 
     #[test]

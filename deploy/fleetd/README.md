@@ -45,14 +45,18 @@ the machine should re-enroll with a new key; the controller supports
 rebinding an existing machine to a new node key.
 
 `--purge` deletes the state directory recursively, so it deletes only a
-directory that is fleetd's own: a real directory (not a symbolic link), owned
-by the `fleet` account, not a system directory, and empty or holding
-fleetd's `node.key`. Anything else is refused before anything is removed.
-`uninstall.sh` also stops with an error, removing nothing, when the service
-cannot be stopped (`systemctl disable --now` fails) or when systemd still
-reports it active while its unit file is gone. `install.sh` refuses to adopt
-a state directory that is a symbolic link or that already holds files
-without a `node.key`.
+directory that is fleetd's own: an absolute path (trailing slashes are
+stripped first), a real directory (not a symbolic link), owned by the `fleet`
+account, not a system directory, and empty or holding fleetd's `node.key` as
+a regular file. Every ancestor must be a real directory owned by root and not
+writable by group or others. Anything else is refused before anything is
+removed; the checks run again right before the delete, which stays on one
+file system (`rm -rf --one-file-system`). `uninstall.sh` also stops with an
+error, removing nothing, when the service cannot be stopped (`systemctl
+disable --now` fails), or when the unit file is gone and `systemctl
+is-active` does not answer `inactive`, `unknown` or `failed`. `install.sh`
+refuses to adopt a state directory that is a symbolic link, whose contents
+cannot be read, or that already holds files without a regular `node.key`.
 
 ## Local socket access
 

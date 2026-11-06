@@ -627,6 +627,78 @@ async fn a_second_session_supersedes_the_first() {
 }
 
 #[tokio::test]
+async fn a_session_invalid_by_the_handshake_is_refused_and_the_older_one_stays() {
+    let harness = harness().await;
+    let keys = NodeKeys::generate();
+    let (machine_id, credential) = harness.enroll_node("recheck", &keys).await;
+    let first_token = harness.prove_session(&credential, &keys).await;
+    let (first, _) = connect_node(&harness, &first_token).await.unwrap();
+    let (mut first_sink, mut first_source) = first.split();
+    send_frame(&mut first_sink, hello_frame(&machine_id, 1, 1)).await;
+    let welcome = receive_frame(&mut first_source).await.expect("a Welcome");
+    let Some(wire::frame::Payload::Welcome(welcome)) = welcome.payload else {
+        panic!("the first session must be welcomed");
+    };
+
+    // The second session passes the upgrade, then stops being valid before
+    // its Hello: the re-check refuses it before it is registered.
+    let second_token = harness.prove_session(&credential, &keys).await;
+    let (second, _) = connect_node(&harness, &second_token).await.unwrap();
+    let (mut second_sink, mut second_source) = second.split();
+    sqlx::query(
+        "UPDATE node_sessions SET status = 'revoked' WHERE id = \
+         (SELECT id FROM node_sessions WHERE machine_id = ?1 ORDER BY issued_at DESC, rowid DESC LIMIT 1)",
+    )
+    .bind(&machine_id)
+    .execute(&harness.pool)
+    .await
+    .unwrap();
+    send_frame(&mut second_sink, hello_frame(&machine_id, 1, 1)).await;
+    let fault = receive_frame(&mut second_source).await.expect("a fault");
+    assert!(
+        matches!(fault.payload, Some(wire::frame::Payload::Fault(_))),
+        "the refused session must fault, not {:?}",
+        fault.payload
+    );
+
+    // The first session was never superseded.
+    let entry = harness
+        .gateway
+        .session_of(&machine_id)
+        .await
+        .expect("the first session stays");
+    assert_eq!(entry.boot_session, welcome.session_id);
+    send_frame(&mut first_sink, heartbeat_frame(1)).await;
+    let first_entry = entry.clone();
+    wait_until(
+        async || first_entry.heartbeat_sequence.load(Ordering::Relaxed) == 1,
+        "the first session still heartbeats",
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn a_removed_machine_never_registers_a_session_again() {
+    let harness = harness().await;
+    let keys = NodeKeys::generate();
+    let (machine_id, credential) = harness.enroll_node("tombstoned", &keys).await;
+    let token = harness.prove_session(&credential, &keys).await;
+    // The removal closed the machine's sessions (none were open) while this
+    // connection was between its checks and its registration.
+    assert!(!harness.gateway.close_session(&machine_id));
+    let (stream, _) = connect_node(&harness, &token).await.unwrap();
+    let (mut sink, mut source) = stream.split();
+    send_frame(&mut sink, hello_frame(&machine_id, 1, 1)).await;
+    let frame = receive_frame(&mut source).await.expect("a fault");
+    assert!(
+        matches!(frame.payload, Some(wire::frame::Payload::Fault(_))),
+        "{:?}",
+        frame.payload
+    );
+    assert!(harness.gateway.session_of(&machine_id).await.is_none());
+}
+
+#[tokio::test]
 async fn removing_a_machine_closes_its_session_and_says_why() {
     let harness = harness().await;
     let keys = NodeKeys::generate();

@@ -54,6 +54,9 @@ log() { printf 'install: %s\n' "$1"; }
 SELF_DIR="$(cd "$(dirname "$0")" && pwd)"
 ARCHIVE_DIR="${FLEETD_ARCHIVE_DIR:-$SELF_DIR}"
 STATE_DIR="${FLEETD_STATE_DIR:-/var/lib/fleetd}"
+# `dir/` would make the checks below look through a symlink.
+while [ "${STATE_DIR%/}" != "$STATE_DIR" ]; do STATE_DIR="${STATE_DIR%/}"; done
+[ -n "$STATE_DIR" ] || die "the state directory cannot be /"
 BIN_DIR="${FLEETD_BIN_DIR:-/usr/local/bin}"
 UNIT_DIR="${FLEETD_UNIT_DIR:-/etc/systemd/system}"
 ENV_FILE="${FLEETD_ENV_FILE:-/etc/default/fleetd}"
@@ -166,10 +169,14 @@ trap cleanup EXIT
 if [ -L "$STATE_DIR" ]; then
     die "the state directory $STATE_DIR is a symbolic link; refusing to adopt it"
 fi
-if [ -d "$STATE_DIR" ] \
-    && [ -n "$("${RUN_PRIV[@]}" find "$STATE_DIR" -mindepth 1 -maxdepth 1 -print -quit 2>/dev/null)" ] \
-    && ! "${RUN_PRIV[@]}" test -f "$STATE_DIR/node.key"; then
-    die "the state directory $STATE_DIR already holds files that are not fleetd's (no node.key); refusing to adopt it"
+if [ -d "$STATE_DIR" ]; then
+    STATE_ENTRY="$("${RUN_PRIV[@]}" find "$STATE_DIR" -mindepth 1 -maxdepth 1 -print -quit 2>/dev/null)" \
+        || die "the contents of the state directory $STATE_DIR cannot be read; refusing to adopt it"
+    if [ -n "$STATE_ENTRY" ] \
+        && ! { "${RUN_PRIV[@]}" test -f "$STATE_DIR/node.key" \
+            && ! "${RUN_PRIV[@]}" test -L "$STATE_DIR/node.key"; }; then
+        die "the state directory $STATE_DIR already holds files that are not fleetd's (no node.key); refusing to adopt it"
+    fi
 fi
 if ! getent passwd "$SERVICE_USER" >/dev/null 2>&1; then
     "${RUN_PRIV[@]}" "$USER_ADD" --system --user-group --home-dir "$STATE_DIR" \

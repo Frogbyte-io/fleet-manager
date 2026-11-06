@@ -53,8 +53,13 @@ pub enum InstallerTools {
 /// The directories a production tool override may name a tool in.
 const SYSTEM_TOOL_DIRECTORIES: [&str; 4] = ["/bin", "/usr/bin", "/sbin", "/usr/sbin"];
 
-/// The tool overrides, which the installer runs as root.
-const TOOL_VARIABLES: [&str; 3] = ["FLEETD_SYSTEMCTL", "FLEETD_USER_ADD", "FLEETD_RUNUSER"];
+/// The tool overrides, which the installer runs as root, and the only file
+/// name each may name in production.
+const TOOL_VARIABLES: [(&str, &str); 3] = [
+    ("FLEETD_SYSTEMCTL", "systemctl"),
+    ("FLEETD_USER_ADD", "useradd"),
+    ("FLEETD_RUNUSER", "runuser"),
+];
 
 /// The installer layout overrides an uninstall honours (`uninstall.sh` reads
 /// the same names).
@@ -159,15 +164,19 @@ pub fn validate_installer_variable(
     }
     // Every other variable is a directory, a file or a tool: an absolute path.
     let components = absolute_components(name, value)?;
-    if TOOL_VARIABLES.contains(&name) && tools == InstallerTools::System {
+    if let Some((_, tool)) = TOOL_VARIABLES
+        .iter()
+        .find(|(variable, _)| *variable == name)
+        && tools == InstallerTools::System
+    {
         let (file, directory) = components
             .split_last()
             .map_or(("", "/".to_owned()), |(file, directory)| {
                 (*file, format!("/{}", directory.join("/")))
             });
-        if file.is_empty() || !SYSTEM_TOOL_DIRECTORIES.contains(&directory.as_str()) {
+        if file != *tool || !SYSTEM_TOOL_DIRECTORIES.contains(&directory.as_str()) {
             return Err(format!(
-                "installer variable {name} runs as root, so it must name a tool in {}, not {value:?}",
+                "installer variable {name} runs as root, so it must be {tool} in {}, not {value:?}",
                 SYSTEM_TOOL_DIRECTORIES.join(", ")
             ));
         }
@@ -198,11 +207,22 @@ pub fn validate_installer_env(
         .try_for_each(|(name, value)| validate_installer_variable(name, value, tools))
 }
 
-/// The components of an absolute path without `..`.
+/// The components of an absolute, normalized path: no `..`, no `.`, no
+/// `//` and no trailing `/`, so the scripts never test one path and act on
+/// another (`link/` is the link's target to `rm`, but not to `[ -L ]`).
 fn absolute_components<'a>(name: &str, value: &'a str) -> Result<Vec<&'a str>, String> {
     if !value.starts_with('/') {
         return Err(format!(
             "installer variable {name} must be an absolute path, not {value:?}"
+        ));
+    }
+    if value != "/"
+        && (value.ends_with('/')
+            || value.contains("//")
+            || value.split('/').any(|part| part == "."))
+    {
+        return Err(format!(
+            "installer variable {name} must be a normalized path (no trailing `/`, `//` or `.`), not {value:?}"
         ));
     }
     let components: Vec<&str> = value
@@ -234,8 +254,14 @@ mod tests {
     #[test]
     fn production_tools_come_from_the_system_directories_and_tests_may_use_stubs() {
         ok("FLEETD_SYSTEMCTL", "/usr/bin/systemctl");
-        ok("FLEETD_SYSTEMCTL", "/bin//systemctl");
         ok("FLEETD_USER_ADD", "/sbin/useradd");
+        ok("FLEETD_RUNUSER", "/usr/sbin/runuser");
+        // Only the tool's own name, in production.
+        refused("FLEETD_SYSTEMCTL", "/bin/true");
+        refused("FLEETD_USER_ADD", "/usr/bin/bash");
+        refused("FLEETD_RUNUSER", "/usr/bin/sudo");
+        refused("FLEETD_SYSTEMCTL", "/usr/bin/systemctl/");
+        refused("FLEETD_USER_ADD", "/usr/sbin//useradd");
         for (name, value) in [
             ("FLEETD_SYSTEMCTL", "/tmp/stubs/systemctl"),
             ("FLEETD_SYSTEMCTL", "/usr/local/bin/systemctl"),
@@ -268,7 +294,7 @@ mod tests {
         ok("FLEETD_UNIT_DIR", "/etc/systemd/system");
         ok("FLEETD_ENV_FILE", "/etc/default/fleetd");
         ok("FLEETD_SERVICE", "fleetd@test.service-1_a");
-        ok("FLEETD_SYSTEMCTL", "/bin/true");
+        ok("FLEETD_SYSTEMCTL", "/bin/systemctl");
         ok("FLEETD_USER_ADD", "/usr/sbin/useradd");
         ok("FLEETD_RUNUSER", "/usr/sbin/runuser");
         ok("FLEETD_ARCHIVE_DIR", "/tmp/fleetd-install.x");
@@ -301,6 +327,21 @@ mod tests {
             let error = refused("FLEETD_STATE_DIR", dir);
             assert!(error.contains("FLEETD_STATE_DIR"), "{dir}: {error}");
         }
+    }
+
+    #[test]
+    fn non_normalized_paths_are_refused() {
+        for value in [
+            "/var/lib/fleetd/",
+            "/var/lib//fleetd",
+            "/var/lib/./fleetd",
+            "/var/lib/fleetd/.",
+        ] {
+            let error = refused("FLEETD_STATE_DIR", value);
+            assert!(error.contains("normalized"), "{value}: {error}");
+            refused("FLEETD_BIN_DIR", value);
+        }
+        ok("FLEETD_BIN_DIR", "/");
     }
 
     #[test]
