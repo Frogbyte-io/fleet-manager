@@ -13,8 +13,14 @@
 //!   path.
 //! - Directory and file variables are absolute paths without `..`.
 //! - `FLEETD_STATE_DIR` is never a system root or a top-level directory.
-//! - `FLEETD_SERVICE` is a plain unit name; the tool overrides are absolute
-//!   paths.
+//! - `FLEETD_SERVICE` is a plain unit name.
+//! - The tool overrides (`FLEETD_SYSTEMCTL`, `FLEETD_USER_ADD`,
+//!   `FLEETD_RUNUSER`) run as root, so a production controller accepts them
+//!   only from `/bin`, `/usr/bin`, `/sbin` or `/usr/sbin`, and refuses the
+//!   test harness's `FLEETD_STUB_LOG`. A controller composed in installer test
+//!   mode ([`InstallerTools::Any`], never set by the controller binary)
+//!   accepts any absolute tool path and the stub log, which the hermetic
+//!   install tests need for their stubs.
 #![warn(missing_docs)]
 
 /// The installer variables `machine.install-fleetd` accepts: the layout
@@ -32,6 +38,23 @@ pub const INSTALLER_VARIABLES: [&str; 10] = [
     "FLEETD_RUNUSER",
     "FLEETD_STUB_LOG",
 ];
+
+/// Which tool overrides the installer environment accepts.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum InstallerTools {
+    /// Production: tools only from the system binary directories, no stub
+    /// log.
+    #[default]
+    System,
+    /// Installer test mode: any absolute tool path and the stub log.
+    Any,
+}
+
+/// The directories a production tool override may name a tool in.
+const SYSTEM_TOOL_DIRECTORIES: [&str; 4] = ["/bin", "/usr/bin", "/sbin", "/usr/sbin"];
+
+/// The tool overrides, which the installer runs as root.
+const TOOL_VARIABLES: [&str; 3] = ["FLEETD_SYSTEMCTL", "FLEETD_USER_ADD", "FLEETD_RUNUSER"];
 
 /// The installer layout overrides an uninstall honours (`uninstall.sh` reads
 /// the same names).
@@ -93,7 +116,11 @@ const MAX_VALUE_BYTES: usize = 1024;
 /// # Errors
 ///
 /// Names the variable and the rule it broke.
-pub fn validate_installer_variable(name: &str, value: &str) -> Result<(), String> {
+pub fn validate_installer_variable(
+    name: &str,
+    value: &str,
+    tools: InstallerTools,
+) -> Result<(), String> {
     if name.chars().any(char::is_control) || value.chars().any(char::is_control) {
         return Err(format!(
             "installer variable {:?} contains a control character",
@@ -124,8 +151,27 @@ pub fn validate_installer_variable(name: &str, value: &str) -> Result<(), String
             ))
         };
     }
+    if name == "FLEETD_STUB_LOG" && tools == InstallerTools::System {
+        return Err(
+            "installer variable FLEETD_STUB_LOG is only accepted by a controller in installer test mode"
+                .to_owned(),
+        );
+    }
     // Every other variable is a directory, a file or a tool: an absolute path.
     let components = absolute_components(name, value)?;
+    if TOOL_VARIABLES.contains(&name) && tools == InstallerTools::System {
+        let (file, directory) = components
+            .split_last()
+            .map_or(("", "/".to_owned()), |(file, directory)| {
+                (*file, format!("/{}", directory.join("/")))
+            });
+        if file.is_empty() || !SYSTEM_TOOL_DIRECTORIES.contains(&directory.as_str()) {
+            return Err(format!(
+                "installer variable {name} runs as root, so it must name a tool in {}, not {value:?}",
+                SYSTEM_TOOL_DIRECTORIES.join(", ")
+            ));
+        }
+    }
     if name == "FLEETD_STATE_DIR" {
         let normalized = format!("/{}", components.join("/"));
         if components.len() < 2 || PROTECTED_DIRECTORIES.contains(&normalized.as_str()) {
@@ -143,10 +189,13 @@ pub fn validate_installer_variable(name: &str, value: &str) -> Result<(), String
 ///
 /// As [`validate_installer_variable`], for the first variable that breaks a
 /// rule.
-pub fn validate_installer_env(entries: &[(String, String)]) -> Result<(), String> {
+pub fn validate_installer_env(
+    entries: &[(String, String)],
+    tools: InstallerTools,
+) -> Result<(), String> {
     entries
         .iter()
-        .try_for_each(|(name, value)| validate_installer_variable(name, value))
+        .try_for_each(|(name, value)| validate_installer_variable(name, value, tools))
 }
 
 /// The components of an absolute path without `..`.
@@ -173,13 +222,42 @@ mod tests {
     use super::*;
 
     fn ok(name: &str, value: &str) {
-        validate_installer_variable(name, value)
+        validate_installer_variable(name, value, InstallerTools::System)
             .unwrap_or_else(|error| panic!("{name}={value}: {error}"));
     }
 
     fn refused(name: &str, value: &str) -> String {
-        validate_installer_variable(name, value)
+        validate_installer_variable(name, value, InstallerTools::System)
             .expect_err(&format!("{name}={value} must be refused"))
+    }
+
+    #[test]
+    fn production_tools_come_from_the_system_directories_and_tests_may_use_stubs() {
+        ok("FLEETD_SYSTEMCTL", "/usr/bin/systemctl");
+        ok("FLEETD_SYSTEMCTL", "/bin//systemctl");
+        ok("FLEETD_USER_ADD", "/sbin/useradd");
+        for (name, value) in [
+            ("FLEETD_SYSTEMCTL", "/tmp/stubs/systemctl"),
+            ("FLEETD_SYSTEMCTL", "/usr/local/bin/systemctl"),
+            ("FLEETD_SYSTEMCTL", "/usr/bin"),
+            ("FLEETD_SYSTEMCTL", "/usr/bin/x/../../tmp/evil"),
+            ("FLEETD_USER_ADD", "/home/alice/useradd"),
+            ("FLEETD_RUNUSER", "/usr/bin/sub/runuser"),
+            ("FLEETD_STUB_LOG", "/tmp/stubs.log"),
+        ] {
+            refused(name, value);
+            // Test mode still refuses `..` and a bare directory as a tool is
+            // still a path; everything else here is a stub test mode accepts.
+            if !value.contains("..") && value != "/usr/bin" {
+                validate_installer_variable(name, value, InstallerTools::Any)
+                    .unwrap_or_else(|error| panic!("test mode {name}={value}: {error}"));
+            }
+        }
+        // Test mode relaxes only the tool and stub-log rules.
+        assert!(
+            validate_installer_variable("FLEETD_STATE_DIR", "/etc", InstallerTools::Any).is_err()
+        );
+        assert!(validate_installer_variable("BASH_ENV", "/tmp/x", InstallerTools::Any).is_err());
     }
 
     #[test]
@@ -193,7 +271,6 @@ mod tests {
         ok("FLEETD_SYSTEMCTL", "/bin/true");
         ok("FLEETD_USER_ADD", "/usr/sbin/useradd");
         ok("FLEETD_RUNUSER", "/usr/sbin/runuser");
-        ok("FLEETD_STUB_LOG", "/tmp/stubs.log");
         ok("FLEETD_ARCHIVE_DIR", "/tmp/fleetd-install.x");
     }
 
@@ -247,10 +324,13 @@ mod tests {
         refused("FLEETD_SERVICE", "../fleetd");
         refused("FLEETD_SERVICE", "..");
         assert!(
-            validate_installer_env(&[
-                ("FLEETD_BIN_DIR".to_owned(), "/opt/fleet/bin".to_owned()),
-                ("FLEETD_STATE_DIR".to_owned(), "/etc".to_owned()),
-            ])
+            validate_installer_env(
+                &[
+                    ("FLEETD_BIN_DIR".to_owned(), "/opt/fleet/bin".to_owned()),
+                    ("FLEETD_STATE_DIR".to_owned(), "/etc".to_owned()),
+                ],
+                InstallerTools::System
+            )
             .is_err()
         );
     }

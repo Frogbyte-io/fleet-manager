@@ -364,10 +364,17 @@ impl GatewayService {
         // since (#616) deleted its node identity and sessions, and its
         // removal may already have closed the sessions it saw: validate again
         // now that this one is registered, so it cannot outlive the machine.
-        if !matches!(
-            self.nodes.validate_session(&session_token).await,
-            Ok(SessionValidity::Valid { .. })
-        ) {
+        // Only a definitive "no longer valid" closes it: registering already
+        // superseded any older session, so failing closed on a transient
+        // store error would leave the node with no session at all. The
+        // token was validated before the upgrade, so keeping it is safe.
+        let recheck = self.nodes.validate_session(&session_token).await;
+        if let Err(error) = &recheck {
+            eprintln!(
+                "node gateway: machine {machine_id}: the session could not be re-checked, kept: {error}"
+            );
+        }
+        if matches!(recheck, Ok(SessionValidity::Invalid { .. })) {
             self.registry.remove_if_current(&machine_id, &boot_session);
             send_fault(
                 &mut sender,

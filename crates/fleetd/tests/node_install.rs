@@ -214,7 +214,10 @@ async fn harness_with(setup_hook: SetupHook) -> Harness {
     let crypto = fleet_controller::node_crypto::NodeCryptoService::open(&secrets)
         .await
         .expect("the node signing key must provision");
-    let services = compose_node_services(store.pool(), Arc::new(crypto));
+    let mut services = compose_node_services(store.pool(), Arc::new(crypto));
+    // The stubbed systemctl, useradd and runuser live in temp directories:
+    // installer test mode accepts them (#616); production refuses them.
+    services.installer_test_tools = true;
     let ssh_dir = tempfile::tempdir().unwrap();
     let artifacts = tempfile::tempdir().unwrap();
 
@@ -250,10 +253,13 @@ async fn harness_with(setup_hook: SetupHook) -> Harness {
         .expect("the test server must serve");
     });
 
-    let operations = Arc::new(fleet_application::operation::Operations::new(
-        Arc::new(OperationRepository::new(store.pool().clone())),
-        Arc::new(fleet_storage_sqlite::AuditSink::new(store.pool().clone())),
-    ));
+    let operations = Arc::new(
+        fleet_application::operation::Operations::new(
+            Arc::new(OperationRepository::new(store.pool().clone())),
+            Arc::new(fleet_storage_sqlite::AuditSink::new(store.pool().clone())),
+        )
+        .with_installer_test_tools(),
+    );
     let limiter = ExecutionLimiter::new(4);
     let machines = Arc::new(MachineRepository::new(store.pool().clone()));
     let ssh_fallback: Arc<dyn fleet_application::worker::OperationExecutor> =
@@ -279,7 +285,8 @@ async fn harness_with(setup_hook: SetupHook) -> Harness {
                 limiter,
                 Some(artifacts.path().to_path_buf()),
                 onboarding_executor,
-            ),
+            )
+            .with_installer_test_tools(),
             setup_hook,
             machines.clone(),
             operations.clone(),

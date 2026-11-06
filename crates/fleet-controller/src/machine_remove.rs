@@ -115,7 +115,11 @@ impl FleetdUninstallPort for SshFleetdUninstaller {
             if !fleet_application::machine_remove::LAYOUT_VARIABLES.contains(&name.as_str()) {
                 return Err(format!("{name} is not an uninstall layout variable"));
             }
-            fleet_application::fleetd_layout::validate_installer_variable(name, value)?;
+            fleet_application::fleetd_layout::validate_installer_variable(
+                name,
+                value,
+                fleet_application::fleetd_layout::InstallerTools::System,
+            )?;
         }
         let auth = self
             .ssh_auth(&request.plan.auth, &request.machine_id)
@@ -375,6 +379,159 @@ mod tests {
             format!("{}{}", String::from_utf8_lossy(&output.stderr), still_there),
             calls,
         )
+    }
+
+    /// Runs `uninstall.sh --purge` with the unit present and a `systemctl`
+    /// that succeeds, against the state directory `state`, which the
+    /// closure prepares. Answers the exit code, stderr, and whether the unit
+    /// file is still there.
+    fn run_purge(
+        state: impl FnOnce(&std::path::Path) -> std::path::PathBuf,
+    ) -> (Option<i32>, String, bool, tempfile::TempDir) {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let stub = root.join("systemctl");
+        std::fs::write(&stub, "#!/bin/sh\nexit 0\n").unwrap();
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            std::fs::set_permissions(&stub, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let unit = root.join("fleetd.service");
+        std::fs::write(&unit, "").unwrap();
+        let state_dir = state(root);
+        let output = std::process::Command::new("bash")
+            .arg("-c")
+            .arg(UNINSTALL_SCRIPT)
+            .arg("uninstall.sh")
+            .arg("--purge")
+            .env("FLEETD_UNIT_DIR", root)
+            .env("FLEETD_BIN_DIR", root)
+            .env("FLEETD_ENV_FILE", root.join("fleetd.env"))
+            .env("FLEETD_STATE_DIR", &state_dir)
+            .env("FLEETD_SYSTEMCTL", &stub)
+            .output()
+            .unwrap();
+        (
+            output.status.code(),
+            String::from_utf8_lossy(&output.stderr).into_owned(),
+            unit.exists(),
+            dir,
+        )
+    }
+
+    #[test]
+    fn a_purge_refuses_a_directory_that_is_not_fleetds_and_removes_nothing() {
+        // A populated directory fleetd never wrote (no node.key).
+        let (code, stderr, unit_kept, dir) = run_purge(|root| {
+            let foreign = root.join("home-alice");
+            std::fs::create_dir(&foreign).unwrap();
+            std::fs::write(foreign.join("thesis.tex"), "years of work").unwrap();
+            foreign
+        });
+        assert_ne!(code, Some(0), "{stderr}");
+        assert!(stderr.contains("node.key"), "{stderr}");
+        assert!(stderr.contains("nothing was removed"), "{stderr}");
+        assert!(unit_kept, "the refusal comes before anything is removed");
+        assert!(dir.path().join("home-alice/thesis.tex").exists());
+
+        // A symbolic link, even to a real fleetd state directory.
+        let (code, stderr, unit_kept, dir) = run_purge(|root| {
+            let real = root.join("real-state");
+            std::fs::create_dir(&real).unwrap();
+            std::fs::write(real.join("node.key"), "key").unwrap();
+            let link = root.join("state-link");
+            std::os::unix::fs::symlink(&real, &link).unwrap();
+            link
+        });
+        assert_ne!(code, Some(0), "{stderr}");
+        assert!(stderr.contains("symbolic link"), "{stderr}");
+        assert!(unit_kept);
+        assert!(dir.path().join("real-state/node.key").exists());
+
+        // A system directory (owned by root, and on the denylist).
+        let (code, stderr, unit_kept, _dir) = run_purge(|_| "/var/lib".into());
+        assert_ne!(code, Some(0), "{stderr}");
+        assert!(stderr.contains("refusing to purge"), "{stderr}");
+        assert!(unit_kept);
+        assert!(std::path::Path::new("/var/lib").is_dir());
+    }
+
+    #[test]
+    fn a_purge_removes_fleetds_own_state_and_an_empty_directory() {
+        let (code, stderr, unit_kept, dir) = run_purge(|root| {
+            let state = root.join("state");
+            std::fs::create_dir(&state).unwrap();
+            for name in ["node.key", "credential", "machine-id", "journal.ndjson"] {
+                std::fs::write(state.join(name), "x").unwrap();
+            }
+            state
+        });
+        assert_eq!(code, Some(0), "{stderr}");
+        assert!(!unit_kept);
+        assert!(!dir.path().join("state").exists());
+
+        let (code, stderr, _, dir) = run_purge(|root| {
+            let state = root.join("state");
+            std::fs::create_dir(&state).unwrap();
+            state
+        });
+        assert_eq!(code, Some(0), "{stderr}");
+        assert!(!dir.path().join("state").exists());
+    }
+
+    #[test]
+    fn the_install_refuses_to_adopt_a_foreign_or_linked_state_directory() {
+        const INSTALL_SCRIPT: &str = include_str!("../../../deploy/fleetd/install.sh");
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        std::fs::create_dir(root.join("archive")).unwrap();
+        std::fs::write(root.join("archive/fleetd.service"), "").unwrap();
+        std::fs::write(root.join("archive/fleetd"), "#!/bin/sh\nexit 0\n").unwrap();
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            std::fs::set_permissions(
+                root.join("archive/fleetd"),
+                std::fs::Permissions::from_mode(0o755),
+            )
+            .unwrap();
+        }
+        let foreign = root.join("foreign");
+        std::fs::create_dir(&foreign).unwrap();
+        std::fs::write(foreign.join("data"), "not fleetd's").unwrap();
+        let link = root.join("link");
+        std::os::unix::fs::symlink(&foreign, &link).unwrap();
+        for (state, why) in [(&foreign, "not fleetd's"), (&link, "symbolic link")] {
+            let output = std::process::Command::new("bash")
+                .arg("-c")
+                .arg(INSTALL_SCRIPT)
+                .arg(root.join("archive/install.sh"))
+                .env("FLEETD_ARCHIVE_DIR", root.join("archive"))
+                .env("FLEETD_STATE_DIR", state)
+                .env("FLEETD_BIN_DIR", root.join("bin"))
+                .env("FLEETD_UNIT_DIR", root.join("unit"))
+                .env("FLEETD_ENV_FILE", root.join("env"))
+                .env("FLEETD_SYSTEMCTL", "/bin/true")
+                .env("FLEETD_USER_ADD", "/bin/true")
+                .output()
+                .unwrap();
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            assert_ne!(output.status.code(), Some(0), "{stderr}");
+            assert!(stderr.contains(why), "{stderr}");
+            assert!(
+                !root.join("bin").exists(),
+                "nothing was installed: {stderr}"
+            );
+        }
+        assert!(foreign.join("data").exists());
+    }
+
+    #[test]
+    fn an_active_service_without_its_unit_is_not_removed() {
+        // systemctl answers 0 to everything, so `is-active` says active.
+        let (code, stderr, calls) = run_uninstall(false, 0);
+        assert_ne!(code, Some(0), "{stderr}");
+        assert!(stderr.contains("still active"), "{stderr}");
+        assert!(calls.contains("is-active"), "{calls}");
     }
 
     #[test]

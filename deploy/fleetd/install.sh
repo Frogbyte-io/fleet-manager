@@ -160,6 +160,17 @@ trap cleanup EXIT
 # Ownership flags derive from the account's actual existence: a stubbed
 # useradd (tests) creates nothing, and `install -o fleet` would then fail
 # even as root.
+# The state directory becomes the service account's, and an uninstall with
+# --purge deletes it: never adopt a symlink, or a non-empty directory that is
+# not already fleetd's (it would hold fleetd's node key).
+if [ -L "$STATE_DIR" ]; then
+    die "the state directory $STATE_DIR is a symbolic link; refusing to adopt it"
+fi
+if [ -d "$STATE_DIR" ] \
+    && [ -n "$("${RUN_PRIV[@]}" find "$STATE_DIR" -mindepth 1 -maxdepth 1 -print -quit 2>/dev/null)" ] \
+    && ! "${RUN_PRIV[@]}" test -f "$STATE_DIR/node.key"; then
+    die "the state directory $STATE_DIR already holds files that are not fleetd's (no node.key); refusing to adopt it"
+fi
 if ! getent passwd "$SERVICE_USER" >/dev/null 2>&1; then
     "${RUN_PRIV[@]}" "$USER_ADD" --system --user-group --home-dir "$STATE_DIR" \
         --shell /usr/sbin/nologin "$SERVICE_USER" \

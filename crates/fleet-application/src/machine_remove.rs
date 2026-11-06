@@ -1062,7 +1062,12 @@ impl MachineRemoval {
         // The layout reaches a root script that deletes FLEETD_STATE_DIR: a
         // recorded value that breaks a rule refuses the uninstall.
         for (name, value) in &layout {
-            crate::fleetd_layout::validate_installer_variable(name, value).map_err(|reason| {
+            crate::fleetd_layout::validate_installer_variable(
+                name,
+                value,
+                crate::fleetd_layout::InstallerTools::System,
+            )
+            .map_err(|reason| {
                 MachineRemovalError::Conflict {
                     detail: format!(
                         "the layout recorded by machine {}'s last fleetd install is not safe to uninstall with ({reason}); remove the machine without --uninstall and remove fleetd by hand",
