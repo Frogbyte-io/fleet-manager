@@ -12,8 +12,9 @@ name: Release
 #
 # This is the "own workflow, own trigger, own scoped credentials" that
 # .github/SECURITY.md reserves for release automation. The only credential is
-# the per-run GITHUB_TOKEN, and only the publish job may write (contents:
-# write, to create the release and its tag). Builds run on GitHub-hosted
+# the per-run GITHUB_TOKEN, and only two jobs may write (contents: write):
+# publish, to create the release and its tag, and latest, to move the
+# "latest" marker. Builds run on GitHub-hosted
 # runners, not the shared self-hosted dev box, so no write-scoped run touches
 # that machine. Provenance attestations need id-token: write and
 # attestations: write, which check-workflows.mjs refuses; they are a

@@ -12,7 +12,10 @@ fn main() -> ExitCode {
         println!("fleetctl {}", env!("CARGO_PKG_VERSION"));
     }
 
-    match fleetctl::parse(&args) {
+    match fleetctl::parse_with_environment(
+        &args,
+        &fleetctl::controller_url::ClientEnvironment::from_process(),
+    ) {
         Ok(invocation) => match fleetctl::run_with_exit(&invocation) {
             Ok((text, code)) => {
                 println!("{text}");

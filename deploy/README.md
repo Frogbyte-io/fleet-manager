@@ -132,6 +132,14 @@ pinned versions are the same ones CI pins in
 
 `fleetctl` is a single binary. There are two places to get one:
 
+- **From a GitHub release (preferred).** Every merge to `main` publishes a
+  release tagged `v<version>-<commit>` with `fleetctl-linux-x86_64`,
+  `fleetctl-linux-aarch64`, `fleetctl-windows-x86_64.exe`, and `SHA256SUMS`.
+  Pick the release whose commit matches your controller. The binaries and
+  `SHA256SUMS` come over HTTPS from GitHub, so the checksum also shows the
+  file is the one the release workflow built. The Linux binaries are static
+  (musl) and run on any distribution; the Windows binary needs no Visual C++
+  runtime. Releases exist only for commits merged to `main`.
 - **From your controller.** `GET /downloads/fleetctl/<platform>` serves the
   `fleetctl` built from the same commit as the controller, and
   `/downloads/fleetctl/<platform>.sha256` serves its SHA-256 in `sha256sum`
@@ -140,41 +148,24 @@ pinned versions are the same ones CI pins in
   `linux-aarch64` on an arm64 host. Other platforms answer 404 unless you put
   the release binary in `<FLEET_DATA_DIR>/artifacts/fleetctl/` under its
   release name (`fleetctl-windows-x86_64.exe`, for example). The routes sit
-  behind the same caller check as the rest of the listener, so a machine that
-  can use the controller can download from it.
-- **From a GitHub release.** Every merge to `main` publishes a release tagged
-  `v<version>-<commit>` with `fleetctl-linux-x86_64`, `fleetctl-linux-aarch64`,
-  `fleetctl-windows-x86_64.exe`, and `SHA256SUMS`. Pick the release whose
-  commit matches your controller. The release's Linux binaries are static
-  (musl) and run on any distribution; the Windows binary needs no Visual C++
-  runtime. The controller's own copy is built in its Debian 12 image and needs
-  glibc 2.36 or newer (Debian 12, Ubuntu 23.04, or later); on an older
-  system such as Ubuntu 22.04, use the release binary.
+  behind the same caller check as the rest of the listener. This copy is
+  built in the Debian 12 image and needs glibc 2.36 or newer (Debian 12,
+  Ubuntu 23.04, or later); on Ubuntu 22.04, use the release binary.
 
-Each snippet below runs in a subshell or script block that stops at the
-first failure, so a download that fails its checksum is deleted and never
-installed or run.
+  **The controller's checksum detects corruption, not tampering.** Over
+  `http://...:8080` the binary and its `.sha256` come from the same
+  unauthenticated origin, so anyone on the path can replace both. For
+  integrity, compare against the release's `SHA256SUMS` from GitHub, or
+  download through the controller's Tailscale Serve HTTPS URL
+  (`https://controller.example.ts.net`).
 
-On Linux, from the controller. `uname -m` picks the platform; the controller
-answers 404 if it does not carry that one:
+Each snippet below stops at the first failure. It checks the download and
+runs `--version` from a temporary directory, and only then replaces the
+installed copy, so a corrupt binary or one that cannot run on this machine
+never replaces a working one.
 
-```sh
-(
-  set -eu
-  url=http://controller.example.ts.net:8080
-  platform="linux-$(uname -m)"
-  tmp="$(mktemp -d)"
-  trap 'rm -rf "$tmp"' EXIT
-  cd "$tmp"
-  curl -fsSLo fleetctl "$url/downloads/fleetctl/$platform"
-  curl -fsSLo fleetctl.sha256 "$url/downloads/fleetctl/$platform.sha256"
-  sha256sum --check --strict fleetctl.sha256
-  install -D -m 0755 fleetctl ~/.local/bin/fleetctl
-  ~/.local/bin/fleetctl --version
-)
-```
-
-Or from a release (`<tag>` is the release tag, for example `v0.1.0-1a2b3c4`):
+On Linux, from a release (`<tag>` is the release tag, for example
+`v0.1.0-1a2b3c4`; `uname -m` picks the platform):
 
 ```sh
 (
@@ -187,37 +178,65 @@ Or from a release (`<tag>` is the release tag, for example `v0.1.0-1a2b3c4`):
   curl -fsSLO "$base/$asset"
   curl -fsSLO "$base/SHA256SUMS"
   grep "  $asset\$" SHA256SUMS | sha256sum --check --strict -
+  chmod 0755 "$asset"
+  "./$asset" --version
   install -D -m 0755 "$asset" ~/.local/bin/fleetctl
-  ~/.local/bin/fleetctl --version
+)
+```
+
+Or from the controller (it answers 404 if it does not carry this platform):
+
+```sh
+(
+  set -eu
+  url=http://controller.example.ts.net:8080
+  platform="linux-$(uname -m)"
+  tmp="$(mktemp -d)"
+  trap 'rm -rf "$tmp"' EXIT
+  cd "$tmp"
+  curl -fsSLo fleetctl "$url/downloads/fleetctl/$platform"
+  curl -fsSLo fleetctl.sha256 "$url/downloads/fleetctl/$platform.sha256"
+  sha256sum --check --strict fleetctl.sha256
+  chmod 0755 fleetctl
+  ./fleetctl --version
+  install -D -m 0755 fleetctl ~/.local/bin/fleetctl
 )
 ```
 
 `sha256sum` must print `OK`. Make sure `~/.local/bin` is on your `PATH`.
 
-On Windows, in PowerShell, from a release. The controller image carries no
-Windows build; if an operator added one, download
-`$url/downloads/fleetctl/windows-x86_64` and its `.sha256` the same way.
+On Windows, in PowerShell. The block downloads from a release; the
+commented lines switch it to a controller that carries a Windows build (the
+controller image does not ship one):
 
 ```powershell
 & {
   $ErrorActionPreference = 'Stop'
   $base = 'https://github.com/Frogbyte-io/fleet-manager/releases/download/<tag>'
-  $asset = 'fleetctl-windows-x86_64.exe'
+  $binaryUrl = "$base/fleetctl-windows-x86_64.exe"
+  $sumsUrl = "$base/SHA256SUMS"
+  # From a controller instead:
+  # $url = 'http://controller.example.ts.net:8080'
+  # $binaryUrl = "$url/downloads/fleetctl/windows-x86_64"
+  # $sumsUrl = "$binaryUrl.sha256"
   $dir = "$env:LOCALAPPDATA\Programs\fleet"
-  $tmp = Join-Path ([IO.Path]::GetTempPath()) $asset
-  Invoke-WebRequest -UseBasicParsing "$base/$asset" -OutFile $tmp
-  $sums = Join-Path ([IO.Path]::GetTempPath()) 'fleetctl-SHA256SUMS'
-  Invoke-WebRequest -UseBasicParsing "$base/SHA256SUMS" -OutFile $sums
-  $line = Get-Content $sums | Where-Object { $_.EndsWith("  $asset") }
+  $tmp = Join-Path ([IO.Path]::GetTempPath()) 'fleetctl-download.exe'
+  $sums = Join-Path ([IO.Path]::GetTempPath()) 'fleetctl-download.sha256'
+  Invoke-WebRequest -UseBasicParsing $binaryUrl -OutFile $tmp
+  Invoke-WebRequest -UseBasicParsing $sumsUrl -OutFile $sums
+  $line = Get-Content $sums |
+    Where-Object { $_ -match '  fleetctl(-windows-x86_64)?\.exe$' } |
+    Select-Object -First 1
   Remove-Item $sums
   $expected = "$line".Split(' ')[0]
   if ($expected -notmatch '^[0-9a-f]{64}$' -or (Get-FileHash $tmp -Algorithm SHA256).Hash -ne $expected) {
     Remove-Item $tmp
     throw 'fleetctl checksum mismatch; nothing was installed'
   }
+  & $tmp --version
+  if ($LASTEXITCODE -ne 0) { Remove-Item $tmp; throw 'fleetctl did not run; nothing was installed' }
   New-Item -ItemType Directory -Force $dir | Out-Null
   Move-Item -Force $tmp "$dir\fleetctl.exe"
-  & "$dir\fleetctl.exe" --version
 }
 ```
 
@@ -225,9 +244,28 @@ Then add that directory to your user `PATH`. On Windows, `fleetctl status`
 without `--url` reports that the local `fleetd` surface is unavailable; every
 other command talks to the controller.
 
-Finally, tell `fleetctl` where the controller is. `--url <controller>` on each
-command always works. Once
-[#614](https://github.com/Frogbyte-io/fleet-manager/issues/614) lands,
-`FLEET_URL` or `url = "<controller>"` in `~/.config/fleet/config.toml`
-(`%APPDATA%\fleet\config.toml` on Windows) sets it once per login.
-`fleetctl --output json system` shows the controller's version.
+Finally, tell `fleetctl` where the controller is. It takes the URL from the
+first of these that is set: `--url <controller>` on the command line, the
+`FLEET_URL` environment variable, then `url` in the config file
+`$XDG_CONFIG_HOME/fleet/config.toml` (or `~/.config/fleet/config.toml` when
+`XDG_CONFIG_HOME` is unset or not absolute; `%APPDATA%\fleet\config.toml` on
+Windows). Set it once per login:
+
+```sh
+(
+  set -eu
+  case "${XDG_CONFIG_HOME:-}" in
+    /*) fleet_config="$XDG_CONFIG_HOME/fleet" ;;
+    *) fleet_config="$HOME/.config/fleet" ;;
+  esac
+  mkdir -p "$fleet_config"
+  printf 'url = "http://controller.example.ts.net:8080"\n' > "$fleet_config/config.toml"
+  fleetctl --output json system   # client.urlSource is "config"
+)
+```
+
+Or export `FLEET_URL=http://controller.example.ts.net:8080` in the login's
+environment; it takes precedence over the file.
+
+`fleetctl --output json system` shows the controller's version and which
+source supplied the URL.

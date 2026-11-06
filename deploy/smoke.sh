@@ -6,8 +6,8 @@
 # Proves the FM-008 acceptance criteria against a real daemon: the stack
 # builds, the container reaches healthy, the controller serves the web shell
 # and the public API, the root filesystem is read-only, and SIGTERM drains
-# into a clean exit. Docker with the compose plugin is required; no other
-# tools beyond curl.
+# into a clean exit. Docker with the compose plugin is required, plus curl
+# and sha256sum (or shasum, on macOS) to check the served fleetctl.
 set -euo pipefail
 cd "$(dirname "$0")"
 
