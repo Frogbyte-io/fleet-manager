@@ -113,6 +113,10 @@ const PROTECTED_DIRECTORIES: [&str; 37] = [
     "/var/tmp",
 ];
 
+/// World-writable system directories a production state directory may not
+/// live under.
+const WORLD_WRITABLE_DIRECTORIES: [&str; 3] = ["/tmp", "/var/tmp", "/dev/shm"];
+
 /// The longest value accepted.
 const MAX_VALUE_BYTES: usize = 1024;
 
@@ -186,6 +190,19 @@ pub fn validate_installer_variable(
         if components.len() < 2 || PROTECTED_DIRECTORIES.contains(&normalized.as_str()) {
             return Err(format!(
                 "installer variable FLEETD_STATE_DIR must be fleetd's own directory, not the system directory {normalized:?} (uninstalling with --purge deletes it)"
+            ));
+        }
+        // The purge refuses a state directory under a group- or
+        // world-writable ancestor, so a production install must not put it
+        // there: an accepted layout stays removable. The hermetic install
+        // tests (installer test mode) keep theirs in temp directories.
+        if tools == InstallerTools::System
+            && let Some(shared) = WORLD_WRITABLE_DIRECTORIES
+                .iter()
+                .find(|shared| normalized.starts_with(&format!("{shared}/")))
+        {
+            return Err(format!(
+                "installer variable FLEETD_STATE_DIR must not be under the world-writable {shared} (uninstalling with --purge refuses such a directory), not {normalized:?}"
             ));
         }
     }
@@ -289,7 +306,7 @@ mod tests {
     #[test]
     fn the_layouts_the_tests_and_defaults_use_are_accepted() {
         ok("FLEETD_STATE_DIR", "/var/lib/fleetd");
-        ok("FLEETD_STATE_DIR", "/tmp/.tmpAbC/state");
+        ok("FLEETD_STATE_DIR", "/srv/fleet/state");
         ok("FLEETD_BIN_DIR", "/usr/local/bin");
         ok("FLEETD_UNIT_DIR", "/etc/systemd/system");
         ok("FLEETD_ENV_FILE", "/etc/default/fleetd");
@@ -298,6 +315,24 @@ mod tests {
         ok("FLEETD_USER_ADD", "/usr/sbin/useradd");
         ok("FLEETD_RUNUSER", "/usr/sbin/runuser");
         ok("FLEETD_ARCHIVE_DIR", "/tmp/fleetd-install.x");
+    }
+
+    #[test]
+    fn a_state_dir_under_a_world_writable_directory_is_refused_in_production() {
+        for dir in [
+            "/tmp/fleetd",
+            "/tmp/.tmpAbC/state",
+            "/var/tmp/fleetd",
+            "/dev/shm/fleetd",
+        ] {
+            let error = refused("FLEETD_STATE_DIR", dir);
+            assert!(error.contains("world-writable"), "{dir}: {error}");
+            // The hermetic install tests keep their state in temp directories.
+            validate_installer_variable("FLEETD_STATE_DIR", dir, InstallerTools::Any)
+                .unwrap_or_else(|error| panic!("test mode {dir}: {error}"));
+        }
+        ok("FLEETD_STATE_DIR", "/var/lib/fleetd");
+        ok("FLEETD_STATE_DIR", "/tmpfleet/state");
     }
 
     #[test]

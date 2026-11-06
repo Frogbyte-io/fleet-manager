@@ -49,7 +49,10 @@ directory that is fleetd's own: an absolute path (trailing slashes are
 stripped first), a real directory (not a symbolic link), owned by the `fleet`
 account, not a system directory, and empty or holding fleetd's `node.key` as
 a regular file. Every ancestor must be a real directory owned by root and not
-writable by group or others. Anything else is refused before anything is
+writable by group or others. On a test layout where no `fleet` account
+exists and a non-root user runs the script (as `install.sh` allows with a
+stubbed `useradd`), the state directory and its ancestors may belong to that
+user instead; run as root without the account, the purge is refused. Anything else is refused before anything is
 removed; the checks run again right before the delete, which stays on one
 file system (`rm -rf --one-file-system`). `uninstall.sh` also stops with an
 error, removing nothing, when the service cannot be stopped (`systemctl
