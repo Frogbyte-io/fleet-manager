@@ -29,7 +29,7 @@
 //! (FM-206/FM-207); this channel carries liveness and negotiation only.
 #![warn(missing_docs)]
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
@@ -93,6 +93,9 @@ pub struct SessionEntry {
     /// The supersede signal: holds a permit when a newer session takes over,
     /// so a loop that is mid-read still observes the takeover on return.
     pub superseded: Arc<tokio::sync::Notify>,
+    /// Set before `superseded` is notified when the machine was removed
+    /// (#616), so the loop audits the closure as such, not as a takeover.
+    pub machine_removed: std::sync::atomic::AtomicBool,
 }
 
 impl SessionEntry {
@@ -113,6 +116,7 @@ impl SessionEntry {
             pending: Arc::new(Mutex::new(HashMap::new())),
             persisted_state: Mutex::new(GatewayState::Offline),
             superseded: Arc::new(tokio::sync::Notify::new()),
+            machine_removed: std::sync::atomic::AtomicBool::new(false),
         }
     }
 
@@ -130,13 +134,25 @@ impl SessionEntry {
 #[derive(Debug, Default)]
 pub struct Registry {
     sessions: Mutex<HashMap<String, Arc<SessionEntry>>>,
+    /// Machines removed from Fleet (#616). Their ids are never reused, so a
+    /// session for one is never registered again. Locked before `sessions`.
+    removed: Mutex<HashSet<String>>,
 }
 
 impl Registry {
     /// Inserts a session, superseding any previous one for the machine.
-    /// Returns the superseded entry so its loop can drain it.
-    fn insert(&self, machine_id: &str, entry: Arc<SessionEntry>) -> Option<Arc<SessionEntry>> {
+    /// Returns the superseded entry so its loop can drain it, or `Err` when
+    /// the machine was removed (nothing is registered or superseded then).
+    fn insert(
+        &self,
+        machine_id: &str,
+        entry: Arc<SessionEntry>,
+    ) -> Result<Option<Arc<SessionEntry>>, ()> {
         let superseded = {
+            let removed = self.removed.lock().expect("uncontended");
+            if removed.contains(machine_id) {
+                return Err(());
+            }
             let mut sessions = self.sessions.lock().expect("uncontended");
             sessions
                 .insert(machine_id.to_owned(), entry)
@@ -150,7 +166,7 @@ impl Registry {
                 old.boot_session
             );
         }
-        superseded
+        Ok(superseded)
     }
 
     /// Removes the session if it is still the registered one; a superseded
@@ -278,13 +294,20 @@ impl GatewayService {
         Ok(ws
             .protocols([NODE_SUBPROTOCOL])
             .on_upgrade(move |socket| async move {
-                self_arc.serve_session(socket, machine_id).await;
+                self_arc
+                    .serve_session(socket, machine_id, session_token)
+                    .await;
             }))
     }
 
     /// One connected node session: negotiate, then serve heartbeats until
     /// the socket closes or a newer session supersedes this one.
-    async fn serve_session(self: Arc<Self>, socket: WebSocket, machine_id: String) {
+    async fn serve_session(
+        self: Arc<Self>,
+        socket: WebSocket,
+        machine_id: String,
+        session_token: String,
+    ) {
         let (mut sender, mut receiver) = socket.split();
         let now = fleet_core::SystemClock::now_unix_millis();
         let boot_session = Uuid::now_v7().to_string();
@@ -346,8 +369,40 @@ impl GatewayService {
             now,
             outbound_tx,
         ));
-        if self.registry.insert(&machine_id, entry.clone()).is_some() {
-            self.audit_event(&machine_id, "gateway_superseded");
+        // The session was validated before the upgrade, and the handshake
+        // took time: a machine removed since (#616) deleted its node identity
+        // and sessions. Validate again BEFORE registering, failing closed:
+        // a session no longer valid, or a store that cannot say, refuses this
+        // connection and leaves any older session untouched. A removal that
+        // lands between this check and the registration is caught by the
+        // registry, which never registers a session for a removed machine.
+        match self.nodes.validate_session(&session_token).await {
+            Ok(SessionValidity::Valid { .. }) => {}
+            other => {
+                if let Err(error) = &other {
+                    eprintln!(
+                        "node gateway: refusing machine {machine_id}: the session could not be re-checked: {error}"
+                    );
+                }
+                send_fault(
+                    &mut sender,
+                    ProtocolFault::new(wire::FaultCode::SessionRejected),
+                )
+                .await;
+                return;
+            }
+        }
+        match self.registry.insert(&machine_id, entry.clone()) {
+            Ok(Some(_)) => self.audit_event(&machine_id, "gateway_superseded"),
+            Ok(None) => {}
+            Err(()) => {
+                send_fault(
+                    &mut sender,
+                    ProtocolFault::new(wire::FaultCode::SessionRejected),
+                )
+                .await;
+                return;
+            }
         }
 
         let welcome = wire::Frame {
@@ -390,7 +445,12 @@ impl GatewayService {
             tokio::select! {
                 _ = entry.superseded.notified() => {
                     send_fault(&mut sender, ProtocolFault::new(wire::FaultCode::SessionRejected)).await;
-                    self.audit_event(&machine_id, "gateway_superseded");
+                    let event = if entry.machine_removed.load(Ordering::SeqCst) {
+                        "gateway_closed_machine_removed"
+                    } else {
+                        "gateway_superseded"
+                    };
+                    self.audit_event(&machine_id, event);
                     self.finish_session(&machine_id, &boot_session, &entry).await;
                     return;
                 }
@@ -589,6 +649,32 @@ impl GatewayService {
             .expect("uncontended")
             .get(machine_id)
             .cloned()
+    }
+
+    /// Ends a machine's live session the way a newer session supersedes it:
+    /// the loop sends the node a fault and closes. Used when the machine is
+    /// removed (#616), so its node is not left connected to nothing. Answers
+    /// whether a session was open.
+    #[must_use]
+    pub fn close_session(&self, machine_id: &str) -> bool {
+        // Tombstone first, under the same lock order as registration, so a
+        // connection that passed its checks before the delete cannot register
+        // after this close.
+        let entry = {
+            let mut removed = self.registry.removed.lock().expect("uncontended");
+            removed.insert(machine_id.to_owned());
+            self.registry
+                .sessions
+                .lock()
+                .expect("uncontended")
+                .get(machine_id)
+                .cloned()
+        };
+        entry.is_some_and(|entry| {
+            entry.machine_removed.store(true, Ordering::SeqCst);
+            entry.superseded.notify_one();
+            true
+        })
     }
 
     /// Dispatches one command to a live node and awaits its result.

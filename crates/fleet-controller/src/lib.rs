@@ -38,6 +38,7 @@ pub mod lab_put_store;
 pub mod lab_ssh_keys;
 pub mod lab_sweeper;
 pub mod machine_access;
+pub mod machine_remove;
 pub mod machine_terminal;
 pub mod machine_usb;
 pub mod mise;
@@ -125,6 +126,10 @@ pub struct NodeServices {
     /// The site-template use cases (FM-1035); set with the lifecycle use
     /// cases, absent otherwise.
     pub site_templates: Option<Arc<fleet_application::site_templates::SiteTemplates>>,
+    /// Installer test mode (#616): the API accepts any absolute tool path
+    /// and the stub log in a `machine.install-fleetd`'s `installerEnv`.
+    /// Only hermetic install tests set it; the controller binary never does.
+    pub installer_test_tools: bool,
 }
 
 fn event_hub_for_services(
@@ -195,6 +200,7 @@ pub fn compose_node_services_with_events(
         coolify_lifecycle: None,
         coolify_settings: None,
         site_templates: None,
+        installer_test_tools: false,
         nodes,
         gateway,
         events,
@@ -399,6 +405,7 @@ fn api_state(
     lab: Option<Arc<fleet_application::lab::Lab>>,
     git_credentials: Option<Arc<dyn fleet_application::source::GitCredentialStore>>,
     events: Arc<fleet_application::events::EventHub>,
+    installer_test_tools: bool,
 ) -> fleet_api::operations::ApiState {
     // One grant book joins the credential resolver (which registers the
     // allow-list a request authenticated with) and the authorizer (which
@@ -451,8 +458,12 @@ fn api_state(
             persistent_bounds_from_env().unwrap_or_default(),
             Some(request_store.clone()),
         );
-        let operations =
-            std::sync::Arc::new(operations.with_brokered_kinds(action_registry.operation_kinds()));
+        let operations = operations.with_brokered_kinds(action_registry.operation_kinds());
+        let operations = std::sync::Arc::new(if installer_test_tools {
+            operations.with_installer_test_tools()
+        } else {
+            operations
+        });
         let requests = fleet_application::broker::Broker::new(
             request_store,
             action_registry,
@@ -727,6 +738,7 @@ fn build_router_for_caller(
         lab.cloned(),
         services.and_then(|services| services.git_credentials.clone()),
         events,
+        services.is_some_and(|services| services.installer_test_tools),
     ));
     let credentials = api_state.credentials.clone();
     let console_authorizer = api_state.authorizer.clone();

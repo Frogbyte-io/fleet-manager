@@ -175,6 +175,46 @@ use `--review-only` first when unsure. A failed creation keeps the VM and names
 the `step` that failed; re-running the same command resumes it. Destroying a
 persistent VM is a separate, confirmed act by the user.
 
+### Removing a machine
+
+Do not remove a machine or revoke its node unless the user asked you to.
+Removal deletes the machine from Fleet: its record, endpoints, facts, node
+identity, recorded skill installs and stored keys, including a stored Windows
+administrator password. It cannot be undone; the machine has to be onboarded
+again. When asked, review first and show the user what the review says:
+
+```bash
+fleetctl --output json machines remove <machine-id> --review-only
+fleetctl --output json machines remove <machine-id> --yes
+```
+
+The review answers `unpinHosts` (pinned host keys that go), `keptHosts`
+(shared with another machine, so they stay), `footprint` (what is removed, and
+`collectedFilesKept`, the collected files that stay until their retention
+pass), `warnings` (show every one to the user before confirming) and
+`blockers`. A non-empty `blockers` list means the removal is refused; each
+entry's `detail` says what to do (destroy a Lab lease, drain a Lab pool member,
+unregister a persistent VM, detach a USB device, wait for an operation, or
+start the controller with its secret store). Report it to the user; do not
+clear blockers yourself.
+
+Without `--uninstall` nothing on the machine is touched. Add
+`--uninstall --endpoint <endpoint-id>` only when the user asked for fleetd to
+be removed from the machine: it runs the fleetd uninstall over SSH first and
+deletes the node's state there, and a failed uninstall leaves the machine
+registered.
+
+To keep the machine and revoke only its node instead (an alternative to
+removal, not a step after it):
+
+```bash
+fleetctl --output json nodes revoke <machine-id> --yes
+```
+
+This revokes the node identity with every node credential and session, so the
+running fleetd loses its access at once; the machine record stays, and fleetd
+cannot connect again until it is enrolled again.
+
 ## Projects
 
 ```bash
