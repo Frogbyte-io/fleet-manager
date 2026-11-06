@@ -28,6 +28,12 @@
 //! acting on operations callers already created, and minting is part of that
 //! work — the use case's own authorization funnel and audit event record it.
 //! There is deliberately no path that skips the funnel.
+//!
+//! After a successful install the executor runs the machine-setup hook
+//! (#600) as the same trusted principal: it queues a pinned Skills Manager
+//! install through the authorized, audited operation path, and the result
+//! reports what it did as `skillsManager`. The hook is best effort — the
+//! install has already succeeded, and nothing it answers changes that.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -36,7 +42,9 @@ use async_trait::async_trait;
 
 use fleet_application::authz::ActingPrincipal;
 use fleet_application::machine::MachinePort;
+use fleet_application::machine_setup::{MachineSetup, MachineSetupPort, SetupFollowUp};
 use fleet_application::node::Nodes;
+use fleet_application::onboarding::OnboardAuth;
 use fleet_application::operation::{Operation, Operations};
 use fleet_application::worker::OperationExecutor;
 use fleet_provider_ssh::{ExecutionLimiter, SshAuth, SshProvider};
@@ -130,6 +138,9 @@ pub struct InstallExecutor {
     /// from here. Absent in most tests, which supply explicit artifacts.
     artifacts_dir: Option<std::path::PathBuf>,
     fallback: Arc<dyn OperationExecutor>,
+    /// The follow-up run after a successful install (#600); absent when the
+    /// controller setting turns it off.
+    setup_hook: Option<Arc<dyn MachineSetupPort>>,
 }
 
 impl InstallExecutor {
@@ -160,7 +171,43 @@ impl InstallExecutor {
             limiter,
             artifacts_dir,
             fallback,
+            setup_hook: None,
         }
+    }
+
+    /// Runs `hook` after every successful install (#600).
+    #[must_use]
+    pub fn with_setup_hook(mut self, hook: Arc<dyn MachineSetupPort>) -> Self {
+        self.setup_hook = Some(hook);
+        self
+    }
+
+    /// The setup follow-up for a successful install. Never fails the
+    /// install: a failure is logged and reported in the result.
+    async fn setup_follow_up(&self, operation_id: &str, payload: &InstallPayload) -> SetupFollowUp {
+        let Some(hook) = &self.setup_hook else {
+            return SetupFollowUp::Disabled;
+        };
+        let auth = match &payload.auth {
+            InstallAuth::Agent => OnboardAuth::Agent,
+            InstallAuth::IdentityFile { path } => OnboardAuth::IdentityFile { path: path.clone() },
+        };
+        let outcome = hook
+            .machine_set_up(
+                &fleet_auth::LanAllowAllAuthorizer,
+                fleet_auth::LAN_PRINCIPAL_ID,
+                &MachineSetup {
+                    machine_id: payload.machine_id.clone(),
+                    endpoint_id: payload.endpoint_id.clone(),
+                    auth,
+                    trigger: operation_id.to_owned(),
+                },
+            )
+            .await;
+        if let SetupFollowUp::Failed { reason } = &outcome {
+            eprintln!("install {operation_id}: the setup follow-up was not queued: {reason}");
+        }
+        outcome
     }
 }
 
@@ -388,12 +435,14 @@ impl InstallExecutor {
             .await
         {
             Ok(facts) => {
+                let skills_manager = self.setup_follow_up(&operation.id, &payload).await;
                 let result_json = serde_json::json!({
                     "connected": true,
                     "machineId": payload.machine_id,
                     "controllerUrl": controller_url,
                     "artifact": artifact_name,
                     "inventoryFacts": facts,
+                    "skillsManager": skills_manager,
                 })
                 .to_string();
                 operations

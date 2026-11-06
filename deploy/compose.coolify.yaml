@@ -45,6 +45,9 @@ services:
       # Periodic fetch of the Fleet Git source (FM-1014); 0 is off, otherwise
       # at least 30 seconds. Registry-only revisions auto-activate.
       FLEET_DESIRED_FETCH_INTERVAL_SECONDS: ${FLEET_DESIRED_FETCH_INTERVAL_SECONDS:-0}
+      # Skills Manager install after a machine is set up (#600); empty keeps
+      # the default (on), `false` turns it off.
+      FLEET_SKILLS_MANAGER_AUTO_INSTALL: ${FLEET_SKILLS_MANAGER_AUTO_INSTALL:-}
       # Domain RDAP/DNS enrichment (FM-1020); empty keeps the controller's
       # defaults (daily sweep, 30-day expiry window). 0 turns the sweep off.
       FLEET_REGISTRY_ENRICH_INTERVAL_SECONDS: ${FLEET_REGISTRY_ENRICH_INTERVAL_SECONDS:-}

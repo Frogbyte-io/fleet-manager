@@ -214,6 +214,22 @@ fn run_serve(mut config: fleet_config::ControllerConfig) -> ExitCode {
             )
             .with_brokered_kinds(fleet_controller::brokered_operation_kinds()),
         );
+        // #600: after a fleetd install or an onboarding add, queue a pinned
+        // Skills Manager install, unless the operator turned it off.
+        let skills_setup: Option<
+            std::sync::Arc<dyn fleet_application::machine_setup::MachineSetupPort>,
+        > = if config.skills_manager_auto_install {
+            Some(std::sync::Arc::new(
+                fleet_controller::skills_setup::SkillsManagerSetup::new(
+                    std::sync::Arc::new(fleet_storage_sqlite::MachineRepository::new(
+                        store.pool().clone(),
+                    )),
+                    worker_operations.clone(),
+                ),
+            ))
+        } else {
+            None
+        };
         let (worker_shutdown, worker_shutdown_rx) = tokio::sync::oneshot::channel::<()>();
         let (image_sweep_shutdown, image_sweep_shutdown_rx) = tokio::sync::oneshot::channel::<()>();
         // FM-721: Lab artifact bytes live in the configured directory; the
@@ -528,7 +544,7 @@ fn run_serve(mut config: fleet_config::ControllerConfig) -> ExitCode {
             let with_install: std::sync::Arc<dyn fleet_application::worker::OperationExecutor> =
                 match &services {
                     Some(services) => {
-                        std::sync::Arc::new(fleet_controller::install::InstallExecutor::new(
+                        let install = fleet_controller::install::InstallExecutor::new(
                             std::sync::Arc::new(fleet_storage_sqlite::MachineRepository::new(
                                 store.pool().clone(),
                             )),
@@ -538,7 +554,11 @@ fn run_serve(mut config: fleet_config::ControllerConfig) -> ExitCode {
                             limiter.clone(),
                             Some(config.data_dir.join("artifacts")),
                             onboarding,
-                        ))
+                        );
+                        std::sync::Arc::new(match &skills_setup {
+                            Some(hook) => install.with_setup_hook(hook.clone()),
+                            None => install,
+                        })
                     }
                     None => onboarding,
                 };
@@ -1465,10 +1485,14 @@ fn run_serve(mut config: fleet_config::ControllerConfig) -> ExitCode {
         // The Add Machine workflow serves whenever the store is open: it
         // needs the draft repository, the machine use cases, and the SSH
         // trust adapter over the controller's SSH work directory.
-        let onboarding = std::sync::Arc::new(fleet_controller::compose_onboarding(
-            store.pool(),
-            config.data_dir.join("ssh"),
-        ));
+        let onboarding = {
+            let onboarding =
+                fleet_controller::compose_onboarding(store.pool(), config.data_dir.join("ssh"));
+            std::sync::Arc::new(match &skills_setup {
+                Some(hook) => onboarding.with_setup_hook(hook.clone()),
+                None => onboarding,
+            })
+        };
         // The Tailscale discovery composes only over a secret store: its
         // OAuth client lives there. Without it the surface serves the
         // standard "unavailable" envelope.

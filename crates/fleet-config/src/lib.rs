@@ -49,6 +49,13 @@
 //! nodes and up to 512 guest configs. Above 900 seconds the inventory's
 //! observation bound makes devices read as stale between refreshes.
 //!
+//! `FLEET_SKILLS_MANAGER_AUTO_INSTALL` (TOML `skills_manager_auto_install`,
+//! default `true`) makes the controller queue a pinned, checksum-verified
+//! `skills.probe` after a successful `machine.install-fleetd` and after an
+//! SSH onboarding add (#600), so a machine Fleet sets up ends with the tested
+//! `skills-manager-cli`. `false` turns the follow-up off; any other value
+//! fails configuration loading.
+//!
 //! `FLEET_DESIRED_FETCH_INTERVAL_SECONDS` (TOML
 //! `desired_fetch_interval_seconds`, default `0` = off) makes the
 //! controller fetch the configured desired source's head periodically; a
@@ -110,6 +117,9 @@ pub const HARDWARE_REFRESH_INTERVAL_VAR: &str = "FLEET_HARDWARE_REFRESH_INTERVAL
 pub const DEFAULT_HARDWARE_REFRESH_INTERVAL_SECONDS: u64 = 600;
 /// The shortest allowed non-zero hardware refresh interval, in seconds.
 pub const MIN_HARDWARE_REFRESH_INTERVAL_SECONDS: u64 = 60;
+/// Environment variable turning the Skills Manager follow-up install off
+/// (`false`) or on (`true`, the default) (#600).
+pub const SKILLS_MANAGER_AUTO_INSTALL_VAR: &str = "FLEET_SKILLS_MANAGER_AUTO_INSTALL";
 /// Environment variable holding the periodic desired-source fetch interval
 /// in seconds (`0`, the default, disables the periodic fetch).
 pub const DESIRED_FETCH_INTERVAL_VAR: &str = "FLEET_DESIRED_FETCH_INTERVAL_SECONDS";
@@ -202,6 +212,9 @@ pub struct ControllerConfig {
     /// head, in seconds; `0` (the default) disables the periodic fetch. A
     /// non-zero value must be at least [`MIN_DESIRED_FETCH_INTERVAL_SECONDS`].
     pub desired_fetch_interval_seconds: u64,
+    /// Whether the controller queues a pinned Skills Manager install after a
+    /// machine is set up (fleetd install or onboarding add). Default `true`.
+    pub skills_manager_auto_install: bool,
     /// Where Lab artifact bytes live (FM-721). The controller prepares it at
     /// startup and serves without Lab artifacts when it cannot.
     pub lab_artifacts_dir: PathBuf,
@@ -381,6 +394,7 @@ struct ConfigFile {
     lab_sweep_interval_seconds: Option<u64>,
     hardware_refresh_interval_seconds: Option<u64>,
     desired_fetch_interval_seconds: Option<u64>,
+    skills_manager_auto_install: Option<bool>,
     lab_memory_overcommit: Option<f64>,
     lab_cpu_overcommit: Option<f64>,
     lab_capacity_max_age_seconds: Option<u64>,
@@ -441,6 +455,11 @@ pub enum ConfigError {
     /// seconds of at least the minimum.
     HardwareRefreshIntervalInvalid {
         /// The value that failed to parse or validate.
+        value: String,
+    },
+    /// The Skills Manager auto-install switch is not `true` or `false`.
+    SkillsManagerAutoInstallInvalid {
+        /// The value that failed to parse.
         value: String,
     },
     /// The Lab sweeper interval is not a whole number of seconds.
@@ -565,6 +584,10 @@ impl fmt::Display for ConfigError {
                 f,
                 "{HARDWARE_REFRESH_INTERVAL_VAR} must be 0 (off) or a whole number of seconds of at least {MIN_HARDWARE_REFRESH_INTERVAL_SECONDS}, not {value:?}"
             ),
+            Self::SkillsManagerAutoInstallInvalid { value } => write!(
+                f,
+                "{SKILLS_MANAGER_AUTO_INSTALL_VAR} must be true or false, not {value:?}"
+            ),
             Self::LabSweepIntervalInvalid { value } => write!(
                 f,
                 "{LAB_SWEEP_INTERVAL_VAR} must be a whole number of seconds (0 disables the sweeper), not {value:?}"
@@ -649,6 +672,7 @@ pub fn load(
     let mut lab_sweep_interval_seconds: Option<u64> = None;
     let mut hardware_refresh_interval_seconds: Option<u64> = None;
     let mut desired_fetch_interval_seconds: Option<u64> = None;
+    let mut skills_manager_auto_install: Option<bool> = None;
     let mut lab_placement = LabPlacementConfig::default();
     let mut lab_artifacts_dir: Option<String> = None;
     let mut lab_artifact_retention_seconds: Option<u64> = None;
@@ -681,6 +705,7 @@ pub fn load(
         lab_sweep_interval_seconds = file.lab_sweep_interval_seconds;
         hardware_refresh_interval_seconds = file.hardware_refresh_interval_seconds;
         desired_fetch_interval_seconds = file.desired_fetch_interval_seconds;
+        skills_manager_auto_install = file.skills_manager_auto_install;
         if let Some(ratio) = file.lab_memory_overcommit {
             lab_placement.memory_overcommit = ratio;
         }
@@ -752,6 +777,14 @@ pub fn load(
             value: value.to_string(),
         });
     }
+    // An empty value (a Compose `${VAR:-}` default) means unset.
+    if let Some(raw) = env(SKILLS_MANAGER_AUTO_INSTALL_VAR).filter(|raw| !raw.trim().is_empty()) {
+        skills_manager_auto_install = Some(match raw.trim().to_ascii_lowercase().as_str() {
+            "true" | "1" => true,
+            "false" | "0" => false,
+            _ => return Err(ConfigError::SkillsManagerAutoInstallInvalid { value: raw }),
+        });
+    }
     let lab_placement = layer_lab_placement(lab_placement, env)?;
 
     lab_artifacts_dir = env(LAB_ARTIFACTS_DIR_VAR).or(lab_artifacts_dir);
@@ -809,6 +842,7 @@ pub fn load(
         hardware_refresh_interval_seconds: hardware_refresh_interval_seconds
             .unwrap_or(DEFAULT_HARDWARE_REFRESH_INTERVAL_SECONDS),
         desired_fetch_interval_seconds: desired_fetch_interval_seconds.unwrap_or(0),
+        skills_manager_auto_install: skills_manager_auto_install.unwrap_or(true),
         lab_placement,
         image_build_proxy,
         image_build_address_pool,
@@ -1172,6 +1206,10 @@ impl ControllerConfig {
                 } else {
                     ""
                 }
+            ),
+            format!(
+                "skills_manager_auto_install = {}",
+                self.skills_manager_auto_install
             ),
             format!("lab_artifacts_dir = {}", self.lab_artifacts_dir.display()),
             format!(

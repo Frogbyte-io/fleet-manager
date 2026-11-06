@@ -332,6 +332,7 @@ fn validation_creates_the_state_directory() {
         master_key_file: None,
         lab_sweep_interval_seconds: 60,
         hardware_refresh_interval_seconds: 600,
+        skills_manager_auto_install: true,
         desired_fetch_interval_seconds: 0,
         lab_artifacts_dir: dir.path().join("lab-artifacts"),
         lab_artifact_retention_seconds: fleet_config::DEFAULT_LAB_ARTIFACT_RETENTION_SECONDS,
@@ -361,6 +362,7 @@ fn an_uncreatable_state_directory_fails_validation() {
         master_key_file: None,
         lab_sweep_interval_seconds: 60,
         hardware_refresh_interval_seconds: 600,
+        skills_manager_auto_install: true,
         desired_fetch_interval_seconds: 0,
         lab_artifacts_dir: dir.path().join("lab-artifacts"),
         lab_artifact_retention_seconds: fleet_config::DEFAULT_LAB_ARTIFACT_RETENTION_SECONDS,
@@ -386,6 +388,7 @@ fn a_missing_master_key_file_fails_validation() {
         master_key_file: Some(dir.path().join("absent_key")),
         lab_sweep_interval_seconds: 60,
         hardware_refresh_interval_seconds: 600,
+        skills_manager_auto_install: true,
         desired_fetch_interval_seconds: 0,
         lab_artifacts_dir: dir.path().join("lab-artifacts"),
         lab_artifact_retention_seconds: fleet_config::DEFAULT_LAB_ARTIFACT_RETENTION_SECONDS,
@@ -411,6 +414,7 @@ fn a_directory_as_master_key_path_is_not_a_file() {
         master_key_file: Some(dir.path().to_path_buf()),
         lab_sweep_interval_seconds: 60,
         hardware_refresh_interval_seconds: 600,
+        skills_manager_auto_install: true,
         desired_fetch_interval_seconds: 0,
         lab_artifacts_dir: dir.path().join("lab-artifacts"),
         lab_artifact_retention_seconds: fleet_config::DEFAULT_LAB_ARTIFACT_RETENTION_SECONDS,
@@ -442,6 +446,7 @@ fn a_group_or_world_readable_master_key_file_is_unsafe() {
             master_key_file: Some(key.clone()),
             lab_sweep_interval_seconds: 60,
             hardware_refresh_interval_seconds: 600,
+            skills_manager_auto_install: true,
             desired_fetch_interval_seconds: 0,
             lab_artifacts_dir: dir.path().join("lab-artifacts"),
             lab_artifact_retention_seconds: fleet_config::DEFAULT_LAB_ARTIFACT_RETENTION_SECONDS,
@@ -471,6 +476,7 @@ fn a_group_or_world_readable_master_key_file_is_unsafe() {
         master_key_file: Some(key),
         lab_sweep_interval_seconds: 60,
         hardware_refresh_interval_seconds: 600,
+        skills_manager_auto_install: true,
         desired_fetch_interval_seconds: 0,
         lab_artifacts_dir: dir.path().join("lab-artifacts"),
         lab_artifact_retention_seconds: fleet_config::DEFAULT_LAB_ARTIFACT_RETENTION_SECONDS,
@@ -509,6 +515,7 @@ fn no_diagnostic_surface_contains_secret_material() {
         master_key_file: Some(key.clone()),
         lab_sweep_interval_seconds: 60,
         hardware_refresh_interval_seconds: 600,
+        skills_manager_auto_install: true,
         desired_fetch_interval_seconds: 0,
         lab_artifacts_dir: dir.path().join("lab-artifacts"),
         lab_artifact_retention_seconds: fleet_config::DEFAULT_LAB_ARTIFACT_RETENTION_SECONDS,
@@ -584,6 +591,61 @@ fn the_lab_sweep_interval_defaults_and_layers() {
     )
     .unwrap();
     assert_eq!(overridden.lab_sweep_interval_seconds, 15);
+}
+
+#[test]
+fn the_skills_manager_auto_install_defaults_on_and_can_be_turned_off() {
+    let config = fleet_config::load(None, &|_| None).unwrap();
+    assert!(config.skills_manager_auto_install);
+    assert!(
+        config
+            .summary()
+            .contains("skills_manager_auto_install = true")
+    );
+    let env = |value: &'static str| {
+        move |key: &str| {
+            (key == fleet_config::SKILLS_MANAGER_AUTO_INSTALL_VAR).then(|| value.to_owned())
+        }
+    };
+    for off in ["false", "FALSE", "0", " false "] {
+        assert!(
+            !fleet_config::load(None, &env(off))
+                .unwrap()
+                .skills_manager_auto_install,
+            "{off}"
+        );
+    }
+    // An empty value is unset, so the default holds.
+    assert!(
+        fleet_config::load(None, &env(""))
+            .unwrap()
+            .skills_manager_auto_install
+    );
+    for bad in ["no", "off", "yes please"] {
+        assert!(
+            matches!(
+                fleet_config::load(None, &env(bad)),
+                Err(fleet_config::ConfigError::SkillsManagerAutoInstallInvalid { .. })
+            ),
+            "{bad}"
+        );
+    }
+    // The file layer applies, and the environment overrides it.
+    let dir = tempfile::tempdir().unwrap();
+    let file = write_config(
+        dir.path(),
+        &format!("{VALID_FILE}skills_manager_auto_install = false\n"),
+    );
+    assert!(
+        !fleet_config::load(Some(&file), &none_env)
+            .unwrap()
+            .skills_manager_auto_install
+    );
+    assert!(
+        fleet_config::load(Some(&file), &env("true"))
+            .unwrap()
+            .skills_manager_auto_install
+    );
 }
 
 #[test]
@@ -803,6 +865,7 @@ fn validation_refuses_zero_lab_artifact_bounds() {
             master_key_file: None,
             lab_sweep_interval_seconds: 60,
             hardware_refresh_interval_seconds: 600,
+            skills_manager_auto_install: true,
             desired_fetch_interval_seconds: 0,
             lab_artifacts_dir: dir.path().join("lab-artifacts"),
             lab_artifact_retention_seconds: retention,
