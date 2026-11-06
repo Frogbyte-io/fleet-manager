@@ -163,6 +163,81 @@ fn the_status_command_selects_its_route_explicitly() {
     assert_eq!(invocation.url, "http://controller:8080");
 }
 
+/// `FLEET_URL` and the config file are ambient per-login settings (#614):
+/// they choose the controller for every other command, but `status` keeps
+/// asking the node's socket unless `--url` names the controller.
+#[cfg(unix)]
+#[test]
+fn an_ambient_controller_url_does_not_reroute_status() {
+    use fleetctl::controller_url::{ClientEnvironment, UrlSource};
+
+    let dir = tempfile::tempdir().unwrap();
+    let config = dir.path().join("config.toml");
+    std::fs::write(&config, "url = \"http://config-controller:8080\"\n").unwrap();
+    let args: Vec<String> = ["--socket", "/nonexistent/fleetd/local.sock", "status"]
+        .iter()
+        .map(ToString::to_string)
+        .collect();
+    for (environment, source) in [
+        (
+            ClientEnvironment {
+                fleet_url: Some("http://env-controller:8080".to_owned()),
+                config_file: Some(config.clone()),
+            },
+            UrlSource::Env,
+        ),
+        (
+            ClientEnvironment {
+                fleet_url: None,
+                config_file: Some(config.clone()),
+            },
+            UrlSource::Config(config.clone()),
+        ),
+    ] {
+        let invocation = fleetctl::parse_with_environment(&args, &environment).unwrap();
+        assert_eq!(invocation.url_source, source);
+        assert!(!invocation.url_explicit, "{source:?} is not the override");
+        // The local route was taken: the error names the socket, and no
+        // request went to the (unresolvable) controller host.
+        let error = fleetctl::run(&invocation).unwrap_err();
+        assert!(
+            error.message.contains("/nonexistent/fleetd/local.sock"),
+            "{error}"
+        );
+
+        // --url still wins over both and is the override.
+        let mut with_flag = vec!["--url".to_owned(), "http://flag-controller:1".to_owned()];
+        with_flag.extend(args.iter().cloned());
+        let invocation = fleetctl::parse_with_environment(&with_flag, &environment).unwrap();
+        assert_eq!(invocation.url, "http://flag-controller:1");
+        assert_eq!(invocation.url_source, UrlSource::Flag);
+        assert!(invocation.url_explicit);
+    }
+}
+
+/// A bad ambient URL fails at parse time with the source named, but help
+/// stays available.
+#[test]
+fn a_bad_ambient_url_fails_naming_its_source_but_help_still_works() {
+    use fleetctl::controller_url::ClientEnvironment;
+
+    let environment = ClientEnvironment {
+        fleet_url: Some("http://user:pw@controller:8080".to_owned()),
+        config_file: None,
+    };
+    let args: Vec<String> = ["system"].iter().map(ToString::to_string).collect();
+    let error = fleetctl::parse_with_environment(&args, &environment).unwrap_err();
+    assert!(error.message.starts_with("FLEET_URL "), "{error}");
+    assert!(!error.message.contains("pw@"), "{error}");
+
+    let args: Vec<String> = ["machines", "list", "--help"]
+        .iter()
+        .map(ToString::to_string)
+        .collect();
+    let invocation = fleetctl::parse_with_environment(&args, &environment).unwrap();
+    assert!(matches!(invocation.command, fleetctl::Command::Help { .. }));
+}
+
 #[test]
 fn parsing_refuses_the_undocumented() {
     for args in [
@@ -507,6 +582,29 @@ fn fleetctl_talks_to_a_real_controller() {
     assert_eq!(system["service"], "fleet-controller");
     assert_eq!(system["trustMode"], "trusted-lan");
     assert_eq!(system["storageOk"], true);
+    // The client-side context: where the request went and who named it.
+    assert_eq!(system["client"]["url"], format!("http://{addr}"));
+    assert_eq!(system["client"]["urlSource"], "flag");
+
+    // The same view with the controller named by FLEET_URL alone (#614).
+    let system = std::thread::spawn(move || {
+        let args: Vec<String> = ["--output", "json", "system"]
+            .iter()
+            .map(ToString::to_string)
+            .collect();
+        let environment = fleetctl::controller_url::ClientEnvironment {
+            fleet_url: Some(format!("http://{addr}/")),
+            config_file: None,
+        };
+        let invocation = fleetctl::parse_with_environment(&args, &environment).unwrap();
+        fleetctl::run(&invocation).unwrap()
+    })
+    .join()
+    .unwrap();
+    let system: serde_json::Value = serde_json::from_str(&system).unwrap();
+    assert_eq!(system["service"], "fleet-controller");
+    assert_eq!(system["client"]["url"], format!("http://{addr}"));
+    assert_eq!(system["client"]["urlSource"], "env");
 
     // Create an operation through the CLI and see it in the list.
     let args: Vec<String> = [

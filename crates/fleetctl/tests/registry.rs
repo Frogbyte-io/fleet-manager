@@ -20,6 +20,9 @@ fn run(dir: &Path, path_prefix: Option<&Path>, stdin: Option<&str>, args: &[&str
     let mut command = Command::new(env!("CARGO_BIN_EXE_fleetctl"));
     command
         .current_dir(dir)
+        // Hermetic: no ambient controller URL from the developer's login.
+        .env_remove("FLEET_URL")
+        .env("XDG_CONFIG_HOME", dir)
         .args(args)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -560,6 +563,8 @@ fn publish_pull_request_mode_without_gh_prints_the_compare_url() {
     let out = command
         .current_dir(&work)
         .env("PATH", &bin)
+        .env_remove("FLEET_URL")
+        .env("XDG_CONFIG_HOME", &work)
         .args([
             "--output",
             "json",

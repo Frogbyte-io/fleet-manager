@@ -38,10 +38,18 @@ fleetctl --output json status
 fleetctl --output json system
 ```
 
+`fleetctl` finds the controller by itself: `--url`, then the `FLEET_URL`
+environment variable, then `url` in `~/.config/fleet/config.toml`
+(`%APPDATA%\fleet\config.toml` on Windows), then `http://127.0.0.1:8080`. Do not
+add `--url` unless the user names a different controller. `system` reports
+which source was used in `client.urlSource` (`flag`, `env`, `config`, or
+`default`), together with the controller's version, storage health, operation
+queue, trust mode, and the principal you are acting as. If it cannot reach the
+controller, ask the user to set `FLEET_URL` or the config file.
+
 `status` asks this machine's fleetd over its local socket, which needs no
-controller credentials; with `--url <controller>` it asks the controller directly.
-`system` reports the controller's version, storage health, operation queue,
-trust mode, and the principal you are acting as.
+controller credentials. Only an explicit `--url <controller>` makes it ask the
+controller directly; `FLEET_URL` and the config file do not.
 
 ## Machines
 
