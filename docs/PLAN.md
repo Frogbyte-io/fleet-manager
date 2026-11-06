@@ -171,9 +171,12 @@ FM-000 recorded the original Linux-and-Windows baseline. The 2026-08-27 product-
 |---|---|---|
 | Linux x86_64 (Debian/Ubuntu) | Primary | Agentless SSH, `fleetd` service, Docker, real integration tests, and the controller image |
 | Windows guests | Limited initially | Proxmox lifecycle plus QEMU Guest Agent health/IP observations; no Windows controller or in-guest `fleetd` release gate |
+| Windows workstations (Windows 11 x64) | In progress (M12, epic [#606](https://github.com/Frogbyte-io/fleet-manager/issues/606)) | Agentless over OpenSSH Server and Windows PowerShell 5.1: onboarding, inventory, Skills Manager and brokered exec/put/collect/terminal; no Windows `fleetd` ([ADR 0021](adr/0021-windows-workstations.md), Proposed) |
 | Linux aarch64 | Deferred | Revisit with FM-S06, which flags Skills Manager release coverage on non-x86 Linux |
 | macOS | Deferred | Still a design goal in the architecture documents; not an M2 acceptance requirement |
 | Proxmox VE 8.x and 9.x | Supported | The M6 compatibility matrix and real-cluster suite must pass on both majors |
+
+Maintainer decision (2026-11-06): Windows workstations are the next platform, and macOS stays deferred.
 
 Deferred is not rejected. Cross-platform assumptions stay in the protocol, configuration, and filesystem layers so Windows in-guest management, Linux aarch64, or macOS can be added later by testing and packaging work rather than by redesign.
 
