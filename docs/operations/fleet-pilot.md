@@ -28,7 +28,27 @@ Examples use placeholders: the controller is `controller.example.ts.net`, the pi
   fleetctl desired activate <commit-sha> <content-digest> --wait
   ```
 
-In this guide, `fleetctl` stands for `fleetctl --url http://controller.example.ts.net:8080`. `fleetctl` has no environment variable or file for the URL. Pass `--url` yourself, or use the wrapper in [Agents and the Registry](#agents-and-the-registry).
+The commands below carry no global `--url` (the prerequisite check above passes it because no URL is configured yet). `fleetctl` takes the controller URL from the first of these that is set:
+
+1. `--url <controller>` on the command line;
+2. the `FLEET_URL` environment variable;
+3. `url` in the config file `$XDG_CONFIG_HOME/fleet/config.toml`, or `~/.config/fleet/config.toml` when `XDG_CONFIG_HOME` is unset or not an absolute path (`%APPDATA%\fleet\config.toml` on Windows);
+4. the default, `http://127.0.0.1:8080`.
+
+Set it once on your own workstation:
+
+```sh
+# The directory fleetctl reads: an absolute XDG_CONFIG_HOME, otherwise ~/.config.
+case "${XDG_CONFIG_HOME:-}" in
+  /*) fleet_config="$XDG_CONFIG_HOME/fleet" ;;
+  *) fleet_config="$HOME/.config/fleet" ;;
+esac
+mkdir -p "$fleet_config"
+printf 'url = "http://controller.example.ts.net:8080"\n' > "$fleet_config/config.toml"
+fleetctl --output json system   # client.urlSource is "config"
+```
+
+The URL must be `http` or `https` and must not contain a user name or password. A delegated credential goes in `FLEET_TOKEN`, never in the URL. `fleetctl` reads only the `url` key and ignores other keys. `system` reports which source supplied the URL in `client.urlSource` (`flag`, `env`, `config`, or `default`). `status` asks the local `fleetd` socket unless you pass `--url`. `FLEET_URL` and the config file do not change that.
 
 ## Restrict access first
 
@@ -168,19 +188,23 @@ The probe refreshes the machine's observed inventory, and `skills matrix` shows 
 
 ## Agents and the Registry
 
-Agents use the `fleet` skill, which drives `fleetctl --output json`. Each pilot machine needs `fleetctl`, and it must reach the controller. Because the skill's commands carry no `--url`, a small wrapper in the agent login's `PATH` adds it:
+Agents use the `fleet` skill, which drives `fleetctl --output json`. Each pilot machine needs `fleetctl`, and it must reach the controller. The skill's commands carry no `--url`, so give the agent login a config file that names the controller.
 
-Copy the `fleetctl` binary you built (see the prerequisites) to the pilot machine first, for example with `scp target/release/fleetctl dev-1:/tmp/fleetctl`, then on the pilot machine:
+Copy the `fleetctl` binary you built (see the prerequisites) to the pilot machine first, for example with `scp target/release/fleetctl dev-1:/tmp/fleetctl`. Then, on the pilot machine, as the agent login:
 
 ```sh
-install -D -m 0755 /tmp/fleetctl ~/.local/libexec/fleetctl && rm /tmp/fleetctl
-cat > ~/.local/bin/fleetctl <<'EOF'
-#!/bin/sh
-exec "$HOME/.local/libexec/fleetctl" --url http://controller.example.ts.net:8080 "$@"
-EOF
-chmod 0755 ~/.local/bin/fleetctl
+install -D -m 0755 /tmp/fleetctl ~/.local/bin/fleetctl && rm /tmp/fleetctl
+# The directory fleetctl reads: an absolute XDG_CONFIG_HOME, otherwise ~/.config.
+case "${XDG_CONFIG_HOME:-}" in
+  /*) fleet_config="$XDG_CONFIG_HOME/fleet" ;;
+  *) fleet_config="$HOME/.config/fleet" ;;
+esac
+mkdir -p "$fleet_config"
+printf 'url = "http://controller.example.ts.net:8080"\n' > "$fleet_config/config.toml"
 fleetctl --output json system
 ```
+
+`FLEET_URL=http://controller.example.ts.net:8080` in the agent's environment also works and takes precedence over the file. The file is simpler because every shell and agent harness under that login reads it. Machine setup does not write this file yet.
 
 `system` shows the controller version, the trust mode, and the principal you act as. In trusted-LAN mode that principal is `anonymous-lan-admin`. In identity mode, use the Serve URL (`https://controller.example.ts.net`) from your own untagged devices, and the principal is your Tailscale login; tagged pilot machines are refused there.
 
