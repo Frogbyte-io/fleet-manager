@@ -450,6 +450,8 @@ Issue-ready work for M0–M2 is in [planning/initial-issues.md](planning/initial
 | Inspect/manage a Windows VM | M6 | Proxmox lifecycle plus QEMU Guest Agent health/IP; in-guest management is later |
 | Hardware-in-the-loop Lab | M7 later sub-epic | Exclusive reservation and cleanup under failure |
 
+To pilot machine enrollment, fleet-wide skills, and the Registry on a few Linux developer machines before M8, follow [operations/fleet-pilot.md](operations/fleet-pilot.md).
+
 ## Risks and research gates
 
 - **Migration scope:** do not combine the Rust rewrite, schema redesign, and new behavior in one issue. Port fixtures first and maintain a written parity/deletion checklist.
