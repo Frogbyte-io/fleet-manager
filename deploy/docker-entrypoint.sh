@@ -27,6 +27,13 @@ if [ "$(id -u)" = "0" ]; then
       [ -f "$artifact" ] || continue
       install -m 644 -o "$uid" -g "$gid" "$artifact" /var/lib/fleet/artifacts/fleetd/
     done
+    # The fleetctl this image was built with replaces any older copy for the
+    # same platform; binaries for other platforms an operator added stay.
+    install -d -m 750 -o "$uid" -g "$gid" /var/lib/fleet/artifacts/fleetctl
+    for binary in /opt/fleet/artifacts/fleetctl/fleetctl-*; do
+      [ -f "$binary" ] || continue
+      install -m 644 -o "$uid" -g "$gid" "$binary" /var/lib/fleet/artifacts/fleetctl/
+    done
   fi
 
   if [ -e /run/secrets/master_key ]; then

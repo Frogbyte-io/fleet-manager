@@ -13,7 +13,7 @@ Examples use placeholders: the controller is `controller.example.ts.net`, the pi
 ## Prerequisites
 
 - **A controller** on a Linux host in your tailnet, deployed with [deploy/README.md](../../deploy/README.md) or [deploy/COOLIFY.md](../../deploy/COOLIFY.md), with its master key (`FLEET_MASTER_KEY_FILE`) set so it can store secrets.
-- **`fleetctl` built from the same commit as the controller** (`cargo build --release -p fleetctl`, then copy `target/release/fleetctl` into your `PATH`). There is no published `fleetctl` package yet. `fleetctl --url <controller> --output json system` shows the controller's version.
+- **`fleetctl` from the same commit as the controller**, on your workstation and on each pilot machine. If the controller runs a commit from `main`, use the GitHub release for that commit (tagged `v<version>-<short commit>`). Its static Linux binary runs on every pilot machine, Ubuntu 22.04 included. Releases exist only for commits merged to `main`. Otherwise, download the controller's own build from `/downloads/fleetctl/linux-<arch>`. It is served only for the controller's architecture (`linux-x86_64` on an x86_64 controller host) and needs glibc 2.36 or newer (Debian 12, Ubuntu 23.04 or later). Check the SHA-256 before you put the binary on your `PATH`. [Install fleetctl](../../deploy/README.md#install-fleetctl) has the commands. `fleetctl --url <controller> --output json system` shows the controller's version.
 - **Each pilot machine** runs Debian or Ubuntu on x86_64, is joined to your tailnet, runs an OpenSSH server, and has `curl`, `sha256sum`, `base64`, and `jq`. Without `jq`, a rollout that updates an existing skill fails closed.
 - **One login per machine for agents.** Skills Manager and the skills it deploys live in the SSH login's home directory. Use the account your coding agents run as (`dev` here).
 - **SSH from the controller.** That login accepts a key the controller can present: `--auth agent` offers the keys in the controller's ssh-agent, then its default key files ([which keys](lab.md#which-keys-the-controller-offers)); `--auth identity-file --identity <path>` names a key file on the controller.
@@ -190,18 +190,20 @@ The probe refreshes the machine's observed inventory, and `skills matrix` shows 
 
 Agents use the `fleet` skill, which drives `fleetctl --output json`. Each pilot machine needs `fleetctl`, and it must reach the controller. The skill's commands carry no `--url`, so give the agent login a config file that names the controller.
 
-Copy the `fleetctl` binary you built (see the prerequisites) to the pilot machine first, for example with `scp target/release/fleetctl dev-1:/tmp/fleetctl`. Then, on the pilot machine, as the agent login:
+On the pilot machine, as the agent login, install `fleetctl` first with the commands in [Install fleetctl](../../deploy/README.md#install-fleetctl), which put it at `~/.local/bin/fleetctl`. Prefer the release binary; on Ubuntu 22.04 it is the only option, because the controller's build needs glibc 2.36. Then point it at the controller:
 
 ```sh
-install -D -m 0755 /tmp/fleetctl ~/.local/bin/fleetctl && rm /tmp/fleetctl
-# The directory fleetctl reads: an absolute XDG_CONFIG_HOME, otherwise ~/.config.
-case "${XDG_CONFIG_HOME:-}" in
-  /*) fleet_config="$XDG_CONFIG_HOME/fleet" ;;
-  *) fleet_config="$HOME/.config/fleet" ;;
-esac
-mkdir -p "$fleet_config"
-printf 'url = "http://controller.example.ts.net:8080"\n' > "$fleet_config/config.toml"
-fleetctl --output json system
+(
+  set -eu
+  # The directory fleetctl reads: an absolute XDG_CONFIG_HOME, otherwise ~/.config.
+  case "${XDG_CONFIG_HOME:-}" in
+    /*) fleet_config="$XDG_CONFIG_HOME/fleet" ;;
+    *) fleet_config="$HOME/.config/fleet" ;;
+  esac
+  mkdir -p "$fleet_config"
+  printf 'url = "http://controller.example.ts.net:8080"\n' > "$fleet_config/config.toml"
+  fleetctl --output json system
+)
 ```
 
 `FLEET_URL=http://controller.example.ts.net:8080` in the agent's environment also works and takes precedence over the file. The file is simpler because every shell and agent harness under that login reads it. Machine setup does not write this file yet.
