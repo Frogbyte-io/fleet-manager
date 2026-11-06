@@ -1172,7 +1172,7 @@ async fn stored_secrets_are_counted_bound_revoked_and_their_revocation_failure_r
     );
     assert_eq!(removed["data"]["secretsRevoked"], 0);
     assert_eq!(removed["data"]["sessionClosed"], true);
-    assert_eq!(*harness.sessions.closed.lock().unwrap(), [machine.clone()]);
+    assert_eq!(*harness.sessions.closed.lock().unwrap(), std::slice::from_ref(&machine));
     assert_eq!(harness.unpinned(), ["box.lan"]);
     assert_eq!(
         harness.audit_events(&machine).await,

@@ -223,8 +223,11 @@ fn question(review: &Value) -> String {
             items
                 .iter()
                 .filter_map(Value::as_str)
-                .map(|warning| format!("Warning: {warning}\n"))
-                .collect()
+                .fold(String::new(), |mut out, warning| {
+                    use std::fmt::Write as _;
+                    let _ = writeln!(out, "Warning: {warning}");
+                    out
+                })
         })
         .unwrap_or_default();
     let uninstall = if review["uninstall"].is_object() {
@@ -337,50 +340,7 @@ pub(crate) fn render(payload: &Value) -> String {
         );
     }
     if payload.get("removed").is_some() {
-        let mut lines = vec![format!(
-            "removed machine {} ({})",
-            text(&payload["name"]),
-            text(&payload["machineId"])
-        )];
-        if let Some(error) = payload["secretRevocationError"].as_str() {
-            lines.push(format!(
-                "  stored secrets were NOT revoked (delete them by hand): {error}"
-            ));
-        } else {
-            lines.push(format!(
-                "  stored secrets revoked: {}",
-                payload["secretsRevoked"]
-            ));
-        }
-        if payload["sessionClosed"] == true {
-            lines.push("  the live node session was closed".to_owned());
-        }
-        if payload["uninstalled"] == true {
-            lines.push(format!(
-                "  fleetd uninstalled: {}",
-                text(&payload["uninstallSummary"])
-            ));
-        } else {
-            lines.push("  nothing on the machine was touched".to_owned());
-        }
-        lines.push(format!(
-            "  host keys unpinned: {}",
-            list(&payload["unpinnedHosts"])
-        ));
-        lines.push(format!(
-            "  host keys kept (shared): {}",
-            list(&payload["keptHosts"])
-        ));
-        if payload["unpinFailedHosts"]
-            .as_array()
-            .is_some_and(|hosts| !hosts.is_empty())
-        {
-            lines.push(format!(
-                "  host keys that could not be unpinned (remove them by hand): {}",
-                list(&payload["unpinFailedHosts"])
-            ));
-        }
-        return lines.join("\n");
+        return render_removed(payload);
     }
     let mut lines = vec![format!(
         "review of removing machine {} ({})",
@@ -429,6 +389,54 @@ pub(crate) fn render(payload: &Value) -> String {
         }
     } else {
         lines.push(format!("  review token {}", text(&payload["reviewToken"])));
+    }
+    lines.join("\n")
+}
+
+/// Renders what a removal did.
+fn render_removed(payload: &Value) -> String {
+    let mut lines = vec![format!(
+        "removed machine {} ({})",
+        text(&payload["name"]),
+        text(&payload["machineId"])
+    )];
+    if let Some(error) = payload["secretRevocationError"].as_str() {
+        lines.push(format!(
+            "  stored secrets were NOT revoked (delete them by hand): {error}"
+        ));
+    } else {
+        lines.push(format!(
+            "  stored secrets revoked: {}",
+            payload["secretsRevoked"]
+        ));
+    }
+    if payload["sessionClosed"] == true {
+        lines.push("  the live node session was closed".to_owned());
+    }
+    if payload["uninstalled"] == true {
+        lines.push(format!(
+            "  fleetd uninstalled: {}",
+            text(&payload["uninstallSummary"])
+        ));
+    } else {
+        lines.push("  nothing on the machine was touched".to_owned());
+    }
+    lines.push(format!(
+        "  host keys unpinned: {}",
+        list(&payload["unpinnedHosts"])
+    ));
+    lines.push(format!(
+        "  host keys kept (shared): {}",
+        list(&payload["keptHosts"])
+    ));
+    if payload["unpinFailedHosts"]
+        .as_array()
+        .is_some_and(|hosts| !hosts.is_empty())
+    {
+        lines.push(format!(
+            "  host keys that could not be unpinned (remove them by hand): {}",
+            list(&payload["unpinFailedHosts"])
+        ));
     }
     lines.join("\n")
 }

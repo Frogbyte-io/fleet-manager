@@ -4012,9 +4012,16 @@ export interface RemovalEndpointDto {
 }
 
 /**
- * The records a removal deletes (and the collected files it keeps).
+ * The records a removal deletes, and the collected files it keeps. The
+ * stored-secret counts are bound by the review token.
  */
 export interface RemovalFootprintDto {
+  /**
+     * Rotated Windows administrator passwords Fleet holds for this machine;
+     * destroyed, so nobody can read them afterwards.
+     * @minimum 0
+     */
+  adminPasswords: number;
   /**
      * Capability facts.
      * @minimum 0
@@ -4036,6 +4043,11 @@ export interface RemovalFootprintDto {
      */
   endpointAuth: number;
   /**
+     * Endpoints whose stored default authentication is a stored key.
+     * @minimum 0
+     */
+  endpointAuthSecrets: number;
+  /**
      * Endpoints.
      * @minimum 0
      */
@@ -4051,7 +4063,7 @@ export interface RemovalFootprintDto {
      */
   inventorySnapshots: number;
   /**
-     * Node credentials, sessions and enrollment tokens.
+     * Node credentials, sessions, challenges and enrollment tokens.
      * @minimum 0
      */
   nodeCredentials: number;
@@ -4071,6 +4083,11 @@ export interface RemovalFootprintDto {
      */
   skillsSnapshot: number;
   /**
+     * SSH private keys Fleet holds for this machine; revoked.
+     * @minimum 0
+     */
+  storedSshKeys: number;
+  /**
      * Tag and group memberships.
      * @minimum 0
      */
@@ -4078,23 +4095,46 @@ export interface RemovalFootprintDto {
 }
 
 /**
- * The fleetd uninstall a removal runs first.
+ * The installer layout overrides (`FLEETD_BIN_DIR`, `FLEETD_UNIT_DIR`,
+ * `FLEETD_ENV_FILE`, `FLEETD_STATE_DIR`, `FLEETD_SERVICE`,
+ * `FLEETD_SYSTEMCTL`) of the machine's last successful fleetd install;
+ * empty for the default layout. The uninstall fails when no fleetd unit
+ * or binary is found in this layout.
  */
-export interface MachineUninstallDto {
-  auth?: null | EndpointAuthDto;
-  /** The machine's SSH endpoint the uninstall runs over. */
+export type MachineUninstallPlanDtoLayout = {[key: string]: string};
+
+/**
+ * The fleetd uninstall a removal will run, as the review resolved it.
+ */
+export interface MachineUninstallPlanDto {
+  /** The authentication it uses. */
+  auth: EndpointAuthDto;
+  /** The SSH endpoint the uninstall runs over. */
   endpointId: string;
+  /**
+     * The installer layout overrides (`FLEETD_BIN_DIR`, `FLEETD_UNIT_DIR`,
+     * `FLEETD_ENV_FILE`, `FLEETD_STATE_DIR`, `FLEETD_SERVICE`,
+     * `FLEETD_SYSTEMCTL`) of the machine's last successful fleetd install;
+     * empty for the default layout. The uninstall fails when no fleetd unit
+     * or binary is found in this layout.
+     */
+  layout: MachineUninstallPlanDtoLayout;
 }
 
 /**
  * What a removal would do, and the token that binds the removal to it.
  */
 export interface MachineRemovalReviewDto {
-  /** What refuses the removal now, each with what to do. */
+  /**
+     * What refuses the removal now, each with what to do: a Lab provision,
+     * a persistent marker, a USB reservation, an unfinished operation, or
+     * (on a controller without its secret store) stored secrets it could
+     * not revoke.
+     */
   blockers: RemovalBlockerDto[];
   /** Its endpoints. */
   endpoints: RemovalEndpointDto[];
-  /** What is deleted. */
+  /** What is deleted, and the collected files that are kept. */
   footprint: RemovalFootprintDto;
   /**
      * The hosts whose pins stay because another machine or an onboarding
@@ -4117,9 +4157,14 @@ export interface MachineRemovalReviewDto {
      * @nullable
      */
   reviewToken?: string | null;
-  uninstall?: null | MachineUninstallDto;
+  uninstall?: null | MachineUninstallPlanDto;
   /** The hosts whose pinned SSH host keys are removed. */
   unpinHosts: string[];
+  /**
+     * What to know before confirming, for example that a stored Windows
+     * administrator password is destroyed.
+     */
+  warnings: string[];
 }
 
 /**
@@ -4128,7 +4173,10 @@ export interface MachineRemovalReviewDto {
 export interface MachineRemovedDto {
   /** What was deleted. */
   footprint: RemovalFootprintDto;
-  /** The hosts whose pins stayed because they are shared. */
+  /**
+     * The hosts whose pins stayed because they are shared, including hosts
+     * another machine or draft started using during the removal.
+     */
   keptHosts: string[];
   /** The removed machine. */
   machineId: string;
@@ -4138,6 +4186,19 @@ export interface MachineRemovedDto {
   nodeIdentityRemoved: boolean;
   /** Always true: the machine record is gone. */
   removed: boolean;
+  /**
+     * Why revoking the machine's stored secrets failed, when it did; the
+     * machine is removed and the secrets must be deleted by hand.
+     * @nullable
+     */
+  secretRevocationError?: string | null;
+  /**
+     * The stored secrets bound to the machine that were revoked.
+     * @minimum 0
+     */
+  secretsRevoked: number;
+  /** Whether a live node gateway session was closed. */
+  sessionClosed: boolean;
   /**
      * The uninstall's last line of output, when it ran.
      * @nullable
@@ -4152,6 +4213,15 @@ export interface MachineRemovedDto {
   unpinFailedHosts: string[];
   /** The hosts whose pinned keys were removed. */
   unpinnedHosts: string[];
+}
+
+/**
+ * The fleetd uninstall a removal runs first.
+ */
+export interface MachineUninstallDto {
+  auth?: null | EndpointAuthDto;
+  /** The machine's SSH endpoint the uninstall runs over. */
+  endpointId: string;
 }
 
 /**
@@ -8649,11 +8719,16 @@ export interface ResourceMachineFileDto {
  * What a removal would do, and the token that binds the removal to it.
  */
 export type ResourceMachineRemovalReviewDtoData = {
-  /** What refuses the removal now, each with what to do. */
+  /**
+     * What refuses the removal now, each with what to do: a Lab provision,
+     * a persistent marker, a USB reservation, an unfinished operation, or
+     * (on a controller without its secret store) stored secrets it could
+     * not revoke.
+     */
   blockers: RemovalBlockerDto[];
   /** Its endpoints. */
   endpoints: RemovalEndpointDto[];
-  /** What is deleted. */
+  /** What is deleted, and the collected files that are kept. */
   footprint: RemovalFootprintDto;
   /**
      * The hosts whose pins stay because another machine or an onboarding
@@ -8676,9 +8751,14 @@ export type ResourceMachineRemovalReviewDtoData = {
      * @nullable
      */
   reviewToken?: string | null;
-  uninstall?: null | MachineUninstallDto;
+  uninstall?: null | MachineUninstallPlanDto;
   /** The hosts whose pinned SSH host keys are removed. */
   unpinHosts: string[];
+  /**
+     * What to know before confirming, for example that a stored Windows
+     * administrator password is destroyed.
+     */
+  warnings: string[];
 };
 
 /**
@@ -8698,7 +8778,10 @@ export interface ResourceMachineRemovalReviewDto {
 export type ResourceMachineRemovedDtoData = {
   /** What was deleted. */
   footprint: RemovalFootprintDto;
-  /** The hosts whose pins stayed because they are shared. */
+  /**
+     * The hosts whose pins stayed because they are shared, including hosts
+     * another machine or draft started using during the removal.
+     */
   keptHosts: string[];
   /** The removed machine. */
   machineId: string;
@@ -8708,6 +8791,19 @@ export type ResourceMachineRemovedDtoData = {
   nodeIdentityRemoved: boolean;
   /** Always true: the machine record is gone. */
   removed: boolean;
+  /**
+     * Why revoking the machine's stored secrets failed, when it did; the
+     * machine is removed and the secrets must be deleted by hand.
+     * @nullable
+     */
+  secretRevocationError?: string | null;
+  /**
+     * The stored secrets bound to the machine that were revoked.
+     * @minimum 0
+     */
+  secretsRevoked: number;
+  /** Whether a live node gateway session was closed. */
+  sessionClosed: boolean;
   /**
      * The uninstall's last line of output, when it ran.
      * @nullable

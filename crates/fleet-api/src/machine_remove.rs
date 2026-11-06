@@ -262,6 +262,7 @@ impl From<RemovalReview> for MachineRemovalReviewDto {
 /// What a removal did.
 #[derive(Debug, Serialize, ToSchema)]
 #[serde(rename_all = "camelCase")]
+#[allow(clippy::struct_excessive_bools)] // independent facts of one answer, each a JSON boolean
 pub struct MachineRemovedDto {
     /// The removed machine.
     pub machine_id: String,
