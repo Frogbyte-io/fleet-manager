@@ -34,6 +34,7 @@ deploy/smoke.sh
 | `/api/v1/*` | The public API described by `packages/api-client/openapi.json` |
 | `/api/node/v1/*` | Node enrollment, session proof, and outbound WebSocket gateway |
 | `/downloads/fleetd/*` | Linux node installer packages |
+| `/downloads/fleetctl/<platform>` | The `fleetctl` built with this controller, and `<platform>.sha256` beside it ([install fleetctl](#install-fleetctl)) |
 | `/healthz` | Process liveness |
 | `/readyz` | Readiness; reports unavailable while the web shell is missing |
 
@@ -121,7 +122,84 @@ operator provisions a real one.
 `deploy/controller.Dockerfile` is a three-stage build — web shell (Node
 `24.19.0`, pnpm `9.15.9`), controller binary (Rust `1.98.0`, `--locked`), and
 a `debian:bookworm-slim` runtime with the binary, static assets, Git/SSH client
-tools, CA roots, and a native-architecture Linux node installer package. The
-package is copied into the persistent artifacts directory on startup. The
+tools, CA roots, a native-architecture Linux node installer package, and a
+native-architecture `fleetctl`. The entrypoint copies the package and
+`fleetctl` into the persistent artifacts directory on startup. The
 pinned versions are the same ones CI pins in
 `.github/toolchain.env` and `rust-toolchain.toml`.
+
+## Install fleetctl
+
+`fleetctl` is a single binary. There are two places to get one:
+
+- **From your controller.** `GET /downloads/fleetctl/<platform>` serves the
+  `fleetctl` built from the same commit as the controller, and
+  `/downloads/fleetctl/<platform>.sha256` serves its SHA-256 in `sha256sum`
+  format (the binary response also carries it in `x-checksum-sha256`). The
+  image carries only its own architecture: `linux-x86_64` on an x86_64 host,
+  `linux-aarch64` on an arm64 host. Other platforms answer 404 unless you put
+  the release binary in `<FLEET_DATA_DIR>/artifacts/fleetctl/` under its
+  release name (`fleetctl-windows-x86_64.exe`, for example). The routes sit
+  behind the same caller check as the rest of the listener, so a machine that
+  can use the controller can download from it.
+- **From a GitHub release.** Every merge to `main` publishes a release tagged
+  `v<version>-<commit>` with `fleetctl-linux-x86_64`, `fleetctl-linux-aarch64`,
+  `fleetctl-windows-x86_64.exe`, and `SHA256SUMS`. Pick the release whose
+  commit matches your controller. The release's Linux binaries are static
+  (musl) and run on any distribution; the Windows binary needs no Visual C++
+  runtime. The controller's own copy is built in its Debian 12 image and needs
+  glibc 2.36 or newer (Debian 12, Ubuntu 23.04, or later); on an older
+  system such as Ubuntu 22.04, use the release binary.
+
+On Linux, from the controller (swap in `linux-aarch64` on arm64):
+
+```sh
+FLEET_URL=http://controller.example.ts.net:8080
+mkdir -p /tmp/fleetctl-install && cd /tmp/fleetctl-install
+curl -fsSLo fleetctl "$FLEET_URL/downloads/fleetctl/linux-x86_64"
+curl -fsSLo fleetctl.sha256 "$FLEET_URL/downloads/fleetctl/linux-x86_64.sha256"
+sha256sum --check --strict fleetctl.sha256
+install -D -m 0755 fleetctl ~/.local/bin/fleetctl
+cd / && rm -rf /tmp/fleetctl-install
+fleetctl --version
+```
+
+Or from a release (`<tag>` is the release tag, for example `v0.1.0-1a2b3c4`):
+
+```sh
+base=https://github.com/Frogbyte-io/fleet-manager/releases/download/<tag>
+curl -fsSLO "$base/fleetctl-linux-x86_64"
+curl -fsSLO "$base/SHA256SUMS"
+sha256sum --check --ignore-missing --strict SHA256SUMS
+install -D -m 0755 fleetctl-linux-x86_64 ~/.local/bin/fleetctl
+```
+
+`sha256sum` must print `OK`; delete the download if it does not. Make sure
+`~/.local/bin` is on your `PATH`.
+
+On Windows, in PowerShell:
+
+```powershell
+$url = 'http://controller.example.ts.net:8080'
+$dir = "$env:LOCALAPPDATA\Programs\fleet"
+New-Item -ItemType Directory -Force $dir | Out-Null
+Invoke-WebRequest -UseBasicParsing "$url/downloads/fleetctl/windows-x86_64" -OutFile "$dir\fleetctl.exe"
+$expected = ((Invoke-WebRequest -UseBasicParsing "$url/downloads/fleetctl/windows-x86_64.sha256").Content -split '\s+')[0]
+if ((Get-FileHash "$dir\fleetctl.exe" -Algorithm SHA256).Hash -ne $expected) {
+  Remove-Item "$dir\fleetctl.exe"; throw 'fleetctl checksum mismatch'
+}
+& "$dir\fleetctl.exe" --version
+```
+
+Then add that directory to your user `PATH`. From a release, download
+`fleetctl-windows-x86_64.exe` and `SHA256SUMS` instead and compare with the
+`fleetctl-windows-x86_64.exe` line. On Windows, `fleetctl status` without
+`--url` reports that the local `fleetd` surface is unavailable; every other
+command talks to the controller.
+
+Finally, tell `fleetctl` where the controller is. `--url <controller>` on each
+command always works. Once
+[#614](https://github.com/Frogbyte-io/fleet-manager/issues/614) lands,
+`FLEET_URL` or `url = "<controller>"` in `~/.config/fleet/config.toml`
+(`%APPDATA%\fleet\config.toml` on Windows) sets it once per login.
+`fleetctl --output json system` shows the controller's version.

@@ -1,0 +1,235 @@
+name: Release
+
+# Publishes checksummed fleetctl binaries (#615) as a GitHub release for every
+# commit that lands on main. A release is a reviewed dev -> main merge, so the
+# push to main is the release trigger; there is no separate tagging step. The
+# tag is the workspace version plus the short commit (v0.1.0-1a2b3c4), because
+# the version in Cargo.toml does not change with every release yet.
+#
+# workflow_dispatch re-runs the release for the head of main, for example
+# after a failed upload. A commit that already has a published release is
+# left alone: assets are never replaced once published.
+#
+# This is the "own workflow, own trigger, own scoped credentials" that
+# .github/SECURITY.md reserves for release automation. The only credential is
+# the per-run GITHUB_TOKEN, and only the publish job may write (contents:
+# write, to create the release and its tag). Builds run on GitHub-hosted
+# runners, not the shared self-hosted dev box, so no write-scoped run touches
+# that machine. Provenance attestations need id-token: write and
+# attestations: write, which check-workflows.mjs refuses; they are a
+# follow-up that needs that policy changed first.
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# One release run per commit; never cancel a run that may be mid-upload.
+concurrency:
+  group: release-${{ github.sha }}
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  version:
+    name: Release version
+    # A dispatch from another branch publishes nothing.
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      tag: ${{ steps.version.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - id: version
+        shell: bash
+        run: |
+          set -euo pipefail
+          # The one version in [workspace.package]; every binary inherits it.
+          version="$(sed -n '/^\[workspace\.package\]/,/^\[/{s/^version = "\([^"]*\)"$/\1/p}' Cargo.toml)"
+          if ! [[ "${version}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::cannot read [workspace.package] version from Cargo.toml (got '${version}')"
+            exit 1
+          fi
+          {
+            echo "version=${version}"
+            echo "tag=v${version}-${GITHUB_SHA::7}"
+          } | tee -a "$GITHUB_OUTPUT"
+
+  build:
+    name: fleetctl (${{ matrix.platform }})
+    needs: version
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          # Linux binaries are static musl builds, so one file runs on any
+          # glibc or musl distribution (Ubuntu 22.04 and RHEL 8 included).
+          # They build in the Rust image the controller image builds in
+          # (deploy/controller.Dockerfile), which pins the same toolchain.
+          - platform: linux-x86_64
+            runner: ubuntu-24.04
+            container: rust:1.98.0-slim-bookworm
+            target: x86_64-unknown-linux-musl
+            binary: fleetctl
+            asset: fleetctl-linux-x86_64
+          - platform: linux-aarch64
+            runner: ubuntu-24.04-arm
+            container: rust:1.98.0-slim-bookworm
+            target: aarch64-unknown-linux-musl
+            binary: fleetctl
+            asset: fleetctl-linux-aarch64
+          # MSVC with a static C runtime, so the binary runs on a Windows
+          # workstation without the Visual C++ redistributable.
+          - platform: windows-x86_64
+            runner: windows-2025
+            container: ''
+            target: x86_64-pc-windows-msvc
+            binary: fleetctl.exe
+            asset: fleetctl-windows-x86_64.exe
+            rustflags: -C target-feature=+crt-static
+    runs-on: ${{ matrix.runner }}
+    container: ${{ matrix.container }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      # The container already holds the pinned toolchain; rustup reads
+      # rust-toolchain.toml either way.
+      - if: matrix.container == ''
+        uses: ./.github/actions/setup-toolchain
+        with:
+          node: 'false'
+          rust: 'true'
+
+      # ring compiles C, so a musl target needs the musl compiler wrapper.
+      - name: Install the musl toolchain
+        if: matrix.container != ''
+        shell: bash
+        env:
+          TARGET: ${{ matrix.target }}
+        run: |
+          set -euo pipefail
+          apt-get update
+          apt-get install -y --no-install-recommends musl-tools
+          rustup target add "${TARGET}"
+          # cc-rs reads CC_<target>; musl-gcc is the native-architecture
+          # wrapper on both runners.
+          echo "CC_${TARGET//-/_}=musl-gcc" >> "$GITHUB_ENV"
+
+      - name: Build
+        shell: bash
+        env:
+          RUSTFLAGS: ${{ matrix.rustflags }}
+          TARGET: ${{ matrix.target }}
+        run: |
+          set -euo pipefail
+          rustc --version
+          cargo build --release --locked -p fleetctl --target "${TARGET}"
+
+      - name: Stage and check the binary
+        shell: bash
+        env:
+          TARGET: ${{ matrix.target }}
+          BINARY: ${{ matrix.binary }}
+          ASSET: ${{ matrix.asset }}
+          VERSION: ${{ needs.version.outputs.version }}
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          cp "target/${TARGET}/release/${BINARY}" "dist/${ASSET}"
+          reported="$("./dist/${ASSET}" --version | tr -d '\r')"
+          if [ "${reported}" != "fleetctl ${VERSION}" ]; then
+            echo "::error::the binary reports '${reported}', expected 'fleetctl ${VERSION}'"
+            exit 1
+          fi
+          # A static binary has no NEEDED entries in its dynamic section.
+          if [ "${RUNNER_OS}" = "Linux" ] && readelf -d "dist/${ASSET}" | grep -q '(NEEDED)'; then
+            echo "::error::dist/${ASSET} is dynamically linked; the release ships static Linux binaries"
+            exit 1
+          fi
+          (cd dist && sha256sum "${ASSET}" > "${ASSET}.sha256" && cat "${ASSET}.sha256")
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: ${{ matrix.asset }}
+          path: dist/
+          if-no-files-found: error
+          retention-days: 7
+
+  publish:
+    name: Publish the release
+    needs: [version, build]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: fleetctl-*
+          path: dist
+          merge-multiple: true
+
+      - name: Verify the binaries and write SHA256SUMS
+        shell: bash
+        working-directory: dist
+        run: |
+          set -euo pipefail
+          # Each build recorded its own digest; the bytes published must be
+          # the bytes built.
+          cat ./*.sha256 | sha256sum --check --strict -
+          rm ./*.sha256
+          sha256sum fleetctl-* > SHA256SUMS
+          cat SHA256SUMS
+          [ "$(wc -l < SHA256SUMS)" -eq 3 ] || { echo "::error::expected three binaries"; exit 1; }
+
+      - name: Create the release
+        shell: bash
+        working-directory: dist
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ needs.version.outputs.tag }}
+          VERSION: ${{ needs.version.outputs.version }}
+          SERVER_URL: ${{ github.server_url }}
+        run: |
+          set -euo pipefail
+          if state="$(gh release view "${TAG}" --json isDraft --jq '.isDraft' 2>/dev/null)"; then
+            if [ "${state}" = "false" ]; then
+              echo "Release ${TAG} is already published; leaving it unchanged."
+              exit 0
+            fi
+            # A draft is what an interrupted upload leaves behind.
+            gh release delete "${TAG}" --yes
+          fi
+          notes="$(cat <<EOF
+          fleetctl ${VERSION} built from ${GITHUB_SHA}.
+
+          Download the binary for your platform and \`SHA256SUMS\`, then check it:
+
+          \`\`\`sh
+          sha256sum --check --ignore-missing SHA256SUMS
+          \`\`\`
+
+          Install and verification steps: ${SERVER_URL}/${GH_REPO}/blob/${GITHUB_SHA}/deploy/README.md#install-fleetctl
+          EOF
+          )"
+          # gh uploads the assets to a draft and publishes it only when every
+          # upload succeeded.
+          gh release create "${TAG}" \
+            --target "${GITHUB_SHA}" \
+            --title "fleetctl ${VERSION} (${GITHUB_SHA::7})" \
+            --notes "${notes}" \
+            --latest \
+            fleetctl-linux-x86_64 \
+            fleetctl-linux-aarch64 \
+            fleetctl-windows-x86_64.exe \
+            SHA256SUMS

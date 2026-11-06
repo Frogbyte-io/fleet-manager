@@ -91,6 +91,24 @@ curl -fsS "http://127.0.0.1:${smoke_port}/api/v1/meta" | grep -q '"service":"fle
   || { echo "error: /api/v1/meta did not answer the public envelope" >&2; exit 1; }
 echo "    web shell, API, and readiness OK"
 
+echo "==> Downloading the fleetctl the image carries"
+# The image carries fleetctl for its own architecture; the download must
+# match the digest the controller publishes beside it.
+case "$(docker exec "$container" uname -m)" in
+  x86_64) fleetctl_platform="linux-x86_64" ;;
+  aarch64) fleetctl_platform="linux-aarch64" ;;
+  *) fleetctl_platform="" ;;
+esac
+if [ -n "$fleetctl_platform" ]; then
+  fleetctl_dir="$(mktemp -d "${TMPDIR:-/tmp}/fleet-smoke-fleetctl.XXXXXX")"
+  curl -fsS -o "$fleetctl_dir/fleetctl" "http://127.0.0.1:${smoke_port}/downloads/fleetctl/${fleetctl_platform}"
+  curl -fsS -o "$fleetctl_dir/fleetctl.sha256" "http://127.0.0.1:${smoke_port}/downloads/fleetctl/${fleetctl_platform}.sha256"
+  (cd "$fleetctl_dir" && sha256sum --check --strict --quiet fleetctl.sha256) \
+    || { echo "error: the served fleetctl does not match its sha256" >&2; exit 1; }
+  rm -rf "$fleetctl_dir"
+  echo "    fleetctl for ${fleetctl_platform} served and verified"
+fi
+
 echo "==> Asserting the isolation posture"
 [ "$(docker inspect -f '{{.HostConfig.ReadonlyRootfs}}' "$container")" = "true" ] \
   || { echo "error: the root filesystem is not read-only" >&2; exit 1; }
