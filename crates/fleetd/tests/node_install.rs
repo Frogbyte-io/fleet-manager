@@ -174,10 +174,12 @@ async fn with_setup_hook(
     setup_hook: SetupHook,
     machines: Arc<MachineRepository>,
     operations: Arc<fleet_application::operation::Operations>,
+    pool: sqlx::SqlitePool,
 ) -> InstallExecutor {
     match setup_hook {
         SetupHook::SkillsManager => install.with_setup_hook(Arc::new(
-            fleet_controller::skills_setup::SkillsManagerSetup::new(machines, operations),
+            fleet_controller::skills_setup::SkillsManagerSetup::new(machines, operations)
+                .with_snapshots(Arc::new(fleet_storage_sqlite::SkillsRepository::new(pool))),
         )),
         SetupHook::Off => install,
         SetupHook::Failing => install.with_setup_hook(Arc::new(failing_setup_hook().await)),
@@ -281,6 +283,7 @@ async fn harness_with(setup_hook: SetupHook) -> Harness {
             setup_hook,
             machines.clone(),
             operations.clone(),
+            store.pool().clone(),
         )
         .await,
     );
@@ -864,6 +867,22 @@ async fn an_upgrade_installs_over_a_live_identity_without_minting_a_token() {
         .await;
     assert_eq!(first["state"], "succeeded", "{first}");
 
+    // The queued probe ran and the operator has since removed the CLI: the
+    // machine's Skills Manager observation reads `absent`.
+    fleet_application::skills::SkillsPort::record(
+        &fleet_storage_sqlite::SkillsRepository::new(harness.pool.clone()),
+        &fleet_application::skills::SkillsSnapshot {
+            machine_id: machine_id.clone(),
+            availability: fleet_application::skills::SkillsAvailability::Absent,
+            cli_version: None,
+            data: json!({}),
+            update_check: "unavailable".to_owned(),
+            observed_at: fleet_core::SystemClock::now_unix_millis(),
+        },
+    )
+    .await
+    .unwrap();
+
     // The second install is an upgrade: no token, no enrollment, same key.
     let upgrade_id = harness
         .create_operation("machine.install-fleetd", payload(&package))
@@ -872,8 +891,8 @@ async fn an_upgrade_installs_over_a_live_identity_without_minting_a_token() {
         .run_operation(harness.install_executor.as_ref(), &upgrade_id)
         .await;
     assert_eq!(upgrade["state"], "succeeded", "{upgrade}");
-    // #600: the first enrollment set the machine up; the upgrade does not,
-    // so a CLI the operator removed since is not reinstalled.
+    // #600: the first enrollment set the machine up; the upgrade of an
+    // observed machine does not, so the removed CLI is not reinstalled.
     let upgrade_result: Value =
         serde_json::from_str(upgrade["resultJson"].as_str().unwrap()).unwrap();
     assert_eq!(

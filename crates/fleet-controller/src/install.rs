@@ -29,12 +29,14 @@
 //! work — the use case's own authorization funnel and audit event record it.
 //! There is deliberately no path that skips the funnel.
 //!
-//! After a successful first or forced enrollment (not an upgrade) the
-//! executor runs the machine-setup hook (#600) as the same trusted
-//! principal: it queues a pinned Skills Manager install through the
-//! authorized, audited operation path, correlated with the install, and the
-//! result reports what it did as `skillsManager`. The hook is best effort and
-//! time-bounded: nothing it answers changes the install's success.
+//! After a successful install the executor runs the machine-setup hook
+//! (#600) as the same trusted principal. A first or forced enrollment queues
+//! a pinned Skills Manager install through the authorized, audited operation
+//! path, correlated with the install; an upgrade queues only when the machine
+//! was never observed by Skills Manager (an earlier enrolling install failed
+//! before its follow-up). The result reports what it did as `skillsManager`.
+//! The hook is best effort and time-bounded: nothing it answers changes the
+//! install's success.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -43,7 +45,7 @@ use async_trait::async_trait;
 
 use fleet_application::authz::ActingPrincipal;
 use fleet_application::machine::MachinePort;
-use fleet_application::machine_setup::{MachineSetup, MachineSetupPort, SetupFollowUp};
+use fleet_application::machine_setup::{MachineSetup, MachineSetupPort, SetupFollowUp, SetupKind};
 use fleet_application::node::Nodes;
 use fleet_application::onboarding::OnboardAuth;
 use fleet_application::operation::{Operation, Operations};
@@ -180,7 +182,11 @@ impl InstallExecutor {
         }
     }
 
-    /// Runs `hook` after every successful install (#600).
+    /// Runs `hook` after a successful install that sets the machine up
+    /// (#600): a first or forced enrollment. After an upgrade over a live
+    /// identity the hook is told so ([`SetupKind::Upgrade`]) and queues only
+    /// when the machine has no Skills Manager observation at all, i.e. an
+    /// earlier enrolling install failed before its follow-up.
     #[must_use]
     pub fn with_setup_hook(mut self, hook: Arc<dyn MachineSetupPort>) -> Self {
         self.setup_hook = Some(hook);
@@ -188,11 +194,13 @@ impl InstallExecutor {
     }
 
     /// The setup follow-up for a successful install. Never fails the
-    /// install: a failure is logged and reported in the result. Only a
-    /// first or forced enrollment sets a machine up; a fleetd upgrade does
-    /// not, so a CLI the operator removed is not reinstalled. The hook is
-    /// bounded by [`SETUP_HOOK_TIMEOUT`], because it runs before the install
-    /// records its success.
+    /// install: a failure is logged and reported in the result. A first or
+    /// forced enrollment sets the machine up; an upgrade is passed as
+    /// [`SetupKind::Upgrade`], which queues only when the machine has never
+    /// been observed by Skills Manager, so a CLI the operator removed (an
+    /// `absent` observation) is not reinstalled. The hook is bounded by
+    /// [`SETUP_HOOK_TIMEOUT`], because it runs before the install records
+    /// its success.
     async fn setup_follow_up(
         &self,
         operation: &Operation,
@@ -202,11 +210,6 @@ impl InstallExecutor {
         let Some(hook) = &self.setup_hook else {
             return SetupFollowUp::Disabled;
         };
-        if enrollment == Enrollment::Upgrade {
-            return SetupFollowUp::Skipped {
-                reason: "a fleetd upgrade does not set the machine up again; the Skills Manager install runs only on a first or forced enrollment".to_owned(),
-            };
-        }
         let auth = match &payload.auth {
             InstallAuth::Agent => OnboardAuth::Agent,
             InstallAuth::IdentityFile { path } => OnboardAuth::IdentityFile { path: path.clone() },
@@ -222,6 +225,13 @@ impl InstallExecutor {
                     .clone()
                     .unwrap_or_else(|| operation.id.clone()),
             ),
+            // An upgrade is not a new setup: the hook decides whether the
+            // earlier setup's follow-up is still owed.
+            kind: if enrollment == Enrollment::Upgrade {
+                SetupKind::Upgrade
+            } else {
+                SetupKind::Initial
+            },
         };
         let outcome = match tokio::time::timeout(
             SETUP_HOOK_TIMEOUT,

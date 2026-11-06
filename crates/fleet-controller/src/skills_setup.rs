@@ -13,11 +13,12 @@
 use std::sync::Arc;
 
 use fleet_application::authz::Authorizer;
-use fleet_application::machine::MachinePort;
-use fleet_application::machine_setup::{MachineSetup, MachineSetupPort, SetupFollowUp};
+use fleet_application::machine::{CAPABILITY_FRESHNESS_MS, MachinePort};
+use fleet_application::machine_setup::{MachineSetup, MachineSetupPort, SetupFollowUp, SetupKind};
 use fleet_application::operation::{
     NewOperation, OperationUseCaseError, Operations, SETUP_FOLLOW_UP_IDEMPOTENCY_PREFIX,
 };
+use fleet_application::skills::SkillsPort;
 use fleet_core::{CapabilityFact, CapabilityStatus};
 
 /// The deadline of the queued probe: the download is bounded at 120 seconds
@@ -25,10 +26,18 @@ use fleet_core::{CapabilityFact, CapabilityStatus};
 pub const SETUP_PROBE_TIMEOUT_SECONDS: u64 = 300;
 
 /// Queues the pinned Skills Manager install after a machine is set up.
-#[derive(Debug)]
 pub struct SkillsManagerSetup {
     machines: Arc<dyn MachinePort>,
     operations: Arc<Operations>,
+    /// The Skills Manager observations; an upgrade consults them. Without
+    /// them an upgrade never queues.
+    snapshots: Option<Arc<dyn SkillsPort>>,
+}
+
+impl std::fmt::Debug for SkillsManagerSetup {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SkillsManagerSetup").finish_non_exhaustive()
+    }
 }
 
 impl SkillsManagerSetup {
@@ -39,6 +48,37 @@ impl SkillsManagerSetup {
         Self {
             machines,
             operations,
+            snapshots: None,
+        }
+    }
+
+    /// Lets an upgrade (a fleetd install over a live identity) queue the
+    /// follow-up when the machine has no Skills Manager observation at all:
+    /// the earlier enrolling install then failed before its follow-up. Any
+    /// observation, `absent` included (an operator's removal), keeps the
+    /// upgrade skipped.
+    #[must_use]
+    pub fn with_snapshots(mut self, snapshots: Arc<dyn SkillsPort>) -> Self {
+        self.snapshots = Some(snapshots);
+        self
+    }
+
+    /// Whether an upgrade still owes the follow-up, or why not.
+    async fn upgrade_owes_follow_up(&self, machine_id: &str) -> Result<(), SetupFollowUp> {
+        const OBSERVED: &str = "a fleetd upgrade does not set the machine up again, and Skills Manager was already observed on this machine";
+        let Some(snapshots) = &self.snapshots else {
+            return Err(SetupFollowUp::Skipped {
+                reason: OBSERVED.to_owned(),
+            });
+        };
+        match snapshots.get(machine_id).await {
+            Ok(None) => Ok(()),
+            Ok(Some(_)) => Err(SetupFollowUp::Skipped {
+                reason: OBSERVED.to_owned(),
+            }),
+            Err(failure) => Err(SetupFollowUp::Failed {
+                reason: format!("the Skills Manager observation is unreadable: {failure}"),
+            }),
         }
     }
 
@@ -51,7 +91,9 @@ impl SkillsManagerSetup {
             .map_err(|failure| SetupFollowUp::Failed {
                 reason: format!("the machine is unreadable: {failure}"),
             })?;
-        let family = freshest_fact(&machine.capabilities, &[("os", "family")]);
+        let now =
+            fleet_core::Timestamp::from_unix_millis(fleet_core::SystemClock::now_unix_millis());
+        let family = freshest_fact(&machine.capabilities, &[("os", "family")], now);
         // Agentless inventory reports `host/architecture` (`uname -m`);
         // fleetd reports `os/arch` (Rust's `std::env::consts::ARCH`, the
         // same spellings for the pinned platforms). A machine can carry
@@ -59,6 +101,7 @@ impl SkillsManagerSetup {
         let architecture = freshest_fact(
             &machine.capabilities,
             &[("host", "architecture"), ("os", "arch")],
+            now,
         );
         let pin =
             fleet_provider_skills_manager::release_pin(family.as_deref(), architecture.as_deref())
@@ -76,10 +119,16 @@ impl SkillsManagerSetup {
     }
 }
 
-/// The value of the best observation among `names`: a known fact over a
-/// stale one, then the newest `observed_at`. Other statuses carry no value
-/// worth acting on.
-fn freshest_fact(facts: &[CapabilityFact], names: &[(&str, &str)]) -> Option<String> {
+/// The value of the best observation among `names`, ranked by each fact's
+/// effective status at `now` (the read model's staleness rule: a `known`
+/// fact older than [`CAPABILITY_FRESHNESS_MS`] reads as `stale`): a fresh
+/// known fact over a stale one, then the newest `observed_at`. Other
+/// statuses carry no value worth acting on.
+fn freshest_fact(
+    facts: &[CapabilityFact],
+    names: &[(&str, &str)],
+    now: fleet_core::Timestamp,
+) -> Option<String> {
     facts
         .iter()
         .filter(|fact| {
@@ -87,18 +136,14 @@ fn freshest_fact(facts: &[CapabilityFact], names: &[(&str, &str)]) -> Option<Str
                 && names
                     .iter()
                     .any(|(namespace, name)| fact.namespace == *namespace && fact.name == *name)
-                && matches!(
-                    fact.status,
-                    CapabilityStatus::Known | CapabilityStatus::Stale
-                )
         })
-        .max_by_key(|fact| {
-            (
-                fact.status == CapabilityStatus::Known,
-                fact.observed_at.unix_millis(),
-            )
+        .filter_map(|fact| {
+            let status = fact.effective_status(now, CAPABILITY_FRESHNESS_MS);
+            matches!(status, CapabilityStatus::Known | CapabilityStatus::Stale)
+                .then_some((status == CapabilityStatus::Known, fact))
         })
-        .and_then(|fact| fact.value.clone())
+        .max_by_key(|(known, fact)| (*known, fact.observed_at.unix_millis()))
+        .and_then(|(_, fact)| fact.value.clone())
 }
 
 /// Whether the operation a setup key answered with is the follow-up this
@@ -130,6 +175,11 @@ impl MachineSetupPort for SkillsManagerSetup {
         principal_id: &str,
         setup: &MachineSetup,
     ) -> SetupFollowUp {
+        if setup.kind == SetupKind::Upgrade
+            && let Err(outcome) = self.upgrade_owes_follow_up(&setup.machine_id).await
+        {
+            return outcome;
+        }
         let payload = match self.payload(setup).await {
             Ok(payload) => payload,
             Err(outcome) => return outcome,

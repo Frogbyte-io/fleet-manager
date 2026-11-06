@@ -10,11 +10,12 @@ use std::time::Duration;
 
 use fleet_application::authz::{AccessRequest, Authorizer, Decision, Permission, ReasonId};
 use fleet_application::machine::{MachinePort, NewEndpoint, RegisterMachine};
-use fleet_application::machine_setup::{MachineSetup, MachineSetupPort, SetupFollowUp};
+use fleet_application::machine_setup::{MachineSetup, MachineSetupPort, SetupFollowUp, SetupKind};
 use fleet_application::onboarding::OnboardAuth;
 use fleet_application::operation::{
     NewOperation, OperationPort as _, Operations, SETUP_FOLLOW_UP_IDEMPOTENCY_PREFIX,
 };
+use fleet_application::skills::{SkillsAvailability, SkillsPort as _, SkillsSnapshot};
 use fleet_controller::skills_setup::SkillsManagerSetup;
 use fleet_core::{CapabilityFact, CapabilityStatus, Timestamp};
 use fleet_provider_ssh::ExecutionLimiter;
@@ -60,7 +61,10 @@ async fn compose(reference: &str) -> Fixture {
     let hook = SkillsManagerSetup::new(
         Arc::new(MachineRepository::new(pool.clone())),
         operations.clone(),
-    );
+    )
+    .with_snapshots(Arc::new(fleet_storage_sqlite::SkillsRepository::new(
+        pool.clone(),
+    )));
     Fixture {
         _dir: dir,
         pool,
@@ -75,7 +79,15 @@ impl Fixture {
     async fn plant_facts(&self, facts: &[(&str, &str, &str)]) {
         let facts: Vec<(&str, &str, &str, CapabilityStatus, i64)> = facts
             .iter()
-            .map(|(namespace, name, value)| (*namespace, *name, *value, CapabilityStatus::Known, 1))
+            .map(|(namespace, name, value)| {
+                (
+                    *namespace,
+                    *name,
+                    *value,
+                    CapabilityStatus::Known,
+                    fleet_core::SystemClock::now_unix_millis(),
+                )
+            })
             .collect();
         self.plant_observed(&facts).await;
     }
@@ -105,7 +117,17 @@ impl Fixture {
             auth,
             trigger: "install-op-1".to_owned(),
             correlation_id: Some("install-op-1".to_owned()),
+            kind: SetupKind::Initial,
         }
+    }
+
+    async fn set_up_upgrade(&self) -> SetupFollowUp {
+        let mut setup = self.setup(OnboardAuth::Agent);
+        setup.kind = SetupKind::Upgrade;
+        setup.trigger = "upgrade-op-1".to_owned();
+        self.hook
+            .machine_set_up(&fleet_auth::LanAllowAllAuthorizer, PRINCIPAL, &setup)
+            .await
     }
 
     async fn set_up(&self, authorizer: &dyn Authorizer) -> SetupFollowUp {
@@ -280,6 +302,8 @@ async fn a_setup_key_held_by_another_operation_is_not_reported_as_queued() {
                         "machineId": "someone-else",
                         "endpointId": "endpoint",
                         "auth": {"type": "agent"},
+                        "artifactUrl": "https://example.invalid/other",
+                        "artifactSha256": "0".repeat(64),
                         "timeoutSeconds": 30,
                     })
                     .to_string(),
@@ -296,21 +320,36 @@ async fn a_setup_key_held_by_another_operation_is_not_reported_as_queued() {
     assert!(reason.contains("held by another operation"), "{reason}");
 }
 
-/// The setup route creates only setup-keyed `skills.probe` operations.
+/// The setup route creates only setup-keyed, pinned `skills.probe`
+/// operations, and refuses a trigger the audit could not record, before
+/// anything persists.
 #[tokio::test]
-async fn the_setup_route_refuses_other_kinds_and_keys() {
+async fn the_setup_route_refuses_other_kinds_keys_and_unpinned_probes() {
     let fixture = compose("deploy@host-one:22").await;
-    for (kind, key) in [
-        (
-            "noop",
-            Some(format!("{SETUP_FOLLOW_UP_IDEMPOTENCY_PREFIX}x")),
-        ),
-        ("skills.probe", Some("other-key".to_owned())),
-        (
-            "skills.probe",
-            Some(SETUP_FOLLOW_UP_IDEMPOTENCY_PREFIX.to_owned()),
-        ),
-        ("skills.probe", None),
+    let pinned = || {
+        serde_json::json!({
+            "machineId": "m",
+            "endpointId": "endpoint",
+            "auth": {"type": "agent"},
+            "artifactUrl": "https://example.invalid/cli",
+            "artifactSha256": "0".repeat(64),
+            "timeoutSeconds": 30,
+        })
+    };
+    let mut unpinned = pinned();
+    unpinned.as_object_mut().unwrap().remove("artifactUrl");
+    let mut blank = pinned();
+    blank["artifactSha256"] = serde_json::json!("");
+    let key = |trigger: &str| Some(format!("{SETUP_FOLLOW_UP_IDEMPOTENCY_PREFIX}{trigger}"));
+    for (kind, key, payload) in [
+        ("noop", key("x"), Some(pinned())),
+        ("skills.probe", Some("other-key".to_owned()), Some(pinned())),
+        ("skills.probe", key(""), Some(pinned())),
+        ("skills.probe", None, Some(pinned())),
+        ("skills.probe", key(&"t".repeat(2049)), Some(pinned())),
+        ("skills.probe", key("unpinned"), Some(unpinned)),
+        ("skills.probe", key("blank"), Some(blank)),
+        ("skills.probe", key("none"), None),
     ] {
         let result = fixture
             .operations
@@ -322,49 +361,120 @@ async fn the_setup_route_refuses_other_kinds_and_keys() {
                     idempotency_key: key.clone(),
                     deadline_at: None,
                     correlation_id: None,
-                    payload_json: None,
+                    payload_json: payload.map(|payload| payload.to_string()),
                     review_token: None,
                 },
             )
             .await;
-        assert!(result.is_err(), "{kind} {key:?}");
+        assert!(
+            matches!(
+                result,
+                Err(fleet_application::operation::OperationUseCaseError::Invalid { .. })
+            ),
+            "{kind} key of {} bytes",
+            key.as_deref().map_or(0, str::len)
+        );
     }
+    // No refusal persisted anything.
+    let all: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM operations")
+        .fetch_one(&fixture.pool)
+        .await
+        .unwrap();
+    assert_eq!(all, 0);
 }
 
-/// With both architecture facts, the freshest known observation wins, and
-/// a known fact beats a newer stale one.
+/// With both architecture facts, the best observation wins, ranked by the
+/// effective status at read time: a fresh known fact beats a newer stale
+/// one, and a known fact older than a day reads as stale, so it does not
+/// beat a newer one.
 #[tokio::test]
 async fn the_freshest_known_architecture_fact_selects_the_pin() {
+    let now = fleet_core::SystemClock::now_unix_millis();
+    let minute = 60_000;
+    let day = 24 * 60 * minute;
     let cases = [
         (
             vec![
-                ("os", "family", "Linux", CapabilityStatus::Known, 1),
-                ("host", "architecture", "x86_64", CapabilityStatus::Known, 1),
-                ("os", "arch", "aarch64", CapabilityStatus::Known, 2),
+                ("os", "family", "Linux", CapabilityStatus::Known, now),
+                (
+                    "host",
+                    "architecture",
+                    "x86_64",
+                    CapabilityStatus::Known,
+                    now - 2 * minute,
+                ),
+                (
+                    "os",
+                    "arch",
+                    "aarch64",
+                    CapabilityStatus::Known,
+                    now - minute,
+                ),
             ],
             "arm64",
         ),
         (
             vec![
-                ("os", "family", "Linux", CapabilityStatus::Known, 1),
+                ("os", "family", "Linux", CapabilityStatus::Known, now),
                 (
                     "host",
                     "architecture",
                     "aarch64",
                     CapabilityStatus::Known,
-                    3,
+                    now - minute,
                 ),
-                ("os", "arch", "x86_64", CapabilityStatus::Known, 2),
+                (
+                    "os",
+                    "arch",
+                    "x86_64",
+                    CapabilityStatus::Known,
+                    now - 2 * minute,
+                ),
             ],
             "arm64",
         ),
+        // A fresh known fact beats a newer recorded-stale one.
         (
             vec![
-                ("os", "family", "Linux", CapabilityStatus::Known, 1),
-                ("host", "architecture", "x86_64", CapabilityStatus::Known, 1),
-                ("os", "arch", "aarch64", CapabilityStatus::Stale, 9),
+                ("os", "family", "Linux", CapabilityStatus::Known, now),
+                (
+                    "host",
+                    "architecture",
+                    "x86_64",
+                    CapabilityStatus::Known,
+                    now - 2 * minute,
+                ),
+                (
+                    "os",
+                    "arch",
+                    "aarch64",
+                    CapabilityStatus::Stale,
+                    now - minute,
+                ),
             ],
             "x64",
+        ),
+        // A recorded-known fact three days old is stale at read time, so the
+        // newer stale observation wins.
+        (
+            vec![
+                ("os", "family", "Linux", CapabilityStatus::Known, now),
+                (
+                    "host",
+                    "architecture",
+                    "x86_64",
+                    CapabilityStatus::Known,
+                    now - 3 * day,
+                ),
+                (
+                    "os",
+                    "arch",
+                    "aarch64",
+                    CapabilityStatus::Stale,
+                    now - day - minute,
+                ),
+            ],
+            "arm64",
         ),
     ];
     for (facts, asset) in cases {
@@ -389,6 +499,76 @@ async fn the_freshest_known_architecture_fact_selects_the_pin() {
             "{facts:?}: {payload}"
         );
     }
+}
+
+/// An upgrade (a fleetd install over a live identity) queues only when the
+/// machine was never observed by Skills Manager: an enrolling install that
+/// failed before its follow-up still gets it on the retry, while an
+/// operator's removal (an `absent` observation) is respected.
+#[tokio::test]
+async fn an_upgrade_queues_only_without_any_skills_observation() {
+    let fixture = compose("deploy@host-one:22").await;
+    fixture
+        .plant_facts(&[
+            ("os", "family", "Linux"),
+            ("host", "architecture", "x86_64"),
+        ])
+        .await;
+    let outcome = fixture.set_up_upgrade().await;
+    assert!(
+        matches!(outcome, SetupFollowUp::Queued { .. }),
+        "{outcome:?}"
+    );
+
+    fleet_storage_sqlite::SkillsRepository::new(fixture.pool.clone())
+        .record(&SkillsSnapshot {
+            machine_id: fixture.machine_id.clone(),
+            availability: SkillsAvailability::Absent,
+            cli_version: None,
+            data: serde_json::json!({}),
+            update_check: "unavailable".to_owned(),
+            observed_at: fleet_core::SystemClock::now_unix_millis(),
+        })
+        .await
+        .unwrap();
+    let mut setup = fixture.setup(OnboardAuth::Agent);
+    setup.kind = SetupKind::Upgrade;
+    setup.trigger = "upgrade-op-2".to_owned();
+    let outcome = fixture
+        .hook
+        .machine_set_up(&fleet_auth::LanAllowAllAuthorizer, PRINCIPAL, &setup)
+        .await;
+    let SetupFollowUp::Skipped { reason } = &outcome else {
+        panic!("expected a skip, got {outcome:?}");
+    };
+    assert!(reason.contains("upgrade"), "{reason}");
+    assert_eq!(fixture.probe_count().await, 1);
+}
+
+/// Without the observation port an upgrade never queues.
+#[tokio::test]
+async fn an_upgrade_without_the_observation_port_is_skipped() {
+    let fixture = compose("deploy@host-one:22").await;
+    fixture
+        .plant_facts(&[
+            ("os", "family", "Linux"),
+            ("host", "architecture", "x86_64"),
+        ])
+        .await;
+    let hook = SkillsManagerSetup::new(
+        Arc::new(MachineRepository::new(fixture.pool.clone())),
+        fixture.operations.clone(),
+    );
+    let mut setup = fixture.setup(OnboardAuth::Agent);
+    setup.kind = SetupKind::Upgrade;
+    let outcome = hook
+        .machine_set_up(&fleet_auth::LanAllowAllAuthorizer, PRINCIPAL, &setup)
+        .await;
+    assert!(
+        matches!(outcome, SetupFollowUp::Skipped { .. }),
+        "{outcome:?}"
+    );
+    assert_eq!(fixture.probe_count().await, 0);
 }
 
 #[test]

@@ -13,6 +13,20 @@ use serde::{Deserialize, Serialize};
 use crate::authz::Authorizer;
 use crate::onboarding::OnboardAuth;
 
+/// What set the machine up.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SetupKind {
+    /// The machine was set up for the first time, or set up again on
+    /// purpose: an onboarding add, or a fleetd install that enrolled the
+    /// node (first or forced enrollment).
+    Initial,
+    /// A fleetd install over a live node identity. It is not a new setup, so
+    /// a follow-up must not undo what the operator changed since (e.g. a
+    /// removed CLI); it applies only when the earlier setup never got as far
+    /// as the follow-up (e.g. an enrolled install that failed before it).
+    Upgrade,
+}
+
 /// The machine that was just set up, and how the controller reaches it.
 #[derive(Clone, Debug)]
 pub struct MachineSetup {
@@ -31,6 +45,8 @@ pub struct MachineSetup {
     /// audit trace back to the setup (the install operation's correlation id,
     /// or its id when it has none).
     pub correlation_id: Option<String>,
+    /// What set the machine up.
+    pub kind: SetupKind,
 }
 
 /// What the follow-up did. Serialized into the install operation's result as

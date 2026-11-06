@@ -542,6 +542,11 @@ async fn the_pinned_install_verifies_the_checksum() {
     assert_eq!(state, "failed");
     assert!(result.is_none());
     assert!(error.unwrap().contains("checksum did not match"));
+    // The staged download beside the destination is gone too.
+    let leftovers: Vec<_> = std::fs::read_dir(format!("{home}/.local/bin"))
+        .map(|entries| entries.filter_map(Result::ok).collect())
+        .unwrap_or_default();
+    assert!(leftovers.is_empty(), "{leftovers:?}");
     let retained =
         fleet_application::skills::SkillsPort::get(fixture.snapshots.as_ref(), &fixture.machine_id)
             .await

@@ -20,8 +20,9 @@ be present; Fleet maps them to the documented `/tree/<revision>/<subpath>`
 install form and never guesses a repository's default branch.
 
 A rollout needs `skills-manager-cli` on the machine. When Fleet sets a machine
-up (a `machine.install-fleetd` that enrolls the node, not a fleetd upgrade,
-or an SSH onboarding add), the
+up (a `machine.install-fleetd` that enrolls the node, or an SSH onboarding
+add; a fleetd upgrade only when the machine was never observed by Skills
+Manager), the
 controller queues a pinned `skills.probe` as a follow-up (#600): the release
 asset and its sha256 come from the built-in pin table in
 `fleet-provider-skills-manager` (the tested 1.40.0, Linux x86_64 and aarch64),

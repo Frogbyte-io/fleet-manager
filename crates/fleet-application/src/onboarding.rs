@@ -935,6 +935,7 @@ impl Onboarding {
                     auth: draft.auth.clone(),
                     trigger: format!("onboarding:{}", machine.id),
                     correlation_id: None,
+                    kind: crate::machine_setup::SetupKind::Initial,
                 },
             )
             .await;

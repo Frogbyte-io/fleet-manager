@@ -1014,16 +1014,40 @@ impl Operations {
         principal_id: &str,
         new: &NewOperation,
     ) -> Result<Operation, OperationUseCaseError> {
+        // The trigger is recorded as audit metadata after the row is
+        // inserted, so its bound is checked here, before anything persists.
         let keyed = new
             .idempotency_key
             .as_deref()
             .and_then(|key| key.strip_prefix(SETUP_FOLLOW_UP_IDEMPOTENCY_PREFIX))
-            .is_some_and(|trigger| !trigger.is_empty());
+            .is_some_and(|trigger| {
+                !trigger.is_empty() && trigger.len() <= crate::audit::MAX_METADATA_VALUE_BYTES
+            });
         if new.kind != "skills.probe" || !keyed {
             return Err(OperationUseCaseError::Invalid {
                 detail: format!(
-                    "the setup follow-up route creates only skills.probe keyed by {SETUP_FOLLOW_UP_IDEMPOTENCY_PREFIX}<trigger>"
+                    "the setup follow-up route creates only skills.probe keyed by {SETUP_FOLLOW_UP_IDEMPOTENCY_PREFIX}<trigger>, with a trigger of at most {} bytes",
+                    crate::audit::MAX_METADATA_VALUE_BYTES
                 ),
+            });
+        }
+        // A setup follow-up is always a pinned install: an unpinned probe
+        // would only need `skills.read` and could occupy the reserved key
+        // without installing anything.
+        let pinned = new
+            .payload_json
+            .as_deref()
+            .and_then(|payload| serde_json::from_str::<serde_json::Value>(payload).ok())
+            .is_some_and(|payload| {
+                ["artifactUrl", "artifactSha256"].iter().all(|field| {
+                    payload[*field]
+                        .as_str()
+                        .is_some_and(|value| !value.trim().is_empty())
+                })
+            });
+        if !pinned {
+            return Err(OperationUseCaseError::Invalid {
+                detail: "the setup follow-up must pin a release: artifactUrl and artifactSha256 are required".to_owned(),
             });
         }
         self.create_inner(authorizer, principal_id, new, CreateRoute::SetupFollowUp)

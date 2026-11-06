@@ -225,7 +225,10 @@ fn run_serve(mut config: fleet_config::ControllerConfig) -> ExitCode {
                         store.pool().clone(),
                     )),
                     worker_operations.clone(),
-                ),
+                )
+                .with_snapshots(std::sync::Arc::new(
+                    fleet_storage_sqlite::SkillsRepository::new(store.pool().clone()),
+                )),
             ))
         } else {
             None
