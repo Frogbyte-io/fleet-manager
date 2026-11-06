@@ -109,6 +109,14 @@ impl SshFleetdUninstaller {
 #[async_trait]
 impl FleetdUninstallPort for SshFleetdUninstaller {
     async fn uninstall(&self, request: &FleetdUninstall) -> Result<String, String> {
+        // The review validated the layout; it is checked again here because
+        // it reaches a root script that deletes FLEETD_STATE_DIR.
+        for (name, value) in &request.plan.layout {
+            if !fleet_application::machine_remove::LAYOUT_VARIABLES.contains(&name.as_str()) {
+                return Err(format!("{name} is not an uninstall layout variable"));
+            }
+            fleet_application::fleetd_layout::validate_installer_variable(name, value)?;
+        }
         let auth = self
             .ssh_auth(&request.plan.auth, &request.machine_id)
             .await?;
@@ -320,6 +328,73 @@ mod tests {
         assert!(String::from_utf8_lossy(&present.stdout).contains("reached"));
         assert!(uninstall_script().starts_with(UNINSTALL_PREFLIGHT));
         assert!(uninstall_script().ends_with(UNINSTALL_SCRIPT));
+    }
+
+    /// Runs the shipped uninstall in a scratch layout with a `systemctl`
+    /// stub that logs its arguments and exits `systemctl_exit`.
+    fn run_uninstall(unit_present: bool, systemctl_exit: i32) -> (Option<i32>, String, String) {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let log = root.join("systemctl.log");
+        let stub = root.join("systemctl");
+        std::fs::write(
+            &stub,
+            format!(
+                "#!/bin/sh\necho \"$*\" >> {}\nexit {systemctl_exit}\n",
+                log.display()
+            ),
+        )
+        .unwrap();
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            std::fs::set_permissions(&stub, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let unit = root.join("fleetd.service");
+        if unit_present {
+            std::fs::write(&unit, "").unwrap();
+        }
+        std::fs::write(root.join("fleetd"), "").unwrap();
+        let output = std::process::Command::new("bash")
+            .arg("-c")
+            .arg(UNINSTALL_SCRIPT)
+            .env("FLEETD_UNIT_DIR", root)
+            .env("FLEETD_BIN_DIR", root)
+            .env("FLEETD_ENV_FILE", root.join("fleetd.env"))
+            .env("FLEETD_STATE_DIR", root.join("state"))
+            .env("FLEETD_SYSTEMCTL", &stub)
+            .output()
+            .unwrap();
+        let calls = std::fs::read_to_string(&log).unwrap_or_default();
+        let still_there = if unit.exists() {
+            "unit kept"
+        } else {
+            "unit removed"
+        };
+        (
+            output.status.code(),
+            format!("{}{}", String::from_utf8_lossy(&output.stderr), still_there),
+            calls,
+        )
+    }
+
+    #[test]
+    fn a_service_that_cannot_be_stopped_is_not_removed() {
+        let (code, stderr, calls) = run_uninstall(true, 1);
+        assert_ne!(code, Some(0), "{stderr}");
+        assert!(stderr.contains("cannot stop and disable"), "{stderr}");
+        assert!(stderr.ends_with("unit kept"), "{stderr}");
+        assert!(calls.contains("disable --now fleetd"), "{calls}");
+    }
+
+    #[test]
+    fn an_absent_unit_is_not_stopped_and_a_present_one_is() {
+        let (code, stderr, calls) = run_uninstall(false, 1);
+        assert_eq!(code, Some(0), "{stderr}");
+        assert!(!calls.contains("disable"), "{calls}");
+        let (code, stderr, calls) = run_uninstall(true, 0);
+        assert_eq!(code, Some(0), "{stderr}");
+        assert!(calls.contains("disable --now fleetd"), "{calls}");
+        assert!(stderr.ends_with("unit removed"), "{stderr}");
     }
 
     #[test]

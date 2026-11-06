@@ -42,7 +42,13 @@ PURGE=false
 BIN="$BIN_DIR/fleetd"
 UNIT="$UNIT_DIR/$SERVICE.service"
 
-"${RUN_PRIV[@]}" "$SYSTEMCTL" disable --now "$SERVICE" >/dev/null 2>&1 || true
+# A service that cannot be stopped is not removed: deleting its files under
+# a running fleetd would leave it running without a unit. When the unit is
+# already gone there is nothing to stop.
+if [ -e "$UNIT" ]; then
+    "${RUN_PRIV[@]}" "$SYSTEMCTL" disable --now "$SERVICE" >/dev/null 2>&1 \
+        || die "cannot stop and disable $SERVICE ($SYSTEMCTL disable --now failed); nothing was removed"
+fi
 "${RUN_PRIV[@]}" rm -f "$UNIT" || die "cannot remove $UNIT"
 "${RUN_PRIV[@]}" rm -f "$ENV_FILE" || true
 "${RUN_PRIV[@]}" rm -f "$BIN" || true

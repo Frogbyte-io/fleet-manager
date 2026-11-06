@@ -16,6 +16,7 @@ pub mod credentials;
 pub mod dns;
 pub mod events;
 pub mod external_accounts;
+pub mod fleetd_layout;
 pub mod hardware;
 pub mod hardware_inventory;
 pub mod hardware_override;

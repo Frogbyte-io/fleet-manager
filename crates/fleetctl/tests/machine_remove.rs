@@ -230,6 +230,7 @@ fn removed(uninstalled: bool) -> Value {
         "unpinnedHosts": ["box.lan"],
         "keptHosts": [],
         "unpinFailedHosts": [],
+        "auditGaps": [],
         "footprint": footprint(),
     })
 }

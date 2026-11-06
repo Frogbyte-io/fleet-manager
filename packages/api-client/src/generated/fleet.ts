@@ -4171,6 +4171,11 @@ export interface MachineRemovalReviewDto {
  * What a removal did.
  */
 export interface MachineRemovedDto {
+  /**
+     * The audit events that could not be written; the removal went on and
+     * the controller log has the cause.
+     */
+  auditGaps: string[];
   /** What was deleted. */
   footprint: RemovalFootprintDto;
   /**
@@ -8776,6 +8781,11 @@ export interface ResourceMachineRemovalReviewDto {
  * What a removal did.
  */
 export type ResourceMachineRemovedDtoData = {
+  /**
+     * The audit events that could not be written; the removal went on and
+     * the controller log has the cause.
+     */
+  auditGaps: string[];
   /** What was deleted. */
   footprint: RemovalFootprintDto;
   /**

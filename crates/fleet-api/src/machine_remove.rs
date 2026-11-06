@@ -291,6 +291,9 @@ pub struct MachineRemovedDto {
     /// The hosts whose pins could not be removed; remove them from the
     /// controller's known-hosts file by hand.
     pub unpin_failed_hosts: Vec<String>,
+    /// The audit events that could not be written; the removal went on and
+    /// the controller log has the cause.
+    pub audit_gaps: Vec<String>,
     /// What was deleted.
     pub footprint: RemovalFootprintDto,
 }
@@ -310,6 +313,7 @@ impl From<RemovalOutcome> for MachineRemovedDto {
             unpinned_hosts: outcome.unpinned_hosts,
             kept_hosts: outcome.kept_hosts,
             unpin_failed_hosts: outcome.unpin_failed_hosts,
+            audit_gaps: outcome.audit_gaps,
             footprint: outcome.footprint.into(),
         }
     }
@@ -389,6 +393,13 @@ pub(crate) fn map_removal_error(
             "conflict",
             message,
             RetryClass::Never,
+            correlation_id,
+        ),
+        MachineRemovalError::Busy { .. } => error(
+            StatusCode::CONFLICT,
+            "machine_removal_busy",
+            message,
+            RetryClass::Backoff,
             correlation_id,
         ),
         MachineRemovalError::UninstallUnavailable => error(
@@ -498,7 +509,7 @@ pub async fn review_machine_removal(
         (status = 400, description = "The body is malformed, or the review token does not match the machine as it is now.", body = crate::error::ApiError),
         (status = 403, description = "The caller may not delete machines (`machine.delete`).", body = crate::error::ApiError),
         (status = 404, description = "The machine does not exist.", body = crate::error::ApiError),
-        (status = 409, description = "Refused: `machine_removal_blocked` (a Lab provision, persistent marker, USB reservation, unfinished operation, or stored secrets a controller without its secret store cannot revoke; the message says what to do) or `conflict` (a hold appeared after the review, or during the uninstall, and the guarded delete refused it; nothing was deleted).", body = crate::error::ApiError),
+        (status = 409, description = "Refused: `machine_removal_blocked` (a Lab provision, persistent marker, USB reservation, unfinished operation, or stored secrets a controller without its secret store cannot revoke; the message says what to do) `conflict` (a hold appeared after the review, or during the uninstall, and the guarded delete refused it, or the recorded install layout is not safe to uninstall with; nothing was deleted), or `machine_removal_busy` (another removal of the machine is running, or a hold came and went during the delete; retry).", body = crate::error::ApiError),
         (status = 500, description = "A backend port failed.", body = crate::error::ApiError),
         (status = 502, description = "The fleetd uninstall failed (`fleetd_uninstall_failed`); the machine was not removed.", body = crate::error::ApiError),
         (status = 503, description = "Machine removal, or the uninstall, is not wired.", body = crate::error::ApiError),

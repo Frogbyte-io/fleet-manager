@@ -410,6 +410,14 @@ fn render_removed(payload: &Value) -> String {
             payload["secretsRevoked"]
         ));
     }
+    if let Some(gaps) = payload["auditGaps"].as_array()
+        && !gaps.is_empty()
+    {
+        lines.push(format!(
+            "  audit events not written (see the controller log): {}",
+            list(&payload["auditGaps"])
+        ));
+    }
     if payload["sessionClosed"] == true {
         lines.push("  the live node session was closed".to_owned());
     }

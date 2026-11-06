@@ -627,6 +627,69 @@ async fn a_second_session_supersedes_the_first() {
 }
 
 #[tokio::test]
+async fn removing_a_machine_closes_its_session_and_says_why() {
+    let harness = harness().await;
+    let keys = NodeKeys::generate();
+    let (machine_id, credential) = harness.enroll_node("removed", &keys).await;
+    let session = harness.prove_session(&credential, &keys).await;
+    let (stream, _) = connect_node(&harness, &session).await.unwrap();
+    let (mut sink, mut source) = stream.split();
+    send_frame(&mut sink, hello_frame(&machine_id, 1, 1)).await;
+    let welcome = receive_frame(&mut source).await.expect("a Welcome");
+    assert!(matches!(
+        welcome.payload,
+        Some(wire::frame::Payload::Welcome(_))
+    ));
+
+    // The machine is deleted (its node rows cascade), then its session is
+    // closed, as a removal does.
+    sqlx::query("DELETE FROM machines WHERE id = ?1")
+        .bind(&machine_id)
+        .execute(&harness.pool)
+        .await
+        .unwrap();
+    assert!(harness.gateway.close_session(&machine_id));
+    let fault = receive_frame(&mut source).await.expect("a fault");
+    assert!(matches!(
+        fault.payload,
+        Some(wire::frame::Payload::Fault(_))
+    ));
+    let machine = machine_id.clone();
+    let pool = harness.pool.clone();
+    wait_until(
+        async || {
+            sqlx::query_scalar::<_, i64>(
+                "SELECT COUNT(*) FROM audit_events WHERE resource = ?1 \
+                 AND json_extract(metadata_json, '$.event') = 'gateway_closed_machine_removed'",
+            )
+            .bind(&machine)
+            .fetch_one(&pool)
+            .await
+            .unwrap()
+                == 1
+        },
+        "the closure is audited as a removal",
+    )
+    .await;
+    assert!(!harness.gateway.close_session(&machine_id));
+
+    // The node cannot come back: its session is gone with the machine.
+    if let Ok((stream, _)) = connect_node(&harness, &session).await {
+        let (mut sink, mut source) = stream.split();
+        send_frame(&mut sink, hello_frame(&machine_id, 1, 1)).await;
+        let frame = receive_frame(&mut source).await;
+        assert!(
+            !matches!(
+                frame.and_then(|frame| frame.payload),
+                Some(wire::frame::Payload::Welcome(_))
+            ),
+            "a removed machine's node is never welcomed"
+        );
+    }
+    assert!(harness.gateway.session_of(&machine_id).await.is_none());
+}
+
+#[tokio::test]
 async fn a_quiet_session_goes_stale_and_a_heartbeat_recovers_it() {
     let harness = harness().await;
     let keys = NodeKeys::generate();

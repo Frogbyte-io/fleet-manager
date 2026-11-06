@@ -284,6 +284,14 @@ impl InstallExecutor {
                 .ok_or("the operation carries no payload")?,
         )
         .map_err(|error| format!("the payload is not a valid install record: {error}"))?;
+        // Checked when the operation was accepted; checked again here, so a
+        // payload queued before the rule existed cannot reach the installer.
+        if let Err(reason) =
+            fleet_application::fleetd_layout::validate_installer_env(&payload.installer_env)
+        {
+            return fail_operation(operations, &operation.id, "invalid_request", &reason, &[])
+                .await;
+        }
         let auth = match &payload.auth {
             InstallAuth::Agent => SshAuth::Agent,
             InstallAuth::IdentityFile { path } => SshAuth::IdentityFile { path: path.clone() },

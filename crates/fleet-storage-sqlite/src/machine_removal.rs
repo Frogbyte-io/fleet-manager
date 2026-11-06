@@ -33,10 +33,9 @@ use async_trait::async_trait;
 use sqlx::SqlitePool;
 
 use fleet_application::machine_remove::{
-    ActiveOperationHold, LabProvisionHold, MachineRemovalPort, OtherHostUsers,
+    ActiveOperationHold, GuardedDeleteError, LabProvisionHold, MachineRemovalPort, OtherHostUsers,
     PersistentMarkerHold, RemovalFootprint,
 };
-use fleet_application::operation::PortFailure;
 use fleet_application::persistent::{ADMIN_PASSWORD_PREFIX, REGISTERED_SOURCE};
 
 /// The secret-record name prefix of SSH keys stored for a machine.
@@ -79,7 +78,7 @@ impl MachineRemovalRepository {
     }
 
     /// Why the guarded delete refused, once it did: the first hold found.
-    async fn hold(&self, machine_id: &str) -> Result<Option<String>, PortFailure> {
+    async fn hold(&self, machine_id: &str) -> Result<Option<String>, GuardedDeleteError> {
         let checks: [(&'static str, &str); 4] = [
             (
                 "SELECT 'Lab provision ' || id || ' (' || state || ')' FROM lab_provisions \
@@ -108,8 +107,10 @@ impl MachineRemovalRepository {
                 .bind(machine_id)
                 .fetch_optional(&self.pool)
                 .await
-                .map_err(|error| PortFailure::Backend {
-                    detail: format!("the machine's holds could not be read: {error}"),
+                .map_err(|error| {
+                    GuardedDeleteError::Backend(format!(
+                        "the machine's holds could not be read: {error}"
+                    ))
                 })?;
             if let Some(found) = found {
                 return Ok(Some(format!(
@@ -346,29 +347,40 @@ impl MachineRemovalPort for MachineRemovalRepository {
             .filter_map(|pair| {
                 let name = pair.get(0)?.as_str()?;
                 let value = pair.get(1)?.as_str()?;
-                fleet_application::machine_remove::LAYOUT_VARIABLES
+                fleet_application::fleetd_layout::LAYOUT_VARIABLES
                     .contains(&name)
                     .then(|| (name.to_owned(), value.to_owned()))
             })
             .collect())
     }
 
-    async fn delete_unheld(&self, machine_id: &str) -> Result<(), PortFailure> {
+    async fn delete_unheld(&self, machine_id: &str) -> Result<(), GuardedDeleteError> {
         let deleted = sqlx::query(GUARDED_DELETE)
             .bind(machine_id)
             .execute(&self.pool)
             .await
-            .map_err(|error| PortFailure::Backend {
-                detail: format!("machine delete failed: {error}"),
+            .map_err(|error| {
+                GuardedDeleteError::Backend(format!("machine delete failed: {error}"))
             })?;
         if deleted.rows_affected() == 1 {
             return Ok(());
         }
         if let Some(detail) = self.hold(machine_id).await? {
-            return Err(PortFailure::Conflict { detail });
+            return Err(GuardedDeleteError::Held(detail));
         }
-        Err(PortFailure::NotFound {
-            what: format!("machine {machine_id:?}"),
+        // Nothing holds it now. If the machine is still there, a hold came
+        // and went between the delete and this look: retryable, not gone.
+        let exists: Option<i64> = sqlx::query_scalar("SELECT 1 FROM machines WHERE id = ?1")
+            .bind(machine_id)
+            .fetch_optional(&self.pool)
+            .await
+            .map_err(|error| {
+                GuardedDeleteError::Backend(format!("machine read failed: {error}"))
+            })?;
+        Err(if exists.is_some() {
+            GuardedDeleteError::Raced
+        } else {
+            GuardedDeleteError::NotFound
         })
     }
 }

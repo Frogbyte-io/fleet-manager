@@ -67,16 +67,7 @@ use fleet_core::EndpointKind;
 /// The review-token kind of a removal.
 pub const REMOVE_KIND: &str = "machine.remove";
 
-/// The installer layout overrides an uninstall honours, as the install
-/// recorded them (`deploy/fleetd/uninstall.sh` reads the same names).
-pub const LAYOUT_VARIABLES: [&str; 6] = [
-    "FLEETD_BIN_DIR",
-    "FLEETD_UNIT_DIR",
-    "FLEETD_ENV_FILE",
-    "FLEETD_STATE_DIR",
-    "FLEETD_SERVICE",
-    "FLEETD_SYSTEMCTL",
-];
+pub use crate::fleetd_layout::LAYOUT_VARIABLES;
 
 /// The uninstall the caller asked for, as the request carries it.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -210,8 +201,11 @@ pub struct RemovalFootprint {
 }
 
 impl RemovalFootprint {
-    fn stored_secrets(&self) -> u64 {
-        self.stored_ssh_keys + self.admin_passwords + self.endpoint_auth_secrets
+    /// The secrets bound to this machine that the removal revokes. An
+    /// endpoint's stored-key reference can name a fleet-wide key the removal
+    /// never touches, so it does not count.
+    fn machine_secrets(&self) -> u64 {
+        self.stored_ssh_keys + self.admin_passwords
     }
 }
 
@@ -274,10 +268,22 @@ pub trait MachineRemovalPort: fmt::Debug + Send + Sync {
     ///
     /// # Errors
     ///
-    /// [`PortFailure::NotFound`] for an unknown machine,
-    /// [`PortFailure::Conflict`] naming the hold that refused it, or a
-    /// backend failure.
-    async fn delete_unheld(&self, machine_id: &str) -> Result<(), PortFailure>;
+    /// The [`GuardedDeleteError`] that says why nothing was deleted.
+    async fn delete_unheld(&self, machine_id: &str) -> Result<(), GuardedDeleteError>;
+}
+
+/// Why the guarded delete deleted nothing.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum GuardedDeleteError {
+    /// The machine does not exist.
+    NotFound,
+    /// A hold names the machine; the sentence names the hold.
+    Held(String),
+    /// The delete was refused, but no hold was found when it was looked for
+    /// and the machine still exists: a hold came and went. Retrying is safe.
+    Raced,
+    /// The store failed.
+    Backend(String),
 }
 
 /// Who else uses a host, as the store reports it.
@@ -385,6 +391,8 @@ pub struct RemovalOutcome {
     /// The hosts whose pins could not be removed (the machine is gone; the
     /// pin is left for the operator to remove).
     pub unpin_failed_hosts: Vec<String>,
+    /// The audit events that could not be written (the removal went on).
+    pub audit_gaps: Vec<String>,
     /// What was deleted.
     pub footprint: RemovalFootprint,
 }
@@ -409,9 +417,16 @@ pub enum MachineRemovalError {
         /// Every hold.
         blockers: Vec<RemovalBlocker>,
     },
-    /// A hold appeared after the review (the guarded delete refused it).
+    /// A hold appeared after the review (the guarded delete refused it), or
+    /// the recorded install layout is not safe to uninstall with.
     Conflict {
         /// The hold.
+        detail: String,
+    },
+    /// Another removal of the machine is in progress, or a hold came and
+    /// went during the delete. Nothing was deleted; retrying is safe.
+    Busy {
+        /// What happened.
         detail: String,
     },
     /// The uninstall was asked for but the controller cannot run it.
@@ -442,6 +457,7 @@ impl fmt::Display for MachineRemovalError {
                 write!(f, "{}", details.join("; "))
             }
             Self::Conflict { detail } => write!(f, "conflict: {detail}"),
+            Self::Busy { detail } => write!(f, "busy: {detail}"),
             Self::UninstallUnavailable => write!(
                 f,
                 "the controller cannot run the fleetd uninstall (no SSH executor is wired); remove without --uninstall and uninstall by hand"
@@ -475,6 +491,23 @@ pub struct MachineRemoval {
     endpoint_auth: Option<Arc<dyn EndpointAuthPort>>,
     uninstaller: Option<Arc<dyn FleetdUninstallPort>>,
     sessions: Option<Arc<dyn NodeSessionPort>>,
+    /// The machines a removal is running for, so a second removal of the
+    /// same machine waits for nothing and is refused.
+    in_progress: std::sync::Mutex<BTreeSet<String>>,
+}
+
+/// Holds a machine in [`MachineRemoval::in_progress`] until it is dropped.
+struct InProgress<'a> {
+    set: &'a std::sync::Mutex<BTreeSet<String>>,
+    machine_id: String,
+}
+
+impl Drop for InProgress<'_> {
+    fn drop(&mut self) {
+        if let Ok(mut set) = self.set.lock() {
+            set.remove(&self.machine_id);
+        }
+    }
 }
 
 impl MachineRemoval {
@@ -498,6 +531,7 @@ impl MachineRemoval {
             endpoint_auth: None,
             uninstaller: None,
             sessions: None,
+            in_progress: std::sync::Mutex::new(BTreeSet::new()),
         }
     }
 
@@ -574,6 +608,9 @@ impl MachineRemoval {
         correlation_id: Option<&str>,
     ) -> Result<RemovalOutcome, MachineRemovalError> {
         self.authorize(authorizer, principal, machine_id)?;
+        // One removal per machine at a time, held across the uninstall and
+        // the delete: a second one is refused, never interleaved.
+        let _running = self.claim(machine_id)?;
         let review = self.assess(machine_id, uninstall).await?;
         if !review.blockers.is_empty() {
             return Err(MachineRemovalError::Blocked {
@@ -603,24 +640,49 @@ impl MachineRemoval {
             .delete_unheld(machine_id)
             .await
             .map_err(|failure| match failure {
-                PortFailure::NotFound { what } => MachineRemovalError::NotFound { what },
-                PortFailure::Conflict { detail } => MachineRemovalError::Conflict { detail },
-                PortFailure::Backend { detail } => MachineRemovalError::Backend {
+                GuardedDeleteError::NotFound => MachineRemovalError::NotFound {
+                    what: format!("machine {machine_id:?}"),
+                },
+                GuardedDeleteError::Held(detail) => MachineRemovalError::Conflict { detail },
+                GuardedDeleteError::Raced => MachineRemovalError::Busy {
+                    detail: format!(
+                        "the delete of machine {machine_id} was refused by a hold that is gone now; nothing was deleted; review the removal again"
+                    ),
+                },
+                GuardedDeleteError::Backend(detail) => MachineRemovalError::Backend {
                     context: "delete",
                     detail,
                 },
             })?;
-        // The delete is recorded before anything else can fail.
-        audit
+        Ok(self.finish(&audit, review, summary).await)
+    }
+
+    /// Everything after the delete. The machine is gone, so nothing here
+    /// fails the removal: a step that fails (an audit write, the secret
+    /// revocation, an unpin) is logged and reported in the outcome.
+    async fn finish(
+        &self,
+        audit: &Recorder<'_>,
+        review: RemovalReview,
+        summary: Option<String>,
+    ) -> RemovalOutcome {
+        let machine_id = audit.machine_id;
+        let mut audit_gaps = Vec::new();
+        if let Err(error) = audit
             .record(&[
                 ("event", "machine_deleted"),
                 ("name", &review.name),
                 ("endpoints", &review.endpoints.len().to_string()),
             ])
-            .await?;
+            .await
+        {
+            eprintln!("machine removal {machine_id}: the delete was not audited: {error}");
+            audit_gaps.push("machine_deleted".to_owned());
+        }
 
-        let (secrets_revoked, secret_revocation_error) =
-            self.revoke_secrets(&audit, machine_id).await;
+        let (secrets_revoked, secret_revocation_error) = self
+            .revoke_secrets(audit, machine_id, &mut audit_gaps)
+            .await;
         let session_closed = match &self.sessions {
             Some(sessions) => sessions.close(machine_id).await,
             None => false,
@@ -631,7 +693,12 @@ impl MachineRemoval {
             .node_identity
             .clone()
             .unwrap_or_else(|| "none".to_owned());
-        audit
+        let gaps = if audit_gaps.is_empty() {
+            "none".to_owned()
+        } else {
+            audit_gaps.join(",")
+        };
+        if let Err(error) = audit
             .record(&[
                 ("event", "machine_removed"),
                 ("name", &review.name),
@@ -651,9 +718,14 @@ impl MachineRemoval {
                     "skillInstallsDropped",
                     &review.footprint.catalog_skill_installs.to_string(),
                 ),
+                ("auditGaps", &gaps),
             ])
-            .await?;
-        Ok(RemovalOutcome {
+            .await
+        {
+            eprintln!("machine removal {machine_id}: the summary was not audited: {error}");
+            audit_gaps.push("machine_removed".to_owned());
+        }
+        RemovalOutcome {
             machine_id: review.machine_id,
             name: review.name,
             uninstalled: review.uninstall.is_some(),
@@ -665,7 +737,29 @@ impl MachineRemoval {
             unpinned_hosts: unpinned,
             kept_hosts: kept,
             unpin_failed_hosts: failed,
+            audit_gaps,
             footprint: review.footprint,
+        }
+    }
+
+    fn claim(&self, machine_id: &str) -> Result<InProgress<'_>, MachineRemovalError> {
+        let mut set = self
+            .in_progress
+            .lock()
+            .map_err(|_| MachineRemovalError::Backend {
+                context: "in_progress",
+                detail: "the removal registry is poisoned".to_owned(),
+            })?;
+        if !set.insert(machine_id.to_owned()) {
+            return Err(MachineRemovalError::Busy {
+                detail: format!(
+                    "a removal of machine {machine_id} is already in progress; wait for it to finish"
+                ),
+            });
+        }
+        Ok(InProgress {
+            set: &self.in_progress,
+            machine_id: machine_id.to_owned(),
         })
     }
 
@@ -676,6 +770,7 @@ impl MachineRemoval {
         &self,
         audit: &Recorder<'_>,
         machine_id: &str,
+        audit_gaps: &mut Vec<String>,
     ) -> (u64, Option<String>) {
         let Some(keys) = &self.keys else {
             return (0, None);
@@ -687,12 +782,16 @@ impl MachineRemoval {
                     "machine removal {machine_id}: stored secrets were not revoked: {detail}"
                 );
                 let reason = bounded(&detail);
-                let _ = audit
+                if audit
                     .record(&[
                         ("event", "machine_secret_revocation_failed"),
                         ("reason", &reason),
                     ])
-                    .await;
+                    .await
+                    .is_err()
+                {
+                    audit_gaps.push("machine_secret_revocation_failed".to_owned());
+                }
                 (0, Some(reason))
             }
         }
@@ -847,16 +946,14 @@ impl MachineRemoval {
             .await
             .map_err(backend("footprint"))?;
         let mut blockers = self.blockers(machine_id).await?;
-        if self.keys.is_none() && footprint.stored_secrets() > 0 {
+        if self.keys.is_none() && footprint.machine_secrets() > 0 {
             blockers.push(RemovalBlocker {
                 kind: "stored_secret".to_owned(),
                 id: machine_id.to_owned(),
                 state: "unrevocable".to_owned(),
                 detail: format!(
-                    "machine {machine_id} has secrets in Fleet's secret store ({} SSH keys, {} Windows administrator passwords, {} endpoints authenticating with a stored key) and this controller runs without its secret store, so it could not revoke them; start the controller with its master key, then remove the machine",
-                    footprint.stored_ssh_keys,
-                    footprint.admin_passwords,
-                    footprint.endpoint_auth_secrets
+                    "machine {machine_id} has secrets bound to it in Fleet's secret store ({} SSH keys, {} Windows administrator passwords) and this controller runs without its secret store, so it could not revoke them; start the controller with its master key, then remove the machine",
+                    footprint.stored_ssh_keys, footprint.admin_passwords
                 ),
             });
         }
@@ -961,7 +1058,19 @@ impl MachineRemoval {
             .map_err(backend("install_layout"))?
             .into_iter()
             .filter(|(name, _)| LAYOUT_VARIABLES.contains(&name.as_str()))
-            .collect();
+            .collect::<BTreeMap<String, String>>();
+        // The layout reaches a root script that deletes FLEETD_STATE_DIR: a
+        // recorded value that breaks a rule refuses the uninstall.
+        for (name, value) in &layout {
+            crate::fleetd_layout::validate_installer_variable(name, value).map_err(|reason| {
+                MachineRemovalError::Conflict {
+                    detail: format!(
+                        "the layout recorded by machine {}'s last fleetd install is not safe to uninstall with ({reason}); remove the machine without --uninstall and remove fleetd by hand",
+                        machine.id
+                    ),
+                }
+            })?;
+        }
         Ok(UninstallPlan {
             endpoint_id: endpoint.id.clone(),
             auth,

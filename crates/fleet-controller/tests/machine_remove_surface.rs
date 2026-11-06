@@ -95,12 +95,19 @@ struct FakeUninstall {
     answer: Mutex<Result<String, String>>,
     seen: Mutex<Vec<FleetdUninstall>>,
     during: Mutex<Vec<&'static str>>,
+    /// Signals `.0` when the uninstall starts and waits for `.1`.
+    pause: Mutex<Option<(Arc<tokio::sync::Notify>, Arc<tokio::sync::Notify>)>>,
 }
 
 #[async_trait]
 impl FleetdUninstallPort for FakeUninstall {
     async fn uninstall(&self, request: &FleetdUninstall) -> Result<String, String> {
         self.seen.lock().unwrap().push(request.clone());
+        let pause = self.pause.lock().unwrap().take();
+        if let Some((entered, release)) = pause {
+            entered.notify_one();
+            release.notified().await;
+        }
         let statements: Vec<&'static str> = std::mem::take(&mut *self.during.lock().unwrap());
         for statement in statements {
             sqlx::query(statement)
@@ -170,6 +177,39 @@ impl fleet_application::lab::ImagePinValidator for NoPins {
     }
 }
 
+/// The audit sink, failing the writes of one event when told to.
+#[derive(Debug)]
+struct FlakyAudit {
+    inner: Arc<AuditSink>,
+    fail_event: Mutex<Option<&'static str>>,
+}
+
+#[async_trait]
+impl fleet_application::operation::AuditPort for FlakyAudit {
+    async fn record_intent(
+        &self,
+        intent: &fleet_application::audit::AuditIntent,
+    ) -> Result<(), String> {
+        let event = intent
+            .metadata
+            .entries()
+            .find(|(key, _)| *key == "event")
+            .map(|(_, value)| value.to_owned());
+        if event.is_some() && event.as_deref() == *self.fail_event.lock().unwrap() {
+            return Err("the audit store is full".to_owned());
+        }
+        self.inner.record_intent(intent).await
+    }
+
+    async fn record_outcome(
+        &self,
+        operation_id: &str,
+        outcome: fleet_application::audit::AuditOutcome,
+    ) -> Result<(), String> {
+        self.inner.record_outcome(operation_id, outcome).await
+    }
+}
+
 struct Harness {
     _dir: tempfile::TempDir,
     pool: sqlx::SqlitePool,
@@ -178,6 +218,7 @@ struct Harness {
     uninstall: Arc<FakeUninstall>,
     keys: Arc<FakeKeys>,
     sessions: Arc<FakeSessions>,
+    flaky: Arc<FlakyAudit>,
     machines: Arc<MachineRepository>,
     hardware: Arc<HardwareRepository>,
 }
@@ -214,15 +255,20 @@ impl Harness {
             )),
             seen: Mutex::new(Vec::new()),
             during: Mutex::new(Vec::new()),
+            pause: Mutex::new(None),
         });
         let keys = Arc::new(FakeKeys::default());
         let sessions = Arc::new(FakeSessions::default());
+        let flaky = Arc::new(FlakyAudit {
+            inner: audit.clone(),
+            fail_event: Mutex::new(None),
+        });
         let removal = MachineRemoval::new(
             machines.clone(),
             Arc::new(MachineRemovalRepository::new(pool.clone())),
             Arc::new(StoreMachineHardwareGate::new(hardware.clone())),
             trust.clone(),
-            audit.clone(),
+            flaky.clone(),
         )
         .with_endpoint_auth(Arc::new(EndpointAuthRepository::new(pool.clone())))
         .with_uninstaller(uninstall.clone())
@@ -259,6 +305,7 @@ impl Harness {
             uninstall,
             keys,
             sessions,
+            flaky,
             machines,
             hardware,
         }
@@ -1172,7 +1219,10 @@ async fn stored_secrets_are_counted_bound_revoked_and_their_revocation_failure_r
     );
     assert_eq!(removed["data"]["secretsRevoked"], 0);
     assert_eq!(removed["data"]["sessionClosed"], true);
-    assert_eq!(*harness.sessions.closed.lock().unwrap(), std::slice::from_ref(&machine));
+    assert_eq!(
+        *harness.sessions.closed.lock().unwrap(),
+        std::slice::from_ref(&machine)
+    );
     assert_eq!(harness.unpinned(), ["box.lan"]);
     assert_eq!(
         harness.audit_events(&machine).await,
@@ -1212,9 +1262,18 @@ async fn without_a_secret_store_only_a_machine_without_stored_secrets_is_removed
         .await
         .unwrap();
 
+    // A reference to a key is not a key bound to this machine: the removal
+    // never revokes it, so it does not block.
+    let (_, review) = harness.review(&keyed, json!({})).await;
+    assert_eq!(review["data"]["blockers"], json!([]), "{review}");
+    assert_eq!(review["data"]["footprint"]["endpointAuthSecrets"], 1);
+    // A key bound to the machine would be left behind: it blocks.
+    store_secret(&harness, format!("machines/ssh/{keyed}/key")).await;
     let (_, review) = harness.review(&keyed, json!({})).await;
     assert_eq!(review["data"]["reviewToken"], Value::Null);
     assert_eq!(review["data"]["blockers"][0]["kind"], "stored_secret");
+    let detail = review["data"]["blockers"][0]["detail"].as_str().unwrap();
+    assert!(detail.contains("1 SSH keys"), "{detail}");
 
     let token = harness.token(&plain, json!({})).await;
     let (status, removed) = harness
@@ -1260,4 +1319,163 @@ async fn the_uninstall_uses_the_layout_the_machine_was_installed_with() {
         Some("/opt/units")
     );
     assert_eq!(seen[0].plan.layout.len(), 1);
+}
+
+#[tokio::test]
+async fn an_unsafe_recorded_layout_refuses_the_uninstall_and_runs_nothing() {
+    for (name, value) in [
+        ("FLEETD_STATE_DIR", "/etc"),
+        ("FLEETD_STATE_DIR", "/var/lib/../../etc/x"),
+        ("FLEETD_STATE_DIR", "/var/lib/fleetd\u{0}x"),
+        ("FLEETD_UNIT_DIR", "units"),
+        ("FLEETD_SERVICE", "fleetd;reboot"),
+        ("FLEETD_SYSTEMCTL", "systemctl"),
+    ] {
+        let harness = Harness::new(Arc::new(Permit)).await;
+        let machine = harness.machine("box", &["root@box.lan:22"]).await;
+        let ssh = harness.endpoint(&machine, EndpointKind::Ssh).await;
+        // Recorded before the install-time check existed.
+        let payload = json!({
+            "machineId": machine,
+            "installerEnv": [[name, value]],
+        })
+        .to_string();
+        sqlx::query(
+            "INSERT INTO operations (id, kind, state, cancel_requested, created_at, updated_at, payload_json) \
+             VALUES ('op-install', 'machine.install-fleetd', 'succeeded', 0, 1, 1, ?1)",
+        )
+        .bind(payload)
+        .execute(&harness.pool)
+        .await
+        .unwrap();
+        let (status, error) = harness
+            .review(&machine, json!({ "uninstall": { "endpointId": ssh } }))
+            .await;
+        assert_eq!(status, StatusCode::CONFLICT, "{name}={value}: {error}");
+        let message = error["message"].as_str().unwrap();
+        assert!(message.contains("not safe to uninstall with"), "{message}");
+        assert!(message.contains(name), "{message}");
+        assert!(harness.uninstall.seen.lock().unwrap().is_empty());
+        // Without the uninstall the machine can still be removed.
+        let token = harness.token(&machine, json!({})).await;
+        let (status, _) = harness
+            .remove(&machine, json!({ "reviewToken": token }))
+            .await;
+        assert_eq!(status, StatusCode::OK);
+    }
+}
+
+#[tokio::test]
+async fn a_second_removal_of_the_same_machine_is_refused_while_one_runs() {
+    let harness = Arc::new(Harness::new(Arc::new(Permit)).await);
+    let machine = harness.machine("box", &["root@box.lan:22"]).await;
+    let ssh = harness.endpoint(&machine, EndpointKind::Ssh).await;
+    let body = json!({ "uninstall": { "endpointId": ssh } });
+    let token = harness.token(&machine, body.clone()).await;
+    let mut body = body;
+    body["reviewToken"] = json!(token);
+    let entered = Arc::new(tokio::sync::Notify::new());
+    let release = Arc::new(tokio::sync::Notify::new());
+    *harness.uninstall.pause.lock().unwrap() = Some((entered.clone(), release.clone()));
+
+    let first = {
+        let harness = harness.clone();
+        let machine = machine.clone();
+        let body = body.clone();
+        tokio::spawn(async move { harness.remove(&machine, body).await })
+    };
+    entered.notified().await;
+    let (status, error) = harness.remove(&machine, body).await;
+    assert_eq!(status, StatusCode::CONFLICT, "{error}");
+    assert_eq!(error["code"], "machine_removal_busy");
+    assert_eq!(error["retry"], "backoff");
+    assert!(
+        error["message"]
+            .as_str()
+            .unwrap()
+            .contains("already in progress"),
+        "{error}"
+    );
+    release.notify_one();
+    let (status, removed) = first.await.unwrap();
+    assert_eq!(status, StatusCode::OK, "{removed}");
+    assert_eq!(harness.uninstall.seen.lock().unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn a_failed_delete_audit_does_not_stop_the_removal() {
+    let harness = Harness::new(Arc::new(Permit)).await;
+    let machine = harness.machine("box", &["root@box.lan:22"]).await;
+    let token = harness.token(&machine, json!({})).await;
+    *harness.flaky.fail_event.lock().unwrap() = Some("machine_deleted");
+    let (status, removed) = harness
+        .remove(&machine, json!({ "reviewToken": token }))
+        .await;
+    assert_eq!(status, StatusCode::OK, "{removed}");
+    assert_eq!(removed["data"]["auditGaps"], json!(["machine_deleted"]));
+    assert!(!harness.exists(&machine).await);
+    assert_eq!(harness.unpinned(), ["box.lan"]);
+    assert_eq!(harness.keys.revoked.lock().unwrap().len(), 1);
+    assert_eq!(harness.audit_events(&machine).await, ["machine_removed"]);
+    let summary: String = sqlx::query_scalar(
+        "SELECT metadata_json FROM audit_events WHERE resource = ?1 \
+         AND json_extract(metadata_json, '$.event') = 'machine_removed'",
+    )
+    .bind(&machine)
+    .fetch_one(&harness.pool)
+    .await
+    .unwrap();
+    let summary: Value = serde_json::from_str(&summary).unwrap();
+    assert_eq!(summary["auditGaps"], "machine_deleted");
+}
+
+#[tokio::test]
+async fn a_usb_hold_taken_during_the_uninstall_refuses_the_delete() {
+    let harness = Harness::new(Arc::new(Permit)).await;
+    let machine = harness.machine("box", &["root@box.lan:22"]).await;
+    let ssh = harness.endpoint(&machine, EndpointKind::Ssh).await;
+    let now = fleet_core::SystemClock::now_unix_millis();
+    harness
+        .hardware
+        .upsert_device(
+            &DeviceObservation {
+                id: "device-1".to_owned(),
+                account_id: ACCOUNT.to_owned(),
+                mapping_id: "fm-test-reader-a".to_owned(),
+                kind: HardwareKind::Usb,
+                entries: vec![DeviceNodeEntry {
+                    node: "pve".to_owned(),
+                    vendor_id: "aaaa".to_owned(),
+                    product_id: "0001".to_owned(),
+                    usbpath: Some("1-1".to_owned()),
+                    manufacturer: None,
+                    product: None,
+                    last_seen_at: now,
+                }],
+                status: DeviceStatus::Available,
+                status_detail: None,
+            },
+            now,
+        )
+        .await
+        .unwrap();
+    let body = json!({ "uninstall": { "endpointId": ssh } });
+    let token = harness.token(&machine, body.clone()).await;
+    harness.uninstall.during.lock().unwrap().push(
+        "INSERT INTO hardware_reservations (id, device_id, owner_kind, owner_id, state, created_at, updated_at) \
+         VALUES ('reservation-late', 'device-1', 'machine', ?1, 'held', 1, 1)",
+    );
+    let mut body = body;
+    body["reviewToken"] = json!(token);
+    let (status, error) = harness.remove(&machine, body).await;
+    assert_eq!(status, StatusCode::CONFLICT, "{error}");
+    assert_eq!(error["code"], "conflict");
+    assert!(
+        error["message"]
+            .as_str()
+            .unwrap()
+            .contains("USB reservation reservation-late"),
+        "{error}"
+    );
+    assert!(harness.exists(&machine).await);
 }

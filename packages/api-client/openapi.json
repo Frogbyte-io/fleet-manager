@@ -9032,7 +9032,7 @@
             }
           },
           "409": {
-            "description": "Refused: `machine_removal_blocked` (a Lab provision, persistent marker, USB reservation, unfinished operation, or stored secrets a controller without its secret store cannot revoke; the message says what to do) or `conflict` (a hold appeared after the review, or during the uninstall, and the guarded delete refused it; nothing was deleted).",
+            "description": "Refused: `machine_removal_blocked` (a Lab provision, persistent marker, USB reservation, unfinished operation, or stored secrets a controller without its secret store cannot revoke; the message says what to do) `conflict` (a hold appeared after the review, or during the uninstall, and the guarded delete refused it, or the recorded install layout is not safe to uninstall with; nothing was deleted), or `machine_removal_busy` (another removal of the machine is running, or a hold came and went during the delete; retry).",
             "content": {
               "application/json": {
                 "schema": {
@@ -21016,9 +21016,17 @@
           "unpinnedHosts",
           "keptHosts",
           "unpinFailedHosts",
+          "auditGaps",
           "footprint"
         ],
         "properties": {
+          "auditGaps": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "The audit events that could not be written; the removal went on and\nthe controller log has the cause."
+          },
           "footprint": {
             "$ref": "#/components/schemas/RemovalFootprintDto",
             "description": "What was deleted."
@@ -29370,9 +29378,17 @@
               "unpinnedHosts",
               "keptHosts",
               "unpinFailedHosts",
+              "auditGaps",
               "footprint"
             ],
             "properties": {
+              "auditGaps": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                },
+                "description": "The audit events that could not be written; the removal went on and\nthe controller log has the cause."
+              },
               "footprint": {
                 "$ref": "#/components/schemas/RemovalFootprintDto",
                 "description": "What was deleted."

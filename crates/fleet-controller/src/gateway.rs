@@ -93,6 +93,9 @@ pub struct SessionEntry {
     /// The supersede signal: holds a permit when a newer session takes over,
     /// so a loop that is mid-read still observes the takeover on return.
     pub superseded: Arc<tokio::sync::Notify>,
+    /// Set before `superseded` is notified when the machine was removed
+    /// (#616), so the loop audits the closure as such, not as a takeover.
+    pub machine_removed: std::sync::atomic::AtomicBool,
 }
 
 impl SessionEntry {
@@ -113,6 +116,7 @@ impl SessionEntry {
             pending: Arc::new(Mutex::new(HashMap::new())),
             persisted_state: Mutex::new(GatewayState::Offline),
             superseded: Arc::new(tokio::sync::Notify::new()),
+            machine_removed: std::sync::atomic::AtomicBool::new(false),
         }
     }
 
@@ -278,13 +282,20 @@ impl GatewayService {
         Ok(ws
             .protocols([NODE_SUBPROTOCOL])
             .on_upgrade(move |socket| async move {
-                self_arc.serve_session(socket, machine_id).await;
+                self_arc
+                    .serve_session(socket, machine_id, session_token)
+                    .await;
             }))
     }
 
     /// One connected node session: negotiate, then serve heartbeats until
     /// the socket closes or a newer session supersedes this one.
-    async fn serve_session(self: Arc<Self>, socket: WebSocket, machine_id: String) {
+    async fn serve_session(
+        self: Arc<Self>,
+        socket: WebSocket,
+        machine_id: String,
+        session_token: String,
+    ) {
         let (mut sender, mut receiver) = socket.split();
         let now = fleet_core::SystemClock::now_unix_millis();
         let boot_session = Uuid::now_v7().to_string();
@@ -349,6 +360,22 @@ impl GatewayService {
         if self.registry.insert(&machine_id, entry.clone()).is_some() {
             self.audit_event(&machine_id, "gateway_superseded");
         }
+        // The session was validated before the upgrade. A machine removed
+        // since (#616) deleted its node identity and sessions, and its
+        // removal may already have closed the sessions it saw: validate again
+        // now that this one is registered, so it cannot outlive the machine.
+        if !matches!(
+            self.nodes.validate_session(&session_token).await,
+            Ok(SessionValidity::Valid { .. })
+        ) {
+            self.registry.remove_if_current(&machine_id, &boot_session);
+            send_fault(
+                &mut sender,
+                ProtocolFault::new(wire::FaultCode::SessionRejected),
+            )
+            .await;
+            return;
+        }
 
         let welcome = wire::Frame {
             message_id: Uuid::now_v7().to_string(),
@@ -390,7 +417,12 @@ impl GatewayService {
             tokio::select! {
                 _ = entry.superseded.notified() => {
                     send_fault(&mut sender, ProtocolFault::new(wire::FaultCode::SessionRejected)).await;
-                    self.audit_event(&machine_id, "gateway_superseded");
+                    let event = if entry.machine_removed.load(Ordering::SeqCst) {
+                        "gateway_closed_machine_removed"
+                    } else {
+                        "gateway_superseded"
+                    };
+                    self.audit_event(&machine_id, event);
                     self.finish_session(&machine_id, &boot_session, &entry).await;
                     return;
                 }
@@ -605,6 +637,7 @@ impl GatewayService {
             .get(machine_id)
             .cloned();
         entry.is_some_and(|entry| {
+            entry.machine_removed.store(true, Ordering::SeqCst);
             entry.superseded.notify_one();
             true
         })
