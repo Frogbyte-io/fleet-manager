@@ -1,0 +1,11 @@
+[Unit]
+Description=Post Fleet status to TRMNL every 10 minutes
+
+[Timer]
+# TRMNL accepts 12 webhook posts an hour (30 with TRMNL+).
+OnBootSec=2min
+OnUnitActiveSec=10min
+RandomizedDelaySec=30s
+
+[Install]
+WantedBy=timers.target

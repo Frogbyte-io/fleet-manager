@@ -1,0 +1,18 @@
+<div class="layout layout--col layout--center gap--xsmall">
+  {% if updated == blank %}
+    <span class="value value--small">Waiting</span>
+    <span class="label">for the first update</span>
+  {% elsif controller.reachable == false %}
+    <span class="value value--small">Unreachable</span>
+    <span class="label">Fleet controller</span>
+  {% else %}
+    <span class="value value--large value--tnums">{% if ok %}OK{% else %}{{ attention_count }}{% endif %}</span>
+    <span class="label">{% if ok %}{% if streak %}clear for {% if streak.hours == 0 %}&lt;1{% else %}{% if streak.since_start %}≥{% endif %}{{ streak.hours }}{% endif %} h{% else %}all clear{% endif %}{% else %}to check{% endif %}</span>
+    <div class="fl-quad-spark">{% render "spark", values: trends.attention, height: 24 %}</div>
+    {% if attention.size > 0 %}<span class="description" data-clamp="1">{{ attention.first }}</span>{% endif %}
+  {% endif %}
+</div>
+<div class="title_bar">
+  <span class="title">Fleet</span>
+  <span class="instance">{{ updated }}</span>
+</div>

@@ -1,0 +1,188 @@
+{% comment %}
+  Shared markup and the charts. `render` arguments cannot take filters, so
+  callers build composite strings with `assign` first. Charts are inline SVG
+  and plain boxes: no JavaScript, so e-ink renders are deterministic.
+{% endcomment %}
+
+<style>
+  /* Fleet plugin layout helpers; chart geometry is SVG attributes. */
+  .fl-col { display: flex; flex-direction: column; align-items: stretch; width: 100%; gap: 3px; }
+  .fl-row { display: flex; justify-content: space-between; align-items: baseline; width: 100%; }
+  .fl-split { display: grid; grid-template-columns: 2fr 1fr; column-gap: 28px; width: 100%; }
+  .fl-spark { display: block; width: 100%; overflow: visible; }
+  .fl-runway { display: flex; align-items: center; gap: 6px; width: 100%; }
+  .fl-runway-name { width: 40%; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+  .fl-runway-track { flex: 1 1 auto; display: block; overflow: visible; }
+  .fl-runway-days { width: 44px; text-align: right; }
+  .fl-quad-spark { width: 260px; }
+</style>
+
+{% comment %} A sparkline of hourly values (nulls are gaps), scaled min to max. {% endcomment %}
+{% template spark %}
+{% assign vals = values | compact %}
+{% assign h = height | default: 26 %}
+{% if vals.size > 1 %}
+  {% assign sorted = vals | sort %}
+  {% assign top = sorted | last %}
+  {% assign bottom = sorted | first %}
+  {% assign range = top | minus: bottom %}
+  {% assign w = values.size | minus: 1 %}
+  {% comment %} A flat line sits on the baseline at zero, mid-height otherwise. {% endcomment %}
+  {% if top == 0 %}{% assign flat_y = 100 %}{% else %}{% assign flat_y = 50 %}{% endif %}
+  {% capture pts %}{% for v in values %}{% if v != nil %}{% if range == 0 %}{% assign y = flat_y %}{% else %}{% assign y = top | minus: v | times: 100 | divided_by: range %}{% endif %}{{ forloop.index0 }},{{ y }} {% endif %}{% endfor %}{% endcapture %}
+  {% assign last_v = vals | last %}
+  {% if range == 0 %}{% assign last_y = flat_y %}{% else %}{% assign last_y = top | minus: last_v | times: 100 | divided_by: range %}{% endif %}
+  <svg class="fl-spark" viewBox="-1 -8 {{ w | plus: 2 }} 116" preserveAspectRatio="none" height="{{ h }}">
+    <line x1="-1" y1="108" x2="{{ w | plus: 1 }}" y2="108" stroke="#000" stroke-width="1" stroke-dasharray="1 3" vector-effect="non-scaling-stroke"/>
+    <polyline points="{{ pts }}" fill="none" stroke="#000" stroke-width="2.5" stroke-linejoin="round" stroke-linecap="round" vector-effect="non-scaling-stroke"/>
+    <line x1="{{ w }}" y1="{{ last_y }}" x2="{{ w }}" y2="{{ last_y }}" stroke="#000" stroke-width="7" stroke-linecap="round" vector-effect="non-scaling-stroke"/>
+  </svg>
+{% else %}
+  <svg class="fl-spark" viewBox="0 0 100 10" preserveAspectRatio="none" height="{{ h }}">
+    <line x1="0" y1="5" x2="100" y2="5" stroke="#000" stroke-width="1" stroke-dasharray="2 4" vector-effect="non-scaling-stroke"/>
+  </svg>
+{% endif %}
+{% endtemplate %}
+
+{% comment %} A headline number with its label and a 24 h sparkline. {% endcomment %}
+{% template stat %}
+<div class="fl-col">
+  <span class="value value--tnums {{ size | default: 'value--small' }}">{{ value }}</span>
+  <span class="label">{{ label }}</span>
+  {% if trend %}{% render "spark", values: trend, height: spark_height %}{% endif %}
+  {% if detail != blank %}<span class="description">{{ detail }}</span>{% endif %}
+</div>
+{% endtemplate %}
+
+{% comment %} Operations started per hour: stacked bars, failed share in black. {% endcomment %}
+{% template ops_chart %}
+{% assign h = height | default: 90 %}
+<div class="fl-col">
+  <div class="fl-row">
+    <span class="label">Operations per hour</span>
+    <span class="description">peak {{ hourly.peak }}/h</span>
+  </div>
+  <svg class="fl-spark" viewBox="0 0 240 102" preserveAspectRatio="none" height="{{ h }}">
+    <defs>
+      <pattern id="fl-hatch-ops" width="5" height="5" patternUnits="userSpaceOnUse" patternTransform="rotate(45)">
+        <rect width="1.6" height="5" fill="#000"/>
+      </pattern>
+    </defs>
+    {% for b in hourly.bars %}
+      {% if b.h > 0 %}
+        {% assign x = forloop.index0 | times: 10 | plus: 1 %}
+        {% assign y = 100 | minus: b.h %}
+        <rect x="{{ x }}" y="{{ y }}" width="8" height="{{ b.h }}" fill="url(#fl-hatch-ops)" stroke="#000" stroke-width="1.5" vector-effect="non-scaling-stroke"/>
+        {% if b.f > 0 %}
+          {% assign fh = b.h | times: b.f | divided_by: 100 %}
+          {% if fh < 4 %}{% assign fh = 4 %}{% endif %}
+          <rect x="{{ x }}" y="{{ y }}" width="8" height="{{ fh }}" fill="#000"/>
+        {% endif %}
+      {% endif %}
+    {% endfor %}
+    <line x1="0" y1="101" x2="240" y2="101" stroke="#000" stroke-width="2" vector-effect="non-scaling-stroke"/>
+  </svg>
+  <div class="fl-row">
+    <span class="description">−24 h</span>
+    <span class="description">■ failed · ▨ succeeded or running</span>
+    <span class="description">now</span>
+  </div>
+</div>
+{% endtemplate %}
+
+{% comment %} Running / stopped / unknown services as one split bar. {% endcomment %}
+{% template services_bar %}
+{% if services.total > 0 %}
+  {% assign run_w = services.running | times: 100 | divided_by: services.total %}
+  {% assign stop_w = services.stopped | times: 100 | divided_by: services.total %}
+  {% assign other_x = run_w %}
+  {% assign stop_x = 100 | minus: stop_w %}
+  {% assign other_w = stop_x | minus: run_w %}
+  <div class="fl-col">
+    <span class="label">Services</span>
+    <svg class="fl-spark" viewBox="0 0 100 10" preserveAspectRatio="none" height="16">
+      <defs>
+        <pattern id="fl-hatch-svc" width="4" height="4" patternUnits="userSpaceOnUse" patternTransform="rotate(45)">
+          <rect width="1.4" height="4" fill="#000"/>
+        </pattern>
+      </defs>
+      <rect x="0" y="0" width="{{ run_w }}" height="10" fill="#000"/>
+      {% if other_w > 0 %}<rect x="{{ other_x }}" y="0" width="{{ other_w }}" height="10" fill="url(#fl-hatch-svc)"/>{% endif %}
+      <rect x="0" y="0" width="100" height="10" fill="none" stroke="#000" stroke-width="2" vector-effect="non-scaling-stroke"/>
+      {% if stop_w > 0 %}<line x1="{{ stop_x }}" y1="0" x2="{{ stop_x }}" y2="10" stroke="#000" stroke-width="2" vector-effect="non-scaling-stroke"/>{% endif %}
+    </svg>
+    <span class="description">■ {{ services.running }} up · ▨ {{ services.other }} unknown · □ {{ services.stopped }} stopped</span>
+  </div>
+{% endif %}
+{% endtemplate %}
+
+{% comment %} Days until the soonest domain expiries, as a share of a year. {% endcomment %}
+{% template runway %}
+{% if domains.next.size > 0 %}
+  <div class="fl-col">
+    <span class="label">Domain runway</span>
+    {% for d in domains.next limit: max %}
+      <div class="fl-runway">
+        <span class="description fl-runway-name">{{ d.name | default: "domain" }}</span>
+        <svg class="fl-runway-track" viewBox="0 0 100 10" preserveAspectRatio="none" height="10">
+          <rect x="0" y="0" width="{{ d.pct }}" height="10" fill="#000"/>
+          <rect x="0" y="0" width="100" height="10" fill="none" stroke="#000" stroke-width="1" vector-effect="non-scaling-stroke"/>
+        </svg>
+        <span class="description fl-runway-days">{{ d.days }} d</span>
+      </div>
+    {% endfor %}
+  </div>
+{% endif %}
+{% endtemplate %}
+
+{% comment %} How long the fleet has been clear (or not), with the trend of items to check. {% endcomment %}
+{% template streak_block %}
+<div class="fl-col">
+  {% if streak %}
+    <span class="value value--small value--tnums">{% if streak.hours == 0 %}&lt;1 h{% else %}{% if streak.since_start %}≥{% endif %}{{ streak.hours }} h{% endif %}</span>
+    <span class="label">{% if streak.clear %}all clear{% else %}needing attention{% endif %}</span>
+  {% else %}
+    <span class="value value--small">–</span>
+    <span class="label">no history yet</span>
+  {% endif %}
+  {% render "spark", values: trends.attention, height: spark_height %}
+  {% assign att_points = trends.attention | compact %}
+  <span class="description">{% if att_points.size < 2 %}trend builds over the next hours{% else %}items to check, 24 h{% endif %}{% if availability_pct %} · controller up {{ availability_pct }}%{% endif %}</span>
+</div>
+{% endtemplate %}
+
+{% template unreachable %}
+<div class="layout layout--col layout--center gap--small">
+  {% if updated == blank %}
+    <span class="value value--small">Waiting for data</span>
+    <span class="description">No update from the Fleet publisher yet</span>
+  {% else %}
+    <span class="value value--small">Controller unreachable</span>
+    <span class="description">Last tried {{ updated }}{% if availability_pct %} · up {{ availability_pct }}% of the last 24 h{% endif %}</span>
+  {% endif %}
+</div>
+{% endtemplate %}
+
+{% template attention_list %}
+<div class="fl-col">
+{% if attention_count == 0 and errors.size == 0 %}
+  <span class="title title--small">All clear</span>
+  <span class="description">Nothing to check</span>
+{% else %}
+  <span class="label">To check</span>
+  {% for line in attention limit: max %}
+    <span class="{% if forloop.first %}title title--small{% else %}description{% endif %}" data-clamp="1">{{ line }}</span>
+  {% endfor %}
+  {% for line in errors limit: 2 %}
+    <span class="description" data-clamp="1">No data: {{ line }}</span>
+  {% endfor %}
+{% endif %}
+</div>
+{% endtemplate %}
+
+{% template title %}
+<div class="title_bar">
+  <span class="title">Fleet</span>
+  <span class="instance">{% if controller.reachable %}{% if ok %}OK{% else %}{{ attention_count }} to check{% endif %} · {% endif %}{{ updated }}</span>
+</div>
+{% endtemplate %}
