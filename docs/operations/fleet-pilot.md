@@ -75,8 +75,12 @@ Tagging a machine replaces its user ownership in Tailscale, so rules that matche
 Identity mode ([ADR 0010](../adr/0010-tailscale-serve-identity.md)) adds a loopback listener that accepts only requests Tailscale Serve forwards with a user identity, and audits requests under that Tailscale login instead of `anonymous-lan-admin`. Set `FLEET_TAILSCALE_SERVE_LISTEN=127.0.0.1:8081`, keep `FLEET_LISTEN` on loopback, run the controller as a host process or with `deploy/compose.tailscale.yaml` (the default bridged Compose deployment cannot use it), and point Serve at the identity listener:
 
 ```sh
+tailscale serve --http=8080 off
 tailscale serve --bg --https=443 http://127.0.0.1:8081
+tailscale serve status
 ```
+
+Remove the trusted-LAN `--http=8080` route first, and check `tailscale serve status` lists only the identity listener. Serve forwards to loopback, so any route left pointing at `127.0.0.1:8080` keeps the anonymous administrator listener reachable from the tailnet and bypasses identity mode. Drop the `tag:fleet-pilot` → controller grant and the `tcp:8080` port from the policy as well.
 
 Know what it does not do:
 
