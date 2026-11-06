@@ -25,6 +25,7 @@ uuid = { version = "1.26.0", features = ["v7"] }
 axum = "0.8.9"
 fleet-auth = { path = "../fleet-auth" }
 fleet-controller = { path = "../fleet-controller" }
+fleet-provider-skills-manager = { path = "../providers/fleet-provider-skills-manager" }
 fleet-provider-ssh = { path = "../providers/fleet-provider-ssh" }
 fleet-secrets = { path = "../fleet-secrets" }
 sqlx = { version = "0.9.0", features = ["sqlite", "runtime-tokio"] }

@@ -24,8 +24,13 @@ pub struct MachineSetup {
     pub auth: OnboardAuth,
     /// A stable identity of the setup event (the install operation's id, or
     /// the onboarded machine's id). The follow-up uses it as an idempotency
-    /// key, so a retried setup does not queue a second follow-up.
+    /// key, so a retried setup does not queue a second follow-up, and the
+    /// follow-up's audit names it.
     pub trigger: String,
+    /// The correlation identity the follow-up joins, so its operation and
+    /// audit trace back to the setup (the install operation's correlation id,
+    /// or its id when it has none).
+    pub correlation_id: Option<String>,
 }
 
 /// What the follow-up did. Serialized into the install operation's result as

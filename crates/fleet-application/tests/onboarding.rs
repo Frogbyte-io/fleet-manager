@@ -862,6 +862,9 @@ async fn the_sensitive_question_redacts_only_the_userinfo() {
 #[derive(Debug)]
 struct FakeSetupHook {
     calls: Mutex<Vec<(String, MachineSetup)>>,
+    /// What the forwarded authorizer answered for `skills.deploy` on the
+    /// machine, the permission the real follow-up needs.
+    deploy_decisions: Mutex<Vec<Decision>>,
     outcome: SetupFollowUp,
 }
 
@@ -869,6 +872,7 @@ impl FakeSetupHook {
     fn answering(outcome: SetupFollowUp) -> Arc<Self> {
         Arc::new(Self {
             calls: Mutex::new(Vec::new()),
+            deploy_decisions: Mutex::new(Vec::new()),
             outcome,
         })
     }
@@ -878,16 +882,61 @@ impl FakeSetupHook {
 impl MachineSetupPort for FakeSetupHook {
     async fn machine_set_up(
         &self,
-        _authorizer: &dyn Authorizer,
+        authorizer: &dyn Authorizer,
         principal_id: &str,
         setup: &MachineSetup,
     ) -> SetupFollowUp {
+        self.deploy_decisions
+            .lock()
+            .unwrap()
+            .push(authorizer.decide(AccessRequest {
+                principal_id,
+                action: Permission::SkillsDeploy,
+                resource: Some(&setup.machine_id),
+            }));
         self.calls
             .lock()
             .unwrap()
             .push((principal_id.to_owned(), setup.clone()));
         self.outcome.clone()
     }
+}
+
+/// Allows everything except `skills.deploy`, so a test can tell the
+/// caller's authorizer apart from any other.
+#[derive(Debug)]
+struct DenySkillsDeploy;
+
+impl Authorizer for DenySkillsDeploy {
+    fn decide(&self, request: AccessRequest<'_>) -> Decision {
+        if request.action == Permission::SkillsDeploy {
+            Decision::deny(ReasonId::UnknownPrincipal)
+        } else {
+            Decision::allow()
+        }
+    }
+}
+
+/// #600: the hook gets the caller's own authorizer, so the follow-up is
+/// authorized as the caller: a caller without `skills.deploy` is denied
+/// there, and the add still succeeds.
+#[tokio::test]
+async fn the_setup_hook_is_authorized_by_the_callers_authorizer() {
+    let hook = FakeSetupHook::answering(SetupFollowUp::Failed {
+        reason: "denied".to_owned(),
+    });
+    let mut fixture = compose(FakeMachines::default());
+    fixture.onboarding = fixture.onboarding.with_setup_hook(hook.clone());
+    let draft_id = ready_draft(&fixture).await;
+    fixture
+        .onboarding
+        .add(&DenySkillsDeploy, &principal(), &draft_id, NOW)
+        .await
+        .expect("the add needs machine.create only");
+    assert_eq!(
+        *hook.deploy_decisions.lock().unwrap(),
+        vec![Decision::deny(ReasonId::UnknownPrincipal)]
+    );
 }
 
 /// A confirmed, ready-to-add draft in `fixture`.
@@ -931,6 +980,10 @@ async fn add_runs_the_setup_hook_as_the_caller() {
     assert_eq!(setup.endpoint_id, added.machine.endpoints[0].id);
     assert_eq!(setup.auth, OnboardAuth::Agent);
     assert_eq!(setup.trigger, format!("onboarding:{}", added.machine.id));
+    assert_eq!(
+        *hook.deploy_decisions.lock().unwrap(),
+        vec![Decision::allow()]
+    );
     assert_eq!(
         added.setup_follow_up,
         Some(SetupFollowUp::Queued {

@@ -691,35 +691,40 @@ async fn an_install_operation_enrolls_and_reaches_connected() {
 
     // #600: a pinned Skills Manager install was queued for the new node,
     // through the audited operation path, over the install's own endpoint.
+    // The pin matches the node's own platform: fleetd reports
+    // `std::env::consts::ARCH` as `os/arch`. Only x86_64 and aarch64 have a
+    // pinned asset; any other platform is skipped with a reason.
     let follow_up = &result["skillsManager"];
-    assert_eq!(follow_up["status"], "queued", "{result}");
-    assert_eq!(follow_up["version"], "1.40.0");
-    let probe = OperationRepository::new(harness.pool.clone())
-        .get(follow_up["operationId"].as_str().unwrap())
-        .await
+    if matches!(std::env::consts::ARCH, "x86_64" | "aarch64") {
+        assert_eq!(follow_up["status"], "queued", "{result}");
+        assert_eq!(follow_up["version"], "1.40.0");
+        let probe = OperationRepository::new(harness.pool.clone())
+            .get(follow_up["operationId"].as_str().unwrap())
+            .await
+            .unwrap();
+        assert_eq!(probe.kind, "skills.probe");
+        assert_eq!(probe.state, "pending");
+        // The probe joins the install's correlation (its id, as the install
+        // carried none), so the follow-up traces back to the install.
+        assert_eq!(probe.correlation_id.as_deref(), Some(operation_id.as_str()));
+        let probe_payload: Value =
+            serde_json::from_str(probe.payload_json.as_deref().unwrap()).unwrap();
+        assert_eq!(probe_payload["machineId"], machine_id.as_str());
+        assert_eq!(probe_payload["endpointId"], endpoint_id.as_str());
+        assert_eq!(probe_payload["auth"]["type"], "identityFile");
+        let pin = fleet_provider_skills_manager::release_pin(
+            Some(std::env::consts::OS),
+            Some(std::env::consts::ARCH),
+        )
         .unwrap();
-    assert_eq!(probe.kind, "skills.probe");
-    assert_eq!(probe.state, "pending");
-    let probe_payload: Value =
-        serde_json::from_str(probe.payload_json.as_deref().unwrap()).unwrap();
-    assert_eq!(probe_payload["machineId"], machine_id.as_str());
-    assert_eq!(probe_payload["endpointId"], endpoint_id.as_str());
-    assert_eq!(probe_payload["auth"]["type"], "identityFile");
-    // The pin matches the node's own platform (fleetd reports `uname -m`).
-    let asset = match std::env::consts::ARCH {
-        "aarch64" => "skills-manager-cli-Linux-arm64",
-        _ => "skills-manager-cli-Linux-x64",
-    };
-    assert!(
-        probe_payload["artifactUrl"]
-            .as_str()
-            .is_some_and(|url| url.ends_with(&format!("/v1.40.0/{asset}"))),
-        "{probe_payload}"
-    );
-    assert_eq!(
-        probe_payload["artifactSha256"].as_str().map(str::len),
-        Some(64)
-    );
+        assert_eq!(probe_payload["artifactUrl"], pin.url, "{probe_payload}");
+        assert_eq!(
+            probe_payload["artifactSha256"], pin.sha256,
+            "{probe_payload}"
+        );
+    } else {
+        assert_eq!(follow_up["status"], "skipped", "{result}");
+    }
 
     // The identity is bound, the token is consumed, and nothing pending
     // remains.
@@ -826,8 +831,7 @@ async fn a_wrong_digest_fails_and_leaves_the_agentless_endpoint_usable() {
 
 #[tokio::test]
 async fn an_upgrade_installs_over_a_live_identity_without_minting_a_token() {
-    // The Skills Manager follow-up is off here (#600): nothing is queued.
-    let harness = harness_with(SetupHook::Off).await;
+    let harness = harness().await;
     let sshd = start_sshd();
     let (machine_id, endpoint_id) = harness.register_machine(&sshd).await;
     let package = TestPackage::build();
@@ -868,20 +872,27 @@ async fn an_upgrade_installs_over_a_live_identity_without_minting_a_token() {
         .run_operation(harness.install_executor.as_ref(), &upgrade_id)
         .await;
     assert_eq!(upgrade["state"], "succeeded", "{upgrade}");
-    for operation in [&first, &upgrade] {
-        let result: Value =
-            serde_json::from_str(operation["resultJson"].as_str().unwrap()).unwrap();
-        assert_eq!(result["skillsManager"]["status"], "disabled", "{result}");
-    }
+    // #600: the first enrollment set the machine up; the upgrade does not,
+    // so a CLI the operator removed since is not reinstalled.
+    let upgrade_result: Value =
+        serde_json::from_str(upgrade["resultJson"].as_str().unwrap()).unwrap();
+    assert_eq!(
+        upgrade_result["skillsManager"]["status"], "skipped",
+        "{upgrade_result}"
+    );
+    assert!(
+        upgrade_result["skillsManager"]["reason"]
+            .as_str()
+            .is_some_and(|reason| reason.contains("upgrade")),
+        "{upgrade_result}"
+    );
     let queued_probes: i64 =
         sqlx::query_scalar("SELECT COUNT(*) FROM operations WHERE kind = 'skills.probe'")
             .fetch_one(&harness.pool)
             .await
             .unwrap();
-    assert_eq!(
-        queued_probes, 0,
-        "no follow-up is queued when the setting is off"
-    );
+    let expected = i64::from(matches!(std::env::consts::ARCH, "x86_64" | "aarch64"));
+    assert_eq!(queued_probes, expected, "only the first enrollment queues");
     let view = harness.node_view(&machine_id).await;
     assert!(
         view.pending_tokens.is_empty(),
@@ -1081,7 +1092,8 @@ async fn plant_facts(harness: &Harness, machine_id: &str, family: &str, architec
 
 #[tokio::test]
 async fn the_orchestrated_install_selects_the_package_from_the_machines_facts() {
-    let harness = harness().await;
+    // The Skills Manager follow-up is off here (#600): nothing is queued.
+    let harness = harness_with(SetupHook::Off).await;
     let sshd = start_sshd();
     let (machine_id, endpoint_id) = harness.register_machine(&sshd).await;
     let package = TestPackage::build();
@@ -1126,6 +1138,16 @@ async fn the_orchestrated_install_selects_the_package_from_the_machines_facts() 
     );
     let facts = result["inventoryFacts"].as_u64().unwrap();
     assert!(facts > 0, "the node reported its facts: {result}");
+    assert_eq!(result["skillsManager"]["status"], "disabled", "{result}");
+    let queued_probes: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM operations WHERE kind = 'skills.probe'")
+            .fetch_one(&harness.pool)
+            .await
+            .unwrap();
+    assert_eq!(
+        queued_probes, 0,
+        "no follow-up is queued when the setting is off"
+    );
 
     // The digest came from the store; the node's download was verified
     // against it (the install would have refused otherwise).

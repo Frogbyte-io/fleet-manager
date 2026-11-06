@@ -15,14 +15,14 @@ use std::sync::Arc;
 use fleet_application::authz::Authorizer;
 use fleet_application::machine::MachinePort;
 use fleet_application::machine_setup::{MachineSetup, MachineSetupPort, SetupFollowUp};
-use fleet_application::operation::{NewOperation, Operations};
+use fleet_application::operation::{
+    NewOperation, OperationUseCaseError, Operations, SETUP_FOLLOW_UP_IDEMPOTENCY_PREFIX,
+};
+use fleet_core::{CapabilityFact, CapabilityStatus};
 
 /// The deadline of the queued probe: the download is bounded at 120 seconds
 /// by the script, and the inventory read follows.
 pub const SETUP_PROBE_TIMEOUT_SECONDS: u64 = 300;
-
-/// The idempotency-key prefix of a setup follow-up.
-pub const SETUP_IDEMPOTENCY_PREFIX: &str = "skills-manager-setup:";
 
 /// Queues the pinned Skills Manager install after a machine is set up.
 #[derive(Debug)]
@@ -51,26 +51,15 @@ impl SkillsManagerSetup {
             .map_err(|failure| SetupFollowUp::Failed {
                 reason: format!("the machine is unreadable: {failure}"),
             })?;
-        let fact = |namespace: &str, name: &str| -> Option<String> {
-            machine
-                .capabilities
-                .iter()
-                .find(|candidate| {
-                    candidate.namespace == namespace
-                        && candidate.name == name
-                        && matches!(
-                            candidate.status,
-                            fleet_core::CapabilityStatus::Known
-                                | fleet_core::CapabilityStatus::Stale
-                        )
-                })
-                .and_then(|candidate| candidate.value.clone())
-        };
-        let family = fact("os", "family");
+        let family = freshest_fact(&machine.capabilities, &[("os", "family")]);
         // Agentless inventory reports `host/architecture` (`uname -m`);
         // fleetd reports `os/arch` (Rust's `std::env::consts::ARCH`, the
-        // same spellings for the pinned platforms).
-        let architecture = fact("host", "architecture").or_else(|| fact("os", "arch"));
+        // same spellings for the pinned platforms). A machine can carry
+        // both, so the freshest known observation wins.
+        let architecture = freshest_fact(
+            &machine.capabilities,
+            &[("host", "architecture"), ("os", "arch")],
+        );
         let pin =
             fleet_provider_skills_manager::release_pin(family.as_deref(), architecture.as_deref())
                 .map_err(|why| SetupFollowUp::Skipped {
@@ -87,6 +76,52 @@ impl SkillsManagerSetup {
     }
 }
 
+/// The value of the best observation among `names`: a known fact over a
+/// stale one, then the newest `observed_at`. Other statuses carry no value
+/// worth acting on.
+fn freshest_fact(facts: &[CapabilityFact], names: &[(&str, &str)]) -> Option<String> {
+    facts
+        .iter()
+        .filter(|fact| {
+            fact.value.is_some()
+                && names
+                    .iter()
+                    .any(|(namespace, name)| fact.namespace == *namespace && fact.name == *name)
+                && matches!(
+                    fact.status,
+                    CapabilityStatus::Known | CapabilityStatus::Stale
+                )
+        })
+        .max_by_key(|fact| {
+            (
+                fact.status == CapabilityStatus::Known,
+                fact.observed_at.unix_millis(),
+            )
+        })
+        .and_then(|fact| fact.value.clone())
+}
+
+/// Whether the operation a setup key answered with is the follow-up this
+/// setup would have created: a `skills.probe` for the same machine and pin.
+fn is_our_follow_up(
+    operation: &fleet_application::operation::Operation,
+    payload: &serde_json::Value,
+) -> bool {
+    if operation.kind != "skills.probe" {
+        return false;
+    }
+    let Some(existing) = operation
+        .payload_json
+        .as_deref()
+        .and_then(|text| serde_json::from_str::<serde_json::Value>(text).ok())
+    else {
+        return false;
+    };
+    ["machineId", "artifactUrl", "artifactSha256"]
+        .iter()
+        .all(|field| existing[*field] == payload[*field])
+}
+
 #[async_trait::async_trait]
 impl MachineSetupPort for SkillsManagerSetup {
     async fn machine_set_up(
@@ -101,16 +136,34 @@ impl MachineSetupPort for SkillsManagerSetup {
         };
         let new = NewOperation {
             kind: "skills.probe".to_owned(),
-            idempotency_key: Some(format!("{SETUP_IDEMPOTENCY_PREFIX}{}", setup.trigger)),
+            idempotency_key: Some(format!(
+                "{SETUP_FOLLOW_UP_IDEMPOTENCY_PREFIX}{}",
+                setup.trigger
+            )),
             deadline_at: None,
-            correlation_id: None,
+            correlation_id: setup.correlation_id.clone(),
             payload_json: Some(payload.to_string()),
             review_token: None,
         };
-        match self.operations.create(authorizer, principal_id, &new).await {
-            Ok(operation) => SetupFollowUp::Queued {
+        match self
+            .operations
+            .create_setup_follow_up(authorizer, principal_id, &new)
+            .await
+        {
+            // The key can answer with an existing operation; it counts only
+            // when it is this very follow-up (the generic route cannot use
+            // the prefix, so this is defense in depth).
+            Ok(operation) if is_our_follow_up(&operation, &payload) => SetupFollowUp::Queued {
                 operation_id: operation.id,
                 version: fleet_provider_skills_manager::PINNED_CLI_VERSION.to_owned(),
+            },
+            Ok(_) => SetupFollowUp::Failed {
+                reason: "the setup key is held by another operation; nothing was queued".to_owned(),
+            },
+            // A backend failure can come after the row was inserted (the
+            // audit write failed), so the outcome is uncertain.
+            Err(error @ OperationUseCaseError::Backend { .. }) => SetupFollowUp::Failed {
+                reason: format!("the Skills Manager install may not have been queued: {error}"),
             },
             Err(error) => SetupFollowUp::Failed {
                 reason: format!("the Skills Manager install could not be queued: {error}"),

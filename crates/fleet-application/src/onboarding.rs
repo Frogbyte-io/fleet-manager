@@ -934,6 +934,7 @@ impl Onboarding {
                     endpoint_id,
                     auth: draft.auth.clone(),
                     trigger: format!("onboarding:{}", machine.id),
+                    correlation_id: None,
                 },
             )
             .await;

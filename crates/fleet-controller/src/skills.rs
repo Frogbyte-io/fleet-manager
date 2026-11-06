@@ -967,6 +967,10 @@ impl SkillsExecutor {
                             "install_failed",
                             "the pinned Skills Manager artifact could not be downloaded",
                         ),
+                        "binary_unusable" => (
+                            "install_failed",
+                            "the pinned Skills Manager binary does not run on this machine (it needs glibc 2.34+, liblzma and zlib); nothing was installed",
+                        ),
                         _ => (
                             "install_failed",
                             "the pinned Skills Manager binary could not be installed",
@@ -1281,6 +1285,10 @@ if [ -z "${fleet_cli:-}" ] && [ -n "${FLEET_PIN_URL:-}" ] && [ -n "${FLEET_PIN_S
   fleet_digest=$(sha256sum "$fleet_tmp" | awk '{print $1}')
   if [ "$fleet_digest" != "$FLEET_PIN_SHA256" ]; then fleet_emit_failure checksum_mismatch; exit 0; fi
   chmod +x "$fleet_tmp"
+  # A verified binary that cannot run here (the Linux assets need glibc
+  # 2.34+, liblzma.so.5 and libz.so.1) is never placed: it would shadow a
+  # working copy on PATH and no later probe would replace it.
+  "$fleet_tmp" --version >/dev/null 2>&1 || { rm -f "$fleet_tmp"; fleet_emit_failure binary_unusable; exit 0; }
   mkdir -p "$HOME/.local/bin" || { fleet_emit_failure install_failed; exit 0; }
   mv "$fleet_tmp" "$HOME/.local/bin/skills-manager-cli" || { fleet_emit_failure install_failed; exit 0; }
   fleet_cli="$HOME/.local/bin/skills-manager-cli"

@@ -12,7 +12,9 @@ use fleet_application::authz::{AccessRequest, Authorizer, Decision, Permission, 
 use fleet_application::machine::{MachinePort, NewEndpoint, RegisterMachine};
 use fleet_application::machine_setup::{MachineSetup, MachineSetupPort, SetupFollowUp};
 use fleet_application::onboarding::OnboardAuth;
-use fleet_application::operation::{OperationPort as _, Operations};
+use fleet_application::operation::{
+    NewOperation, OperationPort as _, Operations, SETUP_FOLLOW_UP_IDEMPOTENCY_PREFIX,
+};
 use fleet_controller::skills_setup::SkillsManagerSetup;
 use fleet_core::{CapabilityFact, CapabilityStatus, Timestamp};
 use fleet_provider_ssh::ExecutionLimiter;
@@ -71,14 +73,22 @@ async fn compose(reference: &str) -> Fixture {
 
 impl Fixture {
     async fn plant_facts(&self, facts: &[(&str, &str, &str)]) {
+        let facts: Vec<(&str, &str, &str, CapabilityStatus, i64)> = facts
+            .iter()
+            .map(|(namespace, name, value)| (*namespace, *name, *value, CapabilityStatus::Known, 1))
+            .collect();
+        self.plant_observed(&facts).await;
+    }
+
+    async fn plant_observed(&self, facts: &[(&str, &str, &str, CapabilityStatus, i64)]) {
         let facts: Vec<CapabilityFact> = facts
             .iter()
-            .map(|(namespace, name, value)| CapabilityFact {
+            .map(|(namespace, name, value, status, at)| CapabilityFact {
                 namespace: (*namespace).to_owned(),
                 name: (*name).to_owned(),
                 value: Some((*value).to_owned()),
-                status: CapabilityStatus::Known,
-                observed_at: Timestamp::from_unix_millis(1),
+                status: *status,
+                observed_at: Timestamp::from_unix_millis(*at),
                 source: "agentless/1".to_owned(),
             })
             .collect();
@@ -94,6 +104,7 @@ impl Fixture {
             endpoint_id: self.endpoint_id.clone(),
             auth,
             trigger: "install-op-1".to_owned(),
+            correlation_id: Some("install-op-1".to_owned()),
         }
     }
 
@@ -174,6 +185,210 @@ async fn a_linux_machine_gets_the_pinned_probe_queued_once() {
         serde_json::to_value(&outcome).unwrap(),
         serde_json::json!({"status": "queued", "operationId": operation_id, "version": "1.40.0"})
     );
+}
+
+/// The probe's audit row names the principal that queued it, the setup that
+/// triggered it, and the setup's correlation id, so it traces back to the
+/// install.
+#[tokio::test]
+async fn the_follow_up_audit_names_its_actor_and_trigger() {
+    let fixture = compose("deploy@host-one:22").await;
+    fixture
+        .plant_facts(&[
+            ("os", "family", "Linux"),
+            ("host", "architecture", "x86_64"),
+        ])
+        .await;
+    let outcome = fixture
+        .hook
+        .machine_set_up(
+            &fleet_auth::LanAllowAllAuthorizer,
+            fleet_auth::LAN_PRINCIPAL_ID,
+            &fixture.setup(OnboardAuth::Agent),
+        )
+        .await;
+    let SetupFollowUp::Queued { operation_id, .. } = outcome else {
+        panic!("expected a queued follow-up, got {outcome:?}");
+    };
+    let operation = OperationRepository::new(fixture.pool.clone())
+        .get(&operation_id)
+        .await
+        .unwrap();
+    assert_eq!(operation.correlation_id.as_deref(), Some("install-op-1"));
+    let (actor, correlation, metadata): (String, Option<String>, String) = sqlx::query_as(
+        "SELECT actor, correlation_id, metadata_json FROM audit_events \
+         WHERE action = 'operation.create' AND operation_id = ?",
+    )
+    .bind(&operation_id)
+    .fetch_one(&fixture.pool)
+    .await
+    .unwrap();
+    assert_eq!(actor, fleet_auth::LAN_PRINCIPAL_ID);
+    assert_eq!(correlation.as_deref(), Some("install-op-1"));
+    let metadata: serde_json::Value = serde_json::from_str(&metadata).unwrap();
+    assert_eq!(metadata["kind"], "skills.probe", "{metadata}");
+    assert_eq!(metadata["setup_trigger"], "install-op-1", "{metadata}");
+}
+
+/// The setup prefix is reserved: the generic route refuses it, so no caller
+/// can occupy the key a setup follow-up will use.
+#[tokio::test]
+async fn the_generic_route_cannot_take_a_setup_key() {
+    let fixture = compose("deploy@host-one:22").await;
+    let error = fixture
+        .operations
+        .create(
+            &fleet_auth::LanAllowAllAuthorizer,
+            PRINCIPAL,
+            &NewOperation {
+                kind: "noop".to_owned(),
+                idempotency_key: Some(format!("{SETUP_FOLLOW_UP_IDEMPOTENCY_PREFIX}install-op-1")),
+                deadline_at: None,
+                correlation_id: None,
+                payload_json: None,
+                review_token: None,
+            },
+        )
+        .await
+        .unwrap_err();
+    assert!(error.to_string().contains("reserved"), "{error}");
+}
+
+/// A setup key held by an operation that is not this follow-up (another
+/// machine's probe here) answers `failed`, never `queued` with a stranger.
+#[tokio::test]
+async fn a_setup_key_held_by_another_operation_is_not_reported_as_queued() {
+    let fixture = compose("deploy@host-one:22").await;
+    fixture
+        .plant_facts(&[
+            ("os", "family", "Linux"),
+            ("host", "architecture", "x86_64"),
+        ])
+        .await;
+    fixture
+        .operations
+        .create_setup_follow_up(
+            &fleet_auth::LanAllowAllAuthorizer,
+            PRINCIPAL,
+            &NewOperation {
+                kind: "skills.probe".to_owned(),
+                idempotency_key: Some(format!("{SETUP_FOLLOW_UP_IDEMPOTENCY_PREFIX}install-op-1")),
+                deadline_at: None,
+                correlation_id: None,
+                payload_json: Some(
+                    serde_json::json!({
+                        "machineId": "someone-else",
+                        "endpointId": "endpoint",
+                        "auth": {"type": "agent"},
+                        "timeoutSeconds": 30,
+                    })
+                    .to_string(),
+                ),
+                review_token: None,
+            },
+        )
+        .await
+        .unwrap();
+    let outcome = fixture.set_up(&fleet_auth::LanAllowAllAuthorizer).await;
+    let SetupFollowUp::Failed { reason } = &outcome else {
+        panic!("expected a failure, got {outcome:?}");
+    };
+    assert!(reason.contains("held by another operation"), "{reason}");
+}
+
+/// The setup route creates only setup-keyed `skills.probe` operations.
+#[tokio::test]
+async fn the_setup_route_refuses_other_kinds_and_keys() {
+    let fixture = compose("deploy@host-one:22").await;
+    for (kind, key) in [
+        (
+            "noop",
+            Some(format!("{SETUP_FOLLOW_UP_IDEMPOTENCY_PREFIX}x")),
+        ),
+        ("skills.probe", Some("other-key".to_owned())),
+        (
+            "skills.probe",
+            Some(SETUP_FOLLOW_UP_IDEMPOTENCY_PREFIX.to_owned()),
+        ),
+        ("skills.probe", None),
+    ] {
+        let result = fixture
+            .operations
+            .create_setup_follow_up(
+                &fleet_auth::LanAllowAllAuthorizer,
+                PRINCIPAL,
+                &NewOperation {
+                    kind: kind.to_owned(),
+                    idempotency_key: key.clone(),
+                    deadline_at: None,
+                    correlation_id: None,
+                    payload_json: None,
+                    review_token: None,
+                },
+            )
+            .await;
+        assert!(result.is_err(), "{kind} {key:?}");
+    }
+}
+
+/// With both architecture facts, the freshest known observation wins, and
+/// a known fact beats a newer stale one.
+#[tokio::test]
+async fn the_freshest_known_architecture_fact_selects_the_pin() {
+    let cases = [
+        (
+            vec![
+                ("os", "family", "Linux", CapabilityStatus::Known, 1),
+                ("host", "architecture", "x86_64", CapabilityStatus::Known, 1),
+                ("os", "arch", "aarch64", CapabilityStatus::Known, 2),
+            ],
+            "arm64",
+        ),
+        (
+            vec![
+                ("os", "family", "Linux", CapabilityStatus::Known, 1),
+                (
+                    "host",
+                    "architecture",
+                    "aarch64",
+                    CapabilityStatus::Known,
+                    3,
+                ),
+                ("os", "arch", "x86_64", CapabilityStatus::Known, 2),
+            ],
+            "arm64",
+        ),
+        (
+            vec![
+                ("os", "family", "Linux", CapabilityStatus::Known, 1),
+                ("host", "architecture", "x86_64", CapabilityStatus::Known, 1),
+                ("os", "arch", "aarch64", CapabilityStatus::Stale, 9),
+            ],
+            "x64",
+        ),
+    ];
+    for (facts, asset) in cases {
+        let fixture = compose("deploy@host-one:22").await;
+        fixture.plant_observed(&facts).await;
+        let SetupFollowUp::Queued { operation_id, .. } =
+            fixture.set_up(&fleet_auth::LanAllowAllAuthorizer).await
+        else {
+            panic!("expected a queued follow-up for {facts:?}");
+        };
+        let operation = OperationRepository::new(fixture.pool.clone())
+            .get(&operation_id)
+            .await
+            .unwrap();
+        let payload: serde_json::Value =
+            serde_json::from_str(operation.payload_json.as_deref().unwrap()).unwrap();
+        assert!(
+            payload["artifactUrl"]
+                .as_str()
+                .unwrap()
+                .ends_with(&format!("-Linux-{asset}")),
+            "{facts:?}: {payload}"
+        );
+    }
 }
 
 #[test]

@@ -53,8 +53,10 @@
 //! default `true`) makes the controller queue a pinned, checksum-verified
 //! `skills.probe` after a successful `machine.install-fleetd` and after an
 //! SSH onboarding add (#600), so a machine Fleet sets up ends with the tested
-//! `skills-manager-cli`. `false` turns the follow-up off; any other value
-//! fails configuration loading.
+//! `skills-manager-cli`. The variable accepts `true`/`false` or `1`/`0`, in
+//! any case, like the other boolean settings; `false` (or `0`) turns the
+//! follow-up off, an empty value means unset, and any other value fails
+//! configuration loading.
 //!
 //! `FLEET_DESIRED_FETCH_INTERVAL_SECONDS` (TOML
 //! `desired_fetch_interval_seconds`, default `0` = off) makes the
@@ -586,7 +588,7 @@ impl fmt::Display for ConfigError {
             ),
             Self::SkillsManagerAutoInstallInvalid { value } => write!(
                 f,
-                "{SKILLS_MANAGER_AUTO_INSTALL_VAR} must be true or false, not {value:?}"
+                "{SKILLS_MANAGER_AUTO_INSTALL_VAR} must be true or false (or 1 or 0, any case), not {value:?}"
             ),
             Self::LabSweepIntervalInvalid { value } => write!(
                 f,
