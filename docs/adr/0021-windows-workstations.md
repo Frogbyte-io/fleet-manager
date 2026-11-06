@@ -72,7 +72,7 @@ An outbound connection (ADR 0002/0003) would serve laptops that are rarely reach
 | New: `fleetctl` on Windows | Publish a pinned, checksummed `fleetctl.exe`; a controller URL setting with no shell wrapper; Windows notes in the `fleet` skill and the pilot guide | this ADR |
 | [#611](https://github.com/Frogbyte-io/fleet-manager/issues/611) | Live validation on a Windows 11 workstation, as a standard and as an administrator account, with Smart App Control on and off; agent uses the Registry through `fleetctl` | #608–#610, `fleetctl` on Windows |
 
-A comment on #604 records that Windows token storage is in its scope. ADR 0015 and this ADR move to Accepted together after #611.
+Windows token storage at rest belongs to #604 (to be noted there when this ADR is accepted). ADR 0015 and this ADR move to Accepted together after #611.
 
 ## Open questions for the maintainer
 
