@@ -45,21 +45,23 @@ tailscale serve --bg --http=8080 http://127.0.0.1:8080
 tailscale serve --bg --https=443 http://127.0.0.1:8080
 ```
 
-Then let only your own devices reach those ports. Tag the controller host (`tag:fleet-controller`) and remove any allow-all rule from the tailnet policy. A policy fragment:
+Then let only your own devices reach those ports. Tag the controller host (`tag:fleet-controller`) and each pilot machine (`tag:fleet-pilot`), and remove any allow-all rule from the tailnet policy. A policy fragment:
 
 ```jsonc
 {
   "tagOwners": {
-    "tag:fleet-controller": ["you@example.com"]
+    "tag:fleet-controller": ["you@example.com"],
+    "tag:fleet-pilot": ["you@example.com"]
   },
   "grants": [
-    // Your devices (browser, fleetctl, and fleetd on your pilot machines) reach the controller.
-    { "src": ["you@example.com"], "dst": ["tag:fleet-controller"], "ip": ["tcp:443", "tcp:8080"] },
-    // The controller reaches your pilot machines over SSH.
-    { "src": ["tag:fleet-controller"], "dst": ["you@example.com"], "ip": ["tcp:22"] }
+    // Your devices (browser, fleetctl) and the pilot machines (fleetd, the fleet skill) reach the controller.
+    { "src": ["you@example.com", "tag:fleet-pilot"], "dst": ["tag:fleet-controller"], "ip": ["tcp:443", "tcp:8080"] },
+    // The controller reaches only the tagged pilot machines over SSH, not every device you own.
+    { "src": ["tag:fleet-controller"], "dst": ["tag:fleet-pilot"], "ip": ["tcp:22"] }
   ],
   "tests": [
     { "src": "you@example.com", "accept": ["tag:fleet-controller:443", "tag:fleet-controller:8080"] },
+    { "src": "tag:fleet-controller", "accept": ["tag:fleet-pilot:22"] },
     { "src": "teammate@example.com", "deny": ["tag:fleet-controller:443", "tag:fleet-controller:8080"] }
   ]
 }
@@ -163,8 +165,10 @@ The probe refreshes the machine's observed inventory, and `skills matrix` shows 
 
 Agents use the `fleet` skill, which drives `fleetctl --output json`. Each pilot machine needs `fleetctl`, and it must reach the controller. Because the skill's commands carry no `--url`, a small wrapper in the agent login's `PATH` adds it:
 
+Copy the `fleetctl` binary you built (see the prerequisites) to the pilot machine first, for example with `scp target/release/fleetctl dev-1:/tmp/fleetctl`, then on the pilot machine:
+
 ```sh
-install -D -m 0755 target/release/fleetctl ~/.local/libexec/fleetctl
+install -D -m 0755 /tmp/fleetctl ~/.local/libexec/fleetctl && rm /tmp/fleetctl
 cat > ~/.local/bin/fleetctl <<'EOF'
 #!/bin/sh
 exec "$HOME/.local/libexec/fleetctl" --url http://controller.example.ts.net:8080 "$@"

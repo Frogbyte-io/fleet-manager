@@ -450,7 +450,7 @@ Issue-ready work for M0–M2 is in [planning/initial-issues.md](planning/initial
 | Inspect/manage a Windows VM | M6 | Proxmox lifecycle plus QEMU Guest Agent health/IP; in-guest management is later |
 | Hardware-in-the-loop Lab | M7 later sub-epic | Exclusive reservation and cleanup under failure |
 
-To pilot these workflows on a few Linux developer machines before M8, follow [operations/fleet-pilot.md](operations/fleet-pilot.md).
+To pilot machine enrollment, fleet-wide skills, and the Registry on a few Linux developer machines before M8, follow [operations/fleet-pilot.md](operations/fleet-pilot.md).
 
 ## Risks and research gates
 
