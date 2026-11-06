@@ -543,9 +543,14 @@ async fn the_pinned_install_verifies_the_checksum() {
     assert!(result.is_none());
     assert!(error.unwrap().contains("checksum did not match"));
     // The staged download beside the destination is gone too.
-    let leftovers: Vec<_> = std::fs::read_dir(format!("{home}/.local/bin"))
-        .map(|entries| entries.filter_map(Result::ok).collect())
-        .unwrap_or_default();
+    let leftovers: Vec<_> = match std::fs::read_dir(format!("{home}/.local/bin")) {
+        // A directory that was never created holds nothing.
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Vec::new(),
+        entries => entries
+            .expect("the bin directory is readable")
+            .collect::<Result<_, _>>()
+            .expect("every bin entry is readable"),
+    };
     assert!(leftovers.is_empty(), "{leftovers:?}");
     let retained =
         fleet_application::skills::SkillsPort::get(fixture.snapshots.as_ref(), &fixture.machine_id)
@@ -597,9 +602,14 @@ async fn a_pinned_binary_that_cannot_run_is_not_installed() {
         !std::path::Path::new(&format!("{home}/.local/bin/skills-manager-cli")).exists(),
         "nothing is left in ~/.local/bin"
     );
-    let leftovers: Vec<_> = std::fs::read_dir(format!("{home}/.local/bin"))
-        .map(|entries| entries.filter_map(Result::ok).collect())
-        .unwrap_or_default();
+    let leftovers: Vec<_> = match std::fs::read_dir(format!("{home}/.local/bin")) {
+        // A directory that was never created holds nothing.
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Vec::new(),
+        entries => entries
+            .expect("the bin directory is readable")
+            .collect::<Result<_, _>>()
+            .expect("every bin entry is readable"),
+    };
     assert!(leftovers.is_empty(), "{leftovers:?}");
     let _ = std::fs::remove_file(&staged);
 }

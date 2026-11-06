@@ -68,7 +68,7 @@ impl SkillsManagerSetup {
         const OBSERVED: &str = "a fleetd upgrade does not set the machine up again, and Skills Manager was already observed on this machine";
         let Some(snapshots) = &self.snapshots else {
             return Err(SetupFollowUp::Skipped {
-                reason: OBSERVED.to_owned(),
+                reason: "a fleetd upgrade does not set the machine up again, and this controller cannot read Skills Manager observations to tell whether an earlier setup was missed".to_owned(),
             });
         };
         match snapshots.get(machine_id).await {
