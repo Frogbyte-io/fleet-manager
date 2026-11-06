@@ -217,6 +217,16 @@ fn list(value: &Value) -> String {
 }
 
 fn question(review: &Value) -> String {
+    let warnings: String = review["warnings"]
+        .as_array()
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(Value::as_str)
+                .map(|warning| format!("Warning: {warning}\n"))
+                .collect()
+        })
+        .unwrap_or_default();
     let uninstall = if review["uninstall"].is_object() {
         format!(
             "uninstall fleetd over endpoint {} first, then ",
@@ -226,7 +236,7 @@ fn question(review: &Value) -> String {
         String::new()
     };
     format!(
-        "Remove machine {} ({}): {uninstall}delete its record, node identity and recorded facts, and unpin host keys for {}?",
+        "{warnings}Remove machine {} ({}): {uninstall}delete its record, node identity, recorded facts and stored secrets, and unpin host keys for {}?",
         text(&review["name"]),
         text(&review["machineId"]),
         list(&review["unpinHosts"]),
@@ -332,6 +342,19 @@ pub(crate) fn render(payload: &Value) -> String {
             text(&payload["name"]),
             text(&payload["machineId"])
         )];
+        if let Some(error) = payload["secretRevocationError"].as_str() {
+            lines.push(format!(
+                "  stored secrets were NOT revoked (delete them by hand): {error}"
+            ));
+        } else {
+            lines.push(format!(
+                "  stored secrets revoked: {}",
+                payload["secretsRevoked"]
+            ));
+        }
+        if payload["sessionClosed"] == true {
+            lines.push("  the live node session was closed".to_owned());
+        }
         if payload["uninstalled"] == true {
             lines.push(format!(
                 "  fleetd uninstalled: {}",
@@ -381,6 +404,13 @@ pub(crate) fn render(payload: &Value) -> String {
         "  keeps host keys (shared): {}",
         list(&payload["keptHosts"])
     ));
+    lines.push(format!(
+        "  revokes {} stored SSH keys and destroys {} stored Windows administrator passwords",
+        footprint["storedSshKeys"], footprint["adminPasswords"],
+    ));
+    for warning in payload["warnings"].as_array().into_iter().flatten() {
+        lines.push(format!("  warning: {}", text(warning)));
+    }
     if payload["uninstall"].is_object() {
         lines.push(format!(
             "  uninstalls fleetd first over endpoint {} ({})",

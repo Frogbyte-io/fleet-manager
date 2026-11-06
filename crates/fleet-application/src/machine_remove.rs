@@ -11,43 +11,44 @@
 //! - **Reviewed and payload-bound.** A review reads the machine and answers
 //!   what the removal will do and a token over it: the machine, its
 //!   endpoints, the hosts whose pinned keys go and the hosts that keep them,
-//!   and the optional uninstall (endpoint and authentication). The removal
-//!   recomputes the same payload and refuses a token that no longer matches,
-//!   so an endpoint added, a host now shared, or a different uninstall
-//!   between the two is reviewed again.
+//!   the counts of stored SSH keys and Windows administrator passwords the
+//!   removal destroys, and the optional uninstall (endpoint, authentication
+//!   and the install layout it uses). The removal recomputes the same payload
+//!   and refuses a token that no longer matches.
 //! - **Refused while something holds the machine.** A Lab provision record
-//!   (the machine is a Lab guest, and Lab cleanup owns its record), a
-//!   persistent marker (the persistent unregister or destroy flow owns it), a
-//!   live USB reservation the machine owns (detach first), and a pending,
-//!   running or cancelling operation on the machine. The review lists every
-//!   hold with what to do; the removal re-checks and refuses while any
-//!   remains. The storage delete re-checks the USB hold in the same statement
-//!   as the delete, so a reservation taken between the check and the delete
-//!   still refuses.
-//! - **What goes.** The record goes through [`Machines::delete`]: its
+//!   (Lab cleanup owns the record), a persistent marker (the persistent
+//!   unregister or destroy flow owns it), a live USB reservation the machine
+//!   owns (detach first), and a pending, running or cancelling operation on
+//!   the machine. A controller without a secret store also refuses a machine
+//!   that has stored secrets, because it could not revoke them. The review
+//!   lists every hold with what to do. The delete itself re-checks the Lab,
+//!   persistent, USB and operation holds in the same statement as the delete
+//!   ([`MachineRemovalPort::delete_unheld`]), so a hold taken after the review
+//!   or during the uninstall still refuses.
+//! - **What goes.** The record and everything that cascades from it:
 //!   endpoints and their stored default authentication, capability facts,
-//!   inventory snapshots, tags, groups, node identity with its credentials,
-//!   sessions and enrollment tokens, project checkout observations, the
-//!   Skills Manager snapshot, recorded catalog skill installs and a confirmed
-//!   guest link all cascade, and the keys and rotated passwords bound to the
-//!   machine are revoked. The pinned host keys of its SSH hosts are removed
-//!   from the Fleet known-hosts file unless another machine's endpoint or an
-//!   onboarding draft uses the same host (pins are host-scoped, as in the
-//!   onboarding cancel).
+//!   inventory snapshots, tags, groups, the node identity with its
+//!   credentials, sessions, challenges and enrollment tokens, project
+//!   checkout observations, the Skills Manager snapshot, recorded catalog
+//!   skill installs and a confirmed guest link. The keys and rotated
+//!   passwords bound to the machine are revoked, a live node gateway session
+//!   is closed, and the pinned host keys of its SSH hosts are removed from
+//!   the Fleet known-hosts file unless another machine's endpoint or an
+//!   onboarding draft uses the same host, checked again after the delete.
 //! - **What stays.** The audit trail, finished operations, released hardware
 //!   reservations, action requests, collected files (until their retention
 //!   pass) and Fleet Git (the Registry) are history and are not touched.
 //! - **Nothing on the machine is touched** unless the caller asks for the
-//!   uninstall: then the existing fleetd uninstall (`deploy/fleetd/uninstall.sh
+//!   uninstall: then the shipped fleetd uninstall (`deploy/fleetd/uninstall.sh
 //!   --purge`) runs over SSH first, and a failed uninstall leaves the machine
 //!   registered.
 //!
-//! Every step is audited, without secrets: the uninstall's start and result,
-//! the delete (`machine.delete`, by [`Machines::delete`]) and a summary of the
-//! removal.
+//! Every step is audited under `machine.delete`, with the request's
+//! correlation id and without secrets: the uninstall's start and result, the
+//! delete, the secret revocation when it fails, and a summary of the removal.
 #![warn(missing_docs)]
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::sync::Arc;
 
@@ -56,8 +57,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::audit::{AuditIntent, AuditMetadata};
 use crate::authz::{AccessRequest, ActingPrincipal, Authorizer, Decision, Permission, authorize};
-use crate::machine::{Machine, MachinePort, MachineUseCaseError, Machines};
-use crate::machine_access::{EndpointAuth, EndpointAuthPort};
+use crate::machine::{Machine, MachinePort};
+use crate::machine_access::{EndpointAuth, EndpointAuthPort, MachineKeyPort};
 use crate::machine_usb::MachineHardwareGate;
 use crate::onboarding::{OnboardTrustPort, reference_host};
 use crate::operation::{AuditPort, PortFailure, review_token_for};
@@ -65,6 +66,17 @@ use fleet_core::EndpointKind;
 
 /// The review-token kind of a removal.
 pub const REMOVE_KIND: &str = "machine.remove";
+
+/// The installer layout overrides an uninstall honours, as the install
+/// recorded them (`deploy/fleetd/uninstall.sh` reads the same names).
+pub const LAYOUT_VARIABLES: [&str; 6] = [
+    "FLEETD_BIN_DIR",
+    "FLEETD_UNIT_DIR",
+    "FLEETD_ENV_FILE",
+    "FLEETD_STATE_DIR",
+    "FLEETD_SERVICE",
+    "FLEETD_SYSTEMCTL",
+];
 
 /// The uninstall the caller asked for, as the request carries it.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -85,6 +97,9 @@ pub struct UninstallPlan {
     pub endpoint_id: String,
     /// The authentication it uses.
     pub auth: EndpointAuth,
+    /// The installer layout overrides of the machine's last successful
+    /// fleetd install (empty for the default layout).
+    pub layout: BTreeMap<String, String>,
 }
 
 /// What the uninstall port is asked to do.
@@ -92,7 +107,7 @@ pub struct UninstallPlan {
 pub struct FleetdUninstall {
     /// The machine.
     pub machine_id: String,
-    /// The SSH endpoint and authentication.
+    /// The SSH endpoint, authentication and layout.
     pub plan: UninstallPlan,
 }
 
@@ -105,8 +120,16 @@ pub trait FleetdUninstallPort: fmt::Debug + Send + Sync {
     /// # Errors
     ///
     /// Fails, with a scrubbed and bounded detail, when the endpoint cannot be
-    /// reached or trusted, or the script does not exit 0.
+    /// reached or trusted, no fleetd service is found in the layout, or the
+    /// script does not exit 0.
     async fn uninstall(&self, request: &FleetdUninstall) -> Result<String, String>;
+}
+
+/// Closes a machine's live node gateway session after the machine is gone.
+#[async_trait]
+pub trait NodeSessionPort: fmt::Debug + Send + Sync {
+    /// Closes the session, if one is open; answers whether one was.
+    async fn close(&self, machine_id: &str) -> bool;
 }
 
 /// A Lab provision record that names the machine.
@@ -116,9 +139,10 @@ pub struct LabProvisionHold {
     pub provision_id: String,
     /// Its state.
     pub state: String,
-    /// The lease it belongs to, when any.
+    /// The lease that owns it, only when the lease links back to this
+    /// provision (`provision_id`).
     pub lease_id: Option<String>,
-    /// The lease's state, when there is a lease.
+    /// The owning lease's state.
     pub lease_state: Option<String>,
 }
 
@@ -146,8 +170,9 @@ pub struct ActiveOperationHold {
     pub state: String,
 }
 
-/// The records a removal deletes, counted for the review. Informational: the
-/// counts move with inventory and are not bound by the review token.
+/// The records a removal deletes, and the collected files it keeps, counted
+/// for the review. The secret counts are bound by the review token; the rest
+/// move with inventory and are informational.
 #[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RemovalFootprint {
@@ -155,6 +180,8 @@ pub struct RemovalFootprint {
     pub endpoints: u64,
     /// Stored default endpoint authentication records.
     pub endpoint_auth: u64,
+    /// Endpoints whose stored default authentication is a stored key.
+    pub endpoint_auth_secrets: u64,
     /// Capability facts.
     pub capabilities: u64,
     /// Inventory snapshots.
@@ -163,7 +190,7 @@ pub struct RemovalFootprint {
     pub tags_and_groups: u64,
     /// Node identity records (0 or 1).
     pub node_identity: u64,
-    /// Node credentials, sessions and enrollment tokens.
+    /// Node credentials, sessions, challenges and enrollment tokens.
     pub node_credentials: u64,
     /// Project checkout observations.
     pub project_checkouts: u64,
@@ -173,11 +200,23 @@ pub struct RemovalFootprint {
     pub catalog_skill_installs: u64,
     /// Confirmed Proxmox guest links (0 or 1).
     pub guest_link: u64,
+    /// SSH private keys Fleet holds for this machine (revoked).
+    pub stored_ssh_keys: u64,
+    /// Rotated Windows administrator passwords Fleet holds for this machine
+    /// (destroyed: nobody can read them afterwards).
+    pub admin_passwords: u64,
     /// Collected files kept until their retention pass (not deleted).
     pub collected_files_kept: u64,
 }
 
-/// What the store answers about a machine before it is removed.
+impl RemovalFootprint {
+    fn stored_secrets(&self) -> u64 {
+        self.stored_ssh_keys + self.admin_passwords + self.endpoint_auth_secrets
+    }
+}
+
+/// What the store answers about a machine before it is removed, and the
+/// guarded delete.
 #[async_trait]
 pub trait MachineRemovalPort: fmt::Debug + Send + Sync {
     /// The Lab provision records that name the machine.
@@ -220,6 +259,25 @@ pub trait MachineRemovalPort: fmt::Debug + Send + Sync {
     ///
     /// As [`Self::lab_provisions`].
     async fn footprint(&self, machine_id: &str) -> Result<RemovalFootprint, String>;
+
+    /// The installer layout overrides ([`LAYOUT_VARIABLES`]) of the
+    /// machine's last successful fleetd install.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::lab_provisions`].
+    async fn install_layout(&self, machine_id: &str) -> Result<BTreeMap<String, String>, String>;
+
+    /// Deletes the machine in one statement that also requires no Lab
+    /// provision, persistent marker, live USB reservation or unfinished
+    /// operation to name it.
+    ///
+    /// # Errors
+    ///
+    /// [`PortFailure::NotFound`] for an unknown machine,
+    /// [`PortFailure::Conflict`] naming the hold that refused it, or a
+    /// backend failure.
+    async fn delete_unheld(&self, machine_id: &str) -> Result<(), PortFailure>;
 }
 
 /// Who else uses a host, as the store reports it.
@@ -231,12 +289,24 @@ pub struct OtherHostUsers {
     pub draft_hosts: Vec<String>,
 }
 
+impl OtherHostUsers {
+    /// The hosts in use, lower-cased.
+    fn hosts(&self) -> BTreeSet<String> {
+        self.endpoint_references
+            .iter()
+            .filter_map(|reference| reference_host(reference))
+            .chain(self.draft_hosts.iter().map(String::as_str))
+            .map(str::to_ascii_lowercase)
+            .collect()
+    }
+}
+
 /// Why a removal is refused, with what to do about it.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RemovalBlocker {
-    /// `lab_provision`, `persistent_marker`, `hardware_reservation` or
-    /// `active_operation`.
+    /// `lab_provision`, `persistent_marker`, `hardware_reservation`,
+    /// `active_operation` or `stored_secret`.
     pub kind: String,
     /// The holding record's id.
     pub id: String,
@@ -278,8 +348,11 @@ pub struct RemovalReview {
     pub kept_hosts: Vec<String>,
     /// The uninstall the removal runs first, when asked.
     pub uninstall: Option<UninstallPlan>,
-    /// What the removal deletes.
+    /// What the removal deletes and keeps.
     pub footprint: RemovalFootprint,
+    /// What the caller must know before confirming (a destroyed Windows
+    /// administrator password).
+    pub warnings: Vec<String>,
     /// What refuses the removal now.
     pub blockers: Vec<RemovalBlocker>,
 }
@@ -297,9 +370,17 @@ pub struct RemovalOutcome {
     pub uninstall_summary: Option<String>,
     /// Whether a node identity was deleted with the machine.
     pub node_identity_removed: bool,
+    /// Whether a live node gateway session was closed.
+    pub session_closed: bool,
+    /// The stored secrets bound to the machine that were revoked.
+    pub secrets_revoked: u64,
+    /// Why the revocation of the machine's stored secrets failed, when it
+    /// did; the machine is gone and the secrets must be deleted by hand.
+    pub secret_revocation_error: Option<String>,
     /// The hosts whose pins were removed.
     pub unpinned_hosts: Vec<String>,
-    /// The hosts whose pins stayed because they are shared.
+    /// The hosts whose pins stayed because they are shared, including hosts
+    /// another machine or draft started using during the removal.
     pub kept_hosts: Vec<String>,
     /// The hosts whose pins could not be removed (the machine is gone; the
     /// pin is left for the operator to remove).
@@ -328,9 +409,9 @@ pub enum MachineRemovalError {
         /// Every hold.
         blockers: Vec<RemovalBlocker>,
     },
-    /// A hold raced the removal (the store refused the delete).
+    /// A hold appeared after the review (the guarded delete refused it).
     Conflict {
-        /// What conflicts.
+        /// The hold.
         detail: String,
     },
     /// The uninstall was asked for but the controller cannot run it.
@@ -385,23 +466,22 @@ fn backend(context: &'static str) -> impl FnOnce(String) -> MachineRemovalError 
 /// The removal use case.
 #[derive(Debug)]
 pub struct MachineRemoval {
-    machines: Arc<Machines>,
     records: Arc<dyn MachinePort>,
     store: Arc<dyn MachineRemovalPort>,
     hardware: Arc<dyn MachineHardwareGate>,
     trust: Arc<dyn OnboardTrustPort>,
     audit: Arc<dyn AuditPort>,
+    keys: Option<Arc<dyn MachineKeyPort>>,
     endpoint_auth: Option<Arc<dyn EndpointAuthPort>>,
     uninstaller: Option<Arc<dyn FleetdUninstallPort>>,
+    sessions: Option<Arc<dyn NodeSessionPort>>,
 }
 
 impl MachineRemoval {
-    /// Composes the use case. `machines` performs the delete (and revokes the
-    /// machine's bound keys when it was composed to); `records` reads the
-    /// machine; `trust` removes pins.
+    /// Composes the use case: `records` reads the machine, `store` answers
+    /// the holds and performs the guarded delete, `trust` removes pins.
     #[must_use]
     pub fn new(
-        machines: Arc<Machines>,
         records: Arc<dyn MachinePort>,
         store: Arc<dyn MachineRemovalPort>,
         hardware: Arc<dyn MachineHardwareGate>,
@@ -409,15 +489,24 @@ impl MachineRemoval {
         audit: Arc<dyn AuditPort>,
     ) -> Self {
         Self {
-            machines,
             records,
             store,
             hardware,
             trust,
             audit,
+            keys: None,
             endpoint_auth: None,
             uninstaller: None,
+            sessions: None,
         }
+    }
+
+    /// Revokes the keys and rotated passwords bound to a removed machine.
+    /// Without it (no secret store) a machine with stored secrets is refused.
+    #[must_use]
+    pub fn with_key_revocation(mut self, keys: Arc<dyn MachineKeyPort>) -> Self {
+        self.keys = Some(keys);
+        self
     }
 
     /// Reads an endpoint's stored default authentication for an uninstall
@@ -432,6 +521,13 @@ impl MachineRemoval {
     #[must_use]
     pub fn with_uninstaller(mut self, uninstaller: Arc<dyn FleetdUninstallPort>) -> Self {
         self.uninstaller = Some(uninstaller);
+        self
+    }
+
+    /// Closes a removed machine's live gateway session.
+    #[must_use]
+    pub fn with_sessions(mut self, sessions: Arc<dyn NodeSessionPort>) -> Self {
+        self.sessions = Some(sessions);
         self
     }
 
@@ -455,8 +551,14 @@ impl MachineRemoval {
     }
 
     /// Removes a reviewed machine: re-checks every hold, runs the uninstall
-    /// when asked (a failure leaves the machine), deletes the record, and
-    /// removes the pins of hosts nobody else uses. Audited.
+    /// when asked (a failure leaves the machine), deletes the record in a
+    /// statement that refuses any hold, revokes its stored secrets, closes
+    /// its gateway session, and removes the pins of hosts nobody else uses
+    /// after the delete. Audited.
+    ///
+    /// Callers that can be cancelled (an HTTP request) should run this to
+    /// completion on its own task, so a dropped request never leaves an
+    /// uninstall running unobserved.
     ///
     /// # Errors
     ///
@@ -480,39 +582,154 @@ impl MachineRemoval {
         }
         if review.review_token.as_deref() != Some(review_token) {
             return Err(MachineRemovalError::Invalid {
-                detail: "the review token does not match this machine as it is now (its endpoints, shared hosts or the uninstall changed, or the token is for another request); review the removal again".to_owned(),
+                detail: "the review token does not match this machine as it is now (its endpoints, shared hosts, stored secrets or the uninstall changed, or the token is for another request); review the removal again".to_owned(),
             });
         }
+        let audit = Recorder {
+            audit: self.audit.as_ref(),
+            principal,
+            machine_id,
+            correlation_id,
+        };
 
         let summary = match &review.uninstall {
-            Some(plan) => Some(
-                self.uninstall(principal, machine_id, plan, correlation_id)
-                    .await?,
-            ),
+            Some(plan) => Some(self.uninstall(&audit, machine_id, plan).await?),
             None => None,
         };
 
-        self.machines
-            .delete(authorizer, principal, machine_id)
+        // One statement deletes the machine only while nothing holds it: a
+        // hold taken after the review, or during the uninstall, refuses here.
+        self.store
+            .delete_unheld(machine_id)
             .await
-            .map_err(|error| match error {
-                MachineUseCaseError::Denied(decision) => MachineRemovalError::Denied(decision),
-                MachineUseCaseError::NotFound { what } => MachineRemovalError::NotFound { what },
-                MachineUseCaseError::Conflict { detail } => {
-                    MachineRemovalError::Conflict { detail }
-                }
-                MachineUseCaseError::Invalid { detail } => MachineRemovalError::Invalid { detail },
-                MachineUseCaseError::Backend { context, detail } => {
-                    MachineRemovalError::Backend { context, detail }
-                }
+            .map_err(|failure| match failure {
+                PortFailure::NotFound { what } => MachineRemovalError::NotFound { what },
+                PortFailure::Conflict { detail } => MachineRemovalError::Conflict { detail },
+                PortFailure::Backend { detail } => MachineRemovalError::Backend {
+                    context: "delete",
+                    detail,
+                },
             })?;
+        // The delete is recorded before anything else can fail.
+        audit
+            .record(&[
+                ("event", "machine_deleted"),
+                ("name", &review.name),
+                ("endpoints", &review.endpoints.len().to_string()),
+            ])
+            .await?;
 
-        // The record is gone; its hosts' pins follow unless shared. A pin
-        // that cannot be removed is reported, not hidden: the removal itself
-        // already happened.
+        let (secrets_revoked, secret_revocation_error) =
+            self.revoke_secrets(&audit, machine_id).await;
+        let session_closed = match &self.sessions {
+            Some(sessions) => sessions.close(machine_id).await,
+            None => false,
+        };
+        let (unpinned, kept, failed) = self.unpin(machine_id, &review).await;
+
+        let node = review
+            .node_identity
+            .clone()
+            .unwrap_or_else(|| "none".to_owned());
+        audit
+            .record(&[
+                ("event", "machine_removed"),
+                ("name", &review.name),
+                ("endpoints", &review.endpoints.len().to_string()),
+                ("nodeIdentity", &node),
+                ("sessionClosed", bool_text(session_closed)),
+                ("uninstalled", bool_text(review.uninstall.is_some())),
+                ("hostsUnpinned", &unpinned.len().to_string()),
+                ("hostsKept", &kept.len().to_string()),
+                ("hostsUnpinFailed", &failed.len().to_string()),
+                ("credentialsRevoked", &secrets_revoked.to_string()),
+                (
+                    "credentialRevocationFailed",
+                    bool_text(secret_revocation_error.is_some()),
+                ),
+                (
+                    "skillInstallsDropped",
+                    &review.footprint.catalog_skill_installs.to_string(),
+                ),
+            ])
+            .await?;
+        Ok(RemovalOutcome {
+            machine_id: review.machine_id,
+            name: review.name,
+            uninstalled: review.uninstall.is_some(),
+            uninstall_summary: summary,
+            node_identity_removed: review.node_identity.is_some(),
+            session_closed,
+            secrets_revoked,
+            secret_revocation_error,
+            unpinned_hosts: unpinned,
+            kept_hosts: kept,
+            unpin_failed_hosts: failed,
+            footprint: review.footprint,
+        })
+    }
+
+    /// Revokes the machine's bound secrets. A failure is audited and
+    /// reported, never hidden, and never stops the rest of the removal: the
+    /// machine is already gone.
+    async fn revoke_secrets(
+        &self,
+        audit: &Recorder<'_>,
+        machine_id: &str,
+    ) -> (u64, Option<String>) {
+        let Some(keys) = &self.keys else {
+            return (0, None);
+        };
+        match keys.revoke_for_machine(machine_id).await {
+            Ok(count) => (u64::try_from(count).unwrap_or(u64::MAX), None),
+            Err(detail) => {
+                eprintln!(
+                    "machine removal {machine_id}: stored secrets were not revoked: {detail}"
+                );
+                let reason = bounded(&detail);
+                let _ = audit
+                    .record(&[
+                        ("event", "machine_secret_revocation_failed"),
+                        ("reason", &reason),
+                    ])
+                    .await;
+                (0, Some(reason))
+            }
+        }
+    }
+
+    /// Removes the pins of the reviewed hosts that nobody uses now. Sharing
+    /// is read again after the delete: a host another machine or a draft
+    /// started using during the removal keeps its pins and is reported as
+    /// kept.
+    async fn unpin(
+        &self,
+        machine_id: &str,
+        review: &RemovalReview,
+    ) -> (Vec<String>, Vec<String>, Vec<String>) {
+        let mut kept = review.kept_hosts.clone();
         let mut unpinned = Vec::new();
         let mut failed = Vec::new();
+        if review.unpin_hosts.is_empty() {
+            return (unpinned, kept, failed);
+        }
+        let used = match self.store.other_host_users(machine_id).await {
+            Ok(others) => others.hosts(),
+            Err(detail) => {
+                // Without knowing who else uses a host, unpinning could break
+                // another machine's trust: keep every pin and say so.
+                eprintln!(
+                    "machine removal {machine_id}: host sharing unreadable, pins kept: {detail}"
+                );
+                failed.extend(review.unpin_hosts.iter().cloned());
+                return (unpinned, kept, failed);
+            }
+        };
         for host in &review.unpin_hosts {
+            if used.contains(host) {
+                kept.push(host.clone());
+                continue;
+            }
             match self.trust.unpin(host).await {
                 Ok(()) => unpinned.push(host.clone()),
                 Err(failure) => {
@@ -521,72 +738,35 @@ impl MachineRemoval {
                 }
             }
         }
-        let uninstalled = review.uninstall.is_some();
-        let endpoints = review.endpoints.len().to_string();
-        let unpinned_count = unpinned.len().to_string();
-        let kept_count = review.kept_hosts.len().to_string();
-        let failed_count = failed.len().to_string();
-        let node = review
-            .node_identity
-            .clone()
-            .unwrap_or_else(|| "none".to_owned());
-        self.record(
-            principal,
-            machine_id,
-            correlation_id,
-            &[
-                ("event", "machine_removed"),
-                ("name", &review.name),
-                ("endpoints", &endpoints),
-                ("nodeIdentity", &node),
-                ("uninstalled", if uninstalled { "true" } else { "false" }),
-                ("hostsUnpinned", &unpinned_count),
-                ("hostsKept", &kept_count),
-                ("hostsUnpinFailed", &failed_count),
-                (
-                    "skillInstallsDropped",
-                    &review.footprint.catalog_skill_installs.to_string(),
-                ),
-            ],
-        )
-        .await?;
-        Ok(RemovalOutcome {
-            machine_id: review.machine_id,
-            name: review.name,
-            uninstalled,
-            uninstall_summary: summary,
-            node_identity_removed: review.node_identity.is_some(),
-            unpinned_hosts: unpinned,
-            kept_hosts: review.kept_hosts,
-            unpin_failed_hosts: failed,
-            footprint: review.footprint,
-        })
+        kept.sort();
+        (unpinned, kept, failed)
     }
 
     /// Runs the uninstall the review planned, audited before and after. A
     /// failure is the removal's failure: nothing has been deleted yet.
     async fn uninstall(
         &self,
-        principal: &ActingPrincipal,
+        audit: &Recorder<'_>,
         machine_id: &str,
         plan: &UninstallPlan,
-        correlation_id: Option<&str>,
     ) -> Result<String, MachineRemovalError> {
         let uninstaller = self
             .uninstaller
             .as_ref()
             .ok_or(MachineRemovalError::UninstallUnavailable)?;
-        self.record(
-            principal,
-            machine_id,
-            correlation_id,
-            &[
+        let layout = if plan.layout.is_empty() {
+            "default".to_owned()
+        } else {
+            "recorded".to_owned()
+        };
+        audit
+            .record(&[
                 ("event", "fleetd_uninstall_started"),
                 ("endpointId", &plan.endpoint_id),
                 ("auth", plan.auth.kind()),
-            ],
-        )
-        .await?;
+                ("layout", &layout),
+            ])
+            .await?;
         match uninstaller
             .uninstall(&FleetdUninstall {
                 machine_id: machine_id.to_owned(),
@@ -595,30 +775,22 @@ impl MachineRemoval {
             .await
         {
             Ok(line) => {
-                self.record(
-                    principal,
-                    machine_id,
-                    correlation_id,
-                    &[
+                audit
+                    .record(&[
                         ("event", "fleetd_uninstalled"),
                         ("endpointId", &plan.endpoint_id),
-                    ],
-                )
-                .await?;
+                    ])
+                    .await?;
                 Ok(line)
             }
             Err(detail) => {
-                self.record(
-                    principal,
-                    machine_id,
-                    correlation_id,
-                    &[
+                audit
+                    .record(&[
                         ("event", "fleetd_uninstall_failed"),
                         ("endpointId", &plan.endpoint_id),
                         ("reason", &bounded(&detail)),
-                    ],
-                )
-                .await?;
+                    ])
+                    .await?;
                 Err(MachineRemovalError::UninstallFailed { detail })
             }
         }
@@ -669,13 +841,33 @@ impl MachineRemoval {
             Some(request) => Some(self.plan_uninstall(&machine, request).await?),
             None => None,
         };
-        let blockers = self.blockers(machine_id).await?;
-        let (unpin_hosts, kept_hosts) = self.host_split(&machine).await?;
         let footprint = self
             .store
             .footprint(machine_id)
             .await
             .map_err(backend("footprint"))?;
+        let mut blockers = self.blockers(machine_id).await?;
+        if self.keys.is_none() && footprint.stored_secrets() > 0 {
+            blockers.push(RemovalBlocker {
+                kind: "stored_secret".to_owned(),
+                id: machine_id.to_owned(),
+                state: "unrevocable".to_owned(),
+                detail: format!(
+                    "machine {machine_id} has secrets in Fleet's secret store ({} SSH keys, {} Windows administrator passwords, {} endpoints authenticating with a stored key) and this controller runs without its secret store, so it could not revoke them; start the controller with its master key, then remove the machine",
+                    footprint.stored_ssh_keys,
+                    footprint.admin_passwords,
+                    footprint.endpoint_auth_secrets
+                ),
+            });
+        }
+        let mut warnings = Vec::new();
+        if footprint.admin_passwords > 0 {
+            warnings.push(format!(
+                "the removal destroys the Windows administrator password Fleet rotated and stored for machine {machine_id} ({} stored); read it first (it is the only copy) if anyone may still need to log in as the administrator",
+                footprint.admin_passwords
+            ));
+        }
+        let (unpin_hosts, kept_hosts) = self.host_split(&machine).await?;
         let endpoints: Vec<ReviewedEndpoint> = machine
             .endpoints
             .iter()
@@ -697,6 +889,8 @@ impl MachineRemoval {
                 .collect::<Vec<_>>(),
             "unpin": unpin_hosts,
             "keep": kept_hosts,
+            "storedSshKeys": footprint.stored_ssh_keys,
+            "adminPasswords": footprint.admin_passwords,
             "uninstall": uninstall,
         });
         let review_token = blockers.is_empty().then(|| Self::token_for(&payload));
@@ -713,6 +907,7 @@ impl MachineRemoval {
             kept_hosts,
             uninstall,
             footprint,
+            warnings,
             blockers,
         })
     }
@@ -759,9 +954,18 @@ impl MachineRemoval {
                 None => EndpointAuth::Agent,
             },
         };
+        let layout = self
+            .store
+            .install_layout(&machine.id)
+            .await
+            .map_err(backend("install_layout"))?
+            .into_iter()
+            .filter(|(name, _)| LAYOUT_VARIABLES.contains(&name.as_str()))
+            .collect();
         Ok(UninstallPlan {
             endpoint_id: endpoint.id.clone(),
             auth,
+            layout,
         })
     }
 
@@ -780,7 +984,7 @@ impl MachineRemoval {
                 (Some(lease), Some(state)) => format!(
                     "Lab owns it: release lease {lease} ({state}) with `fleetctl lab destroy {lease}`, and its cleanup removes the machine"
                 ),
-                _ => "Lab owns it (a pool member or an unleased provision): drain or release it through Lab, and its cleanup removes the machine".to_owned(),
+                _ => "Lab owns it and no lease links back to it (a pool member or an unleased provision): drain it from its pool with `fleetctl lab pool drain <pool-id> --vmid <vmid>` (see `fleetctl lab provisions`), and Lab's cleanup removes the machine".to_owned(),
             };
             blockers.push(RemovalBlocker {
                 kind: "lab_provision".to_owned(),
@@ -872,30 +1076,29 @@ impl MachineRemoval {
         if own.is_empty() {
             return Ok((Vec::new(), Vec::new()));
         }
-        let others = self
+        let used = self
             .store
             .other_host_users(&machine.id)
             .await
-            .map_err(backend("other_host_users"))?;
-        let used: BTreeSet<String> = others
-            .endpoint_references
-            .iter()
-            .filter_map(|reference| reference_host(reference))
-            .chain(others.draft_hosts.iter().map(String::as_str))
-            .map(str::to_ascii_lowercase)
-            .collect();
+            .map_err(backend("other_host_users"))?
+            .hosts();
         let (kept, unpin): (Vec<String>, Vec<String>) =
             own.into_iter().partition(|host| used.contains(host));
         Ok((unpin, kept))
     }
+}
 
-    async fn record(
-        &self,
-        principal: &ActingPrincipal,
-        machine_id: &str,
-        correlation_id: Option<&str>,
-        facts: &[(&str, &str)],
-    ) -> Result<(), MachineRemovalError> {
+/// Writes one removal's audit events: all under `machine.delete`, on the
+/// machine, with the request's correlation id.
+struct Recorder<'a> {
+    audit: &'a dyn AuditPort,
+    principal: &'a ActingPrincipal,
+    machine_id: &'a str,
+    correlation_id: Option<&'a str>,
+}
+
+impl Recorder<'_> {
+    async fn record(&self, facts: &[(&str, &str)]) -> Result<(), MachineRemovalError> {
         let mut metadata = AuditMetadata::default();
         for (key, value) in facts {
             metadata
@@ -907,17 +1110,21 @@ impl MachineRemoval {
         }
         self.audit
             .record_intent(&AuditIntent {
-                actor: principal.id.clone(),
+                actor: self.principal.id.clone(),
                 action: Permission::MachineDelete.id().to_owned(),
-                resource: Some(machine_id.to_owned()),
+                resource: Some(self.machine_id.to_owned()),
                 decision: Decision::allow(),
-                correlation_id: correlation_id.map(str::to_owned),
+                correlation_id: self.correlation_id.map(str::to_owned),
                 operation_id: None,
                 metadata,
             })
             .await
             .map_err(backend("audit"))
     }
+}
+
+const fn bool_text(value: bool) -> &'static str {
+    if value { "true" } else { "false" }
 }
 
 /// A failure detail bounded for an audit value.

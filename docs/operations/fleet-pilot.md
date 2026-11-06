@@ -217,7 +217,7 @@ Reads come from the controller's active revision. Edits (`registry set`, `relate
   fleetctl --output json machines remove <machine-id> --uninstall --endpoint <endpoint-id> --yes
   ```
 
-  The review lists anything that blocks the removal, with what to do: a Lab lease (destroy the lease; its cleanup removes the machine), a persistent marker (`machines persistent unregister`, or the reviewed destroy for a VM Fleet created), a USB device the machine holds (`machines usb detach`), or an operation that has not finished. Removing needs `machine.delete`, which no delegated credential has.
+  The review lists each blocker with what to do: a Lab provision (for a leased guest, destroy the lease, or retry a failed cleanup with `lab cleanup-retry`; for a pool member or an unleased provision, drain it with `lab pool drain <pool-id> --vmid <vmid>`; Lab's cleanup then removes the machine), a persistent marker (`machines persistent unregister`, or the reviewed destroy for a VM Fleet created), a USB device the machine holds (`machines usb detach`), an operation that has not finished, or, on a controller running without its secret store, stored keys or passwords it could not revoke. The review also counts the stored SSH keys and Windows administrator passwords the removal deletes, and warns before a stored administrator password is destroyed. `--uninstall` uses the install layout of the machine's last successful `machines install-node`, and fails when no fleetd unit or binary is found there. Removing needs `machine.delete`, which no delegated credential has.
 
   Without `--uninstall`, remove the service on the machine yourself, as `deploy/fleetd/uninstall.sh --purge` does:
 

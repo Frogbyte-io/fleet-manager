@@ -7,7 +7,9 @@
 //! host-key unpinning and the audit all live in
 //! `fleet_application::machine_remove`. The removal is synchronous: the
 //! answer says what was deleted, what was unpinned, and whether fleetd was
-//! uninstalled.
+//! uninstalled. It runs on its own task, so a caller that disconnects does
+//! not cancel it half-way: an uninstall that started is always followed by
+//! the delete (or its refusal) and the audit.
 
 use std::str::FromStr as _;
 use std::sync::Arc;
@@ -50,11 +52,28 @@ impl From<MachineUninstallDto> for UninstallRequest {
     }
 }
 
-impl From<UninstallPlan> for MachineUninstallDto {
+/// The fleetd uninstall a removal will run, as the review resolved it.
+#[derive(Clone, Debug, Serialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct MachineUninstallPlanDto {
+    /// The SSH endpoint the uninstall runs over.
+    pub endpoint_id: String,
+    /// The authentication it uses.
+    pub auth: EndpointAuthDto,
+    /// The installer layout overrides (`FLEETD_BIN_DIR`, `FLEETD_UNIT_DIR`,
+    /// `FLEETD_ENV_FILE`, `FLEETD_STATE_DIR`, `FLEETD_SERVICE`,
+    /// `FLEETD_SYSTEMCTL`) of the machine's last successful fleetd install;
+    /// empty for the default layout. The uninstall fails when no fleetd unit
+    /// or binary is found in this layout.
+    pub layout: std::collections::BTreeMap<String, String>,
+}
+
+impl From<UninstallPlan> for MachineUninstallPlanDto {
     fn from(plan: UninstallPlan) -> Self {
         Self {
             endpoint_id: plan.endpoint_id,
-            auth: Some(plan.auth.into()),
+            auth: plan.auth.into(),
+            layout: plan.layout,
         }
     }
 }
@@ -126,7 +145,8 @@ impl From<RemovalBlocker> for RemovalBlockerDto {
     }
 }
 
-/// The records a removal deletes (and the collected files it keeps).
+/// The records a removal deletes, and the collected files it keeps. The
+/// stored-secret counts are bound by the review token.
 #[derive(Debug, Serialize, ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct RemovalFootprintDto {
@@ -134,6 +154,8 @@ pub struct RemovalFootprintDto {
     pub endpoints: u64,
     /// Stored default endpoint authentication records.
     pub endpoint_auth: u64,
+    /// Endpoints whose stored default authentication is a stored key.
+    pub endpoint_auth_secrets: u64,
     /// Capability facts.
     pub capabilities: u64,
     /// Inventory snapshots.
@@ -142,7 +164,7 @@ pub struct RemovalFootprintDto {
     pub tags_and_groups: u64,
     /// Node identity records (0 or 1).
     pub node_identity: u64,
-    /// Node credentials, sessions and enrollment tokens.
+    /// Node credentials, sessions, challenges and enrollment tokens.
     pub node_credentials: u64,
     /// Project checkout observations.
     pub project_checkouts: u64,
@@ -152,6 +174,11 @@ pub struct RemovalFootprintDto {
     pub catalog_skill_installs: u64,
     /// Confirmed Proxmox guest links (0 or 1).
     pub guest_link: u64,
+    /// SSH private keys Fleet holds for this machine; revoked.
+    pub stored_ssh_keys: u64,
+    /// Rotated Windows administrator passwords Fleet holds for this machine;
+    /// destroyed, so nobody can read them afterwards.
+    pub admin_passwords: u64,
     /// Collected files, kept until their retention pass.
     pub collected_files_kept: u64,
 }
@@ -161,6 +188,7 @@ impl From<RemovalFootprint> for RemovalFootprintDto {
         Self {
             endpoints: footprint.endpoints,
             endpoint_auth: footprint.endpoint_auth,
+            endpoint_auth_secrets: footprint.endpoint_auth_secrets,
             capabilities: footprint.capabilities,
             inventory_snapshots: footprint.inventory_snapshots,
             tags_and_groups: footprint.tags_and_groups,
@@ -170,6 +198,8 @@ impl From<RemovalFootprint> for RemovalFootprintDto {
             skills_snapshot: footprint.skills_snapshot,
             catalog_skill_installs: footprint.catalog_skill_installs,
             guest_link: footprint.guest_link,
+            stored_ssh_keys: footprint.stored_ssh_keys,
+            admin_passwords: footprint.admin_passwords,
             collected_files_kept: footprint.collected_files_kept,
         }
     }
@@ -197,11 +227,17 @@ pub struct MachineRemovalReviewDto {
     /// draft uses them.
     pub kept_hosts: Vec<String>,
     /// The fleetd uninstall that runs first, with its resolved
-    /// authentication, when asked.
-    pub uninstall: Option<MachineUninstallDto>,
-    /// What is deleted.
+    /// authentication and layout, when asked.
+    pub uninstall: Option<MachineUninstallPlanDto>,
+    /// What is deleted, and the collected files that are kept.
     pub footprint: RemovalFootprintDto,
-    /// What refuses the removal now, each with what to do.
+    /// What to know before confirming, for example that a stored Windows
+    /// administrator password is destroyed.
+    pub warnings: Vec<String>,
+    /// What refuses the removal now, each with what to do: a Lab provision,
+    /// a persistent marker, a USB reservation, an unfinished operation, or
+    /// (on a controller without its secret store) stored secrets it could
+    /// not revoke.
     pub blockers: Vec<RemovalBlockerDto>,
 }
 
@@ -217,6 +253,7 @@ impl From<RemovalReview> for MachineRemovalReviewDto {
             kept_hosts: review.kept_hosts,
             uninstall: review.uninstall.map(Into::into),
             footprint: review.footprint.into(),
+            warnings: review.warnings,
             blockers: review.blockers.into_iter().map(Into::into).collect(),
         }
     }
@@ -238,9 +275,17 @@ pub struct MachineRemovedDto {
     pub uninstall_summary: Option<String>,
     /// Whether a node identity was deleted with the machine.
     pub node_identity_removed: bool,
+    /// Whether a live node gateway session was closed.
+    pub session_closed: bool,
+    /// The stored secrets bound to the machine that were revoked.
+    pub secrets_revoked: u64,
+    /// Why revoking the machine's stored secrets failed, when it did; the
+    /// machine is removed and the secrets must be deleted by hand.
+    pub secret_revocation_error: Option<String>,
     /// The hosts whose pinned keys were removed.
     pub unpinned_hosts: Vec<String>,
-    /// The hosts whose pins stayed because they are shared.
+    /// The hosts whose pins stayed because they are shared, including hosts
+    /// another machine or draft started using during the removal.
     pub kept_hosts: Vec<String>,
     /// The hosts whose pins could not be removed; remove them from the
     /// controller's known-hosts file by hand.
@@ -258,6 +303,9 @@ impl From<RemovalOutcome> for MachineRemovedDto {
             uninstalled: outcome.uninstalled,
             uninstall_summary: outcome.uninstall_summary,
             node_identity_removed: outcome.node_identity_removed,
+            session_closed: outcome.session_closed,
+            secrets_revoked: outcome.secrets_revoked,
+            secret_revocation_error: outcome.secret_revocation_error,
             unpinned_hosts: outcome.unpinned_hosts,
             kept_hosts: outcome.kept_hosts,
             unpin_failed_hosts: outcome.unpin_failed_hosts,
@@ -282,18 +330,22 @@ fn error(
 }
 
 fn removal_or_error(
-    extension: Option<Extension<Arc<MachineRemoval>>>,
+    state: &crate::operations::ApiState,
     correlation_id: CorrelationId,
 ) -> Result<Arc<MachineRemoval>, ApiErrorResponse> {
-    extension.map(|Extension(removal)| removal).ok_or_else(|| {
-        error(
-            StatusCode::SERVICE_UNAVAILABLE,
-            "machine_removal_unavailable",
-            "machine removal is not wired; the controller needs its database and node services",
-            RetryClass::Backoff,
-            correlation_id,
-        )
-    })
+    state
+        .lab
+        .as_ref()
+        .and_then(|lab| lab.machine_removal().cloned())
+        .ok_or_else(|| {
+            error(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "machine_removal_unavailable",
+                "machine removal is not wired; the controller needs its database",
+                RetryClass::Backoff,
+                correlation_id,
+            )
+        })
 }
 
 /// Maps a removal refusal onto the public envelope.
@@ -394,11 +446,10 @@ pub async fn review_machine_removal(
     State(state): State<Arc<crate::operations::ApiState>>,
     principal: Option<Extension<crate::ActingPrincipal>>,
     Extension(correlation_id): Extension<CorrelationId>,
-    removal: Option<Extension<Arc<MachineRemoval>>>,
     Path(machine_id): Path<String>,
     request: Result<Json<ReviewMachineRemovalRequest>, axum::extract::rejection::JsonRejection>,
 ) -> Result<Json<Resource<MachineRemovalReviewDto>>, ApiErrorResponse> {
-    let removal = removal_or_error(removal, correlation_id)?;
+    let removal = removal_or_error(&state, correlation_id)?;
     let principal = crate::operations::principal_or_error(principal, correlation_id)?;
     let Json(request) = request.map_err(|_| {
         error(
@@ -446,7 +497,7 @@ pub async fn review_machine_removal(
         (status = 400, description = "The body is malformed, or the review token does not match the machine as it is now.", body = crate::error::ApiError),
         (status = 403, description = "The caller may not delete machines (`machine.delete`).", body = crate::error::ApiError),
         (status = 404, description = "The machine does not exist.", body = crate::error::ApiError),
-        (status = 409, description = "Refused: `machine_removal_blocked` (a Lab provision, persistent marker, USB reservation or unfinished operation holds the machine; the message says what to do) or `conflict` (a hold raced the removal).", body = crate::error::ApiError),
+        (status = 409, description = "Refused: `machine_removal_blocked` (a Lab provision, persistent marker, USB reservation, unfinished operation, or stored secrets a controller without its secret store cannot revoke; the message says what to do) or `conflict` (a hold appeared after the review, or during the uninstall, and the guarded delete refused it; nothing was deleted).", body = crate::error::ApiError),
         (status = 500, description = "A backend port failed.", body = crate::error::ApiError),
         (status = 502, description = "The fleetd uninstall failed (`fleetd_uninstall_failed`); the machine was not removed.", body = crate::error::ApiError),
         (status = 503, description = "Machine removal, or the uninstall, is not wired.", body = crate::error::ApiError),
@@ -456,11 +507,10 @@ pub async fn remove_machine(
     State(state): State<Arc<crate::operations::ApiState>>,
     principal: Option<Extension<crate::ActingPrincipal>>,
     Extension(correlation_id): Extension<CorrelationId>,
-    removal: Option<Extension<Arc<MachineRemoval>>>,
     Path(machine_id): Path<String>,
     request: Result<Json<RemoveMachineRequest>, axum::extract::rejection::JsonRejection>,
 ) -> Result<Json<Resource<MachineRemovedDto>>, ApiErrorResponse> {
-    let removal = removal_or_error(removal, correlation_id)?;
+    let removal = removal_or_error(&state, correlation_id)?;
     let principal = crate::operations::principal_or_error(principal, correlation_id)?;
     let Json(request) = request.map_err(|_| {
         error(
@@ -473,17 +523,33 @@ pub async fn remove_machine(
     })?;
     let uninstall = request.uninstall.map(UninstallRequest::from);
     let correlation = correlation_id.to_string();
-    let outcome = removal
-        .remove(
-            state.authorizer.as_ref(),
-            &principal,
-            &machine_id,
-            uninstall.as_ref(),
-            &request.review_token,
-            Some(&correlation),
+    let authorizer = state.authorizer.clone();
+    // The removal runs to completion on its own task: if the caller goes
+    // away, an uninstall that started is still followed by the delete (or
+    // its refusal) and the audit, never left running unobserved.
+    let outcome = tokio::spawn(async move {
+        removal
+            .remove(
+                authorizer.as_ref(),
+                &principal,
+                &machine_id,
+                uninstall.as_ref(),
+                &request.review_token,
+                Some(&correlation),
+            )
+            .await
+    })
+    .await
+    .map_err(|join| {
+        error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "internal",
+            format!("the removal task failed: {join}"),
+            RetryClass::Backoff,
+            correlation_id,
         )
-        .await
-        .map_err(|failure| map_removal_error(&failure, correlation_id))?;
+    })?
+    .map_err(|failure| map_removal_error(&failure, correlation_id))?;
     state
         .events
         .publish(fleet_application::events::EventKind::MachineChanged);

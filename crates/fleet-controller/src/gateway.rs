@@ -591,6 +591,25 @@ impl GatewayService {
             .cloned()
     }
 
+    /// Ends a machine's live session the way a newer session supersedes it:
+    /// the loop sends the node a fault and closes. Used when the machine is
+    /// removed (#616), so its node is not left connected to nothing. Answers
+    /// whether a session was open.
+    #[must_use]
+    pub fn close_session(&self, machine_id: &str) -> bool {
+        let entry = self
+            .registry
+            .sessions
+            .lock()
+            .expect("uncontended")
+            .get(machine_id)
+            .cloned();
+        entry.is_some_and(|entry| {
+            entry.superseded.notify_one();
+            true
+        })
+    }
+
     /// Dispatches one command to a live node and awaits its result.
     ///
     /// Delivery is at-least-once by contract: a node that already executed

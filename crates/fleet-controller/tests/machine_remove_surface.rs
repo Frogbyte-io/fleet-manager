@@ -4,8 +4,11 @@
 //! controller serves: the review token, `machine.delete` authorization, the
 //! holds that refuse a removal (Lab provision, persistent marker, USB
 //! reservation, unfinished operation), what the delete removes and keeps,
-//! host-key unpinning with and without a shared host, and an uninstall that
-//! fails before anything is deleted.
+//! host-key unpinning with and without a shared host (also when the host
+//! becomes shared during the removal), holds taken after the review or
+//! during the uninstall, stored secrets (counted, bound, revoked, and refused
+//! without a secret store), the install layout an uninstall uses, and an
+//! uninstall that fails before anything is deleted.
 
 use std::sync::{Arc, Mutex};
 
@@ -15,11 +18,14 @@ use axum::http::{Request, StatusCode};
 use fleet_api::{API_BASE_PATH, CORRELATION_ID_HEADER, operations::ApiState, router};
 use fleet_application::authz::{AccessRequest, Authorizer, Decision, Permission, ReasonId};
 use fleet_application::hardware::{DeviceObservation, HardwareStore as _, NewHardwareReservation};
+use fleet_application::lab::Lab;
 use fleet_application::machine::{
-    GuestLink, GuestLinkPort as _, MachinePort as _, Machines, NewEndpoint, RegisterMachine,
+    GuestLink, GuestLinkPort as _, MachinePort as _, NewEndpoint, RegisterMachine,
 };
-use fleet_application::machine_access::{EndpointAuth, EndpointAuthPort as _};
-use fleet_application::machine_remove::{FleetdUninstall, FleetdUninstallPort, MachineRemoval};
+use fleet_application::machine_access::{EndpointAuth, EndpointAuthPort as _, MachineKeyPort};
+use fleet_application::machine_remove::{
+    FleetdUninstall, FleetdUninstallPort, MachineRemoval, NodeSessionPort,
+};
 use fleet_application::machine_usb::StoreMachineHardwareGate;
 use fleet_application::onboarding::{OnboardHostKey, OnboardTrustPort};
 use fleet_application::operation::PortFailure;
@@ -31,8 +37,9 @@ use fleet_core::{
     ReservationOwnerKind,
 };
 use fleet_storage_sqlite::{
-    AuditSink, EndpointAuthRepository, GuestLinkRepository, HardwareRepository,
-    MachineRemovalRepository, MachineRepository, PersistentGuestRepository, Store,
+    AuditSink, EndpointAuthRepository, GuestLinkRepository, HardwareRepository, LabRepository,
+    LeaseRepository, MachineRemovalRepository, MachineRepository, PersistentGuestRepository,
+    ProjectRepository, Store,
 };
 use serde_json::{Value, json};
 use tower::ServiceExt as _;
@@ -79,18 +86,87 @@ impl OnboardTrustPort for FakeTrust {
     }
 }
 
-/// Answers what the test scripted and remembers what it was asked.
+/// Answers what the test scripted and remembers what it was asked. The
+/// statements in `during` run while the uninstall "runs" (with `?1` = the
+/// machine), to take a hold or share a host in the middle of a removal.
 #[derive(Debug)]
 struct FakeUninstall {
+    pool: sqlx::SqlitePool,
     answer: Mutex<Result<String, String>>,
     seen: Mutex<Vec<FleetdUninstall>>,
+    during: Mutex<Vec<&'static str>>,
 }
 
 #[async_trait]
 impl FleetdUninstallPort for FakeUninstall {
     async fn uninstall(&self, request: &FleetdUninstall) -> Result<String, String> {
         self.seen.lock().unwrap().push(request.clone());
+        let statements: Vec<&'static str> = std::mem::take(&mut *self.during.lock().unwrap());
+        for statement in statements {
+            sqlx::query(statement)
+                .bind(&request.machine_id)
+                .execute(&self.pool)
+                .await
+                .unwrap_or_else(|error| panic!("{statement}: {error}"));
+        }
         self.answer.lock().unwrap().clone()
+    }
+}
+
+/// The key store's revocation, scripted.
+#[derive(Debug, Default)]
+struct FakeKeys {
+    fail: Mutex<Option<String>>,
+    revoked: Mutex<Vec<String>>,
+}
+
+#[async_trait]
+impl MachineKeyPort for FakeKeys {
+    async fn create(&self, _key: &str, _machine: Option<&str>) -> Result<String, String> {
+        Err("unused".to_owned())
+    }
+
+    async fn exists(&self, _reference: &str, _machine: &str) -> Result<bool, String> {
+        Ok(false)
+    }
+
+    async fn resolve(&self, _reference: &str, _machine: &str) -> Result<Option<String>, String> {
+        Ok(None)
+    }
+
+    async fn revoke_for_machine(&self, machine_id: &str) -> Result<usize, String> {
+        if let Some(error) = self.fail.lock().unwrap().clone() {
+            return Err(error);
+        }
+        self.revoked.lock().unwrap().push(machine_id.to_owned());
+        Ok(2)
+    }
+}
+
+/// A gateway that has a live session for every machine.
+#[derive(Debug, Default)]
+struct FakeSessions {
+    closed: Mutex<Vec<String>>,
+}
+
+#[async_trait]
+impl NodeSessionPort for FakeSessions {
+    async fn close(&self, machine_id: &str) -> bool {
+        self.closed.lock().unwrap().push(machine_id.to_owned());
+        true
+    }
+}
+
+#[derive(Debug)]
+struct NoPins;
+
+#[async_trait]
+impl fleet_application::lab::ImagePinValidator for NoPins {
+    async fn promoted_version(
+        &self,
+        _version_id: &str,
+    ) -> Result<Option<fleet_core::RecipeVersion>, String> {
+        Ok(None)
     }
 }
 
@@ -98,19 +174,22 @@ struct Harness {
     _dir: tempfile::TempDir,
     pool: sqlx::SqlitePool,
     state: Arc<ApiState>,
-    removal: Option<Arc<MachineRemoval>>,
     trust: Arc<FakeTrust>,
     uninstall: Arc<FakeUninstall>,
+    keys: Arc<FakeKeys>,
+    sessions: Arc<FakeSessions>,
     machines: Arc<MachineRepository>,
     hardware: Arc<HardwareRepository>,
 }
 
 impl Harness {
     async fn new(authorizer: Arc<dyn Authorizer>) -> Self {
-        Self::with(authorizer, true).await
+        Self::with(authorizer, true, true).await
     }
 
-    async fn with(authorizer: Arc<dyn Authorizer>, wired: bool) -> Self {
+    /// `wired`: the controller composed removal; `secrets`: it has its
+    /// secret store (the key revocation).
+    async fn with(authorizer: Arc<dyn Authorizer>, wired: bool, secrets: bool) -> Self {
         let dir = tempfile::tempdir().unwrap();
         let store = Store::open(&dir.path().join("fleet.db")).await.unwrap();
         let pool = store.pool().clone();
@@ -128,35 +207,58 @@ impl Harness {
         let audit = Arc::new(AuditSink::new(pool.clone()));
         let trust = Arc::new(FakeTrust::default());
         let uninstall = Arc::new(FakeUninstall {
+            pool: pool.clone(),
             answer: Mutex::new(Ok(
                 "uninstall: service removed and state purged; the next install enrolls fresh"
                     .to_owned(),
             )),
             seen: Mutex::new(Vec::new()),
+            during: Mutex::new(Vec::new()),
         });
-        let removal = Arc::new(
-            MachineRemoval::new(
-                Arc::new(Machines::new(machines.clone(), audit.clone())),
-                machines.clone(),
-                Arc::new(MachineRemovalRepository::new(pool.clone())),
-                Arc::new(StoreMachineHardwareGate::new(hardware.clone())),
-                trust.clone(),
-                audit,
-            )
-            .with_endpoint_auth(Arc::new(EndpointAuthRepository::new(pool.clone())))
-            .with_uninstaller(uninstall.clone()),
+        let keys = Arc::new(FakeKeys::default());
+        let sessions = Arc::new(FakeSessions::default());
+        let removal = MachineRemoval::new(
+            machines.clone(),
+            Arc::new(MachineRemovalRepository::new(pool.clone())),
+            Arc::new(StoreMachineHardwareGate::new(hardware.clone())),
+            trust.clone(),
+            audit.clone(),
+        )
+        .with_endpoint_auth(Arc::new(EndpointAuthRepository::new(pool.clone())))
+        .with_uninstaller(uninstall.clone())
+        .with_sessions(sessions.clone());
+        let removal = if secrets {
+            removal.with_key_revocation(keys.clone())
+        } else {
+            removal
+        };
+        let labs = Arc::new(LabRepository::new(pool.clone()));
+        let lab = Lab::new(
+            labs.clone(),
+            labs,
+            Arc::new(LeaseRepository::new(pool.clone())),
+            Arc::new(NoPins),
+            Arc::new(ProjectRepository::new(pool.clone())),
+            audit,
         );
+        let lab = if wired {
+            lab.with_machine_removal(Arc::new(removal))
+        } else {
+            lab
+        };
         let state = Arc::new(ApiState {
             authorizer,
+            lab: Some(Arc::new(lab)),
             ..ApiState::for_document()
         });
         Self {
             _dir: dir,
             pool,
             state,
-            removal: wired.then_some(removal),
             trust,
             uninstall,
+            keys,
+            sessions,
             machines,
             hardware,
         }
@@ -226,13 +328,9 @@ impl Harness {
             )
             .body(Body::from(body.to_string()))
             .unwrap();
-        let mut app =
-            router(self.state.clone()).layer(axum::Extension(fleet_api::ActingPrincipal {
-                id: principal.to_owned(),
-            }));
-        if let Some(removal) = &self.removal {
-            app = app.layer(axum::Extension(removal.clone()));
-        }
+        let app = router(self.state.clone()).layer(axum::Extension(fleet_api::ActingPrincipal {
+            id: principal.to_owned(),
+        }));
         let response = app.oneshot(request).await.unwrap();
         let status = response.status();
         let bytes = axum::body::to_bytes(response.into_body(), 1 << 20)
@@ -455,7 +553,7 @@ async fn a_removal_deletes_the_facts_keeps_the_history_and_unpins_its_own_host()
         1
     );
     let events = harness.audit_events(&machine).await;
-    assert_eq!(events, ["delete", "machine_removed"], "{events:?}");
+    assert_eq!(events, ["machine_deleted", "machine_removed"], "{events:?}");
     let summary: String = sqlx::query_scalar(
         "SELECT metadata_json FROM audit_events WHERE resource = ?1 \
          AND json_extract(metadata_json, '$.event') = 'machine_removed'",
@@ -594,8 +692,8 @@ async fn every_hold_refuses_the_removal_with_what_to_do() {
     // A Lab guest: its lease owns its lifecycle.
     harness
         .sql(
-            "INSERT INTO lab_leases (id, template_version_id, owner, purpose, state, cleanup, created_at) \
-             VALUES ('lease-1', 'tv-1', 'lan', 'test', 'ready', 'destroy', 1)",
+            "INSERT INTO lab_leases (id, template_version_id, owner, purpose, state, provision_id, cleanup, created_at) \
+             VALUES ('lease-1', 'tv-1', 'lan', 'test', 'ready', 'provision-1', 'destroy', 1)",
             "",
         )
         .await;
@@ -796,7 +894,7 @@ async fn a_failed_uninstall_leaves_the_machine_and_a_clean_one_runs_first() {
     assert_eq!(status, StatusCode::OK, "{review}");
     assert_eq!(
         review["data"]["uninstall"],
-        json!({ "endpointId": ssh, "auth": { "type": "identityFile", "path": "/etc/fleet/keys/box" } })
+        json!({ "endpointId": ssh, "auth": { "type": "identityFile", "path": "/etc/fleet/keys/box" }, "layout": {} })
     );
     let token = review["data"]["reviewToken"].as_str().unwrap().to_owned();
 
@@ -843,7 +941,7 @@ async fn a_failed_uninstall_leaves_the_machine_and_a_clean_one_runs_first() {
             "fleetd_uninstall_failed",
             "fleetd_uninstall_started",
             "fleetd_uninstalled",
-            "delete",
+            "machine_deleted",
             "machine_removed"
         ]
     );
@@ -881,7 +979,7 @@ async fn removal_needs_machine_delete_and_a_wired_controller() {
     assert!(harness.exists(&machine).await);
     assert!(harness.audit_events(&machine).await.is_empty());
 
-    let unwired = Harness::with(Arc::new(Permit), false).await;
+    let unwired = Harness::with(Arc::new(Permit), false, true).await;
     let machine = unwired.machine("box", &["root@box.lan:22"]).await;
     let (status, error) = unwired.review(&machine, json!({})).await;
     assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{error}");
@@ -892,4 +990,274 @@ async fn removal_needs_machine_delete_and_a_wired_controller() {
 fn machine_delete_is_risky_and_never_delegated() {
     assert!(Permission::MachineDelete.is_risky());
     assert_eq!(Permission::MachineDelete.id(), "machine.delete");
+}
+
+#[tokio::test]
+async fn a_hold_taken_during_the_uninstall_refuses_the_delete() {
+    for (hold, named) in [
+        (
+            "INSERT INTO lab_provisions (id, template_version_id, state, created_at, updated_at, machine_id) \
+             VALUES ('provision-late', 'tv-1', 'ready', 1, 1, ?1)",
+            "Lab provision provision-late",
+        ),
+        (
+            "INSERT INTO persistent_guests (account_id, vmid, name, node, image_version_id, machine_id, cloned, state, created_at, updated_at) \
+             VALUES ('acct', 8200, 'late', 'pve', 'registered', ?1, 1, 'ready', 1, 1)",
+            "persistent marker acct/8200",
+        ),
+        (
+            "INSERT INTO operations (id, kind, state, cancel_requested, created_at, updated_at, payload_json) \
+             VALUES ('op-late', 'machine.exec', 'pending', 0, 1, 1, json_object('machineId', ?1))",
+            "operation op-late",
+        ),
+    ] {
+        let harness = Harness::new(Arc::new(Permit)).await;
+        let machine = harness.machine("box", &["root@box.lan:22"]).await;
+        let ssh = harness.endpoint(&machine, EndpointKind::Ssh).await;
+        let body = json!({ "uninstall": { "endpointId": ssh } });
+        let token = harness.token(&machine, body.clone()).await;
+        harness.uninstall.during.lock().unwrap().push(hold);
+        let mut body = body;
+        body["reviewToken"] = json!(token);
+        let (status, error) = harness.remove(&machine, body).await;
+        assert_eq!(status, StatusCode::CONFLICT, "{error}");
+        assert_eq!(error["code"], "conflict");
+        let message = error["message"].as_str().unwrap();
+        assert!(message.contains(named), "{message}");
+        assert!(harness.exists(&machine).await, "the guarded delete refused");
+        assert!(harness.unpinned().is_empty());
+        assert!(harness.keys.revoked.lock().unwrap().is_empty());
+    }
+}
+
+#[tokio::test]
+async fn a_hold_taken_after_the_review_refuses_the_removal() {
+    let harness = Harness::new(Arc::new(Permit)).await;
+    let machine = harness.machine("box", &["root@box.lan:22"]).await;
+    let token = harness.token(&machine, json!({})).await;
+    harness
+        .sql(
+            "INSERT INTO operations (id, kind, state, cancel_requested, created_at, updated_at, payload_json) \
+             VALUES ('op-late', 'machine.exec', 'cancelling', 0, 1, 1, json_object('machineId', ?1))",
+            &machine,
+        )
+        .await;
+    let (status, error) = harness
+        .remove(&machine, json!({ "reviewToken": token }))
+        .await;
+    assert_eq!(status, StatusCode::CONFLICT, "{error}");
+    assert_eq!(error["code"], "machine_removal_blocked");
+    assert!(harness.exists(&machine).await);
+}
+
+#[tokio::test]
+async fn an_operation_blocked_for_manual_approval_does_not_hold_the_machine() {
+    let harness = Harness::new(Arc::new(Permit)).await;
+    let machine = harness.machine("box", &["root@box.lan:22"]).await;
+    // `blocked_manual_approval` is terminal: nothing moves it on, and cancel
+    // cannot clear it, so it must not keep the machine forever.
+    harness
+        .sql(
+            "INSERT INTO operations (id, kind, state, cancel_requested, created_at, updated_at, payload_json) \
+             VALUES ('op-blocked', 'frogenv.request', 'blocked_manual_approval', 0, 1, 1, json_object('machineId', ?1))",
+            &machine,
+        )
+        .await;
+    let (_, review) = harness.review(&machine, json!({})).await;
+    assert_eq!(review["data"]["blockers"], json!([]), "{review}");
+    let token = review["data"]["reviewToken"].as_str().unwrap().to_owned();
+    let (status, removed) = harness
+        .remove(&machine, json!({ "reviewToken": token }))
+        .await;
+    assert_eq!(status, StatusCode::OK, "{removed}");
+}
+
+#[tokio::test]
+async fn a_lease_that_does_not_link_back_is_not_offered_as_the_way_out() {
+    let harness = Harness::new(Arc::new(Permit)).await;
+    let machine = harness.machine("box", &["root@box.lan:22"]).await;
+    harness
+        .sql(
+            "INSERT INTO lab_leases (id, template_version_id, owner, purpose, state, provision_id, cleanup, created_at) \
+             VALUES ('lease-other', 'tv-1', 'lan', 'test', 'ready', 'provision-other', 'destroy', 1)",
+            "",
+        )
+        .await;
+    harness
+        .sql(
+            "INSERT INTO lab_provisions (id, template_version_id, state, created_at, updated_at, lease_id, machine_id) \
+             VALUES ('provision-1', 'tv-1', 'ready', 1, 1, 'lease-other', ?1)",
+            &machine,
+        )
+        .await;
+    let (_, review) = harness.review(&machine, json!({})).await;
+    let detail = review["data"]["blockers"][0]["detail"].as_str().unwrap();
+    assert!(!detail.contains("lease-other"), "{detail}");
+    assert!(detail.contains("lab pool drain"), "{detail}");
+}
+
+#[tokio::test]
+async fn a_host_shared_during_the_removal_keeps_its_pins() {
+    let harness = Harness::new(Arc::new(Permit)).await;
+    let machine = harness
+        .machine("box", &["root@box.lan:22", "root@own.lan:22"])
+        .await;
+    let ssh = harness.endpoint(&machine, EndpointKind::Ssh).await;
+    let body = json!({ "uninstall": { "endpointId": ssh } });
+    let (_, review) = harness.review(&machine, body.clone()).await;
+    assert_eq!(review["data"]["unpinHosts"], json!(["box.lan", "own.lan"]));
+    // While the uninstall runs, an onboarding draft starts using box.lan.
+    harness.uninstall.during.lock().unwrap().push(
+        "INSERT INTO onboarding_drafts (id, endpoint_user, endpoint_host, endpoint_port, auth_type, name, created_at, updated_at) \
+         VALUES ('draft-late', 'root', 'BOX.lan', 22, 'agent', 'late-' || ?1, 1, 1)",
+    );
+    let mut body = body;
+    body["reviewToken"] = review["data"]["reviewToken"].clone();
+    let (status, removed) = harness.remove(&machine, body).await;
+    assert_eq!(status, StatusCode::OK, "{removed}");
+    assert_eq!(harness.unpinned(), ["own.lan"]);
+    assert_eq!(removed["data"]["unpinnedHosts"], json!(["own.lan"]));
+    assert_eq!(removed["data"]["keptHosts"], json!(["box.lan"]));
+}
+
+async fn store_secret(harness: &Harness, name: String) {
+    sqlx::query(
+        "INSERT INTO secret_records (id, name, value, key_version, record_version, created_at, updated_at) \
+         VALUES (?1, ?2, x'00', 1, 1, 1, 1)",
+    )
+    .bind(format!("secret-{}", name.replace('/', "-")))
+    .bind(name)
+    .execute(&harness.pool)
+    .await
+    .unwrap();
+}
+
+#[tokio::test]
+async fn stored_secrets_are_counted_bound_revoked_and_their_revocation_failure_reported() {
+    let harness = Harness::new(Arc::new(Permit)).await;
+    let machine = harness.machine("box", &["root@box.lan:22"]).await;
+    store_secret(&harness, format!("machines/ssh/{machine}/key")).await;
+    let before = harness.token(&machine, json!({})).await;
+    store_secret(
+        &harness,
+        format!("machines/windows-admin/{machine}/administrator"),
+    )
+    .await;
+
+    let (_, review) = harness.review(&machine, json!({})).await;
+    let data = &review["data"];
+    assert_eq!(data["footprint"]["storedSshKeys"], 1);
+    assert_eq!(data["footprint"]["adminPasswords"], 1);
+    let warning = data["warnings"][0].as_str().unwrap();
+    assert!(warning.contains("administrator password"), "{warning}");
+    // The token reviewed before the password was stored no longer applies.
+    let (status, _) = harness
+        .remove(&machine, json!({ "reviewToken": before }))
+        .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+
+    // The revocation fails after the delete: the machine is still removed,
+    // the delete is audited first, the pins still go, and the failure is
+    // reported and audited.
+    *harness.keys.fail.lock().unwrap() = Some("the secret store is unreadable".to_owned());
+    let token = data["reviewToken"].as_str().unwrap().to_owned();
+    let (status, removed) = harness
+        .remove(&machine, json!({ "reviewToken": token }))
+        .await;
+    assert_eq!(status, StatusCode::OK, "{removed}");
+    assert!(!harness.exists(&machine).await);
+    assert_eq!(
+        removed["data"]["secretRevocationError"],
+        "the secret store is unreadable"
+    );
+    assert_eq!(removed["data"]["secretsRevoked"], 0);
+    assert_eq!(removed["data"]["sessionClosed"], true);
+    assert_eq!(*harness.sessions.closed.lock().unwrap(), [machine.clone()]);
+    assert_eq!(harness.unpinned(), ["box.lan"]);
+    assert_eq!(
+        harness.audit_events(&machine).await,
+        [
+            "machine_deleted",
+            "machine_secret_revocation_failed",
+            "machine_removed"
+        ]
+    );
+    let correlations: Vec<Option<String>> =
+        sqlx::query_scalar("SELECT correlation_id FROM audit_events WHERE resource = ?1")
+            .bind(&machine)
+            .fetch_all(&harness.pool)
+            .await
+            .unwrap();
+    assert!(
+        correlations
+            .iter()
+            .all(|id| id.as_deref() == Some("01900000-0000-7000-8000-000000000000")),
+        "{correlations:?}"
+    );
+}
+
+#[tokio::test]
+async fn without_a_secret_store_only_a_machine_without_stored_secrets_is_removed() {
+    let harness = Harness::with(Arc::new(Permit), true, false).await;
+    let plain = harness.machine("plain", &["root@plain.lan:22"]).await;
+    let keyed = harness.machine("keyed", &["root@keyed.lan:22"]).await;
+    let ssh = harness.endpoint(&keyed, EndpointKind::Ssh).await;
+    EndpointAuthRepository::new(harness.pool.clone())
+        .set(
+            &ssh,
+            Some(&EndpointAuth::Secret {
+                credential: "machines/ssh/shared".to_owned(),
+            }),
+        )
+        .await
+        .unwrap();
+
+    let (_, review) = harness.review(&keyed, json!({})).await;
+    assert_eq!(review["data"]["reviewToken"], Value::Null);
+    assert_eq!(review["data"]["blockers"][0]["kind"], "stored_secret");
+
+    let token = harness.token(&plain, json!({})).await;
+    let (status, removed) = harness
+        .remove(&plain, json!({ "reviewToken": token }))
+        .await;
+    assert_eq!(status, StatusCode::OK, "{removed}");
+    assert!(harness.keys.revoked.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn the_uninstall_uses_the_layout_the_machine_was_installed_with() {
+    let harness = Harness::new(Arc::new(Permit)).await;
+    let machine = harness.machine("box", &["root@box.lan:22"]).await;
+    let ssh = harness.endpoint(&machine, EndpointKind::Ssh).await;
+    harness
+        .sql(
+            "INSERT INTO operations (id, kind, state, cancel_requested, created_at, updated_at, payload_json) \
+             VALUES ('op-install', 'machine.install-fleetd', 'succeeded', 0, 1, 1, \
+                     json_object('machineId', ?1, 'installerEnv', \
+                         json_array(json_array('FLEETD_UNIT_DIR', '/opt/units'), \
+                                    json_array('FLEETD_USER_ADD', '/bin/true'))))",
+            &machine,
+        )
+        .await;
+    let body = json!({ "uninstall": { "endpointId": ssh, "auth": { "type": "agent" } } });
+    let (_, review) = harness.review(&machine, body.clone()).await;
+    assert_eq!(
+        review["data"]["uninstall"]["layout"],
+        json!({ "FLEETD_UNIT_DIR": "/opt/units" }),
+        "only layout names are carried over"
+    );
+    let mut body = body;
+    body["reviewToken"] = review["data"]["reviewToken"].clone();
+    let (status, removed) = harness.remove(&machine, body).await;
+    assert_eq!(status, StatusCode::OK, "{removed}");
+    let seen = harness.uninstall.seen.lock().unwrap().clone();
+    assert_eq!(
+        seen[0]
+            .plan
+            .layout
+            .get("FLEETD_UNIT_DIR")
+            .map(String::as_str),
+        Some("/opt/units")
+    );
+    assert_eq!(seen[0].plan.layout.len(), 1);
 }

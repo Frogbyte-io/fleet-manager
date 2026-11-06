@@ -7,6 +7,14 @@
 //! the install script, over the endpoint's confirmed host key and the
 //! authentication the review bound; it touches nothing else on the machine.
 //! Its output is scrubbed and cut to one line before anything records it.
+//!
+//! The uninstall honours the layout the machine's fleetd was installed with:
+//! the review reads the installer layout overrides (`FLEETD_BIN_DIR`,
+//! `FLEETD_UNIT_DIR`, ...) of the machine's last successful
+//! `machine.install-fleetd` and the script runs with them. A preflight runs
+//! before the script and fails the uninstall when neither the unit nor the
+//! binary is where that layout says, so a fleetd installed some other way is
+//! reported as not found instead of "removed".
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -14,7 +22,9 @@ use std::time::Duration;
 use async_trait::async_trait;
 use fleet_application::machine::MachinePort;
 use fleet_application::machine_access::EndpointAuth;
-use fleet_application::machine_remove::{FleetdUninstall, FleetdUninstallPort};
+use fleet_application::machine_remove::{
+    FleetdUninstall, FleetdUninstallPort, MachineRemoval, NodeSessionPort,
+};
 use fleet_provider_ssh::{ExecutionLimiter, SshAuth, SshProvider};
 
 use crate::exec::resolve_ssh_endpoint;
@@ -22,6 +32,24 @@ use crate::machine_access::SshAuthResolver;
 
 /// The shipped uninstall script, delivered over SSH stdin.
 pub const UNINSTALL_SCRIPT: &str = include_str!("../../../deploy/fleetd/uninstall.sh");
+
+/// Runs before the uninstall: with the same defaults and overrides the
+/// script reads, it refuses when there is no fleetd unit and no fleetd binary
+/// to remove (exit 3), instead of letting the script report success.
+pub const UNINSTALL_PREFLIGHT: &str = r#"UNIT_DIR="${FLEETD_UNIT_DIR:-/etc/systemd/system}"
+BIN_DIR="${FLEETD_BIN_DIR:-/usr/local/bin}"
+SERVICE="${FLEETD_SERVICE:-fleetd}"
+if [ ! -e "$UNIT_DIR/$SERVICE.service" ] && [ ! -e "$BIN_DIR/fleetd" ]; then
+    printf 'uninstall: no fleetd found: neither %s nor %s exists, so nothing was removed (fleetd may have been installed with another layout, or already removed; remove the machine without --uninstall)\n' "$UNIT_DIR/$SERVICE.service" "$BIN_DIR/fleetd" >&2
+    exit 3
+fi
+"#;
+
+/// The script the uninstall runs: the preflight, then the shipped script.
+#[must_use]
+pub fn uninstall_script() -> String {
+    format!("{UNINSTALL_PREFLIGHT}{UNINSTALL_SCRIPT}")
+}
 
 /// The argument the uninstall runs with.
 pub const UNINSTALL_ARGUMENTS: [&str; 1] = ["--purge"];
@@ -93,7 +121,16 @@ impl FleetdUninstallPort for SshFleetdUninstaller {
         .await?;
         let metadata = fleet_provider_ssh::ScriptMetadata {
             working_directory: String::new(),
-            environment: Vec::new(),
+            // Only the layout names reach the machine; the review bound them.
+            environment: request
+                .plan
+                .layout
+                .iter()
+                .filter(|(name, _)| {
+                    fleet_application::machine_remove::LAYOUT_VARIABLES.contains(&name.as_str())
+                })
+                .map(|(name, value)| (name.clone(), value.clone()))
+                .collect(),
             arguments: UNINSTALL_ARGUMENTS
                 .iter()
                 .map(|arg| (*arg).to_owned())
@@ -101,12 +138,13 @@ impl FleetdUninstallPort for SshFleetdUninstaller {
         };
         let provider = self.provider.clone();
         let limiter = self.limiter.clone();
+        let script = uninstall_script();
         let outcome = tokio::task::spawn_blocking(move || {
             fleet_provider_ssh::execute_script(
                 &provider,
                 &limiter,
                 &spec,
-                UNINSTALL_SCRIPT,
+                &script,
                 &metadata,
                 UNINSTALL_TIMEOUT,
             )
@@ -176,11 +214,23 @@ fn bound(line: &str) -> String {
     format!("{}…", &line[..end])
 }
 
-/// Composes the removal use case over the store: the delete through the
-/// machine use cases (which revoke the machine's bound keys when `keys` is
-/// given), the hold checks, the USB gate, the SSH trust store in the
-/// controller's SSH work directory, the endpoints' stored authentication, and
-/// the uninstall.
+/// [`NodeSessionPort`] over the node gateway's session registry.
+#[derive(Debug)]
+pub struct GatewaySessions(pub Arc<crate::gateway::GatewayService>);
+
+#[async_trait]
+impl NodeSessionPort for GatewaySessions {
+    async fn close(&self, machine_id: &str) -> bool {
+        self.0.close_session(machine_id)
+    }
+}
+
+/// Composes the removal use case over the store: the holds and the guarded
+/// delete, the USB gate, the SSH trust store in the controller's SSH work
+/// directory, the endpoints' stored authentication, and the uninstall. The
+/// key store (`keys`, with the secret store) revokes the machine's stored
+/// secrets; without it a machine with stored secrets is refused. The gateway
+/// closes a removed machine's live session when the node services run.
 ///
 /// # Errors
 ///
@@ -190,23 +240,17 @@ pub fn compose(
     ssh_work_dir: std::path::PathBuf,
     keys: Option<Arc<dyn fleet_application::machine_access::MachineKeyPort>>,
     resolver: Option<Arc<SshAuthResolver>>,
-) -> Result<fleet_application::machine_remove::MachineRemoval, String> {
+    gateway: Option<Arc<crate::gateway::GatewayService>>,
+) -> Result<MachineRemoval, String> {
     let records: Arc<dyn MachinePort> =
         Arc::new(fleet_storage_sqlite::MachineRepository::new(pool.clone()));
-    let audit = Arc::new(fleet_storage_sqlite::AuditSink::new(pool.clone()));
-    let machines = fleet_application::machine::Machines::new(records.clone(), audit.clone());
-    let machines = match keys {
-        Some(keys) => machines.with_key_revocation(keys),
-        None => machines,
-    };
     let uninstaller = SshFleetdUninstaller::new(
         records.clone(),
         ssh_work_dir.clone(),
         ExecutionLimiter::new(2),
         resolver,
     )?;
-    Ok(fleet_application::machine_remove::MachineRemoval::new(
-        Arc::new(machines),
+    let removal = MachineRemoval::new(
         records,
         Arc::new(fleet_storage_sqlite::MachineRemovalRepository::new(
             pool.clone(),
@@ -217,12 +261,20 @@ pub fn compose(
             )),
         ),
         Arc::new(crate::onboard::SshTrustAdapter::new(ssh_work_dir)),
-        audit,
+        Arc::new(fleet_storage_sqlite::AuditSink::new(pool.clone())),
     )
     .with_endpoint_auth(Arc::new(fleet_storage_sqlite::EndpointAuthRepository::new(
         pool.clone(),
     )))
-    .with_uninstaller(Arc::new(uninstaller)))
+    .with_uninstaller(Arc::new(uninstaller));
+    let removal = match keys {
+        Some(keys) => removal.with_key_revocation(keys),
+        None => removal,
+    };
+    Ok(match gateway {
+        Some(gateway) => removal.with_sessions(Arc::new(GatewaySessions(gateway))),
+        None => removal,
+    })
 }
 
 #[cfg(test)]
@@ -243,6 +295,31 @@ mod tests {
             truncated_stderr: false,
             killed_by_deadline: killed,
         }
+    }
+
+    #[test]
+    fn the_preflight_refuses_when_no_fleetd_is_in_the_layout() {
+        let dir = tempfile::tempdir().unwrap();
+        let run = |unit_dir: &std::path::Path| {
+            std::process::Command::new("bash")
+                .arg("-c")
+                .arg(format!("{UNINSTALL_PREFLIGHT}echo reached"))
+                .env("FLEETD_UNIT_DIR", unit_dir)
+                .env("FLEETD_BIN_DIR", unit_dir)
+                .output()
+                .unwrap()
+        };
+        let missing = run(dir.path());
+        assert_eq!(missing.status.code(), Some(3));
+        let stderr = String::from_utf8_lossy(&missing.stderr);
+        assert!(stderr.contains("no fleetd found"), "{stderr}");
+        assert!(!String::from_utf8_lossy(&missing.stdout).contains("reached"));
+        std::fs::write(dir.path().join("fleetd.service"), "").unwrap();
+        let present = run(dir.path());
+        assert_eq!(present.status.code(), Some(0));
+        assert!(String::from_utf8_lossy(&present.stdout).contains("reached"));
+        assert!(uninstall_script().starts_with(UNINSTALL_PREFLIGHT));
+        assert!(uninstall_script().ends_with(UNINSTALL_SCRIPT));
     }
 
     #[test]

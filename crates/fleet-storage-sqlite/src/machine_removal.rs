@@ -8,10 +8,12 @@
 //!
 //! - **Holds** (refuse the removal): `lab_provisions.machine_id` (a Lab
 //!   guest), `persistent_guests.machine_id` (a persistent marker),
-//!   `hardware_reservations` owned by the machine and not released (read
-//!   through the hardware gate, and re-checked by the delete itself), and
-//!   operations in `pending`, `running`, `cancelling` or
-//!   `blocked_manual_approval` whose payload names the machine (`machineId`).
+//!   `hardware_reservations` owned by the machine and not released, and
+//!   operations in `pending`, `running` or `cancelling` whose payload names
+//!   the machine (`machineId`). `blocked_manual_approval` is terminal (no
+//!   transition leaves it and cancel cannot clear it), so it does not hold.
+//!   [`MachineRemovalRepository::delete_unheld`] re-checks all four in the
+//!   statement that deletes the machine.
 //! - **Facts** (cascade with the machine row): `machine_endpoints` and
 //!   `machine_endpoint_auth`, `machine_capabilities`, `inventory_snapshots`,
 //!   `machine_tags`, `machine_groups`, `node_identities` with
@@ -21,6 +23,11 @@
 //! - **History** (kept): `audit_events`, finished `operations`, released
 //!   `hardware_reservations`, `action_requests`, and `machine_files` (removed
 //!   by their retention pass, not by the delete).
+//! - **Secrets** (revoked by the application through the key store, counted
+//!   here by name only): `secret_records` named `machines/ssh/<machine>/…`
+//!   and `machines/windows-admin/<machine>/…`.
+
+use std::collections::BTreeMap;
 
 use async_trait::async_trait;
 use sqlx::SqlitePool;
@@ -29,7 +36,22 @@ use fleet_application::machine_remove::{
     ActiveOperationHold, LabProvisionHold, MachineRemovalPort, OtherHostUsers,
     PersistentMarkerHold, RemovalFootprint,
 };
-use fleet_application::persistent::REGISTERED_SOURCE;
+use fleet_application::operation::PortFailure;
+use fleet_application::persistent::{ADMIN_PASSWORD_PREFIX, REGISTERED_SOURCE};
+
+/// The secret-record name prefix of SSH keys stored for a machine.
+const SSH_KEY_PREFIX: &str = "machines/ssh/";
+
+/// The delete, guarded by every hold in the same statement.
+const GUARDED_DELETE: &str = "DELETE FROM machines WHERE id = ?1 \
+     AND NOT EXISTS (SELECT 1 FROM hardware_reservations \
+         WHERE owner_kind = 'machine' AND owner_id = ?1 AND state <> 'released') \
+     AND NOT EXISTS (SELECT 1 FROM lab_provisions WHERE machine_id = ?1) \
+     AND NOT EXISTS (SELECT 1 FROM persistent_guests WHERE machine_id = ?1) \
+     AND NOT EXISTS (SELECT 1 FROM operations \
+         WHERE state IN ('pending', 'running', 'cancelling') \
+           AND json_valid(payload_json) \
+           AND json_extract(payload_json, '$.machineId') = ?1)";
 
 /// The SQLite [`MachineRemovalPort`].
 #[derive(Clone, Debug)]
@@ -42,6 +64,60 @@ impl MachineRemovalRepository {
     #[must_use]
     pub fn new(pool: SqlitePool) -> Self {
         Self { pool }
+    }
+
+    async fn count_prefixed(&self, prefix: &str, machine_id: &str) -> Result<u64, String> {
+        let prefix = format!("{prefix}{machine_id}/");
+        let count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM secret_records WHERE substr(name, 1, length(?1)) = ?1",
+        )
+        .bind(&prefix)
+        .fetch_one(&self.pool)
+        .await
+        .map_err(|error| format!("the machine's stored secrets could not be counted: {error}"))?;
+        Ok(u64::try_from(count).unwrap_or(0))
+    }
+
+    /// Why the guarded delete refused, once it did: the first hold found.
+    async fn hold(&self, machine_id: &str) -> Result<Option<String>, PortFailure> {
+        let checks: [(&'static str, &str); 4] = [
+            (
+                "SELECT 'Lab provision ' || id || ' (' || state || ')' FROM lab_provisions \
+                 WHERE machine_id = ?1 LIMIT 1",
+                "it is a Lab guest",
+            ),
+            (
+                "SELECT 'persistent marker ' || account_id || '/' || vmid FROM persistent_guests \
+                 WHERE machine_id = ?1 LIMIT 1",
+                "it is a persistent machine",
+            ),
+            (
+                "SELECT 'USB reservation ' || id || ' (' || state || ')' FROM hardware_reservations \
+                 WHERE owner_kind = 'machine' AND owner_id = ?1 AND state <> 'released' LIMIT 1",
+                "it holds a USB device",
+            ),
+            (
+                "SELECT 'operation ' || id || ' (' || kind || ', ' || state || ')' FROM operations \
+                 WHERE state IN ('pending', 'running', 'cancelling') AND json_valid(payload_json) \
+                   AND json_extract(payload_json, '$.machineId') = ?1 LIMIT 1",
+                "work on it has not finished",
+            ),
+        ];
+        for (sql, why) in checks {
+            let found: Option<String> = sqlx::query_scalar(sql)
+                .bind(machine_id)
+                .fetch_optional(&self.pool)
+                .await
+                .map_err(|error| PortFailure::Backend {
+                    detail: format!("the machine's holds could not be read: {error}"),
+                })?;
+            if let Some(found) = found {
+                return Ok(Some(format!(
+                    "{found} took hold of machine {machine_id} after the review ({why}); nothing was deleted; review the removal again"
+                )));
+            }
+        }
+        Ok(None)
     }
 
     async fn count(&self, sql: &'static str, machine_id: &str) -> Result<u64, String> {
@@ -62,8 +138,11 @@ fn failed(what: &str) -> impl FnOnce(sqlx::Error) -> String + '_ {
 impl MachineRemovalPort for MachineRemovalRepository {
     async fn lab_provisions(&self, machine_id: &str) -> Result<Vec<LabProvisionHold>, String> {
         let rows: Vec<(String, String, Option<String>, Option<String>)> = sqlx::query_as(
-            "SELECT p.id, p.state, p.lease_id, l.state FROM lab_provisions p \
-             LEFT JOIN lab_leases l ON l.id = p.lease_id \
+            // The lease counts only when it links back to this provision:
+            // cleanup follows the lease's `provision_id`, so a lease that
+            // names another provision could not clean this one up.
+            "SELECT p.id, p.state, l.id, l.state FROM lab_provisions p \
+             LEFT JOIN lab_leases l ON l.id = p.lease_id AND l.provision_id = p.id \
              WHERE p.machine_id = ?1 ORDER BY p.created_at, p.id",
         )
         .bind(machine_id)
@@ -113,7 +192,7 @@ impl MachineRemovalPort for MachineRemovalRepository {
         let rows: Vec<(String, String, String)> = sqlx::query_as(
             // The operation states that have not finished.
             "SELECT id, kind, state FROM operations \
-             WHERE state IN ('pending', 'running', 'cancelling', 'blocked_manual_approval') \
+             WHERE state IN ('pending', 'running', 'cancelling') \
                AND json_valid(payload_json) \
                AND json_extract(payload_json, '$.machineId') = ?1 \
              ORDER BY created_at, id",
@@ -162,6 +241,14 @@ impl MachineRemovalPort for MachineRemovalRepository {
                     machine_id,
                 )
                 .await?,
+            endpoint_auth_secrets: self
+                .count(
+                    "SELECT COUNT(*) FROM machine_endpoint_auth a \
+                     JOIN machine_endpoints e ON e.id = a.endpoint_id \
+                     WHERE e.machine_id = ?1 AND a.kind = 'secret'",
+                    machine_id,
+                )
+                .await?,
             capabilities: self
                 .count(
                     "SELECT COUNT(*) FROM machine_capabilities WHERE machine_id = ?1",
@@ -191,6 +278,7 @@ impl MachineRemovalPort for MachineRemovalRepository {
                 .count(
                     "SELECT (SELECT COUNT(*) FROM node_credentials WHERE machine_id = ?1) \
                      + (SELECT COUNT(*) FROM node_sessions WHERE machine_id = ?1) \
+                     + (SELECT COUNT(*) FROM node_challenges WHERE machine_id = ?1) \
                      + (SELECT COUNT(*) FROM node_enrollment_tokens WHERE machine_id = ?1)",
                     machine_id,
                 )
@@ -219,12 +307,68 @@ impl MachineRemovalPort for MachineRemovalRepository {
                     machine_id,
                 )
                 .await?,
+            stored_ssh_keys: self.count_prefixed(SSH_KEY_PREFIX, machine_id).await?,
+            admin_passwords: self
+                .count_prefixed(ADMIN_PASSWORD_PREFIX, machine_id)
+                .await?,
             collected_files_kept: self
                 .count(
                     "SELECT COUNT(*) FROM machine_files WHERE machine_id = ?1",
                     machine_id,
                 )
                 .await?,
+        })
+    }
+
+    async fn install_layout(&self, machine_id: &str) -> Result<BTreeMap<String, String>, String> {
+        let payload: Option<String> = sqlx::query_scalar(
+            "SELECT payload_json FROM operations \
+             WHERE kind = 'machine.install-fleetd' AND state = 'succeeded' \
+               AND json_valid(payload_json) \
+               AND json_extract(payload_json, '$.machineId') = ?1 \
+             ORDER BY updated_at DESC, id DESC LIMIT 1",
+        )
+        .bind(machine_id)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(failed("install record"))?;
+        let Some(payload) = payload else {
+            return Ok(BTreeMap::new());
+        };
+        let payload: serde_json::Value = serde_json::from_str(&payload)
+            .map_err(|error| format!("the machine's install record is unreadable: {error}"))?;
+        // `installerEnv` is a list of `[name, value]` pairs; only the layout
+        // names are kept, so nothing a secret could hide in is carried over.
+        Ok(payload["installerEnv"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|pair| {
+                let name = pair.get(0)?.as_str()?;
+                let value = pair.get(1)?.as_str()?;
+                fleet_application::machine_remove::LAYOUT_VARIABLES
+                    .contains(&name)
+                    .then(|| (name.to_owned(), value.to_owned()))
+            })
+            .collect())
+    }
+
+    async fn delete_unheld(&self, machine_id: &str) -> Result<(), PortFailure> {
+        let deleted = sqlx::query(GUARDED_DELETE)
+            .bind(machine_id)
+            .execute(&self.pool)
+            .await
+            .map_err(|error| PortFailure::Backend {
+                detail: format!("machine delete failed: {error}"),
+            })?;
+        if deleted.rows_affected() == 1 {
+            return Ok(());
+        }
+        if let Some(detail) = self.hold(machine_id).await? {
+            return Err(PortFailure::Conflict { detail });
+        }
+        Err(PortFailure::NotFound {
+            what: format!("machine {machine_id:?}"),
         })
     }
 }

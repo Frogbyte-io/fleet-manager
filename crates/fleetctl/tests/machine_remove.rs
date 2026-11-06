@@ -120,6 +120,9 @@ fn undocumented_forms_are_refused() {
         vec!["nodes", "list"],
         vec!["nodes", "revoke"],
         vec!["nodes", "revoke", MACHINE, "--purge"],
+        // An option-like word is never taken as a machine id.
+        vec!["machines", "remove", "-x"],
+        vec!["nodes", "revoke", "-x"],
     ] {
         assert!(fleetctl::parse(&args(&words)).is_err(), "{words:?}");
     }
@@ -186,9 +189,10 @@ async fn cli(url: &str, words: &[&str]) -> Result<(String, u8), String> {
 
 fn footprint() -> Value {
     json!({
-        "endpoints": 2, "endpointAuth": 0, "capabilities": 12, "inventorySnapshots": 3,
-        "tagsAndGroups": 1, "nodeIdentity": 1, "nodeCredentials": 2, "projectCheckouts": 0,
-        "skillsSnapshot": 1, "catalogSkillInstalls": 2, "guestLink": 0, "collectedFilesKept": 0,
+        "endpoints": 2, "endpointAuth": 0, "endpointAuthSecrets": 0, "capabilities": 12,
+        "inventorySnapshots": 3, "tagsAndGroups": 1, "nodeIdentity": 1, "nodeCredentials": 2,
+        "projectCheckouts": 0, "skillsSnapshot": 1, "catalogSkillInstalls": 2, "guestLink": 0,
+        "storedSshKeys": 1, "adminPasswords": 0, "collectedFilesKept": 0,
     })
 }
 
@@ -207,6 +211,7 @@ fn review(token: Option<&str>, blockers: Value, uninstall: Value) -> Value {
         "keptHosts": [],
         "uninstall": uninstall,
         "footprint": footprint(),
+        "warnings": [],
         "blockers": blockers,
     })
 }
@@ -219,6 +224,9 @@ fn removed(uninstalled: bool) -> Value {
         "uninstalled": uninstalled,
         "uninstallSummary": if uninstalled { json!("uninstall: service removed") } else { Value::Null },
         "nodeIdentityRemoved": true,
+        "sessionClosed": false,
+        "secretsRevoked": 1,
+        "secretRevocationError": null,
         "unpinnedHosts": ["box.lan"],
         "keptHosts": [],
         "unpinFailedHosts": [],
@@ -235,7 +243,8 @@ fn path(review: bool) -> String {
 async fn remove_reviews_then_removes_with_the_token_and_the_same_uninstall() {
     let spec = openapi_shape::spec();
     let uninstall = json!({ "endpointId": ENDPOINT, "auth": { "type": "agent" } });
-    let reviewed = review(Some(TOKEN), json!([]), uninstall.clone());
+    let plan = json!({ "endpointId": ENDPOINT, "auth": { "type": "agent" }, "layout": {} });
+    let reviewed = review(Some(TOKEN), json!([]), plan);
     let answer = removed(true);
     let (url, seen) = controller(vec![
         (path(true), StatusCode::OK, json!({ "data": reviewed })),
@@ -265,6 +274,8 @@ async fn remove_reviews_then_removes_with_the_token_and_the_same_uninstall() {
     assert_eq!(serde_json::from_str::<Value>(&printed).unwrap(), answer);
     let seen = seen.lock().unwrap().clone();
     assert_eq!(seen.len(), 2, "{seen:?}");
+    assert_eq!(seen[0].0, "POST");
+    assert_eq!(seen[1].0, "POST");
     assert_eq!(seen[0].1, path(true));
     assert_eq!(seen[0].2, json!({ "uninstall": uninstall }));
     assert_eq!(seen[1].1, path(false));
@@ -405,7 +416,7 @@ async fn a_refused_removal_exits_non_zero_with_the_controllers_reason() {
         (
             path(true),
             StatusCode::OK,
-            json!({ "data": review(Some(TOKEN), json!([]), json!({ "endpointId": ENDPOINT, "auth": { "type": "agent" } })) }),
+            json!({ "data": review(Some(TOKEN), json!([]), json!({ "endpointId": ENDPOINT, "auth": { "type": "agent" }, "layout": {} })) }),
         ),
         (
             path(false),

@@ -3506,9 +3506,16 @@ const ID_POSITIONALS: &[(&str, &[&str], usize)] = &[
     ("operations", &["get", "cancel"], 2),
     (
         "machines",
-        &["get", "link-guest", "unlink-guest", "install-node"],
+        &[
+            "get",
+            "link-guest",
+            "unlink-guest",
+            "install-node",
+            "remove",
+        ],
         2,
     ),
+    ("nodes", &["revoke"], 2),
     (
         "projects",
         &[
