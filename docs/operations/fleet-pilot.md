@@ -61,6 +61,7 @@ Then let only your own devices reach those ports. Tag the controller host (`tag:
   ],
   "tests": [
     { "src": "you@example.com", "accept": ["tag:fleet-controller:443", "tag:fleet-controller:8080"] },
+    { "src": "tag:fleet-pilot", "accept": ["tag:fleet-controller:443", "tag:fleet-controller:8080"] },
     { "src": "tag:fleet-controller", "accept": ["tag:fleet-pilot:22"] },
     { "src": "teammate@example.com", "deny": ["tag:fleet-controller:443", "tag:fleet-controller:8080"] }
   ]
@@ -81,7 +82,7 @@ Know what it does not do:
 
 - **Every Tailscale user it admits is still a full administrator.** It identifies people for the audit log. It does not authorize per user.
 - **It blocks remote `fleetd`.** The node routes become host-local, so pilot machines stay agentless in this mode ([deploy/README.md](../../deploy/README.md)).
-- **Tagged devices have no user identity** and are refused.
+- **Tagged devices have no user identity** and are refused. The pilot machines are tagged (`tag:fleet-pilot`), so in identity mode neither `fleetd` nor the agents on them can reach the controller. Use identity mode only when the agents you pilot run on your own untagged devices; to pilot agents on the tagged machines, stay in trusted-LAN mode behind the policy above.
 
 Delegated credentials ([ADR 0011](../adr/0011-delegated-lab-credentials.md), `fleetctl credentials issue`) narrow a caller to Lab leases on allowed templates. They do not restrict machine, skill, or Registry access, and anonymous callers stay administrators.
 
@@ -177,7 +178,7 @@ chmod 0755 ~/.local/bin/fleetctl
 fleetctl --output json system
 ```
 
-`system` shows the controller version, the trust mode, and the principal you act as. In trusted-LAN mode that principal is `anonymous-lan-admin`. In identity mode, use the Serve URL (`https://controller.example.ts.net`) and the principal is your Tailscale login.
+`system` shows the controller version, the trust mode, and the principal you act as. In trusted-LAN mode that principal is `anonymous-lan-admin`. In identity mode, use the Serve URL (`https://controller.example.ts.net`) from your own untagged devices, and the principal is your Tailscale login; tagged pilot machines are refused there.
 
 An agent looks things up before it asks you:
 
