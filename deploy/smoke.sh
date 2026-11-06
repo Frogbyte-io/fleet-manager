@@ -27,9 +27,20 @@ if ! docker compose version >/dev/null 2>&1; then
   exit 1
 fi
 
+# GNU coreutils on Linux, shasum on macOS; one of them is required.
+if command -v sha256sum >/dev/null 2>&1; then
+  sha256_of() { sha256sum "$1" | cut -d' ' -f1; }
+elif command -v shasum >/dev/null 2>&1; then
+  sha256_of() { shasum -a 256 "$1" | cut -d' ' -f1; }
+else
+  echo "error: sha256sum or shasum is required" >&2
+  exit 1
+fi
+
 cleanup() {
   docker compose -p "$project" down --volumes --remove-orphans >/dev/null 2>&1 || true
   [ -n "${key_file:-}" ] && rm -f "$key_file"
+  [ -n "${fleetctl_dir:-}" ] && rm -rf "$fleetctl_dir"
   return 0
 }
 trap cleanup EXIT
@@ -94,20 +105,23 @@ echo "    web shell, API, and readiness OK"
 echo "==> Downloading the fleetctl the image carries"
 # The image carries fleetctl for its own architecture; the download must
 # match the digest the controller publishes beside it.
-case "$(docker exec "$container" uname -m)" in
+arch="$(docker exec "$container" uname -m)" \
+  || { echo "error: could not read the controller container's architecture" >&2; exit 1; }
+case "$arch" in
   x86_64) fleetctl_platform="linux-x86_64" ;;
   aarch64) fleetctl_platform="linux-aarch64" ;;
-  *) fleetctl_platform="" ;;
+  *) echo "error: the image carries no fleetctl for architecture '$arch'" >&2; exit 1 ;;
 esac
-if [ -n "$fleetctl_platform" ]; then
-  fleetctl_dir="$(mktemp -d "${TMPDIR:-/tmp}/fleet-smoke-fleetctl.XXXXXX")"
-  curl -fsS -o "$fleetctl_dir/fleetctl" "http://127.0.0.1:${smoke_port}/downloads/fleetctl/${fleetctl_platform}"
-  curl -fsS -o "$fleetctl_dir/fleetctl.sha256" "http://127.0.0.1:${smoke_port}/downloads/fleetctl/${fleetctl_platform}.sha256"
-  (cd "$fleetctl_dir" && sha256sum --check --strict --quiet fleetctl.sha256) \
-    || { echo "error: the served fleetctl does not match its sha256" >&2; exit 1; }
-  rm -rf "$fleetctl_dir"
-  echo "    fleetctl for ${fleetctl_platform} served and verified"
+fleetctl_dir="$(mktemp -d "${TMPDIR:-/tmp}/fleet-smoke-fleetctl.XXXXXX")"
+curl -fsS -o "$fleetctl_dir/fleetctl" "http://127.0.0.1:${smoke_port}/downloads/fleetctl/${fleetctl_platform}"
+curl -fsS -o "$fleetctl_dir/fleetctl.sha256" "http://127.0.0.1:${smoke_port}/downloads/fleetctl/${fleetctl_platform}.sha256"
+expected="$(cut -d' ' -f1 "$fleetctl_dir/fleetctl.sha256")"
+actual="$(sha256_of "$fleetctl_dir/fleetctl")"
+if [ -z "$expected" ] || [ "$actual" != "$expected" ]; then
+  echo "error: the served fleetctl does not match its sha256" >&2
+  exit 1
 fi
+echo "    fleetctl for ${fleetctl_platform} served and verified"
 
 echo "==> Asserting the isolation posture"
 [ "$(docker inspect -f '{{.HostConfig.ReadonlyRootfs}}' "$container")" = "true" ] \

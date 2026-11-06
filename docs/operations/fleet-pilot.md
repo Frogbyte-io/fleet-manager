@@ -13,7 +13,7 @@ Examples use placeholders: the controller is `controller.example.ts.net`, the pi
 ## Prerequisites
 
 - **A controller** on a Linux host in your tailnet, deployed with [deploy/README.md](../../deploy/README.md) or [deploy/COOLIFY.md](../../deploy/COOLIFY.md), with its master key (`FLEET_MASTER_KEY_FILE`) set so it can store secrets.
-- **`fleetctl` from the same commit as the controller**, on your workstation and on each pilot machine. Download it from the controller itself (`/downloads/fleetctl/linux-x86_64`, which serves the build that matches the controller), or take the GitHub release for the controller's commit, and check its SHA-256 before you put it on your `PATH`. [Install fleetctl](../../deploy/README.md#install-fleetctl) has the commands. `fleetctl --url <controller> --output json system` shows the controller's version.
+- **`fleetctl` from the same commit as the controller**, on your workstation and on each pilot machine. If the controller runs a commit from `main`, use the GitHub release for that commit (tagged `v<version>-<short commit>`). Its static Linux binary runs on every pilot machine, Ubuntu 22.04 included. Releases exist only for commits merged to `main`. Otherwise, download the controller's own build from `/downloads/fleetctl/linux-<arch>`. It is served only for the controller's architecture (`linux-x86_64` on an x86_64 controller host) and needs glibc 2.36 or newer (Debian 12, Ubuntu 23.04 or later). Check the SHA-256 before you put the binary on your `PATH`. [Install fleetctl](../../deploy/README.md#install-fleetctl) has the commands. `fleetctl --url <controller> --output json system` shows the controller's version.
 - **Each pilot machine** runs Debian or Ubuntu on x86_64, is joined to your tailnet, runs an OpenSSH server, and has `curl`, `sha256sum`, `base64`, and `jq`. Without `jq`, a rollout that updates an existing skill fails closed.
 - **One login per machine for agents.** Skills Manager and the skills it deploys live in the SSH login's home directory. Use the account your coding agents run as (`dev` here).
 - **SSH from the controller.** That login accepts a key the controller can present: `--auth agent` offers the keys in the controller's ssh-agent, then its default key files ([which keys](lab.md#which-keys-the-controller-offers)); `--auth identity-file --identity <path>` names a key file on the controller.
@@ -170,19 +170,10 @@ The probe refreshes the machine's observed inventory, and `skills matrix` shows 
 
 Agents use the `fleet` skill, which drives `fleetctl --output json`. Each pilot machine needs `fleetctl`, and it must reach the controller. Because the skill's commands carry no `--url`, a small wrapper in the agent login's `PATH` adds it:
 
-On the pilot machine, download `fleetctl` from the controller first and check its SHA-256 ([Install fleetctl](../../deploy/README.md#install-fleetctl) describes the routes):
+On the pilot machine, as the agent login, install `fleetctl` first with the commands in [Install fleetctl](../../deploy/README.md#install-fleetctl). On Ubuntu 22.04, use the release binary, because the controller's build needs glibc 2.36. Those commands install to `~/.local/bin/fleetctl`. Then move the binary behind the wrapper:
 
 ```sh
-cd /tmp
-curl -fsSLo fleetctl http://controller.example.ts.net:8080/downloads/fleetctl/linux-x86_64
-curl -fsSLo fleetctl.sha256 http://controller.example.ts.net:8080/downloads/fleetctl/linux-x86_64.sha256
-sha256sum --check --strict fleetctl.sha256 && rm fleetctl.sha256
-```
-
-Then:
-
-```sh
-install -D -m 0755 /tmp/fleetctl ~/.local/libexec/fleetctl && rm /tmp/fleetctl
+mkdir -p ~/.local/libexec && mv ~/.local/bin/fleetctl ~/.local/libexec/fleetctl
 cat > ~/.local/bin/fleetctl <<'EOF'
 #!/bin/sh
 exec "$HOME/.local/libexec/fleetctl" --url http://controller.example.ts.net:8080 "$@"

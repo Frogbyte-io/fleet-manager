@@ -151,51 +151,79 @@ pinned versions are the same ones CI pins in
   glibc 2.36 or newer (Debian 12, Ubuntu 23.04, or later); on an older
   system such as Ubuntu 22.04, use the release binary.
 
-On Linux, from the controller (swap in `linux-aarch64` on arm64):
+Each snippet below runs in a subshell or script block that stops at the
+first failure, so a download that fails its checksum is deleted and never
+installed or run.
+
+On Linux, from the controller. `uname -m` picks the platform; the controller
+answers 404 if it does not carry that one:
 
 ```sh
-FLEET_URL=http://controller.example.ts.net:8080
-mkdir -p /tmp/fleetctl-install && cd /tmp/fleetctl-install
-curl -fsSLo fleetctl "$FLEET_URL/downloads/fleetctl/linux-x86_64"
-curl -fsSLo fleetctl.sha256 "$FLEET_URL/downloads/fleetctl/linux-x86_64.sha256"
-sha256sum --check --strict fleetctl.sha256
-install -D -m 0755 fleetctl ~/.local/bin/fleetctl
-cd / && rm -rf /tmp/fleetctl-install
-fleetctl --version
+(
+  set -eu
+  url=http://controller.example.ts.net:8080
+  platform="linux-$(uname -m)"
+  tmp="$(mktemp -d)"
+  trap 'rm -rf "$tmp"' EXIT
+  cd "$tmp"
+  curl -fsSLo fleetctl "$url/downloads/fleetctl/$platform"
+  curl -fsSLo fleetctl.sha256 "$url/downloads/fleetctl/$platform.sha256"
+  sha256sum --check --strict fleetctl.sha256
+  install -D -m 0755 fleetctl ~/.local/bin/fleetctl
+  ~/.local/bin/fleetctl --version
+)
 ```
 
 Or from a release (`<tag>` is the release tag, for example `v0.1.0-1a2b3c4`):
 
 ```sh
-base=https://github.com/Frogbyte-io/fleet-manager/releases/download/<tag>
-curl -fsSLO "$base/fleetctl-linux-x86_64"
-curl -fsSLO "$base/SHA256SUMS"
-sha256sum --check --ignore-missing --strict SHA256SUMS
-install -D -m 0755 fleetctl-linux-x86_64 ~/.local/bin/fleetctl
+(
+  set -eu
+  base=https://github.com/Frogbyte-io/fleet-manager/releases/download/<tag>
+  asset="fleetctl-linux-$(uname -m)"
+  tmp="$(mktemp -d)"
+  trap 'rm -rf "$tmp"' EXIT
+  cd "$tmp"
+  curl -fsSLO "$base/$asset"
+  curl -fsSLO "$base/SHA256SUMS"
+  grep "  $asset\$" SHA256SUMS | sha256sum --check --strict -
+  install -D -m 0755 "$asset" ~/.local/bin/fleetctl
+  ~/.local/bin/fleetctl --version
+)
 ```
 
-`sha256sum` must print `OK`; delete the download if it does not. Make sure
-`~/.local/bin` is on your `PATH`.
+`sha256sum` must print `OK`. Make sure `~/.local/bin` is on your `PATH`.
 
-On Windows, in PowerShell:
+On Windows, in PowerShell, from a release. The controller image carries no
+Windows build; if an operator added one, download
+`$url/downloads/fleetctl/windows-x86_64` and its `.sha256` the same way.
 
 ```powershell
-$url = 'http://controller.example.ts.net:8080'
-$dir = "$env:LOCALAPPDATA\Programs\fleet"
-New-Item -ItemType Directory -Force $dir | Out-Null
-Invoke-WebRequest -UseBasicParsing "$url/downloads/fleetctl/windows-x86_64" -OutFile "$dir\fleetctl.exe"
-$expected = ((Invoke-WebRequest -UseBasicParsing "$url/downloads/fleetctl/windows-x86_64.sha256").Content -split '\s+')[0]
-if ((Get-FileHash "$dir\fleetctl.exe" -Algorithm SHA256).Hash -ne $expected) {
-  Remove-Item "$dir\fleetctl.exe"; throw 'fleetctl checksum mismatch'
+& {
+  $ErrorActionPreference = 'Stop'
+  $base = 'https://github.com/Frogbyte-io/fleet-manager/releases/download/<tag>'
+  $asset = 'fleetctl-windows-x86_64.exe'
+  $dir = "$env:LOCALAPPDATA\Programs\fleet"
+  $tmp = Join-Path ([IO.Path]::GetTempPath()) $asset
+  Invoke-WebRequest -UseBasicParsing "$base/$asset" -OutFile $tmp
+  $sums = Join-Path ([IO.Path]::GetTempPath()) 'fleetctl-SHA256SUMS'
+  Invoke-WebRequest -UseBasicParsing "$base/SHA256SUMS" -OutFile $sums
+  $line = Get-Content $sums | Where-Object { $_.EndsWith("  $asset") }
+  Remove-Item $sums
+  $expected = "$line".Split(' ')[0]
+  if ($expected -notmatch '^[0-9a-f]{64}$' -or (Get-FileHash $tmp -Algorithm SHA256).Hash -ne $expected) {
+    Remove-Item $tmp
+    throw 'fleetctl checksum mismatch; nothing was installed'
+  }
+  New-Item -ItemType Directory -Force $dir | Out-Null
+  Move-Item -Force $tmp "$dir\fleetctl.exe"
+  & "$dir\fleetctl.exe" --version
 }
-& "$dir\fleetctl.exe" --version
 ```
 
-Then add that directory to your user `PATH`. From a release, download
-`fleetctl-windows-x86_64.exe` and `SHA256SUMS` instead and compare with the
-`fleetctl-windows-x86_64.exe` line. On Windows, `fleetctl status` without
-`--url` reports that the local `fleetd` surface is unavailable; every other
-command talks to the controller.
+Then add that directory to your user `PATH`. On Windows, `fleetctl status`
+without `--url` reports that the local `fleetd` surface is unavailable; every
+other command talks to the controller.
 
 Finally, tell `fleetctl` where the controller is. `--url <controller>` on each
 command always works. Once

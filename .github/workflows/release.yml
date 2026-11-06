@@ -28,6 +28,8 @@ permissions:
   contents: read
 
 # One release run per commit; never cancel a run that may be mid-upload.
+# Runs for different commits may publish concurrently, so publishing never
+# moves the "latest" marker; the serialized latest job below does.
 concurrency:
   group: release-${{ github.sha }}
   cancel-in-progress: false
@@ -228,8 +230,37 @@ jobs:
             --target "${GITHUB_SHA}" \
             --title "fleetctl ${VERSION} (${GITHUB_SHA::7})" \
             --notes "${notes}" \
-            --latest \
+            --latest=false \
             fleetctl-linux-x86_64 \
             fleetctl-linux-aarch64 \
             fleetctl-windows-x86_64.exe \
             SHA256SUMS
+
+  latest:
+    name: Mark the latest release
+    needs: [version, publish]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    # Serialized across every release run: each run reads the head of main
+    # and moves the marker without another run in between, so an older run
+    # that finishes late cannot take "latest" back from a newer one.
+    concurrency:
+      group: release-latest
+      cancel-in-progress: false
+    steps:
+      - name: Mark this release latest if its commit is still the head of main
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ needs.version.outputs.tag }}
+        run: |
+          set -euo pipefail
+          head="$(gh api "repos/${GH_REPO}/commits/main" --jq '.sha')"
+          if [ "${head}" != "${GITHUB_SHA}" ]; then
+            echo "main is at ${head}, not ${GITHUB_SHA}; leaving the latest release unchanged."
+            exit 0
+          fi
+          gh release edit "${TAG}" --latest
+          echo "${TAG} is now the latest release."

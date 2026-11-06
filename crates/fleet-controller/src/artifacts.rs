@@ -30,6 +30,7 @@ use axum::extract::{Path as AxumPath, State};
 use axum::http::{HeaderName, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
+use sha2::{Digest as _, Sha256};
 
 /// The response header carrying a served binary's sha256, lowercase hex.
 pub const CHECKSUM_HEADER: HeaderName = HeaderName::from_static("x-checksum-sha256");
@@ -75,13 +76,32 @@ async fn serve_fleetctl(
         return not_found();
     };
     let path = root.join("fleetctl").join(stored);
-    // The binary is tens of megabytes; read and hash it off the runtime.
+    if digest_only {
+        // The digest needs no copy of the binary: hash it in fixed-size
+        // reads, off the runtime.
+        let digest = tokio::task::spawn_blocking(move || {
+            path.is_file().then(|| sha256_file(&path).ok()).flatten()
+        })
+        .await
+        .ok()
+        .flatten();
+        let Some(digest) = digest else {
+            return not_found();
+        };
+        return (
+            [(header::CONTENT_TYPE, "text/plain; charset=utf-8")],
+            format!("{digest}  {saved_as}\n"),
+        )
+            .into_response();
+    }
+    // The header digest is computed from the very bytes in the body, so the
+    // two cannot disagree if the file is replaced mid-request.
     let loaded = tokio::task::spawn_blocking(move || {
         if !path.is_file() {
             return None;
         }
         let bytes = std::fs::read(&path).ok()?;
-        let digest = sha256_hex(&bytes);
+        let digest = hex(&Sha256::digest(&bytes));
         Some((bytes, digest))
     })
     .await
@@ -90,13 +110,6 @@ async fn serve_fleetctl(
     let Some((bytes, digest)) = loaded else {
         return not_found();
     };
-    if digest_only {
-        return (
-            [(header::CONTENT_TYPE, "text/plain; charset=utf-8")],
-            format!("{digest}  {saved_as}\n"),
-        )
-            .into_response();
-    }
     (
         [
             (header::CONTENT_TYPE, "application/octet-stream".to_owned()),
@@ -111,9 +124,24 @@ async fn serve_fleetctl(
         .into_response()
 }
 
-fn sha256_hex(bytes: &[u8]) -> String {
-    use sha2::{Digest as _, Sha256};
-    Sha256::digest(bytes)
+/// Hashes a file in 64 KiB reads, so memory stays flat whatever its size.
+fn sha256_file(path: &std::path::Path) -> std::io::Result<String> {
+    use std::io::Read as _;
+    let mut file = std::fs::File::open(path)?;
+    let mut hasher = Sha256::new();
+    let mut buffer = vec![0_u8; 64 * 1024];
+    loop {
+        let read = file.read(&mut buffer)?;
+        if read == 0 {
+            break;
+        }
+        hasher.update(&buffer[..read]);
+    }
+    Ok(hex(&hasher.finalize()))
+}
+
+fn hex(digest: &[u8]) -> String {
+    digest
         .iter()
         .fold(String::with_capacity(64), |mut text, byte| {
             use std::fmt::Write as _;
@@ -215,6 +243,26 @@ mod tests {
         assert_eq!(
             String::from_utf8(body(response).await).unwrap(),
             format!("{LINUX_DIGEST}  fleetctl\n")
+        );
+    }
+
+    #[tokio::test]
+    async fn the_streamed_digest_matches_the_served_bytes_across_read_boundaries() {
+        let dir = artifacts();
+        // Larger than one 64 KiB read and not a multiple of it.
+        let big: Vec<u8> = (0..200_003_u32).map(|n| (n % 251) as u8).collect();
+        std::fs::write(dir.path().join("fleetctl/fleetctl-linux-aarch64"), &big).unwrap();
+        let binary = get(dir.path(), "/fleetctl/linux-aarch64").await;
+        let header = binary.headers()[CHECKSUM_HEADER]
+            .to_str()
+            .unwrap()
+            .to_owned();
+        assert_eq!(header, hex(&Sha256::digest(&big)));
+        assert_eq!(body(binary).await, big);
+        let digest = get(dir.path(), "/fleetctl/linux-aarch64.sha256").await;
+        assert_eq!(
+            String::from_utf8(body(digest).await).unwrap(),
+            format!("{header}  fleetctl\n")
         );
     }
 
