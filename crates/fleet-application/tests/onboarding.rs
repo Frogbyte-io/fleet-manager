@@ -12,6 +12,7 @@ use fleet_application::authz::{
 use fleet_application::machine::{
     Endpoint, Machine, MachineFilter, MachinePort, Machines, NewEndpoint, RegisterMachine,
 };
+use fleet_application::machine_setup::{MachineSetup, MachineSetupPort, SetupFollowUp};
 use fleet_application::onboarding::{
     DraftEndpoint, DraftStage, HostKeyStage, NewDraft, OnboardAuth, OnboardHostKey,
     OnboardTrustPort, Onboarding, OnboardingDraft, OnboardingPort, OnboardingUseCaseError,
@@ -855,6 +856,194 @@ async fn the_sensitive_question_redacts_only_the_userinfo() {
         .unwrap();
     assert_eq!(view.endpoint.user, "***");
     assert_eq!(view.endpoint.host, "host-one");
+}
+
+/// A setup hook that records each call and answers a fixed outcome.
+#[derive(Debug)]
+struct FakeSetupHook {
+    calls: Mutex<Vec<(String, MachineSetup)>>,
+    /// What the forwarded authorizer answered for `skills.deploy` on the
+    /// machine, the permission the real follow-up needs.
+    deploy_decisions: Mutex<Vec<Decision>>,
+    outcome: SetupFollowUp,
+}
+
+impl FakeSetupHook {
+    fn answering(outcome: SetupFollowUp) -> Arc<Self> {
+        Arc::new(Self {
+            calls: Mutex::new(Vec::new()),
+            deploy_decisions: Mutex::new(Vec::new()),
+            outcome,
+        })
+    }
+}
+
+#[async_trait]
+impl MachineSetupPort for FakeSetupHook {
+    async fn machine_set_up(
+        &self,
+        authorizer: &dyn Authorizer,
+        principal_id: &str,
+        setup: &MachineSetup,
+    ) -> SetupFollowUp {
+        self.deploy_decisions
+            .lock()
+            .unwrap()
+            .push(authorizer.decide(AccessRequest {
+                principal_id,
+                action: Permission::SkillsDeploy,
+                resource: Some(&setup.machine_id),
+            }));
+        self.calls
+            .lock()
+            .unwrap()
+            .push((principal_id.to_owned(), setup.clone()));
+        self.outcome.clone()
+    }
+}
+
+/// Allows everything except `skills.deploy`, so a test can tell the
+/// caller's authorizer apart from any other.
+#[derive(Debug)]
+struct DenySkillsDeploy;
+
+impl Authorizer for DenySkillsDeploy {
+    fn decide(&self, request: AccessRequest<'_>) -> Decision {
+        if request.action == Permission::SkillsDeploy {
+            Decision::deny(ReasonId::UnknownPrincipal)
+        } else {
+            Decision::allow()
+        }
+    }
+}
+
+/// #600: the hook gets the caller's own authorizer, so the follow-up is
+/// authorized as the caller: a caller without `skills.deploy` is denied
+/// there, and the add still succeeds.
+#[tokio::test]
+async fn the_setup_hook_is_authorized_by_the_callers_authorizer() {
+    let hook = FakeSetupHook::answering(SetupFollowUp::Failed {
+        reason: "denied".to_owned(),
+    });
+    let mut fixture = compose(FakeMachines::default());
+    fixture.onboarding = fixture.onboarding.with_setup_hook(hook.clone());
+    let draft_id = ready_draft(&fixture).await;
+    fixture
+        .onboarding
+        .add(&DenySkillsDeploy, &principal(), &draft_id, NOW)
+        .await
+        .expect("the add needs machine.create only");
+    assert_eq!(
+        *hook.deploy_decisions.lock().unwrap(),
+        vec![Decision::deny(ReasonId::UnknownPrincipal)]
+    );
+}
+
+/// A confirmed, ready-to-add draft in `fixture`.
+async fn ready_draft(fixture: &Fixture) -> String {
+    let draft = fixture
+        .onboarding
+        .create_draft(&AllowAll, &principal(), new_draft())
+        .await
+        .unwrap();
+    fixture.drafts.mutate(&draft.id, |draft| {
+        draft.host_key = Some(observed_host_key(FINGERPRINT));
+        draft.host_key_stage = HostKeyStage::Confirmed;
+        draft.confirmed_fingerprint = Some(FINGERPRINT.to_owned());
+    });
+    draft.id
+}
+
+/// #600: a successful add runs the setup hook as the caller, over the new
+/// machine's SSH endpoint and the draft's auth, and reports its outcome.
+#[tokio::test]
+async fn add_runs_the_setup_hook_as_the_caller() {
+    let hook = FakeSetupHook::answering(SetupFollowUp::Queued {
+        operation_id: "op-follow-up".to_owned(),
+        version: "1.40.0".to_owned(),
+    });
+    let mut fixture = compose(FakeMachines::default());
+    fixture.onboarding = fixture.onboarding.with_setup_hook(hook.clone());
+    let draft_id = ready_draft(&fixture).await;
+
+    let added = fixture
+        .onboarding
+        .add(&AllowAll, &principal(), &draft_id, NOW)
+        .await
+        .unwrap();
+
+    let calls = hook.calls.lock().unwrap();
+    assert_eq!(calls.len(), 1);
+    let (caller, setup) = &calls[0];
+    assert_eq!(caller, &principal().id);
+    assert_eq!(setup.machine_id, added.machine.id);
+    assert_eq!(setup.endpoint_id, added.machine.endpoints[0].id);
+    assert_eq!(setup.auth, OnboardAuth::Agent);
+    assert_eq!(setup.trigger, format!("onboarding:{}", added.machine.id));
+    assert_eq!(
+        *hook.deploy_decisions.lock().unwrap(),
+        vec![Decision::allow()]
+    );
+    assert_eq!(
+        added.setup_follow_up,
+        Some(SetupFollowUp::Queued {
+            operation_id: "op-follow-up".to_owned(),
+            version: "1.40.0".to_owned(),
+        })
+    );
+}
+
+/// #600: a follow-up that could not be queued never fails the add.
+#[tokio::test]
+async fn a_failed_setup_follow_up_does_not_fail_the_add() {
+    let hook = FakeSetupHook::answering(SetupFollowUp::Failed {
+        reason: "denied".to_owned(),
+    });
+    let mut fixture = compose(FakeMachines::default());
+    fixture.onboarding = fixture.onboarding.with_setup_hook(hook.clone());
+    let draft_id = ready_draft(&fixture).await;
+
+    let added = fixture
+        .onboarding
+        .add(&AllowAll, &principal(), &draft_id, NOW)
+        .await
+        .expect("the add succeeds whatever the follow-up answers");
+    assert!(matches!(
+        added.setup_follow_up,
+        Some(SetupFollowUp::Failed { .. })
+    ));
+    assert!(fixture.drafts.get_raw(&draft_id).is_none());
+}
+
+/// Without a hook (the setting is off) the add queues nothing and reports
+/// no follow-up.
+#[tokio::test]
+async fn without_a_setup_hook_the_add_reports_no_follow_up() {
+    let fixture = compose(FakeMachines::default());
+    let draft_id = ready_draft(&fixture).await;
+    let added = fixture
+        .onboarding
+        .add(&AllowAll, &principal(), &draft_id, NOW)
+        .await
+        .unwrap();
+    assert_eq!(added.setup_follow_up, None);
+}
+
+/// A denied add never reaches the hook.
+#[tokio::test]
+async fn a_denied_add_does_not_run_the_setup_hook() {
+    let hook = FakeSetupHook::answering(SetupFollowUp::Disabled);
+    let mut fixture = compose(FakeMachines::default());
+    fixture.onboarding = fixture.onboarding.with_setup_hook(hook.clone());
+    let draft_id = ready_draft(&fixture).await;
+    assert!(
+        fixture
+            .onboarding
+            .add(&DenyAll, &principal(), &draft_id, NOW)
+            .await
+            .is_err()
+    );
+    assert!(hook.calls.lock().unwrap().is_empty());
 }
 
 #[test]

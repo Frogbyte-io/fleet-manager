@@ -542,6 +542,16 @@ async fn the_pinned_install_verifies_the_checksum() {
     assert_eq!(state, "failed");
     assert!(result.is_none());
     assert!(error.unwrap().contains("checksum did not match"));
+    // The staged download beside the destination is gone too.
+    let leftovers: Vec<_> = match std::fs::read_dir(format!("{home}/.local/bin")) {
+        // A directory that was never created holds nothing.
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Vec::new(),
+        entries => entries
+            .expect("the bin directory is readable")
+            .collect::<Result<_, _>>()
+            .expect("every bin entry is readable"),
+    };
+    assert!(leftovers.is_empty(), "{leftovers:?}");
     let retained =
         fleet_application::skills::SkillsPort::get(fixture.snapshots.as_ref(), &fixture.machine_id)
             .await
@@ -554,6 +564,54 @@ async fn the_pinned_install_verifies_the_checksum() {
 
     let _ = std::fs::remove_file(&staged);
     let _ = std::fs::remove_file(format!("{home}/.local/bin/skills-manager-cli"));
+}
+
+/// A verified asset that cannot run on the machine (e.g. a glibc too old
+/// for the Linux build) is never placed: it would shadow a working copy and
+/// no later probe would replace it (#600).
+#[tokio::test]
+async fn a_pinned_binary_that_cannot_run_is_not_installed() {
+    let home_dir = tempfile::tempdir().unwrap();
+    let sshd = start_sshd_with_home(home_dir.path());
+    let fixture = compose(&sshd).await;
+    let home = home_dir.path().display().to_string();
+    let _ = std::fs::remove_file(format!("{home}/.local/bin/skills-manager-cli"));
+    let staged = format!("{home}/unusable-artifact");
+    std::fs::write(
+        &staged,
+        "#!/bin/sh\necho 'version GLIBC_2.34 not found' >&2\nexit 1\n",
+    )
+    .unwrap();
+    let digest = sha256_of(&staged);
+
+    let payload = serde_json::json!({
+        "machineId": fixture.machine_id,
+        "endpointId": fixture.endpoint_id,
+        "auth": fixture.auth_json(),
+        "artifactUrl": format!("file://{staged}"),
+        "artifactSha256": digest,
+        "timeoutSeconds": 60,
+    });
+    let (state, result, error) = fixture.run_kind("skills.probe", payload).await;
+    assert_eq!(state, "failed");
+    assert!(result.is_none());
+    let error = error.unwrap();
+    assert!(error.contains("install_failed"), "{error}");
+    assert!(error.contains("does not run on this machine"), "{error}");
+    assert!(
+        !std::path::Path::new(&format!("{home}/.local/bin/skills-manager-cli")).exists(),
+        "nothing is left in ~/.local/bin"
+    );
+    let leftovers: Vec<_> = match std::fs::read_dir(format!("{home}/.local/bin")) {
+        // A directory that was never created holds nothing.
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Vec::new(),
+        entries => entries
+            .expect("the bin directory is readable")
+            .collect::<Result<_, _>>()
+            .expect("every bin entry is readable"),
+    };
+    assert!(leftovers.is_empty(), "{leftovers:?}");
+    let _ = std::fs::remove_file(&staged);
 }
 
 #[tokio::test]

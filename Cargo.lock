@@ -1073,6 +1073,7 @@ dependencies = [
  "fleet-controller",
  "fleet-core",
  "fleet-protocol",
+ "fleet-provider-skills-manager",
  "fleet-provider-ssh",
  "fleet-secrets",
  "fleet-storage-sqlite",

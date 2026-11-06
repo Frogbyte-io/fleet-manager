@@ -52,6 +52,7 @@ pub mod ready;
 pub mod registry_enrich;
 pub mod site_exec;
 pub mod skills;
+pub mod skills_setup;
 pub mod source;
 pub mod source_poller;
 pub mod tailnet_store;

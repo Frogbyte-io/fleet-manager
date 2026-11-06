@@ -408,3 +408,128 @@ pub fn redact(text: &str) -> String {
     // still one token; then flatten control noise.
     fleet_core::flatten_control_characters(&fleet_core::redact_credentials(text))
 }
+
+/// The `skills-manager-cli` version Fleet installs on a machine it sets up
+/// (#600): the version the read contract fixtures were recorded against.
+pub const PINNED_CLI_VERSION: &str = "1.40.0";
+
+/// One pinned, checksum-verified release asset of `skills-manager-cli`.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ReleasePin {
+    /// The CLI version the asset carries.
+    pub version: &'static str,
+    /// The upstream asset name.
+    pub asset: &'static str,
+    /// The download URL of the GitHub release asset.
+    pub url: &'static str,
+    /// The asset's sha256, from the GitHub release API's published digest.
+    pub sha256: &'static str,
+}
+
+/// The built-in pin table: the tested release's Linux assets, keyed by the
+/// normalized `uname -m`. The digests are the GitHub release API's `digest`
+/// values for `xingkongliang/skills-manager` `v1.40.0`.
+const RELEASE_PINS: [(&str, ReleasePin); 2] = [
+    (
+        "x86_64",
+        ReleasePin {
+            version: PINNED_CLI_VERSION,
+            asset: "skills-manager-cli-Linux-x64",
+            url: "https://github.com/xingkongliang/skills-manager/releases/download/v1.40.0/skills-manager-cli-Linux-x64",
+            sha256: "6edb154b290803cd652fa047cac2d980fd94dc75c1f16bd9acb7a0536544e61b",
+        },
+    ),
+    (
+        "aarch64",
+        ReleasePin {
+            version: PINNED_CLI_VERSION,
+            asset: "skills-manager-cli-Linux-arm64",
+            url: "https://github.com/xingkongliang/skills-manager/releases/download/v1.40.0/skills-manager-cli-Linux-arm64",
+            sha256: "377e3538ce74a13118ba0c30ebaaff597c7be4f0bb2bec2598ea0da27064a187",
+        },
+    ),
+];
+
+/// Why a machine has no pinned release.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum NoReleasePin {
+    /// The machine's OS family or architecture is not known yet.
+    UnknownPlatform,
+    /// The OS family has no pinned asset (Windows is #609).
+    UnsupportedOs {
+        /// The reported family, bounded and sanitized.
+        family: String,
+    },
+    /// Linux, but an architecture with no published asset.
+    UnsupportedArchitecture {
+        /// The reported architecture, bounded and sanitized.
+        architecture: String,
+    },
+}
+
+impl fmt::Display for NoReleasePin {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::UnknownPlatform => f.write_str(
+                "the machine's OS family and architecture are unknown; discover the machine, then run a pinned skills probe",
+            ),
+            Self::UnsupportedOs { family } => write!(
+                f,
+                "no pinned skills-manager-cli release for OS family {family:?}; only Linux is pinned"
+            ),
+            Self::UnsupportedArchitecture { architecture } => write!(
+                f,
+                "no pinned skills-manager-cli release for Linux {architecture:?}; the pinned assets are x86_64 and aarch64"
+            ),
+        }
+    }
+}
+
+/// Chooses the pinned release for a machine from its inventory facts:
+/// `os/family` (`uname -s`, e.g. `Linux`) and `host/architecture`
+/// (`uname -m`, e.g. `x86_64`, `aarch64`; `amd64` and `arm64` are accepted
+/// aliases).
+///
+/// # Errors
+///
+/// Returns why there is no pin: an unknown platform, an OS other than Linux,
+/// or an architecture without a published asset.
+pub fn release_pin(
+    os_family: Option<&str>,
+    architecture: Option<&str>,
+) -> Result<ReleasePin, NoReleasePin> {
+    let (Some(family), Some(architecture)) = (os_family, architecture) else {
+        return Err(NoReleasePin::UnknownPlatform);
+    };
+    if !family.trim().eq_ignore_ascii_case("linux") {
+        return Err(NoReleasePin::UnsupportedOs {
+            family: bounded_fact(family),
+        });
+    }
+    let normalized = match architecture.trim().to_ascii_lowercase().as_str() {
+        "x86_64" | "amd64" => "x86_64",
+        "aarch64" | "arm64" => "aarch64",
+        _ => {
+            return Err(NoReleasePin::UnsupportedArchitecture {
+                architecture: bounded_fact(architecture),
+            });
+        }
+    };
+    RELEASE_PINS
+        .iter()
+        .find(|(key, _)| *key == normalized)
+        .map(|(_, pin)| *pin)
+        .ok_or_else(|| NoReleasePin::UnsupportedArchitecture {
+            architecture: bounded_fact(architecture),
+        })
+}
+
+/// A fact value fit for a reason string: printable ASCII, at most 64 chars.
+fn bounded_fact(value: &str) -> String {
+    value
+        .trim()
+        .chars()
+        .filter(char::is_ascii_graphic)
+        .take(64)
+        .collect()
+}
