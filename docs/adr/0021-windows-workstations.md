@@ -4,7 +4,7 @@ Status: Accepted
 
 Proposed: 2026-11-06 (tracking issue [#607](https://github.com/Frogbyte-io/fleet-manager/issues/607), epic [#606](https://github.com/Frogbyte-io/fleet-manager/issues/606), milestone M12)
 
-Accepted: 2026-11-07 by maintainer review, as proposed; the answers to the review questions are under [Maintainer decisions](#maintainer-decisions-2026-11-07). It applies the Windows guest transport of [ADR 0015](0015-windows-lab-guest-transport.md) and the brokered access of [ADR 0017](0017-agent-ssh-access.md) to developer workstations. It **amends ADR 0017 decision 7** for registered machines: the guest OS of an endpoint is detected and recorded, and the caller's `--os` becomes a check instead of a choice (decision 4). It reverses nothing else in ADR 0015 or ADR 0017.
+Accepted: 2026-11-07 by maintainer review, as proposed except for one Consequences line on agent tokens; the answers to the review questions are under [Maintainer decisions](#maintainer-decisions-2026-11-07). It applies the Windows guest transport of [ADR 0015](0015-windows-lab-guest-transport.md) and the brokered access of [ADR 0017](0017-agent-ssh-access.md) to developer workstations. It **amends ADR 0017 decision 7** for registered machines: the guest OS of an endpoint is detected and recorded, and the caller's `--os` becomes a check instead of a choice (decision 4). It reverses nothing else in ADR 0015 or ADR 0017.
 
 ## Context
 
@@ -54,7 +54,7 @@ An outbound connection (ADR 0002/0003) would serve laptops that are rarely reach
 - One transport, one trust model and one audit trail for Linux machines, Lab guests and workstations. The controller stays in the data path (ADR 0017), and rollouts reach only reachable machines; drift reporting is how an operator sees one that was missed.
 - **Agents on the workstation need `fleetctl.exe`** for the Registry and the `fleet` skill. The Windows binary already builds in CI (informational job), but there is no distribution, and the Linux pilot's `--url` wrapper is a shell script. A `.cmd` wrapper that forwards `%*` is a known argument-injection shape ([BatBadBut, CVE-2024-24576](https://blog.rust-lang.org/2024/04/09/cve-2024-24576/)), so `fleetctl` needs a non-shell way to name the controller before Windows agents use it ([#614](https://github.com/Frogbyte-io/fleet-manager/issues/614), with release binaries in [#615](https://github.com/Frogbyte-io/fleet-manager/issues/615)).
 - The `fleet` skill's examples are POSIX-quoted; agents on Windows run them from PowerShell or Git Bash, so the skill needs Windows notes.
-- M8 tokens on a workstation are the user's, obtained by `fleetctl login` (#604); Fleet does not push a token over SSH. The Windows at-rest store (DPAPI or Credential Manager) is #604's call.
+- M8 tokens on a workstation work as on Linux. Machine setup ([#629](https://github.com/Frogbyte-io/fleet-manager/issues/629), ADR 0020) writes the device's agent token over the brokered SSH session into the login user's profile, `%APPDATA%\fleet\credentials.toml` next to `config.toml`, with an ACL limited to that user, SYSTEM and Administrators; a human's own personal token comes from `fleetctl login` (#604). The Windows at-rest store for `fleetctl login` (DPAPI or Credential Manager) is #604's call.
 
 ## Risks
 
@@ -78,9 +78,10 @@ Windows token storage at rest belongs to #604 (noted there on acceptance). This 
 
 ## Maintainer decisions (2026-11-07)
 
-The review questions raised in #607 / PR #620 were answered on 2026-11-07; the decisions above stand as proposed.
+The review questions raised in #607 / PR #620 were answered on 2026-11-07; the decisions above stand as proposed, and answer 5 amends one Consequences line.
 
 1. **Account.** The SSH login is the developer's own account: a standard user is recommended, and an administrator is allowed with a warning (decision 7). Onboarding does not refuse elevated sessions.
 2. **`DefaultShell`.** Windows PowerShell 5.1 is required as the OpenSSH `DefaultShell` (decision 2). The shell-independent launcher is not part of this milestone.
 3. **Windows 10 22H2** is allowed but untested (decision 5).
 4. **Unsigned `skills-manager-cli.exe`.** The workaround is documented: allow the binary (for example in Smart App Control or Defender) or install it by hand. Upstream has been asked for signed Windows releases in [xingkongliang/skills-manager#405](https://github.com/xingkongliang/skills-manager/issues/405#issuecomment-6713021132); the Windows asset was verified unsigned on v1.43.3.
+5. **Agent tokens on workstations.** Windows works the same as Linux: machine setup (#629) writes the agent token over the brokered SSH session into `%APPDATA%\fleet\credentials.toml` in the login user's profile, next to `config.toml`, with an ACL limited to that user, SYSTEM and Administrators (Consequences). This replaces the proposed "Fleet does not push a token over SSH".
