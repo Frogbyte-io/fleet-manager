@@ -389,7 +389,7 @@ M11 depends on M6 and M7 (Lab leases, placement, cleanup) and on persistent mach
 
 ### M12 — Windows workstations
 
-Status: in progress (2026-11-07). Boundaries: [ADR 0021](adr/0021-windows-workstations.md) (Accepted 2026-11-07); onboarding and inventory (#608) is in progress. Epic: [#606](https://github.com/Frogbyte-io/fleet-manager/issues/606).
+Status: ADR accepted; #608 in PR #633 (2026-11-07). Boundaries: [ADR 0021](adr/0021-windows-workstations.md) (Accepted 2026-11-07). Epic: [#606](https://github.com/Frogbyte-io/fleet-manager/issues/606).
 
 Outcome: Windows 11 developer workstations join the fleet like Linux ones, agentless over OpenSSH Server: onboarding, inventory, fleet-wide skills through an automatically installed Skills Manager, and brokered exec, put, collect and terminal.
 

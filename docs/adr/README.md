@@ -1,6 +1,6 @@
 # Architecture decision records
 
-These records were proposed with the master plan and accepted on 2026-08-25 under [FM-000](../planning/fm-000-acceptance.md). An accepted decision is changed by a new superseding ADR, not an incidental implementation issue.
+The initial set of records (0001–0008) was proposed with the master plan and accepted on 2026-08-25 under [FM-000](../planning/fm-000-acceptance.md); later records carry their own status and acceptance date in the table below. An accepted decision is changed by a new superseding ADR, not an incidental implementation issue.
 
 Accepting these ADRs did not close every open question inside them. The named spikes in [../planning/spikes.md](../planning/spikes.md) resolve implementation choices *within* the accepted boundaries; a spike may add a follow-up ADR, but it does not reopen the decision it serves.
 
