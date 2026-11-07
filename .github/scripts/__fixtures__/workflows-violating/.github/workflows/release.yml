@@ -1,0 +1,27 @@
+# Fixture: release.yml, the workflow that holds the provenance exception, but
+# with the exception stretched past the publish job: the provenance scopes at
+# the workflow level and on another job, and another write scope on publish.
+name: Release
+on:
+  push:
+    branches: [main]
+permissions:
+  contents: read
+  id-token: write
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+      packages: write
+    steps:
+      - run: echo ok
+  latest:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      attestations: write
+    steps:
+      - run: echo ok

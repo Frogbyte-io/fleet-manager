@@ -49,12 +49,40 @@ build if a workflow:
 - grants a write permission other than `contents`, at the workflow level or
   on any single job — `packages: write` and `id-token: write` are how a
   publish or a cloud deploy gets its credentials, and neither leaves a
-  stored secret behind to grep for;
+  stored secret behind to grep for (the one exception is below);
 - uses the `pull_request_target` trigger, which runs with a writable token
   against code a fork controls;
 - or refers to a third-party action by a mutable tag.
 
 `ci.yml` declares `permissions: contents: read` and asks for nothing more.
+
+### The release provenance exception
+
+[`workflows/release.yml`](workflows/release.yml) is the release automation
+this section anticipated: its own workflow, triggered by a push to `main`,
+holding only the per-run `GITHUB_TOKEN`. Its `publish` job, and only that job,
+also holds `id-token: write` and `attestations: write` (approved by the
+maintainer on 2026-11-07). It uses them to sign a
+[build provenance attestation](https://docs.github.com/en/actions/security-for-github-actions/using-artifact-attestations/using-artifact-attestations-to-establish-provenance-for-builds)
+for each `fleetctl` binary and `SHA256SUMS` before it publishes them:
+
+- `id-token: write` lets the job request a GitHub OIDC token, which Sigstore
+  exchanges for a short-lived signing certificate naming this repository,
+  workflow, and commit. No key is stored anywhere.
+- `attestations: write` stores the signed attestation on this repository, where
+  `gh attestation verify` finds it.
+
+The attestation lets someone who downloaded a binary check that this
+workflow built it from a commit on `main`, which `SHA256SUMS` alone cannot
+show: the checksum file comes from the same release as the binary.
+
+`check-workflows.mjs` lists the exception by workflow path and job id
+(`JOB_WRITE_EXCEPTIONS`). The same two scopes in any other workflow, in
+another job of `release.yml`, or at its workflow level still fail the build,
+and the exception grants no other scope. Widening it needs the same explicit
+approval. Because the action that signs runs with that OIDC token,
+`actions/attest-build-provenance` is pinned to a full commit SHA, although
+`actions/` actions may otherwise be used by major tag.
 
 ## Third-party actions are pinned to commits
 

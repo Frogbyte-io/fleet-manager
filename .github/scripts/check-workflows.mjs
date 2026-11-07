@@ -7,7 +7,8 @@
 // workflow that adds a secret looks exactly like the workflow that does not.
 // This asserts the property instead of documenting it, and covers the two
 // neighbouring supply-chain footguns — an over-broad GITHUB_TOKEN and a
-// third-party action pinned to a mutable tag.
+// third-party action pinned to a mutable tag. One job may hold the two scopes
+// that build provenance needs; JOB_WRITE_EXCEPTIONS names it.
 import { readdirSync, readFileSync } from 'node:fs';
 import { dirname, join, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -19,6 +20,16 @@ const repoRoot = resolve(join(dirname(fileURLToPath(import.meta.url)), '..', '..
 const FORBIDDEN_TRIGGERS = ['pull_request_target'];
 // The only secret CI may use: the ephemeral, per-run, read-scoped token.
 const ALLOWED_SECRET = 'GITHUB_TOKEN';
+// The one exception to "only contents may be written", approved by the
+// maintainer on 2026-11-07: the release job signs build provenance for the
+// binaries it publishes. id-token: write mints the OIDC token Sigstore signs
+// with, and attestations: write stores the attestation on this repository.
+// Keyed by workflow path and job id, so the same grant in another workflow, in
+// another job of this one, or at the workflow level is still refused.
+// See .github/SECURITY.md.
+const JOB_WRITE_EXCEPTIONS = {
+  '.github/workflows/release.yml': { publish: ['id-token', 'attestations'] },
+};
 
 function yamlFiles(dir) {
   const out = [];
@@ -44,11 +55,11 @@ function collectUses(node, out = []) {
  * Applies the least-privilege rule to one `permissions` block. Only `contents`
  * may be granted write: everything else in the list is a way to publish.
  */
-function permissionProblems(name, where, permissions) {
+function permissionProblems(name, where, permissions, excepted = []) {
   if (permissions === 'write-all') return [`${name}: permissions: write-all ${where}`];
   if (typeof permissions !== 'object' || permissions === null) return [];
   return Object.entries(permissions)
-    .filter(([scope, level]) => level === 'write' && scope !== 'contents')
+    .filter(([scope, level]) => level === 'write' && scope !== 'contents' && !excepted.includes(scope))
     .map(([scope]) => `${name}: grants ${scope}: write ${where}; CI publishes nothing`);
 }
 
@@ -115,9 +126,13 @@ function checkFile(root, file, isWorkflow) {
   // `packages: write` or `id-token: write` on one job is a publishing
   // credential however deep in the file it is written, so jobs are held to the
   // same rule rather than trusted because the top of the file looked fine.
+  // The only widening allowed is a JOB_WRITE_EXCEPTIONS entry for this exact
+  // workflow and job.
+  const exceptions = Object.hasOwn(JOB_WRITE_EXCEPTIONS, name) ? JOB_WRITE_EXCEPTIONS[name] : {};
   for (const [id, job] of Object.entries(document.jobs ?? {})) {
     if (job?.permissions === undefined) continue;
-    problems.push(...permissionProblems(name, `on job ${id}`, job.permissions));
+    const excepted = Object.hasOwn(exceptions, id) ? exceptions[id] : [];
+    problems.push(...permissionProblems(name, `on job ${id}`, job.permissions, excepted));
   }
 
   return problems;

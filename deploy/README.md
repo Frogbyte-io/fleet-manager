@@ -240,7 +240,39 @@ controller image does not ship one):
 }
 ```
 
-Then add that directory to your user `PATH`. On Windows, `fleetctl status`
+Then add that directory to your user `PATH`.
+
+**Verify the build provenance of a release binary.** The `SHA256SUMS` check
+above is the baseline and needs nothing but a shell. A release binary also
+carries a signed build provenance attestation. The checksum trusts the
+release page it came from, since `SHA256SUMS` sits next to the binary; the
+attestation is signed separately, with a short-lived certificate that names
+the workflow, the commit, and the run that built the file. With the
+[GitHub CLI](https://cli.github.com/) installed and signed in, check the
+downloaded file before you install it (it is matched by its digest, so an
+installed, renamed copy checks the same way):
+
+```sh
+gh attestation verify fleetctl-linux-x86_64 --repo Frogbyte-io/fleet-manager \
+  --signer-workflow Frogbyte-io/fleet-manager/.github/workflows/release.yml \
+  --source-ref refs/heads/main
+```
+
+```powershell
+gh attestation verify "$env:LOCALAPPDATA\Programs\fleet\fleetctl.exe" --repo Frogbyte-io/fleet-manager `
+  --signer-workflow Frogbyte-io/fleet-manager/.github/workflows/release.yml `
+  --source-ref refs/heads/main
+```
+
+It must print `Verification succeeded!`. `--repo` alone accepts an
+attestation from any workflow in the repository; `--signer-workflow` and
+`--source-ref` narrow it to the release workflow running on `main`. Releases
+published before provenance was added (such as `v0.1.0-482fd9c`) have no
+attestation, and the command reports that none was found. A binary from a
+controller's `/downloads` route has no attestation either: the controller
+image builds its own copy.
+
+On Windows, `fleetctl status`
 without `--url` reports that the local `fleetd` surface is unavailable; every
 other command talks to the controller.
 

@@ -16,9 +16,14 @@ name: Release
 # publish, to create the release and its tag, and latest, to move the
 # "latest" marker. Builds run on GitHub-hosted
 # runners, not the shared self-hosted dev box, so no write-scoped run touches
-# that machine. Provenance attestations need id-token: write and
-# attestations: write, which check-workflows.mjs refuses; they are a
-# follow-up that needs that policy changed first.
+# that machine.
+#
+# publish also signs build provenance for every asset it uploads, so a
+# download can be traced to this workflow, this commit, and this run with
+# `gh attestation verify`. That needs id-token: write (the OIDC token Sigstore
+# signs with) and attestations: write (to store the attestation on this
+# repository), on publish only. check-workflows.mjs allows those two scopes
+# in this workflow's publish job and nowhere else; see .github/SECURITY.md.
 
 on:
   push:
@@ -174,6 +179,10 @@ jobs:
     runs-on: ubuntu-24.04
     permissions:
       contents: write
+      # Build provenance only; the policy exception in check-workflows.mjs
+      # names this job.
+      id-token: write
+      attestations: write
     steps:
       - uses: actions/download-artifact@v8
         with:
@@ -194,7 +203,42 @@ jobs:
           cat SHA256SUMS
           [ "$(wc -l < SHA256SUMS)" -eq 3 ] || { echo "::error::expected three binaries"; exit 1; }
 
+      - name: Check for an existing release
+        id: existing
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ needs.version.outputs.tag }}
+        run: |
+          set -euo pipefail
+          published=false
+          if state="$(gh release view "${TAG}" --json isDraft --jq '.isDraft' 2>/dev/null)"; then
+            if [ "${state}" = "false" ]; then
+              echo "Release ${TAG} is already published; leaving it unchanged."
+              published=true
+            else
+              # A draft is what an interrupted upload leaves behind.
+              gh release delete "${TAG}" --yes
+            fi
+          fi
+          echo "published=${published}" >> "$GITHUB_OUTPUT"
+
+      # Attest before publishing, so a release never exists without provenance
+      # for its assets. Skipped when the release is already published: a re-run
+      # rebuilds the binaries, and those bytes are not the ones on the release.
+      - name: Attest build provenance
+        if: steps.existing.outputs.published != 'true'
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: |
+            dist/fleetctl-linux-x86_64
+            dist/fleetctl-linux-aarch64
+            dist/fleetctl-windows-x86_64.exe
+            dist/SHA256SUMS
+
       - name: Create the release
+        if: steps.existing.outputs.published != 'true'
         shell: bash
         working-directory: dist
         env:
@@ -205,14 +249,6 @@ jobs:
           SERVER_URL: ${{ github.server_url }}
         run: |
           set -euo pipefail
-          if state="$(gh release view "${TAG}" --json isDraft --jq '.isDraft' 2>/dev/null)"; then
-            if [ "${state}" = "false" ]; then
-              echo "Release ${TAG} is already published; leaving it unchanged."
-              exit 0
-            fi
-            # A draft is what an interrupted upload leaves behind.
-            gh release delete "${TAG}" --yes
-          fi
           notes="$(cat <<EOF
           fleetctl ${VERSION} built from ${GITHUB_SHA}.
 
@@ -220,6 +256,13 @@ jobs:
 
           \`\`\`sh
           sha256sum --check --ignore-missing SHA256SUMS
+          \`\`\`
+
+          Each file also carries a signed build provenance attestation; with
+          the GitHub CLI, check it with:
+
+          \`\`\`sh
+          gh attestation verify fleetctl-linux-x86_64 --repo ${GH_REPO}
           \`\`\`
 
           Install and verification steps: ${SERVER_URL}/${GH_REPO}/blob/${GITHUB_SHA}/deploy/README.md#install-fleetctl
