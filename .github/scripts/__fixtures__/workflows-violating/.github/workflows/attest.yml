@@ -1,0 +1,16 @@
+# Fixture: the provenance scopes on a job named publish, in a workflow that is
+# not release.yml. The exception is keyed by workflow path, not job id.
+name: Attest
+on:
+  push:
+permissions:
+  contents: read
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+    steps:
+      - run: echo ok

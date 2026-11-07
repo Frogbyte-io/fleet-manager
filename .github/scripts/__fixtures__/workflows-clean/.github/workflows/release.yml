@@ -1,0 +1,17 @@
+# Fixture: the one place the provenance scopes are allowed, the publish job of
+# release.yml.
+name: Release
+on:
+  push:
+    branches: [main]
+permissions:
+  contents: read
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+    steps:
+      - run: echo ok
