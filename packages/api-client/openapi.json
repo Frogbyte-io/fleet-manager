@@ -8118,7 +8118,7 @@
           {
             "name": "guestOs",
             "in": "query",
-            "description": "`linux` (default) or `windows`.",
+            "description": "`linux` or `windows`; absent means the endpoint's recorded OS, else `linux`. A value that contradicts a recorded OS is refused.",
             "required": false,
             "schema": {
               "type": "string"
@@ -18138,6 +18138,13 @@
           "reference"
         ],
         "properties": {
+          "guestOs": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The guest OS detected on this SSH endpoint at onboarding or\ninventory, `linux` or `windows`; null while unknown (ADR 0021)."
+          },
           "id": {
             "type": "string",
             "description": "The endpoint's identity."
@@ -20531,7 +20538,7 @@
               "string",
               "null"
             ],
-            "description": "The guest's OS, `linux` (default) or `windows`."
+            "description": "The guest's OS, `linux` or `windows`. When the endpoint's OS was\nrecorded at onboarding or inventory, absent means that OS and a\ndifferent value is refused (`guest_os_mismatch`); otherwise absent\nmeans `linux`."
           },
           "paths": {
             "type": "array",
@@ -20812,7 +20819,7 @@
               "string",
               "null"
             ],
-            "description": "The guest's OS, `linux` (default) or `windows`."
+            "description": "The guest's OS, `linux` or `windows`. When the endpoint's OS was\nrecorded at onboarding or inventory, absent means that OS and a\ndifferent value is refused (`guest_os_mismatch`); otherwise absent\nmeans `linux`."
           },
           "script": {
             "type": [
@@ -21758,6 +21765,17 @@
               "null"
             ],
             "description": "The OS/profile hint derived from the facts, when the facts name an\noperating system. A display hint only; nothing is applied."
+          },
+          "shellCheck": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/ShellCheckDto",
+                "description": "The newest login-shell check, when a test or discover reached the\nendpoint."
+              }
+            ]
           },
           "stage": {
             "type": "string",
@@ -29811,6 +29829,17 @@
                 ],
                 "description": "The OS/profile hint derived from the facts, when the facts name an\noperating system. A display hint only; nothing is applied."
               },
+              "shellCheck": {
+                "oneOf": [
+                  {
+                    "type": "null"
+                  },
+                  {
+                    "$ref": "#/components/schemas/ShellCheckDto",
+                    "description": "The newest login-shell check, when a test or discover reached the\nendpoint."
+                  }
+                ]
+              },
               "stage": {
                 "type": "string",
                 "description": "The derived stage: `untested`, `review`, or `ready`."
@@ -32719,6 +32748,46 @@
           "warn",
           "err"
         ]
+      },
+      "ShellCheckDto": {
+        "type": "object",
+        "description": "The login-shell check of a draft (ADR 0021): which shell answered, the\nguest OS the endpoint will be recorded as, and the refusal when Fleet\ncannot drive that shell.",
+        "required": [
+          "shell",
+          "at"
+        ],
+        "properties": {
+          "at": {
+            "type": "integer",
+            "format": "int64",
+            "description": "When the check ran (epoch milliseconds)."
+          },
+          "guestOs": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The guest OS the endpoint is driven as, `linux` or `windows`; absent\nwhen the shell is refused or unrecognized (the endpoint stays\nunknown)."
+          },
+          "refusalDetail": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The refusal detail, naming the setup step that fixes it."
+          },
+          "refusalReason": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The refusal reason: `unsupported_shell`, `constrained_language` or\n`profile_output`. Add refuses a draft that carries one."
+          },
+          "shell": {
+            "type": "string",
+            "description": "The detected login shell: `posix`, `windows_powershell`,\n`powershell_core`, `cmd` or `unrecognized`."
+          }
+        }
       },
       "SiteDeployBody": {
         "type": "object",

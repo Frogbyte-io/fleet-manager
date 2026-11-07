@@ -446,6 +446,25 @@ impl MachinePort for MachineRepository {
         }))
     }
 
+    async fn record_endpoint_os(
+        &self,
+        endpoint_id: &str,
+        guest_os: fleet_core::GuestOs,
+    ) -> Result<(), PortFailure> {
+        let updated = sqlx::query("UPDATE machine_endpoints SET guest_os = ?2 WHERE id = ?1")
+            .bind(endpoint_id)
+            .bind(guest_os.id())
+            .execute(&self.pool)
+            .await
+            .map_err(|error| backend("record_endpoint_os", &error))?;
+        if updated.rows_affected() == 0 {
+            return Err(PortFailure::NotFound {
+                what: format!("endpoint {endpoint_id:?}"),
+            });
+        }
+        Ok(())
+    }
+
     async fn verified_fingerprint(&self, endpoint_id: &str) -> Result<Option<String>, PortFailure> {
         sqlx::query_scalar("SELECT verified_fingerprint FROM machine_endpoints WHERE id = ?1")
             .bind(endpoint_id)
@@ -483,7 +502,7 @@ impl MachineRepository {
     async fn hydrate(&self, row: &sqlx::sqlite::SqliteRow) -> Result<Machine, PortFailure> {
         use sqlx::Row as _;
         let id: String = row.get("id");
-        let endpoint_rows = sqlx::query("SELECT id, kind, reference FROM machine_endpoints WHERE machine_id = ?1 ORDER BY created_at ASC")
+        let endpoint_rows = sqlx::query("SELECT id, kind, reference, guest_os FROM machine_endpoints WHERE machine_id = ?1 ORDER BY created_at ASC")
             .bind(&id)
             .fetch_all(&self.pool)
             .await
@@ -537,6 +556,11 @@ impl MachineRepository {
                     kind: EndpointKind::from_id(&row.get::<String, _>("kind"))
                         .unwrap_or(EndpointKind::Ssh),
                     reference: row.get("reference"),
+                    // The CHECK admits only the two ids; anything else
+                    // reads as unknown rather than failing the machine.
+                    guest_os: row
+                        .get::<Option<String>, _>("guest_os")
+                        .and_then(|id| fleet_core::GuestOs::from_id(&id).ok()),
                 })
                 .collect(),
             tags: tag_rows.iter().map(|row| row.get(0)).collect(),

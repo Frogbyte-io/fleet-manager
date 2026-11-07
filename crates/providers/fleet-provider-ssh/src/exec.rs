@@ -290,7 +290,17 @@ fn execute_script_inner(
         guest_watchdog,
     )?;
     drop(child.stdin.take());
+    Ok(wait_bounded(&mut child, started, deadline))
+}
 
+/// Drains a started session's pipes to their caps and waits for it, killing
+/// the local `ssh` at `deadline` (measured from `started`). A deadline kill
+/// is reported in the result, never as an error.
+pub(crate) fn wait_bounded(
+    child: &mut std::process::Child,
+    started: Instant,
+    deadline: Duration,
+) -> ExecutionResult {
     // Reader threads drain the pipes so a silent remote session cannot wedge
     // the deadline poll; killing the child closes the pipes and ends them.
     let stdout_pipe = child.stdout.take();
@@ -305,26 +315,26 @@ fn execute_script_inner(
             // The pipes close with the process; join the readers.
             let (stdout, truncated_stdout) = stdout_reader.join().unwrap_or_default();
             let (stderr, truncated_stderr) = stderr_reader.join().unwrap_or_default();
-            return Ok(ExecutionResult {
+            return ExecutionResult {
                 exit_code: None,
                 stdout,
                 stderr,
                 truncated_stdout,
                 truncated_stderr,
                 killed_by_deadline: true,
-            });
+            };
         }
         if let Some(status) = child.try_wait().unwrap_or(None) {
             let (stdout, truncated_stdout) = stdout_reader.join().unwrap_or_default();
             let (stderr, truncated_stderr) = stderr_reader.join().unwrap_or_default();
-            return Ok(ExecutionResult {
+            return ExecutionResult {
                 exit_code: status.code(),
                 stdout,
                 stderr,
                 truncated_stdout,
                 truncated_stderr,
                 killed_by_deadline: false,
-            });
+            };
         }
         std::thread::sleep(POLL);
     }

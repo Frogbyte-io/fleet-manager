@@ -73,6 +73,13 @@ pub struct Endpoint {
     /// The reference, e.g. `user@host:port` for SSH or the node id for
     /// fleetd. Never carries a secret.
     pub reference: String,
+    /// The guest OS detected on this SSH endpoint (ADR 0021 decision 4),
+    /// when onboarding or an inventory probe recorded it. `None` is
+    /// unknown: the caller's `--os` still chooses for such an endpoint.
+    /// Recorded per endpoint, not per machine, because one Windows PC can
+    /// also expose a WSL `sshd` that is a Linux endpoint.
+    #[serde(default)]
+    pub guest_os: Option<fleet_core::GuestOs>,
 }
 
 /// The newest inventory observation of a machine: what probed it and when.
@@ -260,6 +267,7 @@ impl MachineView {
                     } else {
                         redact_userinfo(&endpoint.reference)
                     },
+                    guest_os: endpoint.guest_os,
                 })
                 .collect(),
             tags: machine.tags,
@@ -573,6 +581,22 @@ pub trait MachinePort: fmt::Debug + Send + Sync {
     /// Fails when the backend errors.
     async fn latest_inventory_revision(&self, machine_id: &str)
     -> Result<Option<u64>, PortFailure>;
+    /// Records the guest OS detected on one SSH endpoint (ADR 0021). The
+    /// default refuses: a port that cannot store it must not pretend to.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the endpoint is unknown or the backend errors.
+    async fn record_endpoint_os(
+        &self,
+        endpoint_id: &str,
+        guest_os: fleet_core::GuestOs,
+    ) -> Result<(), PortFailure> {
+        let _ = (endpoint_id, guest_os);
+        Err(PortFailure::Backend {
+            detail: "this machine store cannot record an endpoint's guest OS".to_owned(),
+        })
+    }
 }
 
 /// Durable one-to-one confirmed Proxmox guest links.
@@ -1273,6 +1297,65 @@ impl Machines {
                             context: "audit",
                             detail: error.to_string(),
                         })?;
+                    metadata
+                },
+            })
+            .await
+            .map_err(|detail| MachineUseCaseError::Backend {
+                context: "audit",
+                detail,
+            })?;
+        Ok(())
+    }
+
+    /// Records the guest OS detected on an SSH endpoint (ADR 0021 decision
+    /// 4). Once recorded, the caller's `--os` is a check against it, not a
+    /// choice.
+    ///
+    /// # Errors
+    ///
+    /// Fails on denial, an unknown endpoint, or a backend failure.
+    pub async fn record_endpoint_os(
+        &self,
+        authorizer: &dyn Authorizer,
+        principal: &ActingPrincipal,
+        endpoint_id: &str,
+        guest_os: fleet_core::GuestOs,
+    ) -> Result<(), MachineUseCaseError> {
+        authorize(
+            authorizer,
+            AccessRequest {
+                principal_id: &principal.id,
+                action: Permission::MachineUpdate,
+                resource: Some(endpoint_id),
+            },
+        )
+        .map_err(MachineUseCaseError::Denied)?;
+        self.port
+            .record_endpoint_os(endpoint_id, guest_os)
+            .await
+            .map_err(|failure| map_port("record_endpoint_os", failure))?;
+        self.audit
+            .record_intent(&crate::audit::AuditIntent {
+                actor: principal.id.clone(),
+                action: Permission::MachineUpdate.id().to_owned(),
+                resource: Some(endpoint_id.to_owned()),
+                decision: Decision::allow(),
+                correlation_id: None,
+                operation_id: None,
+                metadata: {
+                    let mut metadata = crate::audit::AuditMetadata::default();
+                    for (key, value) in [
+                        ("event", "endpoint_os_recorded"),
+                        ("guestOs", guest_os.id()),
+                    ] {
+                        metadata.insert(key, value).map_err(|error| {
+                            MachineUseCaseError::Backend {
+                                context: "audit",
+                                detail: error.to_string(),
+                            }
+                        })?;
+                    }
                     metadata
                 },
             })

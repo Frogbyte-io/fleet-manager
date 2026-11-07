@@ -172,6 +172,7 @@ fn machine_record(id: &str, reference: &str) -> Machine {
         name: id.to_owned(),
         description: String::new(),
         endpoints: vec![Endpoint {
+            guest_os: None,
             id: format!("{id}-endpoint"),
             kind: EndpointKind::Ssh,
             reference: reference.to_owned(),
@@ -198,6 +199,7 @@ impl MachinePort for FakeMachines {
                 .iter()
                 .enumerate()
                 .map(|(index, new)| Endpoint {
+                    guest_os: None,
                     id: format!("{}-endpoint-{index}", registration.name),
                     kind: new.kind,
                     reference: new.reference.clone(),
@@ -298,6 +300,7 @@ impl OnboardingPort for FakeOnboarding {
     ) -> Result<fleet_application::onboarding::OnboardingDraft, PortFailure> {
         let now = fleet_core::SystemClock::now_unix_millis();
         let created = fleet_application::onboarding::OnboardingDraft {
+            shell_check: None,
             id: format!("draft-{}", self.drafts.lock().unwrap().len() + 1),
             endpoint: draft.endpoint.clone(),
             auth: draft.auth.clone(),

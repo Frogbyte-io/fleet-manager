@@ -164,9 +164,11 @@ struct InventoryPayload {
     auth: SshExecAuth,
     /// The deadline, in seconds. Bounded hard.
     timeout_seconds: u64,
-    /// The guest's OS; absent means Linux.
+    /// The caller's guest OS. For an endpoint whose OS is recorded it is a
+    /// check (ADR 0021 decision 4); for an unknown endpoint it chooses when
+    /// the login-shell check cannot tell, and absent means Linux.
     #[serde(default)]
-    guest_os: fleet_core::GuestOs,
+    guest_os: Option<fleet_core::GuestOs>,
 }
 
 impl ScriptExecutor {
@@ -258,7 +260,7 @@ impl ScriptExecutor {
                 .ok_or("the operation carries no payload")?,
         )
         .map_err(|error| format!("the payload is not a valid inventory record: {error}"))?;
-        let (spec, verified, host) = self.resolve_inventory_endpoint(&payload).await?;
+        let (mut spec, verified, host) = self.resolve_inventory_endpoint(&payload).await?;
 
         operations
             .record_progress(
@@ -269,6 +271,18 @@ impl ScriptExecutor {
             )
             .await
             .map_err(|error| error.to_string())?;
+
+        spec.guest_os = match self.inventory_guest_os(&payload, &spec).await {
+            Ok(guest_os) => guest_os,
+            Err((reason, detail)) => {
+                let error_json = transport_failure_json(reason, &detail);
+                return operations
+                    .complete(&operation.id, "failed", None, Some(&error_json))
+                    .await
+                    .map(|_| ())
+                    .map_err(|error| error.to_string());
+            }
+        };
 
         let (collected, detail) = {
             let provider = self.provider.clone();
@@ -310,7 +324,9 @@ impl ScriptExecutor {
                     )
                     .await
                     .map_err(|failure| failure.to_string())?;
-                let result_json = serde_json::json!({ "facts": count }).to_string();
+                let result_json =
+                    serde_json::json!({ "facts": count, "guestOs": spec.guest_os.id() })
+                        .to_string();
                 operations
                     .complete(&operation.id, "succeeded", Some(&result_json), None)
                     .await
@@ -344,11 +360,76 @@ impl ScriptExecutor {
             arguments: Vec::new(),
             auth: payload.auth.clone(),
             timeout_seconds: payload.timeout_seconds,
-            guest_os: payload.guest_os,
+            guest_os: payload.guest_os.unwrap_or_default(),
             guest_watchdog: true,
             guest_refusals: false,
         })
         .await
+    }
+
+    /// The guest OS an inventory probe runs as (ADR 0021 decision 4). A
+    /// recorded endpoint OS wins and the payload's choice must match it. An
+    /// unknown endpoint runs the fixed login-shell check first: a shell
+    /// Fleet cannot drive is refused with its setup step, a recognized one
+    /// is recorded on the endpoint, and unrecognized output leaves the
+    /// endpoint unknown with the payload's choice (Linux when absent), so
+    /// Linux behaviour does not change.
+    async fn inventory_guest_os(
+        &self,
+        payload: &InventoryPayload,
+        spec: &SshConnectionSpec,
+    ) -> Result<fleet_core::GuestOs, (&'static str, String)> {
+        let mismatch = |detail: String| {
+            let detail = detail
+                .strip_prefix("guest_os_mismatch: ")
+                .map_or_else(|| detail.clone(), str::to_owned);
+            ("guest_os_mismatch", detail)
+        };
+        let recorded = endpoint_guest_os(
+            self.machines.as_ref(),
+            &payload.machine_id,
+            &payload.endpoint_id,
+        )
+        .await
+        .map_err(|detail| ("collection_failed", detail))?;
+        if let Some(recorded) = recorded {
+            return fleet_application::machine_access::effective_guest_os(
+                payload.guest_os,
+                Some(recorded),
+            )
+            .map_err(mismatch);
+        }
+        let provider = self.provider.clone();
+        let limiter = self.limiter.clone();
+        let sniff_spec = spec.clone();
+        let sniff = tokio::task::spawn_blocking(move || {
+            fleet_provider_ssh::sniff_shell(
+                &provider,
+                &limiter,
+                &sniff_spec,
+                fleet_provider_ssh::SNIFF_DEADLINE,
+            )
+        })
+        .await
+        .map_err(|join_error| {
+            (
+                "collection_failed",
+                format!("the shell-check thread failed: {join_error}"),
+            )
+        })?
+        .map_err(|error| ("collection_failed", error.to_string()))?;
+        if let Some(refusal) = sniff.refusal() {
+            return Err((refusal.reason, refusal.detail));
+        }
+        let Some(detected) = sniff.guest_os() else {
+            return Ok(payload.guest_os.unwrap_or_default());
+        };
+        self.machines
+            .record_endpoint_os(&payload.endpoint_id, detected)
+            .await
+            .map_err(|failure| ("collection_failed", failure.to_string()))?;
+        fleet_application::machine_access::effective_guest_os(payload.guest_os, Some(detected))
+            .map_err(mismatch)
     }
 
     async fn execute_ssh(
@@ -612,6 +693,23 @@ pub(crate) async fn resolve_ssh_endpoint(
         verified,
         host.to_owned(),
     ))
+}
+
+/// The guest OS recorded on a machine's endpoint, `None` while unknown.
+pub(crate) async fn endpoint_guest_os(
+    machines: &dyn MachinePort,
+    machine_id: &str,
+    endpoint_id: &str,
+) -> Result<Option<fleet_core::GuestOs>, String> {
+    let machine = machines
+        .get(machine_id)
+        .await
+        .map_err(|failure| failure.to_string())?;
+    Ok(machine
+        .endpoints
+        .iter()
+        .find(|endpoint| endpoint.id == endpoint_id)
+        .and_then(|endpoint| endpoint.guest_os))
 }
 
 /// Convenience: the noop executor remains available for hosts that do not

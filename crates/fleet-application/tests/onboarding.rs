@@ -16,7 +16,7 @@ use fleet_application::machine_setup::{MachineSetup, MachineSetupPort, SetupFoll
 use fleet_application::onboarding::{
     DraftEndpoint, DraftStage, HostKeyStage, NewDraft, OnboardAuth, OnboardHostKey,
     OnboardTrustPort, Onboarding, OnboardingDraft, OnboardingPort, OnboardingUseCaseError,
-    endpoint_reference_matches, profile_hint,
+    ShellCheck, endpoint_reference_matches, profile_hint,
 };
 use fleet_application::operation::PortFailure;
 use fleet_core::{CapabilityFact, CapabilityStatus, EndpointKind, Timestamp};
@@ -143,6 +143,7 @@ impl OnboardingPort for FakeDrafts {
     async fn create(&self, draft: &NewDraft) -> Result<OnboardingDraft, PortFailure> {
         let now = fleet_core::SystemClock::now_unix_millis();
         let created = OnboardingDraft {
+            shell_check: None,
             id: format!("draft-{}", self.drafts.lock().unwrap().len() + 1),
             endpoint: draft.endpoint.clone(),
             auth: draft.auth.clone(),
@@ -244,6 +245,7 @@ fn machine_record(id: &str, reference: &str) -> Machine {
         name: id.to_owned(),
         description: String::new(),
         endpoints: vec![Endpoint {
+            guest_os: None,
             id: format!("{id}-endpoint"),
             kind: EndpointKind::Ssh,
             reference: reference.to_owned(),
@@ -271,6 +273,7 @@ impl MachinePort for FakeMachines {
                 .iter()
                 .enumerate()
                 .map(|(index, new)| Endpoint {
+                    guest_os: None,
                     id: format!("{}-endpoint-{index}", registration.name),
                     kind: new.kind,
                     reference: new.reference.clone(),
@@ -395,6 +398,23 @@ impl MachinePort for FakeMachines {
         _machine_id: &str,
     ) -> Result<Option<u64>, PortFailure> {
         Ok(None)
+    }
+
+    async fn record_endpoint_os(
+        &self,
+        endpoint_id: &str,
+        guest_os: fleet_core::GuestOs,
+    ) -> Result<(), PortFailure> {
+        let mut machines = self.machines.lock().unwrap();
+        let endpoint = machines
+            .iter_mut()
+            .flat_map(|machine| machine.endpoints.iter_mut())
+            .find(|endpoint| endpoint.id == endpoint_id)
+            .ok_or_else(|| PortFailure::NotFound {
+                what: format!("endpoint {endpoint_id:?}"),
+            })?;
+        endpoint.guest_os = Some(guest_os);
+        Ok(())
     }
 }
 
@@ -710,6 +730,92 @@ async fn add_registers_the_machine_and_ingests_the_reviewed_facts() {
     assert_eq!(snapshots[0].3, NOW - 1_000);
     // The draft is gone: the defined cleanup.
     assert!(fixture.drafts.get_raw(&draft.id).is_none());
+}
+
+fn shell_check(shell: &str, guest_os: Option<fleet_core::GuestOs>) -> ShellCheck {
+    ShellCheck {
+        shell: shell.to_owned(),
+        guest_os,
+        refusal_reason: None,
+        refusal_detail: None,
+        at: NOW - 500,
+    }
+}
+
+#[tokio::test]
+async fn add_records_the_detected_guest_os_on_the_new_endpoint() {
+    let fixture = compose(FakeMachines::default());
+    let id = ready_draft(&fixture).await;
+    fixture.drafts.mutate(&id, |draft| {
+        draft.shell_check = Some(shell_check(
+            "windows_powershell",
+            Some(fleet_core::GuestOs::Windows),
+        ));
+    });
+    let added = fixture
+        .onboarding
+        .add(&AllowAll, &principal(), &id, NOW)
+        .await
+        .unwrap();
+    assert_eq!(
+        added.machine.endpoints[0].guest_os,
+        Some(fleet_core::GuestOs::Windows),
+        "the read model shows the endpoint as Windows"
+    );
+    // The recording is authorized and audited like any endpoint mutation.
+    let events = fixture.audit.events.lock().unwrap();
+    assert!(
+        events.iter().any(|event| {
+            let entries: Vec<_> = event.metadata.entries().collect();
+            entries.contains(&("event", "endpoint_os_recorded"))
+                && entries.contains(&("guestOs", "windows"))
+        }),
+        "{events:?}"
+    );
+}
+
+#[tokio::test]
+async fn add_leaves_the_endpoint_unknown_without_a_recognized_shell() {
+    for check in [None, Some(shell_check("unrecognized", None))] {
+        let fixture = compose(FakeMachines::default());
+        let id = ready_draft(&fixture).await;
+        fixture
+            .drafts
+            .mutate(&id, |draft| draft.shell_check = check.clone());
+        let added = fixture
+            .onboarding
+            .add(&AllowAll, &principal(), &id, NOW)
+            .await
+            .unwrap();
+        assert_eq!(added.machine.endpoints[0].guest_os, None, "{check:?}");
+    }
+}
+
+#[tokio::test]
+async fn add_refuses_a_draft_whose_shell_was_refused() {
+    let fixture = compose(FakeMachines::default());
+    let id = ready_draft(&fixture).await;
+    fixture.drafts.mutate(&id, |draft| {
+        draft.shell_check = Some(ShellCheck {
+            refusal_reason: Some("unsupported_shell".to_owned()),
+            refusal_detail: Some(
+                "the endpoint's login shell is cmd.exe; set the OpenSSH DefaultShell".to_owned(),
+            ),
+            ..shell_check("cmd", None)
+        });
+    });
+    let refused = fixture
+        .onboarding
+        .add(&AllowAll, &principal(), &id, NOW)
+        .await
+        .unwrap_err();
+    let OnboardingUseCaseError::Conflict { detail } = refused else {
+        panic!("a refused shell is a conflict: {refused:?}");
+    };
+    assert!(detail.starts_with("unsupported_shell:"), "{detail}");
+    assert!(detail.contains("DefaultShell"), "{detail}");
+    assert!(fixture.machines.machines.lock().unwrap().is_empty());
+    assert!(fixture.drafts.get_raw(&id).is_some(), "the draft is kept");
 }
 
 #[tokio::test]

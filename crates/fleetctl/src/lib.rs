@@ -8891,9 +8891,10 @@ fn render_onboarding(value: Option<&Value>) -> String {
         )];
         for endpoint in machine["endpoints"].as_array().into_iter().flatten() {
             lines.push(format!(
-                "  endpoint: {} {}",
+                "  endpoint: {} {}{}",
                 endpoint["kind"].as_str().unwrap_or("-"),
-                endpoint["reference"].as_str().unwrap_or("-")
+                endpoint["reference"].as_str().unwrap_or("-"),
+                endpoint_os_suffix(endpoint)
             ));
         }
         match value["duplicates"].as_array() {
@@ -9755,6 +9756,28 @@ fn render_tailnet(value: Option<&Value>) -> String {
     lines.join("\n")
 }
 
+/// ` (windows)` when the endpoint's guest OS was recorded (ADR 0021); empty
+/// while unknown, so output for existing endpoints does not change.
+fn endpoint_os_suffix(endpoint: &Value) -> String {
+    endpoint["guestOs"]
+        .as_str()
+        .map(|os| format!(" ({os})"))
+        .unwrap_or_default()
+}
+
+/// The draft's login-shell check (ADR 0021) as one line.
+fn shell_check_line(check: &Value) -> String {
+    let shell = check["shell"].as_str().unwrap_or("-");
+    match (check["guestOs"].as_str(), check["refusalReason"].as_str()) {
+        (_, Some(reason)) => format!(
+            "shell: {shell}, refused: {reason} ({})",
+            check["refusalDetail"].as_str().unwrap_or("-")
+        ),
+        (Some(os), None) => format!("shell: {shell} (guest OS {os})"),
+        (None, None) => format!("shell: {shell} (guest OS unknown)"),
+    }
+}
+
 fn draft_detail(draft: &Value) -> String {
     let mut lines = Vec::new();
     for key in ["id", "name", "description", "stage", "hostKeyStage"] {
@@ -9812,6 +9835,11 @@ fn draft_detail(draft: &Value) -> String {
                 .map(|detail| format!(" ({detail})"))
                 .unwrap_or_default()
         ));
+    }
+    if let Some(check) = draft.get("shellCheck")
+        && !check.is_null()
+    {
+        lines.push(shell_check_line(check));
     }
     if let Some(hint) = draft.get("profileHint")
         && !hint.is_null()
@@ -9916,9 +9944,10 @@ fn machine_detail(machine: &Value) -> String {
                 .iter()
                 .map(|item| match (key, item) {
                     ("endpoints", endpoint) => format!(
-                        "  {} {}",
+                        "  {} {}{}",
                         endpoint["kind"].as_str().unwrap_or("-"),
-                        endpoint["reference"].as_str().unwrap_or("-")
+                        endpoint["reference"].as_str().unwrap_or("-"),
+                        endpoint_os_suffix(endpoint)
                     ),
                     (_, tag) => format!("  {}", tag.as_str().unwrap_or("-")),
                 })

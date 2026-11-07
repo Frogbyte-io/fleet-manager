@@ -14,7 +14,7 @@ use fleet_application::authz::{
 };
 use fleet_application::lab::LabUseCaseError;
 use fleet_application::lab_artifacts::ArtifactPolicy;
-use fleet_application::machine::{NewEndpoint, RegisterMachine};
+use fleet_application::machine::{MachinePort as _, NewEndpoint, RegisterMachine};
 use fleet_application::machine_access::{
     AccessTarget, EndpointAuth, ExecCommand, ExecRequest, MachineAccess, PutRequestTarget,
 };
@@ -203,7 +203,7 @@ impl World {
             machine_id: &self.machine_id,
             endpoint_id: None,
             auth: None,
-            guest_os: GuestOs::Linux,
+            guest_os: Some(GuestOs::Linux),
         }
     }
 
@@ -294,6 +294,71 @@ async fn a_stored_key_runs_a_command_and_leaves_no_key_file() {
     assert_eq!(result["exitCode"], 0);
     assert_eq!(result["stdout"], "from-the-machine\n");
     assert_eq!(world.key_files(), 0, "the key file outlived the session");
+}
+
+/// ADR 0021 decision 4: once an endpoint's OS is recorded, the caller's
+/// guest OS is a check. Absent means the recorded OS; a contradiction is
+/// refused before anything is queued. An unknown endpoint keeps choosing.
+#[tokio::test]
+async fn a_recorded_endpoint_os_is_used_and_checked() {
+    let world = World::new().await;
+    world.use_stored_key_by_default().await;
+    let machines = MachineRepository::new(world.pool.clone());
+    let request = |guest_os: Option<GuestOs>| ExecRequest {
+        target: AccessTarget {
+            guest_os,
+            ..world.target()
+        },
+        command: ExecCommand::Script("exit 0".to_owned()),
+        timeout_seconds: Some(15),
+        idempotency_key: None,
+    };
+    let queued_os = |new: &fleet_application::operation::NewOperation| {
+        let payload: serde_json::Value =
+            serde_json::from_str(new.payload_json.as_deref().unwrap()).unwrap();
+        payload["guestOs"].as_str().unwrap().to_owned()
+    };
+
+    // Unknown: the caller chooses, and absent is Linux, as before.
+    for (chosen, expected) in [
+        (None, "linux"),
+        (Some(GuestOs::Windows), "windows"),
+        (Some(GuestOs::Linux), "linux"),
+    ] {
+        let new = world
+            .access
+            .request_exec(&fleet_auth::LanAllowAllAuthorizer, &lan(), &request(chosen))
+            .await
+            .unwrap();
+        assert_eq!(queued_os(&new), expected, "{chosen:?}");
+    }
+
+    // Recorded as Windows: absent takes it, a match passes, Linux is refused.
+    machines
+        .record_endpoint_os(&world.endpoint_id, GuestOs::Windows)
+        .await
+        .unwrap();
+    for chosen in [None, Some(GuestOs::Windows)] {
+        let new = world
+            .access
+            .request_exec(&fleet_auth::LanAllowAllAuthorizer, &lan(), &request(chosen))
+            .await
+            .unwrap();
+        assert_eq!(queued_os(&new), "windows", "{chosen:?}");
+    }
+    let refused = world
+        .access
+        .request_exec(
+            &fleet_auth::LanAllowAllAuthorizer,
+            &lan(),
+            &request(Some(GuestOs::Linux)),
+        )
+        .await
+        .unwrap_err();
+    let LabUseCaseError::Conflict { detail } = refused else {
+        panic!("a contradicting guest OS is a conflict: {refused:?}");
+    };
+    assert!(detail.starts_with("guest_os_mismatch:"), "{detail}");
 }
 
 #[tokio::test]
@@ -892,7 +957,7 @@ fn request<'a>(world: &'a World, auth: Option<&'a EndpointAuth>) -> ExecRequest<
             machine_id: &world.machine_id,
             endpoint_id: None,
             auth,
-            guest_os: GuestOs::Linux,
+            guest_os: Some(GuestOs::Linux),
         },
         command: ExecCommand::Script("true".to_owned()),
         timeout_seconds: Some(10),

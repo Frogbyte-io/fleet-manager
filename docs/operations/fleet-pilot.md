@@ -7,7 +7,7 @@ Examples use placeholders: the controller is `controller.example.ts.net`, the pi
 ## Scope
 
 - **In scope:** Linux x86_64 Debian or Ubuntu machines, the primary target in the [supported platform baseline](../PLAN.md#supported-platform-baseline).
-- **Out of scope:** Windows workstations (milestone M12, epic [#606](https://github.com/Frogbyte-io/fleet-manager/issues/606)), macOS (deferred), and Linux aarch64 (deferred).
+- **Out of scope:** Windows workstations (milestone M12, epic [#606](https://github.com/Frogbyte-io/fleet-manager/issues/606); onboarding and inventory setup in [windows-workstations.md](windows-workstations.md)), macOS (deferred), and Linux aarch64 (deferred).
 - **Few machines, all yours.** Enroll only machines whose compromise you could accept. The [security section](#restrict-access-first) explains why.
 
 ## Prerequisites

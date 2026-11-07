@@ -280,3 +280,126 @@ fn a_tool_reports_its_version_as_a_separate_fact() {
         "an unavailable tool has no version fact"
     );
 }
+
+/// A sanitized Windows probe stream (ADR 0021): the shared fact set plus the
+/// release, edition, session and shell facts. Placeholder values only.
+fn windows_stream(release: &str, edition: &str, architecture: &str, admin: &str) -> String {
+    [
+        line("host", "architecture", architecture, "known", 7_000),
+        line("host", "hostname", "WORKSTATION-01", "known", 7_000),
+        line("os", "kernel", "10.0.22631", "known", 7_000),
+        line("os", "family", "Windows", "known", 7_000),
+        line("os", "distribution", "windows", "known", 7_000),
+        line("os", "windows_release", release, "known", 7_000),
+        line("os", "distribution_version", release, "known", 7_000),
+        line(
+            "os",
+            "product_name",
+            "Microsoft Windows 11 Pro",
+            "known",
+            7_000,
+        ),
+        line("os", "product_type", "workstation", "known", 7_000),
+        line("os", "edition", edition, "known", 7_000),
+        line("os", "display_version", "23H2", "known", 7_000),
+        line("os", "build", "22631.4460", "known", 7_000),
+        line("session", "user", "developer", "known", 7_000),
+        line("session", "administrator", admin, "known", 7_000),
+        line(
+            "shell",
+            "powershell_version",
+            "5.1.22621.4391",
+            "known",
+            7_000,
+        ),
+        line("shell", "language_mode", "FullLanguage", "known", 7_000),
+        line(
+            "shell",
+            "default_shell",
+            "C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe",
+            "known",
+            7_000,
+        ),
+        line("tool", "git", "", "known", 7_000),
+        line(
+            "tool-version",
+            "git",
+            "git version 2.47.1.windows.1",
+            "known",
+            7_000,
+        ),
+        line("tool", "claude", "", "known", 7_000),
+        line("tool-version", "claude", "", "known", 7_000),
+        line("tool", "docker", "", "unavailable", 7_000),
+        line("tool", "skills-manager-cli", "", "unavailable", 7_000),
+    ]
+    .join("\r\n")
+}
+
+fn value_of<'a>(facts: &'a [fleet_core::CapabilityFact], namespace: &str, name: &str) -> &'a str {
+    facts
+        .iter()
+        .find(|fact| fact.namespace == namespace && fact.name == name)
+        .and_then(|fact| fact.value.as_deref())
+        .unwrap_or_else(|| panic!("no {namespace}/{name}"))
+}
+
+#[test]
+fn a_windows_11_workstation_parses_into_facts_and_is_supported() {
+    let now = SystemTime::UNIX_EPOCH + Duration::from_secs(60);
+    let stdout = windows_stream("11", "Professional", "x86_64", "false");
+    let facts = parse_probe_output(&stdout, now);
+    // Every line parses (CRLF included), plus the derived support tier.
+    assert_eq!(facts.len(), stdout.lines().count() + 1);
+    assert_eq!(value_of(&facts, "os", "family"), "Windows");
+    assert_eq!(value_of(&facts, "os", "windows_release"), "11");
+    assert_eq!(value_of(&facts, "os", "edition"), "Professional");
+    assert_eq!(value_of(&facts, "host", "architecture"), "x86_64");
+    assert_eq!(value_of(&facts, "host", "hostname"), "WORKSTATION-01");
+    assert_eq!(value_of(&facts, "session", "user"), "developer");
+    assert_eq!(value_of(&facts, "session", "administrator"), "false");
+    assert_eq!(value_of(&facts, "shell", "language_mode"), "FullLanguage");
+    assert_eq!(
+        value_of(&facts, "tool-version", "git"),
+        "git version 2.47.1.windows.1"
+    );
+    assert_eq!(value_of(&facts, "os", "support"), "supported");
+    let docker = facts.iter().find(|fact| fact.name == "docker").unwrap();
+    assert_eq!(docker.status, fleet_core::CapabilityStatus::Unavailable);
+}
+
+#[test]
+fn windows_10_home_and_arm64_are_flagged_untested_not_refused() {
+    let now = SystemTime::UNIX_EPOCH + Duration::from_secs(60);
+    for (release, edition, architecture) in [
+        ("10", "Professional", "x86_64"),
+        ("11", "Core", "x86_64"),
+        ("11", "Enterprise", "aarch64"),
+    ] {
+        let facts =
+            parse_probe_output(&windows_stream(release, edition, architecture, "true"), now);
+        assert_eq!(
+            value_of(&facts, "os", "support"),
+            "untested",
+            "{release} {edition} {architecture}"
+        );
+        // An administrator session is reported, as a fact, not a refusal.
+        assert_eq!(value_of(&facts, "session", "administrator"), "true");
+    }
+}
+
+#[test]
+fn no_support_tier_is_invented_without_a_windows_release() {
+    let now = SystemTime::UNIX_EPOCH + Duration::from_secs(60);
+    // A Linux stream, and a Windows stream whose release query failed.
+    let linux = line("os", "family", "Linux", "known", 1_000);
+    let windows = [
+        line("os", "family", "Windows", "known", 1_000),
+        line("os", "windows_release", "", "unavailable", 1_000),
+    ]
+    .join("\n");
+    for stdout in [linux, windows] {
+        let facts = parse_probe_output(&stdout, now);
+        assert!(facts.iter().all(|fact| fact.name != "support"), "{facts:?}");
+    }
+}

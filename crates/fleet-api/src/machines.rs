@@ -96,6 +96,9 @@ pub struct EndpointDto {
     /// The reference, e.g. `***@host:port` for SSH when redacted, or the
     /// node id for fleetd. Never carries a secret.
     pub reference: String,
+    /// The guest OS detected on this SSH endpoint at onboarding or
+    /// inventory, `linux` or `windows`; null while unknown (ADR 0021).
+    pub guest_os: Option<String>,
 }
 
 /// One capability fact as the read model displays it: the recorded status
@@ -197,6 +200,7 @@ impl From<MachineView> for MachineDto {
                     id: endpoint.id,
                     kind: endpoint.kind.id().to_owned(),
                     reference: endpoint.reference,
+                    guest_os: endpoint.guest_os.map(|os| os.id().to_owned()),
                 })
                 .collect(),
             tags: view.tags,

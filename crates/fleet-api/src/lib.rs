@@ -194,6 +194,7 @@ pub const API_BASE_PATH: &str = "/api/v1";
         onboarding::OnboardHostKeyDto,
         onboarding::OnboardingDraftDetailDto,
         onboarding::OnboardingDraftDto,
+        onboarding::ShellCheckDto,
         onboarding::TestOutcomeDto,
         system::SystemInfo,
         tailnet::ConfigureTailnetRequest,

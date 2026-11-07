@@ -204,6 +204,12 @@ export interface CapabilityFactDto {
  * from the use case unless the caller may read sensitive endpoint detail.
  */
 export interface EndpointDto {
+  /**
+     * The guest OS detected on this SSH endpoint at onboarding or
+     * inventory, `linux` or `windows`; null while unknown (ADR 0021).
+     * @nullable
+     */
+  guestOs?: string | null;
   /** The endpoint's identity. */
   id: string;
   /** How this endpoint reaches the machine: `ssh` or `fleetd`. */
@@ -3805,7 +3811,10 @@ export interface MachineCollectRequest {
      */
   endpointId?: string | null;
   /**
-     * The guest's OS, `linux` (default) or `windows`.
+     * The guest's OS, `linux` or `windows`. When the endpoint's OS was
+     * recorded at onboarding or inventory, absent means that OS and a
+     * different value is refused (`guest_os_mismatch`); otherwise absent
+     * means `linux`.
      * @nullable
      */
   guestOs?: string | null;
@@ -3931,7 +3940,10 @@ export interface MachineExecRequest {
      */
   endpointId?: string | null;
   /**
-     * The guest's OS, `linux` (default) or `windows`.
+     * The guest's OS, `linux` or `windows`. When the endpoint's OS was
+     * recorded at onboarding or inventory, absent means that OS and a
+     * different value is refused (`guest_os_mismatch`); otherwise absent
+     * means `linux`.
      * @nullable
      */
   guestOs?: string | null;
@@ -4480,6 +4492,39 @@ export interface TestOutcomeDto {
 }
 
 /**
+ * The login-shell check of a draft (ADR 0021): which shell answered, the
+ * guest OS the endpoint will be recorded as, and the refusal when Fleet
+ * cannot drive that shell.
+ */
+export interface ShellCheckDto {
+  /** When the check ran (epoch milliseconds). */
+  at: number;
+  /**
+     * The guest OS the endpoint is driven as, `linux` or `windows`; absent
+     * when the shell is refused or unrecognized (the endpoint stays
+     * unknown).
+     * @nullable
+     */
+  guestOs?: string | null;
+  /**
+     * The refusal detail, naming the setup step that fixes it.
+     * @nullable
+     */
+  refusalDetail?: string | null;
+  /**
+     * The refusal reason: `unsupported_shell`, `constrained_language` or
+     * `profile_output`. Add refuses a draft that carries one.
+     * @nullable
+     */
+  refusalReason?: string | null;
+  /**
+     * The detected login shell: `posix`, `windows_powershell`,
+     * `powershell_core`, `cmd` or `unrecognized`.
+     */
+  shell: string;
+}
+
+/**
  * A draft in full: everything the review step renders.
  */
 export interface OnboardingDraftDetailDto {
@@ -4524,6 +4569,7 @@ export interface OnboardingDraftDetailDto {
      * @nullable
      */
   profileHint?: string | null;
+  shellCheck?: null | ShellCheckDto;
   /** The derived stage: `untested`, `review`, or `ready`. */
   stage: string;
   /** Tags carried onto the machine. */
@@ -9028,6 +9074,7 @@ export type ResourceOnboardingDraftDetailDtoData = {
      * @nullable
      */
   profileHint?: string | null;
+  shellCheck?: null | ShellCheckDto;
   /** The derived stage: `untested`, `review`, or `ready`. */
   stage: string;
   /** Tags carried onto the machine. */
@@ -11747,7 +11794,7 @@ overwrite?: boolean;
  */
 endpointId?: string;
 /**
- * `linux` (default) or `windows`.
+ * `linux` or `windows`; absent means the endpoint's recorded OS, else `linux`. A value that contradicts a recorded OS is refused.
  */
 guestOs?: string;
 /**

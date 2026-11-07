@@ -97,13 +97,15 @@ pub(crate) fn access_or_error(
 fn parse_guest_os(
     text: Option<&str>,
     correlation_id: CorrelationId,
-) -> Result<GuestOs, ApiErrorResponse> {
-    match text {
-        None => Ok(GuestOs::Linux),
-        Some(id) => GuestOs::from_id(id).map_err(|_| {
+) -> Result<Option<GuestOs>, ApiErrorResponse> {
+    // Absent stays absent: the use case checks a choice against the
+    // endpoint's recorded OS, or uses the recorded OS (ADR 0021).
+    text.map(|id| {
+        GuestOs::from_id(id).map_err(|_| {
             crate::machines::invalid_request("guestOs must be `linux` or `windows`", correlation_id)
-        }),
-    }
+        })
+    })
+    .transpose()
 }
 
 /// The body of `POST /machine-ssh-keys`.
@@ -358,7 +360,10 @@ pub struct MachineExecRequest {
     pub script: Option<String>,
     /// The deadline in seconds (1-900; default 60).
     pub timeout_seconds: Option<u64>,
-    /// The guest's OS, `linux` (default) or `windows`.
+    /// The guest's OS, `linux` or `windows`. When the endpoint's OS was
+    /// recorded at onboarding or inventory, absent means that OS and a
+    /// different value is refused (`guest_os_mismatch`); otherwise absent
+    /// means `linux`.
     pub guest_os: Option<String>,
 }
 
@@ -463,7 +468,10 @@ pub struct MachineCollectRequest {
     /// characters (a Windows guest takes drive-absolute paths). Each file
     /// must fit the controller's artifact size cap.
     pub paths: Vec<String>,
-    /// The guest's OS, `linux` (default) or `windows`.
+    /// The guest's OS, `linux` or `windows`. When the endpoint's OS was
+    /// recorded at onboarding or inventory, absent means that OS and a
+    /// different value is refused (`guest_os_mismatch`); otherwise absent
+    /// means `linux`.
     pub guest_os: Option<String>,
 }
 
@@ -558,7 +566,10 @@ pub struct PutMachineFileParams {
     pub overwrite: bool,
     /// The SSH endpoint; absent means the machine's only SSH endpoint.
     pub endpoint_id: Option<String>,
-    /// The guest's OS, `linux` (default) or `windows`.
+    /// The guest's OS, `linux` or `windows`. When the endpoint's OS was
+    /// recorded at onboarding or inventory, absent means that OS and a
+    /// different value is refused (`guest_os_mismatch`); otherwise absent
+    /// means `linux`.
     pub guest_os: Option<String>,
     /// An explicit auth kind (`agent`, `identityFile` or `secret`),
     /// overriding the endpoint's default.
@@ -611,7 +622,7 @@ fn explicit_auth(
         ("path" = String, Query, description = "The absolute guest path of the file to create."),
         ("overwrite" = Option<bool>, Query, description = "Replace an existing regular file at the path (default false)."),
         ("endpointId" = Option<String>, Query, description = "The SSH endpoint; absent means the machine's only SSH endpoint."),
-        ("guestOs" = Option<String>, Query, description = "`linux` (default) or `windows`."),
+        ("guestOs" = Option<String>, Query, description = "`linux` or `windows`; absent means the endpoint's recorded OS, else `linux`. A value that contradicts a recorded OS is refused."),
         ("authType" = Option<String>, Query, description = "An explicit auth kind: `agent`, `identityFile` or `secret`."),
         ("credential" = Option<String>, Query, description = "The secret reference, for `authType=secret`."),
         ("identityPath" = Option<String>, Query, description = "The identity file path, for `authType=identityFile`."),
@@ -728,7 +739,7 @@ struct QueuedPut {
     machine_id: String,
     endpoint_id: Option<String>,
     auth: Option<EndpointAuth>,
-    guest_os: GuestOs,
+    guest_os: Option<GuestOs>,
     guest_path: String,
     overwrite: bool,
     declared: Option<String>,

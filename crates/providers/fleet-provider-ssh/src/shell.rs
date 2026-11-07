@@ -375,6 +375,20 @@ pub(crate) fn spawn_session(
 ) -> Result<crate::key::SshChild, SshProviderError> {
     let shell = GuestShell::for_os(endpoint.guest_os)?;
     validate_metadata(metadata)?;
+    let (command_line, input) = shell.session_parts(watched, metadata, script, deadline);
+    spawn_fixed_command(provider, endpoint, &command_line, &input, deadline)
+}
+
+/// Starts `ssh` with one fixed remote command string and writes `input` to
+/// its stdin. `command_line` must be fixed text owned by this crate: the
+/// remote login shell parses it.
+pub(crate) fn spawn_fixed_command(
+    provider: &SshProvider,
+    endpoint: &SshConnectionSpec,
+    command_line: &str,
+    input: &[u8],
+    connect_timeout: Duration,
+) -> Result<crate::key::SshChild, SshProviderError> {
     let config_path = provider.write_config(&endpoint.auth)?;
     // The guard travels with the child: dropping the session removes the file.
     let key_file = match &endpoint.auth {
@@ -382,13 +396,15 @@ pub(crate) fn spawn_session(
         _ => None,
     };
 
-    let (command_line, input) = shell.session_parts(watched, metadata, script, deadline);
     let mut command = std::process::Command::new("ssh");
     command
         .arg("-F")
         .arg(&config_path)
         .arg("-o")
-        .arg(format!("ConnectTimeout={}", deadline.as_secs().max(1)))
+        .arg(format!(
+            "ConnectTimeout={}",
+            connect_timeout.as_secs().max(1)
+        ))
         .arg("-T")
         .arg("-p")
         .arg(endpoint.port.to_string());
@@ -406,7 +422,7 @@ pub(crate) fn spawn_session(
     }
     crate::add_ssh_destination(&mut command, endpoint);
     command
-        .arg(&command_line)
+        .arg(command_line)
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped());
@@ -419,7 +435,7 @@ pub(crate) fn spawn_session(
         tool: "ssh",
         detail: "the ssh process has no stdin".to_owned(),
     })?;
-    if let Err(error) = stdin.write_all(&input) {
+    if let Err(error) = stdin.write_all(input) {
         let _ = child.kill();
         let _ = child.wait();
         return Err(SshProviderError::Tool {
