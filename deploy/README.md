@@ -164,6 +164,25 @@ runs `--version` from a temporary directory, and only then replaces the
 installed copy, so a corrupt binary or one that cannot run on this machine
 never replaces a working one.
 
+The `SHA256SUMS` check is the baseline and needs nothing but a shell. A
+release binary also carries a signed build provenance attestation. The
+checksum trusts the release page it came from, since `SHA256SUMS` sits next
+to the binary; the attestation is signed separately, with a short-lived
+certificate that names the workflow, the commit, and the run that built the
+file. When the [GitHub CLI](https://cli.github.com/) (`gh`) is installed, the
+release snippets also run `gh attestation verify` on the temporary download,
+and a failed verification stops the install. Without `gh`, they print that
+the check was skipped and install on the checksum alone. An installed `gh`
+must be 2.49 or newer (the first with `gh attestation`) and signed in
+(`gh auth login`); an older or signed-out `gh` fails the check, and nothing
+is installed.
+
+`--signer-workflow` and `--source-ref` narrow the check to the release
+workflow running on `main`; `--repo` alone would accept an attestation from
+any workflow in the repository. Only releases published after provenance was
+added carry an attestation: for an older one, such as `v0.1.0-482fd9c`, set
+`provenance=no` (`$provenance = $false` on Windows) and rely on the checksum.
+
 On Linux, from a release (`<tag>` is the release tag, for example
 `v0.1.0-1a2b3c4`; `uname -m` picks the platform):
 
@@ -171,6 +190,7 @@ On Linux, from a release (`<tag>` is the release tag, for example
 (
   set -eu
   base=https://github.com/Frogbyte-io/fleet-manager/releases/download/<tag>
+  provenance=yes
   asset="fleetctl-linux-$(uname -m)"
   tmp="$(mktemp -d)"
   trap 'rm -rf "$tmp"' EXIT
@@ -178,6 +198,13 @@ On Linux, from a release (`<tag>` is the release tag, for example
   curl -fsSLO "$base/$asset"
   curl -fsSLO "$base/SHA256SUMS"
   grep "  $asset\$" SHA256SUMS | sha256sum --check --strict -
+  if [ "$provenance" = yes ] && command -v gh >/dev/null 2>&1; then
+    gh attestation verify "$asset" --repo Frogbyte-io/fleet-manager \
+      --signer-workflow Frogbyte-io/fleet-manager/.github/workflows/release.yml \
+      --source-ref refs/heads/main
+  else
+    echo "Provenance check skipped; installing on the checksum alone." >&2
+  fi
   chmod 0755 "$asset"
   "./$asset" --version
   install -D -m 0755 "$asset" ~/.local/bin/fleetctl
@@ -215,10 +242,12 @@ controller image does not ship one):
   $base = 'https://github.com/Frogbyte-io/fleet-manager/releases/download/<tag>'
   $binaryUrl = "$base/fleetctl-windows-x86_64.exe"
   $sumsUrl = "$base/SHA256SUMS"
-  # From a controller instead:
+  $provenance = $true
+  # From a controller instead (its copy has no attestation):
   # $url = 'http://controller.example.ts.net:8080'
   # $binaryUrl = "$url/downloads/fleetctl/windows-x86_64"
   # $sumsUrl = "$binaryUrl.sha256"
+  # $provenance = $false
   $dir = "$env:LOCALAPPDATA\Programs\fleet"
   $tmp = Join-Path ([IO.Path]::GetTempPath()) 'fleetctl-download.exe'
   $sums = Join-Path ([IO.Path]::GetTempPath()) 'fleetctl-download.sha256'
@@ -233,6 +262,14 @@ controller image does not ship one):
     Remove-Item $tmp
     throw 'fleetctl checksum mismatch; nothing was installed'
   }
+  if ($provenance -and (Get-Command gh -ErrorAction SilentlyContinue)) {
+    gh attestation verify $tmp --repo Frogbyte-io/fleet-manager `
+      --signer-workflow Frogbyte-io/fleet-manager/.github/workflows/release.yml `
+      --source-ref refs/heads/main
+    if ($LASTEXITCODE -ne 0) { Remove-Item $tmp; throw 'fleetctl provenance check failed; nothing was installed' }
+  } else {
+    Write-Warning 'Provenance check skipped; installing on the checksum alone.'
+  }
   & $tmp --version
   if ($LASTEXITCODE -ne 0) { Remove-Item $tmp; throw 'fleetctl did not run; nothing was installed' }
   New-Item -ItemType Directory -Force $dir | Out-Null
@@ -240,39 +277,7 @@ controller image does not ship one):
 }
 ```
 
-Then add that directory to your user `PATH`.
-
-**Verify the build provenance of a release binary.** The `SHA256SUMS` check
-above is the baseline and needs nothing but a shell. A release binary also
-carries a signed build provenance attestation. The checksum trusts the
-release page it came from, since `SHA256SUMS` sits next to the binary; the
-attestation is signed separately, with a short-lived certificate that names
-the workflow, the commit, and the run that built the file. With the
-[GitHub CLI](https://cli.github.com/) installed and signed in, check the
-downloaded file before you install it (it is matched by its digest, so an
-installed, renamed copy checks the same way):
-
-```sh
-gh attestation verify fleetctl-linux-x86_64 --repo Frogbyte-io/fleet-manager \
-  --signer-workflow Frogbyte-io/fleet-manager/.github/workflows/release.yml \
-  --source-ref refs/heads/main
-```
-
-```powershell
-gh attestation verify "$env:LOCALAPPDATA\Programs\fleet\fleetctl.exe" --repo Frogbyte-io/fleet-manager `
-  --signer-workflow Frogbyte-io/fleet-manager/.github/workflows/release.yml `
-  --source-ref refs/heads/main
-```
-
-It must print `Verification succeeded!`. `--repo` alone accepts an
-attestation from any workflow in the repository; `--signer-workflow` and
-`--source-ref` narrow it to the release workflow running on `main`. Releases
-published before provenance was added (such as `v0.1.0-482fd9c`) have no
-attestation, and the command reports that none was found. A binary from a
-controller's `/downloads` route has no attestation either: the controller
-image builds its own copy.
-
-On Windows, `fleetctl status`
+Then add that directory to your user `PATH`. On Windows, `fleetctl status`
 without `--url` reports that the local `fleetd` surface is unavailable; every
 other command talks to the controller.
 
