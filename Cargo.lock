@@ -1055,6 +1055,7 @@ dependencies = [
  "sqlx",
  "tempfile",
  "tokio",
+ "toml",
  "tungstenite 0.28.0",
  "uuid",
  "yaml_serde",

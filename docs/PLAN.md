@@ -315,6 +315,8 @@ Exit gate: a human or agent can request a disposable Linux environment from a ma
 
 Status: in progress (2026-10-09). The Release QA Linux slice below has landed on `dev`: scoped delegated Lab credentials ([ADR 0011](adr/0011-delegated-lab-credentials.md), #392/#435), retry-safe lease creation and lease lookup (#395/#432), `lab put` (#393/#434), and detached long-running exec (#394/#438). The rest of M8 (first-run bootstrap, web sessions, refusing anonymous LAN administration) has not started, so the exit gate is not met.
 
+Authenticated deployment (bootstrap, sessions, CLI and agent tokens, roles, refusing anonymous administration) is proposed in [ADR 0020](adr/0020-authenticated-deployment.md) (#602), with implementation planned across #603, #604, #605 and the follow-ups it lists; none of it has started.
+
 Outcome: when Fleet must operate outside the initial fully trusted LAN, anonymous administration can be replaced by authenticated, least-privileged human, agent, and CI identities without changing application use cases.
 
 - First-run controller bootstrap, web session and CLI credential flows, plus delegated short-lived agent/CI credentials scoped by project, node/tag, action, resource limits, TTL, and owner.

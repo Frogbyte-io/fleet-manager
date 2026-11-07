@@ -8961,6 +8961,212 @@
         }
       }
     },
+    "/api/v1/machines/{machineId}/remove": {
+      "post": {
+        "tags": [
+          "machines"
+        ],
+        "summary": "Removes a reviewed machine. Every hold is checked again; then, when\nasked, the fleetd uninstall runs over SSH (`uninstall.sh --purge`) and a\nfailure leaves the machine registered; then the record and every fact\nabout it are deleted, the keys bound to it are revoked, and the pinned\nhost keys of hosts nobody else uses are removed. The audit trail,\nfinished operations and collected files stay. Without an uninstall,\nnothing on the machine is touched. Audited.",
+        "description": "# Errors\n\nReturns the public error envelope on refusal, a review token that does\nnot match, a hold, or a failed uninstall.",
+        "operationId": "removeMachine",
+        "parameters": [
+          {
+            "name": "machineId",
+            "in": "path",
+            "description": "The machine's identity.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RemoveMachineRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "The machine is removed.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Resource_MachineRemovedDto"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The body is malformed, or the review token does not match the machine as it is now.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The caller may not delete machines (`machine.delete`).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "The machine does not exist.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Refused: `machine_removal_blocked` (a Lab provision, persistent marker, USB reservation, unfinished operation, or stored secrets a controller without its secret store cannot revoke; the message says what to do) `conflict` (a hold appeared after the review, or during the uninstall, and the guarded delete refused it, or the recorded install layout is not safe to uninstall with; nothing was deleted), or `machine_removal_busy` (another removal of the machine is running, or a hold came and went during the delete; retry).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "A backend port failed.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "The fleetd uninstall failed (`fleetd_uninstall_failed`); the machine was not removed.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Machine removal, or the uninstall, is not wired.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/machines/{machineId}/remove/review": {
+      "post": {
+        "tags": [
+          "machines"
+        ],
+        "summary": "Reviews removing a machine: what is deleted (endpoints, facts, node\nidentity, project checkouts, Skills Manager snapshot, recorded skill\ninstalls, guest link), which pinned host keys are removed and which stay\nbecause another machine or an onboarding draft shares the host, the\nfleetd uninstall when asked for, and every record that refuses the\nremoval now (a Lab provision, a persistent marker, a USB reservation, an\nunfinished operation), each with what to do. Nothing is written.",
+        "description": "# Errors\n\nReturns the public error envelope on refusal, an unknown machine, or an\nuninstall endpoint that is not one of the machine's SSH endpoints.",
+        "operationId": "reviewMachineRemoval",
+        "parameters": [
+          {
+            "name": "machineId",
+            "in": "path",
+            "description": "The machine's identity.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ReviewMachineRemovalRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "The review; present its token to the removal. The token is null while blockers remain.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Resource_MachineRemovalReviewDto"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The body is malformed, or the uninstall endpoint is not one of the machine's SSH endpoints.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The caller may not delete machines (`machine.delete`).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "The machine does not exist.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "A backend port failed.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Machine removal, or the uninstall, is not wired (`machine_removal_unavailable`, `machine_uninstall_unavailable`).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/machines/{machineId}/skills": {
       "get": {
         "tags": [
@@ -20708,6 +20914,244 @@
           }
         }
       },
+      "MachineRemovalReviewDto": {
+        "type": "object",
+        "description": "What a removal would do, and the token that binds the removal to it.",
+        "required": [
+          "machineId",
+          "name",
+          "endpoints",
+          "unpinHosts",
+          "keptHosts",
+          "footprint",
+          "warnings",
+          "blockers"
+        ],
+        "properties": {
+          "blockers": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/RemovalBlockerDto"
+            },
+            "description": "What refuses the removal now, each with what to do: a Lab provision,\na persistent marker, a USB reservation, an unfinished operation, or\n(on a controller without its secret store) stored secrets it could\nnot revoke."
+          },
+          "endpoints": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/RemovalEndpointDto"
+            },
+            "description": "Its endpoints."
+          },
+          "footprint": {
+            "$ref": "#/components/schemas/RemovalFootprintDto",
+            "description": "What is deleted, and the collected files that are kept."
+          },
+          "keptHosts": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "The hosts whose pins stay because another machine or an onboarding\ndraft uses them."
+          },
+          "machineId": {
+            "type": "string",
+            "description": "The machine."
+          },
+          "name": {
+            "type": "string",
+            "description": "Its name."
+          },
+          "nodeIdentity": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The node identity's status (`active` or `revoked`), when it has one;\nthe identity is deleted with the machine."
+          },
+          "reviewToken": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The token the removal must present; null while `blockers` is not\nempty."
+          },
+          "uninstall": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/MachineUninstallPlanDto",
+                "description": "The fleetd uninstall that runs first, with its resolved\nauthentication and layout, when asked."
+              }
+            ]
+          },
+          "unpinHosts": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "The hosts whose pinned SSH host keys are removed."
+          },
+          "warnings": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "What to know before confirming, for example that a stored Windows\nadministrator password is destroyed."
+          }
+        }
+      },
+      "MachineRemovedDto": {
+        "type": "object",
+        "description": "What a removal did.",
+        "required": [
+          "machineId",
+          "name",
+          "removed",
+          "uninstalled",
+          "nodeIdentityRemoved",
+          "sessionClosed",
+          "secretsRevoked",
+          "unpinnedHosts",
+          "keptHosts",
+          "unpinFailedHosts",
+          "auditGaps",
+          "footprint"
+        ],
+        "properties": {
+          "auditGaps": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "The audit events that could not be written; the removal went on and\nthe controller log has the cause."
+          },
+          "footprint": {
+            "$ref": "#/components/schemas/RemovalFootprintDto",
+            "description": "What was deleted."
+          },
+          "keptHosts": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "The hosts whose pins stayed because they are shared, including hosts\nanother machine or draft started using during the removal."
+          },
+          "machineId": {
+            "type": "string",
+            "description": "The removed machine."
+          },
+          "name": {
+            "type": "string",
+            "description": "Its name."
+          },
+          "nodeIdentityRemoved": {
+            "type": "boolean",
+            "description": "Whether a node identity was deleted with the machine."
+          },
+          "removed": {
+            "type": "boolean",
+            "description": "Always true: the machine record is gone."
+          },
+          "secretRevocationError": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Why revoking the machine's stored secrets failed, when it did; the\nmachine is removed and the secrets must be deleted by hand."
+          },
+          "secretsRevoked": {
+            "type": "integer",
+            "format": "int64",
+            "description": "The stored secrets bound to the machine that were revoked.",
+            "minimum": 0
+          },
+          "sessionClosed": {
+            "type": "boolean",
+            "description": "Whether a live node gateway session was closed."
+          },
+          "uninstallSummary": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The uninstall's last line of output, when it ran."
+          },
+          "uninstalled": {
+            "type": "boolean",
+            "description": "Whether fleetd was uninstalled first."
+          },
+          "unpinFailedHosts": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "The hosts whose pins could not be removed; remove them from the\ncontroller's known-hosts file by hand."
+          },
+          "unpinnedHosts": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "The hosts whose pinned keys were removed."
+          }
+        }
+      },
+      "MachineUninstallDto": {
+        "type": "object",
+        "description": "The fleetd uninstall a removal runs first.",
+        "required": [
+          "endpointId"
+        ],
+        "properties": {
+          "auth": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/EndpointAuthDto",
+                "description": "How to authenticate. In a request, absent means the endpoint's stored\ndefault, or the controller's agent when it has none; a review answers\nthe resolved value."
+              }
+            ]
+          },
+          "endpointId": {
+            "type": "string",
+            "description": "The machine's SSH endpoint the uninstall runs over."
+          }
+        },
+        "additionalProperties": false
+      },
+      "MachineUninstallPlanDto": {
+        "type": "object",
+        "description": "The fleetd uninstall a removal will run, as the review resolved it.",
+        "required": [
+          "endpointId",
+          "auth",
+          "layout"
+        ],
+        "properties": {
+          "auth": {
+            "$ref": "#/components/schemas/EndpointAuthDto",
+            "description": "The authentication it uses."
+          },
+          "endpointId": {
+            "type": "string",
+            "description": "The SSH endpoint the uninstall runs over."
+          },
+          "layout": {
+            "type": "object",
+            "description": "The installer layout overrides (`FLEETD_BIN_DIR`, `FLEETD_UNIT_DIR`,\n`FLEETD_ENV_FILE`, `FLEETD_STATE_DIR`, `FLEETD_SERVICE`,\n`FLEETD_SYSTEMCTL`) of the machine's last successful fleetd install;\nempty for the default layout. The uninstall fails when no fleetd unit\nor binary is found in this layout.",
+            "additionalProperties": {
+              "type": "string"
+            },
+            "propertyNames": {
+              "type": "string"
+            }
+          }
+        }
+      },
       "MachineUsbDto": {
         "type": "object",
         "description": "What an attach or detach came to.",
@@ -26273,6 +26717,197 @@
           }
         }
       },
+      "RemovalBlockerDto": {
+        "type": "object",
+        "description": "Something that refuses the removal, and what to do about it.",
+        "required": [
+          "kind",
+          "id",
+          "state",
+          "detail"
+        ],
+        "properties": {
+          "detail": {
+            "type": "string",
+            "description": "The refusal and what to do."
+          },
+          "id": {
+            "type": "string",
+            "description": "The holding record."
+          },
+          "kind": {
+            "type": "string",
+            "description": "`lab_provision`, `persistent_marker`, `hardware_reservation` or\n`active_operation`."
+          },
+          "state": {
+            "type": "string",
+            "description": "Its state."
+          }
+        }
+      },
+      "RemovalEndpointDto": {
+        "type": "object",
+        "description": "One endpoint of the machine.",
+        "required": [
+          "id",
+          "kind"
+        ],
+        "properties": {
+          "host": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The SSH host, for an SSH endpoint."
+          },
+          "id": {
+            "type": "string",
+            "description": "The endpoint."
+          },
+          "kind": {
+            "type": "string",
+            "description": "`ssh` or `fleetd`."
+          }
+        }
+      },
+      "RemovalFootprintDto": {
+        "type": "object",
+        "description": "The records a removal deletes, and the collected files it keeps. The\nstored-secret counts are bound by the review token.",
+        "required": [
+          "endpoints",
+          "endpointAuth",
+          "endpointAuthSecrets",
+          "capabilities",
+          "inventorySnapshots",
+          "tagsAndGroups",
+          "nodeIdentity",
+          "nodeCredentials",
+          "projectCheckouts",
+          "skillsSnapshot",
+          "catalogSkillInstalls",
+          "guestLink",
+          "storedSshKeys",
+          "adminPasswords",
+          "collectedFilesKept"
+        ],
+        "properties": {
+          "adminPasswords": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Rotated Windows administrator passwords Fleet holds for this machine;\ndestroyed, so nobody can read them afterwards.",
+            "minimum": 0
+          },
+          "capabilities": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Capability facts.",
+            "minimum": 0
+          },
+          "catalogSkillInstalls": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Recorded catalog skill installs.",
+            "minimum": 0
+          },
+          "collectedFilesKept": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Collected files, kept until their retention pass.",
+            "minimum": 0
+          },
+          "endpointAuth": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Stored default endpoint authentication records.",
+            "minimum": 0
+          },
+          "endpointAuthSecrets": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Endpoints whose stored default authentication is a stored key.",
+            "minimum": 0
+          },
+          "endpoints": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Endpoints.",
+            "minimum": 0
+          },
+          "guestLink": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Confirmed Proxmox guest links (0 or 1).",
+            "minimum": 0
+          },
+          "inventorySnapshots": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Inventory snapshots.",
+            "minimum": 0
+          },
+          "nodeCredentials": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Node credentials, sessions, challenges and enrollment tokens.",
+            "minimum": 0
+          },
+          "nodeIdentity": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Node identity records (0 or 1).",
+            "minimum": 0
+          },
+          "projectCheckouts": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Project checkout observations.",
+            "minimum": 0
+          },
+          "skillsSnapshot": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Skills Manager snapshots (0 or 1).",
+            "minimum": 0
+          },
+          "storedSshKeys": {
+            "type": "integer",
+            "format": "int64",
+            "description": "SSH private keys Fleet holds for this machine; revoked.",
+            "minimum": 0
+          },
+          "tagsAndGroups": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Tag and group memberships.",
+            "minimum": 0
+          }
+        }
+      },
+      "RemoveMachineRequest": {
+        "type": "object",
+        "description": "What to remove, and the review it was reviewed in.",
+        "required": [
+          "reviewToken"
+        ],
+        "properties": {
+          "reviewToken": {
+            "type": "string",
+            "description": "The token the review answered."
+          },
+          "uninstall": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/MachineUninstallDto",
+                "description": "The same uninstall the review was asked for, when any."
+              }
+            ]
+          }
+        },
+        "additionalProperties": false
+      },
       "Resource_AbandonReviewDto": {
         "type": "object",
         "description": "A single resource.\n\nThe payload is nested under `data` so that later top-level fields are an\nadditive change rather than a breaking one.",
@@ -28625,6 +29260,208 @@
           }
         }
       },
+      "Resource_MachineRemovalReviewDto": {
+        "type": "object",
+        "description": "A single resource.\n\nThe payload is nested under `data` so that later top-level fields are an\nadditive change rather than a breaking one.",
+        "required": [
+          "data"
+        ],
+        "properties": {
+          "data": {
+            "type": "object",
+            "description": "What a removal would do, and the token that binds the removal to it.",
+            "required": [
+              "machineId",
+              "name",
+              "endpoints",
+              "unpinHosts",
+              "keptHosts",
+              "footprint",
+              "warnings",
+              "blockers"
+            ],
+            "properties": {
+              "blockers": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/components/schemas/RemovalBlockerDto"
+                },
+                "description": "What refuses the removal now, each with what to do: a Lab provision,\na persistent marker, a USB reservation, an unfinished operation, or\n(on a controller without its secret store) stored secrets it could\nnot revoke."
+              },
+              "endpoints": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/components/schemas/RemovalEndpointDto"
+                },
+                "description": "Its endpoints."
+              },
+              "footprint": {
+                "$ref": "#/components/schemas/RemovalFootprintDto",
+                "description": "What is deleted, and the collected files that are kept."
+              },
+              "keptHosts": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                },
+                "description": "The hosts whose pins stay because another machine or an onboarding\ndraft uses them."
+              },
+              "machineId": {
+                "type": "string",
+                "description": "The machine."
+              },
+              "name": {
+                "type": "string",
+                "description": "Its name."
+              },
+              "nodeIdentity": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "description": "The node identity's status (`active` or `revoked`), when it has one;\nthe identity is deleted with the machine."
+              },
+              "reviewToken": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "description": "The token the removal must present; null while `blockers` is not\nempty."
+              },
+              "uninstall": {
+                "oneOf": [
+                  {
+                    "type": "null"
+                  },
+                  {
+                    "$ref": "#/components/schemas/MachineUninstallPlanDto",
+                    "description": "The fleetd uninstall that runs first, with its resolved\nauthentication and layout, when asked."
+                  }
+                ]
+              },
+              "unpinHosts": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                },
+                "description": "The hosts whose pinned SSH host keys are removed."
+              },
+              "warnings": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                },
+                "description": "What to know before confirming, for example that a stored Windows\nadministrator password is destroyed."
+              }
+            }
+          }
+        }
+      },
+      "Resource_MachineRemovedDto": {
+        "type": "object",
+        "description": "A single resource.\n\nThe payload is nested under `data` so that later top-level fields are an\nadditive change rather than a breaking one.",
+        "required": [
+          "data"
+        ],
+        "properties": {
+          "data": {
+            "type": "object",
+            "description": "What a removal did.",
+            "required": [
+              "machineId",
+              "name",
+              "removed",
+              "uninstalled",
+              "nodeIdentityRemoved",
+              "sessionClosed",
+              "secretsRevoked",
+              "unpinnedHosts",
+              "keptHosts",
+              "unpinFailedHosts",
+              "auditGaps",
+              "footprint"
+            ],
+            "properties": {
+              "auditGaps": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                },
+                "description": "The audit events that could not be written; the removal went on and\nthe controller log has the cause."
+              },
+              "footprint": {
+                "$ref": "#/components/schemas/RemovalFootprintDto",
+                "description": "What was deleted."
+              },
+              "keptHosts": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                },
+                "description": "The hosts whose pins stayed because they are shared, including hosts\nanother machine or draft started using during the removal."
+              },
+              "machineId": {
+                "type": "string",
+                "description": "The removed machine."
+              },
+              "name": {
+                "type": "string",
+                "description": "Its name."
+              },
+              "nodeIdentityRemoved": {
+                "type": "boolean",
+                "description": "Whether a node identity was deleted with the machine."
+              },
+              "removed": {
+                "type": "boolean",
+                "description": "Always true: the machine record is gone."
+              },
+              "secretRevocationError": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "description": "Why revoking the machine's stored secrets failed, when it did; the\nmachine is removed and the secrets must be deleted by hand."
+              },
+              "secretsRevoked": {
+                "type": "integer",
+                "format": "int64",
+                "description": "The stored secrets bound to the machine that were revoked.",
+                "minimum": 0
+              },
+              "sessionClosed": {
+                "type": "boolean",
+                "description": "Whether a live node gateway session was closed."
+              },
+              "uninstallSummary": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "description": "The uninstall's last line of output, when it ran."
+              },
+              "uninstalled": {
+                "type": "boolean",
+                "description": "Whether fleetd was uninstalled first."
+              },
+              "unpinFailedHosts": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                },
+                "description": "The hosts whose pins could not be removed; remove them from the\ncontroller's known-hosts file by hand."
+              },
+              "unpinnedHosts": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                },
+                "description": "The hosts whose pinned keys were removed."
+              }
+            }
+          }
+        }
+      },
       "Resource_MachineUsbDto": {
         "type": "object",
         "description": "A single resource.\n\nThe payload is nested under `data` so that later top-level fields are an\nadditive change rather than a breaking one.",
@@ -30602,6 +31439,24 @@
             "description": "The machine to create: account, promoted image version, name, optional\nplacement and hardware, tags, description, `onboot`, `protection`\n(default on), the guest OS, the bootstrap login, the host-key trust,\nthe SSH credential choice (`generate`, `reference` or `publicKey`),\nan optional login user, the Windows options (administrator password\npolicy and activation) and the deadline. It holds references and\npublic keys only, never a secret value."
           }
         }
+      },
+      "ReviewMachineRemovalRequest": {
+        "type": "object",
+        "description": "What to review.",
+        "properties": {
+          "uninstall": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/MachineUninstallDto",
+                "description": "Run the fleetd uninstall over SSH before the removal. Without it,\nnothing on the machine is touched."
+              }
+            ]
+          }
+        },
+        "additionalProperties": false
       },
       "ReviewMachineUsbRequest": {
         "type": "object",

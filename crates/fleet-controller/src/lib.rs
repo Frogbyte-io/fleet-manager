@@ -38,6 +38,7 @@ pub mod lab_put_store;
 pub mod lab_ssh_keys;
 pub mod lab_sweeper;
 pub mod machine_access;
+pub mod machine_remove;
 pub mod machine_terminal;
 pub mod machine_usb;
 pub mod mise;
@@ -88,7 +89,8 @@ pub struct Settings {
     pub web_dist: PathBuf,
     /// The directory holding downloadable node artifacts; when set,
     /// `/downloads/fleetd/<file>` serves files under `<dir>/fleetd/` with
-    /// path containment. Unset in most tests.
+    /// path containment, and `/downloads/fleetctl/<platform>` serves the
+    /// `fleetctl` binaries under `<dir>/fleetctl/`. Unset in most tests.
     pub artifacts_dir: Option<PathBuf>,
 }
 
@@ -124,6 +126,10 @@ pub struct NodeServices {
     /// The site-template use cases (FM-1035); set with the lifecycle use
     /// cases, absent otherwise.
     pub site_templates: Option<Arc<fleet_application::site_templates::SiteTemplates>>,
+    /// Installer test mode (#616): the API accepts any absolute tool path
+    /// and the stub log in a `machine.install-fleetd`'s `installerEnv`.
+    /// Only hermetic install tests set it; the controller binary never does.
+    pub installer_test_tools: bool,
 }
 
 fn event_hub_for_services(
@@ -194,6 +200,7 @@ pub fn compose_node_services_with_events(
         coolify_lifecycle: None,
         coolify_settings: None,
         site_templates: None,
+        installer_test_tools: false,
         nodes,
         gateway,
         events,
@@ -398,6 +405,7 @@ fn api_state(
     lab: Option<Arc<fleet_application::lab::Lab>>,
     git_credentials: Option<Arc<dyn fleet_application::source::GitCredentialStore>>,
     events: Arc<fleet_application::events::EventHub>,
+    installer_test_tools: bool,
 ) -> fleet_api::operations::ApiState {
     // One grant book joins the credential resolver (which registers the
     // allow-list a request authenticated with) and the authorizer (which
@@ -450,8 +458,12 @@ fn api_state(
             persistent_bounds_from_env().unwrap_or_default(),
             Some(request_store.clone()),
         );
-        let operations =
-            std::sync::Arc::new(operations.with_brokered_kinds(action_registry.operation_kinds()));
+        let operations = operations.with_brokered_kinds(action_registry.operation_kinds());
+        let operations = std::sync::Arc::new(if installer_test_tools {
+            operations.with_installer_test_tools()
+        } else {
+            operations
+        });
         let requests = fleet_application::broker::Broker::new(
             request_store,
             action_registry,
@@ -726,6 +738,7 @@ fn build_router_for_caller(
         lab.cloned(),
         services.and_then(|services| services.git_credentials.clone()),
         events,
+        services.is_some_and(|services| services.installer_test_tools),
     ));
     let credentials = api_state.credentials.clone();
     let console_authorizer = api_state.authorizer.clone();
@@ -1373,6 +1386,76 @@ mod tailscale_identity_tests {
             .insert(ConnectInfo(SocketAddr::from(([127, 0, 0, 1], 5000))));
         let response = router.clone().oneshot(request).await.unwrap();
         assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn fleetctl_downloads_need_a_resolved_caller_like_fleetd() {
+        let web_dist = tempfile::tempdir().unwrap();
+        std::fs::write(web_dist.path().join("index.html"), "<html>fleet</html>").unwrap();
+        let artifacts = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(artifacts.path().join("fleetctl")).unwrap();
+        std::fs::write(
+            artifacts.path().join("fleetctl/fleetctl-linux-x86_64"),
+            b"fleetctl",
+        )
+        .unwrap();
+        let settings = Settings {
+            listen: "127.0.0.1:8080".parse().unwrap(),
+            tailscale_serve_listen: Some("127.0.0.1:8081".parse().unwrap()),
+            web_dist: web_dist.path().to_path_buf(),
+            artifacts_dir: Some(artifacts.path().to_path_buf()),
+        };
+        let router = build_tailscale_serve_router(
+            &settings,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            Arc::new(fleet_application::events::EventHub::new(8)),
+        );
+        let call = |uri: &'static str, login: Option<&'static str>| {
+            let router = router.clone();
+            async move {
+                let mut builder = Request::builder().uri(uri);
+                if let Some(login) = login {
+                    builder = builder.header("tailscale-user-login", login);
+                }
+                let mut request = builder.body(Body::empty()).unwrap();
+                request
+                    .extensions_mut()
+                    .insert(ConnectInfo(SocketAddr::from(([127, 0, 0, 1], 5000))));
+                router.oneshot(request).await.unwrap().status()
+            }
+        };
+
+        // Without an identity neither the binary, its digest, nor a probe
+        // for a missing platform is answered.
+        for uri in [
+            "/downloads/fleetctl/linux-x86_64",
+            "/downloads/fleetctl/linux-x86_64.sha256",
+            "/downloads/fleetctl/windows-x86_64",
+        ] {
+            assert_eq!(call(uri, None).await, StatusCode::UNAUTHORIZED, "{uri}");
+        }
+        let login = Some("alice@example.com");
+        assert_eq!(
+            call("/downloads/fleetctl/linux-x86_64", login).await,
+            StatusCode::OK
+        );
+        assert_eq!(
+            call("/downloads/fleetctl/linux-x86_64.sha256", login).await,
+            StatusCode::OK
+        );
+        // A platform the controller does not carry stays a 404, not the
+        // console shell.
+        assert_eq!(
+            call("/downloads/fleetctl/windows-x86_64", login).await,
+            StatusCode::NOT_FOUND
+        );
     }
 
     #[tokio::test]
