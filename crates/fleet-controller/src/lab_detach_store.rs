@@ -88,7 +88,7 @@ impl GuestExecPort for SshGuestExec {
         interactive_user: Option<&str>,
         handle: &str,
     ) -> Result<GuestProcess, String> {
-        let (mut spec, _, _) = crate::exec::resolve_ssh_endpoint(
+        let (mut spec, _, _) = crate::exec::resolve_ssh_endpoint_any_os(
             self.machines.as_ref(),
             machine_id,
             endpoint_id,

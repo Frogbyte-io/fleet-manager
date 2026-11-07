@@ -143,6 +143,7 @@ impl OnboardingPort for FakeDrafts {
     async fn create(&self, draft: &NewDraft) -> Result<OnboardingDraft, PortFailure> {
         let now = fleet_core::SystemClock::now_unix_millis();
         let created = OnboardingDraft {
+            host_key_confirmed_at: None,
             shell_check: None,
             id: format!("draft-{}", self.drafts.lock().unwrap().len() + 1),
             endpoint: draft.endpoint.clone(),
@@ -771,6 +772,69 @@ async fn add_records_the_detected_guest_os_on_the_new_endpoint() {
                 && entries.contains(&("guestOs", "windows"))
         }),
         "{events:?}"
+    );
+}
+
+/// ADR 0021: a (re)confirmed host key drops the shell check taken behind
+/// the previous key, and add refuses a check older than the confirmation.
+#[tokio::test]
+async fn confirming_the_host_key_drops_the_shell_check_and_a_stale_one_is_refused() {
+    let fixture = compose(FakeMachines::default());
+    let draft = fixture
+        .onboarding
+        .create_draft(&AllowAll, &principal(), new_draft())
+        .await
+        .unwrap();
+    fixture.drafts.mutate(&draft.id, |draft| {
+        draft.host_key = Some(observed_host_key(FINGERPRINT));
+        draft.host_key_stage = HostKeyStage::Observed;
+        draft.shell_check = Some(shell_check(
+            "windows_powershell",
+            Some(fleet_core::GuestOs::Windows),
+        ));
+    });
+    fixture
+        .onboarding
+        .confirm_host_key(&AllowAll, &principal(), &draft.id, FINGERPRINT)
+        .await
+        .unwrap();
+    let stored = fixture.drafts.get_raw(&draft.id).unwrap();
+    assert_eq!(stored.shell_check, None, "the old answer is dropped");
+    let confirmed_at = stored.host_key_confirmed_at.expect("the confirmation time");
+
+    // A check from before the confirmation (a race with a running test) is
+    // never carried onto an endpoint.
+    fixture.drafts.mutate(&draft.id, |draft| {
+        draft.shell_check = Some(ShellCheck {
+            at: confirmed_at - 1,
+            ..shell_check("windows_powershell", Some(fleet_core::GuestOs::Windows))
+        });
+    });
+    let refused = fixture
+        .onboarding
+        .add(&AllowAll, &principal(), &draft.id, NOW)
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(&refused, OnboardingUseCaseError::Conflict { detail } if detail.contains("test again")),
+        "{refused:?}"
+    );
+
+    // A check after it records.
+    fixture.drafts.mutate(&draft.id, |draft| {
+        draft.shell_check = Some(ShellCheck {
+            at: confirmed_at + 1,
+            ..shell_check("windows_powershell", Some(fleet_core::GuestOs::Windows))
+        });
+    });
+    let added = fixture
+        .onboarding
+        .add(&AllowAll, &principal(), &draft.id, NOW)
+        .await
+        .unwrap();
+    assert_eq!(
+        added.machine.endpoints[0].guest_os,
+        Some(fleet_core::GuestOs::Windows)
     );
 }
 

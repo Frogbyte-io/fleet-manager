@@ -240,8 +240,12 @@ pub struct OnboardingDraft {
     /// The newest test outcome, when a test ran.
     pub last_test: Option<TestOutcome>,
     /// The newest login-shell check, when a test or discover reached the
-    /// endpoint.
+    /// endpoint. Cleared whenever the host key is (re)confirmed.
     pub shell_check: Option<ShellCheck>,
+    /// When the host key was last confirmed (epoch milliseconds). A shell
+    /// check older than this is never carried onto an endpoint.
+    #[serde(default)]
+    pub host_key_confirmed_at: Option<i64>,
     /// The facts discovery recorded for review; empty until a discover ran.
     pub facts: Vec<CapabilityFact>,
     /// What observed the facts, e.g. `agentless/1`; carried onto the
@@ -742,6 +746,10 @@ impl Onboarding {
         draft.host_key_stage = HostKeyStage::Confirmed;
         draft.confirmed_fingerprint = Some(fingerprint.to_owned());
         draft.updated_at = fleet_core::SystemClock::now_unix_millis();
+        // A (re)confirmed key may be another machine behind the address:
+        // whatever shell answered before says nothing about it (ADR 0021).
+        draft.shell_check = None;
+        draft.host_key_confirmed_at = Some(draft.updated_at);
         let draft = self
             .drafts
             .update(&draft)
@@ -891,7 +899,19 @@ impl Onboarding {
             }
         })?;
         // A login shell Fleet cannot drive is refused here too, with the
-        // setup step, rather than registered and failing on first use.
+        // setup step, rather than registered and failing on first use. A
+        // check older than the latest confirmation is about another key.
+        if let Some(check) = &draft.shell_check
+            && draft
+                .host_key_confirmed_at
+                .is_some_and(|confirmed| check.at < confirmed)
+        {
+            return Err(OnboardingUseCaseError::Conflict {
+                detail: "the login-shell check predates the host-key confirmation; run the \
+                         test again"
+                    .to_owned(),
+            });
+        }
         if let Some(check) = &draft.shell_check
             && let Some(reason) = &check.refusal_reason
         {
@@ -936,7 +956,7 @@ impl Onboarding {
             .map_err(map_machine_error)?;
         if let Some(guest_os) = draft.shell_check.as_ref().and_then(|check| check.guest_os) {
             self.machines
-                .record_endpoint_os(authorizer, principal, &endpoint_id, guest_os)
+                .record_endpoint_os(authorizer, principal, &machine.id, &endpoint_id, guest_os)
                 .await
                 .map_err(map_machine_error)?;
         }

@@ -804,6 +804,22 @@ pub trait CatalogRolloutTargetPort: fmt::Debug + Send + Sync {
         machine_id: &str,
         endpoint_id: &str,
     ) -> Result<Option<fleet_core::EndpointKind>, PortFailure>;
+
+    /// The guest OS recorded on a machine endpoint (ADR 0021), `None` while
+    /// unknown. The default answers unknown, which only ever asks more of
+    /// the caller (see the `agentless.inventory` creation rule).
+    ///
+    /// # Errors
+    ///
+    /// Returns a backend failure when the machine store cannot be read.
+    async fn endpoint_guest_os(
+        &self,
+        machine_id: &str,
+        endpoint_id: &str,
+    ) -> Result<Option<fleet_core::GuestOs>, PortFailure> {
+        let _ = (machine_id, endpoint_id);
+        Ok(None)
+    }
 }
 
 impl Operations {
@@ -998,6 +1014,88 @@ impl Operations {
             reason: POOL_MEMBER_REASON,
             detail,
         })
+    }
+
+    /// The `agentless.inventory` creation rule (ADR 0021 decision 4). A
+    /// payload `guestOs` that contradicts the endpoint's recorded OS is
+    /// refused here (`guest_os_mismatch`), before anything is queued. On an
+    /// endpoint whose OS is unknown, the operation may detect and record it,
+    /// so creating it requires `machine.update` on the machine as well. The
+    /// stored payload then names the requester (`requestedBy`, overriding
+    /// any caller value), so the worker records under that principal and
+    /// audits it with the operation.
+    async fn check_inventory_creation(
+        &self,
+        authorizer: &dyn Authorizer,
+        principal_id: &str,
+        new: &NewOperation,
+    ) -> Result<Option<NewOperation>, OperationUseCaseError> {
+        if new.kind != "agentless.inventory" {
+            return Ok(None);
+        }
+        let Some(mut payload) = new
+            .payload_json
+            .as_deref()
+            .and_then(|payload| serde_json::from_str::<serde_json::Value>(payload).ok())
+            .filter(serde_json::Value::is_object)
+        else {
+            return Ok(None);
+        };
+        let (Some(machine_id), Some(endpoint_id)) = (
+            payload["machineId"].as_str().map(str::to_owned),
+            payload["endpointId"].as_str().map(str::to_owned),
+        ) else {
+            return Ok(None);
+        };
+        let chosen = match payload.get("guestOs") {
+            None | Some(serde_json::Value::Null) => None,
+            Some(value) => Some(
+                value
+                    .as_str()
+                    .and_then(|id| fleet_core::GuestOs::from_id(id).ok())
+                    .ok_or_else(|| OperationUseCaseError::Invalid {
+                        detail: "guestOs must be `linux` or `windows`".to_owned(),
+                    })?,
+            ),
+        };
+        let recorded = match &self.catalog_rollout_targets {
+            Some(targets) => targets
+                .endpoint_guest_os(&machine_id, &endpoint_id)
+                .await
+                .map_err(|failure| match failure {
+                    PortFailure::NotFound { what } => OperationUseCaseError::NotFound { what },
+                    failure => OperationUseCaseError::Backend {
+                        context: "inventory endpoint lookup",
+                        detail: failure.to_string(),
+                    },
+                })?,
+            None => None,
+        };
+        if recorded.is_some() {
+            crate::machine_access::effective_guest_os(chosen, recorded).map_err(|detail| {
+                OperationUseCaseError::Refused {
+                    reason: "guest_os_mismatch",
+                    detail: detail
+                        .strip_prefix("guest_os_mismatch: ")
+                        .map_or_else(|| detail.clone(), str::to_owned),
+                }
+            })?;
+        } else {
+            authorize(
+                authorizer,
+                AccessRequest {
+                    principal_id,
+                    action: Permission::MachineUpdate,
+                    resource: Some(&machine_id),
+                },
+            )
+            .map_err(OperationUseCaseError::Denied)?;
+        }
+        payload["requestedBy"] = serde_json::Value::String(principal_id.to_owned());
+        Ok(Some(NewOperation {
+            payload_json: Some(payload.to_string()),
+            ..new.clone()
+        }))
     }
 
     pub(crate) fn publish_operation(&self, operation: &Operation, completed: bool) {
@@ -1662,6 +1760,10 @@ impl Operations {
             });
         }
         let rollout_payload = catalog_rollout_payload(new)?;
+        let inventory = self
+            .check_inventory_creation(authorizer, principal_id, new)
+            .await?;
+        let new = inventory.as_ref().unwrap_or(new);
 
         // A stored-key auth (ADR 0017) is resolved by the executor with the
         // controller's key store, so only the machine routes, which authorize

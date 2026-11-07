@@ -597,6 +597,74 @@ pub trait MachinePort: fmt::Debug + Send + Sync {
             detail: "this machine store cannot record an endpoint's guest OS".to_owned(),
         })
     }
+    /// Clears the recorded guest OS of one SSH endpoint, so it is unknown
+    /// and detected again. The default refuses, as above.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the endpoint is unknown or the backend errors.
+    async fn clear_endpoint_os(&self, endpoint_id: &str) -> Result<(), PortFailure> {
+        let _ = endpoint_id;
+        Err(PortFailure::Backend {
+            detail: "this machine store cannot clear an endpoint's guest OS".to_owned(),
+        })
+    }
+}
+
+/// Records the guest OS an `agentless.inventory` operation detected on an
+/// unknown endpoint (ADR 0021 decision 4). The operation's creation already
+/// required `machine.update` on the machine from `requested_by` (see
+/// `Operations::create`), so this records under that requester and writes
+/// the audit event naming the operation; the worker never decides it alone.
+///
+/// # Errors
+///
+/// Fails when the endpoint is unknown or the store or audit sink fails.
+pub async fn record_detected_endpoint_os(
+    port: &dyn MachinePort,
+    audit: &dyn crate::operation::AuditPort,
+    detected: &DetectedEndpointOs<'_>,
+) -> Result<(), String> {
+    port.record_endpoint_os(detected.endpoint_id, detected.guest_os)
+        .await
+        .map_err(|failure| failure.to_string())?;
+    let mut metadata = crate::audit::AuditMetadata::default();
+    for (key, value) in [
+        ("event", "endpoint_os_recorded"),
+        ("guestOs", detected.guest_os.id()),
+        ("endpointId", detected.endpoint_id),
+        ("source", "agentless.inventory"),
+    ] {
+        metadata
+            .insert(key, value)
+            .map_err(|error| error.to_string())?;
+    }
+    audit
+        .record_intent(&crate::audit::AuditIntent {
+            actor: detected.requested_by.to_owned(),
+            action: Permission::MachineUpdate.id().to_owned(),
+            resource: Some(detected.machine_id.to_owned()),
+            decision: Decision::allow(),
+            correlation_id: None,
+            operation_id: Some(detected.operation_id.to_owned()),
+            metadata,
+        })
+        .await
+}
+
+/// What an inventory operation detected, and who asked for it.
+#[derive(Clone, Copy, Debug)]
+pub struct DetectedEndpointOs<'a> {
+    /// The operation that ran the detection.
+    pub operation_id: &'a str,
+    /// The principal that created the operation.
+    pub requested_by: &'a str,
+    /// The machine.
+    pub machine_id: &'a str,
+    /// The SSH endpoint.
+    pub endpoint_id: &'a str,
+    /// The detected OS.
+    pub guest_os: fleet_core::GuestOs,
 }
 
 /// Durable one-to-one confirmed Proxmox guest links.
@@ -1319,35 +1387,94 @@ impl Machines {
         &self,
         authorizer: &dyn Authorizer,
         principal: &ActingPrincipal,
+        machine_id: &str,
         endpoint_id: &str,
         guest_os: fleet_core::GuestOs,
+    ) -> Result<(), MachineUseCaseError> {
+        self.write_endpoint_os(
+            authorizer,
+            principal,
+            machine_id,
+            endpoint_id,
+            Some(guest_os),
+        )
+        .await
+    }
+
+    /// Clears the guest OS recorded on an SSH endpoint (ADR 0021), so the
+    /// endpoint is unknown again: the caller's `--os` chooses, and the next
+    /// inventory detects and records it afresh. This is the recovery for a
+    /// wrong record.
+    ///
+    /// # Errors
+    ///
+    /// Fails on denial, an endpoint that is not one of the machine's SSH
+    /// endpoints, or a backend failure.
+    pub async fn clear_endpoint_os(
+        &self,
+        authorizer: &dyn Authorizer,
+        principal: &ActingPrincipal,
+        machine_id: &str,
+        endpoint_id: &str,
+    ) -> Result<(), MachineUseCaseError> {
+        self.write_endpoint_os(authorizer, principal, machine_id, endpoint_id, None)
+            .await
+    }
+
+    async fn write_endpoint_os(
+        &self,
+        authorizer: &dyn Authorizer,
+        principal: &ActingPrincipal,
+        machine_id: &str,
+        endpoint_id: &str,
+        guest_os: Option<fleet_core::GuestOs>,
     ) -> Result<(), MachineUseCaseError> {
         authorize(
             authorizer,
             AccessRequest {
                 principal_id: &principal.id,
                 action: Permission::MachineUpdate,
-                resource: Some(endpoint_id),
+                resource: Some(machine_id),
             },
         )
         .map_err(MachineUseCaseError::Denied)?;
-        self.port
-            .record_endpoint_os(endpoint_id, guest_os)
+        let machine = self
+            .port
+            .get(machine_id)
             .await
-            .map_err(|failure| map_port("record_endpoint_os", failure))?;
+            .map_err(|failure| map_port("get", failure))?;
+        if !machine
+            .endpoints
+            .iter()
+            .any(|endpoint| endpoint.id == endpoint_id && endpoint.kind == EndpointKind::Ssh)
+        {
+            return Err(MachineUseCaseError::NotFound {
+                what: format!("SSH endpoint {endpoint_id:?} of machine {machine_id:?}"),
+            });
+        }
+        match guest_os {
+            Some(guest_os) => self.port.record_endpoint_os(endpoint_id, guest_os).await,
+            None => self.port.clear_endpoint_os(endpoint_id).await,
+        }
+        .map_err(|failure| map_port("record_endpoint_os", failure))?;
+        let (event, guest_os_id) = match guest_os {
+            Some(guest_os) => ("endpoint_os_recorded", guest_os.id()),
+            None => ("endpoint_os_cleared", "unknown"),
+        };
         self.audit
             .record_intent(&crate::audit::AuditIntent {
                 actor: principal.id.clone(),
                 action: Permission::MachineUpdate.id().to_owned(),
-                resource: Some(endpoint_id.to_owned()),
+                resource: Some(machine_id.to_owned()),
                 decision: Decision::allow(),
                 correlation_id: None,
                 operation_id: None,
                 metadata: {
                     let mut metadata = crate::audit::AuditMetadata::default();
                     for (key, value) in [
-                        ("event", "endpoint_os_recorded"),
-                        ("guestOs", guest_os.id()),
+                        ("event", event),
+                        ("guestOs", guest_os_id),
+                        ("endpointId", endpoint_id),
                     ] {
                         metadata.insert(key, value).map_err(|error| {
                             MachineUseCaseError::Backend {

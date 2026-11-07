@@ -300,6 +300,7 @@ impl OnboardingPort for FakeOnboarding {
     ) -> Result<fleet_application::onboarding::OnboardingDraft, PortFailure> {
         let now = fleet_core::SystemClock::now_unix_millis();
         let created = fleet_application::onboarding::OnboardingDraft {
+            host_key_confirmed_at: None,
             shell_check: None,
             id: format!("draft-{}", self.drafts.lock().unwrap().len() + 1),
             endpoint: draft.endpoint.clone(),

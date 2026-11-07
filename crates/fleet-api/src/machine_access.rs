@@ -362,7 +362,8 @@ pub struct MachineExecRequest {
     pub timeout_seconds: Option<u64>,
     /// The guest's OS, `linux` or `windows`. When the endpoint's OS was
     /// recorded at onboarding or inventory, absent means that OS and a
-    /// different value is refused (`guest_os_mismatch`); otherwise absent
+    /// different value is refused with HTTP 409 and error code
+    /// `guest_os_mismatch`; otherwise absent
     /// means `linux`.
     pub guest_os: Option<String>,
 }
@@ -470,7 +471,8 @@ pub struct MachineCollectRequest {
     pub paths: Vec<String>,
     /// The guest's OS, `linux` or `windows`. When the endpoint's OS was
     /// recorded at onboarding or inventory, absent means that OS and a
-    /// different value is refused (`guest_os_mismatch`); otherwise absent
+    /// different value is refused with HTTP 409 and error code
+    /// `guest_os_mismatch`; otherwise absent
     /// means `linux`.
     pub guest_os: Option<String>,
 }
@@ -568,7 +570,8 @@ pub struct PutMachineFileParams {
     pub endpoint_id: Option<String>,
     /// The guest's OS, `linux` or `windows`. When the endpoint's OS was
     /// recorded at onboarding or inventory, absent means that OS and a
-    /// different value is refused (`guest_os_mismatch`); otherwise absent
+    /// different value is refused with HTTP 409 and error code
+    /// `guest_os_mismatch`; otherwise absent
     /// means `linux`.
     pub guest_os: Option<String>,
     /// An explicit auth kind (`agent`, `identityFile` or `secret`),

@@ -221,20 +221,38 @@ impl OnboardingExecutor {
                 Err(error) => outcome.detail = Some(error.to_string()),
             }
         }
+        if !draft.trust_ready() {
+            // An unconfirmed or changed key: whatever shell answered before
+            // was behind a key nobody vouches for now.
+            draft.shell_check = None;
+        }
+        let mut shell_failure = None;
         if outcome.connected {
             match self.check_shell(&draft).await {
                 Ok(check) => draft.shell_check = Some(check),
                 Err(detail) => {
+                    // A failed check leaves no answer behind, old or new.
+                    draft.shell_check = None;
                     outcome.detail = Some(format!("the login-shell check failed: {detail}"));
+                    shell_failure = Some(detail);
                 }
             }
         }
         draft.last_test = Some(outcome.clone());
-        draft.updated_at = outcome.at;
+        draft.updated_at = fleet_core::SystemClock::now_unix_millis();
         self.drafts
             .update(&draft)
             .await
             .map_err(|failure| failure.to_string())?;
+        if let Some(detail) = shell_failure {
+            return fail_operation(
+                operations,
+                &operation.id,
+                "shell_check_failed",
+                &format!("the login-shell check failed: {detail}"),
+            )
+            .await;
+        }
 
         // A shell Fleet cannot drive is refused now, with the setup step,
         // rather than at the first exec. The draft keeps the check for the
@@ -317,20 +335,29 @@ impl OnboardingExecutor {
             .map_err(|error| error.to_string())?;
         // The same sniff as the test, first: discover picks the probe by it,
         // and a confirm-then-discover flow never ran a connected test.
-        let check = match self.check_shell(&draft).await {
+        // The check is persisted at once, so a collection that fails later
+        // never leaves an older answer for `add` to record; a failed check
+        // clears it.
+        let checked = self.check_shell(&draft).await;
+        draft.shell_check = checked.as_ref().ok().cloned();
+        draft.updated_at = fleet_core::SystemClock::now_unix_millis();
+        self.drafts
+            .update(&draft)
+            .await
+            .map_err(|failure| failure.to_string())?;
+        let check = match checked {
             Ok(check) => check,
             Err(detail) => {
-                return fail_operation(operations, &operation.id, "collection_failed", &detail)
-                    .await;
+                return fail_operation(
+                    operations,
+                    &operation.id,
+                    "shell_check_failed",
+                    &format!("the login-shell check failed: {detail}"),
+                )
+                .await;
             }
         };
-        draft.shell_check = Some(check.clone());
         if let (Some(reason), Some(detail)) = (&check.refusal_reason, &check.refusal_detail) {
-            draft.updated_at = fleet_core::SystemClock::now_unix_millis();
-            self.drafts
-                .update(&draft)
-                .await
-                .map_err(|failure| failure.to_string())?;
             return fail_operation(operations, &operation.id, reason, detail).await;
         }
         // Unknown (unrecognized output) keeps today's Linux behaviour.

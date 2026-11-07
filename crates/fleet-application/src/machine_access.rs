@@ -1180,7 +1180,11 @@ impl MachineAccess {
                 };
                 endpoint.and_then(|endpoint| endpoint.guest_os)
             }
-            Err(_) => None,
+            // Only a missing machine is "unknown" here (resolve_target then
+            // reports it); a backend failure must not let a request past the
+            // check.
+            Err(PortFailure::NotFound { .. }) => None,
+            Err(failure) => return Err(backend(failure.to_string())),
         };
         effective_guest_os(target.guest_os, recorded)
             .map_err(|detail| LabUseCaseError::Conflict { detail })

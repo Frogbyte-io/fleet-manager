@@ -84,10 +84,16 @@ impl TestSshd {
     /// An sshd whose every session prints `answer` and exits 0: the
     /// connect test passes, and the login-shell check sees `answer`.
     fn start_answering(answer: &str) -> Self {
+        Self::start_forcing(&format!("printf '%s' '{answer}'\n"))
+    }
+
+    /// An sshd whose sessions run `script` (which sees the requested command
+    /// in `$SSH_ORIGINAL_COMMAND`).
+    fn start_forcing(script: &str) -> Self {
         let mut sshd = Self::start();
-        let script = sshd.dir.path().join("answer.sh");
-        std::fs::write(&script, format!("printf '%s' '{answer}'\n")).unwrap();
-        sshd.force_command = Some(format!("/bin/sh {}", script.display()));
+        let path = sshd.dir.path().join("force.sh");
+        std::fs::write(&path, script).unwrap();
+        sshd.force_command = Some(format!("/bin/sh {}", path.display()));
         sshd.stop();
         sshd.launch();
         sshd
@@ -526,6 +532,23 @@ async fn the_happy_path_goes_from_address_to_registered_machine() {
     assert_eq!(added["data"]["machine"]["machineStatus"], "agentless");
     // The detected OS is recorded on the new SSH endpoint.
     assert_eq!(added["data"]["machine"]["endpoints"][0]["guestOs"], "linux");
+    // The recovery path: clearing it makes the endpoint unknown again.
+    let endpoint_id = added["data"]["machine"]["endpoints"][0]["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let (status, cleared) = raw_request(
+        harness.address,
+        "DELETE",
+        &format!("/api/v1/machines/{machine_id}/endpoints/{endpoint_id}/guest-os"),
+        None,
+    )
+    .await;
+    assert_eq!(status, axum::http::StatusCode::OK, "{cleared}");
+    assert!(
+        cleared["data"]["endpoints"][0]["guestOs"].is_null(),
+        "{cleared}"
+    );
     assert!(
         added["data"]["machine"]["capabilities"]
             .as_array()
@@ -606,6 +629,12 @@ async fn a_changed_host_key_blocks_until_the_new_fingerprint_is_reconfirmed() {
         )
         .await;
     assert_eq!(status, axum::http::StatusCode::OK);
+    // A connected test records the login shell behind the confirmed key.
+    run_test(&harness, &draft_id).await;
+    let (_, detail) = harness
+        .get_json(&format!("/api/v1/machines/onboarding/drafts/{draft_id}"))
+        .await;
+    assert_eq!(detail["data"]["shellCheck"]["guestOs"], "linux", "{detail}");
 
     // The hostile case: same address, different key.
     sshd.rotate_host_key();
@@ -615,6 +644,11 @@ async fn a_changed_host_key_blocks_until_the_new_fingerprint_is_reconfirmed() {
         result["hostKeyStage"], "changed",
         "the change is observed: {test}"
     );
+    // The shell answer came from behind the old key: it is gone (ADR 0021).
+    let (_, detail) = harness
+        .get_json(&format!("/api/v1/machines/onboarding/drafts/{draft_id}"))
+        .await;
+    assert!(detail["data"]["shellCheck"].is_null(), "{detail}");
 
     // Discover and add refuse while the change stands.
     let (status, body) = harness
@@ -821,6 +855,37 @@ async fn a_repeated_test_after_confirmation_keeps_it_and_reports_the_connection(
     }
 }
 
+/// A login-shell check that fails (the session ends with ssh's own failure
+/// status) fails the test and leaves no shell answer on the draft.
+#[tokio::test]
+async fn a_failed_shell_check_fails_the_test_and_leaves_no_answer() {
+    let harness = harness().await;
+    let sshd = TestSshd::start_forcing(
+        "case \"$SSH_ORIGINAL_COMMAND\" in\n\
+         'echo fleet-shell'*) exit 255 ;;\n\
+         *) exec /bin/sh -c \"$SSH_ORIGINAL_COMMAND\" ;;\n\
+         esac\n",
+    );
+    let draft_id = create_draft(&harness, &sshd).await;
+    let first = run_test(&harness, &draft_id).await;
+    let first: Value = serde_json::from_str(first["resultJson"].as_str().unwrap()).unwrap();
+    let (status, _) = harness
+        .post_json(
+            &format!("/api/v1/machines/onboarding/drafts/{draft_id}/confirm-host-key"),
+            Some(json!({"fingerprint": first["fingerprint"]})),
+        )
+        .await;
+    assert_eq!(status, axum::http::StatusCode::OK);
+    let test = run_test(&harness, &draft_id).await;
+    assert_eq!(test["state"], "failed", "{test}");
+    let error: Value = serde_json::from_str(test["errorJson"].as_str().unwrap()).unwrap();
+    assert_eq!(error["reason"], "shell_check_failed", "{error}");
+    let (_, view) = harness
+        .get_json(&format!("/api/v1/machines/onboarding/drafts/{draft_id}"))
+        .await;
+    assert!(view["data"]["shellCheck"].is_null(), "{view}");
+}
+
 /// ADR 0021 decision 2: a login shell Fleet cannot drive is refused at test
 /// time, with a reason that names the setup step, and add refuses the draft.
 #[tokio::test]
@@ -833,7 +898,7 @@ async fn an_unsupported_login_shell_is_refused_at_test_and_add() {
         ),
         // What PowerShell 7 prints.
         (
-            "fleet-shell\r\n%OS%\r\nCore\r\n7\r\nFullLanguage\r\n",
+            "fleet-shell\r\n%OS%\r\nCore\r\n7\r\nFullLanguage\r\nWin32NT\r\n",
             "powershell_core",
         ),
     ] {

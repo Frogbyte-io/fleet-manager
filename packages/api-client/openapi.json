@@ -7883,6 +7883,78 @@
         }
       }
     },
+    "/api/v1/machines/{machineId}/endpoints/{endpointId}/guest-os": {
+      "delete": {
+        "tags": [
+          "machines"
+        ],
+        "summary": "Clears the guest OS recorded on a machine's SSH endpoint (ADR 0021), so\nthe endpoint is unknown again: the caller's `guestOs` chooses, and the\nnext `agentless.inventory` detects and records it afresh. This is the\nrecovery when a record is wrong. A host-key confirmation clears it too.",
+        "description": "# Errors\n\nReturns the public error envelope on refusal or an unknown machine or\nSSH endpoint.",
+        "operationId": "clearMachineEndpointGuestOs",
+        "parameters": [
+          {
+            "name": "machineId",
+            "in": "path",
+            "description": "The machine's identity.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "endpointId",
+            "in": "path",
+            "description": "The SSH endpoint's identity.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The machine, with the endpoint's guest OS unknown.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Resource_MachineDto"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The caller may not update the machine.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "The machine or SSH endpoint does not exist.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The machine surface is not wired.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/machines/{machineId}/exec": {
       "post": {
         "tags": [
@@ -20538,7 +20610,7 @@
               "string",
               "null"
             ],
-            "description": "The guest's OS, `linux` or `windows`. When the endpoint's OS was\nrecorded at onboarding or inventory, absent means that OS and a\ndifferent value is refused (`guest_os_mismatch`); otherwise absent\nmeans `linux`."
+            "description": "The guest's OS, `linux` or `windows`. When the endpoint's OS was\nrecorded at onboarding or inventory, absent means that OS and a\ndifferent value is refused with HTTP 409 and error code\n`guest_os_mismatch`; otherwise absent\nmeans `linux`."
           },
           "paths": {
             "type": "array",
@@ -20819,7 +20891,7 @@
               "string",
               "null"
             ],
-            "description": "The guest's OS, `linux` or `windows`. When the endpoint's OS was\nrecorded at onboarding or inventory, absent means that OS and a\ndifferent value is refused (`guest_os_mismatch`); otherwise absent\nmeans `linux`."
+            "description": "The guest's OS, `linux` or `windows`. When the endpoint's OS was\nrecorded at onboarding or inventory, absent means that OS and a\ndifferent value is refused with HTTP 409 and error code\n`guest_os_mismatch`; otherwise absent\nmeans `linux`."
           },
           "script": {
             "type": [

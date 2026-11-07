@@ -287,7 +287,7 @@ fn windows_stream(release: &str, edition: &str, architecture: &str, admin: &str)
     [
         line("host", "architecture", architecture, "known", 7_000),
         line("host", "hostname", "WORKSTATION-01", "known", 7_000),
-        line("os", "kernel", "10.0.22631", "known", 7_000),
+        line("os", "kernel", "10.0.26100", "known", 7_000),
         line("os", "family", "Windows", "known", 7_000),
         line("os", "distribution", "windows", "known", 7_000),
         line("os", "windows_release", release, "known", 7_000),
@@ -302,7 +302,7 @@ fn windows_stream(release: &str, edition: &str, architecture: &str, admin: &str)
         line("os", "product_type", "workstation", "known", 7_000),
         line("os", "edition", edition, "known", 7_000),
         line("os", "display_version", "23H2", "known", 7_000),
-        line("os", "build", "22631.4460", "known", 7_000),
+        line("os", "build", "26100.2314", "known", 7_000),
         line("session", "user", "developer", "known", 7_000),
         line("session", "administrator", admin, "known", 7_000),
         line(
@@ -386,6 +386,16 @@ fn windows_10_home_and_arm64_are_flagged_untested_not_refused() {
         // An administrator session is reported, as a fact, not a refusal.
         assert_eq!(value_of(&facts, "session", "administrator"), "true");
     }
+}
+
+#[test]
+fn a_windows_11_build_out_of_servicing_is_untested() {
+    let now = SystemTime::UNIX_EPOCH + Duration::from_secs(60);
+    let old = windows_stream("11", "Professional", "x86_64", "false")
+        .replace(&value64("26100.2314"), &value64("22631.4460"));
+    let facts = parse_probe_output(&old, now);
+    assert_eq!(value_of(&facts, "os", "support"), "untested");
+    const { assert!(22_631 < fleet_provider_ssh::inventory::MIN_SERVICED_WINDOWS_11_BUILD) };
 }
 
 #[test]

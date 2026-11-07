@@ -409,7 +409,11 @@ impl MachinePort for MachineRepository {
         confirmed_at: i64,
     ) -> Result<(), PortFailure> {
         let updated = sqlx::query(
-            "UPDATE machine_endpoints SET verified_fingerprint = ?2, verified_at = ?3 WHERE id = ?1",
+            // A (re)confirmed host key may be a different machine behind the
+            // same address: the recorded guest OS is cleared with it and is
+            // detected again (ADR 0021).
+            "UPDATE machine_endpoints SET verified_fingerprint = ?2, verified_at = ?3, \
+             guest_os = NULL WHERE id = ?1",
         )
         .bind(endpoint_id)
         .bind(fingerprint)
@@ -451,18 +455,13 @@ impl MachinePort for MachineRepository {
         endpoint_id: &str,
         guest_os: fleet_core::GuestOs,
     ) -> Result<(), PortFailure> {
-        let updated = sqlx::query("UPDATE machine_endpoints SET guest_os = ?2 WHERE id = ?1")
-            .bind(endpoint_id)
-            .bind(guest_os.id())
-            .execute(&self.pool)
+        self.write_endpoint_os(endpoint_id, Some(guest_os.id()), "record_endpoint_os")
             .await
-            .map_err(|error| backend("record_endpoint_os", &error))?;
-        if updated.rows_affected() == 0 {
-            return Err(PortFailure::NotFound {
-                what: format!("endpoint {endpoint_id:?}"),
-            });
-        }
-        Ok(())
+    }
+
+    async fn clear_endpoint_os(&self, endpoint_id: &str) -> Result<(), PortFailure> {
+        self.write_endpoint_os(endpoint_id, None, "clear_endpoint_os")
+            .await
     }
 
     async fn verified_fingerprint(&self, endpoint_id: &str) -> Result<Option<String>, PortFailure> {
@@ -491,9 +490,46 @@ impl CatalogRolloutTargetPort for MachineRepository {
             .find(|endpoint| endpoint.id == endpoint_id)
             .map(|endpoint| endpoint.kind))
     }
+
+    async fn endpoint_guest_os(
+        &self,
+        machine_id: &str,
+        endpoint_id: &str,
+    ) -> Result<Option<fleet_core::GuestOs>, PortFailure> {
+        let machine = <Self as MachinePort>::get(self, machine_id).await?;
+        Ok(machine
+            .endpoints
+            .into_iter()
+            .find(|endpoint| endpoint.id == endpoint_id)
+            .and_then(|endpoint| endpoint.guest_os))
+    }
 }
 
 impl MachineRepository {
+    /// Writes or clears the guest OS of an SSH endpoint. Only SSH endpoints
+    /// carry one; any other kind is not found.
+    async fn write_endpoint_os(
+        &self,
+        endpoint_id: &str,
+        guest_os: Option<&str>,
+        context: &str,
+    ) -> Result<(), PortFailure> {
+        let updated = sqlx::query(
+            "UPDATE machine_endpoints SET guest_os = ?2 WHERE id = ?1 AND kind = 'ssh'",
+        )
+        .bind(endpoint_id)
+        .bind(guest_os)
+        .execute(&self.pool)
+        .await
+        .map_err(|error| backend(context, &error))?;
+        if updated.rows_affected() == 0 {
+            return Err(PortFailure::NotFound {
+                what: format!("SSH endpoint {endpoint_id:?}"),
+            });
+        }
+        Ok(())
+    }
+
     /// Assembles one machine record with everything that is a fact about
     /// it: endpoints, tags, groups, capability facts, the newest inventory
     /// observation, and the node trust link. The read-time rules — fact

@@ -361,6 +361,124 @@ async fn a_recorded_endpoint_os_is_used_and_checked() {
     assert!(detail.starts_with("guest_os_mismatch:"), "{detail}");
 }
 
+/// The recorded-OS check covers put and collect too, and names the endpoint
+/// it checks: an explicit endpointId, or the only SSH endpoint.
+#[tokio::test]
+async fn put_collect_and_several_endpoints_follow_the_recorded_os() {
+    let world = World::new().await;
+    world.use_stored_key_by_default().await;
+    let machines = MachineRepository::new(world.pool.clone());
+    machines
+        .record_endpoint_os(&world.endpoint_id, GuestOs::Windows)
+        .await
+        .unwrap();
+    let linux = AccessTarget {
+        guest_os: Some(GuestOs::Linux),
+        ..world.target()
+    };
+    let mismatch = |error: LabUseCaseError| match error {
+        LabUseCaseError::Conflict { detail } => {
+            assert!(detail.starts_with("guest_os_mismatch:"), "{detail}")
+        }
+        other => panic!("expected a guest_os_mismatch conflict: {other:?}"),
+    };
+    mismatch(
+        world
+            .access
+            .begin_upload(
+                &fleet_auth::LanAllowAllAuthorizer,
+                &lan(),
+                &PutRequestTarget {
+                    target: linux.clone(),
+                    guest_path: "/tmp/file",
+                    overwrite: false,
+                },
+            )
+            .await
+            .map(|_| ())
+            .unwrap_err(),
+    );
+    mismatch(
+        world
+            .access
+            .request_collect(
+                &fleet_auth::LanAllowAllAuthorizer,
+                &lan(),
+                &linux,
+                &["/tmp/file".to_owned()],
+            )
+            .await
+            .unwrap_err(),
+    );
+
+    // Two SSH endpoints (a Windows PC with a WSL sshd): each has its own OS.
+    let machine = machines
+        .set_endpoints(
+            &world.machine_id,
+            &[
+                NewEndpoint {
+                    kind: EndpointKind::Ssh,
+                    reference: "developer@workstation.example:22".to_owned(),
+                },
+                NewEndpoint {
+                    kind: EndpointKind::Ssh,
+                    reference: "developer@workstation.example:2222".to_owned(),
+                },
+            ],
+        )
+        .await
+        .unwrap();
+    let (windows, wsl) = (&machine.endpoints[0].id, &machine.endpoints[1].id);
+    machines
+        .record_endpoint_os(windows, GuestOs::Windows)
+        .await
+        .unwrap();
+    machines
+        .record_endpoint_os(wsl, GuestOs::Linux)
+        .await
+        .unwrap();
+    let exec = |endpoint_id: Option<&str>, guest_os: Option<GuestOs>| {
+        let access = world.access.clone();
+        let machine_id = world.machine_id.clone();
+        let endpoint_id = endpoint_id.map(str::to_owned);
+        async move {
+            access
+                .request_exec(
+                    &fleet_auth::LanAllowAllAuthorizer,
+                    &lan(),
+                    &ExecRequest {
+                        target: AccessTarget {
+                            machine_id: &machine_id,
+                            endpoint_id: endpoint_id.as_deref(),
+                            auth: None,
+                            guest_os,
+                        },
+                        command: ExecCommand::Script("exit 0".to_owned()),
+                        timeout_seconds: Some(15),
+                        idempotency_key: None,
+                    },
+                )
+                .await
+        }
+    };
+    // Named Windows endpoint, Linux requested: refused by the check.
+    mismatch(exec(Some(windows), Some(GuestOs::Linux)).await.unwrap_err());
+    // Named WSL endpoint, Linux requested: past the check (the new endpoint
+    // is not trusted yet, which resolve_target then reports).
+    let refused = exec(Some(wsl), Some(GuestOs::Linux)).await.unwrap_err();
+    assert!(
+        matches!(&refused, LabUseCaseError::Invalid { detail } if detail.contains("host key")),
+        "{refused:?}"
+    );
+    // No endpoint named on a two-endpoint machine: no single record applies,
+    // so the caller's choice stands and resolve_target asks for an endpoint.
+    let refused = exec(None, Some(GuestOs::Linux)).await.unwrap_err();
+    assert!(
+        matches!(&refused, LabUseCaseError::Invalid { detail } if detail.contains("several SSH endpoints")),
+        "{refused:?}"
+    );
+}
+
 #[tokio::test]
 async fn an_argv_command_passes_its_arguments_as_data() {
     let world = World::new().await;

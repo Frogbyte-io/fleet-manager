@@ -75,37 +75,117 @@ async fn an_endpoint_is_unknown_until_its_os_is_recorded_per_endpoint() {
     assert!(matches!(missing, PortFailure::NotFound { .. }), "{missing}");
 }
 
+/// A database migrated up to 0070, seeded, then opened by the real store
+/// (which runs 0071): the existing endpoint and draft read as unknown.
 #[tokio::test]
-async fn a_pre_migration_endpoint_row_reads_unknown_and_bad_values_are_refused() {
-    let (_dir, store) = store().await;
-    let pool = store.pool().clone();
-    let machines = MachineRepository::new(pool.clone());
-    let machine = machines.register(&workstation()).await.unwrap();
-    // An insert in the pre-0071 shape names no guest_os column.
-    sqlx::query(
-        "INSERT INTO machine_endpoints (id, machine_id, kind, reference, created_at) \
-         VALUES ('legacy-endpoint', ?1, 'ssh', 'ops@legacy.example:22', 1)",
-    )
-    .bind(&machine.id)
-    .execute(&pool)
-    .await
-    .unwrap();
-    let read = machines.get(&machine.id).await.unwrap();
-    let legacy = read
-        .endpoints
-        .iter()
-        .find(|endpoint| endpoint.id == "legacy-endpoint")
-        .unwrap();
-    assert_eq!(legacy.guest_os, None);
-
-    for bad in ["macos", "Windows", ""] {
-        let refused =
-            sqlx::query("UPDATE machine_endpoints SET guest_os = ?1 WHERE id = 'legacy-endpoint'")
-                .bind(bad)
-                .execute(&pool)
-                .await;
-        assert!(refused.is_err(), "{bad:?} must fail the CHECK");
+async fn rows_from_before_0071_read_unknown_after_the_real_migration() {
+    let dir = tempfile::tempdir().unwrap();
+    let held = dir.path().join("migrations");
+    std::fs::create_dir(&held).unwrap();
+    let source = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("migrations");
+    for entry in std::fs::read_dir(&source).unwrap() {
+        let entry = entry.unwrap();
+        let name = entry.file_name().to_string_lossy().into_owned();
+        let number: u32 = name[..4].parse().unwrap();
+        if number <= 70 {
+            std::fs::copy(entry.path(), held.join(&name)).unwrap();
+        }
     }
+    let path = dir.path().join("fleet.db");
+    {
+        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect_with(
+                sqlx::sqlite::SqliteConnectOptions::new()
+                    .filename(&path)
+                    .create_if_missing(true)
+                    .foreign_keys(true),
+            )
+            .await
+            .unwrap();
+        sqlx::migrate::Migrator::new(held.as_path())
+            .await
+            .unwrap()
+            .run(&pool)
+            .await
+            .unwrap();
+        for statement in [
+            "INSERT INTO machines (id, name, description, created_at, updated_at) \
+             VALUES ('legacy', 'legacy', '', 1, 1)",
+            "INSERT INTO machine_endpoints (id, machine_id, kind, reference, created_at, \
+             verified_fingerprint, verified_at) VALUES ('legacy-endpoint', 'legacy', 'ssh', \
+             'ops@legacy.example:22', 1, 'SHA256:legacy', 1)",
+            "INSERT INTO onboarding_drafts (id, endpoint_user, endpoint_host, endpoint_port, \
+             auth_type, name, created_at, updated_at) VALUES ('legacy-draft', 'ops', \
+             'legacy.example', 22, 'agent', 'legacy-draft', 1, 1)",
+        ] {
+            sqlx::query(statement).execute(&pool).await.unwrap();
+        }
+        pool.close().await;
+    }
+
+    let store = Store::open(&path).await.unwrap();
+    let machines = MachineRepository::new(store.pool().clone());
+    let machine = machines.get("legacy").await.unwrap();
+    assert_eq!(machine.endpoints[0].guest_os, None, "unknown, not linux");
+    let drafts = OnboardingRepository::new(store.pool().clone());
+    let draft = drafts.get("legacy-draft").await.unwrap();
+    assert_eq!(draft.shell_check, None);
+    assert_eq!(draft.host_key_confirmed_at, None);
+}
+
+/// A (re)confirmed host key may be another machine behind the address: the
+/// recorded OS is cleared with it.
+#[tokio::test]
+async fn confirming_a_host_key_clears_the_recorded_os() {
+    let (_dir, store) = store().await;
+    let machines = MachineRepository::new(store.pool().clone());
+    let machine = machines.register(&workstation()).await.unwrap();
+    let endpoint = &machine.endpoints[0].id;
+    machines
+        .record_endpoint_os(endpoint, GuestOs::Windows)
+        .await
+        .unwrap();
+    machines
+        .confirm_fingerprint(endpoint, "SHA256:another", 2)
+        .await
+        .unwrap();
+    let read = machines.get(&machine.id).await.unwrap();
+    assert_eq!(read.endpoints[0].guest_os, None);
+    // Clearing directly works too, and only SSH endpoints carry an OS.
+    machines
+        .record_endpoint_os(endpoint, GuestOs::Linux)
+        .await
+        .unwrap();
+    machines.clear_endpoint_os(endpoint).await.unwrap();
+    assert_eq!(
+        machines.get(&machine.id).await.unwrap().endpoints[0].guest_os,
+        None
+    );
+}
+
+#[tokio::test]
+async fn a_fleetd_endpoint_never_carries_an_os() {
+    let (_dir, store) = store().await;
+    let machines = MachineRepository::new(store.pool().clone());
+    let machine = machines
+        .register(&RegisterMachine {
+            name: "node-1".to_owned(),
+            description: String::new(),
+            endpoints: vec![NewEndpoint {
+                kind: EndpointKind::Fleetd,
+                reference: "node-identity".to_owned(),
+            }],
+            tags: Vec::new(),
+            groups: Vec::new(),
+        })
+        .await
+        .unwrap();
+    let refused = machines
+        .record_endpoint_os(&machine.endpoints[0].id, GuestOs::Linux)
+        .await
+        .unwrap_err();
+    assert!(matches!(refused, PortFailure::NotFound { .. }), "{refused}");
 }
 
 #[tokio::test]

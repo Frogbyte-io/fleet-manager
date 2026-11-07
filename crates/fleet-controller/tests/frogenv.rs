@@ -21,6 +21,7 @@ struct Fixture {
     machine_id: String,
     endpoint_id: String,
     identity_file: String,
+    pool: SqlitePool,
 }
 
 async fn compose(sshd: &TestSshd) -> Fixture {
@@ -72,6 +73,7 @@ async fn compose(sshd: &TestSshd) -> Fixture {
         machine_id: machine.id,
         endpoint_id,
         identity_file: format!("{}/user_ed25519", sshd.keys_dir.path().display()),
+        pool,
     }
 }
 
@@ -204,6 +206,37 @@ async fn the_status_surface_answers_the_documented_json() {
     assert_eq!(result["status"]["configured"], true);
     assert_eq!(result["status"]["machineState"], "approved");
     assert_eq!(result["status"]["machineId"], "host-abc123");
+}
+
+/// ADR 0021 / #608: a Bash-only executor refuses an endpoint recorded as
+/// Windows instead of sending it a Bash script (until #609/#610).
+#[tokio::test]
+async fn a_bash_only_operation_refuses_a_windows_endpoint() {
+    let home_dir = tempfile::tempdir().unwrap();
+    let sshd = start_sshd_with_home(home_dir.path());
+    let fixture = compose(&sshd).await;
+    let home = home_dir.path().display().to_string();
+    let _path = install_stub_cli(&home, "configured");
+    MachineRepository::new(fixture.pool.clone())
+        .record_endpoint_os(&fixture.endpoint_id, fleet_core::GuestOs::Windows)
+        .await
+        .unwrap();
+    let payload = serde_json::json!({
+        "machineId": fixture.machine_id,
+        "endpointId": fixture.endpoint_id,
+        "auth": fixture.auth_json(),
+        "timeoutSeconds": 30,
+    });
+    let (state, _, error) = fixture.run_kind("frogenv.status", payload).await;
+    assert_eq!(state, "failed");
+    let error = error.unwrap_or_default();
+    assert!(error.contains("unsupported_guest_os"), "{error}");
+    assert!(
+        !std::fs::read_to_string(home_dir.path().join("frogenv-stub.log"))
+            .unwrap_or_default()
+            .contains("status"),
+        "nothing ran on the machine"
+    );
 }
 
 #[tokio::test]

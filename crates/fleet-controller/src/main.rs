@@ -525,7 +525,10 @@ fn run_serve(mut config: fleet_config::ControllerConfig) -> ExitCode {
                     machines,
                     config.data_dir.join("ssh"),
                     exec_limiter.clone(),
-                );
+                )
+                .with_audit(std::sync::Arc::new(fleet_storage_sqlite::AuditSink::new(
+                    store.pool().clone(),
+                )));
                 std::sync::Arc::new(match &ssh_auth_resolver {
                     Some(resolver) => executor.with_resolver(resolver.clone()),
                     None => executor,

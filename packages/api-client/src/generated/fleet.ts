@@ -3813,7 +3813,8 @@ export interface MachineCollectRequest {
   /**
      * The guest's OS, `linux` or `windows`. When the endpoint's OS was
      * recorded at onboarding or inventory, absent means that OS and a
-     * different value is refused (`guest_os_mismatch`); otherwise absent
+     * different value is refused with HTTP 409 and error code
+     * `guest_os_mismatch`; otherwise absent
      * means `linux`.
      * @nullable
      */
@@ -3942,7 +3943,8 @@ export interface MachineExecRequest {
   /**
      * The guest's OS, `linux` or `windows`. When the endpoint's OS was
      * recorded at onboarding or inventory, absent means that OS and a
-     * different value is refused (`guest_os_mismatch`); otherwise absent
+     * different value is refused with HTTP 409 and error code
+     * `guest_os_mismatch`; otherwise absent
      * means `linux`.
      * @nullable
      */
@@ -19824,6 +19826,75 @@ export const clearMachineEndpointAuth = async (machineId: string,
 
   const data: clearMachineEndpointAuthResponse['data'] = body ? JSON.parse(body) : {}
   return { data, status: res.status, headers: res.headers } as clearMachineEndpointAuthResponse
+}
+
+
+
+export type clearMachineEndpointGuestOsResponse200 = {
+  data: ResourceMachineDto
+  status: 200
+}
+
+export type clearMachineEndpointGuestOsResponse403 = {
+  data: ApiError
+  status: 403
+}
+
+export type clearMachineEndpointGuestOsResponse404 = {
+  data: ApiError
+  status: 404
+}
+
+export type clearMachineEndpointGuestOsResponse503 = {
+  data: ApiError
+  status: 503
+}
+
+export type clearMachineEndpointGuestOsResponseSuccess = (clearMachineEndpointGuestOsResponse200) & {
+  headers: Headers;
+};
+export type clearMachineEndpointGuestOsResponseError = (clearMachineEndpointGuestOsResponse403 | clearMachineEndpointGuestOsResponse404 | clearMachineEndpointGuestOsResponse503) & {
+  headers: Headers;
+};
+
+export type clearMachineEndpointGuestOsResponse = (clearMachineEndpointGuestOsResponseSuccess | clearMachineEndpointGuestOsResponseError)
+
+export const getClearMachineEndpointGuestOsUrl = (machineId: string,
+    endpointId: string,) => {
+
+
+
+
+  return `/api/v1/machines/${machineId}/endpoints/${endpointId}/guest-os`
+}
+
+/**
+ * # Errors
+ *
+ * Returns the public error envelope on refusal or an unknown machine or
+ * SSH endpoint.
+ * @summary Clears the guest OS recorded on a machine's SSH endpoint (ADR 0021), so
+the endpoint is unknown again: the caller's `guestOs` chooses, and the
+next `agentless.inventory` detects and records it afresh. This is the
+recovery when a record is wrong. A host-key confirmation clears it too.
+ */
+export const clearMachineEndpointGuestOs = async (machineId: string,
+    endpointId: string, options?: RequestInit): Promise<clearMachineEndpointGuestOsResponse> => {
+
+  const res = await fetch(getClearMachineEndpointGuestOsUrl(machineId,endpointId),
+  {
+    ...options,
+    method: 'DELETE'
+
+
+  }
+)
+
+
+  const body = [204, 205, 304].includes(res.status) ? null : await res.text();
+
+  const data: clearMachineEndpointGuestOsResponse['data'] = body ? JSON.parse(body) : {}
+  return { data, status: res.status, headers: res.headers } as clearMachineEndpointGuestOsResponse
 }
 
 

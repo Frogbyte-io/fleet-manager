@@ -28,7 +28,16 @@ use crate::{ExecutionLimiter, SshConnectionSpec, SshProvider, SshProviderError};
 
 /// The fixed shell-sniffing command. It carries no caller data, and only the
 /// marker and the shell's own answers come back.
-pub const SNIFF_COMMAND: &str = "echo fleet-shell %OS% $PSVersionTable.PSEdition $PSVersionTable.PSVersion.Major $ExecutionContext.SessionState.LanguageMode";
+pub const SNIFF_COMMAND: &str = "echo fleet-shell %OS% $PSVersionTable.PSEdition $PSVersionTable.PSVersion.Major $ExecutionContext.SessionState.LanguageMode $PSVersionTable.Platform";
+
+/// The second fixed command, run only after a POSIX answer: Git Bash, MSYS2
+/// and Cygwin answer the sniff like any POSIX shell, and `uname -s` is what
+/// tells them from Linux (`MINGW64_NT-...`, `MSYS_NT-...`, `CYGWIN_NT-...`).
+pub const UNAME_COMMAND: &str = "uname -s";
+
+/// The exit status `ssh` itself uses for a connection, authentication or
+/// host-key failure; any other status came from the remote shell.
+const SSH_FAILURE_STATUS: i32 = 255;
 
 /// The marker token the sniff prints first.
 const MARKER: &str = "fleet-shell";
@@ -50,6 +59,9 @@ pub enum DetectedShell {
     PowerShellCore,
     /// `cmd.exe`, the Windows OpenSSH default.
     Cmd,
+    /// A POSIX shell running on Windows (Git Bash, MSYS2, Cygwin) as the
+    /// OpenSSH `DefaultShell`.
+    WindowsPosix,
     /// The output matched none of the above.
     Unrecognized,
 }
@@ -63,6 +75,7 @@ impl DetectedShell {
             Self::WindowsPowerShell => "windows_powershell",
             Self::PowerShellCore => "powershell_core",
             Self::Cmd => "cmd",
+            Self::WindowsPosix => "windows_posix",
             Self::Unrecognized => "unrecognized",
         }
     }
@@ -104,9 +117,10 @@ impl ShellSniff {
         match self.shell {
             DetectedShell::Posix => Some(GuestOs::Linux),
             DetectedShell::WindowsPowerShell => Some(GuestOs::Windows),
-            DetectedShell::PowerShellCore | DetectedShell::Cmd | DetectedShell::Unrecognized => {
-                None
-            }
+            DetectedShell::PowerShellCore
+            | DetectedShell::Cmd
+            | DetectedShell::WindowsPosix
+            | DetectedShell::Unrecognized => None,
         }
     }
 
@@ -125,6 +139,14 @@ impl ShellSniff {
                     "the endpoint's login shell is cmd.exe (the Windows OpenSSH default); \
                      Fleet drives Windows through Windows PowerShell 5.1: {default_shell} \
                      (see {SETUP_GUIDE})"
+                ),
+            }),
+            DetectedShell::WindowsPosix => Some(ShellRefusal {
+                reason: "unsupported_shell",
+                detail: format!(
+                    "the endpoint's login shell is a POSIX shell on Windows (Git Bash, MSYS2 or \
+                     Cygwin); Fleet drives Windows through Windows PowerShell 5.1: \
+                     {default_shell} (see {SETUP_GUIDE})"
                 ),
             }),
             DetectedShell::PowerShellCore => Some(ShellRefusal {
@@ -184,7 +206,9 @@ pub fn parse_sniff(stdout: &str) -> ShellSniff {
     let Some(at) = find_marker(stdout) else {
         return unrecognized;
     };
-    let profile_output = !stdout[..at].trim().is_empty();
+    // Anything at all ahead of the marker, whitespace included, is output
+    // something else wrote into the session before Fleet's command.
+    let profile_output = !stdout[..at].is_empty();
     let tokens: Vec<&str> = stdout[at..].split_whitespace().skip(1).collect();
     let token = |index: usize| tokens.get(index).copied().unwrap_or("");
     let os = token(0);
@@ -211,7 +235,10 @@ pub fn parse_sniff(stdout: &str) -> ShellSniff {
     }
     let shell = match edition {
         "Desktop" => DetectedShell::WindowsPowerShell,
-        "Core" => DetectedShell::PowerShellCore,
+        // PowerShell 7 is refused only on Windows, where the advice to set
+        // `DefaultShell` applies. `pwsh` as a Linux login shell answers
+        // `Unix` and stays unrecognized (unknown), as before.
+        "Core" if token(4) == "Win32NT" => DetectedShell::PowerShellCore,
         _ => DetectedShell::Unrecognized,
     };
     let powershell_major = token(2).parse().ok();
@@ -235,6 +262,16 @@ pub fn parse_sniff(stdout: &str) -> ShellSniff {
     }
 }
 
+/// Whether a `uname -s` answer names a POSIX layer on Windows (Git Bash or
+/// MSYS2 report `MINGW*`/`MSYS*`, Cygwin `CYGWIN*`).
+#[must_use]
+pub fn is_windows_posix_uname(stdout: &str) -> bool {
+    let first = stdout.trim().to_ascii_uppercase();
+    ["MINGW", "MSYS", "CYGWIN"]
+        .iter()
+        .any(|prefix| first.starts_with(prefix))
+}
+
 /// The byte offset of the marker token at the start of a line, when any.
 fn find_marker(stdout: &str) -> Option<usize> {
     let mut offset = 0;
@@ -255,10 +292,14 @@ fn find_marker(stdout: &str) -> Option<usize> {
 /// The endpoint's `guest_os` is ignored: the command is the same for every
 /// shell, and nothing rides stdin.
 ///
+/// A remote shell that answers without the marker (csh, `set -u`, a forced
+/// `command=` in `authorized_keys`) is `Unrecognized`, not an error, so a
+/// Linux login that worked before keeps working.
+///
 /// # Errors
 ///
-/// Fails on transport errors, a deadline kill, or a session that exits
-/// non-zero with no marker (authentication, host key, network).
+/// Fails on transport errors (`ssh` exiting 255: network, authentication,
+/// host key) and on a deadline kill.
 pub fn sniff_shell(
     provider: &SshProvider,
     limiter: &ExecutionLimiter,
@@ -285,23 +326,48 @@ fn sniff_inner(
     deadline: Duration,
 ) -> Result<ShellSniff, SshProviderError> {
     let started = Instant::now();
-    let mut child =
-        crate::shell::spawn_fixed_command(provider, endpoint, SNIFF_COMMAND, b"", deadline)?;
-    drop(child.stdin.take());
-    let result = crate::exec::wait_bounded(&mut child, started, deadline);
-    if result.killed_by_deadline {
-        return Err(SshProviderError::Tool {
-            tool: "ssh",
-            detail: "the login-shell check was killed at its deadline".to_owned(),
-        });
+    let result = run_fixed(provider, endpoint, SNIFF_COMMAND, started, deadline)?;
+    let mut sniff = parse_sniff(&result.stdout);
+    if sniff.shell == DetectedShell::Posix {
+        // A POSIX answer may still be Windows. A failed `uname` keeps the
+        // POSIX answer: nothing on Linux depends on it.
+        if let Ok(uname) = run_fixed(provider, endpoint, UNAME_COMMAND, started, deadline)
+            && is_windows_posix_uname(&uname.stdout)
+        {
+            sniff.shell = DetectedShell::WindowsPosix;
+        }
     }
-    let sniff = parse_sniff(&result.stdout);
-    if sniff.shell == DetectedShell::Unrecognized && result.exit_code != Some(0) {
+    Ok(sniff)
+}
+
+/// Runs one fixed command within what is left of `deadline`.
+fn run_fixed(
+    provider: &SshProvider,
+    endpoint: &SshConnectionSpec,
+    command: &str,
+    started: Instant,
+    deadline: Duration,
+) -> Result<crate::ExecutionResult, SshProviderError> {
+    let killed = || SshProviderError::Tool {
+        tool: "ssh",
+        detail: "the login-shell check was killed at its deadline".to_owned(),
+    };
+    let left = deadline.checked_sub(started.elapsed()).ok_or_else(killed)?;
+    let mut child = crate::shell::spawn_fixed_command(provider, endpoint, command, b"", left)?;
+    drop(child.stdin.take());
+    let result = crate::exec::wait_bounded(&mut child, Instant::now(), left);
+    if result.killed_by_deadline {
+        return Err(killed());
+    }
+    if result
+        .exit_code
+        .is_none_or(|code| code == SSH_FAILURE_STATUS)
+    {
         return Err(SshProviderError::Connect {
             detail: crate::redact_failure(&result.stderr),
         });
     }
-    Ok(sniff)
+    Ok(result)
 }
 
 #[cfg(test)]
@@ -309,13 +375,16 @@ mod tests {
     use super::*;
 
     /// What Bash, dash and other POSIX shells print.
-    const POSIX: &str = "fleet-shell %OS% .PSEdition .PSVersion.Major .SessionState.LanguageMode\n";
+    const POSIX: &str =
+        "fleet-shell %OS% .PSEdition .PSVersion.Major .SessionState.LanguageMode .Platform\n";
     /// What `cmd.exe` prints: `%OS%` expanded, the rest literal, CRLF.
-    const CMD: &str = "fleet-shell Windows_NT $PSVersionTable.PSEdition $PSVersionTable.PSVersion.Major $ExecutionContext.SessionState.LanguageMode\r\n";
+    const CMD: &str = "fleet-shell Windows_NT $PSVersionTable.PSEdition $PSVersionTable.PSVersion.Major $ExecutionContext.SessionState.LanguageMode $PSVersionTable.Platform\r\n";
     /// Windows PowerShell 5.1: Write-Output prints one argument per line.
     const POWERSHELL_51: &str = "fleet-shell\r\n%OS%\r\nDesktop\r\n5\r\nFullLanguage\r\n";
-    /// PowerShell 7 as the login shell.
-    const POWERSHELL_7: &str = "fleet-shell\r\n%OS%\r\nCore\r\n7\r\nFullLanguage\r\n";
+    /// PowerShell 7 as the login shell on Windows.
+    const POWERSHELL_7: &str = "fleet-shell\r\n%OS%\r\nCore\r\n7\r\nFullLanguage\r\nWin32NT\r\n";
+    /// PowerShell 7 as a Linux login shell.
+    const POWERSHELL_7_LINUX: &str = "fleet-shell\n%OS%\nCore\n7\nFullLanguage\nUnix\n";
     /// Windows PowerShell 5.1 under an App Control or `AppLocker` policy.
     const POWERSHELL_51_CLM: &str =
         "fleet-shell\r\n%OS%\r\nDesktop\r\n5\r\nConstrainedLanguage\r\n";
@@ -390,6 +459,50 @@ mod tests {
     }
 
     #[test]
+    fn powershell_7_as_a_linux_login_shell_is_not_given_windows_advice() {
+        let sniff = parse_sniff(POWERSHELL_7_LINUX);
+        assert_eq!(sniff.shell, DetectedShell::Unrecognized);
+        assert_eq!(sniff.refusal(), None);
+        assert_eq!(sniff.guest_os(), None);
+    }
+
+    #[test]
+    fn whitespace_before_the_marker_is_profile_output() {
+        for noise in ["\r\n", " ", "\n\n"] {
+            let sniff = parse_sniff(&format!("{noise}{POWERSHELL_51}"));
+            assert!(sniff.profile_output, "{noise:?}");
+            assert_eq!(sniff.refusal().map(|r| r.reason), Some("profile_output"));
+        }
+    }
+
+    #[test]
+    fn git_bash_msys_and_cygwin_are_windows_and_refused() {
+        for uname in [
+            "MINGW64_NT-10.0-22631\n",
+            "MSYS_NT-10.0-22631\n",
+            "CYGWIN_NT-10.0\n",
+        ] {
+            assert!(is_windows_posix_uname(uname), "{uname}");
+        }
+        for uname in ["Linux\n", "Darwin\n", "FreeBSD\n", ""] {
+            assert!(!is_windows_posix_uname(uname), "{uname}");
+        }
+        let sniff = ShellSniff {
+            shell: DetectedShell::WindowsPosix,
+            ..parse_sniff(POSIX)
+        };
+        assert_eq!(sniff.guest_os(), None);
+        let refusal = sniff.refusal().expect("Git Bash is refused");
+        assert_eq!(refusal.reason, "unsupported_shell");
+        assert!(refusal.detail.contains("Git Bash"), "{}", refusal.detail);
+        assert!(
+            refusal.detail.contains("DefaultShell"),
+            "{}",
+            refusal.detail
+        );
+    }
+
+    #[test]
     fn constrained_language_mode_is_refused() {
         let sniff = parse_sniff(POWERSHELL_51_CLM);
         assert_eq!(sniff.shell, DetectedShell::WindowsPowerShell);
@@ -453,7 +566,7 @@ mod tests {
     }
 
     #[test]
-    fn a_real_powershell_7_answers_as_powershell_core() {
+    fn a_real_powershell_7_answers_by_its_platform() {
         let Some(pwsh) = crate::pwsh_support::require_pwsh() else {
             return;
         };
@@ -465,9 +578,15 @@ mod tests {
             .output()
             .unwrap();
         let sniff = parse_sniff(&String::from_utf8_lossy(&out.stdout));
-        assert_eq!(sniff.shell, DetectedShell::PowerShellCore, "{out:?}");
+        // On a Linux test host pwsh answers `Unix`: unrecognized, never
+        // refused with Windows advice. On Windows it is refused.
+        let expected = if cfg!(windows) {
+            DetectedShell::PowerShellCore
+        } else {
+            DetectedShell::Unrecognized
+        };
+        assert_eq!(sniff.shell, expected, "{out:?}");
         assert!(sniff.powershell_major.unwrap_or_default() >= 6);
         assert_eq!(sniff.language_mode.as_deref(), Some("FullLanguage"));
-        assert_eq!(sniff.refusal().map(|r| r.reason), Some("unsupported_shell"));
     }
 }

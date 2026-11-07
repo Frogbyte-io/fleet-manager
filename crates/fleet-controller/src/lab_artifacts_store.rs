@@ -612,7 +612,7 @@ impl GuestFiles for SshGuestFiles {
             Ok(ssh_auth) => ssh_auth,
             Err(error) => return (Err(error), sink),
         };
-        let spec = match crate::exec::resolve_ssh_endpoint(
+        let spec = match crate::exec::resolve_ssh_endpoint_any_os(
             self.machines.as_ref(),
             machine_id,
             endpoint_id,
@@ -667,7 +667,7 @@ impl GuestFiles for SshGuestFiles {
         mut source: std::fs::File,
     ) -> Result<fleet_provider_ssh::PutOutcome, String> {
         let ssh_auth = self.ssh_auth(machine_id, auth).await?;
-        let (mut spec, _, _) = crate::exec::resolve_ssh_endpoint(
+        let (mut spec, _, _) = crate::exec::resolve_ssh_endpoint_any_os(
             self.machines.as_ref(),
             machine_id,
             endpoint_id,

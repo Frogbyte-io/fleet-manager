@@ -412,6 +412,7 @@ pub fn api(state: Arc<operations::ApiState>) -> (Router, utoipa::openapi::OpenAp
                     machines::link_machine_guest,
                     machines::unlink_machine_guest
                 ))
+                .routes(routes!(machines::clear_machine_endpoint_guest_os))
                 .routes(routes!(projects::create_project, projects::list_projects))
                 .routes(routes!(projects::get_project))
                 .routes(routes!(projects::update_project))

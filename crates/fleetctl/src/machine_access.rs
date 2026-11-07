@@ -150,6 +150,14 @@ pub enum MachineAccessAction {
         /// The SSH endpoint.
         endpoint: String,
     },
+    /// `machines endpoint-os clear <machine> <endpoint>`: forget the guest
+    /// OS recorded on an SSH endpoint (ADR 0021), so it is detected again.
+    EndpointOsClear {
+        /// The machine.
+        machine: String,
+        /// The SSH endpoint.
+        endpoint: String,
+    },
     /// `machines exec <machine> -- <command> [args...]`.
     Exec {
         /// The machine and how to reach it.
@@ -243,6 +251,16 @@ pub(crate) fn parse(verb: &str, rest: &[&str], output: &mut Output) -> Result<Co
             MachineAccessAction::Create(Box::new(crate::persistent::parse_create(rest, output)?))
         }
         "endpoint-auth" => parse_endpoint_auth(rest, output)?,
+        "endpoint-os" => match rest {
+            ["clear", machine, endpoint, flags @ ..] => {
+                parse_flags(flags, output, |flag, _| Err(unknown(flag)))?;
+                MachineAccessAction::EndpointOsClear {
+                    machine: (*machine).to_owned(),
+                    endpoint: (*endpoint).to_owned(),
+                }
+            }
+            _ => return Err(CliError { message: usage() }),
+        },
         "exec" => parse_exec(rest, output)?,
         "put" => parse_put(rest, output)?,
         "collect" => parse_collect(rest, output)?,
@@ -658,6 +676,12 @@ pub(crate) fn request(action: &MachineAccessAction) -> Result<RequestShape, CliE
         MachineAccessAction::EndpointAuthClear { machine, endpoint } => (
             reqwest::Method::DELETE,
             format!("/api/v1/machines/{machine}/endpoints/{endpoint}/auth"),
+            Vec::new(),
+            None,
+        ),
+        MachineAccessAction::EndpointOsClear { machine, endpoint } => (
+            reqwest::Method::DELETE,
+            format!("/api/v1/machines/{machine}/endpoints/{endpoint}/guest-os"),
             Vec::new(),
             None,
         ),
