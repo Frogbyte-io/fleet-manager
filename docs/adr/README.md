@@ -1,6 +1,6 @@
 # Architecture decision records
 
-These records were proposed with the master plan and accepted on 2026-08-25 under [FM-000](../planning/fm-000-acceptance.md). An accepted decision is changed by a new superseding ADR, not an incidental implementation issue.
+The initial set of records (0001–0008) was proposed with the master plan and accepted on 2026-08-25 under [FM-000](../planning/fm-000-acceptance.md); later records carry their own status and acceptance date in the table below. An accepted decision is changed by a new superseding ADR, not an incidental implementation issue.
 
 Accepting these ADRs did not close every open question inside them. The named spikes in [../planning/spikes.md](../planning/spikes.md) resolve implementation choices *within* the accepted boundaries; a spike may add a follow-up ADR, but it does not reopen the decision it serves.
 
@@ -26,7 +26,7 @@ The [2026-08-27 master-plan scope revision](../PLAN.md#confirmed-2026-08-27-prod
 | [0017](0017-agent-ssh-access.md) | Agents reach machines through a brokered SSH session with Fleet-held keys | Proposed | — | — |
 | [0018](0018-persistent-machines.md) | Persistent machines are Fleet-managed VMs that Lab never selects | Proposed | — | — |
 | [0019](0019-usb-device-allocation.md) | USB devices are allocated exclusively through Proxmox resource mappings | Proposed | — | FM-S11 |
-| [0020](0020-authenticated-deployment.md) | Authenticated deployment: accounts, sessions and scoped tokens replace anonymous LAN administration | Proposed | — | — |
-| [0021](0021-windows-workstations.md) | Windows workstations are managed agentless over OpenSSH Server | Proposed | — | — |
+| [0020](0020-authenticated-deployment.md) | Authenticated deployment: accounts, sessions and scoped tokens replace anonymous LAN administration | Accepted | 2026-11-07 | — |
+| [0021](0021-windows-workstations.md) | Windows workstations are managed agentless over OpenSSH Server | Accepted | 2026-11-07 | — |
 
-FM-S02 (authenticated authorization engine) is only partly scoped: [ADR 0011](0011-delegated-lab-credentials.md) proposes the delegated Lab credential slice. The trusted-LAN release needs the authorization port and explicit `anonymous-lan-admin` policy, but an embedded policy engine is deferred until authenticated deployment. The rest of FM-S02 (sessions, bootstrap, roles) still needs its own ADR before that engine lands.
+FM-S02 (authenticated authorization engine) is only partly scoped: [ADR 0011](0011-delegated-lab-credentials.md) proposes the delegated Lab credential slice. The trusted-LAN release needs the authorization port and explicit `anonymous-lan-admin` policy, but an embedded policy engine is deferred until authenticated deployment. The rest of FM-S02 (sessions, bootstrap, roles) is decided by [ADR 0020](0020-authenticated-deployment.md), accepted 2026-11-07.

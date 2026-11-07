@@ -1,8 +1,10 @@
 # ADR 0021: Windows workstations are managed agentless over OpenSSH Server
 
-Status: Proposed
+Status: Accepted
 
-Proposed: 2026-11-06 (tracking issue [#607](https://github.com/Frogbyte-io/fleet-manager/issues/607), epic [#606](https://github.com/Frogbyte-io/fleet-manager/issues/606), milestone M12). Proposed for maintainer review. It applies the Windows guest transport of [ADR 0015](0015-windows-lab-guest-transport.md) and the brokered access of [ADR 0017](0017-agent-ssh-access.md) to developer workstations. It **amends ADR 0017 decision 7** for registered machines: the guest OS of an endpoint is detected and recorded, and the caller's `--os` becomes a check instead of a choice (decision 4). It reverses nothing else in ADR 0015 or ADR 0017.
+Proposed: 2026-11-06 (tracking issue [#607](https://github.com/Frogbyte-io/fleet-manager/issues/607), epic [#606](https://github.com/Frogbyte-io/fleet-manager/issues/606), milestone M12)
+
+Accepted: 2026-11-07 by maintainer review, as proposed except for one Consequences line on agent tokens; the answers to the review questions are under [Maintainer decisions](#maintainer-decisions-2026-11-07). It applies the Windows guest transport of [ADR 0015](0015-windows-lab-guest-transport.md) and the brokered access of [ADR 0017](0017-agent-ssh-access.md) to developer workstations. It **amends ADR 0017 decision 7** for registered machines: the guest OS of an endpoint is detected and recorded, and the caller's `--os` becomes a check instead of a choice (decision 4). It reverses nothing else in ADR 0015 or ADR 0017.
 
 ## Context
 
@@ -24,7 +26,7 @@ Reuses the provider, host-key trust, brokered access, bounds, audit and the live
 
 ### B. A Windows `fleetd` service
 
-An outbound connection (ADR 0002/0003) would serve laptops that are rarely reachable and give continuous observations. But a service runs as LocalSystem or a service account, while Skills Manager, its library and the agent directories are per user, so it would still need a per-user component or impersonation to do the one thing this epic needs most. It also brings Windows service hosting, named pipes, update and rollback, and code signing (an unsigned service binary meets the same Smart App Control and Defender questions as the CLI below), which FM-S04 has not resolved. M8 does not need it: [#604](https://github.com/Frogbyte-io/fleet-manager/issues/604) gives `fleetctl` a login and revocable tokens held by the user, which an agent on a workstation uses without any node service.
+An outbound connection (ADR 0002/0003) would serve laptops that are rarely reachable and give continuous observations. But a service runs as LocalSystem or a service account, while Skills Manager, its library and the agent directories are per user, so it would still need a per-user component or impersonation to do the one thing this epic needs most. It also brings Windows service hosting, named pipes, update and rollback, and code signing (an unsigned service binary meets the same Smart App Control and Defender questions as the CLI below), which FM-S04 has not resolved. M8 does not need it: machine setup ([#629](https://github.com/Frogbyte-io/fleet-manager/issues/629), ADR 0020) places a revocable agent token in the user's profile, which an agent on a workstation uses through `fleetctl` without any node service; [#604](https://github.com/Frogbyte-io/fleet-manager/issues/604) gives humans `fleetctl login` and their personal tokens.
 
 ## Decision
 
@@ -52,13 +54,13 @@ An outbound connection (ADR 0002/0003) would serve laptops that are rarely reach
 - One transport, one trust model and one audit trail for Linux machines, Lab guests and workstations. The controller stays in the data path (ADR 0017), and rollouts reach only reachable machines; drift reporting is how an operator sees one that was missed.
 - **Agents on the workstation need `fleetctl.exe`** for the Registry and the `fleet` skill. The Windows binary already builds in CI (informational job), but there is no distribution, and the Linux pilot's `--url` wrapper is a shell script. A `.cmd` wrapper that forwards `%*` is a known argument-injection shape ([BatBadBut, CVE-2024-24576](https://blog.rust-lang.org/2024/04/09/cve-2024-24576/)), so `fleetctl` needs a non-shell way to name the controller before Windows agents use it ([#614](https://github.com/Frogbyte-io/fleet-manager/issues/614), with release binaries in [#615](https://github.com/Frogbyte-io/fleet-manager/issues/615)).
 - The `fleet` skill's examples are POSIX-quoted; agents on Windows run them from PowerShell or Git Bash, so the skill needs Windows notes.
-- M8 tokens on a workstation are the user's, obtained by `fleetctl login` (#604); Fleet does not push a token over SSH. The Windows at-rest store (DPAPI or Credential Manager) is #604's call.
+- M8 tokens on a workstation work as on Linux. Machine setup ([#629](https://github.com/Frogbyte-io/fleet-manager/issues/629), ADR 0020) writes the device's agent token over the brokered SSH session into the login user's profile, `%APPDATA%\fleet\credentials.toml` next to `config.toml`, with an ACL limited to that user, SYSTEM and Administrators; a human's own personal token comes from `fleetctl login` (#604). The Windows at-rest store for `fleetctl login` (DPAPI or Credential Manager) is #604's call.
 
 ## Risks
 
 - **Unsigned CLI.** [Smart App Control](https://support.microsoft.com/en-us/topic/what-is-smart-app-control-285ea03d-fa88-4d56-882e-6698afdb7003) (available only on clean Windows 11 installs, where it starts in evaluation mode) blocks unsigned apps it has no reputation for, and Defender may quarantine a binary after it is placed. Fleet reports the outcome (`binary_unusable`, or `absent` on the next probe) and does not retry in a loop; it never adds exclusions or turns protection off. A download with `curl.exe` carries no Mark of the Web, so the SmartScreen prompt for downloaded files is not expected over SSH; #611 confirms both on a real machine, with Smart App Control on and off.
 - **Execution policy and language mode.** The bootstrap is a command string, not a script file, so execution policy does not apply to it; detached exec's `run.ps1` already passes `-ExecutionPolicy Bypass`, which a Group Policy setting overrides. Constrained Language Mode (from App Control for Business or AppLocker) breaks the bootstrap and is unsupported; onboarding should detect and report it.
-- **Profiles.** Windows OpenSSH runs `powershell.exe -c` without `-NoProfile`. A developer's profile that prints or reads stdin corrupts framing. The Windows 11 default policy (`Restricted`) keeps profiles from loading; a developer who set `RemoteSigned` has profiles that load. Onboarding detects profile output and reports it; the cleaner fix is a shell-independent launcher (open question 2).
+- **Profiles.** Windows OpenSSH runs `powershell.exe -c` without `-NoProfile`. A developer's profile that prints or reads stdin corrupts framing. The Windows 11 default policy (`Restricted`) keeps profiles from loading; a developer who set `RemoteSigned` has profiles that load. Onboarding detects profile output and reports it; the cleaner fix is a shell-independent launcher, deferred beyond this milestone (Maintainer decisions, item 2).
 - **Admin keys** (decision 7) and **EDR noise** (the watchdog is one extra hidden `powershell.exe` per exec).
 - **Cloud placeholders.** Collecting a OneDrive Files On-Demand placeholder downloads it; the size cap and deadline still bound the read.
 
@@ -72,11 +74,14 @@ An outbound connection (ADR 0002/0003) would serve laptops that are rarely reach
 | [#614](https://github.com/Frogbyte-io/fleet-manager/issues/614), [#615](https://github.com/Frogbyte-io/fleet-manager/issues/615) | `fleetctl` on Windows: find the controller from `FLEET_URL` or a config file (no shell wrapper), and checksummed release binaries including `fleetctl.exe`; Windows notes in the `fleet` skill and the pilot guide | — |
 | [#611](https://github.com/Frogbyte-io/fleet-manager/issues/611) | Live validation on a Windows 11 workstation, as a standard and as an administrator account, with Smart App Control on and off; agent uses the Registry through `fleetctl` | #608–#610, #614, #615 |
 
-Windows token storage at rest belongs to #604 (to be noted there when this ADR is accepted). ADR 0015 and this ADR move to Accepted together after #611.
+Windows token storage at rest belongs to #604 (noted there on acceptance). This ADR was accepted on 2026-11-07 ahead of #611; ADR 0015 stays Proposed until #611's live validation.
 
-## Open questions for the maintainer
+## Maintainer decisions (2026-11-07)
 
-1. **Account guidance.** Is "the developer's own account, standard user recommended, administrator allowed with a warning" right, or should onboarding refuse elevated sessions unless the operator opts in?
-2. **`DefaultShell`.** Requiring Windows PowerShell 5.1 as the machine-wide `DefaultShell` changes the login shell for every SSH user on the workstation. The alternative is a short fixed launcher (`powershell.exe -NoProfile -NonInteractive -EncodedCommand <fixed stage>`) that works under `cmd.exe`, 5.1 and PowerShell 7 alike and also removes the profile risk, at the cost of a new bootstrap to verify live (stdin inheritance under each shell, the 8,191-character `cmd.exe` line limit). Ship the requirement now and the launcher later, or the launcher first?
-3. **Windows 10 22H2.** Untested and unrefused, as proposed, or refused outright?
-4. **Unsigned CLI.** If Smart App Control blocks it on #611's machine, is "turn Smart App Control off or install the CLI by hand" acceptable, or should Fleet ask upstream for signed Windows releases first?
+The review questions raised in #607 / PR #620 were answered on 2026-11-07; the decisions above stand as proposed, and answer 5 amends one Consequences line.
+
+1. **Account.** The SSH login is the developer's own account: a standard user is recommended, and an administrator is allowed with a warning (decision 7). Onboarding does not refuse elevated sessions.
+2. **`DefaultShell`.** Windows PowerShell 5.1 is required as the OpenSSH `DefaultShell` (decision 2). The shell-independent launcher is not part of this milestone.
+3. **Windows 10 22H2** is allowed but untested (decision 5).
+4. **Unsigned `skills-manager-cli.exe`.** The workaround is documented, separately for each protection. *Smart App Control* has no per-app allow, and installing the binary by hand does not get past it: a blocked unsigned CLI needs a signed upstream release or Smart App Control turned off. *Microsoft Defender*: if it quarantines the binary, the developer may restore and allow it, or install it by hand, where their organization's policy permits; Fleet itself never adds exclusions (Risks). Upstream has been asked for signed Windows releases in [xingkongliang/skills-manager#405](https://github.com/xingkongliang/skills-manager/issues/405#issuecomment-6713021132); the Windows asset was verified unsigned on v1.43.3.
+5. **Agent tokens on workstations.** Windows works the same as Linux: machine setup (#629) writes the agent token over the brokered SSH session into `%APPDATA%\fleet\credentials.toml` in the login user's profile, next to `config.toml`, with an ACL limited to that user, SYSTEM and Administrators (Consequences). This replaces the proposed "Fleet does not push a token over SSH".
