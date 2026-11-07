@@ -40,7 +40,7 @@ When authenticated deployment is added, first-class principals are user, node, a
 - Agents receive short-lived delegated credentials or go through the constrained local `fleetd` broker; they do not inherit a user's indefinite admin token.
 - Provider credentials authenticate Fleet to a provider and are never treated as Fleet identities.
 
-Bootstrap credentials and durable human/agent sessions belong to the later authenticated-deployment milestone, not the trusted-LAN release.
+Bootstrap credentials and durable human/agent sessions belong to the later authenticated-deployment milestone, not the trusted-LAN release. [ADR 0020](../adr/0020-authenticated-deployment.md) (proposed) decides the authenticated mode: accounts with argon2id passwords, host-side single-use bootstrap, cookie sessions with CSRF tokens, `fleetctl login` device flow and API tokens, `admin`/`operator`/`viewer`/`delegated` roles, viewer-level agent tokens per device, and session-only approval by a different principal.
 
 ## Delegated Lab credentials (proposed, ADR 0011)
 
