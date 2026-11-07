@@ -1,0 +1,25 @@
+[Unit]
+Description=Post Fleet status to a TRMNL webhook plugin
+Documentation=file:///opt/fleet-trmnl/README.md
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+DynamicUser=yes
+# FLEET_URL and the optional FLEET_TRMNL_* settings (README.md).
+EnvironmentFile=/etc/fleet-trmnl/env
+# The webhook URL is the only credential for writing to the screen; systemd
+# hands it to the script as $CREDENTIALS_DIRECTORY/trmnl-webhook.
+LoadCredential=trmnl-webhook:/etc/fleet-trmnl/webhook
+# A day of samples for the trend graphs, in /var/lib/fleet-trmnl/history.json.
+StateDirectory=fleet-trmnl
+StateDirectoryMode=0700
+ExecStart=/usr/bin/env node /opt/fleet-trmnl/publish.mjs
+TimeoutStartSec=90
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+RestrictAddressFamilies=AF_INET AF_INET6
