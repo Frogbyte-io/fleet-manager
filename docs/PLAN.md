@@ -171,9 +171,12 @@ FM-000 recorded the original Linux-and-Windows baseline. The 2026-08-27 product-
 |---|---|---|
 | Linux x86_64 (Debian/Ubuntu) | Primary | Agentless SSH, `fleetd` service, Docker, real integration tests, and the controller image |
 | Windows guests | Limited initially | Proxmox lifecycle plus QEMU Guest Agent health/IP observations; no Windows controller or in-guest `fleetd` release gate |
+| Windows workstations (Windows 11 x64) | In progress ([M12](#m12--windows-workstations), epic [#606](https://github.com/Frogbyte-io/fleet-manager/issues/606)) | Agentless over OpenSSH Server and Windows PowerShell 5.1: onboarding, inventory, Skills Manager and brokered exec/put/collect/terminal; no Windows `fleetd` ([ADR 0021](adr/0021-windows-workstations.md), Proposed) |
 | Linux aarch64 | Deferred | Revisit with FM-S06, which flags Skills Manager release coverage on non-x86 Linux |
 | macOS | Deferred | Still a design goal in the architecture documents; not an M2 acceptance requirement |
 | Proxmox VE 8.x and 9.x | Supported | The M6 compatibility matrix and real-cluster suite must pass on both majors |
+
+Maintainer decision (2026-11-06): Windows workstations are the next platform, and macOS stays deferred.
 
 Deferred is not rejected. Cross-platform assumptions stay in the protocol, configuration, and filesystem layers so Windows in-guest management, Linux aarch64, or macOS can be added later by testing and packaging work rather than by redesign.
 
@@ -312,6 +315,8 @@ Exit gate: a human or agent can request a disposable Linux environment from a ma
 
 Status: in progress (2026-10-09). The Release QA Linux slice below has landed on `dev`: scoped delegated Lab credentials ([ADR 0011](adr/0011-delegated-lab-credentials.md), #392/#435), retry-safe lease creation and lease lookup (#395/#432), `lab put` (#393/#434), and detached long-running exec (#394/#438). The rest of M8 (first-run bootstrap, web sessions, refusing anonymous LAN administration) has not started, so the exit gate is not met.
 
+Authenticated deployment (bootstrap, sessions, CLI and agent tokens, roles, refusing anonymous administration) is proposed in [ADR 0020](adr/0020-authenticated-deployment.md) (#602), with implementation planned across #603, #604, #605 and the follow-ups it lists; none of it has started.
+
 Outcome: when Fleet must operate outside the initial fully trusted LAN, anonymous administration can be replaced by authenticated, least-privileged human, agent, and CI identities without changing application use cases.
 
 - First-run controller bootstrap, web session and CLI credential flows, plus delegated short-lived agent/CI credentials scoped by project, node/tag, action, resource limits, TTL, and owner.
@@ -382,6 +387,16 @@ Exit gate: on the integration host, a lease declares a test device, Fleet attach
 
 M11 depends on M6 and M7 (Lab leases, placement, cleanup) and on persistent machines (ADR 0018). Queueing, device groups, Fleet-created mappings, and PCI passthrough are not part of it.
 
+### M12 — Windows workstations
+
+Status: planned (2026-11-06). Boundaries: [ADR 0021](adr/0021-windows-workstations.md) (Proposed). Epic: [#606](https://github.com/Frogbyte-io/fleet-manager/issues/606).
+
+Outcome: Windows 11 developer workstations join the fleet like Linux ones, agentless over OpenSSH Server: onboarding, inventory, fleet-wide skills through an automatically installed Skills Manager, and brokered exec, put, collect and terminal.
+
+Exit gate: on a real Windows 11 workstation, Fleet onboards the machine, reports its inventory, installs Skills Manager, rolls out the built-in `fleet` skill, runs exec, and removes the machine; an agent there uses the Registry through `fleetctl` ([#611](https://github.com/Frogbyte-io/fleet-manager/issues/611)).
+
+M12 reuses the Windows Lab guest transport (ADR 0015) and brokered access (ADR 0017), and depends on [#614](https://github.com/Frogbyte-io/fleet-manager/issues/614) and [#615](https://github.com/Frogbyte-io/fleet-manager/issues/615) for `fleetctl` on Windows. A Windows `fleetd`, a Windows controller and macOS are not part of it.
+
 ### Later — scale, convenience, and additional providers
 
 - Optional native desktop shell that consumes the public API and offers local editor/terminal handoff; no core logic.
@@ -410,6 +425,7 @@ M0 Foundation
   M1-M4 + M6 + M7 APIs -> M9 Fleet Console v2 + fleet-wide skills
   M4 desired state + M9 console -> M10 Registry + running services + action broker
   M6 + M7 Lab + persistent machines -> M11 USB hardware allocation
+  M2 onboarding + M3 skills + ADR 0015/0017 + fleetctl URL/binaries (#614, #615) -> M12 Windows workstations
 ```
 
 The critical path is M0 → M1 → M2 → M3 for the complete Developer Fleet release, then M6 plus the Packer/image-version slice of M7 for the first Lab release. Full M4 GitOps and Docker are not Lab prerequisites. Tailscale discovery is optional. Agents use skills and `fleetctl`; MCP is not on the roadmap.
@@ -432,6 +448,7 @@ Use the milestone names M0–M11 above. Each epic should be a tracking issue con
 | M9 | Console foundation; fleet inventory console; fleet-wide skills; Lab and images console; settings/Proxmox/projects/audit/access |
 | M10 | Foundations (plan, ADR, provider accounts); Registry; domain and service views; running services (Coolify and Docker); agent action broker |
 | M11 | USB hardware: spike and provider reads; inventory and reservations; Lab attach, hotplug and cleanup; persistent machine attach; console, skill, and live validation |
+| M12 | Windows workstations (#606): ADR and platform table; onboarding and inventory; Skills Manager on Windows; exec/put/collect/terminal; live validation |
 
 Issue-ready work for M0–M2 is in [planning/initial-issues.md](planning/initial-issues.md). Use its issue template for later milestones.
 

@@ -320,6 +320,44 @@ pub fn review_token_for(kind: &str, payload_json: &str) -> String {
     })
 }
 
+/// Refuses a `machine.install-fleetd` whose `installerEnv` is not a list of
+/// `[name, value]` pairs that [`crate::fleetd_layout`] accepts: the values
+/// reach a root installer, and later the uninstall that deletes
+/// `FLEETD_STATE_DIR`.
+fn check_installer_env(
+    payload: Option<&str>,
+    tools: crate::fleetd_layout::InstallerTools,
+) -> Result<(), OperationUseCaseError> {
+    let invalid = |detail: String| OperationUseCaseError::Invalid { detail };
+    let Some(payload) =
+        payload.and_then(|payload| serde_json::from_str::<serde_json::Value>(payload).ok())
+    else {
+        return Ok(());
+    };
+    let entries = match &payload["installerEnv"] {
+        serde_json::Value::Null => return Ok(()),
+        serde_json::Value::Array(entries) => entries,
+        _ => {
+            return Err(invalid(
+                "installerEnv must be a list of [name, value] pairs".to_owned(),
+            ));
+        }
+    };
+    for entry in entries {
+        let (Some(name), Some(value), Some(2)) = (
+            entry.get(0).and_then(serde_json::Value::as_str),
+            entry.get(1).and_then(serde_json::Value::as_str),
+            entry.as_array().map(Vec::len),
+        ) else {
+            return Err(invalid(
+                "installerEnv must be a list of [name, value] pairs".to_owned(),
+            ));
+        };
+        crate::fleetd_layout::validate_installer_variable(name, value, tools).map_err(invalid)?;
+    }
+    Ok(())
+}
+
 /// Compares two token strings in constant time over their bytes.
 fn constant_time_eq(a: &str, b: &str) -> bool {
     let (a, b) = (a.as_bytes(), b.as_bytes());
@@ -664,6 +702,7 @@ pub struct Operations {
     lease_owners: Option<Arc<dyn LeaseOwnerLookup>>,
     pub(crate) events: Option<Arc<crate::events::EventHub>>,
     brokered_kinds: std::collections::BTreeSet<String>,
+    installer_tools: crate::fleetd_layout::InstallerTools,
 }
 
 /// The stable reason a destroy or snapshot delete of a Lab pool member is
@@ -779,6 +818,7 @@ impl Operations {
             lease_owners: None,
             events: None,
             brokered_kinds: std::collections::BTreeSet::new(),
+            installer_tools: crate::fleetd_layout::InstallerTools::System,
         }
     }
 
@@ -797,6 +837,7 @@ impl Operations {
             lease_owners: None,
             events: Some(events),
             brokered_kinds: std::collections::BTreeSet::new(),
+            installer_tools: crate::fleetd_layout::InstallerTools::System,
         }
     }
 
@@ -815,6 +856,7 @@ impl Operations {
             lease_owners: None,
             events: None,
             brokered_kinds: std::collections::BTreeSet::new(),
+            installer_tools: crate::fleetd_layout::InstallerTools::System,
         }
     }
 
@@ -834,7 +876,17 @@ impl Operations {
             lease_owners: None,
             events: Some(events),
             brokered_kinds: std::collections::BTreeSet::new(),
+            installer_tools: crate::fleetd_layout::InstallerTools::System,
         }
+    }
+
+    /// Installer test mode (#616): `machine.install-fleetd` accepts any
+    /// absolute tool path and the stub log in `installerEnv`. Only hermetic
+    /// install tests compose this; the controller binary never does.
+    #[must_use]
+    pub fn with_installer_test_tools(mut self) -> Self {
+        self.installer_tools = crate::fleetd_layout::InstallerTools::Any;
+        self
     }
 
     /// Supplies the Lab pool membership lookup. With it, `destroy` and
@@ -1523,6 +1575,10 @@ impl Operations {
             return Err(OperationUseCaseError::Invalid {
                 detail: "this operation requires explicit confirmation".to_owned(),
             });
+        }
+
+        if new.kind == "machine.install-fleetd" {
+            check_installer_env(new.payload_json.as_deref(), self.installer_tools)?;
         }
 
         if (new.kind.starts_with("skills.") || new.kind.starts_with("presets."))
@@ -2634,6 +2690,68 @@ mod catalog_rollout_authorization_tests {
             .await
             .unwrap();
         assert_eq!(done.result_json.as_deref(), Some(ok.as_str()));
+    }
+
+    #[tokio::test]
+    async fn an_install_with_an_unsafe_installer_env_is_refused_before_creation() {
+        let port = Arc::new(RecordingPort::default());
+        let operations = Operations::new(port.clone(), Arc::new(RecordingAudit));
+        let authorizer = Policy {
+            deny: None,
+            seen: Mutex::new(Vec::new()),
+        };
+        let install = |env: serde_json::Value| NewOperation {
+            kind: "machine.install-fleetd".to_owned(),
+            payload_json: Some(
+                serde_json::json!({ "machineId": "m1", "installerEnv": env }).to_string(),
+            ),
+            ..NewOperation::default()
+        };
+        for env in [
+            serde_json::json!([["FLEETD_STATE_DIR", "/etc"]]),
+            serde_json::json!([["FLEETD_STATE_DIR", "/var/lib/fleetd\u{0}x"]]),
+            serde_json::json!([["BASH_ENV", "/tmp/x"]]),
+            serde_json::json!([["FLEETD_BIN_DIR", "bin"]]),
+            serde_json::json!([["FLEETD_SERVICE", "fleetd; reboot"]]),
+            serde_json::json!([["FLEETD_SYSTEMCTL", "systemctl"]]),
+            serde_json::json!([["FLEETD_SYSTEMCTL", "/tmp/stubs/systemctl"]]),
+            serde_json::json!([["FLEETD_STUB_LOG", "/tmp/stubs.log"]]),
+            serde_json::json!([["FLEETD_BIN_DIR"]]),
+            serde_json::json!("FLEETD_STATE_DIR=/etc"),
+        ] {
+            let result = operations
+                .create(&authorizer, "operator", &install(env.clone()))
+                .await;
+            assert!(
+                matches!(result, Err(super::OperationUseCaseError::Invalid { .. })),
+                "{env}: {result:?}"
+            );
+        }
+        assert!(port.0.lock().unwrap().is_empty());
+        operations
+            .create(
+                &authorizer,
+                "operator",
+                &install(serde_json::json!([
+                    ["FLEETD_STATE_DIR", "/var/lib/fleetd"],
+                    ["FLEETD_SYSTEMCTL", "/usr/bin/systemctl"]
+                ])),
+            )
+            .await
+            .unwrap();
+        // Installer test mode (hermetic install tests only) accepts stubs.
+        Operations::new(port.clone(), Arc::new(RecordingAudit))
+            .with_installer_test_tools()
+            .create(
+                &authorizer,
+                "operator",
+                &install(serde_json::json!([
+                    ["FLEETD_SYSTEMCTL", "/tmp/stubs/systemctl"],
+                    ["FLEETD_STUB_LOG", "/tmp/stubs.log"]
+                ])),
+            )
+            .await
+            .unwrap();
     }
 
     #[tokio::test]

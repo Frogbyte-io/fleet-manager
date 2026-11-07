@@ -13,7 +13,7 @@ Examples use placeholders: the controller is `controller.example.ts.net`, the pi
 ## Prerequisites
 
 - **A controller** on a Linux host in your tailnet, deployed with [deploy/README.md](../../deploy/README.md) or [deploy/COOLIFY.md](../../deploy/COOLIFY.md), with its master key (`FLEET_MASTER_KEY_FILE`) set so it can store secrets.
-- **`fleetctl` built from the same commit as the controller** (`cargo build --release -p fleetctl`, then copy `target/release/fleetctl` into your `PATH`). There is no published `fleetctl` package yet. `fleetctl --url <controller> --output json system` shows the controller's version.
+- **`fleetctl` from the same commit as the controller**, on your workstation and on each pilot machine. If the controller runs a commit from `main`, use the GitHub release for that commit (tagged `v<version>-<short commit>`). Its static Linux binary runs on every pilot machine, Ubuntu 22.04 included. Releases exist only for commits merged to `main`. Otherwise, download the controller's own build from `/downloads/fleetctl/linux-<arch>`. It is served only for the controller's architecture (`linux-x86_64` on an x86_64 controller host) and needs glibc 2.36 or newer (Debian 12, Ubuntu 23.04 or later). Check the SHA-256 before you put the binary on your `PATH`. [Install fleetctl](../../deploy/README.md#install-fleetctl) has the commands. `fleetctl --url <controller> --output json system` shows the controller's version.
 - **Each pilot machine** runs Debian or Ubuntu on x86_64, is joined to your tailnet, runs an OpenSSH server, and has `curl`, `sha256sum`, `base64`, and `jq`. Without `jq`, a rollout that updates an existing skill fails closed.
 - **One login per machine for agents.** Skills Manager and the skills it deploys live in the SSH login's home directory. Use the account your coding agents run as (`dev` here).
 - **SSH from the controller.** That login accepts a key the controller can present: `--auth agent` offers the keys in the controller's ssh-agent, then its default key files ([which keys](lab.md#which-keys-the-controller-offers)); `--auth identity-file --identity <path>` names a key file on the controller.
@@ -28,7 +28,27 @@ Examples use placeholders: the controller is `controller.example.ts.net`, the pi
   fleetctl desired activate <commit-sha> <content-digest> --wait
   ```
 
-In this guide, `fleetctl` stands for `fleetctl --url http://controller.example.ts.net:8080`. `fleetctl` has no environment variable or file for the URL. Pass `--url` yourself, or use the wrapper in [Agents and the Registry](#agents-and-the-registry).
+The commands below carry no global `--url` (the prerequisite check above passes it because no URL is configured yet). `fleetctl` takes the controller URL from the first of these that is set:
+
+1. `--url <controller>` on the command line;
+2. the `FLEET_URL` environment variable;
+3. `url` in the config file `$XDG_CONFIG_HOME/fleet/config.toml`, or `~/.config/fleet/config.toml` when `XDG_CONFIG_HOME` is unset or not an absolute path (`%APPDATA%\fleet\config.toml` on Windows);
+4. the default, `http://127.0.0.1:8080`.
+
+Set it once on your own workstation:
+
+```sh
+# The directory fleetctl reads: an absolute XDG_CONFIG_HOME, otherwise ~/.config.
+case "${XDG_CONFIG_HOME:-}" in
+  /*) fleet_config="$XDG_CONFIG_HOME/fleet" ;;
+  *) fleet_config="$HOME/.config/fleet" ;;
+esac
+mkdir -p "$fleet_config"
+printf 'url = "http://controller.example.ts.net:8080"\n' > "$fleet_config/config.toml"
+fleetctl --output json system   # client.urlSource is "config"
+```
+
+The URL must be `http` or `https` and must not contain a user name or password. A delegated credential goes in `FLEET_TOKEN`, never in the URL. `fleetctl` reads only the `url` key and ignores other keys. `system` reports which source supplied the URL in `client.urlSource` (`flag`, `env`, `config`, or `default`). `status` asks the local `fleetd` socket unless you pass `--url`. `FLEET_URL` and the config file do not change that.
 
 ## Restrict access first
 
@@ -168,19 +188,25 @@ The probe refreshes the machine's observed inventory, and `skills matrix` shows 
 
 ## Agents and the Registry
 
-Agents use the `fleet` skill, which drives `fleetctl --output json`. Each pilot machine needs `fleetctl`, and it must reach the controller. Because the skill's commands carry no `--url`, a small wrapper in the agent login's `PATH` adds it:
+Agents use the `fleet` skill, which drives `fleetctl --output json`. Each pilot machine needs `fleetctl`, and it must reach the controller. The skill's commands carry no `--url`, so give the agent login a config file that names the controller.
 
-Copy the `fleetctl` binary you built (see the prerequisites) to the pilot machine first, for example with `scp target/release/fleetctl dev-1:/tmp/fleetctl`, then on the pilot machine:
+On the pilot machine, as the agent login, install `fleetctl` first with the commands in [Install fleetctl](../../deploy/README.md#install-fleetctl), which put it at `~/.local/bin/fleetctl`. Prefer the release binary; on Ubuntu 22.04 it is the only option, because the controller's build needs glibc 2.36. Then point it at the controller:
 
 ```sh
-install -D -m 0755 /tmp/fleetctl ~/.local/libexec/fleetctl && rm /tmp/fleetctl
-cat > ~/.local/bin/fleetctl <<'EOF'
-#!/bin/sh
-exec "$HOME/.local/libexec/fleetctl" --url http://controller.example.ts.net:8080 "$@"
-EOF
-chmod 0755 ~/.local/bin/fleetctl
-fleetctl --output json system
+(
+  set -eu
+  # The directory fleetctl reads: an absolute XDG_CONFIG_HOME, otherwise ~/.config.
+  case "${XDG_CONFIG_HOME:-}" in
+    /*) fleet_config="$XDG_CONFIG_HOME/fleet" ;;
+    *) fleet_config="$HOME/.config/fleet" ;;
+  esac
+  mkdir -p "$fleet_config"
+  printf 'url = "http://controller.example.ts.net:8080"\n' > "$fleet_config/config.toml"
+  fleetctl --output json system
+)
 ```
+
+`FLEET_URL=http://controller.example.ts.net:8080` in the agent's environment also works and takes precedence over the file. The file is simpler because every shell and agent harness under that login reads it. Machine setup does not write this file yet.
 
 `system` shows the controller version, the trust mode, and the principal you act as. In trusted-LAN mode that principal is `anonymous-lan-admin`. In identity mode, use the Serve URL (`https://controller.example.ts.net`) from your own untagged devices, and the principal is your Tailscale login; tagged pilot machines are refused there.
 
@@ -204,7 +230,22 @@ Reads come from the controller's active revision. Edits (`registry set`, `relate
   ```
 
   Use the skill id that `skills list` reports. If Fleet Git still assigns the skill, add a `SkillPreset` with an empty `deployTo` for it, or the machine shows drift again.
-- **Revoke `fleetd`.** Use the machine page's Connections tab in the console (**Revoke node**). `fleetctl` has no revoke command yet. Then remove the service on the machine, as `deploy/fleetd/uninstall.sh --purge` does:
+- **Revoke `fleetd`** if you keep the machine but want its node gone. This revokes the node identity with every credential and session, as the console's Connections tab (**Revoke node**) does; `fleetd` cannot connect again until it is enrolled again:
+
+  ```sh
+  fleetctl --output json nodes revoke <machine-id> --yes
+  ```
+
+- **Remove the machine.** `machines remove` reviews first, then removes the machine record with its endpoints, facts, node identity, recorded skill installs, project checkouts and Skills Manager snapshot. It revokes the keys Fleet holds for the machine and unpins the machine's SSH host keys, unless another machine or an onboarding draft uses the same host. The audit trail and finished operations stay. Add `--uninstall` to run `deploy/fleetd/uninstall.sh --purge` over SSH first; if the uninstall fails, the machine is not removed. Without it, nothing on the machine is touched:
+
+  ```sh
+  fleetctl --output json machines remove <machine-id> --review-only
+  fleetctl --output json machines remove <machine-id> --uninstall --endpoint <endpoint-id> --yes
+  ```
+
+  The review lists each blocker with what to do: a Lab provision (for a leased guest, destroy the lease, or retry a failed cleanup with `lab cleanup-retry`; for a pool member or an unleased provision, drain it with `lab pool drain <pool-id> --vmid <vmid>`; Lab's cleanup then removes the machine), a persistent marker (`machines persistent unregister`, or the reviewed destroy for a VM Fleet created), a USB device the machine holds (`machines usb detach`), an operation that has not finished, or, on a controller running without its secret store, stored keys or passwords it could not revoke. The review also counts the stored SSH keys and Windows administrator passwords the removal deletes, and warns before a stored administrator password is destroyed. `--uninstall` uses the install layout of the machine's last successful `machines install-node`, and fails when no fleetd unit or binary is found there, when the service cannot be stopped, or when the recorded layout breaks the installer rules (for example a `FLEETD_STATE_DIR` that is a system directory); then remove the machine without `--uninstall` and remove fleetd by hand. Removing needs `machine.delete`, which no delegated credential has.
+
+  Without `--uninstall`, remove the service on the machine yourself, as `deploy/fleetd/uninstall.sh --purge` does:
 
   ```sh
   sudo systemctl disable --now fleetd
@@ -213,8 +254,8 @@ Reads come from the controller's active revision. Edits (`registry set`, `relate
   sudo rm -rf /var/lib/fleetd
   ```
 
-  The `fleet` system account stays; remove it with `sudo userdel fleet` if you want.
-- **Cut agentless access.** Remove the controller's key from the login's `~/.ssh/authorized_keys`, and clear any stored endpoint credential (`fleetctl machines endpoint-auth clear <machine-id> <endpoint-id>`; see [machine access](machine-access.md#revoke-access)). The machine record stays in the inventory: there is no machine delete yet.
+  The `fleet` system account stays either way; remove it with `sudo userdel fleet` if you want.
+- **Cut agentless access.** Remove the controller's key from the login's `~/.ssh/authorized_keys`. For a machine you keep, also clear any stored endpoint credential (`fleetctl machines endpoint-auth clear <machine-id> <endpoint-id>`; see [machine access](machine-access.md#revoke-access)); `machines remove` revokes the machine's own stored keys itself.
 - **Remove Skills Manager** if Fleet installed it: delete `~/.local/bin/skills-manager-cli`. Its library and agent skill directories belong to Skills Manager, so remove skills through it first.
 - **Roll back a Fleet Git change**: `fleetctl desired rollback <commit-sha> <content-digest> --wait`.
 

@@ -1724,6 +1724,29 @@ fn run_serve(mut config: fleet_config::ControllerConfig) -> ExitCode {
             ),
         ));
         let lab = lab.with_machine_access(machine_access.clone());
+        // #616: removing a machine. It composes over the store alone; the
+        // secret store (to revoke the machine's stored secrets) and the node
+        // gateway (to close a live session) join when they are there, and a
+        // machine with stored secrets is refused without the secret store.
+        let lab = {
+            let keys: Option<std::sync::Arc<dyn fleet_application::machine_access::MachineKeyPort>> =
+                machine_keys.clone().map(|keys| {
+                    keys as std::sync::Arc<dyn fleet_application::machine_access::MachineKeyPort>
+                });
+            match fleet_controller::machine_remove::compose(
+                store.pool(),
+                config.data_dir.join("ssh"),
+                keys,
+                ssh_auth_resolver.clone(),
+                services.as_ref().map(|services| services.gateway.clone()),
+            ) {
+                Ok(removal) => lab.with_machine_removal(std::sync::Arc::new(removal)),
+                Err(error) => {
+                    eprintln!("warning: machine removal unavailable: {error}");
+                    lab
+                }
+            }
+        };
         let lab = std::sync::Arc::new(match &lab_artifacts {
             Some(artifacts) => lab.with_artifacts(artifacts.clone()),
             None => lab,

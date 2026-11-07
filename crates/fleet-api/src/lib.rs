@@ -32,6 +32,7 @@ pub mod lab_hardware;
 pub mod lab_pools;
 pub mod lab_put;
 pub mod machine_access;
+pub mod machine_remove;
 pub mod machine_terminal;
 pub mod machine_usb;
 pub mod machines;
@@ -582,6 +583,8 @@ pub fn api(state: Arc<operations::ApiState>) -> (Router, utoipa::openapi::OpenAp
                 .routes(routes!(lab_put::put_lab_file))
                 .routes(routes!(lab_hardware::attach_lab_lease_hardware))
                 .routes(routes!(lab_hardware::detach_lab_lease_hardware))
+                .routes(routes!(machine_remove::review_machine_removal))
+                .routes(routes!(machine_remove::remove_machine))
                 .routes(routes!(machine_usb::review_machine_usb_attach))
                 .routes(routes!(machine_usb::attach_machine_usb))
                 .routes(routes!(machine_usb::review_machine_usb_detach))

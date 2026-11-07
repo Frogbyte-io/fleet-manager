@@ -40,8 +40,14 @@ COPY skills/fleet/ skills/fleet/
 COPY deploy/fleetd/ deploy/fleetd/
 # Keep self-hosted builds from exhausting RAM on small Coolify servers.
 ARG CARGO_BUILD_JOBS=2
-RUN cargo build --release --locked -p fleet-controller \
-    && cargo run --release --locked -p xtask -- package-fleetd
+# fleetctl is built from the same commit so a device can fetch the CLI that
+# matches this controller from /downloads/fleetctl/<platform>. The image
+# carries the build for its own architecture only (linux-x86_64 or
+# linux-aarch64); other platforms come from the GitHub release.
+RUN cargo build --release --locked -p fleet-controller -p fleetctl \
+    && cargo run --release --locked -p xtask -- package-fleetd \
+    && install -D -m 0755 target/release/fleetctl \
+        "target/dist/fleetctl/fleetctl-linux-$(uname -m)"
 
 FROM debian:bookworm-slim AS runtime
 # The service user (uid/gid 999) owns the runtime state directory. The
@@ -55,6 +61,7 @@ RUN apt-get update \
     && useradd --system --uid 999 --gid fleet --home-dir /var/lib/fleet --create-home --shell /usr/sbin/nologin fleet
 COPY --from=rust /src/target/release/fleet-controller /usr/local/bin/fleet-controller
 COPY --from=rust /src/target/dist/*.tar.gz /opt/fleet/artifacts/
+COPY --from=rust /src/target/dist/fleetctl/ /opt/fleet/artifacts/fleetctl/
 COPY --from=web /src/apps/web/dist /opt/fleet/web
 COPY deploy/docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
 RUN chmod 0755 /usr/local/bin/docker-entrypoint.sh

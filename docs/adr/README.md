@@ -26,5 +26,7 @@ The [2026-08-27 master-plan scope revision](../PLAN.md#confirmed-2026-08-27-prod
 | [0017](0017-agent-ssh-access.md) | Agents reach machines through a brokered SSH session with Fleet-held keys | Proposed | — | — |
 | [0018](0018-persistent-machines.md) | Persistent machines are Fleet-managed VMs that Lab never selects | Proposed | — | — |
 | [0019](0019-usb-device-allocation.md) | USB devices are allocated exclusively through Proxmox resource mappings | Proposed | — | FM-S11 |
+| [0020](0020-authenticated-deployment.md) | Authenticated deployment: accounts, sessions and scoped tokens replace anonymous LAN administration | Proposed | — | — |
+| [0021](0021-windows-workstations.md) | Windows workstations are managed agentless over OpenSSH Server | Proposed | — | — |
 
 FM-S02 (authenticated authorization engine) is only partly scoped: [ADR 0011](0011-delegated-lab-credentials.md) proposes the delegated Lab credential slice. The trusted-LAN release needs the authorization port and explicit `anonymous-lan-admin` policy, but an embedded policy engine is deferred until authenticated deployment. The rest of FM-S02 (sessions, bootstrap, roles) still needs its own ADR before that engine lands.

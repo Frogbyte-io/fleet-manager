@@ -38,10 +38,19 @@ fleetctl --output json status
 fleetctl --output json system
 ```
 
+`fleetctl` finds the controller by itself: `--url`, then the `FLEET_URL`
+environment variable, then `url` in `$XDG_CONFIG_HOME/fleet/config.toml` (or
+`~/.config/fleet/config.toml` when `XDG_CONFIG_HOME` is unset or relative;
+`%APPDATA%\fleet\config.toml` on Windows), then `http://127.0.0.1:8080`. Do not
+add `--url` unless the user names a different controller. `system` reports
+which source was used in `client.urlSource` (`flag`, `env`, `config`, or
+`default`), together with the controller's version, storage health, operation
+queue, trust mode, and the principal you are acting as. If it cannot reach the
+controller, ask the user to set `FLEET_URL` or the config file.
+
 `status` asks this machine's fleetd over its local socket, which needs no
-controller credentials; with `--url <controller>` it asks the controller directly.
-`system` reports the controller's version, storage health, operation queue,
-trust mode, and the principal you are acting as.
+controller credentials. Only an explicit `--url <controller>` makes it ask the
+controller directly; `FLEET_URL` and the config file do not.
 
 ## Machines
 
@@ -165,6 +174,46 @@ privileged action: do it only when the user asked for a permanent machine, and
 use `--review-only` first when unsure. A failed creation keeps the VM and names
 the `step` that failed; re-running the same command resumes it. Destroying a
 persistent VM is a separate, confirmed act by the user.
+
+### Removing a machine
+
+Do not remove a machine or revoke its node unless the user asked you to.
+Removal deletes the machine from Fleet: its record, endpoints, facts, node
+identity, recorded skill installs and stored keys, including a stored Windows
+administrator password. It cannot be undone; the machine has to be onboarded
+again. When asked, review first and show the user what the review says:
+
+```bash
+fleetctl --output json machines remove <machine-id> --review-only
+fleetctl --output json machines remove <machine-id> --yes
+```
+
+The review answers `unpinHosts` (pinned host keys that go), `keptHosts`
+(shared with another machine, so they stay), `footprint` (what is removed, and
+`collectedFilesKept`, the collected files that stay until their retention
+pass), `warnings` (show every one to the user before confirming) and
+`blockers`. A non-empty `blockers` list means the removal is refused; each
+entry's `detail` says what to do (destroy a Lab lease, drain a Lab pool member,
+unregister a persistent VM, detach a USB device, wait for an operation, or
+start the controller with its secret store). Report it to the user; do not
+clear blockers yourself.
+
+Without `--uninstall` nothing on the machine is touched. Add
+`--uninstall --endpoint <endpoint-id>` only when the user asked for fleetd to
+be removed from the machine: it runs the fleetd uninstall over SSH first and
+deletes the node's state there, and a failed uninstall leaves the machine
+registered.
+
+To keep the machine and revoke only its node instead (an alternative to
+removal, not a step after it):
+
+```bash
+fleetctl --output json nodes revoke <machine-id> --yes
+```
+
+This revokes the node identity with every node credential and session, so the
+running fleetd loses its access at once; the machine record stays, and fleetd
+cannot connect again until it is enrolled again.
 
 ## Projects
 

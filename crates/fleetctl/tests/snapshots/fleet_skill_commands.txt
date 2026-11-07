@@ -34,6 +34,12 @@ fleetctl --output json machines create --account <account-id> --image-version <v
   -> POST /api/v1/machines/create/review body {"spec":{"accountId":"account-id-example","cores":4,"imageVersionId":"version-id-example","memoryMib":8192,"name":"build-box"}}
 fleetctl --output json machines create --account <account-id> --image-version <version-id> --name build-box --review-only
   -> POST /api/v1/machines/create/review body {"spec":{"accountId":"account-id-example","imageVersionId":"version-id-example","name":"build-box"}}
+fleetctl --output json machines remove <machine-id> --review-only
+  -> POST /api/v1/machines/machine-id-example/remove/review body {}
+fleetctl --output json machines remove <machine-id> --yes
+  -> POST /api/v1/machines/machine-id-example/remove/review body {}
+fleetctl --output json nodes revoke <machine-id> --yes
+  -> POST /api/v1/machines/machine-id-example/node/revoke
 fleetctl --output json projects list
   -> GET /api/v1/projects
 fleetctl --output json projects get <project-id>
