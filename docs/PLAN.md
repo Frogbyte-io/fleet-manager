@@ -171,7 +171,7 @@ FM-000 recorded the original Linux-and-Windows baseline. The 2026-08-27 product-
 |---|---|---|
 | Linux x86_64 (Debian/Ubuntu) | Primary | Agentless SSH, `fleetd` service, Docker, real integration tests, and the controller image |
 | Windows guests | Limited initially | Proxmox lifecycle plus QEMU Guest Agent health/IP observations; no Windows controller or in-guest `fleetd` release gate |
-| Windows workstations (Windows 11 x64) | In progress ([M12](#m12--windows-workstations), epic [#606](https://github.com/Frogbyte-io/fleet-manager/issues/606)) | Agentless over OpenSSH Server and Windows PowerShell 5.1: onboarding, inventory, Skills Manager and brokered exec/put/collect/terminal; no Windows `fleetd` ([ADR 0021](adr/0021-windows-workstations.md), Proposed) |
+| Windows workstations (Windows 11 x64) | In progress ([M12](#m12--windows-workstations), epic [#606](https://github.com/Frogbyte-io/fleet-manager/issues/606)) | Agentless over OpenSSH Server and Windows PowerShell 5.1: onboarding, inventory, Skills Manager and brokered exec/put/collect/terminal; no Windows `fleetd` ([ADR 0021](adr/0021-windows-workstations.md), Accepted) |
 | Linux aarch64 | Deferred | Revisit with FM-S06, which flags Skills Manager release coverage on non-x86 Linux |
 | macOS | Deferred | Still a design goal in the architecture documents; not an M2 acceptance requirement |
 | Proxmox VE 8.x and 9.x | Supported | The M6 compatibility matrix and real-cluster suite must pass on both majors |
@@ -313,9 +313,9 @@ Exit gate: a human or agent can request a disposable Linux environment from a ma
 
 ### M8 — Authentication and agent/CI hardening
 
-Status: in progress (2026-10-09). The Release QA Linux slice below has landed on `dev`: scoped delegated Lab credentials ([ADR 0011](adr/0011-delegated-lab-credentials.md), #392/#435), retry-safe lease creation and lease lookup (#395/#432), `lab put` (#393/#434), and detached long-running exec (#394/#438). The rest of M8 (first-run bootstrap, web sessions, refusing anonymous LAN administration) has not started, so the exit gate is not met.
+Status: in progress (updated 2026-11-07: the authenticated-deployment design, ADR 0020, is accepted and its implementation issues are listed below). The Release QA Linux slice below has landed on `dev`: scoped delegated Lab credentials ([ADR 0011](adr/0011-delegated-lab-credentials.md), #392/#435), retry-safe lease creation and lease lookup (#395/#432), `lab put` (#393/#434), and detached long-running exec (#394/#438). The rest of M8 (first-run bootstrap, web sessions, refusing anonymous LAN administration) has not started, so the exit gate is not met.
 
-Authenticated deployment (bootstrap, sessions, CLI and agent tokens, roles, refusing anonymous administration) is proposed in [ADR 0020](adr/0020-authenticated-deployment.md) (#602), with implementation planned across #603, #604, #605 and the follow-ups it lists; none of it has started.
+Authenticated deployment (bootstrap, sessions, CLI and agent tokens, roles, refusing anonymous administration) is decided in [ADR 0020](adr/0020-authenticated-deployment.md) (#602; design accepted 2026-11-07 with maintainer decisions). Implementation issues: #628 (auth mode, users, roles), #603 (bootstrap and web sessions), #604 (`fleetctl login` and API tokens), #605 (refuse anonymous administration), #629 (agent tokens placed by machine setup), #630 (Tailscale identity in authenticated mode) and #631 (migrate bergen); none of it has started.
 
 Outcome: when Fleet must operate outside the initial fully trusted LAN, anonymous administration can be replaced by authenticated, least-privileged human, agent, and CI identities without changing application use cases.
 
@@ -389,7 +389,7 @@ M11 depends on M6 and M7 (Lab leases, placement, cleanup) and on persistent mach
 
 ### M12 — Windows workstations
 
-Status: planned (2026-11-06). Boundaries: [ADR 0021](adr/0021-windows-workstations.md) (Proposed). Epic: [#606](https://github.com/Frogbyte-io/fleet-manager/issues/606).
+Status: in progress (2026-11-07). Boundaries: [ADR 0021](adr/0021-windows-workstations.md) (Accepted 2026-11-07); onboarding and inventory (#608) is in progress. Epic: [#606](https://github.com/Frogbyte-io/fleet-manager/issues/606).
 
 Outcome: Windows 11 developer workstations join the fleet like Linux ones, agentless over OpenSSH Server: onboarding, inventory, fleet-wide skills through an automatically installed Skills Manager, and brokered exec, put, collect and terminal.
 

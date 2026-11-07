@@ -1,8 +1,10 @@
 # ADR 0021: Windows workstations are managed agentless over OpenSSH Server
 
-Status: Proposed
+Status: Accepted
 
-Proposed: 2026-11-06 (tracking issue [#607](https://github.com/Frogbyte-io/fleet-manager/issues/607), epic [#606](https://github.com/Frogbyte-io/fleet-manager/issues/606), milestone M12). Proposed for maintainer review. It applies the Windows guest transport of [ADR 0015](0015-windows-lab-guest-transport.md) and the brokered access of [ADR 0017](0017-agent-ssh-access.md) to developer workstations. It **amends ADR 0017 decision 7** for registered machines: the guest OS of an endpoint is detected and recorded, and the caller's `--os` becomes a check instead of a choice (decision 4). It reverses nothing else in ADR 0015 or ADR 0017.
+Proposed: 2026-11-06 (tracking issue [#607](https://github.com/Frogbyte-io/fleet-manager/issues/607), epic [#606](https://github.com/Frogbyte-io/fleet-manager/issues/606), milestone M12)
+
+Accepted: 2026-11-07 by maintainer review, as proposed; the answers to the review questions are under [Maintainer decisions](#maintainer-decisions-2026-11-07). It applies the Windows guest transport of [ADR 0015](0015-windows-lab-guest-transport.md) and the brokered access of [ADR 0017](0017-agent-ssh-access.md) to developer workstations. It **amends ADR 0017 decision 7** for registered machines: the guest OS of an endpoint is detected and recorded, and the caller's `--os` becomes a check instead of a choice (decision 4). It reverses nothing else in ADR 0015 or ADR 0017.
 
 ## Context
 
@@ -72,11 +74,13 @@ An outbound connection (ADR 0002/0003) would serve laptops that are rarely reach
 | [#614](https://github.com/Frogbyte-io/fleet-manager/issues/614), [#615](https://github.com/Frogbyte-io/fleet-manager/issues/615) | `fleetctl` on Windows: find the controller from `FLEET_URL` or a config file (no shell wrapper), and checksummed release binaries including `fleetctl.exe`; Windows notes in the `fleet` skill and the pilot guide | — |
 | [#611](https://github.com/Frogbyte-io/fleet-manager/issues/611) | Live validation on a Windows 11 workstation, as a standard and as an administrator account, with Smart App Control on and off; agent uses the Registry through `fleetctl` | #608–#610, #614, #615 |
 
-Windows token storage at rest belongs to #604 (to be noted there when this ADR is accepted). ADR 0015 and this ADR move to Accepted together after #611.
+Windows token storage at rest belongs to #604 (noted there on acceptance). This ADR was accepted on 2026-11-07 ahead of #611; ADR 0015 stays Proposed until #611's live validation.
 
-## Open questions for the maintainer
+## Maintainer decisions (2026-11-07)
 
-1. **Account guidance.** Is "the developer's own account, standard user recommended, administrator allowed with a warning" right, or should onboarding refuse elevated sessions unless the operator opts in?
-2. **`DefaultShell`.** Requiring Windows PowerShell 5.1 as the machine-wide `DefaultShell` changes the login shell for every SSH user on the workstation. The alternative is a short fixed launcher (`powershell.exe -NoProfile -NonInteractive -EncodedCommand <fixed stage>`) that works under `cmd.exe`, 5.1 and PowerShell 7 alike and also removes the profile risk, at the cost of a new bootstrap to verify live (stdin inheritance under each shell, the 8,191-character `cmd.exe` line limit). Ship the requirement now and the launcher later, or the launcher first?
-3. **Windows 10 22H2.** Untested and unrefused, as proposed, or refused outright?
-4. **Unsigned CLI.** If Smart App Control blocks it on #611's machine, is "turn Smart App Control off or install the CLI by hand" acceptable, or should Fleet ask upstream for signed Windows releases first?
+The review questions raised in #607 / PR #620 were answered on 2026-11-07; the decisions above stand as proposed.
+
+1. **Account.** The SSH login is the developer's own account: a standard user is recommended, and an administrator is allowed with a warning (decision 7). Onboarding does not refuse elevated sessions.
+2. **`DefaultShell`.** Windows PowerShell 5.1 is required as the OpenSSH `DefaultShell` (decision 2). The shell-independent launcher is not part of this milestone.
+3. **Windows 10 22H2** is allowed but untested (decision 5).
+4. **Unsigned `skills-manager-cli.exe`.** The workaround is documented: allow the binary (for example in Smart App Control or Defender) or install it by hand. Upstream has been asked for signed Windows releases in [xingkongliang/skills-manager#405](https://github.com/xingkongliang/skills-manager/issues/405#issuecomment-6713021132); the Windows asset was verified unsigned on v1.43.3.
