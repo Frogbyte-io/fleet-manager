@@ -1088,6 +1088,7 @@ pub struct Lab {
     hotplug: Option<Arc<crate::lab_hardware_hotplug::LabHardwareHotplug>>,
     machine_usb: Option<Arc<crate::machine_usb::MachineUsb>>,
     machine_hardware: Option<Arc<dyn crate::machine_usb::MachineHardwareGate>>,
+    machine_removal: Option<Arc<crate::machine_remove::MachineRemoval>>,
 }
 
 /// One device a lease asked for through its template version, and the
@@ -1131,6 +1132,7 @@ impl Lab {
             hotplug: None,
             machine_usb: None,
             machine_hardware: None,
+            machine_removal: None,
         }
     }
 
@@ -1331,6 +1333,24 @@ impl Lab {
     #[must_use]
     pub fn machine_hardware(&self) -> Option<&Arc<dyn crate::machine_usb::MachineHardwareGate>> {
         self.machine_hardware.as_ref()
+    }
+
+    /// Serves machine removal (#616) beside the Lab surface, as the
+    /// persistent machines' USB use cases are. It composes over the store
+    /// alone, so a controller without a secret store still serves it.
+    #[must_use]
+    pub fn with_machine_removal(
+        mut self,
+        removal: Arc<crate::machine_remove::MachineRemoval>,
+    ) -> Self {
+        self.machine_removal = Some(removal);
+        self
+    }
+
+    /// The machine removal use case, when the controller composed it.
+    #[must_use]
+    pub fn machine_removal(&self) -> Option<&Arc<crate::machine_remove::MachineRemoval>> {
+        self.machine_removal.as_ref()
     }
 
     /// Serves the Lab put use cases (#393) beside the Lab surface.

@@ -34,6 +34,7 @@ deploy/smoke.sh
 | `/api/v1/*` | The public API described by `packages/api-client/openapi.json` |
 | `/api/node/v1/*` | Node enrollment, session proof, and outbound WebSocket gateway |
 | `/downloads/fleetd/*` | Linux node installer packages |
+| `/downloads/fleetctl/<platform>` | The `fleetctl` built with this controller, and `<platform>.sha256` beside it ([install fleetctl](#install-fleetctl)) |
 | `/healthz` | Process liveness |
 | `/readyz` | Readiness; reports unavailable while the web shell is missing |
 
@@ -55,6 +56,7 @@ refuses to start on a missing or unsafe setting.
 | `FLEET_LAB_SWEEP_INTERVAL_SECONDS` | `60` | How often the Lab sweeper runs (FM-716). Each tick expires leases past their TTL, queues due cleanups (including backoff retries), compensates leases stuck past their readiness deadline (and `failed` leases still holding a guest), and reports `fm-lab-*` guests that no live lease owns (audit event `lab_orphan_guest`, plus a log line; never deleted). `0` disables the loop; `POST /api/v1/lab/leases/sweep` still works. TOML key: `lab_sweep_interval_seconds`. |
 | `FLEET_CONSOLE_IDLE_SECONDS` | `600` | How long a Proxmox VM screen (`proxmox.console`) may go without keyboard, pointer, or paste input before the controller closes it (FM-495). Watching without input counts as idle. Accepted range `30` to `3600`; an invalid value is ignored with a startup warning. The maximum console duration is one hour regardless. |
 | `FLEET_DESIRED_FETCH_INTERVAL_SECONDS` | `0` (off) | Optional periodic fetch of the configured desired source's `HEAD` (FM-1014). Each tick queues the ordinary `source.fetch` operation for a new head and never overlaps a pending or running fetch; a Registry-only revision then activates by itself when `registry.autoActivate` is on. A non-zero value must be at least `30`. TOML key: `desired_fetch_interval_seconds`. See `docs/guides/registry-workflow.md`. |
+| `FLEET_SKILLS_MANAGER_AUTO_INSTALL` | `true` | After a fleetd install that enrolls the node (first or forced enrollment; an upgrade of a live node only when the machine was never observed by Skills Manager) and after an SSH onboarding add, queue a pinned `skills.probe` that installs the tested `skills-manager-cli` (1.40.0) for the machine's SSH login when it is absent (#600). The release asset and its sha256 come from Fleet's built-in pin table, chosen by the machine's `os/family` and architecture facts (Linux x86_64 and aarch64; any other platform, Windows included, is skipped with a stated reason). The Linux assets need glibc 2.34 or newer plus `liblzma.so.5` and `libz.so.1` (e.g. Debian 12, Ubuntu 22.04 or newer): the probe stages the download in `~/.local/bin` (so a `noexec` `/tmp` does not matter) and runs the verified binary's `--version` before placing it, and a binary that cannot run is deleted and the probe fails with `install_failed` ("does not run on this machine"), so nothing is left behind. An existing CLI is never replaced. The probe is an ordinary audited operation: the install queues it as the trusted worker principal, correlated with the install; an onboarding add queues it as the caller, who therefore needs both `operation.create` on `skills.probe` and `skills.deploy` on the machine. A failed or denied follow-up never fails the install or the add; the install result reports it as `skillsManager` (`queued` with the operation id, `skipped` or `failed` with a reason, or `disabled`). The machine needs outbound HTTPS to `github.com` and to the release-asset redirect host on `*.githubusercontent.com`. `false` (or `0`) turns it off; `true`/`false`/`1`/`0` are accepted in any case. TOML key: `skills_manager_auto_install`. |
 | `FLEET_LAB_MEMORY_OVERCOMMIT` | `1.0` | Lab placement: the ratio applied to a node's total memory before observed usage and held reservations are subtracted. `1.0` is no overcommit; accepted range is above 0 up to 16. File key `lab_memory_overcommit`. |
 | `FLEET_LAB_CPU_OVERCOMMIT` | `1.0` | Lab placement: the ratio applied to a node's logical CPU count before held reservations are subtracted. Accepted range is above 0 up to 16. File key `lab_cpu_overcommit`. |
 | `FLEET_LAB_CAPACITY_MAX_AGE_SECONDS` | `300` | Lab placement refuses a node capacity observation older than this (1 to 86400 seconds) instead of guessing. File key `lab_capacity_max_age_seconds`. Both Compose files forward the three placement variables and the two artifact bounds below (`FLEET_LAB_ARTIFACT_RETENTION_SECONDS`, `FLEET_LAB_ARTIFACT_MAX_BYTES`) from the host environment (or a Compose `.env`). |
@@ -120,7 +122,150 @@ operator provisions a real one.
 `deploy/controller.Dockerfile` is a three-stage build — web shell (Node
 `24.19.0`, pnpm `9.15.9`), controller binary (Rust `1.98.0`, `--locked`), and
 a `debian:bookworm-slim` runtime with the binary, static assets, Git/SSH client
-tools, CA roots, and a native-architecture Linux node installer package. The
-package is copied into the persistent artifacts directory on startup. The
+tools, CA roots, a native-architecture Linux node installer package, and a
+native-architecture `fleetctl`. The entrypoint copies the package and
+`fleetctl` into the persistent artifacts directory on startup. The
 pinned versions are the same ones CI pins in
 `.github/toolchain.env` and `rust-toolchain.toml`.
+
+## Install fleetctl
+
+`fleetctl` is a single binary. There are two places to get one:
+
+- **From a GitHub release (preferred).** Every merge to `main` publishes a
+  release tagged `v<version>-<commit>` with `fleetctl-linux-x86_64`,
+  `fleetctl-linux-aarch64`, `fleetctl-windows-x86_64.exe`, and `SHA256SUMS`.
+  Pick the release whose commit matches your controller. The binaries and
+  `SHA256SUMS` come over HTTPS from GitHub, so the checksum also shows the
+  file is the one the release workflow built. The Linux binaries are static
+  (musl) and run on any distribution; the Windows binary needs no Visual C++
+  runtime. Releases exist only for commits merged to `main`.
+- **From your controller.** `GET /downloads/fleetctl/<platform>` serves the
+  `fleetctl` built from the same commit as the controller, and
+  `/downloads/fleetctl/<platform>.sha256` serves its SHA-256 in `sha256sum`
+  format (the binary response also carries it in `x-checksum-sha256`). The
+  image carries only its own architecture: `linux-x86_64` on an x86_64 host,
+  `linux-aarch64` on an arm64 host. Other platforms answer 404 unless you put
+  the release binary in `<FLEET_DATA_DIR>/artifacts/fleetctl/` under its
+  release name (`fleetctl-windows-x86_64.exe`, for example). The routes sit
+  behind the same caller check as the rest of the listener. This copy is
+  built in the Debian 12 image and needs glibc 2.36 or newer (Debian 12,
+  Ubuntu 23.04, or later); on Ubuntu 22.04, use the release binary.
+
+  **The controller's checksum detects corruption, not tampering.** Over
+  `http://...:8080` the binary and its `.sha256` come from the same
+  unauthenticated origin, so anyone on the path can replace both. For
+  integrity, compare against the release's `SHA256SUMS` from GitHub, or
+  download through the controller's Tailscale Serve HTTPS URL
+  (`https://controller.example.ts.net`).
+
+Each snippet below stops at the first failure. It checks the download and
+runs `--version` from a temporary directory, and only then replaces the
+installed copy, so a corrupt binary or one that cannot run on this machine
+never replaces a working one.
+
+On Linux, from a release (`<tag>` is the release tag, for example
+`v0.1.0-1a2b3c4`; `uname -m` picks the platform):
+
+```sh
+(
+  set -eu
+  base=https://github.com/Frogbyte-io/fleet-manager/releases/download/<tag>
+  asset="fleetctl-linux-$(uname -m)"
+  tmp="$(mktemp -d)"
+  trap 'rm -rf "$tmp"' EXIT
+  cd "$tmp"
+  curl -fsSLO "$base/$asset"
+  curl -fsSLO "$base/SHA256SUMS"
+  grep "  $asset\$" SHA256SUMS | sha256sum --check --strict -
+  chmod 0755 "$asset"
+  "./$asset" --version
+  install -D -m 0755 "$asset" ~/.local/bin/fleetctl
+)
+```
+
+Or from the controller (it answers 404 if it does not carry this platform):
+
+```sh
+(
+  set -eu
+  url=http://controller.example.ts.net:8080
+  platform="linux-$(uname -m)"
+  tmp="$(mktemp -d)"
+  trap 'rm -rf "$tmp"' EXIT
+  cd "$tmp"
+  curl -fsSLo fleetctl "$url/downloads/fleetctl/$platform"
+  curl -fsSLo fleetctl.sha256 "$url/downloads/fleetctl/$platform.sha256"
+  sha256sum --check --strict fleetctl.sha256
+  chmod 0755 fleetctl
+  ./fleetctl --version
+  install -D -m 0755 fleetctl ~/.local/bin/fleetctl
+)
+```
+
+`sha256sum` must print `OK`. Make sure `~/.local/bin` is on your `PATH`.
+
+On Windows, in PowerShell. The block downloads from a release; the
+commented lines switch it to a controller that carries a Windows build (the
+controller image does not ship one):
+
+```powershell
+& {
+  $ErrorActionPreference = 'Stop'
+  $base = 'https://github.com/Frogbyte-io/fleet-manager/releases/download/<tag>'
+  $binaryUrl = "$base/fleetctl-windows-x86_64.exe"
+  $sumsUrl = "$base/SHA256SUMS"
+  # From a controller instead:
+  # $url = 'http://controller.example.ts.net:8080'
+  # $binaryUrl = "$url/downloads/fleetctl/windows-x86_64"
+  # $sumsUrl = "$binaryUrl.sha256"
+  $dir = "$env:LOCALAPPDATA\Programs\fleet"
+  $tmp = Join-Path ([IO.Path]::GetTempPath()) 'fleetctl-download.exe'
+  $sums = Join-Path ([IO.Path]::GetTempPath()) 'fleetctl-download.sha256'
+  Invoke-WebRequest -UseBasicParsing $binaryUrl -OutFile $tmp
+  Invoke-WebRequest -UseBasicParsing $sumsUrl -OutFile $sums
+  $line = Get-Content $sums |
+    Where-Object { $_ -match '  fleetctl(-windows-x86_64)?\.exe$' } |
+    Select-Object -First 1
+  Remove-Item $sums
+  $expected = "$line".Split(' ')[0]
+  if ($expected -notmatch '^[0-9a-f]{64}$' -or (Get-FileHash $tmp -Algorithm SHA256).Hash -ne $expected) {
+    Remove-Item $tmp
+    throw 'fleetctl checksum mismatch; nothing was installed'
+  }
+  & $tmp --version
+  if ($LASTEXITCODE -ne 0) { Remove-Item $tmp; throw 'fleetctl did not run; nothing was installed' }
+  New-Item -ItemType Directory -Force $dir | Out-Null
+  Move-Item -Force $tmp "$dir\fleetctl.exe"
+}
+```
+
+Then add that directory to your user `PATH`. On Windows, `fleetctl status`
+without `--url` reports that the local `fleetd` surface is unavailable; every
+other command talks to the controller.
+
+Finally, tell `fleetctl` where the controller is. It takes the URL from the
+first of these that is set: `--url <controller>` on the command line, the
+`FLEET_URL` environment variable, then `url` in the config file
+`$XDG_CONFIG_HOME/fleet/config.toml` (or `~/.config/fleet/config.toml` when
+`XDG_CONFIG_HOME` is unset or not absolute; `%APPDATA%\fleet\config.toml` on
+Windows). Set it once per login:
+
+```sh
+(
+  set -eu
+  case "${XDG_CONFIG_HOME:-}" in
+    /*) fleet_config="$XDG_CONFIG_HOME/fleet" ;;
+    *) fleet_config="$HOME/.config/fleet" ;;
+  esac
+  mkdir -p "$fleet_config"
+  printf 'url = "http://controller.example.ts.net:8080"\n' > "$fleet_config/config.toml"
+  fleetctl --output json system   # client.urlSource is "config"
+)
+```
+
+Or export `FLEET_URL=http://controller.example.ts.net:8080` in the login's
+environment; it takes precedence over the file.
+
+`fleetctl --output json system` shows the controller's version and which
+source supplied the URL.

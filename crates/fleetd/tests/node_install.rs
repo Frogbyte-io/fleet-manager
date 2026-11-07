@@ -141,7 +141,57 @@ struct Harness {
     shutdown: Option<tokio::sync::oneshot::Sender<()>>,
 }
 
+/// Which machine-setup follow-up (#600) the install executor runs.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum SetupHook {
+    /// The controller's real Skills Manager follow-up.
+    SkillsManager,
+    /// The setting is off: no hook composed.
+    Off,
+    /// The real follow-up over a closed store, so queueing fails.
+    Failing,
+}
+
+/// The real Skills Manager follow-up over a store that is already closed:
+/// every read and create fails, as a backend outage would.
+async fn failing_setup_hook() -> fleet_controller::skills_setup::SkillsManagerSetup {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::open(&dir.path().join("closed.db")).await.unwrap();
+    let pool = store.pool().clone();
+    pool.close().await;
+    fleet_controller::skills_setup::SkillsManagerSetup::new(
+        Arc::new(MachineRepository::new(pool.clone())),
+        Arc::new(fleet_application::operation::Operations::new(
+            Arc::new(OperationRepository::new(pool.clone())),
+            Arc::new(fleet_storage_sqlite::AuditSink::new(pool)),
+        )),
+    )
+}
+
+/// Composes the install executor with the chosen follow-up.
+async fn with_setup_hook(
+    install: InstallExecutor,
+    setup_hook: SetupHook,
+    machines: Arc<MachineRepository>,
+    operations: Arc<fleet_application::operation::Operations>,
+    pool: sqlx::SqlitePool,
+) -> InstallExecutor {
+    match setup_hook {
+        SetupHook::SkillsManager => install.with_setup_hook(Arc::new(
+            fleet_controller::skills_setup::SkillsManagerSetup::new(machines, operations)
+                .with_snapshots(Arc::new(fleet_storage_sqlite::SkillsRepository::new(pool))),
+        )),
+        SetupHook::Off => install,
+        SetupHook::Failing => install.with_setup_hook(Arc::new(failing_setup_hook().await)),
+    }
+}
+
 async fn harness() -> Harness {
+    harness_with(SetupHook::SkillsManager).await
+}
+
+#[allow(clippy::too_many_lines)]
+async fn harness_with(setup_hook: SetupHook) -> Harness {
     let dist = tempfile::tempdir().unwrap();
     std::fs::write(dist.path().join("index.html"), "<html>fleet</html>").unwrap();
     let store_dir = tempfile::tempdir().unwrap();
@@ -164,7 +214,10 @@ async fn harness() -> Harness {
     let crypto = fleet_controller::node_crypto::NodeCryptoService::open(&secrets)
         .await
         .expect("the node signing key must provision");
-    let services = compose_node_services(store.pool(), Arc::new(crypto));
+    let mut services = compose_node_services(store.pool(), Arc::new(crypto));
+    // The stubbed systemctl, useradd and runuser live in temp directories:
+    // installer test mode accepts them (#616); production refuses them.
+    services.installer_test_tools = true;
     let ssh_dir = tempfile::tempdir().unwrap();
     let artifacts = tempfile::tempdir().unwrap();
 
@@ -200,10 +253,13 @@ async fn harness() -> Harness {
         .expect("the test server must serve");
     });
 
-    let operations = Arc::new(fleet_application::operation::Operations::new(
-        Arc::new(OperationRepository::new(store.pool().clone())),
-        Arc::new(fleet_storage_sqlite::AuditSink::new(store.pool().clone())),
-    ));
+    let operations = Arc::new(
+        fleet_application::operation::Operations::new(
+            Arc::new(OperationRepository::new(store.pool().clone())),
+            Arc::new(fleet_storage_sqlite::AuditSink::new(store.pool().clone())),
+        )
+        .with_installer_test_tools(),
+    );
     let limiter = ExecutionLimiter::new(4);
     let machines = Arc::new(MachineRepository::new(store.pool().clone()));
     let ssh_fallback: Arc<dyn fleet_application::worker::OperationExecutor> =
@@ -219,16 +275,25 @@ async fn harness() -> Harness {
             limiter.clone(),
             ssh_fallback.clone(),
         ));
-    let install_executor: Arc<dyn fleet_application::worker::OperationExecutor> =
-        Arc::new(InstallExecutor::new(
+    let install_executor: Arc<dyn fleet_application::worker::OperationExecutor> = Arc::new(
+        with_setup_hook(
+            InstallExecutor::new(
+                machines.clone(),
+                services.nodes.clone(),
+                services.gateway.clone(),
+                ssh_dir.path().join("ssh"),
+                limiter,
+                Some(artifacts.path().to_path_buf()),
+                onboarding_executor,
+            )
+            .with_installer_test_tools(),
+            setup_hook,
             machines.clone(),
-            services.nodes.clone(),
-            services.gateway.clone(),
-            ssh_dir.path().join("ssh"),
-            limiter,
-            Some(artifacts.path().to_path_buf()),
-            onboarding_executor,
-        ));
+            operations.clone(),
+            store.pool().clone(),
+        )
+        .await,
+    );
     Harness {
         _dist: dist,
         _store_dir: store_dir,
@@ -634,6 +699,43 @@ async fn an_install_operation_enrolls_and_reaches_connected() {
     assert_eq!(result["connected"], true);
     assert_eq!(result["machineId"], machine_id.as_str());
 
+    // #600: a pinned Skills Manager install was queued for the new node,
+    // through the audited operation path, over the install's own endpoint.
+    // The pin matches the node's own platform: fleetd reports
+    // `std::env::consts::ARCH` as `os/arch`. Only x86_64 and aarch64 have a
+    // pinned asset; any other platform is skipped with a reason.
+    let follow_up = &result["skillsManager"];
+    if matches!(std::env::consts::ARCH, "x86_64" | "aarch64") {
+        assert_eq!(follow_up["status"], "queued", "{result}");
+        assert_eq!(follow_up["version"], "1.40.0");
+        let probe = OperationRepository::new(harness.pool.clone())
+            .get(follow_up["operationId"].as_str().unwrap())
+            .await
+            .unwrap();
+        assert_eq!(probe.kind, "skills.probe");
+        assert_eq!(probe.state, "pending");
+        // The probe joins the install's correlation (its id, as the install
+        // carried none), so the follow-up traces back to the install.
+        assert_eq!(probe.correlation_id.as_deref(), Some(operation_id.as_str()));
+        let probe_payload: Value =
+            serde_json::from_str(probe.payload_json.as_deref().unwrap()).unwrap();
+        assert_eq!(probe_payload["machineId"], machine_id.as_str());
+        assert_eq!(probe_payload["endpointId"], endpoint_id.as_str());
+        assert_eq!(probe_payload["auth"]["type"], "identityFile");
+        let pin = fleet_provider_skills_manager::release_pin(
+            Some(std::env::consts::OS),
+            Some(std::env::consts::ARCH),
+        )
+        .unwrap();
+        assert_eq!(probe_payload["artifactUrl"], pin.url, "{probe_payload}");
+        assert_eq!(
+            probe_payload["artifactSha256"], pin.sha256,
+            "{probe_payload}"
+        );
+    } else {
+        assert_eq!(follow_up["status"], "skipped", "{result}");
+    }
+
     // The identity is bound, the token is consumed, and nothing pending
     // remains.
     let view = harness.node_view(&machine_id).await;
@@ -772,6 +874,22 @@ async fn an_upgrade_installs_over_a_live_identity_without_minting_a_token() {
         .await;
     assert_eq!(first["state"], "succeeded", "{first}");
 
+    // The queued probe ran and the operator has since removed the CLI: the
+    // machine's Skills Manager observation reads `absent`.
+    fleet_application::skills::SkillsPort::record(
+        &fleet_storage_sqlite::SkillsRepository::new(harness.pool.clone()),
+        &fleet_application::skills::SkillsSnapshot {
+            machine_id: machine_id.clone(),
+            availability: fleet_application::skills::SkillsAvailability::Absent,
+            cli_version: None,
+            data: json!({}),
+            update_check: "unavailable".to_owned(),
+            observed_at: fleet_core::SystemClock::now_unix_millis(),
+        },
+    )
+    .await
+    .unwrap();
+
     // The second install is an upgrade: no token, no enrollment, same key.
     let upgrade_id = harness
         .create_operation("machine.install-fleetd", payload(&package))
@@ -780,6 +898,27 @@ async fn an_upgrade_installs_over_a_live_identity_without_minting_a_token() {
         .run_operation(harness.install_executor.as_ref(), &upgrade_id)
         .await;
     assert_eq!(upgrade["state"], "succeeded", "{upgrade}");
+    // #600: the first enrollment set the machine up; the upgrade of an
+    // observed machine does not, so the removed CLI is not reinstalled.
+    let upgrade_result: Value =
+        serde_json::from_str(upgrade["resultJson"].as_str().unwrap()).unwrap();
+    assert_eq!(
+        upgrade_result["skillsManager"]["status"], "skipped",
+        "{upgrade_result}"
+    );
+    assert!(
+        upgrade_result["skillsManager"]["reason"]
+            .as_str()
+            .is_some_and(|reason| reason.contains("upgrade")),
+        "{upgrade_result}"
+    );
+    let queued_probes: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM operations WHERE kind = 'skills.probe'")
+            .fetch_one(&harness.pool)
+            .await
+            .unwrap();
+    let expected = i64::from(matches!(std::env::consts::ARCH, "x86_64" | "aarch64"));
+    assert_eq!(queued_probes, expected, "only the first enrollment queues");
     let view = harness.node_view(&machine_id).await;
     assert!(
         view.pending_tokens.is_empty(),
@@ -797,7 +936,8 @@ async fn an_upgrade_installs_over_a_live_identity_without_minting_a_token() {
 
 #[tokio::test]
 async fn a_revoked_identity_is_forcefully_reenrolled() {
-    let harness = harness().await;
+    // A follow-up that cannot be queued never fails the install (#600).
+    let harness = harness_with(SetupHook::Failing).await;
     let sshd = start_sshd();
     let (machine_id, endpoint_id) = harness.register_machine(&sshd).await;
     let package = TestPackage::build();
@@ -826,6 +966,16 @@ async fn a_revoked_identity_is_forcefully_reenrolled() {
         .run_operation(harness.install_executor.as_ref(), &first_id)
         .await;
     assert_eq!(first["state"], "succeeded", "{first}");
+    let first_result: Value = serde_json::from_str(first["resultJson"].as_str().unwrap()).unwrap();
+    assert_eq!(
+        first_result["skillsManager"]["status"], "failed",
+        "{first_result}"
+    );
+    assert!(
+        first_result["skillsManager"]["reason"]
+            .as_str()
+            .is_some_and(|reason| !reason.is_empty())
+    );
     let original_key = {
         let view = harness.node_view(&machine_id).await;
         view.identity.as_ref().unwrap().public_key.clone()
@@ -968,7 +1118,8 @@ async fn plant_facts(harness: &Harness, machine_id: &str, family: &str, architec
 
 #[tokio::test]
 async fn the_orchestrated_install_selects_the_package_from_the_machines_facts() {
-    let harness = harness().await;
+    // The Skills Manager follow-up is off here (#600): nothing is queued.
+    let harness = harness_with(SetupHook::Off).await;
     let sshd = start_sshd();
     let (machine_id, endpoint_id) = harness.register_machine(&sshd).await;
     let package = TestPackage::build();
@@ -1013,6 +1164,16 @@ async fn the_orchestrated_install_selects_the_package_from_the_machines_facts() 
     );
     let facts = result["inventoryFacts"].as_u64().unwrap();
     assert!(facts > 0, "the node reported its facts: {result}");
+    assert_eq!(result["skillsManager"]["status"], "disabled", "{result}");
+    let queued_probes: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM operations WHERE kind = 'skills.probe'")
+            .fetch_one(&harness.pool)
+            .await
+            .unwrap();
+    assert_eq!(
+        queued_probes, 0,
+        "no follow-up is queued when the setting is off"
+    );
 
     // The digest came from the store; the node's download was verified
     // against it (the install would have refused otherwise).

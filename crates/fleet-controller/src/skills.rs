@@ -967,6 +967,10 @@ impl SkillsExecutor {
                             "install_failed",
                             "the pinned Skills Manager artifact could not be downloaded",
                         ),
+                        "binary_unusable" => (
+                            "install_failed",
+                            "the pinned Skills Manager binary does not run on this machine (it needs glibc 2.34+, liblzma and zlib); nothing was installed",
+                        ),
                         _ => (
                             "install_failed",
                             "the pinned Skills Manager binary could not be installed",
@@ -1275,14 +1279,23 @@ for fleet_candidate in "$HOME/.local/bin/skills-manager-cli" "$(command -v skill
 done
 fleet_root=$1
 if [ -z "${fleet_cli:-}" ] && [ -n "${FLEET_PIN_URL:-}" ] && [ -n "${FLEET_PIN_SHA256:-}" ]; then
-  fleet_tmp=$(mktemp) || { fleet_emit_failure download_failed; exit 0; }
-  trap 'rm -f "$fleet_tmp"' EXIT
-  curl -fsSL --max-time 120 -o "$fleet_tmp" "$FLEET_PIN_URL" || { fleet_emit_failure download_failed; exit 0; }
-  fleet_digest=$(sha256sum "$fleet_tmp" | awk '{print $1}')
-  if [ "$fleet_digest" != "$FLEET_PIN_SHA256" ]; then fleet_emit_failure checksum_mismatch; exit 0; fi
-  chmod +x "$fleet_tmp"
   mkdir -p "$HOME/.local/bin" || { fleet_emit_failure install_failed; exit 0; }
-  mv "$fleet_tmp" "$HOME/.local/bin/skills-manager-cli" || { fleet_emit_failure install_failed; exit 0; }
+  # Stage beside the destination, not in mktemp's directory: /tmp may be
+  # mounted noexec (the runnable check below would then refuse a good
+  # binary), and the final rename stays on one filesystem. Every failure
+  # path removes the staged file.
+  fleet_tmp="$HOME/.local/bin/.skills-manager-cli.fleet-tmp.$$"
+  trap 'rm -f "$fleet_tmp"' EXIT
+  rm -f "$fleet_tmp"
+  curl -fsSL --max-time 120 -o "$fleet_tmp" "$FLEET_PIN_URL" || { rm -f "$fleet_tmp"; fleet_emit_failure download_failed; exit 0; }
+  fleet_digest=$(sha256sum "$fleet_tmp" | awk '{print $1}')
+  if [ "$fleet_digest" != "$FLEET_PIN_SHA256" ]; then rm -f "$fleet_tmp"; fleet_emit_failure checksum_mismatch; exit 0; fi
+  chmod +x "$fleet_tmp" || { rm -f "$fleet_tmp"; fleet_emit_failure install_failed; exit 0; }
+  # A verified binary that cannot run here (the Linux assets need glibc
+  # 2.34+, liblzma.so.5 and libz.so.1) is never placed: it would shadow a
+  # working copy on PATH and no later probe would replace it.
+  "$fleet_tmp" --version >/dev/null 2>&1 || { rm -f "$fleet_tmp"; fleet_emit_failure binary_unusable; exit 0; }
+  mv "$fleet_tmp" "$HOME/.local/bin/skills-manager-cli" || { rm -f "$fleet_tmp"; fleet_emit_failure install_failed; exit 0; }
   fleet_cli="$HOME/.local/bin/skills-manager-cli"
 fi
 if [ -z "${fleet_cli:-}" ]; then fleet_emit_absent; exit 0; fi

@@ -19,6 +19,22 @@ revision where available. Separate GitHub subpath and revision pins must both
 be present; Fleet maps them to the documented `/tree/<revision>/<subpath>`
 install form and never guesses a repository's default branch.
 
+A rollout needs `skills-manager-cli` on the machine. When Fleet sets a machine
+up (a `machine.install-fleetd` that enrolls the node, or an SSH onboarding
+add; a fleetd upgrade only when the machine was never observed by Skills
+Manager), the
+controller queues a pinned `skills.probe` as a follow-up (#600): the release
+asset and its sha256 come from the built-in pin table in
+`fleet-provider-skills-manager` (the tested 1.40.0, Linux x86_64 and aarch64),
+chosen by the machine's `os/family` and architecture facts. The probe script
+downloads, verifies the digest, runs the binary's `--version`, and installs to
+`~/.local/bin` only when the CLI is absent, so an existing CLI is never
+replaced or upgraded. The Linux assets need glibc 2.34+, `liblzma.so.5` and
+`libz.so.1`; a binary that does not run is deleted, never placed. Other
+platforms are skipped with a stated reason (Windows is #609). The follow-up is
+an ordinary authorized, audited operation and never fails the install or add
+that triggered it; `FLEET_SKILLS_MANAGER_AUTO_INSTALL=false` turns it off.
+
 When an existing non-Git skill is rolled out, Fleet updates it only if the
 Skills Manager JSON `source_ref` exactly matches the catalog reference. This
 check parses the JSON with `jq`; if `jq` is unavailable or the source differs,

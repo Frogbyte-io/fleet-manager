@@ -214,6 +214,25 @@ fn run_serve(mut config: fleet_config::ControllerConfig) -> ExitCode {
             )
             .with_brokered_kinds(fleet_controller::brokered_operation_kinds()),
         );
+        // #600: after a fleetd install or an onboarding add, queue a pinned
+        // Skills Manager install, unless the operator turned it off.
+        let skills_setup: Option<
+            std::sync::Arc<dyn fleet_application::machine_setup::MachineSetupPort>,
+        > = if config.skills_manager_auto_install {
+            Some(std::sync::Arc::new(
+                fleet_controller::skills_setup::SkillsManagerSetup::new(
+                    std::sync::Arc::new(fleet_storage_sqlite::MachineRepository::new(
+                        store.pool().clone(),
+                    )),
+                    worker_operations.clone(),
+                )
+                .with_snapshots(std::sync::Arc::new(
+                    fleet_storage_sqlite::SkillsRepository::new(store.pool().clone()),
+                )),
+            ))
+        } else {
+            None
+        };
         let (worker_shutdown, worker_shutdown_rx) = tokio::sync::oneshot::channel::<()>();
         let (image_sweep_shutdown, image_sweep_shutdown_rx) = tokio::sync::oneshot::channel::<()>();
         // FM-721: Lab artifact bytes live in the configured directory; the
@@ -528,7 +547,7 @@ fn run_serve(mut config: fleet_config::ControllerConfig) -> ExitCode {
             let with_install: std::sync::Arc<dyn fleet_application::worker::OperationExecutor> =
                 match &services {
                     Some(services) => {
-                        std::sync::Arc::new(fleet_controller::install::InstallExecutor::new(
+                        let install = fleet_controller::install::InstallExecutor::new(
                             std::sync::Arc::new(fleet_storage_sqlite::MachineRepository::new(
                                 store.pool().clone(),
                             )),
@@ -538,7 +557,11 @@ fn run_serve(mut config: fleet_config::ControllerConfig) -> ExitCode {
                             limiter.clone(),
                             Some(config.data_dir.join("artifacts")),
                             onboarding,
-                        ))
+                        );
+                        std::sync::Arc::new(match &skills_setup {
+                            Some(hook) => install.with_setup_hook(hook.clone()),
+                            None => install,
+                        })
                     }
                     None => onboarding,
                 };
@@ -1465,10 +1488,14 @@ fn run_serve(mut config: fleet_config::ControllerConfig) -> ExitCode {
         // The Add Machine workflow serves whenever the store is open: it
         // needs the draft repository, the machine use cases, and the SSH
         // trust adapter over the controller's SSH work directory.
-        let onboarding = std::sync::Arc::new(fleet_controller::compose_onboarding(
-            store.pool(),
-            config.data_dir.join("ssh"),
-        ));
+        let onboarding = {
+            let onboarding =
+                fleet_controller::compose_onboarding(store.pool(), config.data_dir.join("ssh"));
+            std::sync::Arc::new(match &skills_setup {
+                Some(hook) => onboarding.with_setup_hook(hook.clone()),
+                None => onboarding,
+            })
+        };
         // The Tailscale discovery composes only over a secret store: its
         // OAuth client lives there. Without it the surface serves the
         // standard "unavailable" envelope.
@@ -1697,6 +1724,29 @@ fn run_serve(mut config: fleet_config::ControllerConfig) -> ExitCode {
             ),
         ));
         let lab = lab.with_machine_access(machine_access.clone());
+        // #616: removing a machine. It composes over the store alone; the
+        // secret store (to revoke the machine's stored secrets) and the node
+        // gateway (to close a live session) join when they are there, and a
+        // machine with stored secrets is refused without the secret store.
+        let lab = {
+            let keys: Option<std::sync::Arc<dyn fleet_application::machine_access::MachineKeyPort>> =
+                machine_keys.clone().map(|keys| {
+                    keys as std::sync::Arc<dyn fleet_application::machine_access::MachineKeyPort>
+                });
+            match fleet_controller::machine_remove::compose(
+                store.pool(),
+                config.data_dir.join("ssh"),
+                keys,
+                ssh_auth_resolver.clone(),
+                services.as_ref().map(|services| services.gateway.clone()),
+            ) {
+                Ok(removal) => lab.with_machine_removal(std::sync::Arc::new(removal)),
+                Err(error) => {
+                    eprintln!("warning: machine removal unavailable: {error}");
+                    lab
+                }
+            }
+        };
         let lab = std::sync::Arc::new(match &lab_artifacts {
             Some(artifacts) => lab.with_artifacts(artifacts.clone()),
             None => lab,
