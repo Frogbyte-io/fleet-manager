@@ -268,16 +268,18 @@ pub fn parse_sniff(stdout: &str) -> ShellSniff {
 }
 
 /// Whether a `uname -s` answer names a POSIX layer on Windows (Git Bash or
-/// MSYS2 report `MINGW*`/`MSYS*`, Cygwin `CYGWIN*`). Every line is checked,
-/// so profile text printed ahead of the answer cannot hide it.
+/// MSYS2 report `MINGW*`/`MSYS*`, Cygwin `CYGWIN*`). The answer is the last
+/// non-empty line: profile text printed ahead of it can neither hide a
+/// Windows answer nor get a Linux host refused by starting with one.
 #[must_use]
 pub fn is_windows_posix_uname(stdout: &str) -> bool {
-    stdout.lines().any(|line| {
-        let line = line.trim().to_ascii_uppercase();
-        ["MINGW", "MSYS", "CYGWIN"]
-            .iter()
-            .any(|prefix| line.starts_with(prefix))
-    })
+    let Some(last) = stdout.lines().map(str::trim).rfind(|line| !line.is_empty()) else {
+        return false;
+    };
+    let last = last.to_ascii_uppercase();
+    ["MINGW", "MSYS", "CYGWIN"]
+        .iter()
+        .any(|prefix| last.starts_with(prefix))
 }
 
 /// The byte offset of the marker token at the start of a line, when any.
@@ -496,7 +498,16 @@ mod tests {
         assert!(is_windows_posix_uname(
             "Welcome back!\r\nMINGW64_NT-10.0-26100\r\n"
         ));
-        for uname in ["Linux\n", "Darwin\n", "FreeBSD\n", "", "motd\nLinux\n"] {
+        // ...and a Linux profile line that happens to start like one does
+        // not get a Linux host refused: only the last line is the answer.
+        for uname in [
+            "Linux\n",
+            "Darwin\n",
+            "FreeBSD\n",
+            "",
+            "motd\nLinux\n",
+            "MSYS2 tips: see the wiki\nLinux\n\n",
+        ] {
             assert!(!is_windows_posix_uname(uname), "{uname}");
         }
         let sniff = ShellSniff {

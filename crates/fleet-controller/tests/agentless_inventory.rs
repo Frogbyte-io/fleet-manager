@@ -132,6 +132,8 @@ struct Run<'a> {
     recorded: Option<fleet_core::GuestOs>,
     /// A `ForceCommand` script standing in for the login shell.
     force: Option<&'a str>,
+    /// Clear the endpoint's OS between creation and the run.
+    clear_after_create: bool,
 }
 
 /// What one inventory run left behind.
@@ -225,6 +227,9 @@ async fn run_inventory_as(
             },
         )
         .await;
+    if run.clear_after_create {
+        machines.clear_endpoint_os(&endpoint_id).await.unwrap();
+    }
     let operation = match created {
         Err(error) => Err(error.to_string()),
         Ok(operation) => {
@@ -315,6 +320,37 @@ async fn an_inventory_operation_probes_and_ingests() {
     // The record is a resolved event beside the operation's own intent,
     // which the completion resolved: no intent is left open.
     assert_eq!(ran.open_intents, 0);
+}
+
+/// `requestedBy` is stamped only where creation authorized `machine.update`
+/// (an unknown endpoint). An inventory created against a recorded endpoint
+/// names no requester (a caller's value is dropped), so if the record is
+/// cleared before it runs, it detects and probes but records nothing.
+#[tokio::test]
+async fn only_an_authorized_creation_names_a_requester() {
+    let ran = run_inventory(Run {
+        recorded: Some(fleet_core::GuestOs::Linux),
+        clear_after_create: true,
+        ..Run::default()
+    })
+    .await;
+    let finished = ran.operation.unwrap();
+    assert_eq!(finished.state, "succeeded", "{:?}", finished.error_json);
+    assert!(
+        !finished
+            .payload_json
+            .as_deref()
+            .unwrap_or_default()
+            .contains("requestedBy"),
+        "{:?}",
+        finished.payload_json
+    );
+    assert_eq!(ran.machine.endpoints[0].guest_os, None, "nothing recorded");
+    assert!(
+        !ran.audit
+            .iter()
+            .any(|(_, _, _, metadata)| metadata.contains("endpoint_os_recorded"))
+    );
 }
 
 /// An inventory naming an endpoint that does not exist is refused at

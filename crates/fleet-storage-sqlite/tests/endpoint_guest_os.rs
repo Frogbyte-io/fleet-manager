@@ -225,6 +225,55 @@ async fn a_detected_os_is_bound_to_the_fingerprint_and_audited_atomically() {
     );
 }
 
+/// When the audit append fails, the endpoint OS is rolled back with it.
+#[tokio::test]
+async fn a_failed_audit_append_records_no_os() {
+    let (_dir, store) = store().await;
+    let pool = store.pool().clone();
+    let machines = MachineRepository::new(pool.clone());
+    let machine = machines.register(&workstation()).await.unwrap();
+    let endpoint = &machine.endpoints[0].id;
+    machines
+        .confirm_fingerprint(endpoint, "SHA256:current", 1)
+        .await
+        .unwrap();
+    sqlx::query(
+        "CREATE TRIGGER refuse_endpoint_os_audit BEFORE INSERT ON audit_events \
+         WHEN NEW.metadata_json LIKE '%endpoint_os_recorded%' \
+         BEGIN SELECT RAISE(ABORT, 'audit refused'); END",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    let mut metadata = fleet_application::audit::AuditMetadata::default();
+    metadata.insert("event", "endpoint_os_recorded").unwrap();
+    let event = fleet_application::audit::AuditIntent {
+        actor: "operator".to_owned(),
+        action: "machine.update".to_owned(),
+        resource: Some(machine.id.clone()),
+        decision: fleet_application::authz::Decision::allow(),
+        correlation_id: None,
+        operation_id: Some("operation-1".to_owned()),
+        metadata,
+    };
+    let failed = machines
+        .record_detected_endpoint_os(endpoint, GuestOs::Windows, "SHA256:current", &event)
+        .await
+        .unwrap_err();
+    assert!(matches!(failed, PortFailure::Backend { .. }), "{failed}");
+    assert_eq!(
+        machines.get(&machine.id).await.unwrap().endpoints[0].guest_os,
+        None,
+        "the OS rolled back with the audit row"
+    );
+    let rows: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM audit_events WHERE operation_id = 'operation-1'")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(rows, 0);
+}
+
 #[tokio::test]
 async fn a_fleetd_endpoint_never_carries_an_os() {
     let (_dir, store) = store().await;

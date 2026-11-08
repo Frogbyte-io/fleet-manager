@@ -1093,6 +1093,12 @@ impl Operations {
             }
             None => None,
         };
+        // `requestedBy` names a principal the worker may record an OS under,
+        // so it is stamped only where this creation authorized
+        // `machine.update`; anything the caller sent is dropped.
+        if let Some(object) = payload.as_object_mut() {
+            object.remove("requestedBy");
+        }
         if recorded.is_some() {
             crate::machine_access::effective_guest_os(chosen, recorded).map_err(|detail| {
                 OperationUseCaseError::Refused {
@@ -1112,8 +1118,8 @@ impl Operations {
                 },
             )
             .map_err(OperationUseCaseError::Denied)?;
+            payload["requestedBy"] = serde_json::Value::String(principal_id.to_owned());
         }
-        payload["requestedBy"] = serde_json::Value::String(principal_id.to_owned());
         let payload_json = payload.to_string();
         if payload_json.len() > MAX_PAYLOAD_JSON {
             return Err(OperationUseCaseError::Invalid {

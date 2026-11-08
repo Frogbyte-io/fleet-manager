@@ -437,7 +437,9 @@ impl ScriptExecutor {
             return Ok(payload.guest_os.unwrap_or_default());
         };
         // Recorded (with its audit event, atomically) only under the
-        // requester the creation named, and only while the endpoint still
+        // requester the creation named, which it does only after authorizing
+        // `machine.update` for an unknown endpoint (an operation created
+        // against a recorded endpoint names none and records nothing), and only while the endpoint still
         // has the fingerprint this run verified: a key confirmed meanwhile
         // cleared the OS and wins. Either way this run probes as detected.
         if let Some(requested_by) = payload.requested_by.as_deref() {

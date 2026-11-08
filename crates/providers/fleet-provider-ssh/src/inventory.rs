@@ -277,7 +277,8 @@ fleetFact network ipv4 {
 # the first line of `--version` as its own fact. The names are literals here,
 # and only `<name>.exe` is matched: a `.cmd`/`.bat` shim is never run. Each
 # `--version` runs with no stdin and its own 10 s bound (its process tree is
-# killed at the bound, and the output read is bounded too). A session that holds
+# killed at the bound, and reading its output may wait 2 s more at most: a
+# time bound, not a size bound). A session that holds
 # the Administrators role (or whose role could not be read) reports presence
 # only and runs nothing: PATH folders are often user-writable, and an
 # elevated token must not execute what a user dropped there.
