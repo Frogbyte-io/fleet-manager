@@ -19466,6 +19466,11 @@ export type collectMachineFilesResponse404 = {
   status: 404
 }
 
+export type collectMachineFilesResponse409 = {
+  data: ApiError
+  status: 409
+}
+
 export type collectMachineFilesResponse500 = {
   data: ApiError
   status: 500
@@ -19479,7 +19484,7 @@ export type collectMachineFilesResponse503 = {
 export type collectMachineFilesResponseSuccess = (collectMachineFilesResponse202) & {
   headers: Headers;
 };
-export type collectMachineFilesResponseError = (collectMachineFilesResponse400 | collectMachineFilesResponse403 | collectMachineFilesResponse404 | collectMachineFilesResponse500 | collectMachineFilesResponse503) & {
+export type collectMachineFilesResponseError = (collectMachineFilesResponse400 | collectMachineFilesResponse403 | collectMachineFilesResponse404 | collectMachineFilesResponse409 | collectMachineFilesResponse500 | collectMachineFilesResponse503) & {
   headers: Headers;
 };
 
@@ -19919,6 +19924,11 @@ export type execMachineResponse404 = {
   status: 404
 }
 
+export type execMachineResponse409 = {
+  data: ApiError
+  status: 409
+}
+
 export type execMachineResponse500 = {
   data: ApiError
   status: 500
@@ -19932,7 +19942,7 @@ export type execMachineResponse503 = {
 export type execMachineResponseSuccess = (execMachineResponse202) & {
   headers: Headers;
 };
-export type execMachineResponseError = (execMachineResponse400 | execMachineResponse403 | execMachineResponse404 | execMachineResponse500 | execMachineResponse503) & {
+export type execMachineResponseError = (execMachineResponse400 | execMachineResponse403 | execMachineResponse404 | execMachineResponse409 | execMachineResponse500 | execMachineResponse503) & {
   headers: Headers;
 };
 
@@ -20087,6 +20097,11 @@ export type putMachineFileResponse408 = {
   status: 408
 }
 
+export type putMachineFileResponse409 = {
+  data: ApiError
+  status: 409
+}
+
 export type putMachineFileResponse413 = {
   data: ApiError
   status: 413
@@ -20105,7 +20120,7 @@ export type putMachineFileResponse503 = {
 export type putMachineFileResponseSuccess = (putMachineFileResponse202) & {
   headers: Headers;
 };
-export type putMachineFileResponseError = (putMachineFileResponse400 | putMachineFileResponse403 | putMachineFileResponse404 | putMachineFileResponse408 | putMachineFileResponse413 | putMachineFileResponse500 | putMachineFileResponse503) & {
+export type putMachineFileResponseError = (putMachineFileResponse400 | putMachineFileResponse403 | putMachineFileResponse404 | putMachineFileResponse408 | putMachineFileResponse409 | putMachineFileResponse413 | putMachineFileResponse500 | putMachineFileResponse503) & {
   headers: Headers;
 };
 

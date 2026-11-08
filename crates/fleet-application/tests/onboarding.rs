@@ -792,6 +792,9 @@ async fn confirming_the_host_key_drops_the_shell_check_and_a_stale_one_is_refuse
             "windows_powershell",
             Some(fleet_core::GuestOs::Windows),
         ));
+        draft.facts = vec![fact("os", "family", "Windows")];
+        draft.discovery_source = Some("agentless/1".to_owned());
+        draft.discovered_at = Some(NOW - 10);
     });
     fixture
         .onboarding
@@ -800,6 +803,9 @@ async fn confirming_the_host_key_drops_the_shell_check_and_a_stale_one_is_refuse
         .unwrap();
     let stored = fixture.drafts.get_raw(&draft.id).unwrap();
     assert_eq!(stored.shell_check, None, "the old answer is dropped");
+    assert!(stored.facts.is_empty(), "so are the old inventory facts");
+    assert_eq!(stored.discovery_source, None);
+    assert_eq!(stored.discovered_at, None);
     let confirmed_at = stored.host_key_confirmed_at.expect("the confirmation time");
 
     // A check from before the confirmation (a race with a running test) is

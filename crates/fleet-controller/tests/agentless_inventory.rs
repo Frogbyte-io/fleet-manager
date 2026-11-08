@@ -142,6 +142,8 @@ struct Ran {
     machine: fleet_application::machine::Machine,
     /// The audit events' (actor, action, operation id, metadata JSON).
     audit: Vec<(String, String, Option<String>, String)>,
+    /// Audit intents left without an outcome.
+    open_intents: i64,
 }
 
 /// Registers a trusted machine on a real sshd, optionally records an
@@ -170,8 +172,7 @@ async fn run_inventory_as(
         std::sync::Arc::new(MachineRepository::new(pool.clone())),
         dir.path().join("ssh"),
         ExecutionLimiter::new(4),
-    )
-    .with_audit(std::sync::Arc::new(AuditSink::new(pool.clone())));
+    );
     let sshd = start_sshd_forcing(run.force);
     let machine = machines
         .register(&RegisterMachine {
@@ -253,10 +254,19 @@ async fn run_inventory_as(
     .fetch_all(&pool)
     .await
     .unwrap();
+    let open_intents = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM audit_events AS intent WHERE outcome IS NULL \
+         AND operation_id IS NOT NULL AND NOT EXISTS \
+         (SELECT 1 FROM audit_events AS done WHERE done.intent_seq = intent.seq)",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
     Ran {
         operation,
         machine,
         audit,
+        open_intents,
     }
 }
 
@@ -302,6 +312,60 @@ async fn an_inventory_operation_probes_and_ingests() {
     assert_eq!(recorded.1, "machine.update");
     assert_eq!(recorded.2.as_deref(), Some(finished.id.as_str()));
     assert!(recorded.3.contains("linux"), "{}", recorded.3);
+    // The record is a resolved event beside the operation's own intent,
+    // which the completion resolved: no intent is left open.
+    assert_eq!(ran.open_intents, 0);
+}
+
+/// An inventory naming an endpoint that does not exist is refused at
+/// creation, not queued.
+#[tokio::test]
+async fn an_inventory_for_a_missing_endpoint_is_refused_at_creation() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::open(&dir.path().join("fleet.db")).await.unwrap();
+    let pool = store.pool().clone();
+    let machines = MachineRepository::new(pool.clone());
+    let machine = machines
+        .register(&RegisterMachine {
+            name: "box".to_owned(),
+            description: String::new(),
+            endpoints: vec![NewEndpoint {
+                kind: EndpointKind::Fleetd,
+                reference: "node-identity".to_owned(),
+            }],
+            tags: vec![],
+            groups: vec![],
+        })
+        .await
+        .unwrap();
+    let operations = Operations::new_with_events_and_catalog_rollout_targets(
+        std::sync::Arc::new(OperationRepository::new(pool.clone())),
+        std::sync::Arc::new(AuditSink::new(pool.clone())),
+        std::sync::Arc::new(fleet_application::events::EventHub::new(16)),
+        std::sync::Arc::new(MachineRepository::new(pool.clone())),
+    );
+    for endpoint_id in ["no-such-endpoint", machine.endpoints[0].id.as_str()] {
+        let refused = operations
+            .create(
+                &fleet_auth::LanAllowAllAuthorizer,
+                "anonymous-lan-admin",
+                &fleet_application::operation::NewOperation {
+                    kind: "agentless.inventory".to_owned(),
+                    payload_json: Some(
+                        serde_json::json!({
+                            "machineId": machine.id,
+                            "endpointId": endpoint_id,
+                            "timeoutSeconds": 60,
+                            "auth": {"type": "agent"},
+                        })
+                        .to_string(),
+                    ),
+                    ..Default::default()
+                },
+            )
+            .await;
+        assert!(refused.is_err(), "{endpoint_id}: {refused:?}");
+    }
 }
 
 /// Once recorded, the payload's guest OS is a check, refused at creation

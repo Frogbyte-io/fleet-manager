@@ -394,6 +394,7 @@ pub struct MachineExecRequest {
         (status = 400, description = "The command, timeout or target is invalid, the host key was never confirmed, or the endpoint has no auth.", body = crate::error::ApiError),
         (status = 403, description = "The caller may not run commands on this machine.", body = crate::error::ApiError),
         (status = 404, description = "The machine or endpoint does not exist.", body = crate::error::ApiError),
+        (status = 409, description = "`guest_os_mismatch`: the requested guest OS contradicts the endpoint's recorded OS.", body = crate::error::ApiError),
         (status = 500, description = "A backend port failed.", body = crate::error::ApiError),
         (status = 503, description = "Machine access is not wired.", body = crate::error::ApiError),
     )
@@ -501,6 +502,7 @@ pub struct MachineCollectRequest {
         (status = 400, description = "The paths or target are invalid, the host key was never confirmed, or the endpoint has no auth.", body = crate::error::ApiError),
         (status = 403, description = "The caller may not collect files from this machine.", body = crate::error::ApiError),
         (status = 404, description = "The machine or endpoint does not exist.", body = crate::error::ApiError),
+        (status = 409, description = "`guest_os_mismatch`: the requested guest OS contradicts the endpoint's recorded OS.", body = crate::error::ApiError),
         (status = 500, description = "A backend port failed.", body = crate::error::ApiError),
         (status = 503, description = "Machine access is not wired, or the controller has no artifact store.", body = crate::error::ApiError),
     )
@@ -638,6 +640,7 @@ fn explicit_auth(
         (status = 400, description = "The path or target is invalid, the host key was never confirmed, the endpoint has no auth, or the declared SHA-256 does not match the body.", body = crate::error::ApiError),
         (status = 403, description = "The caller may not put files onto this machine.", body = crate::error::ApiError),
         (status = 404, description = "The machine or endpoint does not exist.", body = crate::error::ApiError),
+        (status = 409, description = "`guest_os_mismatch`: the requested guest OS contradicts the endpoint's recorded OS.", body = crate::error::ApiError),
         (status = 408, description = "The upload body stalled for a minute.", body = crate::error::ApiError),
         (status = 413, description = "The file exceeds the controller's upload cap.", body = crate::error::ApiError),
         (status = 500, description = "A backend port failed.", body = crate::error::ApiError),

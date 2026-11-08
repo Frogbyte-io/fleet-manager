@@ -95,7 +95,7 @@ Confirm the fingerprint only when it matches the one you read on the workstation
 echo fleet-shell %OS% $PSVersionTable.PSEdition $PSVersionTable.PSVersion.Major $ExecutionContext.SessionState.LanguageMode $PSVersionTable.Platform
 ```
 
-Each shell answers it differently, so the controller knows which one it reached. After a POSIX answer it also runs `uname -s`, because Git Bash, MSYS2 and Cygwin answer like any POSIX shell. A check that cannot run (the connection or authentication fails) fails the test with `shell_check_failed` and leaves no answer on the draft. A login shell that answers without the marker (csh, `set -u`, a forced `command=` in `authorized_keys`) is `unrecognized`, never a failure. The result is the draft's `shellCheck` (`shell`, `guestOs`, and a refusal when there is one), shown by `onboard get`. `add` records `guestOs` on the new SSH endpoint: the machine reads back with `endpoints[].guestOs` = `windows` in `fleetctl --output json machines get <id>` and the API.
+Each shell answers it differently, so the controller knows which one it reached. After a POSIX answer it also runs `uname -s`, because Git Bash, MSYS2 and Cygwin answer like any POSIX shell. A test whose connection or authentication fails still completes, with `connected: false` and the failure in its detail, as on Linux; the shell is not checked then. When the connection succeeds but the shell check itself cannot complete (its session fails or times out), the test fails with `shell_check_failed` and leaves no answer on the draft. A login shell that answers without the marker (csh, `set -u`, a forced `command=` in `authorized_keys`) is `unrecognized`, never a failure. The result is the draft's `shellCheck` (`shell`, `guestOs`, and a refusal when there is one), shown by `onboard get`. `add` records `guestOs` on the new SSH endpoint: the machine reads back with `endpoints[].guestOs` = `windows` in `fleetctl --output json machines get <id>` and the API.
 
 | The login shell | Result |
 |---|---|
@@ -111,7 +111,7 @@ Each shell answers it differently, so the controller knows which one it reached.
 
 A refused test fails with that reason and a detail naming the setting; `discover` fails the same way, and `add` refuses the draft (`409`) until a new test passes. Fix the setting on the workstation and run `onboard test` again.
 
-Confirming a host key (the first time, or again after the key changed) drops the draft's shell answer, and a test that sees an unconfirmed or changed key drops it too: an answer from behind another key says nothing about this one. `add` refuses a shell answer older than the latest confirmation and asks for a new test. The same holds for a registered machine: confirming an endpoint's host key clears its recorded OS.
+Confirming a host key (the first time, or again after the key changed) drops the draft's shell answer and the facts discover collected, and a test that sees an unconfirmed or changed key drops the shell answer too: what answered behind another key says nothing about this one, so run discover again after a re-confirmation. `add` refuses a shell answer older than the latest confirmation and asks for a new test. The same holds for a registered machine: confirming an endpoint's host key clears its recorded OS.
 
 ## What the inventory reports
 
@@ -138,7 +138,7 @@ The guest OS is recorded **per SSH endpoint**, not per machine: a Windows PC tha
 
 Endpoints that existed before this change are **unknown**, not `linux`. For them `--os` still chooses, and absent still means `linux`, so Windows Lab and persistent machines that work today keep working. The next inventory operation on an unknown endpoint runs the same login-shell check first and records what it finds: a refused shell fails the inventory with its reason, and an unrecognized answer or a check that cannot run leaves the endpoint unknown and probes with the caller's choice (an unrecognized endpoint is checked again on each inventory, one short extra session).
 
-The rules for an `agentless.inventory` operation are checked when it is created: a `guestOs` that contradicts a recorded OS is refused with HTTP 409 and error code `guest_os_mismatch`, and on an endpoint whose OS is unknown, creating the operation also needs `machine.update` on the machine, because the operation may record the OS. A recorded OS is written under the principal who created the operation, with an `endpoint_os_recorded` audit event naming the operation. `machines exec|put|collect` answer a contradiction with the same `409 guest_os_mismatch`.
+The rules for an `agentless.inventory` operation are checked when it is created: a `guestOs` that contradicts a recorded OS is refused with HTTP 409 and error code `guest_os_mismatch`, and on an endpoint whose OS is unknown, creating the operation also needs `machine.update` on the machine, because the operation may record the OS. A recorded OS is written under the principal who created the operation, together with an `endpoint_os_recorded` audit event naming the operation (one transaction), and only while the endpoint still has the host key the inventory verified: a key confirmed meanwhile wins. `machines exec|put|collect` answer a contradiction with the same `409 guest_os_mismatch`.
 
 ### Recovering from a wrong record
 

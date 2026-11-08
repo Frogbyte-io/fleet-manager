@@ -253,7 +253,10 @@ pub(crate) fn parse(verb: &str, rest: &[&str], output: &mut Output) -> Result<Co
         "endpoint-auth" => parse_endpoint_auth(rest, output)?,
         "endpoint-os" => match rest {
             ["clear", machine, endpoint, flags @ ..] => {
-                parse_flags(flags, output, |flag, _| Err(unknown(flag)))?;
+                let words = parse_flags(flags, output, |flag, _| Err(unknown(flag)))?;
+                if !words.is_empty() {
+                    return Err(CliError { message: usage() });
+                }
                 MachineAccessAction::EndpointOsClear {
                     machine: (*machine).to_owned(),
                     endpoint: (*endpoint).to_owned(),

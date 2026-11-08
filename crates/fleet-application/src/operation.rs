@@ -1058,17 +1058,39 @@ impl Operations {
                     })?,
             ),
         };
+        let lookup_failure = |failure: PortFailure| match failure {
+            PortFailure::NotFound { what } => OperationUseCaseError::NotFound { what },
+            failure => OperationUseCaseError::Backend {
+                context: "inventory endpoint lookup",
+                detail: failure.to_string(),
+            },
+        };
         let recorded = match &self.catalog_rollout_targets {
-            Some(targets) => targets
-                .endpoint_guest_os(&machine_id, &endpoint_id)
-                .await
-                .map_err(|failure| match failure {
-                    PortFailure::NotFound { what } => OperationUseCaseError::NotFound { what },
-                    failure => OperationUseCaseError::Backend {
-                        context: "inventory endpoint lookup",
-                        detail: failure.to_string(),
-                    },
-                })?,
+            Some(targets) => {
+                // The target must exist and be an SSH endpoint: an unknown
+                // OS is not the same as no endpoint at all.
+                match targets
+                    .endpoint_kind(&machine_id, &endpoint_id)
+                    .await
+                    .map_err(lookup_failure)?
+                {
+                    None => {
+                        return Err(OperationUseCaseError::NotFound {
+                            what: format!("endpoint {endpoint_id} on machine {machine_id}"),
+                        });
+                    }
+                    Some(kind) if kind != fleet_core::EndpointKind::Ssh => {
+                        return Err(OperationUseCaseError::Invalid {
+                            detail: "agentless.inventory requires an SSH endpoint".to_owned(),
+                        });
+                    }
+                    Some(_) => {}
+                }
+                targets
+                    .endpoint_guest_os(&machine_id, &endpoint_id)
+                    .await
+                    .map_err(lookup_failure)?
+            }
             None => None,
         };
         if recorded.is_some() {
@@ -1092,8 +1114,14 @@ impl Operations {
             .map_err(OperationUseCaseError::Denied)?;
         }
         payload["requestedBy"] = serde_json::Value::String(principal_id.to_owned());
+        let payload_json = payload.to_string();
+        if payload_json.len() > MAX_PAYLOAD_JSON {
+            return Err(OperationUseCaseError::Invalid {
+                detail: format!("the payload exceeds {MAX_PAYLOAD_JSON} bytes"),
+            });
+        }
         Ok(Some(NewOperation {
-            payload_json: Some(payload.to_string()),
+            payload_json: Some(payload_json),
             ..new.clone()
         }))
     }

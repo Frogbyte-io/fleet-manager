@@ -147,9 +147,6 @@ pub struct ScriptExecutor {
     limiter: Arc<ExecutionLimiter>,
     /// Resolves stored-key auth just in time (ADR 0017).
     resolver: Option<Arc<crate::machine_access::SshAuthResolver>>,
-    /// Audits an endpoint OS an inventory records (ADR 0021). Without it
-    /// the inventory still uses what it detected but records nothing.
-    audit: Option<Arc<dyn fleet_application::operation::AuditPort>>,
     /// Retained for the provider's isolated directory lifetime.
     #[allow(dead_code)]
     work_dir: PathBuf,
@@ -198,17 +195,8 @@ impl ScriptExecutor {
             provider,
             limiter,
             resolver: None,
-            audit: None,
             work_dir,
         }
-    }
-
-    /// Lets an inventory record the endpoint OS it detected, audited under
-    /// the operation's requester.
-    #[must_use]
-    pub fn with_audit(mut self, audit: Arc<dyn fleet_application::operation::AuditPort>) -> Self {
-        self.audit = Some(audit);
-        self
     }
 
     /// Lets `ssh.exec` authenticate with a stored key (ADR 0017).
@@ -290,7 +278,7 @@ impl ScriptExecutor {
             .map_err(|error| error.to_string())?;
 
         spec.guest_os = match self
-            .inventory_guest_os(&operation.id, &payload, &spec)
+            .inventory_guest_os(&operation.id, &payload, &spec, &verified)
             .await
         {
             Ok(guest_os) => guest_os,
@@ -402,6 +390,7 @@ impl ScriptExecutor {
         operation_id: &str,
         payload: &InventoryPayload,
         spec: &SshConnectionSpec,
+        verified: &str,
     ) -> Result<fleet_core::GuestOs, (&'static str, String)> {
         let mismatch = |detail: String| {
             let detail = detail
@@ -447,15 +436,19 @@ impl ScriptExecutor {
         let Some(detected) = sniff.guest_os() else {
             return Ok(payload.guest_os.unwrap_or_default());
         };
-        if let (Some(audit), Some(requested_by)) = (&self.audit, payload.requested_by.as_deref()) {
+        // Recorded (with its audit event, atomically) only under the
+        // requester the creation named, and only while the endpoint still
+        // has the fingerprint this run verified: a key confirmed meanwhile
+        // cleared the OS and wins. Either way this run probes as detected.
+        if let Some(requested_by) = payload.requested_by.as_deref() {
             fleet_application::machine::record_detected_endpoint_os(
                 self.machines.as_ref(),
-                audit.as_ref(),
                 &fleet_application::machine::DetectedEndpointOs {
                     operation_id,
                     requested_by,
                     machine_id: &payload.machine_id,
                     endpoint_id: &payload.endpoint_id,
+                    verified_fingerprint: verified,
                     guest_os: detected,
                 },
             )

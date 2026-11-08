@@ -164,6 +164,67 @@ async fn confirming_a_host_key_clears_the_recorded_os() {
     );
 }
 
+/// A detected OS is written with its audit event in one transaction, and
+/// only under the fingerprint the detection ran with.
+#[tokio::test]
+async fn a_detected_os_is_bound_to_the_fingerprint_and_audited_atomically() {
+    let (_dir, store) = store().await;
+    let pool = store.pool().clone();
+    let machines = MachineRepository::new(pool.clone());
+    let machine = machines.register(&workstation()).await.unwrap();
+    let endpoint = &machine.endpoints[0].id;
+    machines
+        .confirm_fingerprint(endpoint, "SHA256:current", 1)
+        .await
+        .unwrap();
+    let event = fleet_application::audit::AuditIntent {
+        actor: "operator".to_owned(),
+        action: "machine.update".to_owned(),
+        resource: Some(machine.id.clone()),
+        decision: fleet_application::authz::Decision::allow(),
+        correlation_id: None,
+        operation_id: Some("operation-1".to_owned()),
+        metadata: fleet_application::audit::AuditMetadata::default(),
+    };
+    let count = || async {
+        sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM audit_events")
+            .fetch_one(&pool)
+            .await
+            .unwrap()
+    };
+    // A fingerprint confirmed after the detection started: nothing written.
+    let stale = machines
+        .record_detected_endpoint_os(endpoint, GuestOs::Linux, "SHA256:previous", &event)
+        .await
+        .unwrap();
+    assert!(!stale);
+    assert_eq!(
+        machines.get(&machine.id).await.unwrap().endpoints[0].guest_os,
+        None
+    );
+    assert_eq!(count().await, 0);
+    // The current one: the OS and one resolved event.
+    let recorded = machines
+        .record_detected_endpoint_os(endpoint, GuestOs::Linux, "SHA256:current", &event)
+        .await
+        .unwrap();
+    assert!(recorded);
+    assert_eq!(
+        machines.get(&machine.id).await.unwrap().endpoints[0].guest_os,
+        Some(GuestOs::Linux)
+    );
+    let outcome: Option<String> =
+        sqlx::query_scalar("SELECT outcome FROM audit_events WHERE operation_id = 'operation-1'")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(
+        outcome.as_deref(),
+        Some("succeeded"),
+        "never an open intent"
+    );
+}
+
 #[tokio::test]
 async fn a_fleetd_endpoint_never_carries_an_os() {
     let (_dir, store) = store().await;

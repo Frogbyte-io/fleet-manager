@@ -609,25 +609,46 @@ pub trait MachinePort: fmt::Debug + Send + Sync {
             detail: "this machine store cannot clear an endpoint's guest OS".to_owned(),
         })
     }
+    /// Records a detected guest OS and its audit event atomically, and only
+    /// while the endpoint's verified fingerprint is still
+    /// `expected_fingerprint` (the trust state the detection ran under).
+    /// The event is written already resolved, so it never opens a second
+    /// intent beside the operation's own. Answers whether it was recorded:
+    /// `false` when the fingerprint changed in between. The default
+    /// refuses, as above.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the backend errors; nothing is written then.
+    async fn record_detected_endpoint_os(
+        &self,
+        endpoint_id: &str,
+        guest_os: fleet_core::GuestOs,
+        expected_fingerprint: &str,
+        event: &crate::audit::AuditIntent,
+    ) -> Result<bool, PortFailure> {
+        let _ = (endpoint_id, guest_os, expected_fingerprint, event);
+        Err(PortFailure::Backend {
+            detail: "this machine store cannot record a detected guest OS".to_owned(),
+        })
+    }
 }
 
 /// Records the guest OS an `agentless.inventory` operation detected on an
 /// unknown endpoint (ADR 0021 decision 4). The operation's creation already
 /// required `machine.update` on the machine from `requested_by` (see
-/// `Operations::create`), so this records under that requester and writes
-/// the audit event naming the operation; the worker never decides it alone.
+/// `Operations::create`), so this records under that requester. The OS and
+/// its audit event (naming the operation) commit together, and only while
+/// the endpoint still has the fingerprint the detection ran under; answers
+/// whether it was recorded.
 ///
 /// # Errors
 ///
-/// Fails when the endpoint is unknown or the store or audit sink fails.
+/// Fails when the store fails; nothing is recorded then.
 pub async fn record_detected_endpoint_os(
     port: &dyn MachinePort,
-    audit: &dyn crate::operation::AuditPort,
     detected: &DetectedEndpointOs<'_>,
-) -> Result<(), String> {
-    port.record_endpoint_os(detected.endpoint_id, detected.guest_os)
-        .await
-        .map_err(|failure| failure.to_string())?;
+) -> Result<bool, String> {
     let mut metadata = crate::audit::AuditMetadata::default();
     for (key, value) in [
         ("event", "endpoint_os_recorded"),
@@ -639,17 +660,23 @@ pub async fn record_detected_endpoint_os(
             .insert(key, value)
             .map_err(|error| error.to_string())?;
     }
-    audit
-        .record_intent(&crate::audit::AuditIntent {
-            actor: detected.requested_by.to_owned(),
-            action: Permission::MachineUpdate.id().to_owned(),
-            resource: Some(detected.machine_id.to_owned()),
-            decision: Decision::allow(),
-            correlation_id: None,
-            operation_id: Some(detected.operation_id.to_owned()),
-            metadata,
-        })
-        .await
+    let event = crate::audit::AuditIntent {
+        actor: detected.requested_by.to_owned(),
+        action: Permission::MachineUpdate.id().to_owned(),
+        resource: Some(detected.machine_id.to_owned()),
+        decision: Decision::allow(),
+        correlation_id: None,
+        operation_id: Some(detected.operation_id.to_owned()),
+        metadata,
+    };
+    port.record_detected_endpoint_os(
+        detected.endpoint_id,
+        detected.guest_os,
+        detected.verified_fingerprint,
+        &event,
+    )
+    .await
+    .map_err(|failure| failure.to_string())
 }
 
 /// What an inventory operation detected, and who asked for it.
@@ -663,6 +690,8 @@ pub struct DetectedEndpointOs<'a> {
     pub machine_id: &'a str,
     /// The SSH endpoint.
     pub endpoint_id: &'a str,
+    /// The endpoint's verified fingerprint when the detection started.
+    pub verified_fingerprint: &'a str,
     /// The detected OS.
     pub guest_os: fleet_core::GuestOs,
 }

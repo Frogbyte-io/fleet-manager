@@ -276,7 +276,8 @@ fleetFact network ipv4 {
 # Tools the plan names, the same set and fact shape as Linux: presence, then
 # the first line of `--version` as its own fact. The names are literals here,
 # and only `<name>.exe` is matched: a `.cmd`/`.bat` shim is never run. Each
-# `--version` runs with no stdin and its own 10 s bound. A session that holds
+# `--version` runs with no stdin and its own 10 s bound (its process tree is
+# killed at the bound, and the output read is bounded too). A session that holds
 # the Administrators role (or whose role could not be read) reports presence
 # only and runs nothing: PATH folders are often user-writable, and an
 # elevated token must not execute what a user dropped there.
@@ -294,9 +295,13 @@ function fleetVersion($path) {
   $out = $proc.StandardOutput.ReadToEndAsync()
   $null = $proc.StandardError.ReadToEndAsync()
   if (-not $proc.WaitForExit(10000)) {
+    # The whole tree: a tool's child must not outlive the bound.
+    try { $null = & "$env:SystemRoot\System32\taskkill.exe" /T /F /PID $proc.Id 2>$null } catch { }
     try { $proc.Kill() } catch { }
     return $null
   }
+  # A child that kept the pipe open must not stall the read either.
+  if (-not $out.Wait(2000)) { return $null }
   ($out.Result -split "`r?`n" | Where-Object { "$_".Trim() -ne '' } | Select-Object -First 1)
 }
 function fleetTool($name) {
@@ -591,6 +596,8 @@ mod tests {
         assert!(guard < run);
         // Each `--version` has its own bound and no stdin.
         assert!(script.contains("WaitForExit(10000)"));
+        assert!(script.contains("taskkill.exe\" /T /F /PID $proc.Id"));
+        assert!(script.contains("$out.Wait(2000)"));
         assert!(script.contains("StandardInput.Close()"));
         assert!(!script.contains("& $cmd.Source"));
     }

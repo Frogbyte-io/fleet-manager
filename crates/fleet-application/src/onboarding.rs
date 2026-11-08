@@ -748,7 +748,12 @@ impl Onboarding {
         draft.updated_at = fleet_core::SystemClock::now_unix_millis();
         // A (re)confirmed key may be another machine behind the address:
         // whatever shell answered before says nothing about it (ADR 0021).
+        // The same holds for the inventory discover observed: facts from
+        // behind the old key must never be carried onto a new machine.
         draft.shell_check = None;
+        draft.facts = Vec::new();
+        draft.discovery_source = None;
+        draft.discovered_at = None;
         draft.host_key_confirmed_at = Some(draft.updated_at);
         let draft = self
             .drafts

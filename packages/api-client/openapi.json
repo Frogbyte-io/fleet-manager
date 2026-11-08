@@ -7515,6 +7515,16 @@
               }
             }
           },
+          "409": {
+            "description": "`guest_os_mismatch`: the requested guest OS contradicts the endpoint's recorded OS.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
           "500": {
             "description": "A backend port failed.",
             "content": {
@@ -8037,6 +8047,16 @@
               }
             }
           },
+          "409": {
+            "description": "`guest_os_mismatch`: the requested guest OS contradicts the endpoint's recorded OS.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
           "500": {
             "description": "A backend port failed.",
             "content": {
@@ -8307,6 +8327,16 @@
           },
           "408": {
             "description": "The upload body stalled for a minute.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "`guest_os_mismatch`: the requested guest OS contradicts the endpoint's recorded OS.",
             "content": {
               "application/json": {
                 "schema": {

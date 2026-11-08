@@ -628,6 +628,17 @@ pub async fn clear_machine_endpoint_guest_os(
 ) -> Result<Json<Resource<MachineDto>>, ApiErrorResponse> {
     let machines = machines_or_error(&state, correlation_id)?;
     let principal = crate::operations::principal_or_error(principal, correlation_id)?;
+    // The answer is the machine, so the caller must be able to read it:
+    // checked before anything changes, not after.
+    machines
+        .get(
+            state.authorizer.as_ref(),
+            &principal,
+            &machine_id,
+            fleet_core::SystemClock::now_unix_millis(),
+        )
+        .await
+        .map_err(|error| map_machine_error(&error, correlation_id))?;
     machines
         .clear_endpoint_os(
             state.authorizer.as_ref(),
@@ -637,6 +648,10 @@ pub async fn clear_machine_endpoint_guest_os(
         )
         .await
         .map_err(|error| map_machine_error(&error, correlation_id))?;
+    // Cached views go stale with the mutation, whatever the read-back does.
+    state
+        .events
+        .publish(fleet_application::events::EventKind::MachineChanged);
     let view = machines
         .get(
             state.authorizer.as_ref(),
@@ -646,8 +661,5 @@ pub async fn clear_machine_endpoint_guest_os(
         )
         .await
         .map_err(|error| map_machine_error(&error, correlation_id))?;
-    state
-        .events
-        .publish(fleet_application::events::EventKind::MachineChanged);
     Ok(Json(Resource::new(MachineDto::from(view))))
 }

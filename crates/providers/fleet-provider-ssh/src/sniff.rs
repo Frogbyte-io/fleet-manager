@@ -7,17 +7,22 @@
 //!
 //! | Login shell                | Output (whitespace-separated tokens)                         |
 //! |----------------------------|--------------------------------------------------------------|
-//! | Bash, dash, other POSIX    | `fleet-shell %OS% .PSEdition .PSVersion.Major .SessionState.LanguageMode` |
+//! | Bash, dash, other POSIX    | `fleet-shell %OS% .PSEdition .PSVersion.Major .SessionState.LanguageMode .Platform` |
 //! | `cmd.exe`                  | `fleet-shell Windows_NT $PSVersionTable.PSEdition ...` (literal) |
-//! | Windows PowerShell 5.1     | `fleet-shell` `%OS%` `Desktop` `5` `FullLanguage`, one per line |
-//! | PowerShell 7 (`pwsh`)      | `fleet-shell` `%OS%` `Core` `7` `FullLanguage`, one per line |
+//! | Windows PowerShell 5.1     | `fleet-shell` `%OS%` `Desktop` `5` `FullLanguage`, one per line (5.1 has no `Platform`) |
+//! | PowerShell 7 on Windows    | `fleet-shell` `%OS%` `Core` `7` `FullLanguage` `Win32NT`, one per line |
+//! | PowerShell 7 on Linux      | the same, ending `Unix` |
 //!
 //! `%OS%` is expanded only by `cmd.exe`; `$name.Member` is a property read
 //! in PowerShell and an empty variable followed by literal text in a POSIX
 //! shell. Only Windows PowerShell 5.1 in `FullLanguage` mode with nothing
-//! printed ahead of the marker classifies as Windows; POSIX output keeps
-//! today's Linux behaviour; anything else is refused with a reason that
-//! names the setup step, or left unrecognized (and so unknown).
+//! printed ahead of the marker classifies as Windows. A POSIX answer is
+//! followed by a second fixed command, [`UNAME_COMMAND`] (`uname -s`):
+//! Git Bash, MSYS2 and Cygwin answer the first like any POSIX shell and are
+//! told apart by it. POSIX output on Linux keeps today's Linux behaviour;
+//! `cmd.exe`, PowerShell 7 on Windows and a Windows POSIX layer are refused
+//! with a reason that names the setup step; anything else (PowerShell 7 on
+//! Linux included) is left unrecognized, and so unknown.
 #![warn(missing_docs)]
 
 use std::time::{Duration, Instant};
@@ -263,13 +268,16 @@ pub fn parse_sniff(stdout: &str) -> ShellSniff {
 }
 
 /// Whether a `uname -s` answer names a POSIX layer on Windows (Git Bash or
-/// MSYS2 report `MINGW*`/`MSYS*`, Cygwin `CYGWIN*`).
+/// MSYS2 report `MINGW*`/`MSYS*`, Cygwin `CYGWIN*`). Every line is checked,
+/// so profile text printed ahead of the answer cannot hide it.
 #[must_use]
 pub fn is_windows_posix_uname(stdout: &str) -> bool {
-    let first = stdout.trim().to_ascii_uppercase();
-    ["MINGW", "MSYS", "CYGWIN"]
-        .iter()
-        .any(|prefix| first.starts_with(prefix))
+    stdout.lines().any(|line| {
+        let line = line.trim().to_ascii_uppercase();
+        ["MINGW", "MSYS", "CYGWIN"]
+            .iter()
+            .any(|prefix| line.starts_with(prefix))
+    })
 }
 
 /// The byte offset of the marker token at the start of a line, when any.
@@ -484,7 +492,11 @@ mod tests {
         ] {
             assert!(is_windows_posix_uname(uname), "{uname}");
         }
-        for uname in ["Linux\n", "Darwin\n", "FreeBSD\n", ""] {
+        // Profile text ahead of the answer does not hide it.
+        assert!(is_windows_posix_uname(
+            "Welcome back!\r\nMINGW64_NT-10.0-26100\r\n"
+        ));
+        for uname in ["Linux\n", "Darwin\n", "FreeBSD\n", "", "motd\nLinux\n"] {
             assert!(!is_windows_posix_uname(uname), "{uname}");
         }
         let sniff = ShellSniff {

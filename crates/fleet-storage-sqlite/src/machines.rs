@@ -459,6 +459,48 @@ impl MachinePort for MachineRepository {
             .await
     }
 
+    async fn record_detected_endpoint_os(
+        &self,
+        endpoint_id: &str,
+        guest_os: fleet_core::GuestOs,
+        expected_fingerprint: &str,
+        event: &fleet_application::audit::AuditIntent,
+    ) -> Result<bool, PortFailure> {
+        let mut tx = self
+            .pool
+            .begin_with("BEGIN IMMEDIATE")
+            .await
+            .map_err(|error| backend("record_detected_endpoint_os", &error))?;
+        // Bound to the trust state the detection ran under: a host key
+        // confirmed in between (which cleared the OS) wins.
+        let updated = sqlx::query(
+            "UPDATE machine_endpoints SET guest_os = ?2 \
+             WHERE id = ?1 AND kind = 'ssh' AND verified_fingerprint = ?3",
+        )
+        .bind(endpoint_id)
+        .bind(guest_os.id())
+        .bind(expected_fingerprint)
+        .execute(&mut *tx)
+        .await
+        .map_err(|error| backend("record_detected_endpoint_os", &error))?;
+        if updated.rows_affected() == 0 {
+            return Ok(false);
+        }
+        crate::audit::append_resolved_tx(
+            &mut tx,
+            event,
+            fleet_application::audit::AuditOutcome::Succeeded,
+        )
+        .await
+        .map_err(|detail| PortFailure::Backend {
+            detail: format!("record_detected_endpoint_os: {detail}"),
+        })?;
+        tx.commit()
+            .await
+            .map_err(|error| backend("record_detected_endpoint_os", &error))?;
+        Ok(true)
+    }
+
     async fn clear_endpoint_os(&self, endpoint_id: &str) -> Result<(), PortFailure> {
         self.write_endpoint_os(endpoint_id, None, "clear_endpoint_os")
             .await
