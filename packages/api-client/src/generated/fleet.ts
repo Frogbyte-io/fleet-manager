@@ -204,6 +204,12 @@ export interface CapabilityFactDto {
  * from the use case unless the caller may read sensitive endpoint detail.
  */
 export interface EndpointDto {
+  /**
+     * The guest OS detected on this SSH endpoint at onboarding or
+     * inventory, `linux` or `windows`; null while unknown (ADR 0021).
+     * @nullable
+     */
+  guestOs?: string | null;
   /** The endpoint's identity. */
   id: string;
   /** How this endpoint reaches the machine: `ssh` or `fleetd`. */
@@ -3805,7 +3811,11 @@ export interface MachineCollectRequest {
      */
   endpointId?: string | null;
   /**
-     * The guest's OS, `linux` (default) or `windows`.
+     * The guest's OS, `linux` or `windows`. When the endpoint's OS was
+     * recorded at onboarding or inventory, absent means that OS and a
+     * different value is refused with HTTP 409 and error code
+     * `guest_os_mismatch`; otherwise absent
+     * means `linux`.
      * @nullable
      */
   guestOs?: string | null;
@@ -3931,7 +3941,11 @@ export interface MachineExecRequest {
      */
   endpointId?: string | null;
   /**
-     * The guest's OS, `linux` (default) or `windows`.
+     * The guest's OS, `linux` or `windows`. When the endpoint's OS was
+     * recorded at onboarding or inventory, absent means that OS and a
+     * different value is refused with HTTP 409 and error code
+     * `guest_os_mismatch`; otherwise absent
+     * means `linux`.
      * @nullable
      */
   guestOs?: string | null;
@@ -4480,6 +4494,39 @@ export interface TestOutcomeDto {
 }
 
 /**
+ * The login-shell check of a draft (ADR 0021): which shell answered, the
+ * guest OS the endpoint will be recorded as, and the refusal when Fleet
+ * cannot drive that shell.
+ */
+export interface ShellCheckDto {
+  /** When the check ran (epoch milliseconds). */
+  at: number;
+  /**
+     * The guest OS the endpoint is driven as, `linux` or `windows`; absent
+     * when the shell is refused or unrecognized (the endpoint stays
+     * unknown).
+     * @nullable
+     */
+  guestOs?: string | null;
+  /**
+     * The refusal detail, naming the setup step that fixes it.
+     * @nullable
+     */
+  refusalDetail?: string | null;
+  /**
+     * The refusal reason: `unsupported_shell`, `constrained_language` or
+     * `profile_output`. Add refuses a draft that carries one.
+     * @nullable
+     */
+  refusalReason?: string | null;
+  /**
+     * The detected login shell: `posix`, `windows_powershell`,
+     * `powershell_core`, `cmd` or `unrecognized`.
+     */
+  shell: string;
+}
+
+/**
  * A draft in full: everything the review step renders.
  */
 export interface OnboardingDraftDetailDto {
@@ -4524,6 +4571,7 @@ export interface OnboardingDraftDetailDto {
      * @nullable
      */
   profileHint?: string | null;
+  shellCheck?: null | ShellCheckDto;
   /** The derived stage: `untested`, `review`, or `ready`. */
   stage: string;
   /** Tags carried onto the machine. */
@@ -9028,6 +9076,7 @@ export type ResourceOnboardingDraftDetailDtoData = {
      * @nullable
      */
   profileHint?: string | null;
+  shellCheck?: null | ShellCheckDto;
   /** The derived stage: `untested`, `review`, or `ready`. */
   stage: string;
   /** Tags carried onto the machine. */
@@ -11747,7 +11796,7 @@ overwrite?: boolean;
  */
 endpointId?: string;
 /**
- * `linux` (default) or `windows`.
+ * `linux` or `windows`; absent means the endpoint's recorded OS, else `linux`. A value that contradicts a recorded OS is refused.
  */
 guestOs?: string;
 /**
@@ -19417,6 +19466,11 @@ export type collectMachineFilesResponse404 = {
   status: 404
 }
 
+export type collectMachineFilesResponse409 = {
+  data: ApiError
+  status: 409
+}
+
 export type collectMachineFilesResponse500 = {
   data: ApiError
   status: 500
@@ -19430,7 +19484,7 @@ export type collectMachineFilesResponse503 = {
 export type collectMachineFilesResponseSuccess = (collectMachineFilesResponse202) & {
   headers: Headers;
 };
-export type collectMachineFilesResponseError = (collectMachineFilesResponse400 | collectMachineFilesResponse403 | collectMachineFilesResponse404 | collectMachineFilesResponse500 | collectMachineFilesResponse503) & {
+export type collectMachineFilesResponseError = (collectMachineFilesResponse400 | collectMachineFilesResponse403 | collectMachineFilesResponse404 | collectMachineFilesResponse409 | collectMachineFilesResponse500 | collectMachineFilesResponse503) & {
   headers: Headers;
 };
 
@@ -19781,6 +19835,75 @@ export const clearMachineEndpointAuth = async (machineId: string,
 
 
 
+export type clearMachineEndpointGuestOsResponse200 = {
+  data: ResourceMachineDto
+  status: 200
+}
+
+export type clearMachineEndpointGuestOsResponse403 = {
+  data: ApiError
+  status: 403
+}
+
+export type clearMachineEndpointGuestOsResponse404 = {
+  data: ApiError
+  status: 404
+}
+
+export type clearMachineEndpointGuestOsResponse503 = {
+  data: ApiError
+  status: 503
+}
+
+export type clearMachineEndpointGuestOsResponseSuccess = (clearMachineEndpointGuestOsResponse200) & {
+  headers: Headers;
+};
+export type clearMachineEndpointGuestOsResponseError = (clearMachineEndpointGuestOsResponse403 | clearMachineEndpointGuestOsResponse404 | clearMachineEndpointGuestOsResponse503) & {
+  headers: Headers;
+};
+
+export type clearMachineEndpointGuestOsResponse = (clearMachineEndpointGuestOsResponseSuccess | clearMachineEndpointGuestOsResponseError)
+
+export const getClearMachineEndpointGuestOsUrl = (machineId: string,
+    endpointId: string,) => {
+
+
+
+
+  return `/api/v1/machines/${machineId}/endpoints/${endpointId}/guest-os`
+}
+
+/**
+ * # Errors
+ *
+ * Returns the public error envelope on refusal or an unknown machine or
+ * SSH endpoint.
+ * @summary Clears the guest OS recorded on a machine's SSH endpoint (ADR 0021), so
+the endpoint is unknown again: the caller's `guestOs` chooses, and the
+next `agentless.inventory` detects and records it afresh. This is the
+recovery when a record is wrong. A host-key confirmation clears it too.
+ */
+export const clearMachineEndpointGuestOs = async (machineId: string,
+    endpointId: string, options?: RequestInit): Promise<clearMachineEndpointGuestOsResponse> => {
+
+  const res = await fetch(getClearMachineEndpointGuestOsUrl(machineId,endpointId),
+  {
+    ...options,
+    method: 'DELETE'
+
+
+  }
+)
+
+
+  const body = [204, 205, 304].includes(res.status) ? null : await res.text();
+
+  const data: clearMachineEndpointGuestOsResponse['data'] = body ? JSON.parse(body) : {}
+  return { data, status: res.status, headers: res.headers } as clearMachineEndpointGuestOsResponse
+}
+
+
+
 export type execMachineResponse202 = {
   data: ResourceOperationDto
   status: 202
@@ -19801,6 +19924,11 @@ export type execMachineResponse404 = {
   status: 404
 }
 
+export type execMachineResponse409 = {
+  data: ApiError
+  status: 409
+}
+
 export type execMachineResponse500 = {
   data: ApiError
   status: 500
@@ -19814,7 +19942,7 @@ export type execMachineResponse503 = {
 export type execMachineResponseSuccess = (execMachineResponse202) & {
   headers: Headers;
 };
-export type execMachineResponseError = (execMachineResponse400 | execMachineResponse403 | execMachineResponse404 | execMachineResponse500 | execMachineResponse503) & {
+export type execMachineResponseError = (execMachineResponse400 | execMachineResponse403 | execMachineResponse404 | execMachineResponse409 | execMachineResponse500 | execMachineResponse503) & {
   headers: Headers;
 };
 
@@ -19969,6 +20097,11 @@ export type putMachineFileResponse408 = {
   status: 408
 }
 
+export type putMachineFileResponse409 = {
+  data: ApiError
+  status: 409
+}
+
 export type putMachineFileResponse413 = {
   data: ApiError
   status: 413
@@ -19987,7 +20120,7 @@ export type putMachineFileResponse503 = {
 export type putMachineFileResponseSuccess = (putMachineFileResponse202) & {
   headers: Headers;
 };
-export type putMachineFileResponseError = (putMachineFileResponse400 | putMachineFileResponse403 | putMachineFileResponse404 | putMachineFileResponse408 | putMachineFileResponse413 | putMachineFileResponse500 | putMachineFileResponse503) & {
+export type putMachineFileResponseError = (putMachineFileResponse400 | putMachineFileResponse403 | putMachineFileResponse404 | putMachineFileResponse408 | putMachineFileResponse409 | putMachineFileResponse413 | putMachineFileResponse500 | putMachineFileResponse503) & {
   headers: Headers;
 };
 

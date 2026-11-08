@@ -1735,11 +1735,13 @@ fn example_machine() -> Machine {
         description: String::new(),
         endpoints: vec![
             Endpoint {
+                guest_os: None,
                 id: "endpoint-1".to_owned(),
                 kind: fleet_core::EndpointKind::Ssh,
                 reference: "ops@10.0.0.5:22".to_owned(),
             },
             Endpoint {
+                guest_os: None,
                 id: "endpoint-2".to_owned(),
                 kind: fleet_core::EndpointKind::Fleetd,
                 reference: "0199-node".to_owned(),

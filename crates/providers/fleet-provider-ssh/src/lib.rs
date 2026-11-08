@@ -43,6 +43,7 @@ pub mod key;
 pub mod persistent;
 pub mod put;
 pub mod shell;
+pub mod sniff;
 #[cfg(unix)]
 pub mod terminal;
 
@@ -62,6 +63,10 @@ pub use inventory::{COLLECTION_DEADLINE, PROBE_SOURCE, collect, parse_probe_outp
 pub use key::{GeneratedKey, PrivateKey};
 pub use put::{PutOutcome, PutRequest, put_file};
 pub use shell::GuestShell;
+pub use sniff::{
+    DetectedShell, SNIFF_COMMAND, SNIFF_DEADLINE, ShellRefusal, ShellSniff, parse_sniff,
+    sniff_shell,
+};
 #[cfg(unix)]
 pub use terminal::{Terminal, TerminalEvent, TerminalSize};
 

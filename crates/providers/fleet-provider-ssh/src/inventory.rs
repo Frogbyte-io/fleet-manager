@@ -185,9 +185,12 @@ fi
 /// The Windows probe: the same fact set and JSON-line protocol, read through
 /// CIM and .NET (Windows PowerShell 5.1) instead of `uname` and `/proc`. Each
 /// fact is independent (a failing query is `unavailable`, never fatal) and
-/// values are base64 of their UTF-8 bytes. The tool set is skipped as
-/// `unknown`, exactly like any non-Linux family: tool detection has not been
-/// validated on Windows.
+/// values are base64 of their UTF-8 bytes. On top of the shared set it
+/// reports the Windows release (10 or 11, from the build number), edition,
+/// display version and build, the session's user and whether it holds the
+/// Administrators role, and the login shell's version, language mode and the
+/// OpenSSH `DefaultShell` value (ADR 0021). The tool set is the Linux one,
+/// found with `Get-Command -CommandType Application`.
 const WINDOWS_PROBE: &str = r#"$fleetT = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()
 function fleetEmit($ns, $name, $value, $status) {
   $v = ''
@@ -214,7 +217,42 @@ fleetFact host hostname { [Net.Dns]::GetHostName() }
 fleetFact os kernel { $fleetOs.Version }
 fleetEmit os family 'Windows' known
 fleetEmit os distribution 'windows' known
-fleetFact os distribution_version { $fleetOs.Caption }
+$fleetCv = $null
+try { $fleetCv = Get-ItemProperty -Path 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion' -ErrorAction Stop } catch { }
+$fleetBuild = 0
+try { $fleetBuild = [int]$fleetOs.BuildNumber } catch { }
+# Windows 11 kept major version 10; the build number tells them apart. A
+# server build is not a workstation release, so it gets no release fact.
+$fleetRelease = $null
+if ($fleetOs.ProductType -eq 1 -and $fleetBuild -ge 22000) { $fleetRelease = '11' }
+elseif ($fleetOs.ProductType -eq 1 -and $fleetBuild -ge 10240) { $fleetRelease = '10' }
+fleetFact os windows_release { $fleetRelease }
+fleetFact os distribution_version { if ($fleetRelease) { $fleetRelease } else { $fleetOs.Caption } }
+fleetFact os product_name { $fleetOs.Caption }
+fleetFact os product_type {
+  switch ([int]$fleetOs.ProductType) { 1 { 'workstation' } 2 { 'domain_controller' } 3 { 'server' } }
+}
+fleetFact os edition { $fleetCv.EditionID }
+fleetFact os display_version { if ($fleetCv.DisplayVersion) { $fleetCv.DisplayVersion } else { $fleetCv.ReleaseId } }
+fleetFact os build {
+  if ($fleetBuild -gt 0) { if ($null -ne $fleetCv.UBR) { "$fleetBuild.$($fleetCv.UBR)" } else { "$fleetBuild" } }
+}
+# The login session: who Fleet runs as, and whether that session holds the
+# Administrators role (a key-authenticated administrator gets the full
+# elevated token over OpenSSH, ADR 0021 decision 7). A warning, never a gate.
+fleetFact session user { [Environment]::UserName }
+$fleetAdmin = $null
+try {
+  $fleetId = [Security.Principal.WindowsIdentity]::GetCurrent()
+  $fleetAdmin = (New-Object Security.Principal.WindowsPrincipal ($fleetId)).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+  if (-not $fleetAdmin) { $fleetAdmin = [bool]($fleetId.Groups | Where-Object { $_.Value -eq 'S-1-5-32-544' }) }
+} catch { $fleetAdmin = $null }
+fleetFact session administrator { if ($null -eq $fleetAdmin) { $null } elseif ($fleetAdmin) { 'true' } else { 'false' } }
+fleetFact shell powershell_version { "$($PSVersionTable.PSVersion)" }
+fleetFact shell language_mode { "$($ExecutionContext.SessionState.LanguageMode)" }
+fleetFact shell default_shell {
+  (Get-ItemProperty -Path 'HKLM:\SOFTWARE\OpenSSH' -Name DefaultShell -ErrorAction Stop).DefaultShell
+}
 fleetFact hardware cpu_cores { [Environment]::ProcessorCount }
 fleetFact hardware memory_bytes { [uint64]$fleetCs.TotalPhysicalMemory }
 $fleetDrive = $null
@@ -235,8 +273,53 @@ fleetFact network ipv4 {
     Where-Object { $_.IPAddress -notlike '127.*' -and $_.IPAddress -notlike '169.254.*' } |
     Select-Object -First 1).IPAddress
 }
-foreach ($skipped in 'git', 'docker', 'tailscale', 'mise', 'frogenv', 'skills-manager-cli', 'claude', 'codex') {
-  fleetEmit tool $skipped '' unknown
+# Tools the plan names, the same set and fact shape as Linux: presence, then
+# the first line of `--version` as its own fact. The names are literals here,
+# and only `<name>.exe` is matched: a `.cmd`/`.bat` shim is never run. Each
+# `--version` runs with no stdin and its own 10 s bound (its process tree is
+# killed at the bound, and reading its output may wait 2 s more at most: a
+# time bound, not a size bound). A session that holds
+# the Administrators role (or whose role could not be read) reports presence
+# only and runs nothing: PATH folders are often user-writable, and an
+# elevated token must not execute what a user dropped there.
+function fleetVersion($path) {
+  $psi = New-Object System.Diagnostics.ProcessStartInfo
+  $psi.FileName = $path
+  $psi.Arguments = '--version'
+  $psi.UseShellExecute = $false
+  $psi.CreateNoWindow = $true
+  $psi.RedirectStandardInput = $true
+  $psi.RedirectStandardOutput = $true
+  $psi.RedirectStandardError = $true
+  $proc = [System.Diagnostics.Process]::Start($psi)
+  $proc.StandardInput.Close()
+  $out = $proc.StandardOutput.ReadToEndAsync()
+  $null = $proc.StandardError.ReadToEndAsync()
+  if (-not $proc.WaitForExit(10000)) {
+    # The whole tree: a tool's child must not outlive the bound.
+    try { $null = & "$env:SystemRoot\System32\taskkill.exe" /T /F /PID $proc.Id 2>$null } catch { }
+    try { $proc.Kill() } catch { }
+    return $null
+  }
+  # A child that kept the pipe open must not stall the read either.
+  if (-not $out.Wait(2000)) { return $null }
+  ($out.Result -split "`r?`n" | Where-Object { "$_".Trim() -ne '' } | Select-Object -First 1)
+}
+function fleetTool($name) {
+  $cmd = $null
+  try {
+    $cmd = Get-Command -Name "$name.exe" -CommandType Application -ErrorAction Stop |
+      Where-Object { [IO.Path]::GetExtension($_.Source) -eq '.exe' } | Select-Object -First 1
+  } catch { $cmd = $null }
+  if ($null -eq $cmd) { fleetEmit tool $name '' unavailable; return }
+  fleetEmit tool $name '' known
+  if ($fleetAdmin -ne $false) { fleetEmit tool-version $name '' unknown; return }
+  $version = $null
+  try { $version = fleetVersion $cmd.Source } catch { $version = $null }
+  if ($null -ne $version -and "$version".Trim() -ne '') { fleetEmit tool-version $name "$version".Trim() known } else { fleetEmit tool-version $name '' known }
+}
+foreach ($fleetToolName in 'git', 'docker', 'tailscale', 'mise', 'frogenv', 'skills-manager-cli', 'claude', 'codex') {
+  fleetTool $fleetToolName
 }
 "#;
 
@@ -341,7 +424,67 @@ pub fn parse_probe_output(
             facts.push(fact);
         }
     }
+    if let Some(support) = windows_support_fact(&facts) {
+        facts.push(support);
+    }
     facts
+}
+
+/// The oldest Windows 11 build Fleet calls `supported`: 26100 (24H2), the
+/// oldest feature update Microsoft still services for the Enterprise and
+/// Education editions as of 2026-11 (until October 2027). Raise it when
+/// Microsoft ends servicing; an older build is reported `untested`, never
+/// refused. Home and Pro follow a shorter schedule, which this single
+/// threshold does not model.
+pub const MIN_SERVICED_WINDOWS_11_BUILD: u32 = 26100;
+
+/// The support tier of a Windows workstation (ADR 0021 decision 5), derived
+/// from the probe's own facts: `supported` for Windows 11 on x64 in a Pro,
+/// Enterprise or Education edition at or above
+/// [`MIN_SERVICED_WINDOWS_11_BUILD`]; `untested` for anything else the probe
+/// recognized as a workstation release (Windows 10 22H2, Home, arm64).
+/// Fleet refuses nothing on it. `None` unless the probe reported a release.
+#[must_use]
+pub fn windows_support_fact(
+    facts: &[fleet_core::CapabilityFact],
+) -> Option<fleet_core::CapabilityFact> {
+    let known = |namespace: &str, name: &str| {
+        facts.iter().find(|fact| {
+            fact.namespace == namespace
+                && fact.name == name
+                && fact.status == fleet_core::CapabilityStatus::Known
+        })
+    };
+    if known("os", "family")?.value.as_deref() != Some("Windows") {
+        return None;
+    }
+    let release = known("os", "windows_release")?;
+    let value =
+        |namespace: &str, name: &str| known(namespace, name).and_then(|fact| fact.value.as_deref());
+    // EditionID: Professional*, Enterprise*, Education*; Home is `Core*`.
+    let tested_edition = value("os", "edition").is_some_and(|edition| {
+        ["Professional", "Enterprise", "Education"]
+            .iter()
+            .any(|prefix| edition.starts_with(prefix))
+    });
+    // `os.build` is `<build>.<revision>`; a build below the oldest one
+    // Microsoft still services is no longer `supported`.
+    let serviced = value("os", "build")
+        .and_then(|build| build.split('.').next())
+        .and_then(|build| build.parse::<u32>().ok())
+        .is_some_and(|build| build >= MIN_SERVICED_WINDOWS_11_BUILD);
+    let supported = release.value.as_deref() == Some("11")
+        && value("host", "architecture") == Some("x86_64")
+        && tested_edition
+        && serviced;
+    Some(fleet_core::CapabilityFact {
+        namespace: "os".to_owned(),
+        name: "support".to_owned(),
+        value: Some(if supported { "supported" } else { "untested" }.to_owned()),
+        status: fleet_core::CapabilityStatus::Known,
+        observed_at: release.observed_at,
+        source: release.source.clone(),
+    })
 }
 
 #[cfg(test)]
@@ -367,7 +510,13 @@ mod tests {
         assert_eq!(out.status.code(), Some(0), "{out:?}");
         let stdout = text(&out.stdout);
         let facts = parse_probe_output(&stdout, SystemTime::now());
-        assert_eq!(facts.len(), stdout.lines().count(), "{stdout}");
+        // One fact per line, plus the derived `os.support` when the probe
+        // reported a Windows release (on a real Windows host).
+        let derived = facts
+            .iter()
+            .filter(|fact| fact.namespace == "os" && fact.name == "support")
+            .count();
+        assert_eq!(facts.len(), stdout.lines().count() + derived, "{stdout}");
         let find = |namespace: &str, name: &str| {
             facts
                 .iter()
@@ -391,12 +540,67 @@ mod tests {
         ] {
             find(namespace, name);
         }
-        for tool in ["git", "docker", "claude", "codex"] {
-            assert_eq!(find("tool", tool).status.id(), "unknown");
+        for (namespace, name) in [
+            ("session", "user"),
+            ("session", "administrator"),
+            ("shell", "powershell_version"),
+            ("shell", "language_mode"),
+            ("shell", "default_shell"),
+            ("os", "windows_release"),
+            ("os", "edition"),
+            ("os", "build"),
+        ] {
+            find(namespace, name);
+        }
+        assert_eq!(
+            find("shell", "language_mode").value.as_deref(),
+            Some("FullLanguage")
+        );
+        // Every named tool is answered for: present (with a version fact) or
+        // unavailable, never skipped.
+        for tool in [
+            "git",
+            "docker",
+            "tailscale",
+            "mise",
+            "frogenv",
+            "skills-manager-cli",
+            "claude",
+            "codex",
+        ] {
+            let status = find("tool", tool).status.id();
+            assert!(
+                status == "known" || status == "unavailable",
+                "{tool}: {status}"
+            );
+            if status == "known" {
+                find("tool-version", tool);
+            }
         }
         // The Windows probe never touches `uname` or `/proc`.
         let script = probe_script_for(GuestShell::PowerShell);
         assert!(!script.contains("uname") && !script.contains("/proc"));
+    }
+
+    #[test]
+    fn the_windows_probe_runs_only_exe_tools_and_nothing_when_elevated() {
+        let script = probe_script_for(GuestShell::PowerShell);
+        // Only `<name>.exe` is matched, and the extension is checked again.
+        assert!(script.contains(r#"-Name "$name.exe" -CommandType Application"#));
+        assert!(script.contains("GetExtension($_.Source) -eq '.exe'"));
+        // An administrator session (or an unreadable role) reports presence
+        // only: the guard returns before `fleetVersion` runs anything.
+        let guard = script
+            .find("if ($fleetAdmin -ne $false) { fleetEmit tool-version $name '' unknown; return }")
+            .expect("the elevated-session guard");
+        let run = script.find("fleetVersion $cmd.Source").expect("the run");
+        assert!(guard < run);
+        // Each `--version` has its own bound and no stdin.
+        assert!(script.contains("WaitForExit(10000)"));
+        assert!(script.contains("taskkill.exe\" /T /F /PID $proc.Id"));
+        assert!(script.contains("$out.Wait(2000)"));
+        assert!(script.contains("StandardInput.Close()"));
+        assert!(!script.contains("& $cmd.Source"));
     }
 
     #[test]

@@ -318,6 +318,7 @@ impl MachinePort for FakeMachines {
             name: "box".to_owned(),
             description: String::new(),
             endpoints: vec![Endpoint {
+                guest_os: None,
                 id: "e-1".to_owned(),
                 kind: EndpointKind::Ssh,
                 reference: "user@host:22".to_owned(),

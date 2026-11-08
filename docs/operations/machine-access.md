@@ -30,7 +30,7 @@ fleetctl --output json machines collect <machine-id> /var/log/nginx/error.log
 fleetctl --output json machines file-get <file-id> --out ./error.log
 ```
 
-`exec` exits with the command's exit code; `--os windows` selects the PowerShell layer of [ADR 0015](../adr/0015-windows-lab-guest-transport.md) and drive-absolute paths. Output is capped at 1 MiB per stream with a truncation flag. A put verifies its SHA-256 inside the machine. Collected files are stored in the controller's artifact directory and removed after the retention period (`FLEET_LAB_ARTIFACT_RETENTION_SECONDS`, seven days by default), by the next collection after they expire.
+`exec` exits with the command's exit code; `--os windows` selects the PowerShell layer of [ADR 0015](../adr/0015-windows-lab-guest-transport.md) and drive-absolute paths. Once onboarding or an inventory has recorded the endpoint's OS, `--os` is a check: absent means the recorded OS and a different value is refused with `guest_os_mismatch` ([windows-workstations.md](windows-workstations.md#the-endpoints-os-and---os)). Output is capped at 1 MiB per stream with a truncation flag. A put verifies its SHA-256 inside the machine. Collected files are stored in the controller's artifact directory and removed after the retention period (`FLEET_LAB_ARTIFACT_RETENTION_SECONDS`, seven days by default), by the next collection after they expire.
 
 ## Permissions and audit
 

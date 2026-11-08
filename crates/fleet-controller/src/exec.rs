@@ -164,9 +164,16 @@ struct InventoryPayload {
     auth: SshExecAuth,
     /// The deadline, in seconds. Bounded hard.
     timeout_seconds: u64,
-    /// The guest's OS; absent means Linux.
+    /// The caller's guest OS. For an endpoint whose OS is recorded it is a
+    /// check (ADR 0021 decision 4); for an unknown endpoint it chooses when
+    /// the login-shell check cannot tell, and absent means Linux.
     #[serde(default)]
-    guest_os: fleet_core::GuestOs,
+    guest_os: Option<fleet_core::GuestOs>,
+    /// The principal that created the operation, written by
+    /// `Operations::create` (never by the caller). A detected OS is recorded
+    /// only under it.
+    #[serde(default)]
+    requested_by: Option<String>,
 }
 
 impl ScriptExecutor {
@@ -258,7 +265,7 @@ impl ScriptExecutor {
                 .ok_or("the operation carries no payload")?,
         )
         .map_err(|error| format!("the payload is not a valid inventory record: {error}"))?;
-        let (spec, verified, host) = self.resolve_inventory_endpoint(&payload).await?;
+        let (mut spec, verified, host) = self.resolve_inventory_endpoint(&payload).await?;
 
         operations
             .record_progress(
@@ -269,6 +276,21 @@ impl ScriptExecutor {
             )
             .await
             .map_err(|error| error.to_string())?;
+
+        spec.guest_os = match self
+            .inventory_guest_os(&operation.id, &payload, &spec, &verified)
+            .await
+        {
+            Ok(guest_os) => guest_os,
+            Err((reason, detail)) => {
+                let error_json = transport_failure_json(reason, &detail);
+                return operations
+                    .complete(&operation.id, "failed", None, Some(&error_json))
+                    .await
+                    .map(|_| ())
+                    .map_err(|error| error.to_string());
+            }
+        };
 
         let (collected, detail) = {
             let provider = self.provider.clone();
@@ -310,7 +332,9 @@ impl ScriptExecutor {
                     )
                     .await
                     .map_err(|failure| failure.to_string())?;
-                let result_json = serde_json::json!({ "facts": count }).to_string();
+                let result_json =
+                    serde_json::json!({ "facts": count, "guestOs": spec.guest_os.id() })
+                        .to_string();
                 operations
                     .complete(&operation.id, "succeeded", Some(&result_json), None)
                     .await
@@ -344,11 +368,97 @@ impl ScriptExecutor {
             arguments: Vec::new(),
             auth: payload.auth.clone(),
             timeout_seconds: payload.timeout_seconds,
-            guest_os: payload.guest_os,
+            guest_os: payload.guest_os.unwrap_or_default(),
             guest_watchdog: true,
             guest_refusals: false,
         })
         .await
+    }
+
+    /// The guest OS an inventory probe runs as (ADR 0021 decision 4). A
+    /// recorded endpoint OS wins and the payload's choice must match it (the
+    /// creation already refused a mismatch; this is the same check against
+    /// the current record). An unknown endpoint runs the fixed login-shell
+    /// check first: a shell Fleet cannot drive is refused with its setup
+    /// step, a recognized one is recorded on the endpoint (audited under the
+    /// requester), and an unrecognized answer or a failed check leaves the
+    /// endpoint unknown with the payload's choice (Linux when absent), so
+    /// Linux behaviour does not change. An unrecognized endpoint is checked
+    /// again on each inventory: one short extra session.
+    async fn inventory_guest_os(
+        &self,
+        operation_id: &str,
+        payload: &InventoryPayload,
+        spec: &SshConnectionSpec,
+        verified: &str,
+    ) -> Result<fleet_core::GuestOs, (&'static str, String)> {
+        let mismatch = |detail: String| {
+            let detail = detail
+                .strip_prefix("guest_os_mismatch: ")
+                .map_or_else(|| detail.clone(), str::to_owned);
+            ("guest_os_mismatch", detail)
+        };
+        let recorded = endpoint_guest_os(
+            self.machines.as_ref(),
+            &payload.machine_id,
+            &payload.endpoint_id,
+        )
+        .await
+        .map_err(|detail| ("collection_failed", detail))?;
+        if let Some(recorded) = recorded {
+            return fleet_application::machine_access::effective_guest_os(
+                payload.guest_os,
+                Some(recorded),
+            )
+            .map_err(mismatch);
+        }
+        let provider = self.provider.clone();
+        let limiter = self.limiter.clone();
+        let sniff_spec = spec.clone();
+        let sniffed = tokio::task::spawn_blocking(move || {
+            fleet_provider_ssh::sniff_shell(
+                &provider,
+                &limiter,
+                &sniff_spec,
+                fleet_provider_ssh::SNIFF_DEADLINE,
+            )
+        })
+        .await;
+        // A failed check is an unrecognized answer here: the probe itself
+        // reports a transport failure honestly, and a login shell that
+        // cannot answer the sniff (csh, a forced command) worked before.
+        let Ok(Ok(sniff)) = sniffed else {
+            return Ok(payload.guest_os.unwrap_or_default());
+        };
+        if let Some(refusal) = sniff.refusal() {
+            return Err((refusal.reason, refusal.detail));
+        }
+        let Some(detected) = sniff.guest_os() else {
+            return Ok(payload.guest_os.unwrap_or_default());
+        };
+        // Recorded (with its audit event, atomically) only under the
+        // requester the creation named, which it does only after authorizing
+        // `machine.update` for an unknown endpoint (an operation created
+        // against a recorded endpoint names none and records nothing), and only while the endpoint still
+        // has the fingerprint this run verified: a key confirmed meanwhile
+        // cleared the OS and wins. Either way this run probes as detected.
+        if let Some(requested_by) = payload.requested_by.as_deref() {
+            fleet_application::machine::record_detected_endpoint_os(
+                self.machines.as_ref(),
+                &fleet_application::machine::DetectedEndpointOs {
+                    operation_id,
+                    requested_by,
+                    machine_id: &payload.machine_id,
+                    endpoint_id: &payload.endpoint_id,
+                    verified_fingerprint: verified,
+                    guest_os: detected,
+                },
+            )
+            .await
+            .map_err(|detail| ("collection_failed", detail))?;
+        }
+        fleet_application::machine_access::effective_guest_os(payload.guest_os, Some(detected))
+            .map_err(mismatch)
     }
 
     async fn execute_ssh(
@@ -548,7 +658,7 @@ impl ScriptExecutor {
                 }
             },
         };
-        let (mut spec, verified, host) = resolve_ssh_endpoint(
+        let (mut spec, verified, host) = resolve_ssh_endpoint_any_os(
             self.machines.as_ref(),
             &payload.machine_id,
             &payload.endpoint_id,
@@ -564,7 +674,34 @@ impl ScriptExecutor {
 /// trust gate the whole SSH surface shares: the endpoint's host key must be
 /// verified, the endpoint must be the machine's, and it must be an SSH
 /// endpoint. Returns the spec, the verified fingerprint, and the host.
+///
+/// This is the resolution for the Bash-only executors (fleetd install,
+/// skills, checkout, frogenv, mise, ready, removal): an endpoint recorded as
+/// `windows` is refused, so none of them sends a Bash script to a Windows
+/// login until #609/#610 give them a Windows path. The executors that take
+/// the guest OS themselves use [`resolve_ssh_endpoint_any_os`].
 pub(crate) async fn resolve_ssh_endpoint(
+    machines: &dyn MachinePort,
+    machine_id: &str,
+    endpoint_id: &str,
+    auth: SshAuth,
+) -> Result<(SshConnectionSpec, String, String), String> {
+    if endpoint_guest_os(machines, machine_id, endpoint_id).await?
+        == Some(fleet_core::GuestOs::Windows)
+    {
+        return Err(
+            "unsupported_guest_os: the endpoint is recorded as windows, and this operation \
+             runs only on Linux endpoints for now"
+                .to_owned(),
+        );
+    }
+    resolve_ssh_endpoint_any_os(machines, machine_id, endpoint_id, auth).await
+}
+
+/// [`resolve_ssh_endpoint`] without the Linux-only refusal, for the
+/// executors that choose the guest shell from the operation's guest OS
+/// (exec, put, collect, inventory, detached exec, the terminal).
+pub(crate) async fn resolve_ssh_endpoint_any_os(
     machines: &dyn MachinePort,
     machine_id: &str,
     endpoint_id: &str,
@@ -612,6 +749,23 @@ pub(crate) async fn resolve_ssh_endpoint(
         verified,
         host.to_owned(),
     ))
+}
+
+/// The guest OS recorded on a machine's endpoint, `None` while unknown.
+pub(crate) async fn endpoint_guest_os(
+    machines: &dyn MachinePort,
+    machine_id: &str,
+    endpoint_id: &str,
+) -> Result<Option<fleet_core::GuestOs>, String> {
+    let machine = machines
+        .get(machine_id)
+        .await
+        .map_err(|failure| failure.to_string())?;
+    Ok(machine
+        .endpoints
+        .iter()
+        .find(|endpoint| endpoint.id == endpoint_id)
+        .and_then(|endpoint| endpoint.guest_os))
 }
 
 /// Convenience: the noop executor remains available for hosts that do not

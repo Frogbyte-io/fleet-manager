@@ -353,6 +353,7 @@ impl fleet_application::machine::MachinePort for FakeMachinePort {
                 .iter()
                 .enumerate()
                 .map(|(index, endpoint)| Endpoint {
+                    guest_os: None,
                     id: format!("ep-{index}"),
                     kind: endpoint.kind,
                     reference: endpoint.reference.clone(),

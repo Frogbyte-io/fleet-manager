@@ -242,8 +242,40 @@ pub struct AccessTarget<'a> {
     pub endpoint_id: Option<&'a str>,
     /// An explicit auth, overriding the endpoint's default.
     pub auth: Option<&'a EndpointAuth>,
-    /// The guest's OS, which selects the shell and the path rules.
-    pub guest_os: GuestOs,
+    /// The caller's `--os`, which selects the shell and the path rules.
+    /// `None` means the caller did not say. Once the endpoint's OS is
+    /// recorded (ADR 0021 decision 4) this is a check against it, and the
+    /// recorded OS is used when it is absent; for an endpoint whose OS is
+    /// unknown it still chooses, and absent means Linux.
+    pub guest_os: Option<GuestOs>,
+}
+
+/// The guest OS a machine access runs as (ADR 0021 decision 4, amending
+/// ADR 0017 decision 7): the endpoint's recorded OS when there is one, which
+/// the caller's choice must then match; otherwise the caller's choice, and
+/// Linux when the caller did not say.
+///
+/// # Errors
+///
+/// Fails with a `guest_os_mismatch:` detail when the caller's choice
+/// contradicts the recorded OS.
+pub fn effective_guest_os(
+    chosen: Option<GuestOs>,
+    recorded: Option<GuestOs>,
+) -> Result<GuestOs, String> {
+    match (chosen, recorded) {
+        (Some(chosen), Some(recorded)) if chosen != recorded => Err(format!(
+            "guest_os_mismatch: the endpoint was detected as {} at onboarding or \
+             inventory; the requested guest OS {} does not match it (omit the OS \
+             or pass {})",
+            recorded.id(),
+            chosen.id(),
+            recorded.id()
+        )),
+        (_, Some(recorded)) => Ok(recorded),
+        (Some(chosen), None) => Ok(chosen),
+        (None, None) => Ok(GuestOs::Linux),
+    }
 }
 
 /// A machine exec request.
@@ -656,8 +688,8 @@ impl MachineAccess {
                 detail: format!("timeoutSeconds must be 1..={MAX_MACHINE_EXEC_TIMEOUT_SECONDS}"),
             });
         }
-        let (script, arguments, digest) =
-            prepare_command(&request.command, request.target.guest_os)?;
+        let guest_os = self.guest_os_for(&request.target).await?;
+        let (script, arguments, digest) = prepare_command(&request.command, guest_os)?;
         let (endpoint_id, auth) = self
             .resolve_target(authorizer, principal, &request.target)
             .await?;
@@ -666,7 +698,7 @@ impl MachineAccess {
             ("authKind", auth.kind().to_owned()),
             ("commandSha256", digest.clone()),
             ("timeoutSeconds", timeout.to_string()),
-            ("guestOs", request.target.guest_os.id().to_owned()),
+            ("guestOs", guest_os.id().to_owned()),
         ];
         self.audit_event(
             principal,
@@ -697,7 +729,7 @@ impl MachineAccess {
                     "auth": auth,
                     "script": script,
                     "arguments": arguments,
-                    "guestOs": request.target.guest_os.id(),
+                    "guestOs": guest_os.id(),
                     "timeoutSeconds": timeout,
                     "commandSha256": digest,
                 })
@@ -770,7 +802,7 @@ impl MachineAccess {
         request: &PutRequestTarget<'_>,
         staged: &StagedUpload,
     ) -> Result<NewOperation, LabUseCaseError> {
-        let (endpoint_id, auth) = self.check_put(authorizer, principal, request).await?;
+        let (endpoint_id, auth, guest_os) = self.check_put(authorizer, principal, request).await?;
         let stage = self.stage_port()?;
         if !is_sha256_hex(&staged.sha256) {
             return Err(LabUseCaseError::Invalid {
@@ -816,7 +848,7 @@ impl MachineAccess {
                     "sizeBytes": staged.size_bytes,
                     "sha256": staged.sha256,
                     "overwrite": request.overwrite,
-                    "guestOs": request.target.guest_os.id(),
+                    "guestOs": guest_os.id(),
                 })
                 .to_string(),
             ),
@@ -829,7 +861,7 @@ impl MachineAccess {
         authorizer: &dyn Authorizer,
         principal: &ActingPrincipal,
         request: &PutRequestTarget<'_>,
-    ) -> Result<(String, EndpointAuth), LabUseCaseError> {
+    ) -> Result<(String, EndpointAuth, GuestOs), LabUseCaseError> {
         authorize(
             authorizer,
             AccessRequest {
@@ -840,13 +872,16 @@ impl MachineAccess {
         )
         .map_err(LabUseCaseError::Denied)?;
         self.stage_port()?;
-        validate_guest_path_for(request.target.guest_os, request.guest_path).map_err(|detail| {
+        let guest_os = self.guest_os_for(&request.target).await?;
+        validate_guest_path_for(guest_os, request.guest_path).map_err(|detail| {
             LabUseCaseError::Invalid {
                 detail: format!("guest path: {detail}"),
             }
         })?;
-        self.resolve_target(authorizer, principal, &request.target)
-            .await
+        let (endpoint_id, auth) = self
+            .resolve_target(authorizer, principal, &request.target)
+            .await?;
+        Ok((endpoint_id, auth, guest_os))
     }
 
     /// Validates a collection of guest paths and answers the
@@ -873,7 +908,8 @@ impl MachineAccess {
         )
         .map_err(LabUseCaseError::Denied)?;
         self.files_port()?;
-        validate_collect_paths_for(target.guest_os, paths)
+        let guest_os = self.guest_os_for(target).await?;
+        validate_collect_paths_for(guest_os, paths)
             .map_err(|detail| LabUseCaseError::Invalid { detail })?;
         let (endpoint_id, auth) = self.resolve_target(authorizer, principal, target).await?;
         self.audit_event(
@@ -899,7 +935,7 @@ impl MachineAccess {
                     "endpointId": endpoint_id,
                     "auth": auth,
                     "paths": paths,
-                    "guestOs": target.guest_os.id(),
+                    "guestOs": guest_os.id(),
                     "owner": principal.id,
                 })
                 .to_string(),
@@ -1118,6 +1154,40 @@ impl MachineAccess {
     #[must_use]
     pub fn policy(&self) -> ArtifactPolicy {
         self.policy
+    }
+
+    /// The guest OS this access runs as: the caller's choice checked against
+    /// the endpoint's recorded OS (see [`effective_guest_os`]). The endpoint
+    /// lookup here is lenient on purpose: an unknown machine or an ambiguous
+    /// endpoint is reported by [`Self::resolve_target`], with its usual
+    /// error, not here.
+    pub(crate) async fn guest_os_for(
+        &self,
+        target: &AccessTarget<'_>,
+    ) -> Result<GuestOs, LabUseCaseError> {
+        let recorded = match self.machines.get(target.machine_id).await {
+            Ok(machine) => {
+                let mut ssh = machine
+                    .endpoints
+                    .iter()
+                    .filter(|endpoint| endpoint.kind == EndpointKind::Ssh);
+                let endpoint = match target.endpoint_id {
+                    Some(id) => ssh.find(|endpoint| endpoint.id == id),
+                    None => match (ssh.next(), ssh.next()) {
+                        (Some(only), None) => Some(only),
+                        _ => None,
+                    },
+                };
+                endpoint.and_then(|endpoint| endpoint.guest_os)
+            }
+            // Only a missing machine is "unknown" here (resolve_target then
+            // reports it); a backend failure must not let a request past the
+            // check.
+            Err(PortFailure::NotFound { .. }) => None,
+            Err(failure) => return Err(backend(failure.to_string())),
+        };
+        effective_guest_os(target.guest_os, recorded)
+            .map_err(|detail| LabUseCaseError::Conflict { detail })
     }
 
     /// Picks the SSH endpoint and the auth to use: the endpoint the caller
@@ -1399,6 +1469,47 @@ fn unwired_files() -> LabUseCaseError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_unknown_endpoint_keeps_the_caller_choosing_the_guest_os() {
+        // Existing endpoints are unknown: `--os` decides, absent is Linux,
+        // exactly as before ADR 0021.
+        assert_eq!(effective_guest_os(None, None), Ok(GuestOs::Linux));
+        assert_eq!(
+            effective_guest_os(Some(GuestOs::Windows), None),
+            Ok(GuestOs::Windows)
+        );
+        assert_eq!(
+            effective_guest_os(Some(GuestOs::Linux), None),
+            Ok(GuestOs::Linux)
+        );
+    }
+
+    #[test]
+    fn a_recorded_endpoint_turns_the_guest_os_into_a_check() {
+        // Recorded: absent `--os` takes the recorded OS, a matching one
+        // passes, a contradicting one is refused.
+        assert_eq!(
+            effective_guest_os(None, Some(GuestOs::Windows)),
+            Ok(GuestOs::Windows)
+        );
+        assert_eq!(
+            effective_guest_os(Some(GuestOs::Windows), Some(GuestOs::Windows)),
+            Ok(GuestOs::Windows)
+        );
+        assert_eq!(
+            effective_guest_os(None, Some(GuestOs::Linux)),
+            Ok(GuestOs::Linux)
+        );
+        for (chosen, recorded) in [
+            (GuestOs::Linux, GuestOs::Windows),
+            (GuestOs::Windows, GuestOs::Linux),
+        ] {
+            let refused = effective_guest_os(Some(chosen), Some(recorded)).unwrap_err();
+            assert!(refused.starts_with("guest_os_mismatch:"), "{refused}");
+            assert!(refused.contains(recorded.id()), "{refused}");
+        }
+    }
 
     #[test]
     fn endpoint_auth_has_the_payload_wire_shape() {

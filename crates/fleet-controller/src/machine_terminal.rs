@@ -207,7 +207,7 @@ impl TerminalPort for SshTerminalPort {
             .resolver
             .resolve(&request.auth, &request.machine_id)
             .await?;
-        let (spec, _, _) = crate::exec::resolve_ssh_endpoint(
+        let (spec, _, _) = crate::exec::resolve_ssh_endpoint_any_os(
             self.machines.as_ref(),
             &request.machine_id,
             &request.endpoint_id,
