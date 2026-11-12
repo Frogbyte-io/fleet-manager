@@ -11,7 +11,7 @@ use std::time::Duration;
 
 use std::process::Command;
 mod common;
-use common::{TestSshd, start_sshd, start_sshd_with_home, whoami};
+use common::{TestSshd, start_sshd, start_sshd_with_home, start_sshd_with_home_logged, whoami};
 
 /// The composed fixture: store, operations, skills executor, and a
 /// verified endpoint.
@@ -776,11 +776,19 @@ async fn a_probe_prunes_installs_for_skills_no_longer_deployed() {
 /// #609: an endpoint recorded as Windows never receives a Bash script. The
 /// library and preset kinds (no Windows scripts yet) refuse it, and a value
 /// Windows PowerShell 5.1 cannot pass safely to a native program is refused
-/// before any session starts.
+/// before any session starts: sshd's own log shows no login.
 #[tokio::test]
 async fn a_windows_endpoint_refuses_what_it_cannot_run_before_any_session() {
     let home_dir = tempfile::tempdir().unwrap();
-    let sshd = start_sshd_with_home(home_dir.path());
+    let log_dir = tempfile::tempdir().unwrap();
+    let sshd_log = log_dir.path().join("sshd.log");
+    let sshd = start_sshd_with_home_logged(home_dir.path(), &sshd_log);
+    let logins = || {
+        std::fs::read_to_string(&sshd_log)
+            .unwrap_or_default()
+            .matches("Accepted publickey")
+            .count()
+    };
     let fixture = compose(&sshd).await;
     let home = home_dir.path().display().to_string();
     let _path = install_stub_cli(&home, None);
@@ -830,6 +838,20 @@ async fn a_windows_endpoint_refuses_what_it_cannot_run_before_any_session() {
             ),
             "invalid_request",
         ),
+        // A Windows root is refused as unsupported, not failed by the POSIX
+        // root check first.
+        (
+            "skills.undeploy",
+            with(
+                serde_json::json!({"skillId": "db", "agents": ["codex"], "skillsRoot": "C:\\skills"}),
+            ),
+            "invalid_request",
+        ),
+        (
+            "skills.install",
+            with(serde_json::json!({"reference": "org/repo/skill", "skillsRoot": "C:\\skills"})),
+            "unsupported_guest_os",
+        ),
         (
             "skills.probe",
             with(serde_json::json!({"skillsRoot": "/srv/skills"})),
@@ -849,8 +871,23 @@ async fn a_windows_endpoint_refuses_what_it_cannot_run_before_any_session() {
         let error: serde_json::Value = serde_json::from_str(&error.unwrap()).unwrap();
         assert_eq!(error["reason"], reason, "{kind}: {error}");
     }
+    assert_eq!(logins(), 0, "no login reached the endpoint");
     assert!(
         !std::path::Path::new(&format!("{home}/stub-cli.log")).exists(),
         "no script reached the endpoint"
     );
+
+    // The log does record logins: the same endpoint recorded as Linux runs
+    // the probe, and sshd logs it.
+    MachineRepository::new(fixture.pool.clone())
+        .record_endpoint_os(&fixture.endpoint_id, fleet_core::GuestOs::Linux)
+        .await
+        .unwrap();
+    let (state, _, error) = fixture.run_kind("skills.probe", base.clone()).await;
+    assert_eq!(state, "succeeded", "{error:?}");
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    while logins() == 0 && std::time::Instant::now() < deadline {
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert!(logins() > 0, "the control login is logged");
 }

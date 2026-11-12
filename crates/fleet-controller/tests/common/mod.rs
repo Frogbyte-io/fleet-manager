@@ -78,7 +78,7 @@ impl Drop for TestSshd {
 /// start surfaces immediately instead of failing every test later on the
 /// first SSH probe with a misleading error.
 pub fn start_sshd() -> TestSshd {
-    start_sshd_inner(None, false)
+    start_sshd_inner(None, false, None)
 }
 
 /// Like [`start_sshd`], but every session sshd opens sees `HOME` set to
@@ -86,7 +86,14 @@ pub fn start_sshd() -> TestSshd {
 /// on the "remote" side gets a private tree per test instead of racing other
 /// runs through the developer's real home.
 pub fn start_sshd_with_home(home: &std::path::Path) -> TestSshd {
-    start_sshd_inner(Some(home), false)
+    start_sshd_inner(Some(home), false, None)
+}
+
+/// Like [`start_sshd_with_home`], but sshd logs to `log` (`-E`) instead of
+/// stderr, so a test can tell whether any login reached the server
+/// (`Accepted publickey` is logged at the default level).
+pub fn start_sshd_with_home_logged(home: &std::path::Path, log: &std::path::Path) -> TestSshd {
+    start_sshd_inner(Some(home), false, Some(log))
 }
 
 /// Like [`start_sshd_with_home`], but the only `authorized_keys` sshd reads
@@ -94,10 +101,14 @@ pub fn start_sshd_with_home(home: &std::path::Path) -> TestSshd {
 /// (`keys_dir/user_ed25519`) as the image's shared bootstrap key. A suite
 /// that installs and removes keys on the "guest" sees the logins change.
 pub fn start_sshd_with_home_keys(home: &std::path::Path) -> TestSshd {
-    start_sshd_inner(Some(home), true)
+    start_sshd_inner(Some(home), true, None)
 }
 
-fn start_sshd_inner(home: Option<&std::path::Path>, keys_in_home: bool) -> TestSshd {
+fn start_sshd_inner(
+    home: Option<&std::path::Path>,
+    keys_in_home: bool,
+    log: Option<&std::path::Path>,
+) -> TestSshd {
     let _guard = acquire_startup_lock();
     let dir = tempfile::tempdir().unwrap();
     let host_key = dir.path().join("host_ed25519");
@@ -177,13 +188,13 @@ fn start_sshd_inner(home: Option<&std::path::Path>, keys_in_home: bool) -> TestS
         String::from_utf8_lossy(&checked.stderr)
     );
 
-    let mut child = match Command::new("/usr/sbin/sshd")
-        .arg("-D")
-        .arg("-e")
-        .arg("-f")
-        .arg(&sshd_config)
-        .spawn()
-    {
+    let mut command = Command::new("/usr/sbin/sshd");
+    command.arg("-D");
+    match log {
+        Some(log) => command.arg("-E").arg(log),
+        None => command.arg("-e"),
+    };
+    let mut child = match command.arg("-f").arg(&sshd_config).spawn() {
         Ok(child) => child,
         Err(error) => panic!("sshd must start: {error}"),
     };

@@ -643,13 +643,7 @@ async fn the_endpoint_os_wins_over_the_family_fact() {
         .unwrap();
     let outcome = fixture.set_up(&fleet_auth::LanAllowAllAuthorizer).await;
     let payload = queued_payload(&fixture, &outcome).await;
-    assert!(
-        payload["artifactUrl"]
-            .as_str()
-            .unwrap()
-            .ends_with("/skills-manager-cli-Windows-x64.exe"),
-        "{payload}"
-    );
+    assert_pin(&payload, "Windows");
 
     // And the other way round: a Linux endpoint on a machine whose freshest
     // family fact says Windows gets the Linux asset.
@@ -666,13 +660,16 @@ async fn the_endpoint_os_wins_over_the_family_fact() {
         .unwrap();
     let outcome = fixture.set_up(&fleet_auth::LanAllowAllAuthorizer).await;
     let payload = queued_payload(&fixture, &outcome).await;
-    assert!(
-        payload["artifactUrl"]
-            .as_str()
-            .unwrap()
-            .ends_with("/skills-manager-cli-Linux-x64"),
-        "{payload}"
-    );
+    assert_pin(&payload, "Linux");
+}
+
+/// The queued probe carries exactly the x86_64 pin for `family`: the URL
+/// and its digest together, so a right asset with a wrong digest fails.
+fn assert_pin(payload: &serde_json::Value, family: &str) {
+    let pin = fleet_provider_skills_manager::release_pin(Some(family), Some("x86_64")).unwrap();
+    assert_eq!(payload["artifactUrl"], pin.url, "{payload}");
+    assert_eq!(payload["artifactSha256"], pin.sha256, "{payload}");
+    assert!(pin.asset.contains(family), "{pin:?}");
 }
 
 #[tokio::test]

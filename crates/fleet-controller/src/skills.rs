@@ -799,15 +799,14 @@ impl SkillsExecutor {
         for agent in &payload.agents {
             validate_id(agent, "an agent id")?;
         }
-        if let Some(root) = payload.skills_root.as_deref() {
-            validate_root(root)?;
-        }
         let spec = self
             .resolve(&payload.machine_id, &payload.endpoint_id, &payload.auth)
             .await?;
         // The library and preset kinds have no Windows scripts yet (#609
         // covers probe, deploy, undeploy and catalog rollouts); a Bash
-        // script is never sent to a Windows login.
+        // script is never sent to an endpoint recorded as Windows. An
+        // endpoint whose OS is not recorded yet keeps the Bash scripts
+        // (ADR 0021 decision 4).
         if is_windows(&spec) {
             return complete_failure(
                 operations,
@@ -816,6 +815,11 @@ impl SkillsExecutor {
                 "Skills Manager library and preset operations run only on Linux endpoints for now; probe, deploy, undeploy and catalog rollouts support Windows",
             )
             .await;
+        }
+        // The POSIX root check runs once the endpoint is known not to be
+        // Windows, so a Windows path is answered as unsupported above.
+        if let Some(root) = payload.skills_root.as_deref() {
+            validate_root(root)?;
         }
         let operation_deadline = deadline(payload.timeout_seconds);
         match self.version_gate(&spec, operation_deadline).await {
@@ -1055,7 +1059,7 @@ impl SkillsExecutor {
                         ),
                         "binary_unusable" if windows => (
                             "install_failed",
-                            "the pinned Skills Manager binary does not run on this machine (the Windows build is unsigned: Smart App Control or an antivirus may have blocked it); nothing was installed",
+                            "the pinned Skills Manager binary does not run on this machine; nothing was installed. The Windows build is unsigned: Smart App Control blocks it outright where it is on (it has no per-app exception), and an antivirus may block or quarantine it, which is the machine's policy to allow",
                         ),
                         "binary_unusable" => (
                             "install_failed",
@@ -1139,20 +1143,22 @@ impl SkillsExecutor {
         for agent in &payload.agents {
             validate_id(agent, "an agent id")?;
         }
-        if let Some(root) = &payload.skills_root {
-            validate_root(root)?;
-        }
         let spec = self
             .resolve(&payload.machine_id, &payload.endpoint_id, &payload.auth)
             .await?;
-        if is_windows(&spec)
-            && let Some(detail) = windows_mutation_refusal(
+        // Every external root is refused on Windows, so the POSIX root check
+        // runs only for the Bash scripts.
+        if is_windows(&spec) {
+            if let Some(detail) = windows_mutation_refusal(
                 &payload.skill_id,
                 &payload.agents,
                 payload.skills_root.as_deref(),
-            )
-        {
-            return complete_failure(operations, &operation.id, "invalid_request", &detail).await;
+            ) {
+                return complete_failure(operations, &operation.id, "invalid_request", &detail)
+                    .await;
+            }
+        } else if let Some(root) = &payload.skills_root {
+            validate_root(root)?;
         }
         // The version gate runs before every mutation: an untested CLI
         // degrades explicitly instead of guessing. One deadline covers
@@ -1228,20 +1234,22 @@ impl SkillsExecutor {
         for agent in &payload.agents {
             validate_id(agent, "an agent id")?;
         }
-        if let Some(root) = &payload.skills_root {
-            validate_root(root)?;
-        }
         let spec = self
             .resolve(&payload.machine_id, &payload.endpoint_id, &payload.auth)
             .await?;
-        if is_windows(&spec)
-            && let Some(detail) = windows_mutation_refusal(
+        // Every external root is refused on Windows, so the POSIX root check
+        // runs only for the Bash scripts.
+        if is_windows(&spec) {
+            if let Some(detail) = windows_mutation_refusal(
                 &payload.skill_id,
                 &payload.agents,
                 payload.skills_root.as_deref(),
-            )
-        {
-            return complete_failure(operations, &operation.id, "invalid_request", &detail).await;
+            ) {
+                return complete_failure(operations, &operation.id, "invalid_request", &detail)
+                    .await;
+            }
+        } else if let Some(root) = &payload.skills_root {
+            validate_root(root)?;
         }
         // The version gate runs before every mutation.
         let operation_deadline = deadline(payload.timeout_seconds);
@@ -2204,7 +2212,17 @@ fleet_backup="$fleet_parent/.${fleet_name}.backup.$$"
 [ ! -e "$fleet_tmp" ] && [ ! -L "$fleet_tmp" ] && [ ! -e "$fleet_backup" ] && [ ! -L "$fleet_backup" ] || { echo "Fleet staging temporary path already exists" >&2; exit 2; }
 mkdir -m 700 "$fleet_tmp"
 fleet_committed=0
-fleet_restore() { if [ "$fleet_committed" -eq 0 ] && [ -d "$fleet_backup" ]; then rm -rf "$fleet_target"; mv "$fleet_backup" "$fleet_target"; fi; rm -rf "$fleet_tmp"; }
+fleet_staged=0
+# A failure restores the previous staging, or removes the one this run
+# created when there was none (the CLI keeps its own copy of an installed
+# skill; the next rollout stages this path again).
+fleet_restore() {
+  if [ "$fleet_committed" -eq 0 ]; then
+    if [ -d "$fleet_backup" ]; then rm -rf "$fleet_target"; mv "$fleet_backup" "$fleet_target"
+    elif [ "$fleet_staged" -eq 1 ]; then rm -rf "$fleet_target"; fi
+  fi
+  rm -rf "$fleet_tmp"
+}
 trap fleet_restore EXIT HUP INT TERM
 i=0
 while [ "$i" -lt "$fleet_count" ]; do
@@ -2227,6 +2245,7 @@ done
 [ -n "$fleet_cli" ] || { echo "skills-manager-cli is not installed" >&2; exit 3; }
 if [ -e "$fleet_target" ]; then mv "$fleet_target" "$fleet_backup"; fi
 mv "$fleet_tmp" "$fleet_target"
+fleet_staged=1
 if "$fleet_cli" --json skills show "$fleet_name" >/dev/null 2>&1; then
   fleet_update_output=$("$fleet_cli" --json skills update "$fleet_name")
   case "$fleet_update_output" in (*held_back_removals*) echo "$fleet_update_output"; echo "update held back removals; inspect the Skills Manager result" >&2; exit 4;; esac
@@ -2477,6 +2496,40 @@ mod tests {
                 .count(),
             2
         );
+    }
+
+    #[test]
+    fn a_failed_first_catalog_rollout_leaves_no_staging_behind() {
+        let root = tempfile::tempdir().unwrap();
+        let home = root.path();
+        let bin = home.join(".local/bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        let cli = bin.join("skills-manager-cli");
+        std::fs::write(&cli, "#!/bin/sh\ncase \"$2 $3\" in\n  'skills show') exit 1 ;;\n  'skills install') printf '{}\\n' ;;\n  'skills deploy') exit 5 ;;\n  *) exit 8 ;;\nesac\n").unwrap();
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::set_permissions(&cli, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let contents = "---\nname: hello-world\ndescription: Do useful work\n---\n";
+        let output = std::process::Command::new("bash")
+            .arg("-c")
+            .arg(catalog_rollout_script())
+            .arg("fleet-rollout")
+            .args([
+                "hello-world",
+                "abc123",
+                "1",
+                "SKILL.md",
+                &b64(contents),
+                &sha256_hex(contents.as_bytes()),
+                "1",
+                "claude_code",
+            ])
+            .env("HOME", home)
+            .env("PATH", format!("{}:/usr/bin:/bin", bin.display()))
+            .output()
+            .unwrap();
+        assert_eq!(output.status.code(), Some(5));
+        let skills = home.join(".local/share/fleet/skills");
+        assert_eq!(std::fs::read_dir(&skills).unwrap().count(), 0);
     }
 
     #[test]

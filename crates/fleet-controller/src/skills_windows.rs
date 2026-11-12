@@ -40,7 +40,9 @@
 /// The shared prologue: preferences, helpers, the Fleet paths, the
 /// directory check and the CLI resolution. `$fleetCli` is the CLI to run
 /// (or `$null`), and `$fleetUntrusted` says a managed copy exists in a
-/// directory that failed the check.
+/// directory that failed the check. `PATH` is searched only when there is
+/// no rejected managed copy: a `PATH` entry naming the rejected directory
+/// would otherwise run the very file the check refused.
 const PRELUDE: &str = r##"$ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
 $fleetWindows = [Environment]::OSVersion.Platform -eq 'Win32NT'
@@ -136,7 +138,7 @@ if ($fleetManaged -and ([IO.File]::Exists($fleetManaged) -or [IO.Directory]::Exi
   if ((fleetSecureDir $fleetRoot) -and (fleetSecureDir $fleetBin) -and (fleetRegularFile $fleetManaged)) { $fleetCli = $fleetManaged }
   else { $fleetUntrusted = $true }
 }
-if (-not $fleetCli) {
+if (-not $fleetCli -and -not $fleetUntrusted) {
   $fleetFound = @(Get-Command -Name 'skills-manager-cli' -CommandType Application -ErrorAction SilentlyContinue | Where-Object { -not $fleetWindows -or [IO.Path]::GetExtension($_.Path) -eq '.exe' })
   if ($fleetFound.Count -gt 0) { $fleetCli = $fleetFound[0].Path }
 }
@@ -301,6 +303,7 @@ foreach ($fleetPath in @($fleetTmp, $fleetBackup)) {
   if ([IO.File]::Exists($fleetPath) -or [IO.Directory]::Exists($fleetPath)) { fleetFail 2 'Fleet staging temporary path already exists' }
 }
 $fleetCommitted = $false
+$fleetStaged = $false
 try {
   # Inherits the parent's protected ACL.
   [void][IO.Directory]::CreateDirectory($fleetTmp)
@@ -318,6 +321,7 @@ try {
   if (-not $fleetCli) { fleetFail 3 'skills-manager-cli is not installed' }
   if ([IO.Directory]::Exists($fleetTarget)) { [IO.Directory]::Move($fleetTarget, $fleetBackup) }
   [IO.Directory]::Move($fleetTmp, $fleetTarget)
+  $fleetStaged = $true
   if ((fleetNative $fleetCli '--json' 'skills' 'show' $fleetName) -eq 0) {
     $fleetCode = fleetNative $fleetCli '--json' 'skills' 'update' $fleetName
     if ($global:fleetStdout.Contains('held_back_removals')) { fleetOut $global:fleetStdout; fleetFail 4 'update held back removals; inspect the Skills Manager result' }
@@ -335,8 +339,18 @@ try {
   if ($fleetCode -ne 0) { fleetFail $fleetCode $global:fleetStderr }
   $fleetCommitted = $true
 } finally {
-  if (-not $fleetCommitted -and [IO.Directory]::Exists($fleetBackup)) {
-    try { if ([IO.Directory]::Exists($fleetTarget)) { [IO.Directory]::Delete($fleetTarget, $true) }; [IO.Directory]::Move($fleetBackup, $fleetTarget) } catch { }
+  # A failure restores the previous staging, or removes the one this run
+  # created when there was none (the CLI keeps its own copy of an
+  # installed skill; the next rollout stages this path again).
+  if (-not $fleetCommitted) {
+    try {
+      if ([IO.Directory]::Exists($fleetBackup)) {
+        if ([IO.Directory]::Exists($fleetTarget)) { [IO.Directory]::Delete($fleetTarget, $true) }
+        [IO.Directory]::Move($fleetBackup, $fleetTarget)
+      } elseif ($fleetStaged -and [IO.Directory]::Exists($fleetTarget)) {
+        [IO.Directory]::Delete($fleetTarget, $true)
+      }
+    } catch { }
   }
   try { if ([IO.Directory]::Exists($fleetTmp)) { [IO.Directory]::Delete($fleetTmp, $true) } } catch { }
 }
@@ -971,10 +985,18 @@ esac
         // `fleet\bin` is a link to a directory someone else controls.
         let elsewhere = guest.path("elsewhere");
         Guest::write_executable(&elsewhere.join("skills-manager-cli.exe"), FAKE_CLI);
+        // The name `Get-Command` resolves on Linux, so a PATH lookup could
+        // reach the planted copy too.
+        Guest::write_executable(&elsewhere.join("skills-manager-cli"), FAKE_CLI);
         std::fs::create_dir_all(guest.path("local/fleet")).unwrap();
         std::os::unix::fs::symlink(&elsewhere, guest.path("local/fleet/bin")).unwrap();
 
         let output = guest.run(&pwsh, &gate_script(), &[], &[], &[]);
+        assert_eq!(stdout_line(&output), serde_json::json!({"present": false}));
+        // A PATH entry naming the rejected directory does not bring the
+        // managed copy back.
+        let path = format!("{}:/usr/bin:/bin", guest.path("local/fleet/bin").display());
+        let output = guest.run(&pwsh, &gate_script(), &[], &[], &[("PATH", &path)]);
         assert_eq!(stdout_line(&output), serde_json::json!({"present": false}));
         let output = guest.run(&pwsh, &probe_script(), &[], &[], &[]);
         assert_eq!(stdout_line(&output), serde_json::json!({"present": false}));
@@ -1196,6 +1218,21 @@ esac
         let guest = Guest::new();
         guest.install_fake();
         let old = [file("SKILL.md", "old\n")];
+        // A failed first rollout leaves no staging behind.
+        let output = guest.run(
+            &pwsh,
+            &catalog_rollout_script(),
+            &rollout_args("hello-world", &old, &["claude_code"], "1", "1"),
+            &[],
+            &[("FAKE_FAIL_DEPLOY", "1")],
+        );
+        assert_eq!(output.status.code(), Some(5), "{}", stderr(&output));
+        assert_eq!(
+            std::fs::read_dir(guest.path("local/fleet/skills"))
+                .unwrap()
+                .count(),
+            0
+        );
         let output = guest.run(
             &pwsh,
             &catalog_rollout_script(),
