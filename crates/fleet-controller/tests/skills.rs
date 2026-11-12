@@ -772,3 +772,85 @@ async fn a_probe_prunes_installs_for_skills_no_longer_deployed() {
         ("hello", "claude_code")
     );
 }
+
+/// #609: an endpoint recorded as Windows never receives a Bash script. The
+/// library and preset kinds (no Windows scripts yet) refuse it, and a value
+/// Windows PowerShell 5.1 cannot pass safely to a native program is refused
+/// before any session starts.
+#[tokio::test]
+async fn a_windows_endpoint_refuses_what_it_cannot_run_before_any_session() {
+    let home_dir = tempfile::tempdir().unwrap();
+    let sshd = start_sshd_with_home(home_dir.path());
+    let fixture = compose(&sshd).await;
+    let home = home_dir.path().display().to_string();
+    let _path = install_stub_cli(&home, None);
+    MachineRepository::new(fixture.pool.clone())
+        .record_endpoint_os(&fixture.endpoint_id, fleet_core::GuestOs::Windows)
+        .await
+        .unwrap();
+    let base = serde_json::json!({
+        "machineId": fixture.machine_id,
+        "endpointId": fixture.endpoint_id,
+        "auth": fixture.auth_json(),
+        "timeoutSeconds": 30,
+    });
+    let with = |extra: serde_json::Value| {
+        let mut payload = base.clone();
+        payload
+            .as_object_mut()
+            .unwrap()
+            .extend(extra.as_object().unwrap().clone());
+        payload
+    };
+    for (kind, payload, reason) in [
+        (
+            "skills.install",
+            with(serde_json::json!({"reference": "org/repo/skill"})),
+            "unsupported_guest_os",
+        ),
+        (
+            "presets.deploy",
+            with(serde_json::json!({"reference": "default", "agents": ["codex"]})),
+            "unsupported_guest_os",
+        ),
+        (
+            "skills.deploy",
+            with(serde_json::json!({"skillId": "db", "agents": ["Claude Code"]})),
+            "invalid_request",
+        ),
+        (
+            "skills.undeploy",
+            with(serde_json::json!({"skillId": "db\"x", "agents": ["codex"]})),
+            "invalid_request",
+        ),
+        (
+            "skills.deploy",
+            with(
+                serde_json::json!({"skillId": "db", "agents": ["codex"], "skillsRoot": "/srv/skills"}),
+            ),
+            "invalid_request",
+        ),
+        (
+            "skills.probe",
+            with(serde_json::json!({"skillsRoot": "/srv/skills"})),
+            "invalid_request",
+        ),
+        (
+            "skills.probe",
+            with(serde_json::json!({
+                "artifactUrl": "https://example.invalid/a b.exe",
+                "artifactSha256": "0".repeat(64),
+            })),
+            "invalid_request",
+        ),
+    ] {
+        let (state, _, error) = fixture.run_kind(kind, payload).await;
+        assert_eq!(state, "failed", "{kind}: {error:?}");
+        let error: serde_json::Value = serde_json::from_str(&error.unwrap()).unwrap();
+        assert_eq!(error["reason"], reason, "{kind}: {error}");
+    }
+    assert!(
+        !std::path::Path::new(&format!("{home}/stub-cli.log")).exists(),
+        "no script reached the endpoint"
+    );
+}
