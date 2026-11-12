@@ -27,6 +27,13 @@ concurrency:
 
 env:
   CARGO_TERM_COLOR: always
+  # The self-hosted runner shares its disk with development work, and a full
+  # workspace test build with debug info and incremental state outgrew it.
+  # Panics still report file and line (#[track_caller]); only debugger
+  # symbols are dropped.
+  CARGO_INCREMENTAL: '0'
+  CARGO_PROFILE_DEV_DEBUG: '0'
+  CARGO_PROFILE_TEST_DEBUG: '0'
 
 jobs:
   detect:
@@ -182,6 +189,9 @@ jobs:
     needs: detect
     if: needs.detect.outputs.cargo == 'true'
     runs-on: [self-hosted, dev-box]
+    # A hung test must fail the job, not hold the only runner for the
+    # six-hour default.
+    timeout-minutes: 120
     steps:
       - uses: actions/checkout@v7
       - uses: ./.github/actions/setup-toolchain
