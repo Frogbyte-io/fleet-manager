@@ -22,8 +22,9 @@ repository and its pipeline.
   `main`, because the commit that introduces a credential is the one worth
   catching, not the merge that buries it. The configuration is
   [`gitleaks.toml`](gitleaks.toml); it extends the upstream ruleset instead of
-  replacing it, and narrows exactly one rule in exactly one directory, with the
-  reason written next to it.
+  replacing it. Each exception narrows named rules to named paths or to exact
+  placeholder values used by tests, with the reason written next to it; no rule
+  is turned off for the whole tree.
 - **If the scan finds a real credential:** rotate it first. A commit that
   removed it is not a fix — it is still in the history and in every clone and
   fork. Removing it from history comes after rotation, if at all.

@@ -114,8 +114,18 @@ impl Auth {
         }
     }
 
+    /// Credentialed sources need owner-only file modes and a POSIX shell
+    /// askpass helper, so they are refused off Unix rather than written with
+    /// weaker permissions. The controller is Linux-only; this keeps the crate
+    /// compiling for the Windows compatibility check.
+    #[cfg(not(unix))]
+    fn prepare(_work_root: &Path, _credential: &GitCredential) -> Result<Self, String> {
+        Err("credentialed Git sources need a Unix controller".to_owned())
+    }
+
     /// Writes the credential into a fresh 0700 directory under the work
     /// root (outside every worktree).
+    #[cfg(unix)]
     fn prepare(work_root: &Path, credential: &GitCredential) -> Result<Self, String> {
         use std::io::Write as _;
         use std::os::unix::fs::{DirBuilderExt as _, OpenOptionsExt as _};
@@ -187,6 +197,7 @@ impl Auth {
 /// The askpass helper: the username prompt gets a fixed placeholder (hosts
 /// authenticate the token alone); every other prompt gets the secret file
 /// beside the script.
+#[cfg(unix)]
 const ASKPASS_SCRIPT: &str = "#!/bin/sh\ncase \"$1\" in\n  Username*) printf '%s\\n' git ;;\n  *) cat \"$(dirname \"$0\")/secret\" ;;\nesac\n";
 
 impl Drop for Auth {
@@ -687,7 +698,25 @@ fn reject_symlinks(base: &Path) -> Result<(), String> {
     Ok(())
 }
 
-#[cfg(test)]
+// Off Unix, only the refusal exists. The Windows CI job type-checks this
+// (`cargo check --all-targets`); it does not run the suite.
+#[cfg(all(test, not(unix)))]
+mod non_unix_tests {
+    use super::{Auth, GitCredential};
+    use fleet_core::SensitiveString;
+
+    #[test]
+    fn a_credentialed_source_is_refused_off_unix() {
+        let credential = GitCredential::HttpsToken(SensitiveString::new("token".to_owned()));
+        let error = Auth::prepare(&std::env::temp_dir(), &credential)
+            .err()
+            .expect("off Unix a credential is refused");
+        assert!(error.contains("Unix controller"), "{error}");
+    }
+}
+
+// The tests exercise credential files and shell helpers, which are Unix-only.
+#[cfg(all(test, unix))]
 mod tests {
     use super::{Auth, CREDENTIAL_MISMATCH, GitCredential, GitSource};
     use fleet_core::SensitiveString;
