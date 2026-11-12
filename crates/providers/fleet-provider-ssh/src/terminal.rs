@@ -9,15 +9,17 @@
 //! the PTY's window size; the kernel delivers `SIGWINCH` to `ssh`, which
 //! sends the guest a `window-change` request.
 //!
-//! No remote command is given, so the guest starts the login's own shell:
-//! on Windows OpenSSH that is its configured default shell (PowerShell when
-//! the operator set `DefaultShell`). A stored key is delivered the way every
-//! other session delivers it: a mode-0600 file that lives as long as the
+//! Linux starts the login shell. Recorded Windows endpoints start an explicit
+//! interactive PowerShell child and preserve its exit status through the
+//! configured default shell (Windows PowerShell 5.1). A stored key is delivered
+//! the way every other session delivers it: a mode-0600 file that lives as long as the
 //! [`Terminal`] and is removed when it drops.
 //!
 //! Nothing read from or written to the terminal is logged or retained here.
 
 use std::io;
+
+use fleet_core::GuestOs;
 
 use pty_process::{Command, OwnedReadPty, OwnedWritePty, Size};
 use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
@@ -57,6 +59,20 @@ impl TerminalSize {
 impl Default for TerminalSize {
     fn default() -> Self {
         Self { cols: 80, rows: 24 }
+    }
+}
+
+// A PTY plus an exec request avoids the shell-request exit-status path in
+// Windows OpenSSH. Use the current default shell's installation, never PATH.
+// The outer PowerShell must explicitly preserve the child's native status:
+// https://learn.microsoft.com/powershell/module/microsoft.powershell.core/about/about_powershell_exe?view=powershell-5.1
+pub(crate) const WINDOWS_TERMINAL_COMMAND: &str =
+    "& (Join-Path $PSHOME 'powershell.exe') -NoLogo -NoProfile; exit $LASTEXITCODE";
+
+fn terminal_command(os: GuestOs) -> Option<&'static str> {
+    match os {
+        GuestOs::Windows => Some(WINDOWS_TERMINAL_COMMAND),
+        GuestOs::Linux => None,
     }
 }
 
@@ -153,6 +169,9 @@ impl SshProvider {
         }
         args.push("--".into());
         args.push(format!("{}@{}", endpoint.user, endpoint.host).into());
+        if let Some(command) = terminal_command(endpoint.guest_os) {
+            args.push(command.into());
+        }
 
         let child = Command::new("ssh")
             .args(args)
@@ -226,6 +245,17 @@ impl Terminal {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_windows_gets_a_fixed_interactive_command() {
+        assert_eq!(terminal_command(GuestOs::Linux), None);
+        assert_eq!(
+            terminal_command(GuestOs::Windows),
+            Some(WINDOWS_TERMINAL_COMMAND)
+        );
+        assert!(WINDOWS_TERMINAL_COMMAND.ends_with("exit $LASTEXITCODE"));
+        assert!(!WINDOWS_TERMINAL_COMMAND.contains("NonInteractive"));
+    }
 
     #[test]
     fn sizes_are_bounded() {
