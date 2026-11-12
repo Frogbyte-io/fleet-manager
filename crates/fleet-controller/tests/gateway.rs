@@ -591,6 +591,15 @@ async fn a_second_session_supersedes_the_first() {
     let (mut first_sink, mut first_source) = first.split();
     send_frame(&mut first_sink, hello_frame(&machine_id, 1, 1)).await;
 
+    // Sending Hello does not mean the server registered this session yet.
+    // Under load the second handshake can otherwise register first, reversing
+    // which socket is superseded and leaving the fault read waiting forever.
+    let welcome_one = receive_frame(&mut first_source).await.expect("a Welcome");
+    assert!(matches!(
+        welcome_one.payload,
+        Some(wire::frame::Payload::Welcome(_))
+    ));
+
     let (second, _) = connect_node(&harness, &session_two).await.unwrap();
     let (mut _second_sink, mut second_source) = second.split();
     send_frame(&mut _second_sink, hello_frame(&machine_id, 1, 1)).await;
@@ -604,13 +613,7 @@ async fn a_second_session_supersedes_the_first() {
         );
     };
 
-    // The old session first drains its own Welcome, then learns it was
-    // superseded in the protocol's own vocabulary.
-    let welcome_one = receive_frame(&mut first_source).await.expect("a Welcome");
-    assert!(matches!(
-        welcome_one.payload,
-        Some(wire::frame::Payload::Welcome(_))
-    ));
+    // The old session learns it was superseded in the protocol's vocabulary.
     let fault = receive_frame(&mut first_source).await.expect("a fault");
     let Some(wire::frame::Payload::Fault(fault)) = fault.payload else {
         panic!("the superseded session must fault, not {:?}", fault.payload);
