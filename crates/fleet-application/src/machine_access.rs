@@ -66,6 +66,13 @@ pub const POWERSHELL_ARGV_SCRIPT: &str = concat!(
     "foreach($fleetChar in $fleetArg.ToCharArray()){if([char]::IsControl($fleetChar)){exit 64}}};",
     "$fleetCmd=Get-Command -Name $args[0] -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1;",
     "if($null -eq $fleetCmd -or [IO.Path]::GetExtension($fleetCmd.Path) -ine '.exe'){exit 64};",
+    // Native discovery expands patterns even through GetCommands(..., false).
+    // Verify the resolved literal name/path before executing it; escaping the
+    // lookup pattern instead breaks existing executable paths with brackets.
+    "$fleetExpected=$args[0];$fleetActual=$fleetCmd.Name;",
+    "if($fleetExpected.IndexOfAny([char[]]@([char]47,[char]92,[char]58)) -ge 0){",
+    "try{$fleetExpected=[IO.Path]::GetFullPath($fleetExpected);$fleetActual=[IO.Path]::GetFullPath($fleetCmd.Path)}catch{exit 64}};",
+    "if($fleetActual -ine $fleetExpected -and $fleetActual -ine ($fleetExpected+'.exe')){exit 64};",
     "$fleetRest=@();if($args.Count -gt 1){$fleetRest=@($args[1..($args.Count-1)])};",
     "& $fleetCmd.Path @fleetRest\n"
 );

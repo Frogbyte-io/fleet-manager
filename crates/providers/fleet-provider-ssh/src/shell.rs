@@ -549,7 +549,7 @@ mod tests {
     fn machine_argv_preserves_spaces_unicode_and_metacharacters() {
         let Some(pwsh) = require_pwsh() else { return };
         let dir = tempfile::tempdir().unwrap();
-        let exe = dir.path().join("fixture.exe");
+        let exe = dir.path().join("fixture [argv].exe");
         std::fs::copy("/usr/bin/printf", &exe).unwrap();
         let argument = "a b; $(not-code) ` café";
         let out = run_ps(
@@ -568,6 +568,34 @@ mod tests {
         );
         assert_eq!(out.status.code(), Some(0), "{out:?}");
         assert_eq!(text(&out.stdout), argument);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn machine_argv_never_expands_program_name_wildcards() {
+        let Some(pwsh) = require_pwsh() else { return };
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::copy("/usr/bin/printf", dir.path().join("fixture.exe")).unwrap();
+        for pattern in ["*.exe", "fixture.ex?", "fixture[.]exe"] {
+            for program in [
+                pattern.to_owned(),
+                dir.path().join(pattern).display().to_string(),
+            ] {
+                let out = run_ps(
+                    &pwsh,
+                    fleet_application::machine_access::POWERSHELL_ARGV_SCRIPT,
+                    &ScriptMetadata {
+                        arguments: vec![program, "%s".to_owned(), "must not run".to_owned()],
+                        environment: vec![("PATH".to_owned(), dir.path().display().to_string())],
+                        ..ScriptMetadata::default()
+                    },
+                    b"",
+                    None,
+                );
+                assert_eq!(out.status.code(), Some(64), "{pattern}: {out:?}");
+                assert!(out.stdout.is_empty(), "{pattern}: {out:?}");
+            }
+        }
     }
 
     #[test]
