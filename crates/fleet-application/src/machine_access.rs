@@ -56,14 +56,19 @@ const MAX_REFERENCE_BYTES: usize = 1024;
 /// The POSIX script that runs the caller's argv: the arguments reach the
 /// script as `$@`, so no caller text is ever parsed by a shell.
 pub const POSIX_ARGV_SCRIPT: &str = "exec \"$@\"\n";
-/// The PowerShell script that runs the caller's argv from `$args` (ADR
-/// 0015's shell layer supplies the arguments), mapping the native exit code
-/// the way the layer already does. Windows PowerShell 5.1 builds a native
-/// command's line from the argument array itself and does not escape
-/// embedded double quotes, so an argument containing `"` may reach the
-/// program split or merged differently than given; use `--script` (and the
-/// program's own quoting) for such arguments.
-pub const POWERSHELL_ARGV_SCRIPT: &str = "$fleetCmd=$args[0];$fleetRest=@();if($args.Count -gt 1){$fleetRest=@($args[1..($args.Count-1)])};& $fleetCmd @fleetRest\n";
+/// The fixed Windows argv runner. PowerShell 5.1 cannot faithfully pass
+/// quotes, trailing backslashes or controls to native programs; both the
+/// application and this runner refuse them. Only native `.exe` applications
+/// may receive argv data; shell scripts and batch shims require script mode.
+pub const POWERSHELL_ARGV_SCRIPT: &str = concat!(
+    "foreach($fleetArg in $args){",
+    "if($fleetArg.Length -eq 0 -or $fleetArg.Contains([string][char]34) -or $fleetArg.EndsWith([string][char]92)){exit 64};",
+    "foreach($fleetChar in $fleetArg.ToCharArray()){if([char]::IsControl($fleetChar)){exit 64}}};",
+    "$fleetCmd=Get-Command -Name $args[0] -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1;",
+    "if($null -eq $fleetCmd -or [IO.Path]::GetExtension($fleetCmd.Path) -ine '.exe'){exit 64};",
+    "$fleetRest=@();if($args.Count -gt 1){$fleetRest=@($args[1..($args.Count-1)])};",
+    "& $fleetCmd.Path @fleetRest\n"
+);
 
 /// How an SSH endpoint authenticates. The wire shape is the `auth` object
 /// every SSH-driven operation payload already carries.
@@ -1422,6 +1427,17 @@ fn prepare_command(
                     "the arguments are longer than {MAX_MACHINE_EXEC_BYTES} bytes together"
                 )));
             }
+            if guest_os == GuestOs::Windows {
+                let batch = argv[0].rsplit_once('.').is_some_and(|(_, extension)| {
+                    extension.eq_ignore_ascii_case("cmd") || extension.eq_ignore_ascii_case("bat")
+                });
+                if argv.iter().any(|arg| {
+                    arg.contains('"') || arg.ends_with('\\') || arg.chars().any(char::is_control)
+                }) || batch
+                {
+                    return Err(invalid("Windows argv refuses quotes, trailing backslashes, control characters and batch files; use --script with the program's own quoting".to_owned()));
+                }
+            }
             let script = match guest_os {
                 GuestOs::Linux => POSIX_ARGV_SCRIPT,
                 GuestOs::Windows => POWERSHELL_ARGV_SCRIPT,
@@ -1594,14 +1610,30 @@ mod tests {
 
     #[test]
     fn the_windows_argv_script_is_fixed_text_and_carries_no_caller_data() {
-        let hostile = ExecCommand::Argv(vec!["cmd.exe".to_owned(), "\"; calc \"$(x)".to_owned()]);
+        let hostile = ExecCommand::Argv(vec!["tool.exe".to_owned(), "a b; $(x) ` café".to_owned()]);
         let (script, arguments, _) = prepare_command(&hostile, GuestOs::Windows).unwrap();
         assert_eq!(script, POWERSHELL_ARGV_SCRIPT);
-        assert!(!script.contains("calc"));
-        assert_eq!(arguments[1], "\"; calc \"$(x)");
+        assert!(!script.contains("café"));
+        assert_eq!(arguments[1], "a b; $(x) ` café");
         // The script is one line of the safe alphabet the shell layer checks
         // its own text against: no quotes that could end a string early.
         assert!(!script.contains('"'));
+    }
+
+    #[test]
+    fn windows_argv_refuses_lossy_native_arguments_and_batch_shims() {
+        for words in [
+            vec!["tool.exe", "embedded\"quote"],
+            vec!["tool.exe", "C:\\tail\\"],
+            vec!["tool.exe", "line\nfeed"],
+            vec!["tool.exe", "a\u{85}b"],
+            vec!["shim.CMD", "value"],
+            vec!["C:\\bin\\shim.bat", "value"],
+        ] {
+            let command = ExecCommand::Argv(words.into_iter().map(str::to_owned).collect());
+            assert!(prepare_command(&command, GuestOs::Windows).is_err());
+            assert!(prepare_command(&command, GuestOs::Linux).is_ok());
+        }
     }
 
     #[test]

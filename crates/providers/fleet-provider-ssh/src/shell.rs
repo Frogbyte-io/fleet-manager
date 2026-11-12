@@ -544,6 +544,58 @@ mod tests {
         assert_eq!(text(&out.stderr), "err-line\n");
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn machine_argv_preserves_spaces_unicode_and_metacharacters() {
+        let Some(pwsh) = require_pwsh() else { return };
+        let dir = tempfile::tempdir().unwrap();
+        let exe = dir.path().join("fixture.exe");
+        std::fs::copy("/usr/bin/printf", &exe).unwrap();
+        let argument = "a b; $(not-code) ` café";
+        let out = run_ps(
+            &pwsh,
+            fleet_application::machine_access::POWERSHELL_ARGV_SCRIPT,
+            &ScriptMetadata {
+                arguments: vec![
+                    exe.display().to_string(),
+                    "%s".to_owned(),
+                    argument.to_owned(),
+                ],
+                ..ScriptMetadata::default()
+            },
+            b"",
+            None,
+        );
+        assert_eq!(out.status.code(), Some(0), "{out:?}");
+        assert_eq!(text(&out.stdout), argument);
+    }
+
+    #[test]
+    fn machine_argv_guard_rechecks_values_and_refuses_shell_commands() {
+        let Some(pwsh) = require_pwsh() else { return };
+        for arguments in [
+            vec!["tool.exe", "embedded\"quote"],
+            vec!["tool.exe", "trailing\\"],
+            vec!["tool.exe", "control\nvalue"],
+            vec!["tool.exe", ""],
+            vec!["Write-Output", "must not run"],
+            vec!["/bin/sh", "must not run"],
+        ] {
+            let out = run_ps(
+                &pwsh,
+                fleet_application::machine_access::POWERSHELL_ARGV_SCRIPT,
+                &ScriptMetadata {
+                    arguments: arguments.into_iter().map(str::to_owned).collect(),
+                    ..ScriptMetadata::default()
+                },
+                b"",
+                None,
+            );
+            assert_eq!(out.status.code(), Some(64), "{out:?}");
+            assert!(out.stdout.is_empty(), "{out:?}");
+        }
+    }
+
     #[test]
     fn powershell_exit_codes_follow_the_posix_shape() {
         let Some(pwsh) = require_pwsh() else { return };

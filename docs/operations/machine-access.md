@@ -46,5 +46,5 @@ Delete the endpoint's default (`machines endpoint-auth clear`) to stop callers t
 
 - `machines onboard test` may be repeated after the host key is confirmed: the probe lists every key type the host offers in a fixed order (ED25519, ECDSA, RSA), a confirmed fingerprint matches any of them, and the connection check runs `exit 0`, which POSIX shells, PowerShell and cmd all accept. Only a fingerprint that none of the offered keys carries reports a changed key and needs a new confirmation.
 - Passphrase-protected keys are refused; the session is non-interactive. Key files need Unix modes, so the controller must run on Linux (or another Unix).
-- On Windows (PowerShell 5.1) an argv argument containing a double quote may be split or merged differently than given; use `--script` for such arguments.
+- On Windows (PowerShell 5.1), argv refuses embedded double quotes, trailing backslashes and control characters instead of passing them incorrectly. The guest resolves only native `.exe` applications; `.cmd`/`.bat` shims, scripts and cmdlets require `--script` with the program’s own quoting (ADR 0021 decision 3). Spaces, Unicode and shell metacharacters remain data in the stdin metadata blob.
 - One command at a time per request: port forwarding and fan-out across machines are not served. An interactive shell is [a separate feature](machine-terminal.md).

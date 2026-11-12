@@ -207,13 +207,20 @@ impl TerminalPort for SshTerminalPort {
             .resolver
             .resolve(&request.auth, &request.machine_id)
             .await?;
-        let (spec, _, _) = crate::exec::resolve_ssh_endpoint_any_os(
+        let (mut spec, _, _) = crate::exec::resolve_ssh_endpoint_any_os(
             self.machines.as_ref(),
             &request.machine_id,
             &request.endpoint_id,
             auth,
         )
         .await?;
+        spec.guest_os = crate::exec::endpoint_guest_os(
+            self.machines.as_ref(),
+            &request.machine_id,
+            &request.endpoint_id,
+        )
+        .await?
+        .unwrap_or_default();
         let size = fleet_provider_ssh::TerminalSize::new(request.cols, request.rows)
             .ok_or("the size is out of range")?;
         let terminal = self
