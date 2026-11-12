@@ -19850,6 +19850,11 @@ export type clearMachineEndpointGuestOsResponse404 = {
   status: 404
 }
 
+export type clearMachineEndpointGuestOsResponse500 = {
+  data: ApiError
+  status: 500
+}
+
 export type clearMachineEndpointGuestOsResponse503 = {
   data: ApiError
   status: 503
@@ -19858,7 +19863,7 @@ export type clearMachineEndpointGuestOsResponse503 = {
 export type clearMachineEndpointGuestOsResponseSuccess = (clearMachineEndpointGuestOsResponse200) & {
   headers: Headers;
 };
-export type clearMachineEndpointGuestOsResponseError = (clearMachineEndpointGuestOsResponse403 | clearMachineEndpointGuestOsResponse404 | clearMachineEndpointGuestOsResponse503) & {
+export type clearMachineEndpointGuestOsResponseError = (clearMachineEndpointGuestOsResponse403 | clearMachineEndpointGuestOsResponse404 | clearMachineEndpointGuestOsResponse500 | clearMachineEndpointGuestOsResponse503) & {
   headers: Headers;
 };
 

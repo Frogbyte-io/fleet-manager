@@ -99,9 +99,9 @@ const sshCopied = ref(false)
 
 // Remove: the reviewed removal (#616). The dialog works on the machine as it
 // was when Remove was clicked and lives outside the page's states: once the
-// machine is gone, live events refetch it and the page turns to "not found",
-// while the dialog still shows what the removal did. Closing it then returns
-// to the Fleet list.
+// machine is gone, the removal refetches it and the page turns to "not
+// found", while the dialog still shows what the removal did. Closing it then
+// returns to the Fleet list.
 const queryClient = useQueryClient()
 const removalTarget = ref<MachineDto | null>(null)
 const removing = computed({
@@ -113,7 +113,10 @@ const removing = computed({
 })
 
 async function onRemoved() {
-  await queryClient.invalidateQueries({ queryKey: ['fleet'] })
+  await Promise.all([
+    queryClient.invalidateQueries({ queryKey: ['fleet'] }),
+    queryClient.invalidateQueries({ queryKey: ['machine', machineId] }),
+  ])
 }
 
 async function leaveRemoved() {

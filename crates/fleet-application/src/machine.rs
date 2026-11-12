@@ -567,6 +567,9 @@ pub trait MachinePort: fmt::Debug + Send + Sync {
     /// (#624); an endpoint removed meanwhile has nothing to vouch for them.
     /// Either way nothing is written.
     ///
+    /// The endpoint must belong to machine `id`: another machine's endpoint
+    /// vouches for nothing here, whatever its key, and reads as gone.
+    ///
     /// The default checks, then writes; a store implements it as one
     /// transaction.
     ///
@@ -580,6 +583,14 @@ pub trait MachinePort: fmt::Debug + Send + Sync {
         verified_fingerprint: &str,
         facts: &[CapabilityFact],
     ) -> Result<VerifiedWrite, PortFailure> {
+        let machine = self.get(id).await?;
+        if !machine
+            .endpoints
+            .iter()
+            .any(|endpoint| endpoint.id == endpoint_id)
+        {
+            return Ok(VerifiedWrite::EndpointGone);
+        }
         match self.verified_fingerprint(endpoint_id).await {
             Err(PortFailure::NotFound { .. }) => Ok(VerifiedWrite::EndpointGone),
             Err(failure) => Err(failure),
@@ -653,11 +664,12 @@ pub trait MachinePort: fmt::Debug + Send + Sync {
     }
     /// Records a detected guest OS and its audit event atomically, and only
     /// while the endpoint's verified fingerprint is still
-    /// `expected_fingerprint` (the trust state the detection ran under).
+    /// `expected_fingerprint` (the trust state the detection ran under) and
+    /// its OS is still unknown (one recorded in between is newer and wins).
     /// The event is written already resolved, so it never opens a second
     /// intent beside the operation's own. Answers whether it was recorded:
-    /// `false` when the fingerprint changed in between. The default
-    /// refuses, as above.
+    /// `false` when the fingerprint changed or an OS was recorded in
+    /// between. The default refuses, as above.
     ///
     /// # Errors
     ///
@@ -1523,15 +1535,49 @@ impl Machines {
                 what: format!("SSH endpoint {endpoint_id:?} of machine {machine_id:?}"),
             });
         }
+        // Two-phase audit: the intent is appended before the write, so an
+        // audit sink that refuses leaves the OS untouched, and the
+        // completion only after the write succeeded.
+        let (intent, completion, guest_os_id) = match guest_os {
+            Some(guest_os) => (
+                "endpoint_os_recording",
+                "endpoint_os_recorded",
+                guest_os.id(),
+            ),
+            None => ("endpoint_os_clearing", "endpoint_os_cleared", "unknown"),
+        };
+        self.audit_endpoint_os(principal, machine_id, endpoint_id, intent, guest_os_id)
+            .await?;
         match guest_os {
             Some(guest_os) => self.port.record_endpoint_os(endpoint_id, guest_os).await,
             None => self.port.clear_endpoint_os(endpoint_id).await,
         }
         .map_err(|failure| map_port("record_endpoint_os", failure))?;
-        let (event, guest_os_id) = match guest_os {
-            Some(guest_os) => ("endpoint_os_recorded", guest_os.id()),
-            None => ("endpoint_os_cleared", "unknown"),
-        };
+        self.audit_endpoint_os(principal, machine_id, endpoint_id, completion, guest_os_id)
+            .await
+    }
+
+    async fn audit_endpoint_os(
+        &self,
+        principal: &ActingPrincipal,
+        machine_id: &str,
+        endpoint_id: &str,
+        event: &str,
+        guest_os_id: &str,
+    ) -> Result<(), MachineUseCaseError> {
+        let mut metadata = crate::audit::AuditMetadata::default();
+        for (key, value) in [
+            ("event", event),
+            ("guestOs", guest_os_id),
+            ("endpointId", endpoint_id),
+        ] {
+            metadata
+                .insert(key, value)
+                .map_err(|error| MachineUseCaseError::Backend {
+                    context: "audit",
+                    detail: error.to_string(),
+                })?;
+        }
         self.audit
             .record_intent(&crate::audit::AuditIntent {
                 actor: principal.id.clone(),
@@ -1540,29 +1586,13 @@ impl Machines {
                 decision: Decision::allow(),
                 correlation_id: None,
                 operation_id: None,
-                metadata: {
-                    let mut metadata = crate::audit::AuditMetadata::default();
-                    for (key, value) in [
-                        ("event", event),
-                        ("guestOs", guest_os_id),
-                        ("endpointId", endpoint_id),
-                    ] {
-                        metadata.insert(key, value).map_err(|error| {
-                            MachineUseCaseError::Backend {
-                                context: "audit",
-                                detail: error.to_string(),
-                            }
-                        })?;
-                    }
-                    metadata
-                },
+                metadata,
             })
             .await
             .map_err(|detail| MachineUseCaseError::Backend {
                 context: "audit",
                 detail,
-            })?;
-        Ok(())
+            })
     }
 
     /// The fingerprint previously confirmed for an endpoint.

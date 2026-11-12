@@ -404,6 +404,56 @@ async fn an_inventory_for_a_missing_endpoint_is_refused_at_creation() {
     }
 }
 
+/// #649: an inventory whose payload the creation rule cannot read — none,
+/// not JSON, not an object, or without string `machineId` and `endpointId`
+/// — is refused as invalid, never queued past the endpoint checks.
+#[tokio::test]
+async fn a_malformed_inventory_payload_is_refused_at_creation() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::open(&dir.path().join("fleet.db")).await.unwrap();
+    let pool = store.pool().clone();
+    let operation_repository = std::sync::Arc::new(OperationRepository::new(pool.clone()));
+    let operations = Operations::new_with_events_and_catalog_rollout_targets(
+        operation_repository.clone(),
+        std::sync::Arc::new(AuditSink::new(pool.clone())),
+        std::sync::Arc::new(fleet_application::events::EventHub::new(16)),
+        std::sync::Arc::new(MachineRepository::new(pool.clone())),
+    );
+    let payloads = [
+        None,
+        Some("not json".to_owned()),
+        Some("[]".to_owned()),
+        Some(serde_json::json!({"machineId": "m"}).to_string()),
+        Some(serde_json::json!({"endpointId": "e"}).to_string()),
+        Some(serde_json::json!({"machineId": 1, "endpointId": "e"}).to_string()),
+    ];
+    for payload_json in payloads {
+        let refused = operations
+            .create(
+                &fleet_auth::LanAllowAllAuthorizer,
+                "anonymous-lan-admin",
+                &fleet_application::operation::NewOperation {
+                    kind: "agentless.inventory".to_owned(),
+                    payload_json: payload_json.clone(),
+                    ..Default::default()
+                },
+            )
+            .await;
+        assert!(
+            matches!(
+                refused,
+                Err(fleet_application::operation::OperationUseCaseError::Invalid { .. })
+            ),
+            "{payload_json:?}: {refused:?}"
+        );
+    }
+    let queued: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM operations")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(queued, 0, "nothing was queued");
+}
+
 /// Once recorded, the payload's guest OS is a check, refused at creation
 /// with `guest_os_mismatch` before anything is queued; a match runs.
 #[tokio::test]

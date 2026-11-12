@@ -322,6 +322,7 @@ impl OnboardingPort for FakeOnboarding {
             idempotency_key: draft.idempotency_key.clone(),
             created_at: now,
             updated_at: now,
+            revision: 0,
         };
         self.drafts.lock().unwrap().push(created.clone());
         Ok(created)

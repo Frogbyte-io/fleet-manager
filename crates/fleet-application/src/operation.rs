@@ -1033,20 +1033,7 @@ impl Operations {
         if new.kind != "agentless.inventory" {
             return Ok(None);
         }
-        let Some(mut payload) = new
-            .payload_json
-            .as_deref()
-            .and_then(|payload| serde_json::from_str::<serde_json::Value>(payload).ok())
-            .filter(serde_json::Value::is_object)
-        else {
-            return Ok(None);
-        };
-        let (Some(machine_id), Some(endpoint_id)) = (
-            payload["machineId"].as_str().map(str::to_owned),
-            payload["endpointId"].as_str().map(str::to_owned),
-        ) else {
-            return Ok(None);
-        };
+        let (mut payload, machine_id, endpoint_id) = inventory_target(new)?;
         let chosen = match payload.get("guestOs") {
             None | Some(serde_json::Value::Null) => None,
             Some(value) => Some(
@@ -2522,6 +2509,34 @@ impl OperationUseCaseError {
             _ => None,
         }
     }
+}
+
+/// The payload of an `agentless.inventory` creation and the target it
+/// names. Every inventory names its target, so every one reaches the
+/// endpoint and OS checks: a payload the rule cannot read is refused, not
+/// queued past them.
+fn inventory_target(
+    new: &NewOperation,
+) -> Result<(serde_json::Value, String, String), OperationUseCaseError> {
+    let Some(payload) = new
+        .payload_json
+        .as_deref()
+        .and_then(|payload| serde_json::from_str::<serde_json::Value>(payload).ok())
+        .filter(serde_json::Value::is_object)
+    else {
+        return Err(OperationUseCaseError::Invalid {
+            detail: "agentless.inventory requires a JSON object payload".to_owned(),
+        });
+    };
+    let (Some(machine_id), Some(endpoint_id)) = (
+        payload["machineId"].as_str().map(str::to_owned),
+        payload["endpointId"].as_str().map(str::to_owned),
+    ) else {
+        return Err(OperationUseCaseError::Invalid {
+            detail: "agentless.inventory requires string machineId and endpointId".to_owned(),
+        });
+    };
+    Ok((payload, machine_id, endpoint_id))
 }
 
 #[cfg(test)]

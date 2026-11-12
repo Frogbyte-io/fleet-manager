@@ -252,21 +252,24 @@ describe('MachinePage', () => {
         unpinnedHosts: ['build.lan'], keptHosts: [], unpinFailedHosts: [], auditGaps: [], footprint,
       },
     }))
-    const { wrapper, router, queryClient } = await mountAt('/fleet/machines/m1')
+    const { wrapper, router } = await mountAt('/fleet/machines/m1')
 
     await wrapper.find('[data-testid="remove-machine"]').trigger('click')
     await flushPromises()
     expect(api.reviewMachineRemoval).toHaveBeenCalledWith('m1', {})
     const confirm = document.querySelector<HTMLButtonElement>('[data-testid="remove-confirm"]')
     expect(confirm?.textContent).toContain('Remove build-host')
+    // The machine is gone once the removal answers.
+    api.getMachine.mockResolvedValue({ status: 404, data: { code: 'not_found', message: 'no such machine' }, headers: new Headers() })
+    const fetchesBefore = api.getMachine.mock.calls.length
     confirm!.click()
     await flushPromises()
     expect(api.removeMachine).toHaveBeenCalledWith('m1', { reviewToken: 'tok' })
 
-    // Live events refetch the machine, which is gone now: the page turns to
-    // "not found" and the outcome stays on screen.
-    api.getMachine.mockResolvedValue({ status: 404, data: { code: 'not_found', message: 'no such machine' }, headers: new Headers() })
-    await queryClient.invalidateQueries()
+    // The removal itself refetches the machine — no live event or manual
+    // invalidation here — so the page turns to "not found" and the outcome
+    // stays on screen.
+    await vi.waitFor(() => expect(api.getMachine.mock.calls.length).toBeGreaterThan(fetchesBefore))
     await flushPromises()
     expect(wrapper.find('[data-testid="machine-not-found"]').exists()).toBe(true)
     expect(document.querySelector('[data-testid="remove-outcome"]')?.textContent).toContain('build-host')

@@ -470,10 +470,12 @@ impl ScriptExecutor {
         // requester the creation named, which it does only after authorizing
         // `machine.update` for an unknown endpoint (an operation created
         // against a recorded endpoint names none and records nothing), and only while the endpoint still
-        // has the fingerprint this run verified: a key confirmed meanwhile
-        // cleared the OS and wins. Either way this run probes as detected.
-        if let Some(requested_by) = payload.requested_by.as_deref() {
-            fleet_application::machine::record_detected_endpoint_os(
+        // has the fingerprint this run verified and is still unknown: a key
+        // confirmed meanwhile cleared the OS and wins, and an OS recorded
+        // meanwhile (another inventory, an operator) is newer than this
+        // detection and wins too, so this run probes as the record says.
+        if let Some(requested_by) = payload.requested_by.as_deref()
+            && !fleet_application::machine::record_detected_endpoint_os(
                 self.machines.as_ref(),
                 &fleet_application::machine::DetectedEndpointOs {
                     operation_id,
@@ -485,7 +487,20 @@ impl ScriptExecutor {
                 },
             )
             .await
-            .map_err(|detail| ("collection_failed", detail))?;
+            .map_err(|detail| ("collection_failed", detail))?
+            && let Some(recorded) = endpoint_guest_os(
+                self.machines.as_ref(),
+                &payload.machine_id,
+                &payload.endpoint_id,
+            )
+            .await
+            .map_err(|detail| ("collection_failed", detail))?
+        {
+            return fleet_application::machine_access::effective_guest_os(
+                payload.guest_os,
+                Some(recorded),
+            )
+            .map_err(mismatch);
         }
         fleet_application::machine_access::effective_guest_os(payload.guest_os, Some(detected))
             .map_err(mismatch)
@@ -782,6 +797,10 @@ pub(crate) async fn resolve_ssh_endpoint_any_os(
 }
 
 /// The guest OS recorded on a machine's endpoint, `None` while unknown.
+/// An endpoint that is not (or no longer) the machine's is an error, never
+/// an unknown OS: a caller that resolved its connection a moment earlier
+/// must not go on with the Linux default against an endpoint replaced or
+/// removed in between.
 pub(crate) async fn endpoint_guest_os(
     machines: &dyn MachinePort,
     machine_id: &str,
@@ -791,11 +810,12 @@ pub(crate) async fn endpoint_guest_os(
         .get(machine_id)
         .await
         .map_err(|failure| failure.to_string())?;
-    Ok(machine
+    machine
         .endpoints
         .iter()
         .find(|endpoint| endpoint.id == endpoint_id)
-        .and_then(|endpoint| endpoint.guest_os))
+        .map(|endpoint| endpoint.guest_os)
+        .ok_or_else(|| "the named endpoint does not belong to the machine".to_owned())
 }
 
 /// Convenience: the noop executor remains available for hosts that do not
@@ -858,6 +878,54 @@ mod tests {
             guest_refusal(Some(77), "fleet: no session\r\nfleet: refusal 77\r\n"),
             Some((77, "fleet: no session".to_owned()))
         );
+    }
+
+    /// #649: an endpoint that is not (or no longer) the machine's is an
+    /// error, not an unknown OS the terminal would run as Linux.
+    #[tokio::test]
+    async fn a_missing_endpoint_has_no_guest_os_to_default() {
+        use fleet_application::machine::{MachinePort as _, NewEndpoint, RegisterMachine};
+        let dir = tempfile::tempdir().unwrap();
+        let store = fleet_storage_sqlite::Store::open(&dir.path().join("fleet.db"))
+            .await
+            .unwrap();
+        let machines = fleet_storage_sqlite::MachineRepository::new(store.pool().clone());
+        let machine = machines
+            .register(&RegisterMachine {
+                name: "workstation-1".to_owned(),
+                description: String::new(),
+                endpoints: vec![NewEndpoint {
+                    kind: fleet_core::EndpointKind::Ssh,
+                    reference: "developer@workstation.example:22".to_owned(),
+                }],
+                tags: Vec::new(),
+                groups: Vec::new(),
+            })
+            .await
+            .unwrap();
+        let endpoint = machine.endpoints[0].id.clone();
+        assert_eq!(
+            super::endpoint_guest_os(&machines, &machine.id, &endpoint)
+                .await
+                .unwrap(),
+            None,
+            "a present endpoint with no record is unknown"
+        );
+        // The endpoint is replaced: the old id is gone.
+        machines
+            .set_endpoints(
+                &machine.id,
+                &[NewEndpoint {
+                    kind: fleet_core::EndpointKind::Ssh,
+                    reference: "developer@workstation.example:2222".to_owned(),
+                }],
+            )
+            .await
+            .unwrap();
+        let gone = super::endpoint_guest_os(&machines, &machine.id, &endpoint)
+            .await
+            .unwrap_err();
+        assert!(gone.contains("does not belong"), "{gone}");
     }
 
     /// The guest-side deadline watchdog (#455) is on unless a payload turns

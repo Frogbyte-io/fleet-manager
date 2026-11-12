@@ -73,6 +73,17 @@ struct FakeTrust {
     pins: Mutex<Vec<(String, String)>>,
     unpins: Mutex<Vec<String>>,
     broken: Mutex<bool>,
+    race_on_pin: Mutex<Option<RaceOnPin>>,
+}
+
+/// A write another caller lands while a pin is in flight — the window
+/// between a confirmation's read and its write.
+struct RaceOnPin(Box<dyn FnOnce() + Send>);
+
+impl std::fmt::Debug for RaceOnPin {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("RaceOnPin")
+    }
 }
 
 impl FakeTrust {
@@ -97,6 +108,10 @@ impl OnboardTrustPort for FakeTrust {
             .lock()
             .unwrap()
             .push((host.to_owned(), key.raw_line.clone()));
+        let race = self.race_on_pin.lock().unwrap().take();
+        if let Some(RaceOnPin(race)) = race {
+            race();
+        }
         Ok(())
     }
 
@@ -126,6 +141,8 @@ impl FakeDrafts {
             .find(|draft| draft.id == id)
             .expect("the draft exists");
         change(draft);
+        // A planted change is a write like any other.
+        draft.revision += 1;
     }
 
     fn get_raw(&self, id: &str) -> Option<OnboardingDraft> {
@@ -165,6 +182,7 @@ impl OnboardingPort for FakeDrafts {
             idempotency_key: draft.idempotency_key.clone(),
             created_at: now,
             updated_at: now,
+            revision: 0,
         };
         self.drafts.lock().unwrap().push(created.clone());
         Ok(created)
@@ -189,8 +207,17 @@ impl OnboardingPort for FakeDrafts {
             .ok_or_else(|| PortFailure::NotFound {
                 what: format!("onboarding draft {:?}", draft.id),
             })?;
-        *slot = draft.clone();
-        Ok(draft.clone())
+        // The port's compare-and-set: a stale snapshot is refused.
+        if slot.revision != draft.revision {
+            return Err(PortFailure::Conflict {
+                detail: "the onboarding draft changed".to_owned(),
+            });
+        }
+        *slot = OnboardingDraft {
+            revision: draft.revision + 1,
+            ..draft.clone()
+        };
+        Ok(slot.clone())
     }
 
     async fn delete(&self, id: &str) -> Result<(), PortFailure> {
@@ -842,6 +869,207 @@ async fn confirming_the_host_key_drops_the_shell_check_and_a_stale_one_is_refuse
         added.machine.endpoints[0].guest_os,
         Some(fleet_core::GuestOs::Windows)
     );
+}
+
+/// #649: a test or discover that read the draft before a host-key
+/// confirmation cannot write its snapshot back over it: the write is
+/// refused, the confirmation stands, and nothing the stale writer observed
+/// reaches the machine.
+#[tokio::test]
+async fn a_write_from_before_a_confirmation_is_refused_and_cannot_undo_it() {
+    let fixture = compose(FakeMachines::default());
+    let draft = fixture
+        .onboarding
+        .create_draft(&AllowAll, &principal(), new_draft())
+        .await
+        .unwrap();
+    fixture.drafts.mutate(&draft.id, |draft| {
+        draft.host_key = Some(observed_host_key(FINGERPRINT));
+        draft.host_key_stage = HostKeyStage::Observed;
+    });
+    // The executor reads the draft and starts probing...
+    let mut in_flight = fixture.drafts.get(&draft.id).await.unwrap();
+    // ...while the operator confirms.
+    fixture
+        .onboarding
+        .confirm_host_key(&AllowAll, &principal(), &draft.id, FINGERPRINT)
+        .await
+        .unwrap();
+    // The probe finishes and writes what it saw behind the old snapshot.
+    in_flight.shell_check = Some(ShellCheck {
+        at: i64::MAX,
+        ..shell_check("windows_powershell", Some(fleet_core::GuestOs::Windows))
+    });
+    in_flight.facts = vec![fact("os", "family", "Windows")];
+    in_flight.discovered_at = Some(i64::MAX);
+    let refused = fixture.drafts.update(&in_flight).await.unwrap_err();
+    assert!(
+        matches!(refused, PortFailure::Conflict { .. }),
+        "{refused:?}"
+    );
+
+    let stored = fixture.drafts.get_raw(&draft.id).unwrap();
+    assert_eq!(stored.host_key_stage, HostKeyStage::Confirmed);
+    assert_eq!(stored.confirmed_fingerprint.as_deref(), Some(FINGERPRINT));
+    assert!(stored.host_key_confirmed_at.is_some());
+    assert_eq!(stored.shell_check, None);
+    assert!(stored.facts.is_empty());
+    let added = fixture
+        .onboarding
+        .add(&AllowAll, &principal(), &draft.id, NOW)
+        .await
+        .unwrap();
+    assert_eq!(added.machine.endpoints[0].guest_os, None);
+    assert!(fixture.machines.capabilities.lock().unwrap().is_empty());
+}
+
+/// #649: a test that lands between a confirmation's read and its write
+/// wins; the confirmation is refused and takes back the pin it placed,
+/// so a key the draft no longer shows is not left trusted.
+#[tokio::test]
+async fn a_confirmation_overtaken_by_a_test_is_refused_and_unpins() {
+    let fixture = compose(FakeMachines::default());
+    let draft = fixture
+        .onboarding
+        .create_draft(&AllowAll, &principal(), new_draft())
+        .await
+        .unwrap();
+    fixture.drafts.mutate(&draft.id, |draft| {
+        draft.host_key = Some(observed_host_key(FINGERPRINT));
+        draft.host_key_stage = HostKeyStage::Observed;
+    });
+    let drafts = fixture.drafts.clone();
+    let draft_id = draft.id.clone();
+    *fixture.trust.race_on_pin.lock().unwrap() = Some(RaceOnPin(Box::new(move || {
+        drafts.mutate(&draft_id, |draft| {
+            draft.host_key = Some(observed_host_key(OTHER_FINGERPRINT));
+            draft.host_key_stage = HostKeyStage::Observed;
+        });
+    })));
+
+    let refused = fixture
+        .onboarding
+        .confirm_host_key(&AllowAll, &principal(), &draft.id, FINGERPRINT)
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(refused, OnboardingUseCaseError::Conflict { .. }),
+        "{refused:?}"
+    );
+    assert_eq!(fixture.trust.pin_count(), 1);
+    assert_eq!(fixture.trust.unpin_count(), 1, "the pin is taken back");
+    let stored = fixture.drafts.get_raw(&draft.id).unwrap();
+    assert_eq!(stored.host_key_stage, HostKeyStage::Observed);
+    assert_eq!(
+        stored.host_key.map(|key| key.fingerprint).as_deref(),
+        Some(OTHER_FINGERPRINT)
+    );
+    assert_eq!(stored.confirmed_fingerprint, None);
+    assert_eq!(stored.host_key_confirmed_at, None);
+}
+
+/// #649: facts discovered before the latest confirmation were observed
+/// behind another key; add refuses them like a stale shell check.
+#[tokio::test]
+async fn add_refuses_facts_discovered_before_the_confirmation() {
+    let fixture = compose(FakeMachines::default());
+    let draft = fixture
+        .onboarding
+        .create_draft(&AllowAll, &principal(), new_draft())
+        .await
+        .unwrap();
+    fixture.drafts.mutate(&draft.id, |draft| {
+        draft.host_key = Some(observed_host_key(FINGERPRINT));
+        draft.host_key_stage = HostKeyStage::Observed;
+    });
+    fixture
+        .onboarding
+        .confirm_host_key(&AllowAll, &principal(), &draft.id, FINGERPRINT)
+        .await
+        .unwrap();
+    let confirmed_at = fixture
+        .drafts
+        .get_raw(&draft.id)
+        .unwrap()
+        .host_key_confirmed_at
+        .unwrap();
+    for discovered_at in [None, Some(confirmed_at - 1)] {
+        fixture.drafts.mutate(&draft.id, |draft| {
+            draft.facts = vec![fact("os", "family", "Linux")];
+            draft.discovery_source = Some("agentless/1".to_owned());
+            draft.discovered_at = discovered_at;
+        });
+        let refused = fixture
+            .onboarding
+            .add(&AllowAll, &principal(), &draft.id, NOW)
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(&refused, OnboardingUseCaseError::Conflict { detail } if detail.contains("discover again")),
+            "{refused:?}"
+        );
+    }
+    assert_eq!(fixture.machines.machine_count(), 0);
+
+    fixture.drafts.mutate(&draft.id, |draft| {
+        draft.discovered_at = Some(confirmed_at + 1);
+    });
+    fixture
+        .onboarding
+        .add(&AllowAll, &principal(), &draft.id, NOW)
+        .await
+        .unwrap();
+    assert_eq!(fixture.machines.capabilities.lock().unwrap().len(), 1);
+}
+
+/// The re-confirmation path: a key that changed after a confirmation, with
+/// shell and inventory observations staged behind it, is re-confirmed and
+/// those observations are dropped, and the old pins go first.
+#[tokio::test]
+async fn reconfirming_a_changed_key_drops_the_staged_shell_and_facts() {
+    let fixture = compose(FakeMachines::default());
+    let draft = fixture
+        .onboarding
+        .create_draft(&AllowAll, &principal(), new_draft())
+        .await
+        .unwrap();
+    fixture.drafts.mutate(&draft.id, |draft| {
+        draft.host_key = Some(observed_host_key(FINGERPRINT));
+        draft.host_key_stage = HostKeyStage::Observed;
+    });
+    fixture
+        .onboarding
+        .confirm_host_key(&AllowAll, &principal(), &draft.id, FINGERPRINT)
+        .await
+        .unwrap();
+    fixture.drafts.mutate(&draft.id, |draft| {
+        draft.host_key = Some(observed_host_key(OTHER_FINGERPRINT));
+        draft.host_key_stage = HostKeyStage::Changed;
+        draft.shell_check = Some(shell_check(
+            "windows_powershell",
+            Some(fleet_core::GuestOs::Windows),
+        ));
+        draft.facts = vec![fact("os", "family", "Windows")];
+        draft.discovery_source = Some("agentless/1".to_owned());
+        draft.discovered_at = Some(i64::MAX);
+    });
+    fixture
+        .onboarding
+        .confirm_host_key(&AllowAll, &principal(), &draft.id, OTHER_FINGERPRINT)
+        .await
+        .unwrap();
+    let stored = fixture.drafts.get_raw(&draft.id).unwrap();
+    assert_eq!(stored.host_key_stage, HostKeyStage::Confirmed);
+    assert_eq!(
+        stored.confirmed_fingerprint.as_deref(),
+        Some(OTHER_FINGERPRINT)
+    );
+    assert_eq!(stored.shell_check, None);
+    assert!(stored.facts.is_empty());
+    assert_eq!(stored.discovery_source, None);
+    assert_eq!(stored.discovered_at, None);
+    assert_eq!(fixture.trust.unpin_count(), 1, "the old pins go first");
+    assert_eq!(fixture.trust.pin_count(), 2);
 }
 
 #[tokio::test]

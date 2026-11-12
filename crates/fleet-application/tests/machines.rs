@@ -10,6 +10,7 @@ use fleet_application::authz::{
 use fleet_application::machine::{
     CapabilityFactView, Endpoint, GuestLink, Machine, MachineFilter, MachineKind, MachinePort,
     MachineStatus, MachineUseCaseError, Machines, NewEndpoint, NodeLink, RegisterMachine,
+    VerifiedWrite,
 };
 use fleet_application::node::{GatewayState, NodeStatus};
 use fleet_application::operation::PortFailure;
@@ -17,6 +18,7 @@ use fleet_core::{CapabilityFact, CapabilityStatus, EndpointKind, Timestamp};
 
 const NOW: i64 = 1_800_000_000_000;
 const FRESHNESS: i64 = 24 * 60 * 60 * 1000;
+const VERIFIED: &str = "SHA256:current";
 
 #[test]
 fn kind_comes_from_confirmed_link_or_known_virtualization() {
@@ -112,6 +114,8 @@ struct FakePort {
     /// What `record_snapshot` and `record_capabilities` were asked to store.
     stored_snapshots: Mutex<Vec<String>>,
     stored_facts: Mutex<Vec<CapabilityFact>>,
+    /// The endpoint OS writes, in order: `(endpoint, os or None)`.
+    endpoint_os_writes: Mutex<Vec<(String, Option<fleet_core::GuestOs>)>>,
 }
 
 impl FakePort {
@@ -239,11 +243,22 @@ impl MachinePort for FakePort {
         unimplemented!("not exercised by these tests")
     }
 
-    async fn verified_fingerprint(
-        &self,
-        _endpoint_id: &str,
-    ) -> Result<Option<String>, PortFailure> {
-        unimplemented!("not exercised by these tests")
+    /// Every planted endpoint presents the same confirmed key, so only
+    /// endpoint ownership tells the default verified write apart.
+    async fn verified_fingerprint(&self, endpoint_id: &str) -> Result<Option<String>, PortFailure> {
+        let known = self.machines.lock().unwrap().iter().any(|machine| {
+            machine
+                .endpoints
+                .iter()
+                .any(|endpoint| endpoint.id == endpoint_id)
+        });
+        if known {
+            Ok(Some(VERIFIED.to_owned()))
+        } else {
+            Err(PortFailure::NotFound {
+                what: format!("endpoint {endpoint_id:?}"),
+            })
+        }
     }
 
     async fn latest_inventory_revision(
@@ -251,6 +266,26 @@ impl MachinePort for FakePort {
         _machine_id: &str,
     ) -> Result<Option<u64>, PortFailure> {
         unimplemented!("not exercised by these tests")
+    }
+
+    async fn record_endpoint_os(
+        &self,
+        endpoint_id: &str,
+        guest_os: fleet_core::GuestOs,
+    ) -> Result<(), PortFailure> {
+        self.endpoint_os_writes
+            .lock()
+            .unwrap()
+            .push((endpoint_id.to_owned(), Some(guest_os)));
+        Ok(())
+    }
+
+    async fn clear_endpoint_os(&self, endpoint_id: &str) -> Result<(), PortFailure> {
+        self.endpoint_os_writes
+            .lock()
+            .unwrap()
+            .push((endpoint_id.to_owned(), None));
+        Ok(())
     }
 }
 
@@ -522,4 +557,162 @@ async fn recorded_facts_and_snapshots_are_scrubbed_and_bounded_before_the_port()
         .await
         .unwrap_err();
     assert!(matches!(error, MachineUseCaseError::Invalid { .. }));
+}
+
+/// #649: the default verified write requires the endpoint to belong to the
+/// machine the facts are written to; another machine's endpoint, whatever
+/// key it verified, vouches for nothing.
+#[tokio::test]
+async fn the_default_verified_write_refuses_another_machines_endpoint() {
+    let ssh = |reference: &str| NewEndpoint {
+        kind: EndpointKind::Ssh,
+        reference: reference.to_owned(),
+    };
+    let mut other = machine_record("machine-b", vec![ssh("deploy@host-b:22")]);
+    other.endpoints[0].id = "endpoint-of-b".to_owned();
+    let port = FakePort::default()
+        .with(machine_record("machine-a", vec![ssh("deploy@host-a:22")]))
+        .with(other);
+    let facts = [fact("os", "family", CapabilityStatus::Known, NOW)];
+
+    let foreign = port
+        .record_verified_capabilities("machine-a", "endpoint-of-b", VERIFIED, &facts)
+        .await
+        .unwrap();
+    assert_eq!(foreign, VerifiedWrite::EndpointGone);
+    assert!(port.stored_facts.lock().unwrap().is_empty());
+
+    let changed = port
+        .record_verified_capabilities("machine-a", "endpoint-0", "SHA256:older", &facts)
+        .await
+        .unwrap();
+    assert_eq!(changed, VerifiedWrite::KeyChanged);
+    assert!(port.stored_facts.lock().unwrap().is_empty());
+
+    let own = port
+        .record_verified_capabilities("machine-a", "endpoint-0", VERIFIED, &facts)
+        .await
+        .unwrap();
+    assert_eq!(own, VerifiedWrite::Recorded);
+    assert_eq!(port.stored_facts.lock().unwrap().len(), 1);
+
+    let unknown = port
+        .record_verified_capabilities("no-such-machine", "endpoint-0", VERIFIED, &facts)
+        .await
+        .unwrap_err();
+    assert!(matches!(unknown, PortFailure::NotFound { .. }), "{unknown}");
+}
+
+/// An audit sink that records each event name, and refuses once `broken`.
+#[derive(Debug, Default)]
+struct EventAudit {
+    events: Mutex<Vec<String>>,
+    broken: Mutex<bool>,
+}
+
+#[async_trait]
+impl fleet_application::operation::AuditPort for EventAudit {
+    async fn record_intent(
+        &self,
+        intent: &fleet_application::audit::AuditIntent,
+    ) -> Result<(), String> {
+        if *self.broken.lock().unwrap() {
+            return Err("the audit sink refused".to_owned());
+        }
+        let event = intent
+            .metadata
+            .entries()
+            .find(|(key, _)| *key == "event")
+            .map(|(_, value)| value.to_owned())
+            .unwrap_or_default();
+        self.events.lock().unwrap().push(event);
+        Ok(())
+    }
+
+    async fn record_outcome(
+        &self,
+        _operation_id: &str,
+        _outcome: fleet_application::audit::AuditOutcome,
+    ) -> Result<(), String> {
+        Ok(())
+    }
+}
+
+/// #649: a manual endpoint-OS write appends its audit intent first, so a
+/// refusing sink leaves the OS untouched; the completion follows the write.
+#[tokio::test]
+async fn a_manual_endpoint_os_write_is_audited_before_it_applies() {
+    let ssh = NewEndpoint {
+        kind: EndpointKind::Ssh,
+        reference: "deploy@host-a:22".to_owned(),
+    };
+    let port = Arc::new(FakePort::default().with(machine_record("machine-a", vec![ssh])));
+    let audit = Arc::new(EventAudit::default());
+    let service = Machines::new(port.clone(), audit.clone());
+
+    *audit.broken.lock().unwrap() = true;
+    for clear in [false, true] {
+        let refused = if clear {
+            service
+                .clear_endpoint_os(&PermitAll, &principal(), "machine-a", "endpoint-0")
+                .await
+        } else {
+            service
+                .record_endpoint_os(
+                    &PermitAll,
+                    &principal(),
+                    "machine-a",
+                    "endpoint-0",
+                    fleet_core::GuestOs::Windows,
+                )
+                .await
+        }
+        .unwrap_err();
+        assert!(
+            matches!(
+                refused,
+                MachineUseCaseError::Backend {
+                    context: "audit",
+                    ..
+                }
+            ),
+            "{refused:?}"
+        );
+    }
+    assert!(
+        port.endpoint_os_writes.lock().unwrap().is_empty(),
+        "nothing applies without its audit intent"
+    );
+
+    *audit.broken.lock().unwrap() = false;
+    service
+        .record_endpoint_os(
+            &PermitAll,
+            &principal(),
+            "machine-a",
+            "endpoint-0",
+            fleet_core::GuestOs::Windows,
+        )
+        .await
+        .unwrap();
+    service
+        .clear_endpoint_os(&PermitAll, &principal(), "machine-a", "endpoint-0")
+        .await
+        .unwrap();
+    assert_eq!(
+        *port.endpoint_os_writes.lock().unwrap(),
+        vec![
+            ("endpoint-0".to_owned(), Some(fleet_core::GuestOs::Windows)),
+            ("endpoint-0".to_owned(), None),
+        ]
+    );
+    assert_eq!(
+        *audit.events.lock().unwrap(),
+        vec![
+            "endpoint_os_recording",
+            "endpoint_os_recorded",
+            "endpoint_os_clearing",
+            "endpoint_os_cleared",
+        ]
+    );
 }

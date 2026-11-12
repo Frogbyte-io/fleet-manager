@@ -217,6 +217,7 @@ impl SkillsExecutor {
     async fn catalog_target(
         &self,
         payload: &CatalogRolloutPayload,
+        windows_values: &[WindowsValue<'_>],
     ) -> Result<(SshConnectionSpec, Duration), (&'static str, String)> {
         let budget = deadline(payload.timeout_seconds);
         let started = Instant::now();
@@ -224,6 +225,14 @@ impl SkillsExecutor {
             .resolve(&payload.machine_id, &payload.endpoint_id, &payload.auth)
             .await
             .map_err(|detail| ("connection_failed", detail))?;
+        // Resolving reads Fleet's own records only. What a Windows native
+        // program cannot take is refused here, before the version gate
+        // opens the first SSH session to the endpoint.
+        if is_windows(&spec)
+            && let Some(detail) = windows_refusal(&payload.agents, windows_values)
+        {
+            return Err(("invalid_request", detail));
+        }
         let gate_budget = budget.saturating_sub(started.elapsed());
         if gate_budget.is_zero() {
             return Err((
@@ -353,32 +362,24 @@ impl SkillsExecutor {
                         .await;
                     }
                 };
-            let (spec, remaining) = match self.catalog_target(&payload).await {
+            let windows_values: [WindowsValue<'_>; 2] = [
+                (
+                    "the skill name",
+                    &version.name,
+                    skills_windows::is_skill_name,
+                ),
+                (
+                    "the skill source reference",
+                    &install_reference,
+                    skills_windows::is_native_token,
+                ),
+            ];
+            let (spec, remaining) = match self.catalog_target(&payload, &windows_values).await {
                 Ok(target) => target,
                 Err((code, detail)) => {
                     return complete_failure(operations, &operation.id, code, &detail).await;
                 }
             };
-            if is_windows(&spec)
-                && let Some(detail) = windows_refusal(
-                    &payload.agents,
-                    &[
-                        (
-                            "the skill name",
-                            &version.name,
-                            skills_windows::is_skill_name,
-                        ),
-                        (
-                            "the skill source reference",
-                            &install_reference,
-                            skills_windows::is_native_token,
-                        ),
-                    ],
-                )
-            {
-                return complete_failure(operations, &operation.id, "invalid_request", &detail)
-                    .await;
-            }
             let is_git = reference.starts_with("https://")
                 || reference.starts_with("ssh://")
                 || reference.ends_with(".git");
@@ -416,24 +417,17 @@ impl SkillsExecutor {
             )
             .await;
         }
-        let (spec, remaining) = match self.catalog_target(&payload).await {
+        let windows_values: [WindowsValue<'_>; 1] = [(
+            "the skill name",
+            &version.name,
+            skills_windows::is_skill_name,
+        )];
+        let (spec, remaining) = match self.catalog_target(&payload, &windows_values).await {
             Ok(target) => target,
             Err((code, detail)) => {
                 return complete_failure(operations, &operation.id, code, &detail).await;
             }
         };
-        if is_windows(&spec)
-            && let Some(detail) = windows_refusal(
-                &payload.agents,
-                &[(
-                    "the skill name",
-                    &version.name,
-                    skills_windows::is_skill_name,
-                )],
-            )
-        {
-            return complete_failure(operations, &operation.id, "invalid_request", &detail).await;
-        }
         operations
             .record_progress(
                 &operation.id,
