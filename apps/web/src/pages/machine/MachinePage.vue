@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { useQuery } from '@tanstack/vue-query'
+import { useQuery, useQueryClient } from '@tanstack/vue-query'
 import { computed, ref } from 'vue'
 import { RouterLink, useRoute, useRouter } from 'vue-router'
 
@@ -11,6 +11,7 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import { machineStatusTone } from '../fleet/inventory'
 import { useFleetInventory } from '../fleet/useFleetInventory'
 import { ApiRequestError, errorMessage, retryTransient, unwrap } from './api'
+import RemoveMachineDialog from './components/RemoveMachineDialog.vue'
 import { parseSshReference, sshCommand, vscodeRemoteUrl } from './handoff'
 import { provideMachineOperations } from './operations'
 import AuditTab from './tabs/AuditTab.vue'
@@ -95,6 +96,30 @@ const sshTarget = computed(() => {
 const sshLine = computed(() => (sshTarget.value ? sshCommand(sshTarget.value) : null))
 const vscodeUrl = computed(() => (sshTarget.value ? vscodeRemoteUrl(sshTarget.value) : null))
 const sshCopied = ref(false)
+
+// Remove: the reviewed removal (#616). The dialog works on the machine as it
+// was when Remove was clicked and lives outside the page's states: once the
+// machine is gone, live events refetch it and the page turns to "not found",
+// while the dialog still shows what the removal did. Closing it then returns
+// to the Fleet list.
+const queryClient = useQueryClient()
+const removalTarget = ref<MachineDto | null>(null)
+const removing = computed({
+  get: () => removalTarget.value !== null,
+  set: (open: boolean) => {
+    if (!open)
+      removalTarget.value = null
+  },
+})
+
+async function onRemoved() {
+  await queryClient.invalidateQueries({ queryKey: ['fleet'] })
+}
+
+async function leaveRemoved() {
+  await router.push('/fleet')
+  queryClient.removeQueries({ queryKey: ['machine', machineId] })
+}
 
 async function copySsh() {
   if (!sshLine.value)
@@ -194,6 +219,14 @@ async function copySsh() {
           >
             VS Code: non-default port
           </span>
+          <button
+            type="button"
+            class="h-8 rounded-sm border border-fc-err/40 px-3 font-mono text-[11px] text-fc-err hover:bg-fc-err/10"
+            data-testid="remove-machine"
+            @click="removalTarget = machine"
+          >
+            Remove…
+          </button>
         </div>
       </header>
 
@@ -267,5 +300,13 @@ async function copySsh() {
         </div>
       </Tabs>
     </template>
+
+    <RemoveMachineDialog
+      v-if="removalTarget"
+      v-model:open="removing"
+      :machine="removalTarget"
+      @removed="onRemoved"
+      @done="leaveRemoved"
+    />
   </div>
 </template>

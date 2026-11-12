@@ -5,7 +5,9 @@ import {
   frogenvCommand,
   installNodeCommand,
   lifecycleCommand,
+  machineRemoveCommand,
   miseCommand,
+  nodeRevokeCommand,
   observeGuestCommand,
   shellQuote,
   skillsProbeCommand,
@@ -48,5 +50,21 @@ describe('fleetctl builders', () => {
   it('pipes destructive parameters on stdin, never in argv', () => {
     expect(destructiveCommand('snapshot', guest, { snapshot: 'pre upgrade', description: `it's` }))
       .toBe(`printf '%s' '{"snapshot":"pre upgrade","description":"it'\\''s"}' | fleetctl proxmox snapshot --account acc1 --node pve --vmid 100 --wait`)
+  })
+})
+
+describe('removal builders', () => {
+  it('mirrors `fleetctl machines remove` without and with the uninstall', () => {
+    expect(machineRemoveCommand('m1', null)).toBe('fleetctl machines remove m1')
+    expect(machineRemoveCommand('m1', { endpointId: 'e2', auth: { type: 'default' } }))
+      .toBe('fleetctl machines remove m1 --uninstall --endpoint e2')
+    expect(machineRemoveCommand('m1', { endpointId: 'e2', auth: { type: 'agent' } }))
+      .toBe('fleetctl machines remove m1 --uninstall --endpoint e2 --auth agent')
+    expect(machineRemoveCommand('m1', { endpointId: 'e2', auth: { type: 'identityFile', path: '/keys/my key' } }))
+      .toBe(`fleetctl machines remove m1 --uninstall --endpoint e2 --auth identity-file --identity '/keys/my key'`)
+  })
+
+  it('mirrors `fleetctl nodes revoke`', () => {
+    expect(nodeRevokeCommand('m1')).toBe('fleetctl nodes revoke m1')
   })
 })
