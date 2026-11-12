@@ -38,3 +38,46 @@ paths = [
     '''^crates/fleet-protocol/src/fixtures\.rs$''',
     '''^proto/fixtures/''',
 ]
+
+[[allowlists]]
+description = """
+The redaction and key-handling modules test that PEM private-key armor is
+recognised and scrubbed, so their unit tests must contain BEGIN/END PRIVATE KEY
+lines. The bodies are placeholders ("fake", "AAAA", base64 of short words) that
+are not keys. This narrows only the private-key rule, only in these three
+files. Every other rule still applies there, and the private-key rule still
+applies everywhere else.
+"""
+targetRules = ["private-key"]
+paths = [
+    '''^crates/fleet-core/src/redact\.rs$''',
+    '''^crates/fleet-controller/src/lab_ssh_keys\.rs$''',
+    '''^crates/providers/fleet-provider-ssh/src/key\.rs$''',
+]
+
+[[allowlists]]
+description = """
+Exact placeholder values that the redaction, Registry and broker tests use as
+"this looks like a credential" input, so the tests can check it never reaches
+output. They are made up (counting sequences, "fake" passwords, a fixed
+UUIDv7 test identity, a made-up 24-character key) and grant nothing anywhere.
+
+W269N-WFGWX-YVC9B-4J6C9-T83GX is Microsoft's published KMS client setup key
+(GVLK) for Windows Pro, documented publicly for volume activation; it is not a
+licence.
+
+Matching is on the exact secret value, so a real credential in the same
+files is still caught.
+"""
+targetRules = ["generic-api-key", "curl-auth-user", "curl-auth-header"]
+regexTarget = "secret"
+regexes = [
+    '''^(api_key=)?0123456789abcdef0123456789abcdef$''',
+    '''^abcdef0123456789abcdef0123456789$''',
+    '''^(api_key=)?Zx81QwErTy93LkJhGf62Mn40$''',
+    '''^abcdefgh12345678$''',
+    '''^abcdefghijklmnop1234$''',
+    '''^01890f3e-9b4a-7cc2-98c3-d24e8f58f2a1$''',
+    '''^bob:fake(1|pw1)$''',
+    '''^W269N-WFGWX-YVC9B-4J6C9-T83GX$''',
+]
