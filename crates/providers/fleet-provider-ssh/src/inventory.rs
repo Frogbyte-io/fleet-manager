@@ -331,20 +331,27 @@ fleetFact hardware cpu_model {
   $name.Trim()
 }
 # The first IPv4 address of an up, non-loopback interface, by IPv4
-# interface index, skipping loopback and link-local addresses. One source
-# for every session: .NET's interface list needs no WMI, so an
-# administrator and a standard user report the same address (CIM's
-# Get-NetIPAddress is refused to a standard user and also lists the
-# addresses of disconnected adapters).
-fleetFact network ipv4 {
-  [System.Net.NetworkInformation.NetworkInterface]::GetAllNetworkInterfaces() |
+# interface index (an interface without IPv4 properties sorts last),
+# skipping loopback and link-local addresses. One source for every
+# session: .NET's interface list needs no WMI, so an administrator and a
+# standard user report the same address (CIM's Get-NetIPAddress is refused
+# to a standard user and also lists the addresses of disconnected adapters).
+function fleetPickIpv4($interfaces) {
+  $interfaces |
     Where-Object { "$($_.OperationalStatus)" -eq 'Up' -and "$($_.NetworkInterfaceType)" -ne 'Loopback' } |
-    Sort-Object -Property { try { $_.GetIPProperties().GetIPv4Properties().Index } catch { [int]::MaxValue } } |
+    Sort-Object -Property {
+      $index = $null
+      try { $index = $_.GetIPProperties().GetIPv4Properties().Index } catch { $index = $null }
+      if ($null -eq $index) { [int]::MaxValue } else { [int]$index }
+    } |
     ForEach-Object { $_.GetIPProperties().UnicastAddresses } |
     Where-Object { "$($_.Address.AddressFamily)" -eq 'InterNetwork' } |
     ForEach-Object { $_.Address.ToString() } |
     Where-Object { $_ -notlike '127.*' -and $_ -notlike '169.254.*' } |
     Select-Object -First 1
+}
+fleetFact network ipv4 {
+  fleetPickIpv4 ([System.Net.NetworkInformation.NetworkInterface]::GetAllNetworkInterfaces())
 }
 # Tools the plan names, the same set and fact shape as Linux: presence, then
 # the first line of `--version` as its own fact. The names are literals here,
@@ -890,6 +897,112 @@ function Get-NetIPAddress {
             known_value(&controller, "os", "product_type"),
             Some("domain_controller")
         );
+    }
+
+    /// The shipped `fleetPickIpv4` function, cut from the probe text so the
+    /// test exercises exactly what runs on a workstation.
+    fn pick_ipv4_function() -> String {
+        let script = probe_script_for(GuestShell::PowerShell);
+        let start = script
+            .find("function fleetPickIpv4(")
+            .expect("the IPv4 selection function");
+        let end = start + script[start..].find("\n}\n").expect("its end") + 3;
+        assert!(
+            script.contains(
+                "fleetPickIpv4 ([System.Net.NetworkInformation.NetworkInterface]::GetAllNetworkInterfaces())"
+            ),
+            "the probe must feed the selection .NET's interface list"
+        );
+        script[start..end].to_owned()
+    }
+
+    #[test]
+    fn the_ipv4_selection_takes_the_lowest_index_up_interface_and_skips_the_rest() {
+        let Some(pwsh) = require_pwsh() else { return };
+        // Fake interfaces with the shape the function reads from .NET:
+        // OperationalStatus, NetworkInterfaceType, GetIPProperties() with
+        // GetIPv4Properties().Index and UnicastAddresses[].Address.
+        let fakes = r"function fleetNic($status, $type, $index, [string[]]$addresses) {
+  $props = New-Object PSObject
+  $props | Add-Member -MemberType NoteProperty -Name Index -Value $index
+  $ip = New-Object PSObject
+  $ip | Add-Member -MemberType NoteProperty -Name V4 -Value $props
+  $ip | Add-Member -MemberType NoteProperty -Name UnicastAddresses -Value @($addresses | ForEach-Object { [pscustomobject]@{ Address = [System.Net.IPAddress]::Parse($_) } })
+  if ($null -eq $index) {
+    $ip | Add-Member -MemberType ScriptMethod -Name GetIPv4Properties -Value { throw 'no IPv4 on this interface' }
+  } else {
+    $ip | Add-Member -MemberType ScriptMethod -Name GetIPv4Properties -Value { $this.V4 }
+  }
+  $nic = [pscustomobject]@{ OperationalStatus = $status; NetworkInterfaceType = $type; Ip = $ip }
+  $nic | Add-Member -MemberType ScriptMethod -Name GetIPProperties -Value { $this.Ip }
+  $nic
+}
+function fleetCase($name, $interfaces) {
+  $picked = fleetPickIpv4 $interfaces
+  if ($null -eq $picked) { $picked = '<none>' }
+  [Console]::Out.Write($name + '=' + $picked + [char]10)
+}
+fleetCase 'mixed' @(
+  (fleetNic 'Up' 'Ethernet' 9 @('192.0.2.9')),
+  (fleetNic 'Down' 'Ethernet' 2 @('10.0.0.2')),
+  (fleetNic 'Up' 'Loopback' 1 @('127.0.0.1', '192.0.2.1')),
+  (fleetNic 'Up' 'Ethernet' $null @('fe80::1')),
+  (fleetNic 'Up' 'Wireless80211' 4 @('169.254.7.7', 'fe80::4', '127.0.0.5', '192.0.2.4', '192.0.2.44'))
+)
+fleetCase 'apipa-only-lower' @(
+  (fleetNic 'Up' 'Ethernet' 3 @('169.254.3.3')),
+  (fleetNic 'Up' 'Ethernet' 8 @('198.51.100.8'))
+)
+fleetCase 'index-not-list-order' @(
+  (fleetNic 'Up' 'Ethernet' 12 @('198.51.100.12')),
+  (fleetNic 'Up' 'Ethernet' 11 @('198.51.100.11'))
+)
+fleetCase 'none' @(
+  (fleetNic 'Down' 'Ethernet' 2 @('10.0.0.2')),
+  (fleetNic 'Up' 'Loopback' 1 @('127.0.0.1')),
+  (fleetNic 'Up' 'Ethernet' 5 @('169.254.5.5', 'fe80::5'))
+)
+fleetCase 'empty' @()
+";
+        let script = format!("{}{fakes}", pick_ipv4_function());
+        let out = run_ps(&pwsh, &script, &ScriptMetadata::default(), b"", None);
+        assert_eq!(out.status.code(), Some(0), "{out:?}");
+        assert_eq!(
+            text(&out.stdout),
+            // Down (index 2) and a loopback-type interface (1, even with a
+            // non-127 address) are skipped, as are 169.254.*,
+            // 127.* and IPv6 on the winner; index 4 beats index 9 and the
+            // interface without IPv4 properties.
+            "mixed=192.0.2.4\n\
+             apipa-only-lower=198.51.100.8\n\
+             index-not-list-order=198.51.100.11\n\
+             none=<none>\n\
+             empty=<none>\n",
+            "{out:?}"
+        );
+    }
+
+    #[test]
+    fn no_ipv4_candidate_is_unavailable() {
+        let Some(pwsh) = require_pwsh() else { return };
+        // A probe whose interface list holds nothing eligible reports the
+        // fact unavailable, not an empty known value.
+        let script = format!(
+            "{}{CIM_REFUSED}",
+            probe_script_for(GuestShell::PowerShell).replace(
+                "fleetPickIpv4 ([System.Net.NetworkInformation.NetworkInterface]::GetAllNetworkInterfaces())",
+                "fleetPickIpv4 @()"
+            )
+        );
+        let out = run_ps(&pwsh, &script, &ScriptMetadata::default(), b"", None);
+        assert_eq!(out.status.code(), Some(0), "{out:?}");
+        let facts = parse_probe_output(&text(&out.stdout), SystemTime::now());
+        let ipv4 = facts
+            .iter()
+            .find(|fact| fact.namespace == "network" && fact.name == "ipv4")
+            .expect("an ipv4 fact");
+        assert_eq!(ipv4.status.id(), "unavailable", "{ipv4:?}");
+        assert_eq!(ipv4.value, None);
     }
 
     #[test]
