@@ -31,9 +31,12 @@ ignore = [
     # Bundled SQLite < 3.54.0 can return uninitialized memory when it opens a
     # database together with a crafted sibling -wal file
     # (Frogbyte-io/fleet-manager#641). The fix is libsqlite3-sys 0.39, but
-    # sqlx 0.9.0, the latest release, requires ^0.37. Fleet opens only the
-    # controller's own database in its own state directory, never a file pair a
-    # less-trusted party could write. Remove when sqlx allows 0.39.
+    # sqlx 0.9.0, the latest release, requires ^0.37. The only database Fleet
+    # opens is the controller's own, at the operator-configured data_dir; no
+    # code path opens a database supplied by a user, node or agent. Whoever can
+    # plant a crafted -wal beside it can already rewrite the database itself,
+    # so the bug gives no capability beyond that write access. Remove when sqlx
+    # allows 0.39.
     "RUSTSEC-2026-0459",
 ]
 
