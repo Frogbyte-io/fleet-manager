@@ -243,11 +243,12 @@ jobs:
           node: 'false'
           rust: 'true'
 
-      # Windows is a supported target for the binaries and libraries, not the
-      # platform the full suite is gated on. It has to compile, link, and
-      # produce the binaries; Linux runs the exhaustive checks.
-      - run: cargo check --workspace --all-targets --all-features --locked
-      - run: cargo build --workspace --bins --locked
+      # Windows ships one binary: fleetctl (release.yml builds only it there).
+      # The controller and fleetd are Linux-only (docs/PLAN.md, supported
+      # platform baseline), so this checks fleetctl and every library it
+      # links, not the whole workspace. Linux runs the exhaustive checks.
+      - run: cargo check -p fleetctl --all-targets --all-features --locked
+      - run: cargo build -p fleetctl --bins --locked
 
   cargo-deny:
     name: Cargo dependency policy (Linux)

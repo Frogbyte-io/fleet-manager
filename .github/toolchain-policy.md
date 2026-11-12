@@ -45,7 +45,8 @@ slide into an unsupported image that GitHub eventually removes anyway.
 
 macOS is deliberately absent. The supported baseline in
 [docs/PLAN.md](../docs/PLAN.md#supported-platform-baseline) is Linux x86_64
-(full checks) and Windows (binary and library compatibility). macOS is deferred,
+(full checks) and Windows for `fleetctl`, the one binary released there, and
+the libraries it links (compatibility). macOS is deferred,
 and a runner for a deferred target produces maintenance without a promise.
 
 ## What CI runs, and when it starts running it
