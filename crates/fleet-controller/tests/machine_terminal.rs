@@ -787,3 +787,74 @@ async fn an_explicit_auth_is_rechecked_at_attach() {
     assert_eq!(closed(&mut socket).await.0, 4403);
     assert_eq!(world.sessions.session_count(), 0);
 }
+
+/// Linux sshd stands in for the Windows server: check the exact exec request,
+/// then relay a real interactive shell. Real ConPTY/5.1 validation is #611.
+#[tokio::test]
+async fn recorded_windows_terminal_uses_exec_and_audits_start_and_end() {
+    use fleet_application::machine::MachinePort as _;
+    let world = World::new(TerminalLimits::default()).await;
+    MachineRepository::new(world.pool.clone())
+        .record_endpoint_os(&world.endpoint_id, fleet_core::GuestOs::Windows)
+        .await
+        .unwrap();
+    let script = world.dir.path().join("terminal-standin");
+    std::fs::write(&script, concat!(
+        "#!/bin/sh\n",
+        "expected=\"& (Join-Path \\$PSHOME 'powershell.exe') -NoLogo -NoProfile; exit \\$LASTEXITCODE\"\n",
+        "[ \"$SSH_ORIGINAL_COMMAND\" = \"$expected\" ] || exit 91\n",
+        "exec /bin/bash --noprofile --norc -i\n"
+    )).unwrap();
+    use std::os::unix::fs::PermissionsExt as _;
+    std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let authorized = world.sshd.keys_dir.path().join("authorized_keys");
+    let public = std::fs::read_to_string(&authorized).unwrap();
+    std::fs::write(
+        &authorized,
+        format!("command=\"{}\" {public}", script.display()),
+    )
+    .unwrap();
+    let address = world.serve(Policy::allow_all(), Some(lan())).await;
+    let token = world.create().await;
+    let mut socket = attach(address, &token, None).await.unwrap();
+    expect_ready(&mut socket).await;
+    socket
+        .send(Message::Binary(
+            b"echo windows-terminal-fixture\n".to_vec().into(),
+        ))
+        .await
+        .unwrap();
+    read_until(&mut socket, "windows-terminal-fixture").await;
+    socket
+        .send(Message::Binary(b"exit 7\n".to_vec().into()))
+        .await
+        .unwrap();
+    let mut exit_frame = None;
+    loop {
+        match next(&mut socket, Duration::from_secs(20)).await {
+            Some(Seen::Text(text)) => exit_frame = Some(text),
+            Some(Seen::Closed(code, _)) => {
+                assert_eq!(code, 1000);
+                break;
+            }
+            Some(Seen::Output(_)) => {}
+            None => panic!("terminal never closed"),
+        }
+    }
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&exit_frame.unwrap()).unwrap(),
+        serde_json::json!({"type":"exit", "code":7})
+    );
+    world.settled().await;
+    let audit = world.audit_text().await;
+    for event in [
+        "terminal_session_created",
+        "terminal_session_started",
+        "terminal_session_ended",
+    ] {
+        assert!(audit.contains(event), "{event}");
+    }
+    assert!(audit.contains(r#""exitCode":"7""#));
+    assert!(!audit.contains("windows-terminal-fixture"));
+    assert_eq!(world.key_files(), 0);
+}
