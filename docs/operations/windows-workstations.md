@@ -111,7 +111,7 @@ Each shell answers it differently, so the controller knows which one it reached.
 
 A refused test fails with that reason and a detail naming the setting; `discover` fails the same way, and `add` refuses the draft (`409`) until a new test passes. Fix the setting on the workstation and run `onboard test` again.
 
-Confirming a host key (the first time, or again after the key changed) drops the draft's shell answer and the facts discover collected, and a test that sees an unconfirmed or changed key drops the shell answer too: what answered behind another key says nothing about this one, so run discover again after a re-confirmation. `add` refuses a shell answer older than the latest confirmation and asks for a new test. The same holds for a registered machine: confirming an endpoint's host key clears its recorded OS.
+Confirming a host key (the first time, or again after the key changed) drops the draft's shell answer and the facts discover collected, and a test that sees an unconfirmed or changed key drops the shell answer too: what answered behind another key says nothing about this one, so run discover again after a re-confirmation. `add` refuses a shell answer older than the latest confirmation and asks for a new test. The same holds for a registered machine: confirming an endpoint's host key clears its recorded OS, and marks the `known` capability facts an SSH inventory observed (source `agentless/…`) `stale` until the next inventory sees them again. Facts reported by a fleetd node or by Proxmox are kept.
 
 ## What the inventory reports
 

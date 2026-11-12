@@ -164,6 +164,93 @@ async fn confirming_a_host_key_clears_the_recorded_os() {
     );
 }
 
+/// The facts an SSH inventory observed through the address may describe the
+/// other machine too: confirming a host key turns them stale until the next
+/// inventory (#624). Facts from other sources and other machines stay.
+#[tokio::test]
+async fn confirming_a_host_key_marks_the_ssh_observed_facts_stale() {
+    use fleet_core::{CapabilityFact, CapabilityStatus, Timestamp};
+    let fact = |name: &str, status: CapabilityStatus, source: &str| CapabilityFact {
+        namespace: "tool".to_owned(),
+        name: name.to_owned(),
+        value: Some("1.0".to_owned()),
+        status,
+        observed_at: Timestamp::from_unix_millis(1_000),
+        source: source.to_owned(),
+    };
+    let (_dir, store) = store().await;
+    let machines = MachineRepository::new(store.pool().clone());
+    let machine = machines.register(&workstation()).await.unwrap();
+    let mut other = workstation();
+    other.name = "workstation-2".to_owned();
+    let other = machines.register(&other).await.unwrap();
+    machines
+        .record_capabilities(
+            &machine.id,
+            &[
+                fact("git", CapabilityStatus::Known, "agentless/1"),
+                fact("docker", CapabilityStatus::Unavailable, "agentless/1"),
+                fact("node", CapabilityStatus::Known, "fleetd/tools/1"),
+                fact("qemu-agent", CapabilityStatus::Known, "proxmox/8.3.0"),
+            ],
+        )
+        .await
+        .unwrap();
+    machines
+        .record_capabilities(
+            &other.id,
+            &[fact("git", CapabilityStatus::Known, "agentless/1")],
+        )
+        .await
+        .unwrap();
+
+    machines
+        .confirm_fingerprint(&machine.endpoints[1].id, "SHA256:another", 2)
+        .await
+        .unwrap();
+    let status_of = |machine: &fleet_application::machine::Machine, name: &str| {
+        let fact = machine
+            .capabilities
+            .iter()
+            .find(|fact| fact.name == name)
+            .unwrap();
+        (
+            fact.status,
+            fact.value.clone(),
+            fact.observed_at.unix_millis(),
+        )
+    };
+    let read = machines.get(&machine.id).await.unwrap();
+    assert_eq!(
+        status_of(&read, "git"),
+        (CapabilityStatus::Stale, Some("1.0".to_owned()), 1_000),
+        "what was seen, and when, stays"
+    );
+    assert_eq!(status_of(&read, "docker").0, CapabilityStatus::Unavailable);
+    assert_eq!(status_of(&read, "node").0, CapabilityStatus::Known);
+    assert_eq!(status_of(&read, "qemu-agent").0, CapabilityStatus::Known);
+    let other_read = machines.get(&other.id).await.unwrap();
+    assert_eq!(status_of(&other_read, "git").0, CapabilityStatus::Known);
+
+    // The next inventory observes it again.
+    machines
+        .record_capabilities(
+            &machine.id,
+            &[fact("git", CapabilityStatus::Known, "agentless/1")],
+        )
+        .await
+        .unwrap();
+    let read = machines.get(&machine.id).await.unwrap();
+    assert_eq!(status_of(&read, "git").0, CapabilityStatus::Known);
+
+    // An unknown endpoint changes nothing.
+    let missing = machines
+        .confirm_fingerprint("no-such-endpoint", "SHA256:another", 3)
+        .await
+        .unwrap_err();
+    assert!(matches!(missing, PortFailure::NotFound { .. }), "{missing}");
+}
+
 /// A detected OS is written with its audit event in one transaction, and
 /// only under the fingerprint the detection ran with.
 #[tokio::test]

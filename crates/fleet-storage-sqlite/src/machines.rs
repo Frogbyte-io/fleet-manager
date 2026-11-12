@@ -408,6 +408,11 @@ impl MachinePort for MachineRepository {
         fingerprint: &str,
         confirmed_at: i64,
     ) -> Result<(), PortFailure> {
+        let mut tx = self
+            .pool
+            .begin_with("BEGIN IMMEDIATE")
+            .await
+            .map_err(|error| backend("confirm_fingerprint", &error))?;
         let updated = sqlx::query(
             // A (re)confirmed host key may be a different machine behind the
             // same address: the recorded guest OS is cleared with it and is
@@ -418,7 +423,7 @@ impl MachinePort for MachineRepository {
         .bind(endpoint_id)
         .bind(fingerprint)
         .bind(confirmed_at)
-        .execute(&self.pool)
+        .execute(&mut *tx)
         .await
         .map_err(|error| backend("confirm_fingerprint", &error))?;
         if updated.rows_affected() == 0 {
@@ -426,6 +431,26 @@ impl MachinePort for MachineRepository {
                 what: format!("endpoint {endpoint_id:?}"),
             });
         }
+        // For the same reason, the facts an SSH inventory observed through
+        // that address may describe the other machine: each `known` one turns
+        // `stale` (planning and tool comparison then treat it as unknown)
+        // until the next inventory observes it again (#624). Its value and
+        // observation time stay, so the read model still shows what was last
+        // seen and when. Facts with another source (a fleetd node, Proxmox,
+        // Fleet's own records) were not observed through the address and are
+        // kept as they are.
+        sqlx::query(
+            "UPDATE machine_capabilities SET status = 'stale' \
+             WHERE status = 'known' AND source LIKE 'agentless/%' \
+             AND machine_id = (SELECT machine_id FROM machine_endpoints WHERE id = ?1)",
+        )
+        .bind(endpoint_id)
+        .execute(&mut *tx)
+        .await
+        .map_err(|error| backend("confirm_fingerprint", &error))?;
+        tx.commit()
+            .await
+            .map_err(|error| backend("confirm_fingerprint", &error))?;
         Ok(())
     }
 

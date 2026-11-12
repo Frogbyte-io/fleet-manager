@@ -403,6 +403,15 @@ mod tests {
     fn run_purge(
         state: impl FnOnce(&std::path::Path) -> std::path::PathBuf,
     ) -> (Option<i32>, String, bool, tempfile::TempDir) {
+        run_purge_on(None, state)
+    }
+
+    /// [`run_purge`] with `PATH` set to `path` (the system `PATH` when
+    /// `None`).
+    fn run_purge_on(
+        path: Option<&std::path::Path>,
+        state: impl FnOnce(&std::path::Path) -> std::path::PathBuf,
+    ) -> (Option<i32>, String, bool, tempfile::TempDir) {
         // The purge refuses a state directory with a group- or
         // world-writable ancestor, which /tmp is: work under $HOME instead.
         let dir = tempfile::tempdir_in(std::env::var_os("HOME").expect("HOME is set")).unwrap();
@@ -420,7 +429,8 @@ mod tests {
         let unit = root.join("fleetd.service");
         std::fs::write(&unit, "").unwrap();
         let state_dir = state(root);
-        let output = std::process::Command::new("bash")
+        let mut command = std::process::Command::new(system_tool("bash"));
+        command
             .arg("-c")
             .arg(UNINSTALL_SCRIPT)
             .arg("uninstall.sh")
@@ -429,9 +439,11 @@ mod tests {
             .env("FLEETD_BIN_DIR", root)
             .env("FLEETD_ENV_FILE", root.join("fleetd.env"))
             .env("FLEETD_STATE_DIR", &state_dir)
-            .env("FLEETD_SYSTEMCTL", &stub)
-            .output()
-            .unwrap();
+            .env("FLEETD_SYSTEMCTL", &stub);
+        if let Some(path) = path {
+            command.env("PATH", path);
+        }
+        let output = command.output().unwrap();
         (
             output.status.code(),
             String::from_utf8_lossy(&output.stderr).into_owned(),
@@ -530,6 +542,140 @@ mod tests {
         assert!(dir.path().join("parent/state/node.key").exists());
     }
 
+    /// The absolute path of a system tool, from the usual directories.
+    fn system_tool(name: &str) -> std::path::PathBuf {
+        ["/usr/bin", "/bin", "/usr/sbin", "/sbin"]
+            .iter()
+            .map(|dir| std::path::Path::new(dir).join(name))
+            .find(|path| path.exists())
+            .unwrap_or_else(|| panic!("{name} is installed"))
+    }
+
+    /// Writes an executable shell script.
+    fn write_script(path: &std::path::Path, body: &str) {
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::write(path, body).unwrap();
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+
+    /// A directory to use as the whole `PATH` of the scripts: the tools they
+    /// call, without `sudo` (so nothing escalates) and without `getfacl`
+    /// unless a stub is given. Each stub answers for a path whose last
+    /// component is `acl-here` (an ACL is present) or `acl-unreadable` (the
+    /// read fails), and like a file without an ACL otherwise.
+    fn curated_path(getfacl: bool, ls_stub: bool) -> tempfile::TempDir {
+        let dir = tempfile::tempdir().unwrap();
+        for tool in [
+            "bash", "dirname", "find", "getent", "grep", "head", "id", "install", "ls", "mv", "rm",
+            "rmdir", "sed", "sleep", "stat", "tee", "tr", "chmod", "cat", "env",
+        ] {
+            if tool == "ls" && ls_stub {
+                continue;
+            }
+            std::os::unix::fs::symlink(system_tool(tool), dir.path().join(tool)).unwrap();
+        }
+        if getfacl {
+            write_script(
+                &dir.path().join("getfacl"),
+                "#!/bin/sh\nfor last; do :; done\ncase \"$last\" in\n  */acl-here) echo 'user:nobody:rwx'; echo 'mask::rwx' ;;\n  */acl-unreadable) exit 1 ;;\nesac\nexit 0\n",
+            );
+        }
+        if ls_stub {
+            write_script(
+                &dir.path().join("ls"),
+                &format!(
+                    "#!/bin/sh\nfor last; do :; done\ncase \"$last\" in\n  */acl-here) echo \"drwxr-xr-x+ 2 owner owner 4096 Jan  1 00:00 $last\"; exit 0 ;;\n  */acl-unreadable) exit 2 ;;\nesac\nexec {} \"$@\"\n",
+                    system_tool("ls").display()
+                ),
+            );
+        }
+        dir
+    }
+
+    /// A fleetd state directory under `root/<ancestor>/state`, where the
+    /// ancestor is an ordinary 0755 directory.
+    fn state_under(root: &std::path::Path, ancestor: &str) -> std::path::PathBuf {
+        use std::os::unix::fs::PermissionsExt as _;
+        let parent = root.join(ancestor);
+        std::fs::create_dir(&parent).unwrap();
+        std::fs::set_permissions(&parent, std::fs::Permissions::from_mode(0o755)).unwrap();
+        fleetd_state(&parent.join("state"));
+        parent.join("state")
+    }
+
+    #[test]
+    fn a_purge_refuses_an_ancestor_with_a_posix_acl() {
+        // Read through getfacl when it is installed, and from the `+` that
+        // `ls -l` prints when it is not.
+        for (getfacl, ls_stub) in [(true, false), (false, true)] {
+            let path = curated_path(getfacl, ls_stub);
+            for (ancestor, why) in [
+                ("acl-here", "has a POSIX ACL"),
+                // An ACL that cannot be read counts as present.
+                ("acl-unreadable", "has a POSIX ACL"),
+            ] {
+                let (code, stderr, unit_kept, dir) =
+                    run_purge_on(Some(path.path()), |root| state_under(root, ancestor));
+                assert_ne!(code, Some(0), "getfacl {getfacl}: {stderr}");
+                assert!(stderr.contains(why), "getfacl {getfacl}: {stderr}");
+                assert!(stderr.contains("nothing was removed"), "{stderr}");
+                assert!(unit_kept, "the refusal comes before anything is removed");
+                assert!(dir.path().join(ancestor).join("state/node.key").exists());
+            }
+            // The same tools let an ancestor without an ACL through.
+            let (code, stderr, _, dir) =
+                run_purge_on(Some(path.path()), |root| state_under(root, "plain"));
+            assert_eq!(code, Some(0), "getfacl {getfacl}: {stderr}");
+            assert!(!dir.path().join("plain/state").exists());
+        }
+    }
+
+    #[test]
+    fn a_purge_refuses_a_real_acl_where_setfacl_is_installed() {
+        let Some(setfacl) = ["/usr/bin/setfacl", "/bin/setfacl"]
+            .into_iter()
+            .find(|path| std::path::Path::new(path).exists())
+        else {
+            eprintln!("setfacl is not installed; the stubbed ACL tests cover the refusal");
+            return;
+        };
+        let (code, stderr, unit_kept, dir) = run_purge(|root| {
+            let state = state_under(root, "shared");
+            let me = std::process::Command::new("id")
+                .arg("-un")
+                .output()
+                .unwrap();
+            let me = String::from_utf8_lossy(&me.stdout).trim().to_owned();
+            let applied = std::process::Command::new(setfacl)
+                .args(["-m", &format!("u:{me}:rwx")])
+                .arg(root.join("shared"))
+                .status()
+                .unwrap();
+            assert!(applied.success(), "the file system takes ACLs");
+            state
+        });
+        assert_ne!(code, Some(0), "{stderr}");
+        assert!(stderr.contains("has a POSIX ACL"), "{stderr}");
+        assert!(unit_kept);
+        assert!(dir.path().join("shared/state/node.key").exists());
+    }
+
+    #[test]
+    fn both_scripts_carry_the_same_ancestor_rule() {
+        const INSTALL_SCRIPT: &str = include_str!("../../../deploy/fleetd/install.sh");
+        fn shared_block(script: &str) -> &str {
+            let start = script
+                .find("# >>> state directory ancestors")
+                .expect("the shared block starts");
+            let end = script
+                .find("# <<< state directory ancestors")
+                .expect("the shared block ends");
+            &script[start..end]
+        }
+        assert_eq!(shared_block(INSTALL_SCRIPT), shared_block(UNINSTALL_SCRIPT));
+        assert!(shared_block(UNINSTALL_SCRIPT).contains("getfacl"));
+    }
+
     #[test]
     fn a_purge_removes_fleetds_own_state_and_an_empty_directory() {
         let (code, stderr, unit_kept, dir) = run_purge(|root| {
@@ -553,43 +699,70 @@ mod tests {
         assert!(!dir.path().join("state").exists());
     }
 
-    #[test]
-    fn the_install_refuses_to_adopt_a_foreign_or_linked_state_directory() {
-        const INSTALL_SCRIPT: &str = include_str!("../../../deploy/fleetd/install.sh");
-        let dir = tempfile::tempdir().unwrap();
+    /// A scratch archive and layout for `install.sh`, under `$HOME` (the
+    /// install refuses `/tmp`, a world-writable ancestor, like the purge).
+    /// `systemctl` is a stub that answers `active`, and `useradd` does
+    /// nothing, so the install runs as the invoking user.
+    fn install_scratch() -> tempfile::TempDir {
+        use std::os::unix::fs::PermissionsExt as _;
+        let dir = tempfile::tempdir_in(std::env::var_os("HOME").expect("HOME is set")).unwrap();
         let root = dir.path();
+        std::fs::set_permissions(root, std::fs::Permissions::from_mode(0o755)).unwrap();
         std::fs::create_dir(root.join("archive")).unwrap();
         std::fs::write(root.join("archive/fleetd.service"), "").unwrap();
-        std::fs::write(root.join("archive/fleetd"), "#!/bin/sh\nexit 0\n").unwrap();
-        {
-            use std::os::unix::fs::PermissionsExt as _;
-            std::fs::set_permissions(
-                root.join("archive/fleetd"),
-                std::fs::Permissions::from_mode(0o755),
-            )
-            .unwrap();
+        write_script(&root.join("archive/fleetd"), "#!/bin/sh\nexit 0\n");
+        write_script(
+            &root.join("systemctl"),
+            "#!/bin/sh\n[ \"$1\" = is-active ] && echo active\nexit 0\n",
+        );
+        dir
+    }
+
+    /// Runs the shipped `install.sh` in [`install_scratch`] with the state
+    /// directory `state`, with `PATH` set to `path` when given. Answers the
+    /// exit code and stderr.
+    fn run_install(
+        root: &std::path::Path,
+        state: &std::path::Path,
+        path: Option<&std::path::Path>,
+    ) -> (Option<i32>, String) {
+        const INSTALL_SCRIPT: &str = include_str!("../../../deploy/fleetd/install.sh");
+        let mut command = std::process::Command::new(system_tool("bash"));
+        command
+            .arg("-c")
+            .arg(INSTALL_SCRIPT)
+            .arg(root.join("archive/install.sh"))
+            .env("FLEETD_ARCHIVE_DIR", root.join("archive"))
+            .env("FLEETD_STATE_DIR", state)
+            .env("FLEETD_BIN_DIR", root.join("bin"))
+            .env("FLEETD_UNIT_DIR", root.join("unit"))
+            .env("FLEETD_ENV_FILE", root.join("env"))
+            .env("FLEETD_SYSTEMCTL", root.join("systemctl"))
+            .env("FLEETD_USER_ADD", "/bin/true")
+            .env("FLEET_CONTROLLER_URL", "http://controller.invalid:8080")
+            .env("FLEET_ENROLL_TOKEN", "fixture-token");
+        if let Some(path) = path {
+            command.env("PATH", path);
         }
+        let output = command.output().unwrap();
+        (
+            output.status.code(),
+            String::from_utf8_lossy(&output.stderr).into_owned(),
+        )
+    }
+
+    #[test]
+    fn the_install_refuses_to_adopt_a_foreign_or_linked_state_directory() {
+        let dir = install_scratch();
+        let root = dir.path();
         let foreign = root.join("foreign");
         std::fs::create_dir(&foreign).unwrap();
         std::fs::write(foreign.join("data"), "not fleetd's").unwrap();
         let link = root.join("link");
         std::os::unix::fs::symlink(&foreign, &link).unwrap();
         for (state, why) in [(&foreign, "not fleetd's"), (&link, "symbolic link")] {
-            let output = std::process::Command::new("bash")
-                .arg("-c")
-                .arg(INSTALL_SCRIPT)
-                .arg(root.join("archive/install.sh"))
-                .env("FLEETD_ARCHIVE_DIR", root.join("archive"))
-                .env("FLEETD_STATE_DIR", state)
-                .env("FLEETD_BIN_DIR", root.join("bin"))
-                .env("FLEETD_UNIT_DIR", root.join("unit"))
-                .env("FLEETD_ENV_FILE", root.join("env"))
-                .env("FLEETD_SYSTEMCTL", "/bin/true")
-                .env("FLEETD_USER_ADD", "/bin/true")
-                .output()
-                .unwrap();
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            assert_ne!(output.status.code(), Some(0), "{stderr}");
+            let (code, stderr) = run_install(root, state, None);
+            assert_ne!(code, Some(0), "{stderr}");
             assert!(stderr.contains(why), "{stderr}");
             assert!(
                 !root.join("bin").exists(),
@@ -597,6 +770,58 @@ mod tests {
             );
         }
         assert!(foreign.join("data").exists());
+    }
+
+    #[test]
+    fn the_install_applies_the_purge_ancestor_rule() {
+        use std::os::unix::fs::PermissionsExt as _;
+        // A group-writable, a symlinked and an ACL-carrying ancestor, and a
+        // relative path, are each refused before anything is created.
+        let dir = install_scratch();
+        let root = dir.path();
+        std::fs::create_dir(root.join("open")).unwrap();
+        std::fs::set_permissions(root.join("open"), std::fs::Permissions::from_mode(0o775))
+            .unwrap();
+        std::fs::create_dir(root.join("real")).unwrap();
+        std::os::unix::fs::symlink(root.join("real"), root.join("linked")).unwrap();
+        std::fs::create_dir(root.join("acl-here")).unwrap();
+        std::fs::set_permissions(
+            root.join("acl-here"),
+            std::fs::Permissions::from_mode(0o755),
+        )
+        .unwrap();
+        let stubbed = curated_path(true, false);
+        for (state, path, why) in [
+            (root.join("open/state"), None, "writable by group or others"),
+            (root.join("linked/state"), None, "is a symbolic link"),
+            (
+                std::path::PathBuf::from("relative/state"),
+                None,
+                "not an absolute path",
+            ),
+            (
+                root.join("acl-here/state"),
+                Some(stubbed.path()),
+                "has a POSIX ACL",
+            ),
+        ] {
+            let (code, stderr) = run_install(root, &state, path);
+            assert_ne!(code, Some(0), "{stderr}");
+            assert!(stderr.contains("refusing to adopt"), "{stderr}");
+            assert!(stderr.contains(why), "{stderr}");
+            assert!(!state.exists(), "no state directory was created");
+            assert!(
+                !root.join("bin").exists(),
+                "nothing was installed: {stderr}"
+            );
+        }
+
+        // Ancestors that do not exist yet pass: the install creates them
+        // (root's, 0755) and checks them again once they exist.
+        let (code, stderr) = run_install(root, &root.join("fresh/deeper/state"), None);
+        assert_eq!(code, Some(0), "{stderr}");
+        assert!(root.join("fresh/deeper/state").is_dir());
+        assert!(root.join("bin/fleetd").exists());
     }
 
     #[test]

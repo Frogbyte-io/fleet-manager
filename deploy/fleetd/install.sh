@@ -34,7 +34,10 @@
 #
 # Behavior:
 #   - Creates the system account `fleet` (no login shell) and the state
-#     directory 0750 fleet:fleet.
+#     directory 0750 fleet:fleet. Every ancestor of the state directory must
+#     pass the rule uninstall.sh --purge applies (a real directory owned by
+#     root, not writable by group or others, no POSIX ACL); anything else is
+#     refused, so no layout the purge would refuse is ever installed.
 #   - Installs the binary atomically (write to temp, rename).
 #   - Installs the unit and the environment file, enables the service.
 #   - Enrolls only when there is no usable enrollment yet: an existing
@@ -160,12 +163,78 @@ cleanup() {
 trap cleanup EXIT
 
 # --- system account and state directory ---------------------------------------
+# >>> state directory ancestors: kept identical in install.sh and uninstall.sh
+# (a test compares the two copies), so the installer never adopts a state
+# directory that the purge would refuse.
+#
+# Every ancestor of $STATE_DIR must be a real directory (not a symbolic
+# link), owned by root, not writable by group or others, and without a POSIX
+# ACL, which can grant write access that the mode bits do not show. Then
+# nobody else can swap a path component. When the service account does not
+# exist and a non-root user runs the script (stubbed installs), the invoking
+# user may own an ancestor instead. With `missing-ok` as $1, an ancestor that
+# does not exist yet passes: install.sh is about to create it. A failure calls
+# refuse_state with the reason.
+#
+# ACLs are read with `getfacl --skip-base` when it is installed, otherwise from
+# the `+` that `ls -l` prints after the mode of a file that has one. An ACL
+# that cannot be read counts as present.
+ancestor_has_acl() {
+    local listing
+    if command -v getfacl >/dev/null 2>&1; then
+        listing="$(getfacl --absolute-names --skip-base --omit-header -- "$1" 2>/dev/null)" \
+            || return 0
+        [ -n "$listing" ]
+        return
+    fi
+    listing="$(ls -ld -- "$1" 2>/dev/null)" || return 0
+    [ "${listing:10:1}" = "+" ]
+}
+check_state_ancestors() {
+    local ancestor_owner dir a_owner a_mode
+    # A relative path has no ancestors to check (and `dirname .` is `.`).
+    case "$STATE_DIR" in
+        /*) ;;
+        *) refuse_state "it is not an absolute path" ;;
+    esac
+    if [ "$IS_ROOT" = true ] || getent passwd "$SERVICE_USER" >/dev/null 2>&1; then
+        ancestor_owner=root
+    else
+        ancestor_owner="$(id -un)"
+    fi
+    dir="$(dirname -- "$STATE_DIR")"
+    while :; do
+        if [ -L "$dir" ]; then
+            refuse_state "its ancestor $dir is a symbolic link"
+        elif [ -e "$dir" ] || [ "${1:-}" != missing-ok ]; then
+            [ -d "$dir" ] || refuse_state "its ancestor $dir is not a directory"
+            a_owner="$(stat -c %U -- "$dir" 2>/dev/null)" || refuse_state "the owner of $dir cannot be read"
+            a_mode="$(stat -c %a -- "$dir" 2>/dev/null)" || refuse_state "the mode of $dir cannot be read"
+            [ "$a_owner" = root ] || [ "$a_owner" = "$ancestor_owner" ] \
+                || refuse_state "its ancestor $dir is owned by $a_owner, not root"
+            [ $(( 8#$a_mode & 8#022 )) -eq 0 ] \
+                || refuse_state "its ancestor $dir is writable by group or others (mode $a_mode)"
+            ! ancestor_has_acl "$dir" \
+                || refuse_state "its ancestor $dir has a POSIX ACL, which may grant write access (remove it with setfacl -b)"
+        fi
+        [ "$dir" = / ] && break
+        dir="$(dirname -- "$dir")"
+    done
+}
+# <<< state directory ancestors
+
+refuse_state() { die "refusing to adopt the state directory $STATE_DIR: $1"; }
+
 # Ownership flags derive from the account's actual existence: a stubbed
 # useradd (tests) creates nothing, and `install -o fleet` would then fail
 # even as root.
 # The state directory becomes the service account's, and an uninstall with
 # --purge deletes it: never adopt a symlink, or a non-empty directory that is
 # not already fleetd's (it would hold fleetd's node key).
+# Its ancestors first, the way uninstall.sh --purge checks them: a layout the
+# purge would refuse is never installed, so it is never recorded either. An
+# ancestor this run creates is checked once it exists, below.
+check_state_ancestors missing-ok
 if [ -L "$STATE_DIR" ]; then
     die "the state directory $STATE_DIR is a symbolic link; refusing to adopt it"
 fi
@@ -193,6 +262,10 @@ else
     install -d -m 0750 "$STATE_DIR" \
         || die "cannot prepare the state directory $STATE_DIR"
 fi
+# Again, now that every ancestor exists and the service account is settled:
+# the first check let the invoking user own an ancestor while no `fleet`
+# account existed, and once it exists the ancestors must be root's.
+check_state_ancestors
 
 # --- binary (atomic replace) -------------------------------------------------
 "${RUN_PRIV[@]}" install -d -m 0755 "$BIN_DIR"

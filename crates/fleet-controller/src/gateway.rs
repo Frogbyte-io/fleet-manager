@@ -134,8 +134,19 @@ impl SessionEntry {
 #[derive(Debug, Default)]
 pub struct Registry {
     sessions: Mutex<HashMap<String, Arc<SessionEntry>>>,
-    /// Machines removed from Fleet (#616). Their ids are never reused, so a
-    /// session for one is never registered again. Locked before `sessions`.
+    /// Machines removed from Fleet (#616): a session for one is never
+    /// registered again. Locked before `sessions`.
+    ///
+    /// This mark lives in this process only. It is not persisted, never
+    /// pruned, and gone after a restart; it grows by one id per removal.
+    /// That is safe because machine ids are never reused (the store mints a
+    /// fresh UUIDv7 per registration), so a stale mark can never block a
+    /// different machine, and after a restart the removed machine's node has
+    /// no identity left to authenticate with. If machine ids ever become
+    /// reusable (re-registering a machine under its old id, say), clear the
+    /// mark when an id is registered again, or key it by node identity
+    /// instead, or a re-added machine's node is refused until the next
+    /// restart (#624).
     removed: Mutex<HashSet<String>>,
 }
 
