@@ -203,7 +203,7 @@ impl World {
             machine_id: &self.machine_id,
             endpoint_id: None,
             auth: None,
-            guest_os: Some(GuestOs::Linux),
+            guest_os: None,
         }
     }
 
@@ -1494,4 +1494,161 @@ async fn the_hidden_operations_do_not_shorten_a_page() {
         .unwrap();
     assert_eq!(page.len(), 3, "a full page of visible operations");
     assert!(page.iter().all(|operation| operation.kind == "noop"));
+}
+
+/// Recorded Windows endpoints use the Lab path rules without a caller OS.
+#[tokio::test]
+async fn windows_machine_file_requests_enforce_drive_path_containment() {
+    let world = World::new().await;
+    world.use_stored_key_by_default().await;
+    MachineRepository::new(world.pool.clone())
+        .record_endpoint_os(&world.endpoint_id, GuestOs::Windows)
+        .await
+        .unwrap();
+    for path in [
+        r"C:\work\..\escape",
+        r"C:\work\.\file",
+        r"C:relative",
+        r"\\share\file",
+        r"\\?\C:\file",
+        r"C:\work\file:stream",
+        r"C:\work\NUL.txt",
+        r"C:\work\trailing.",
+        r"C:/work/../escape",
+    ] {
+        let put = PutRequestTarget {
+            target: world.target(),
+            guest_path: path,
+            overwrite: false,
+        };
+        assert!(
+            world
+                .access
+                .begin_upload(&fleet_auth::LanAllowAllAuthorizer, &lan(), &put)
+                .await
+                .is_err(),
+            "{path}"
+        );
+        assert!(
+            world
+                .access
+                .request_collect(
+                    &fleet_auth::LanAllowAllAuthorizer,
+                    &lan(),
+                    &world.target(),
+                    &[path.to_owned()]
+                )
+                .await
+                .is_err(),
+            "{path}"
+        );
+    }
+    for path in [r"C:\work dir\file.bin", "D:/work/file.bin"] {
+        let put = PutRequestTarget {
+            target: world.target(),
+            guest_path: path,
+            overwrite: false,
+        };
+        let mut writer = world
+            .access
+            .begin_upload(&fleet_auth::LanAllowAllAuthorizer, &lan(), &put)
+            .await
+            .unwrap();
+        writer.write(b"fixture bytes").await.unwrap();
+        let staged = writer.finish().await.unwrap();
+        let new = world
+            .access
+            .request_put(&fleet_auth::LanAllowAllAuthorizer, &lan(), &put, &staged)
+            .await
+            .unwrap();
+        let payload: serde_json::Value =
+            serde_json::from_str(new.payload_json.as_deref().unwrap()).unwrap();
+        assert_eq!(payload["guestOs"], "windows");
+        let new = world
+            .access
+            .request_collect(
+                &fleet_auth::LanAllowAllAuthorizer,
+                &lan(),
+                &world.target(),
+                &[path.to_owned()],
+            )
+            .await
+            .unwrap();
+        let payload: serde_json::Value =
+            serde_json::from_str(new.payload_json.as_deref().unwrap()).unwrap();
+        assert_eq!(payload["guestOs"], "windows");
+    }
+    assert!(
+        world
+            .access
+            .request_collect(
+                &fleet_auth::LanAllowAllAuthorizer,
+                &lan(),
+                &world.target(),
+                &[r"C:\work\file".to_owned(), "c:/WORK/file".to_owned()]
+            )
+            .await
+            .is_err()
+    );
+    let audit = world.audit_text().await;
+    assert!(audit.contains("machine_put_requested"));
+    assert!(audit.contains("machine_collect_requested"));
+    assert!(!audit.contains("fixture bytes"));
+}
+
+/// The real SSH session uses the Windows bootstrap and stdin data, while a
+/// fixed stand-in supplies output to exercise the shared scrubber and audit.
+#[tokio::test]
+async fn recorded_windows_exec_frames_argv_and_scrubs_results() {
+    use std::os::unix::fs::PermissionsExt as _;
+    let world = World::new().await;
+    world.use_stored_key_by_default().await;
+    MachineRepository::new(world.pool.clone())
+        .record_endpoint_os(&world.endpoint_id, GuestOs::Windows)
+        .await
+        .unwrap();
+    let command_file = world.dir.path().join("expected-command");
+    std::fs::write(
+        &command_file,
+        fleet_provider_ssh::shell::POWERSHELL_EXEC_BOOTSTRAP,
+    )
+    .unwrap();
+    let metadata_file = world.dir.path().join("received-metadata");
+    let script_file = world.dir.path().join("received-script");
+    let standin = world.dir.path().join("windows-exec-standin");
+    std::fs::write(&standin, format!(
+        "#!/bin/sh\n[ \"$SSH_ORIGINAL_COMMAND\" = \"$(cat '{}')\" ] || exit 91\nIFS= read -r meta\nIFS= read -r body\nprintf '%s' \"$meta\" | base64 -d > '{}'\nprintf '%s' \"$body\" | base64 -d > '{}'\nIFS= read -r watchdog\nIFS= read -r seconds\n[ \"$seconds\" = 15 ] || exit 92\nprintf '%s\\n' 'https://fixture:fixture@service.example.test/path'\nexit 7\n",
+        command_file.display(), metadata_file.display(), script_file.display(),
+    )).unwrap();
+    std::fs::set_permissions(&standin, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let authorized = world.sshd.keys_dir.path().join("authorized_keys");
+    let public = std::fs::read_to_string(&authorized).unwrap();
+    std::fs::write(
+        &authorized,
+        format!("command=\"{}\" {public}", standin.display()),
+    )
+    .unwrap();
+    let argument = "spaces ; $(not-code) ` café";
+    let done = world
+        .exec(
+            ExecCommand::Argv(vec!["tool.exe".to_owned(), argument.to_owned()]),
+            15,
+        )
+        .await;
+    assert_eq!(done.state, "failed", "{done:?}");
+    let result = error_of(&done);
+    assert_eq!(result["exitCode"], 7, "{done:?}");
+    assert_eq!(result["stdout"], "https://***@service.example.test/path\n");
+    let metadata = std::fs::read_to_string(metadata_file).unwrap();
+    assert!(metadata.split('\0').any(|part| part == argument));
+    assert_eq!(
+        std::fs::read_to_string(script_file).unwrap(),
+        fleet_application::machine_access::POWERSHELL_ARGV_SCRIPT
+    );
+    let audit = world.audit_text().await;
+    assert!(audit.contains("machine_exec_requested"));
+    assert!(audit.contains("commandSha256"));
+    assert!(!audit.contains(argument));
+    assert!(!audit.contains("fixture:fixture"));
+    assert_eq!(world.key_files(), 0);
 }
