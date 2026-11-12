@@ -183,14 +183,16 @@ fi
 }
 
 /// The Windows probe: the same fact set and JSON-line protocol, read through
-/// CIM and .NET (Windows PowerShell 5.1) instead of `uname` and `/proc`. Each
-/// fact is independent (a failing query is `unavailable`, never fatal) and
-/// values are base64 of their UTF-8 bytes. On top of the shared set it
-/// reports the Windows release (10 or 11, from the build number), edition,
-/// display version and build, the session's user and whether it holds the
-/// Administrators role, and the login shell's version, language mode and the
-/// OpenSSH `DefaultShell` value (ADR 0021). The tool set is the Linux one,
-/// found with `Get-Command -CommandType Application`.
+/// CIM, the registry and .NET (Windows PowerShell 5.1) instead of `uname` and
+/// `/proc`. CIM is asked first; WMI refuses a standard user's network logon,
+/// so every CIM fact falls back to a registry or .NET source with the same
+/// value (#611). Each fact is independent (a failing query is `unavailable`,
+/// never fatal) and values are base64 of their UTF-8 bytes. On top of the
+/// shared set it reports the Windows release (10 or 11, from the build
+/// number), edition, display version and build, the session's user and
+/// whether it holds the Administrators role, and the login shell's version,
+/// language mode and the OpenSSH `DefaultShell` value (ADR 0021). The tool
+/// set is the Linux one, found with `Get-Command -CommandType Application`.
 const WINDOWS_PROBE: &str = r#"$fleetT = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()
 function fleetEmit($ns, $name, $value, $status) {
   $v = ''
@@ -204,33 +206,73 @@ function fleetFact($ns, $name, [scriptblock]$read) {
   try { $value = & $read } catch { $value = $null }
   if ($null -ne $value -and "$value" -ne '') { fleetEmit $ns $name $value 'known' } else { fleetEmit $ns $name '' 'unavailable' }
 }
+# CIM first. A standard user's OpenSSH session is a network logon, which
+# WMI refuses ("Access denied"), so each fact read from CIM falls back to a
+# source that token can read: the registry and .NET. The fallbacks produce
+# the values CIM would, so a fact's source never changes its value.
 $fleetOs = $null; $fleetCs = $null; $fleetCpu = $null
-try { $fleetOs = Get-CimInstance -ClassName Win32_OperatingSystem } catch { }
-try { $fleetCs = Get-CimInstance -ClassName Win32_ComputerSystem } catch { }
-try { $fleetCpu = @(Get-CimInstance -ClassName Win32_Processor)[0] } catch { }
+try { $fleetOs = Get-CimInstance -ClassName Win32_OperatingSystem -ErrorAction Stop } catch { }
+try { $fleetCs = Get-CimInstance -ClassName Win32_ComputerSystem -ErrorAction Stop } catch { }
+try { $fleetCpu = @(Get-CimInstance -ClassName Win32_Processor -ErrorAction Stop)[0] } catch { }
+function fleetReg($path) {
+  try { Get-ItemProperty -Path $path -ErrorAction Stop } catch { $null }
+}
+$fleetCv = fleetReg 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion'
+$fleetBios = fleetReg 'HKLM:\HARDWARE\DESCRIPTION\System\BIOS'
+$fleetWinNt = "$([Environment]::OSVersion.Platform)" -eq 'Win32NT'
 fleetFact host architecture {
   switch ($env:PROCESSOR_ARCHITEW6432, $env:PROCESSOR_ARCHITECTURE | Where-Object { $_ } | Select-Object -First 1) {
     'AMD64' { 'x86_64' } 'ARM64' { 'aarch64' } 'x86' { 'i686' } default { $_ }
   }
 }
 fleetFact host hostname { [Net.Dns]::GetHostName() }
-fleetFact os kernel { $fleetOs.Version }
-fleetEmit os family 'Windows' known
-fleetEmit os distribution 'windows' known
-$fleetCv = $null
-try { $fleetCv = Get-ItemProperty -Path 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion' -ErrorAction Stop } catch { }
+# The build: CIM BuildNumber, else the registry's CurrentBuildNumber (the
+# same number), else the manifested process's OS version.
 $fleetBuild = 0
 try { $fleetBuild = [int]$fleetOs.BuildNumber } catch { }
+foreach ($fleetB in $fleetCv.CurrentBuildNumber, $fleetCv.CurrentBuild) {
+  if ($fleetBuild -le 0) { try { $fleetBuild = [int]$fleetB } catch { } }
+}
+if ($fleetBuild -le 0 -and $fleetWinNt) { try { $fleetBuild = [Environment]::OSVersion.Version.Build } catch { } }
+# The kernel version as CIM reports it: `10.0.<build>`.
+$fleetKernel = $null
+if ($fleetOs.Version) { $fleetKernel = "$($fleetOs.Version)" }
+elseif ($null -ne $fleetCv.CurrentMajorVersionNumber -and $null -ne $fleetCv.CurrentMinorVersionNumber -and $fleetBuild -gt 0) {
+  $fleetKernel = "$($fleetCv.CurrentMajorVersionNumber).$($fleetCv.CurrentMinorVersionNumber).$fleetBuild"
+} elseif ($fleetWinNt) {
+  try { $fleetV = [Environment]::OSVersion.Version; $fleetKernel = "$($fleetV.Major).$($fleetV.Minor).$($fleetV.Build)" } catch { }
+}
+fleetFact os kernel { $fleetKernel }
+fleetEmit os family 'Windows' known
+fleetEmit os distribution 'windows' known
+# The product type as CIM numbers it (1 workstation, 2 domain controller,
+# 3 server), else from the registry's ProductOptions.
+$fleetProductType = 0
+try { $fleetProductType = [int]$fleetOs.ProductType } catch { }
+if ($fleetProductType -le 0) {
+  $fleetPo = fleetReg 'HKLM:\SYSTEM\CurrentControlSet\Control\ProductOptions'
+  switch ("$($fleetPo.ProductType)") { 'WinNT' { $fleetProductType = 1 } 'LanmanNT' { $fleetProductType = 2 } 'ServerNT' { $fleetProductType = 3 } }
+}
 # Windows 11 kept major version 10; the build number tells them apart. A
 # server build is not a workstation release, so it gets no release fact.
 $fleetRelease = $null
-if ($fleetOs.ProductType -eq 1 -and $fleetBuild -ge 22000) { $fleetRelease = '11' }
-elseif ($fleetOs.ProductType -eq 1 -and $fleetBuild -ge 10240) { $fleetRelease = '10' }
+if ($fleetProductType -eq 1 -and $fleetBuild -ge 22000) { $fleetRelease = '11' }
+elseif ($fleetProductType -eq 1 -and $fleetBuild -ge 10240) { $fleetRelease = '10' }
+# The product name as the CIM caption reads it (`Microsoft Windows 11 Pro`).
+# The registry's ProductName still says `Windows 10` on Windows 11, so the
+# release from the build replaces it there.
+$fleetProductName = $null
+if ($fleetOs.Caption) { $fleetProductName = "$($fleetOs.Caption)" }
+elseif ($fleetCv.ProductName) {
+  $fleetProductName = "$($fleetCv.ProductName)"
+  if ($fleetRelease -eq '11') { $fleetProductName = $fleetProductName -replace '^(Microsoft )?Windows 10\b', '$1Windows 11' }
+  if ($fleetProductName -notlike 'Microsoft *') { $fleetProductName = "Microsoft $fleetProductName" }
+}
 fleetFact os windows_release { $fleetRelease }
-fleetFact os distribution_version { if ($fleetRelease) { $fleetRelease } else { $fleetOs.Caption } }
-fleetFact os product_name { $fleetOs.Caption }
+fleetFact os distribution_version { if ($fleetRelease) { $fleetRelease } else { $fleetProductName } }
+fleetFact os product_name { $fleetProductName }
 fleetFact os product_type {
-  switch ([int]$fleetOs.ProductType) { 1 { 'workstation' } 2 { 'domain_controller' } 3 { 'server' } }
+  switch ($fleetProductType) { 1 { 'workstation' } 2 { 'domain_controller' } 3 { 'server' } }
 }
 fleetFact os edition { $fleetCv.EditionID }
 fleetFact os display_version { if ($fleetCv.DisplayVersion) { $fleetCv.DisplayVersion } else { $fleetCv.ReleaseId } }
@@ -254,24 +296,62 @@ fleetFact shell default_shell {
   (Get-ItemProperty -Path 'HKLM:\SOFTWARE\OpenSSH' -Name DefaultShell -ErrorAction Stop).DefaultShell
 }
 fleetFact hardware cpu_cores { [Environment]::ProcessorCount }
-fleetFact hardware memory_bytes { [uint64]$fleetCs.TotalPhysicalMemory }
+# Physical memory: CIM, else GlobalMemoryStatusEx through the in-box
+# Microsoft.VisualBasic ComputerInfo (the same total, no WMI). Zero is never
+# a known size: no answer is unavailable.
+$fleetMemory = $null
+if ($null -ne $fleetCs.TotalPhysicalMemory) { try { $fleetMemory = [uint64]$fleetCs.TotalPhysicalMemory } catch { } }
+if (-not $fleetMemory) {
+  try {
+    Add-Type -AssemblyName Microsoft.VisualBasic -ErrorAction Stop
+    $fleetMemory = [uint64](New-Object -TypeName Microsoft.VisualBasic.Devices.ComputerInfo -ErrorAction Stop).TotalPhysicalMemory
+  } catch { $fleetMemory = $null }
+}
+fleetFact hardware memory_bytes { if ($fleetMemory -gt 0) { $fleetMemory } }
 $fleetDrive = $null
 try { $fleetDrive = New-Object System.IO.DriveInfo ($env:SystemDrive) } catch { }
 fleetFact hardware disk_free_bytes { $fleetDrive.AvailableFreeSpace }
 fleetFact hardware disk_total_bytes { $fleetDrive.TotalSize }
+# Maker and model: CIM, else the SMBIOS system strings the registry keeps
+# (the same strings CIM reads). Serials are never read.
+$fleetMaker = "$($fleetCs.Manufacturer)"
+if (-not $fleetMaker) { $fleetMaker = "$($fleetBios.SystemManufacturer)" }
+$fleetModel = "$($fleetCs.Model)"
+if (-not $fleetModel) { $fleetModel = "$($fleetBios.SystemProductName)" }
 fleetFact host virtualization {
-  $maker = "$($fleetCs.Manufacturer)"
-  if ($maker -match 'QEMU') { 'qemu' }
-  elseif ($maker -match 'VMware') { 'vmware' }
-  elseif ($maker -match 'Microsoft' -and "$($fleetCs.Model)" -match 'Virtual') { 'microsoft' }
+  if ($fleetMaker -match 'QEMU') { 'qemu' }
+  elseif ($fleetMaker -match 'VMware') { 'vmware' }
+  elseif ($fleetMaker -match 'Microsoft' -and $fleetModel -match 'Virtual') { 'microsoft' }
   elseif ($fleetCs.HypervisorPresent) { 'hypervisor' }
 }
-fleetFact hardware model { $fleetCs.Model }
-fleetFact hardware cpu_model { "$($fleetCpu.Name)".Trim() }
+fleetFact hardware model { $fleetModel }
+fleetFact hardware cpu_model {
+  $name = "$($fleetCpu.Name)"
+  if (-not $name.Trim()) { $name = "$((fleetReg 'HKLM:\HARDWARE\DESCRIPTION\System\CentralProcessor\0').ProcessorNameString)" }
+  $name.Trim()
+}
+# The first IPv4 address of an up, non-loopback interface, by IPv4
+# interface index (an interface without IPv4 properties sorts last),
+# skipping loopback and link-local addresses. One source for every
+# session: .NET's interface list needs no WMI, so an administrator and a
+# standard user report the same address (CIM's Get-NetIPAddress is refused
+# to a standard user and also lists the addresses of disconnected adapters).
+function fleetPickIpv4($interfaces) {
+  $interfaces |
+    Where-Object { "$($_.OperationalStatus)" -eq 'Up' -and "$($_.NetworkInterfaceType)" -ne 'Loopback' } |
+    Sort-Object -Property {
+      $index = $null
+      try { $index = $_.GetIPProperties().GetIPv4Properties().Index } catch { $index = $null }
+      if ($null -eq $index) { [int]::MaxValue } else { [int]$index }
+    } |
+    ForEach-Object { $_.GetIPProperties().UnicastAddresses } |
+    Where-Object { "$($_.Address.AddressFamily)" -eq 'InterNetwork' } |
+    ForEach-Object { $_.Address.ToString() } |
+    Where-Object { $_ -notlike '127.*' -and $_ -notlike '169.254.*' } |
+    Select-Object -First 1
+}
 fleetFact network ipv4 {
-  (Get-NetIPAddress -AddressFamily IPv4 -ErrorAction Stop |
-    Where-Object { $_.IPAddress -notlike '127.*' -and $_.IPAddress -notlike '169.254.*' } |
-    Select-Object -First 1).IPAddress
+  fleetPickIpv4 ([System.Net.NetworkInformation.NetworkInterface]::GetAllNetworkInterfaces())
 }
 # Tools the plan names, the same set and fact shape as Linux: presence, then
 # the first line of `--version` as its own fact. The names are literals here,
@@ -601,6 +681,328 @@ mod tests {
         assert!(script.contains("$out.Wait(2000)"));
         assert!(script.contains("StandardInput.Close()"));
         assert!(!script.contains("& $cmd.Source"));
+    }
+
+    /// A Windows registry for the probe under test: a function named
+    /// `Get-ItemProperty` shadows the cmdlet, so the probe's registry reads
+    /// return these keys on any host. `$product_type` is the
+    /// `ProductOptions` value (`WinNT`, `ServerNT`, `LanmanNT`).
+    fn registry_fixture(product_name: &str, build: u32, product_type: &str) -> String {
+        format!(
+            r"$env:PROCESSOR_ARCHITECTURE = 'AMD64'
+$env:PROCESSOR_ARCHITEW6432 = $null
+function Get-ItemProperty {{
+  [CmdletBinding()] param([string]$Path, [string]$Name)
+  $values = switch ($Path) {{
+    'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion' {{ @{{ ProductName = '{product_name}'; EditionID = 'Professional'; DisplayVersion = '24H2'; CurrentBuild = '{build}'; CurrentBuildNumber = '{build}'; UBR = 2314; CurrentMajorVersionNumber = 10; CurrentMinorVersionNumber = 0 }} }}
+    'HKLM:\SYSTEM\CurrentControlSet\Control\ProductOptions' {{ @{{ ProductType = '{product_type}' }} }}
+    'HKLM:\HARDWARE\DESCRIPTION\System\BIOS' {{ @{{ SystemManufacturer = 'QEMU'; SystemProductName = 'Standard PC (Q35 + ICH9, 2009)' }} }}
+    'HKLM:\HARDWARE\DESCRIPTION\System\CentralProcessor\0' {{ @{{ ProcessorNameString = 'Example CPU 8-Core Processor   ' }} }}
+    'HKLM:\SOFTWARE\OpenSSH' {{ @{{ DefaultShell = 'C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe' }} }}
+  }}
+  if ($null -eq $values) {{ throw ('Cannot find path ' + $Path) }}
+  [pscustomobject]$values
+}}
+"
+        )
+    }
+
+    /// A standard user's OpenSSH session: a network logon, which WMI
+    /// refuses, so every CIM query fails the way it does live.
+    const CIM_REFUSED: &str = r"function Get-CimInstance { [CmdletBinding()] param([string]$ClassName) throw 'Access denied' }
+function Get-WmiObject { [CmdletBinding()] param([string]$Class) throw 'Access denied' }
+function Get-NetIPAddress { [CmdletBinding()] param($AddressFamily) throw 'Cannot connect to CIM server. Access denied' }
+";
+
+    /// An administrator's session: CIM answers, with the values the
+    /// registry fixture's machine has. `Get-NetIPAddress` answers with an
+    /// address no interface has, which the probe must never report.
+    const CIM_ANSWERS: &str = r"function Get-CimInstance {
+  [CmdletBinding()] param([string]$ClassName)
+  switch ($ClassName) {
+    'Win32_OperatingSystem' { [pscustomobject]@{ Version = '10.0.26100'; BuildNumber = '26100'; Caption = 'Microsoft Windows 11 Pro'; ProductType = [uint32]1 } }
+    'Win32_ComputerSystem' { [pscustomobject]@{ TotalPhysicalMemory = [uint64]8519065600; Manufacturer = 'QEMU'; Model = 'Standard PC (Q35 + ICH9, 2009)'; HypervisorPresent = $true } }
+    'Win32_Processor' { [pscustomobject]@{ Name = 'Example CPU 8-Core Processor   ' } }
+  }
+}
+function Get-NetIPAddress {
+  [CmdletBinding()] param($AddressFamily)
+  [pscustomobject]@{ IPAddress = '192.0.2.99'; InterfaceIndex = 1 }
+}
+";
+
+    /// Runs the probe after `prelude` and returns its facts by key.
+    fn probe_with(
+        pwsh: &str,
+        prelude: &str,
+    ) -> std::collections::BTreeMap<(String, String), fleet_core::CapabilityFact> {
+        let script = format!("{prelude}{}", probe_script_for(GuestShell::PowerShell));
+        let out = run_ps(pwsh, &script, &ScriptMetadata::default(), b"", None);
+        assert_eq!(out.status.code(), Some(0), "{out:?}");
+        parse_probe_output(&text(&out.stdout), SystemTime::now())
+            .into_iter()
+            .map(|fact| ((fact.namespace.clone(), fact.name.clone()), fact))
+            .collect()
+    }
+
+    fn known_value<'a>(
+        facts: &'a std::collections::BTreeMap<(String, String), fleet_core::CapabilityFact>,
+        namespace: &str,
+        name: &str,
+    ) -> Option<&'a str> {
+        let fact = facts
+            .get(&(namespace.to_owned(), name.to_owned()))
+            .unwrap_or_else(|| panic!("no {namespace}/{name}"));
+        assert_eq!(fact.status.id(), "known", "{namespace}/{name}: {fact:?}");
+        fact.value.as_deref()
+    }
+
+    #[test]
+    fn a_standard_user_without_wmi_gets_every_fact_from_the_fallbacks() {
+        let Some(pwsh) = require_pwsh() else { return };
+        let registry = registry_fixture("Windows 10 Pro", 26100, "WinNT");
+        let facts = probe_with(&pwsh, &format!("{registry}{CIM_REFUSED}"));
+        for (namespace, name, expected) in [
+            ("os", "kernel", "10.0.26100"),
+            ("os", "build", "26100.2314"),
+            ("os", "windows_release", "11"),
+            ("os", "distribution_version", "11"),
+            // The registry still says `Windows 10 Pro`; the caption does not.
+            ("os", "product_name", "Microsoft Windows 11 Pro"),
+            ("os", "product_type", "workstation"),
+            ("os", "edition", "Professional"),
+            ("os", "display_version", "24H2"),
+            ("os", "support", "supported"),
+            ("host", "architecture", "x86_64"),
+            ("host", "virtualization", "qemu"),
+            ("hardware", "model", "Standard PC (Q35 + ICH9, 2009)"),
+            ("hardware", "cpu_model", "Example CPU 8-Core Processor"),
+        ] {
+            assert_eq!(
+                known_value(&facts, namespace, name),
+                Some(expected),
+                "{namespace}/{name}"
+            );
+        }
+        // Memory comes from GlobalMemoryStatusEx on Windows; a host without
+        // it reports unavailable. Never a known zero.
+        let memory = &facts[&("hardware".to_owned(), "memory_bytes".to_owned())];
+        match memory.status.id() {
+            "known" => assert!(
+                memory
+                    .value
+                    .as_deref()
+                    .and_then(|value| value.parse::<u64>().ok())
+                    .is_some_and(|bytes| bytes > 0),
+                "{memory:?}"
+            ),
+            status => assert_eq!(status, "unavailable", "{memory:?}"),
+        }
+        // The IPv4 address comes from .NET's interface list (in every
+        // session): a non-loopback, non-link-local address of this host, or
+        // unavailable.
+        let ipv4 = &facts[&("network".to_owned(), "ipv4".to_owned())];
+        if ipv4.status.id() == "known" {
+            let address: std::net::Ipv4Addr = ipv4.value.as_deref().unwrap().parse().unwrap();
+            assert!(
+                !address.is_loopback() && !address.is_link_local(),
+                "{address}"
+            );
+        } else {
+            assert_eq!(ipv4.status.id(), "unavailable", "{ipv4:?}");
+        }
+    }
+
+    #[test]
+    fn a_fact_has_the_same_value_whether_cim_or_a_fallback_answered() {
+        let Some(pwsh) = require_pwsh() else { return };
+        let registry = registry_fixture("Windows 10 Pro", 26100, "WinNT");
+        let admin = probe_with(&pwsh, &format!("{registry}{CIM_ANSWERS}"));
+        let standard = probe_with(&pwsh, &format!("{registry}{CIM_REFUSED}"));
+        assert_eq!(
+            known_value(&admin, "hardware", "memory_bytes"),
+            Some("8519065600")
+        );
+        // The address comes from .NET's interface list in every session, never
+        // from CIM's Get-NetIPAddress, so it is compared below like any fact.
+        let ipv4 = &admin[&("network".to_owned(), "ipv4".to_owned())];
+        assert_ne!(ipv4.value.as_deref(), Some("192.0.2.99"), "{ipv4:?}");
+        // Memory is the host's own under the fallback (see above), and free
+        // space moves between runs.
+        let host_bound = [
+            ("hardware", "memory_bytes"),
+            ("hardware", "disk_free_bytes"),
+        ];
+        assert_eq!(
+            admin.keys().collect::<Vec<_>>(),
+            standard.keys().collect::<Vec<_>>()
+        );
+        for (key, fact) in &admin {
+            if host_bound.contains(&(key.0.as_str(), key.1.as_str())) {
+                continue;
+            }
+            let other = &standard[key];
+            assert_eq!(
+                (fact.status, &fact.value),
+                (other.status, &other.value),
+                "{}/{}",
+                key.0,
+                key.1
+            );
+        }
+        assert_eq!(known_value(&standard, "os", "support"), Some("supported"));
+    }
+
+    #[test]
+    fn the_registry_fallback_names_windows_10_and_servers_as_cim_does() {
+        let Some(pwsh) = require_pwsh() else { return };
+        let windows10 = probe_with(
+            &pwsh,
+            &format!(
+                "{}{CIM_REFUSED}",
+                registry_fixture("Windows 10 Pro", 19045, "WinNT")
+            ),
+        );
+        assert_eq!(
+            known_value(&windows10, "os", "product_name"),
+            Some("Microsoft Windows 10 Pro")
+        );
+        assert_eq!(known_value(&windows10, "os", "windows_release"), Some("10"));
+        assert_eq!(known_value(&windows10, "os", "kernel"), Some("10.0.19045"));
+        assert_eq!(known_value(&windows10, "os", "support"), Some("untested"));
+
+        let server = probe_with(
+            &pwsh,
+            &format!(
+                "{}{CIM_REFUSED}",
+                registry_fixture("Windows Server 2022 Datacenter", 20348, "ServerNT")
+            ),
+        );
+        let caption = Some("Microsoft Windows Server 2022 Datacenter");
+        assert_eq!(known_value(&server, "os", "product_name"), caption);
+        assert_eq!(known_value(&server, "os", "distribution_version"), caption);
+        assert_eq!(known_value(&server, "os", "product_type"), Some("server"));
+        let release = &server[&("os".to_owned(), "windows_release".to_owned())];
+        assert_eq!(release.status.id(), "unavailable");
+        assert!(!server.contains_key(&("os".to_owned(), "support".to_owned())));
+
+        let controller = probe_with(
+            &pwsh,
+            &format!(
+                "{}{CIM_REFUSED}",
+                registry_fixture("Windows Server 2022 Datacenter", 20348, "LanmanNT")
+            ),
+        );
+        assert_eq!(
+            known_value(&controller, "os", "product_type"),
+            Some("domain_controller")
+        );
+    }
+
+    /// The shipped `fleetPickIpv4` function, cut from the probe text so the
+    /// test exercises exactly what runs on a workstation.
+    fn pick_ipv4_function() -> String {
+        let script = probe_script_for(GuestShell::PowerShell);
+        let start = script
+            .find("function fleetPickIpv4(")
+            .expect("the IPv4 selection function");
+        let end = start + script[start..].find("\n}\n").expect("its end") + 3;
+        assert!(
+            script.contains(
+                "fleetPickIpv4 ([System.Net.NetworkInformation.NetworkInterface]::GetAllNetworkInterfaces())"
+            ),
+            "the probe must feed the selection .NET's interface list"
+        );
+        script[start..end].to_owned()
+    }
+
+    #[test]
+    fn the_ipv4_selection_takes_the_lowest_index_up_interface_and_skips_the_rest() {
+        let Some(pwsh) = require_pwsh() else { return };
+        // Fake interfaces with the shape the function reads from .NET:
+        // OperationalStatus, NetworkInterfaceType, GetIPProperties() with
+        // GetIPv4Properties().Index and UnicastAddresses[].Address.
+        let fakes = r"function fleetNic($status, $type, $index, [string[]]$addresses) {
+  $props = New-Object PSObject
+  $props | Add-Member -MemberType NoteProperty -Name Index -Value $index
+  $ip = New-Object PSObject
+  $ip | Add-Member -MemberType NoteProperty -Name V4 -Value $props
+  $ip | Add-Member -MemberType NoteProperty -Name UnicastAddresses -Value @($addresses | ForEach-Object { [pscustomobject]@{ Address = [System.Net.IPAddress]::Parse($_) } })
+  if ($null -eq $index) {
+    $ip | Add-Member -MemberType ScriptMethod -Name GetIPv4Properties -Value { throw 'no IPv4 on this interface' }
+  } else {
+    $ip | Add-Member -MemberType ScriptMethod -Name GetIPv4Properties -Value { $this.V4 }
+  }
+  $nic = [pscustomobject]@{ OperationalStatus = $status; NetworkInterfaceType = $type; Ip = $ip }
+  $nic | Add-Member -MemberType ScriptMethod -Name GetIPProperties -Value { $this.Ip }
+  $nic
+}
+function fleetCase($name, $interfaces) {
+  $picked = fleetPickIpv4 $interfaces
+  if ($null -eq $picked) { $picked = '<none>' }
+  [Console]::Out.Write($name + '=' + $picked + [char]10)
+}
+fleetCase 'mixed' @(
+  (fleetNic 'Up' 'Ethernet' 9 @('192.0.2.9')),
+  (fleetNic 'Down' 'Ethernet' 2 @('10.0.0.2')),
+  (fleetNic 'Up' 'Loopback' 1 @('127.0.0.1', '192.0.2.1')),
+  (fleetNic 'Up' 'Ethernet' $null @('fe80::1')),
+  (fleetNic 'Up' 'Wireless80211' 4 @('169.254.7.7', 'fe80::4', '127.0.0.5', '192.0.2.4', '192.0.2.44'))
+)
+fleetCase 'apipa-only-lower' @(
+  (fleetNic 'Up' 'Ethernet' 3 @('169.254.3.3')),
+  (fleetNic 'Up' 'Ethernet' 8 @('198.51.100.8'))
+)
+fleetCase 'index-not-list-order' @(
+  (fleetNic 'Up' 'Ethernet' 12 @('198.51.100.12')),
+  (fleetNic 'Up' 'Ethernet' 11 @('198.51.100.11'))
+)
+fleetCase 'none' @(
+  (fleetNic 'Down' 'Ethernet' 2 @('10.0.0.2')),
+  (fleetNic 'Up' 'Loopback' 1 @('127.0.0.1')),
+  (fleetNic 'Up' 'Ethernet' 5 @('169.254.5.5', 'fe80::5'))
+)
+fleetCase 'empty' @()
+";
+        let script = format!("{}{fakes}", pick_ipv4_function());
+        let out = run_ps(&pwsh, &script, &ScriptMetadata::default(), b"", None);
+        assert_eq!(out.status.code(), Some(0), "{out:?}");
+        assert_eq!(
+            text(&out.stdout),
+            // Down (index 2) and a loopback-type interface (1, even with a
+            // non-127 address) are skipped, as are 169.254.*,
+            // 127.* and IPv6 on the winner; index 4 beats index 9 and the
+            // interface without IPv4 properties.
+            "mixed=192.0.2.4\n\
+             apipa-only-lower=198.51.100.8\n\
+             index-not-list-order=198.51.100.11\n\
+             none=<none>\n\
+             empty=<none>\n",
+            "{out:?}"
+        );
+    }
+
+    #[test]
+    fn no_ipv4_candidate_is_unavailable() {
+        let Some(pwsh) = require_pwsh() else { return };
+        // A probe whose interface list holds nothing eligible reports the
+        // fact unavailable, not an empty known value.
+        let script = format!(
+            "{}{CIM_REFUSED}",
+            probe_script_for(GuestShell::PowerShell).replace(
+                "fleetPickIpv4 ([System.Net.NetworkInformation.NetworkInterface]::GetAllNetworkInterfaces())",
+                "fleetPickIpv4 @()"
+            )
+        );
+        let out = run_ps(&pwsh, &script, &ScriptMetadata::default(), b"", None);
+        assert_eq!(out.status.code(), Some(0), "{out:?}");
+        let facts = parse_probe_output(&text(&out.stdout), SystemTime::now());
+        let ipv4 = facts
+            .iter()
+            .find(|fact| fact.namespace == "network" && fact.name == "ipv4")
+            .expect("an ipv4 fact");
+        assert_eq!(ipv4.status.id(), "unavailable", "{ipv4:?}");
+        assert_eq!(ipv4.value, None);
     }
 
     #[test]
