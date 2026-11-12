@@ -115,7 +115,7 @@ Confirming a host key (the first time, or again after the key changed) drops the
 
 ## What the inventory reports
 
-Discover, and every later `agentless.inventory` operation, runs the Windows probe (CIM and .NET under Windows PowerShell 5.1). The facts are the Linux set plus:
+Discover, and every later `agentless.inventory` operation, runs the Windows probe under Windows PowerShell 5.1. The facts are the Linux set plus:
 
 | Fact | Meaning |
 |---|---|
@@ -129,6 +129,8 @@ Discover, and every later `agentless.inventory` operation, runs the Windows prob
 | `session.administrator` | `true` when the session holds the Administrators role (a warning, see above) |
 | `shell.powershell_version`, `shell.language_mode`, `shell.default_shell` | The login shell's version and language mode, and the OpenSSH `DefaultShell` value |
 | `tool.<name>`, `tool-version.<name>` | Git, Docker, Tailscale, mise, Frogenv, `skills-manager-cli`, Claude and Codex: present or unavailable, and the first line of `--version` (`unknown` when the session is an administrator, below) |
+
+**Sources, and standard users.** The probe asks CIM first, but a standard user's OpenSSH session is a network logon, and WMI refuses it (`Access denied`, for CIM and `Get-WmiObject` alike), so every fact CIM would give also has a source that account can read: the build, kernel version (`10.0.<build>`), product type and product name from the registry (`ProductName` still says `Windows 10` on Windows 11, so the probe names the release from the build, as the CIM caption does: `Microsoft Windows 11 Pro`), memory from `GlobalMemoryStatusEx` (through the in-box `Microsoft.VisualBasic` `ComputerInfo`), the maker, model and CPU from the SMBIOS and processor strings in `HKLM:\HARDWARE\DESCRIPTION\System`, and the IPv4 address from .NET's interface list. A fact has the same value whichever source answered, so a standard user's inventory reads like an administrator's. The one difference: on physical hardware, `host.virtualization` = `hypervisor` (Hyper-V or virtualization-based security running) comes only from CIM, so a standard user's session reports it unavailable there. A fact no source answered is unavailable, never a guessed value such as a zero memory size. `network.ipv4` is the first address, by interface index, that is not loopback or link-local.
 
 Tools are found as `<name>.exe` on `PATH` with `Get-Command -CommandType Application`; a `.cmd` or `.bat` shim is never matched or run. Each match runs with the fixed argument `--version`, no stdin and its own 10-second bound. **When the session holds the Administrators role, nothing is run**: the inventory reports presence only and `tool-version` as `unknown`, because `PATH` folders are often user-writable and an elevated token must not execute what a user dropped there. Checkout discovery is still Linux-only.
 
