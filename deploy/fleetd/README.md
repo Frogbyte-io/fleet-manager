@@ -53,8 +53,12 @@ writable by group or others, and without a POSIX ACL (read with `getfacl`
 when it is installed, otherwise from the `+` that `ls -ld` shows). On Linux
 the group mode bits already reflect an ACL's mask, so the ACL test is defense
 in depth; remove an ACL with `setfacl -b <dir>`. The state directory path
-itself must be normalized (no `//`, `.` or `..`) and not a system or shared
-temporary directory such as `/tmp`, `/var/tmp` or `/dev/shm`. On a test layout where no `fleet` account
+itself must be normalized (no `//`, `.` or `..`), inside another directory
+(not top-level), not a system directory such as `/var/lib` or `/srv`, and
+nowhere inside the trees `/etc`, `/root`, `/usr`, `/proc`, `/sys`, `/dev`,
+`/boot`, `/run`, `/var/run`, `/tmp` or `/var/tmp` (system, runtime and
+temporary trees). The controller refuses the same paths when it accepts a
+`machines install-node` layout. On a test layout where no `fleet` account
 exists and a non-root user runs the script (as `install.sh` allows with a
 stubbed `useradd`), the state directory and its ancestors may belong to that
 user instead; run as root without the account, the purge is refused. Anything else is refused before anything is

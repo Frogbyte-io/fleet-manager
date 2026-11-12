@@ -331,12 +331,21 @@ impl ScriptExecutor {
                     )
                     .await
                     .map_err(|failure| failure.to_string())?;
-                if !recorded {
-                    let error_json = transport_failure_json(
+                let refused = match recorded {
+                    fleet_application::machine::VerifiedWrite::Recorded => None,
+                    fleet_application::machine::VerifiedWrite::KeyChanged => Some((
                         "host_key_changed",
                         "the endpoint's host key was confirmed again while this inventory ran; \
                          nothing was recorded, run the inventory again",
-                    );
+                    )),
+                    fleet_application::machine::VerifiedWrite::EndpointGone => Some((
+                        "endpoint_removed",
+                        "the endpoint was removed from the machine while this inventory ran; \
+                         nothing was recorded",
+                    )),
+                };
+                if let Some((reason, detail)) = refused {
+                    let error_json = transport_failure_json(reason, detail);
                     return operations
                         .complete(&operation.id, "failed", None, Some(&error_json))
                         .await

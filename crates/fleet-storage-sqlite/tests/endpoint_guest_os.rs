@@ -255,6 +255,7 @@ async fn confirming_a_host_key_marks_the_ssh_observed_facts_stale() {
 /// a confirmation marked them stale (#624).
 #[tokio::test]
 async fn facts_are_recorded_only_under_the_fingerprint_the_inventory_verified() {
+    use fleet_application::machine::VerifiedWrite;
     use fleet_core::{CapabilityFact, CapabilityStatus, Timestamp};
     let git = CapabilityFact {
         namespace: "tool".to_owned(),
@@ -281,7 +282,11 @@ async fn facts_are_recorded_only_under_the_fingerprint_the_inventory_verified() 
         )
         .await
         .unwrap();
-    assert!(!stale, "a key confirmed meanwhile wins");
+    assert_eq!(
+        stale,
+        VerifiedWrite::KeyChanged,
+        "a key confirmed meanwhile wins"
+    );
     assert!(
         machines
             .get(&machine.id)
@@ -298,8 +303,8 @@ async fn facts_are_recorded_only_under_the_fingerprint_the_inventory_verified() 
         .confirm_fingerprint(&other.endpoints[0].id, "SHA256:current", 1)
         .await
         .unwrap();
-    assert!(
-        !machines
+    assert_eq!(
+        machines
             .record_verified_capabilities(
                 &machine.id,
                 &other.endpoints[0].id,
@@ -307,13 +312,27 @@ async fn facts_are_recorded_only_under_the_fingerprint_the_inventory_verified() 
                 std::slice::from_ref(&git),
             )
             .await
-            .unwrap()
+            .unwrap(),
+        VerifiedWrite::EndpointGone
+    );
+    // Nor does an endpoint that no longer exists.
+    assert_eq!(
+        machines
+            .record_verified_capabilities(
+                &machine.id,
+                "no-such-endpoint",
+                "SHA256:current",
+                std::slice::from_ref(&git),
+            )
+            .await
+            .unwrap(),
+        VerifiedWrite::EndpointGone
     );
     let current = machines
         .record_verified_capabilities(&machine.id, endpoint, "SHA256:current", &[git])
         .await
         .unwrap();
-    assert!(current);
+    assert_eq!(current, VerifiedWrite::Recorded);
     let read = machines.get(&machine.id).await.unwrap();
     assert_eq!(read.capabilities.len(), 1);
     assert_eq!(read.capabilities[0].status, CapabilityStatus::Known);

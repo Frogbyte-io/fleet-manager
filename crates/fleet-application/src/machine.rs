@@ -30,6 +30,18 @@ use fleet_core::{CapabilityFact, CapabilityStatus, EndpointKind, Timestamp};
 /// observation time always travels with the fact.
 pub const CAPABILITY_FRESHNESS_MS: i64 = 24 * 60 * 60 * 1000;
 
+/// What [`MachinePort::record_verified_capabilities`] did.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum VerifiedWrite {
+    /// The endpoint still had the verified key: the facts were recorded.
+    Recorded,
+    /// The endpoint now has another confirmed key (or none): nothing was
+    /// recorded.
+    KeyChanged,
+    /// The endpoint is no longer one of the machine's: nothing was recorded.
+    EndpointGone,
+}
+
 /// One registered machine, as read back by queries.
 ///
 /// This is the *record*: what was observed, as it was observed. The
@@ -550,9 +562,10 @@ pub trait MachinePort: fmt::Debug + Send + Sync {
     ) -> Result<(), PortFailure>;
     /// Upserts capability facts an SSH inventory observed through one
     /// endpoint, only while that endpoint of the machine still has the host
-    /// key the observation verified. Answers `false`, writing nothing, when a
-    /// different key was confirmed meanwhile: confirming a key marks those
-    /// facts stale, and an older observation must not undo that (#624).
+    /// key the observation verified. A different key confirmed meanwhile
+    /// marked those facts stale, and an older observation must not undo that
+    /// (#624); an endpoint removed meanwhile has nothing to vouch for them.
+    /// Either way nothing is written.
     ///
     /// The default checks, then writes; a store implements it as one
     /// transaction.
@@ -566,11 +579,16 @@ pub trait MachinePort: fmt::Debug + Send + Sync {
         endpoint_id: &str,
         verified_fingerprint: &str,
         facts: &[CapabilityFact],
-    ) -> Result<bool, PortFailure> {
-        if self.verified_fingerprint(endpoint_id).await?.as_deref() != Some(verified_fingerprint) {
-            return Ok(false);
+    ) -> Result<VerifiedWrite, PortFailure> {
+        match self.verified_fingerprint(endpoint_id).await {
+            Err(PortFailure::NotFound { .. }) => Ok(VerifiedWrite::EndpointGone),
+            Err(failure) => Err(failure),
+            Ok(Some(current)) if current == verified_fingerprint => self
+                .record_capabilities(id, facts)
+                .await
+                .map(|()| VerifiedWrite::Recorded),
+            Ok(_) => Ok(VerifiedWrite::KeyChanged),
         }
-        self.record_capabilities(id, facts).await.map(|()| true)
     }
     /// Removes a machine and all its facts.
     ///

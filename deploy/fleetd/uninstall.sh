@@ -71,8 +71,9 @@ UNIT="$UNIT_DIR/$SERVICE.service"
 # directory that the purge would refuse.
 #
 # $STATE_DIR must be an absolute, normalized path (no `//`, `.` or `..`, so
-# every test below names the directory `rm` would act on) that is not a
-# system directory. Every ancestor must be a real directory (not a symbolic
+# every test below names the directory `rm` would act on) that is neither a
+# system directory nor inside a system, runtime or temporary tree
+# (check_state_path). Every ancestor must be a real directory (not a symbolic
 # link), owned by root, not writable by group or others, and without a POSIX
 # ACL. Then nobody else can swap a path component. (On Linux the group mode
 # bits already show an ACL's mask, so the ACL test is defense in depth: a
@@ -96,8 +97,11 @@ ancestor_has_acl() {
     listing="$(ls -ld -- "$1" 2>/dev/null)" || return 0
     [ "${listing:10:1}" = "+" ]
 }
-check_state_ancestors() {
-    local ancestor_owner dir a_owner a_mode
+# The state path alone: absolute, normalized, and not a system directory or
+# anything inside a system, runtime or temporary tree. The controller's layout
+# validator (fleetd_layout.rs) applies the same rule, and a test checks that
+# the two agree.
+check_state_path() {
     # A relative path has no ancestors to check (and `dirname .` is `.`).
     case "$STATE_DIR" in
         /*) ;;
@@ -109,12 +113,24 @@ check_state_ancestors() {
         *//*|*/./*|*/../*|*/.|*/..)
             refuse_state "it is not a normalized path (no //, . or .. components)" ;;
     esac
-    # The ancestor walk starts above the directory itself, so the shared
-    # temporary directories (`/tmp`, `/var/tmp`, `/dev/shm`) are named here.
     case "$STATE_DIR" in
-        /|/bin|/boot|/dev|/etc|/home|/lib|/lib32|/lib64|/libx32|/media|/mnt|/opt|/proc|/root|/run|/sbin|/snap|/srv|/sys|/tmp|/usr|/var|/etc/*|/root/*|/usr/*|/var/lib|/var/log|/var/tmp|/var/cache|/var/spool|/var/run|/var/run/*|/run/user|/run/user/*|/proc/*|/sys/*|/dev/*|/boot/*)
+        /|/bin|/home|/lib|/lib32|/lib64|/libx32|/media|/mnt|/opt|/sbin|/snap|/srv|/var|/var/lib|/var/log|/var/cache|/var/spool)
             refuse_state "it is a system directory" ;;
+        # Whole trees: system configuration and binaries, kernel and device
+        # file systems, and the volatile or shared temporary directories,
+        # whose contents a reboot or another user can replace. The ancestor
+        # walk starts above the directory, so these are named here.
+        /etc|/etc/*|/root|/root/*|/usr|/usr/*|/proc|/proc/*|/sys|/sys/*|/dev|/dev/*|/boot|/boot/*|/run|/run/*|/var/run|/var/run/*|/tmp|/tmp/*|/var/tmp|/var/tmp/*)
+            refuse_state "it is a system directory or inside one (system, runtime and temporary trees are refused)" ;;
     esac
+    case "$STATE_DIR" in
+        /*/*) ;;
+        *) refuse_state "it is a top-level directory (it must be inside another directory)" ;;
+    esac
+}
+check_state_ancestors() {
+    local ancestor_owner dir a_owner a_mode
+    check_state_path
     if [ "$IS_ROOT" = true ] || getent passwd "$SERVICE_USER" >/dev/null 2>&1; then
         ancestor_owner=root
     else

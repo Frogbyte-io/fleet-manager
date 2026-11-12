@@ -681,20 +681,97 @@ mod tests {
         assert!(dir.path().join("shared/state/node.key").exists());
     }
 
+    /// The state directory block both scripts carry.
+    fn shared_block(script: &str) -> &str {
+        let start = script
+            .find("# >>> state directory ancestors")
+            .expect("the shared block starts");
+        let end = script
+            .find("# <<< state directory ancestors")
+            .expect("the shared block ends");
+        &script[start..end]
+    }
+
     #[test]
     fn both_scripts_carry_the_same_ancestor_rule() {
         const INSTALL_SCRIPT: &str = include_str!("../../../deploy/fleetd/install.sh");
-        fn shared_block(script: &str) -> &str {
-            let start = script
-                .find("# >>> state directory ancestors")
-                .expect("the shared block starts");
-            let end = script
-                .find("# <<< state directory ancestors")
-                .expect("the shared block ends");
-            &script[start..end]
-        }
         assert_eq!(shared_block(INSTALL_SCRIPT), shared_block(UNINSTALL_SCRIPT));
         assert!(shared_block(UNINSTALL_SCRIPT).contains("getfacl"));
+    }
+
+    /// The scripts' state path rule and the controller's layout validator
+    /// answer the same for every path: a layout the controller accepts can
+    /// be installed and purged, and one the scripts refuse is refused before
+    /// an operation is created.
+    #[test]
+    fn the_scripts_and_the_layout_validator_agree_on_state_paths() {
+        let script_accepts = |path: &str| {
+            let output = std::process::Command::new(system_tool("bash"))
+                .arg("-c")
+                .arg(format!(
+                    "refuse_state() {{ echo \"$1\"; exit 1; }}\n{}\ncheck_state_path",
+                    shared_block(UNINSTALL_SCRIPT)
+                ))
+                .env("STATE_DIR", path)
+                .output()
+                .unwrap();
+            output.status.success()
+        };
+        for path in [
+            "/",
+            "/fleetd",
+            "/bin",
+            "/home",
+            "/opt",
+            "/srv",
+            "/var",
+            "/var/lib",
+            "/var/log",
+            "/var/cache",
+            "/var/spool",
+            "/etc",
+            "/etc/fleetd",
+            "/root/fleetd",
+            "/usr",
+            "/usr/local",
+            "/usr/local/fleetd/state",
+            "/proc/1",
+            "/sys/fleetd",
+            "/dev/shm",
+            "/dev/shm/fleetd",
+            "/boot/fleetd",
+            "/run",
+            "/run/fleetd",
+            "/run/user/1000/fleetd",
+            "/var/run/fleetd",
+            "/tmp",
+            "/tmp/fleetd",
+            "/var/tmp",
+            "/var/tmp/fleetd",
+            "/var/lib/fleetd",
+            "/var/lib/fleet/state",
+            "/srv/fleetd",
+            "/opt/fleetd/state",
+            "/home/operator/fleetd",
+            "/tmpfleet/state",
+            "/runtime/fleetd",
+            "/variable/fleetd",
+            "/home/../var/lib/fleetd",
+            "/var/lib/./fleetd",
+            "/var//lib/fleetd",
+            "relative/state",
+        ] {
+            let validator = fleet_application::fleetd_layout::validate_installer_variable(
+                "FLEETD_STATE_DIR",
+                path,
+                fleet_application::fleetd_layout::InstallerTools::System,
+            );
+            assert_eq!(
+                script_accepts(path),
+                validator.is_ok(),
+                "{path}: the scripts and the validator ({validator:?}) disagree"
+            );
+        }
     }
 
     #[test]

@@ -12,7 +12,7 @@ use uuid::Uuid;
 
 use fleet_application::machine::{
     Endpoint, InventoryObservation, Machine, MachineFilter, MachinePort, NewEndpoint, NodeLink,
-    RegisterMachine,
+    RegisterMachine, VerifiedWrite,
 };
 use fleet_application::node::{GatewayState, NodeStatus};
 use fleet_application::operation::{CatalogRolloutTargetPort, PortFailure};
@@ -342,7 +342,7 @@ impl MachinePort for MachineRepository {
         endpoint_id: &str,
         verified_fingerprint: &str,
         facts: &[CapabilityFact],
-    ) -> Result<bool, PortFailure> {
+    ) -> Result<VerifiedWrite, PortFailure> {
         let mut tx = self
             .pool
             .begin_with("BEGIN IMMEDIATE")
@@ -351,25 +351,29 @@ impl MachinePort for MachineRepository {
         require_machine(&mut tx, id).await?;
         // Bound to the trust state the observation ran under, like a
         // detected OS: a host key confirmed in between marked these facts
-        // stale and wins.
-        let current = sqlx::query(
-            "SELECT 1 FROM machine_endpoints \
-             WHERE id = ?1 AND machine_id = ?2 AND verified_fingerprint = ?3",
+        // stale and wins, and an endpoint removed in between vouches for
+        // nothing.
+        let current: Option<(Option<String>,)> = sqlx::query_as(
+            "SELECT verified_fingerprint FROM machine_endpoints \
+             WHERE id = ?1 AND machine_id = ?2",
         )
         .bind(endpoint_id)
         .bind(id)
-        .bind(verified_fingerprint)
         .fetch_optional(&mut *tx)
         .await
         .map_err(|error| backend("record_verified_capabilities", &error))?;
-        if current.is_none() {
-            return Ok(false);
+        match current {
+            None => return Ok(VerifiedWrite::EndpointGone),
+            Some((current,)) if current.as_deref() != Some(verified_fingerprint) => {
+                return Ok(VerifiedWrite::KeyChanged);
+            }
+            Some(_) => {}
         }
         upsert_capabilities(&mut tx, id, facts, "record_verified_capabilities").await?;
         tx.commit()
             .await
             .map_err(|error| backend("record_verified_capabilities", &error))?;
-        Ok(true)
+        Ok(VerifiedWrite::Recorded)
     }
 
     async fn delete(&self, id: &str) -> Result<(), PortFailure> {
@@ -750,21 +754,21 @@ async fn upsert_capabilities(
             continue;
         }
         sqlx::query(
-                "INSERT INTO machine_capabilities (machine_id, namespace, name, value, status, observed_at, source) \
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7) \
-                 ON CONFLICT(machine_id, namespace, name) DO UPDATE SET \
-                 value = excluded.value, status = excluded.status, observed_at = excluded.observed_at, source = excluded.source",
-            )
-            .bind(id)
-            .bind(&fact.namespace)
-            .bind(&fact.name)
-            .bind(&fact.value)
-            .bind(fact.status.id())
-            .bind(fact.observed_at.unix_millis())
-            .bind(&fact.source)
-            .execute(&mut **tx)
-            .await
-            .map_err(|error| backend(context, &error))?;
+            "INSERT INTO machine_capabilities (machine_id, namespace, name, value, status, observed_at, source) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7) \
+             ON CONFLICT(machine_id, namespace, name) DO UPDATE SET \
+             value = excluded.value, status = excluded.status, observed_at = excluded.observed_at, source = excluded.source",
+        )
+        .bind(id)
+        .bind(&fact.namespace)
+        .bind(&fact.name)
+        .bind(&fact.value)
+        .bind(fact.status.id())
+        .bind(fact.observed_at.unix_millis())
+        .bind(&fact.source)
+        .execute(&mut **tx)
+        .await
+        .map_err(|error| backend(context, &error))?;
     }
     Ok(())
 }
