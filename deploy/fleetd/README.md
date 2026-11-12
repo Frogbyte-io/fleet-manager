@@ -50,9 +50,11 @@ stripped first), a real directory (not a symbolic link), owned by the `fleet`
 account, not a system directory, and empty or holding fleetd's `node.key` as
 a regular file. Every ancestor must be a real directory owned by root, not
 writable by group or others, and without a POSIX ACL (read with `getfacl`
-when it is installed, otherwise from the `+` that `ls -l` shows); an ACL can
-grant write access that the mode bits do not show. Remove one with
-`setfacl -b <dir>`. On a test layout where no `fleet` account
+when it is installed, otherwise from the `+` that `ls -ld` shows). On Linux
+the group mode bits already reflect an ACL's mask, so the ACL test is defense
+in depth; remove an ACL with `setfacl -b <dir>`. The state directory path
+itself must be normalized (no `//`, `.` or `..`) and not a system or shared
+temporary directory such as `/tmp`, `/var/tmp` or `/dev/shm`. On a test layout where no `fleet` account
 exists and a non-root user runs the script (as `install.sh` allows with a
 stubbed `useradd`), the state directory and its ancestors may belong to that
 user instead; run as root without the account, the purge is refused. Anything else is refused before anything is

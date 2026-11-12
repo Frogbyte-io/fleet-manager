@@ -251,6 +251,74 @@ async fn confirming_a_host_key_marks_the_ssh_observed_facts_stale() {
     assert!(matches!(missing, PortFailure::NotFound { .. }), "{missing}");
 }
 
+/// An inventory that verified the old key cannot write its facts back after
+/// a confirmation marked them stale (#624).
+#[tokio::test]
+async fn facts_are_recorded_only_under_the_fingerprint_the_inventory_verified() {
+    use fleet_core::{CapabilityFact, CapabilityStatus, Timestamp};
+    let git = CapabilityFact {
+        namespace: "tool".to_owned(),
+        name: "git".to_owned(),
+        value: Some("2.0".to_owned()),
+        status: CapabilityStatus::Known,
+        observed_at: Timestamp::from_unix_millis(5_000),
+        source: "agentless/1".to_owned(),
+    };
+    let (_dir, store) = store().await;
+    let machines = MachineRepository::new(store.pool().clone());
+    let machine = machines.register(&workstation()).await.unwrap();
+    let endpoint = &machine.endpoints[0].id;
+    machines
+        .confirm_fingerprint(endpoint, "SHA256:current", 1)
+        .await
+        .unwrap();
+    let stale = machines
+        .record_verified_capabilities(
+            &machine.id,
+            endpoint,
+            "SHA256:previous",
+            std::slice::from_ref(&git),
+        )
+        .await
+        .unwrap();
+    assert!(!stale, "a key confirmed meanwhile wins");
+    assert!(
+        machines
+            .get(&machine.id)
+            .await
+            .unwrap()
+            .capabilities
+            .is_empty()
+    );
+    // Another machine's endpoint does not count either.
+    let mut other = workstation();
+    other.name = "workstation-2".to_owned();
+    let other = machines.register(&other).await.unwrap();
+    machines
+        .confirm_fingerprint(&other.endpoints[0].id, "SHA256:current", 1)
+        .await
+        .unwrap();
+    assert!(
+        !machines
+            .record_verified_capabilities(
+                &machine.id,
+                &other.endpoints[0].id,
+                "SHA256:current",
+                std::slice::from_ref(&git),
+            )
+            .await
+            .unwrap()
+    );
+    let current = machines
+        .record_verified_capabilities(&machine.id, endpoint, "SHA256:current", &[git])
+        .await
+        .unwrap();
+    assert!(current);
+    let read = machines.get(&machine.id).await.unwrap();
+    assert_eq!(read.capabilities.len(), 1);
+    assert_eq!(read.capabilities[0].status, CapabilityStatus::Known);
+}
+
 /// A detected OS is written with its audit event in one transaction, and
 /// only under the fingerprint the detection ran with.
 #[tokio::test]

@@ -13,7 +13,8 @@
 # --purge deletes the state directory recursively with privilege, so it
 # deletes only a directory that is fleetd's own: an absolute path (trailing
 # slashes are stripped first, so `link/` is the link itself), a real
-# directory (not a symlink), owned by the service account (`fleet`; by the
+# directory (not a symlink) named by a normalized path (no `//`, `.` or
+# `..`), owned by the service account (`fleet`; by the
 # invoking non-root user when that account does not exist, as install.sh
 # does without it), not a system directory, and either empty or holding
 # fleetd's node key (`node.key`). Every ancestor must be a real directory
@@ -69,17 +70,20 @@ UNIT="$UNIT_DIR/$SERVICE.service"
 # (a test compares the two copies), so the installer never adopts a state
 # directory that the purge would refuse.
 #
-# Every ancestor of $STATE_DIR must be a real directory (not a symbolic
+# $STATE_DIR must be an absolute, normalized path (no `//`, `.` or `..`, so
+# every test below names the directory `rm` would act on) that is not a
+# system directory. Every ancestor must be a real directory (not a symbolic
 # link), owned by root, not writable by group or others, and without a POSIX
-# ACL, which can grant write access that the mode bits do not show. Then
-# nobody else can swap a path component. When the service account does not
+# ACL. Then nobody else can swap a path component. (On Linux the group mode
+# bits already show an ACL's mask, so the ACL test is defense in depth: a
+# directory root set up plainly has none.) When the service account does not
 # exist and a non-root user runs the script (stubbed installs), the invoking
 # user may own an ancestor instead. With `missing-ok` as $1, an ancestor that
 # does not exist yet passes: install.sh is about to create it. A failure calls
 # refuse_state with the reason.
 #
 # ACLs are read with `getfacl --skip-base` when it is installed, otherwise from
-# the `+` that `ls -l` prints after the mode of a file that has one. An ACL
+# the `+` that `ls -ld` prints after the mode of a file that has one. An ACL
 # that cannot be read counts as present.
 ancestor_has_acl() {
     local listing
@@ -99,6 +103,18 @@ check_state_ancestors() {
         /*) ;;
         *) refuse_state "it is not an absolute path" ;;
     esac
+    # `/home/../var/lib` would pass every lexical test below as something it
+    # is not.
+    case "$STATE_DIR" in
+        *//*|*/./*|*/../*|*/.|*/..)
+            refuse_state "it is not a normalized path (no //, . or .. components)" ;;
+    esac
+    # The ancestor walk starts above the directory itself, so the shared
+    # temporary directories (`/tmp`, `/var/tmp`, `/dev/shm`) are named here.
+    case "$STATE_DIR" in
+        /|/bin|/boot|/dev|/etc|/home|/lib|/lib32|/lib64|/libx32|/media|/mnt|/opt|/proc|/root|/run|/sbin|/snap|/srv|/sys|/tmp|/usr|/var|/etc/*|/root/*|/usr/*|/var/lib|/var/log|/var/tmp|/var/cache|/var/spool|/var/run|/var/run/*|/run/user|/run/user/*|/proc/*|/sys/*|/dev/*|/boot/*)
+            refuse_state "it is a system directory" ;;
+    esac
     if [ "$IS_ROOT" = true ] || getent passwd "$SERVICE_USER" >/dev/null 2>&1; then
         ancestor_owner=root
     else
@@ -117,7 +133,7 @@ check_state_ancestors() {
             [ $(( 8#$a_mode & 8#022 )) -eq 0 ] \
                 || refuse_state "its ancestor $dir is writable by group or others (mode $a_mode)"
             ! ancestor_has_acl "$dir" \
-                || refuse_state "its ancestor $dir has a POSIX ACL, which may grant write access (remove it with setfacl -b)"
+                || refuse_state "its ancestor $dir has a POSIX ACL (remove it with setfacl -b)"
         fi
         [ "$dir" = / ] && break
         dir="$(dirname -- "$dir")"
@@ -154,12 +170,6 @@ purge_plan() {
         return
     fi
     [ -d "$STATE_DIR" ] || refuse "it is not a directory"
-    local normalized
-    normalized="$(printf '%s' "$STATE_DIR" | tr -s '/' | sed 's:/*$::')"
-    case "${normalized:-/}" in
-        /|/bin|/boot|/dev|/etc|/home|/lib|/lib32|/lib64|/libx32|/media|/mnt|/opt|/proc|/root|/run|/sbin|/snap|/srv|/sys|/tmp|/usr|/var|/etc/*|/root/*|/usr/*|/var/lib|/var/log|/var/tmp|/var/cache|/var/spool|/var/run|/var/run/*|/run/user|/run/user/*|/proc/*|/sys/*|/dev/*|/boot/*)
-            refuse "it is a system directory" ;;
-    esac
     local owner
     owner="$(stat -c %U -- "$STATE_DIR" 2>/dev/null)" || refuse "its owner cannot be read"
     [ "$owner" = "$expected" ] || refuse "it is owned by $owner, not $expected"

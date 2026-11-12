@@ -329,37 +329,47 @@ impl MachinePort for MachineRepository {
             .await
             .map_err(|error| backend("record_capabilities", &error))?;
         require_machine(&mut tx, id).await?;
-        for fact in facts {
-            // The `fleet` namespace is Fleet's own record keeping and is
-            // never written from a report: a node or an inventory probe
-            // could otherwise forge it.
-            if fact
-                .namespace
-                .eq_ignore_ascii_case(fleet_core::RESERVED_FACT_NAMESPACE)
-            {
-                continue;
-            }
-            sqlx::query(
-                "INSERT INTO machine_capabilities (machine_id, namespace, name, value, status, observed_at, source) \
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7) \
-                 ON CONFLICT(machine_id, namespace, name) DO UPDATE SET \
-                 value = excluded.value, status = excluded.status, observed_at = excluded.observed_at, source = excluded.source",
-            )
-            .bind(id)
-            .bind(&fact.namespace)
-            .bind(&fact.name)
-            .bind(&fact.value)
-            .bind(fact.status.id())
-            .bind(fact.observed_at.unix_millis())
-            .bind(&fact.source)
-            .execute(&mut *tx)
-            .await
-            .map_err(|error| backend("record_capabilities", &error))?;
-        }
+        upsert_capabilities(&mut tx, id, facts, "record_capabilities").await?;
         tx.commit()
             .await
             .map_err(|error| backend("record_capabilities", &error))?;
         Ok(())
+    }
+
+    async fn record_verified_capabilities(
+        &self,
+        id: &str,
+        endpoint_id: &str,
+        verified_fingerprint: &str,
+        facts: &[CapabilityFact],
+    ) -> Result<bool, PortFailure> {
+        let mut tx = self
+            .pool
+            .begin_with("BEGIN IMMEDIATE")
+            .await
+            .map_err(|error| backend("record_verified_capabilities", &error))?;
+        require_machine(&mut tx, id).await?;
+        // Bound to the trust state the observation ran under, like a
+        // detected OS: a host key confirmed in between marked these facts
+        // stale and wins.
+        let current = sqlx::query(
+            "SELECT 1 FROM machine_endpoints \
+             WHERE id = ?1 AND machine_id = ?2 AND verified_fingerprint = ?3",
+        )
+        .bind(endpoint_id)
+        .bind(id)
+        .bind(verified_fingerprint)
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(|error| backend("record_verified_capabilities", &error))?;
+        if current.is_none() {
+            return Ok(false);
+        }
+        upsert_capabilities(&mut tx, id, facts, "record_verified_capabilities").await?;
+        tx.commit()
+            .await
+            .map_err(|error| backend("record_verified_capabilities", &error))?;
+        Ok(true)
     }
 
     async fn delete(&self, id: &str) -> Result<(), PortFailure> {
@@ -431,14 +441,17 @@ impl MachinePort for MachineRepository {
                 what: format!("endpoint {endpoint_id:?}"),
             });
         }
-        // For the same reason, the facts an SSH inventory observed through
-        // that address may describe the other machine: each `known` one turns
-        // `stale` (planning and tool comparison then treat it as unknown)
-        // until the next inventory observes it again (#624). Its value and
-        // observation time stay, so the read model still shows what was last
-        // seen and when. Facts with another source (a fleetd node, Proxmox,
-        // Fleet's own records) were not observed through the address and are
-        // kept as they are.
+        // For the same reason, facts an SSH inventory observed may describe
+        // the other machine. Facts carry no endpoint, so every `known` fact of
+        // this machine with an SSH-inventory source turns `stale` (planning
+        // and tool comparison then treat it as unknown), including facts
+        // observed through the machine's other SSH endpoints: one more
+        // inventory refreshes them (#624). Value and observation time stay,
+        // so the read model still shows what was last seen and when. Facts
+        // with another source (a fleetd node, Proxmox, Fleet's own records)
+        // were not observed over SSH and are kept as they are. An inventory
+        // that verified the old key cannot write them back
+        // (`record_verified_capabilities`).
         sqlx::query(
             "UPDATE machine_capabilities SET status = 'stale' \
              WHERE status = 'known' AND source LIKE 'agentless/%' \
@@ -716,6 +729,44 @@ async fn ensure_tag(
         .await
         .map_err(|error| backend("ensure_tag", &error))?;
     Ok(id)
+}
+
+/// Upserts capability facts inside `tx`, skipping the reserved `fleet`
+/// namespace.
+async fn upsert_capabilities(
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    id: &str,
+    facts: &[CapabilityFact],
+    context: &str,
+) -> Result<(), PortFailure> {
+    for fact in facts {
+        // The `fleet` namespace is Fleet's own record keeping and is
+        // never written from a report: a node or an inventory probe
+        // could otherwise forge it.
+        if fact
+            .namespace
+            .eq_ignore_ascii_case(fleet_core::RESERVED_FACT_NAMESPACE)
+        {
+            continue;
+        }
+        sqlx::query(
+                "INSERT INTO machine_capabilities (machine_id, namespace, name, value, status, observed_at, source) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7) \
+                 ON CONFLICT(machine_id, namespace, name) DO UPDATE SET \
+                 value = excluded.value, status = excluded.status, observed_at = excluded.observed_at, source = excluded.source",
+            )
+            .bind(id)
+            .bind(&fact.namespace)
+            .bind(&fact.name)
+            .bind(&fact.value)
+            .bind(fact.status.id())
+            .bind(fact.observed_at.unix_millis())
+            .bind(&fact.source)
+            .execute(&mut **tx)
+            .await
+            .map_err(|error| backend(context, &error))?;
+    }
+    Ok(())
 }
 
 async fn require_machine(

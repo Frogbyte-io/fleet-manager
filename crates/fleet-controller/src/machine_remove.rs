@@ -509,6 +509,27 @@ mod tests {
     }
 
     #[test]
+    fn a_purge_refuses_an_unnormalized_path_and_the_shared_temp_directories() {
+        // `<root>/elsewhere/../state` names the real state directory to `rm`
+        // but not to a lexical check, so it is refused as written.
+        let (code, stderr, unit_kept, dir) = run_purge(|root| {
+            fleetd_state(&root.join("state"));
+            std::fs::create_dir(root.join("elsewhere")).unwrap();
+            format!("{}/elsewhere/../state", root.display()).into()
+        });
+        assert_ne!(code, Some(0), "{stderr}");
+        assert!(stderr.contains("not a normalized path"), "{stderr}");
+        assert!(unit_kept);
+        assert!(dir.path().join("state/node.key").exists());
+        for shared in ["/tmp", "/var/tmp", "/dev/shm"] {
+            let (code, stderr, unit_kept, _dir) = run_purge(|_| shared.into());
+            assert_ne!(code, Some(0), "{shared}: {stderr}");
+            assert!(stderr.contains("system directory"), "{shared}: {stderr}");
+            assert!(unit_kept);
+        }
+    }
+
+    #[test]
     fn a_purge_refuses_a_writable_or_symlinked_ancestor() {
         let (code, stderr, unit_kept, dir) = run_purge(|root| {
             let open = root.join("open");
@@ -810,6 +831,27 @@ mod tests {
             assert!(stderr.contains("refusing to adopt"), "{stderr}");
             assert!(stderr.contains(why), "{stderr}");
             assert!(!state.exists(), "no state directory was created");
+            assert!(
+                !root.join("bin").exists(),
+                "nothing was installed: {stderr}"
+            );
+        }
+
+        // The shared temporary directories themselves (the walk starts above
+        // them) and an unnormalized path are refused, and nothing is touched.
+        std::fs::create_dir(root.join("real/state")).unwrap();
+        for (state, why) in [
+            (std::path::PathBuf::from("/tmp"), "system directory"),
+            (std::path::PathBuf::from("/var/tmp"), "system directory"),
+            (std::path::PathBuf::from("/dev/shm"), "system directory"),
+            (
+                std::path::PathBuf::from(format!("{}/open/../real/state", root.display())),
+                "not a normalized path",
+            ),
+        ] {
+            let (code, stderr) = run_install(root, &state, None);
+            assert_ne!(code, Some(0), "{stderr}");
+            assert!(stderr.contains(why), "{}: {stderr}", state.display());
             assert!(
                 !root.join("bin").exists(),
                 "nothing was installed: {stderr}"

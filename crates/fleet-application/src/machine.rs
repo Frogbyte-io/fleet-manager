@@ -548,6 +548,30 @@ pub trait MachinePort: fmt::Debug + Send + Sync {
         id: &str,
         facts: &[CapabilityFact],
     ) -> Result<(), PortFailure>;
+    /// Upserts capability facts an SSH inventory observed through one
+    /// endpoint, only while that endpoint of the machine still has the host
+    /// key the observation verified. Answers `false`, writing nothing, when a
+    /// different key was confirmed meanwhile: confirming a key marks those
+    /// facts stale, and an older observation must not undo that (#624).
+    ///
+    /// The default checks, then writes; a store implements it as one
+    /// transaction.
+    ///
+    /// # Errors
+    ///
+    /// As [`MachinePort::record_capabilities`].
+    async fn record_verified_capabilities(
+        &self,
+        id: &str,
+        endpoint_id: &str,
+        verified_fingerprint: &str,
+        facts: &[CapabilityFact],
+    ) -> Result<bool, PortFailure> {
+        if self.verified_fingerprint(endpoint_id).await?.as_deref() != Some(verified_fingerprint) {
+            return Ok(false);
+        }
+        self.record_capabilities(id, facts).await.map(|()| true)
+    }
     /// Removes a machine and all its facts.
     ///
     /// # Errors
