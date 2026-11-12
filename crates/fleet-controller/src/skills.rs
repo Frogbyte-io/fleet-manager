@@ -1408,8 +1408,12 @@ fn normalize_probe(
     let normalized_agents = agents
         .iter()
         .map(|agent| {
-            let id = safe_json_text(agent.get("id")?, 255)?;
-            let name = match agent.get("name") {
+            // Skills Manager v1.40.0 names an agent `key` and
+            // `display_name` (docs/research/fixtures/
+            // skills-manager-cli-v1.40.0-agents-list.json); `id` and `name`
+            // are accepted too.
+            let id = safe_json_text(agent.get("key").or_else(|| agent.get("id"))?, 255)?;
+            let name = match agent.get("display_name").or_else(|| agent.get("name")) {
                 Some(value) => safe_json_text(value, 512)?,
                 None => id,
             };
@@ -2562,6 +2566,32 @@ mod tests {
         ));
         assert_eq!(snapshot.cli_version.as_deref(), Some("2.0.0"));
         assert_eq!(snapshot.data["skills"], serde_json::json!([]));
+    }
+
+    #[test]
+    fn the_real_v1_40_agent_listing_normalizes() {
+        // Captured from the released skills-manager-cli 1.40.0 binary.
+        let agents = include_str!(
+            "../../../docs/research/fixtures/skills-manager-cli-v1.40.0-agents-list.json"
+        );
+        let raw = serde_json::json!({
+            "present": true,
+            "version64": b64("skills-manager-cli 1.40.0"),
+            "agents64": b64(agents),
+            "skills64": b64(r#"[{"id":"s","name":"hello-world","description":"x","path":"/p","enabled":true,"tags":[],"source_type":"local","source_ref":"src","preset_ids":[],"presets":[],"deployed_to":["claude_code"]}]"#),
+            "presets64": b64(r#"[{"id":"p","name":"Default","description":"d","icon":null,"sort_order":0,"skill_count":0,"active":true}]"#),
+            "checks64": b64(r#"[{"skill_id":"s","name":"hello-world","source_type":"local","update_status":"local_only","last_check_error":null,"skipped":true}]"#),
+        });
+        let snapshot = normalize_probe("m-1", &raw).expect("the real contract normalizes");
+        let agents = snapshot.data["agents"].as_array().unwrap();
+        assert!(agents.len() > 2);
+        assert_eq!(agents[0]["id"], "claude_code");
+        assert_eq!(agents[0]["name"], "Claude Code");
+        assert_eq!(agents[0]["installed"], true);
+        assert!(
+            snapshot.data.to_string().find("/home/user").is_none(),
+            "agent directories never reach the snapshot"
+        );
     }
 
     #[test]

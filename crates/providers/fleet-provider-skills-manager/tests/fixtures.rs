@@ -102,6 +102,23 @@ fn the_agent_listing_parses() {
 }
 
 #[test]
+fn the_real_v1_40_agent_listing_parses() {
+    // Captured from the released skills-manager-cli 1.40.0 binary, which
+    // names agents `key` and `display_name`.
+    let document = include_str!(
+        "../../../../docs/research/fixtures/skills-manager-cli-v1.40.0-agents-list.json"
+    );
+    let agents: Vec<AgentEntry> = serde_json::from_str(document).unwrap();
+    assert!(agents.len() > 2);
+    assert_eq!(agents[0].id, "claude_code");
+    assert_eq!(agents[0].name.as_deref(), Some("Claude Code"));
+    assert_eq!(
+        agents[0].skills_dir.as_deref(),
+        Some("/home/user/.claude/skills")
+    );
+}
+
+#[test]
 fn the_skill_listing_parses() {
     let document = r#"[
         {"id":"db","name":"db","version":"1.2.0","hasUpdate":false},
