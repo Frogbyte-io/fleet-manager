@@ -148,8 +148,8 @@ printf '%q\n' "$@" >> "$HOME/stub-argv.log"
 [ "$1" = "--json" ] && shift
 [ -e "$HOME/stub-fail-deploy" ] && [ "$1" = skills ] && [ "$2" = deploy ] && { echo "deploy refused" >&2; exit 1; }
 case "$1" in
-  --version) echo '{"version":"1.40.0"}' ;;
-  agents) echo '[{"id":"claude_code","name":"Claude Code","skillsDir":"/secret/agent/path"}]' ;;
+  --version) echo 'skills-manager-cli 1.40.0' ;;
+  agents) echo '[{"key":"claude_code","display_name":"Claude Code","installed":true,"skills_dir":"/secret/agent/path","enabled":true,"is_custom":false,"has_path_override":false,"project_relative_skills_dir":".claude/skills","has_project_path_override":false,"category":"coding"}]' ;;
   presets) echo '[{"id":"default","name":"Default","description":"private","icon":"x","sort_order":0,"skill_count":1,"active":true}]' ;;
   skills)
     shift

@@ -139,13 +139,20 @@ struct VersionDocument {
 /// skills directory.
 #[derive(Debug, Deserialize)]
 pub struct AgentEntry {
-    /// The agent's identifier, e.g. `claude_code`.
+    /// The agent's identifier, e.g. `claude_code` (`key` in v1.40.0).
+    #[serde(alias = "key")]
     pub id: String,
-    /// The agent's display name, when the CLI carries one.
-    #[serde(default, alias = "displayName")]
+    /// The agent's display name, when the CLI carries one (`display_name`
+    /// in v1.40.0).
+    #[serde(default, alias = "displayName", alias = "display_name")]
     pub name: Option<String>,
     /// The agent's global skills directory, when the CLI carries one.
-    #[serde(default, alias = "skillsDir", alias = "skillsPath")]
+    #[serde(
+        default,
+        alias = "skillsDir",
+        alias = "skillsPath",
+        alias = "skills_dir"
+    )]
     pub skills_dir: Option<String>,
 }
 
