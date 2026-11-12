@@ -1652,9 +1652,9 @@ case "$fleet_verb" in
     ;;
   undeploy)
     if [ -n "$fleet_root_arg" ]; then
-      "$fleet_cli" --skills-root "$FLEET_SKILLS_ROOT" --json skills undeploy "$fleet_skill" "${{fleet_agent_args[@]}}" --yes "${{fleet_dry_args[@]}}"
+      "$fleet_cli" --skills-root "$FLEET_SKILLS_ROOT" --json skills undeploy "$fleet_skill" "${{fleet_agent_args[@]}}" "${{fleet_dry_args[@]}}"
     else
-      "$fleet_cli" --json skills undeploy "$fleet_skill" "${{fleet_agent_args[@]}}" --yes "${{fleet_dry_args[@]}}"
+      "$fleet_cli" --json skills undeploy "$fleet_skill" "${{fleet_agent_args[@]}}" "${{fleet_dry_args[@]}}"
     fi
     ;;
 esac
@@ -2230,10 +2230,10 @@ else
   "$fleet_cli" --json skills install "$fleet_target" --local
 fi
 fleet_agent_args=()
-while [ "$#" -gt 0 ]; do fleet_agent_args+=("$1"); shift; done
+while [ "$#" -gt 0 ]; do fleet_agent_args+=(--agent "$1"); shift; done
 "$fleet_cli" --json skills deploy "$fleet_name" "${fleet_agent_args[@]}"
 "$fleet_cli" --json skills show "$fleet_name" >/dev/null
-"$fleet_cli" --json skills status >/dev/null
+"$fleet_cli" --json skills status "$fleet_name" >/dev/null
 fleet_committed=1
 rm -rf "$fleet_backup"
 trap - EXIT HUP INT TERM
@@ -2349,10 +2349,11 @@ else
   fi
 fi
 [ "$#" -eq "$fleet_agents" ] || { echo "invalid explicit agent list" >&2; exit 2; }
-fleet_agent_args=("$@")
+fleet_agent_args=()
+for fleet_agent in "$@"; do fleet_agent_args+=(--agent "$fleet_agent"); done
 fleet_silent skills deploy "$fleet_name" "${fleet_agent_args[@]}"
 fleet_show=$("$fleet_cli" --json skills show "$fleet_name")
-fleet_silent skills status
+fleet_silent skills status "$fleet_name"
 printf '%s\n' "$fleet_show"
 "#.to_owned()
 }
@@ -2463,10 +2464,12 @@ mod tests {
         );
         let calls = std::fs::read_to_string(log).unwrap();
         assert!(calls.contains("skills install"));
+        // The v1.40.0 contract: `skills status` takes the skill reference.
+        assert_eq!(calls.matches("skills status hello-world").count(), 2);
         assert!(calls.contains("skills update hello-world"));
         assert_eq!(
             calls
-                .matches("skills deploy hello-world claude_code")
+                .matches("skills deploy hello-world --agent claude_code")
                 .count(),
             2
         );
@@ -2600,7 +2603,8 @@ mod tests {
         assert!(home.join("rebound").exists());
         let calls = std::fs::read_to_string(log).unwrap();
         assert!(calls.contains("skills set-source release-notes --git-url https://github.com/example/skills/tree/v2.1.0/release-notes --force"));
-        assert!(calls.contains("skills deploy release-notes codex"));
+        assert!(calls.contains("skills deploy release-notes --agent codex"));
+        assert!(calls.contains("skills status release-notes"));
         assert!(!calls.contains("skills update release-notes"));
         assert_eq!(
             String::from_utf8(output.stdout).unwrap().trim(),
@@ -2652,12 +2656,23 @@ mod tests {
                 .unwrap();
             assert_eq!(output.status.success(), succeeds, "case: {name}");
             let calls = std::fs::read_to_string(log).unwrap();
-            assert!(calls.contains("skills deploy hello-world codex"));
+            assert!(calls.contains("skills deploy hello-world --agent codex"));
             assert_eq!(
                 String::from_utf8(output.stdout).unwrap().trim(),
                 show_json,
                 "case: {name}"
             );
+        }
+    }
+
+    #[test]
+    fn undeploy_follows_the_pinned_cli_contract() {
+        // v1.40.0's `skills undeploy` takes `--agent` pairs and has no
+        // `--yes`; an unknown flag would make every undeploy fail.
+        for dry_run in [false, true] {
+            let script = super::mutation_script("undeploy", dry_run);
+            assert!(!script.contains("--yes"), "{script}");
+            assert!(script.contains(r#"fleet_agent_args+=("--agent" "$fleet_agent")"#));
         }
     }
 
