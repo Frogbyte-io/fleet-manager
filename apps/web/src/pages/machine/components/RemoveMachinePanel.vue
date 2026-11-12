@@ -157,7 +157,7 @@ const layout = computed(() => Object.entries(review.value?.uninstall?.layout ?? 
       </p>
     </div>
 
-    <dl class="grid grid-cols-[minmax(0,12rem)_1fr] gap-x-3 gap-y-1.5">
+    <dl class="grid grid-cols-[minmax(0,7rem)_1fr] gap-x-3 gap-y-1.5 sm:grid-cols-[minmax(0,12rem)_1fr]">
       <dt class="text-fc-muted">
         fleetd uninstall
       </dt>
@@ -387,7 +387,7 @@ const layout = computed(() => Object.entries(review.value?.uninstall?.layout ?? 
         <h3 class="fc-kicker border-b-2 border-fc-ink pb-1 text-fc-ink">
           Review
         </h3>
-        <dl class="grid grid-cols-[minmax(0,10rem)_1fr] gap-x-3 gap-y-1.5">
+        <dl class="grid grid-cols-[minmax(0,7rem)_1fr] gap-x-3 gap-y-1.5 sm:grid-cols-[minmax(0,10rem)_1fr]">
           <dt class="text-fc-muted">
             Endpoints
           </dt>
