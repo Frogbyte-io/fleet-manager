@@ -532,6 +532,19 @@ impl TestPackage {
 
 /// The stubs: a systemctl that always reports active, a useradd that
 /// records, and a runuser that just executes (the tests are unprivileged).
+/// A scratch directory for an install's state directory and stubs. It is
+/// under `$HOME`, not `/tmp`: `install.sh` refuses a state directory with a
+/// group- or world-writable ancestor, as `uninstall.sh --purge` does.
+fn work_dir() -> tempfile::TempDir {
+    let dir = tempfile::tempdir_in(std::env::var_os("HOME").expect("HOME is set")).unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    dir
+}
+
 fn write_stubs(stubs_dir: &Path) -> (PathBuf, PathBuf, PathBuf) {
     std::fs::create_dir_all(stubs_dir).unwrap();
     let systemctl = stubs_dir.join("systemctl-stub");
@@ -670,7 +683,7 @@ async fn an_install_operation_enrolls_and_reaches_connected() {
     let package = TestPackage::build();
     publish(&harness, &package);
 
-    let work = tempfile::tempdir().unwrap();
+    let work = work_dir();
     let state_dir = work.path().join("state");
     let payload = install_payload(
         &machine_id,
@@ -790,7 +803,7 @@ async fn a_wrong_digest_fails_and_leaves_the_agentless_endpoint_usable() {
     let package = TestPackage::build();
     publish(&harness, &package);
 
-    let work = tempfile::tempdir().unwrap();
+    let work = work_dir();
     let mut payload = install_payload(
         &machine_id,
         &endpoint_id,
@@ -847,7 +860,7 @@ async fn an_upgrade_installs_over_a_live_identity_without_minting_a_token() {
     let package = TestPackage::build();
     publish(&harness, &package);
 
-    let work = tempfile::tempdir().unwrap();
+    let work = work_dir();
     let state_dir = work.path().join("state");
     let payload = |package: &TestPackage| {
         install_payload(
@@ -943,7 +956,7 @@ async fn a_revoked_identity_is_forcefully_reenrolled() {
     let package = TestPackage::build();
     publish(&harness, &package);
 
-    let work = tempfile::tempdir().unwrap();
+    let work = work_dir();
     let state_dir = work.path().join("state");
     let payload = install_payload(
         &machine_id,
@@ -1133,7 +1146,7 @@ async fn the_orchestrated_install_selects_the_package_from_the_machines_facts() 
     .unwrap();
     plant_facts(&harness, &machine_id, "Linux", "x86_64").await;
 
-    let work = tempfile::tempdir().unwrap();
+    let work = work_dir();
     let state_dir = work.path().join("state");
     let payload = orchestrated_payload(
         &machine_id,
@@ -1205,7 +1218,7 @@ async fn the_orchestrated_install_states_the_platform_limitation() {
             .register_named(&sshd, &format!("limit-{index}"))
             .await;
         plant_facts(&harness, &machine_id, family, architecture).await;
-        let work = tempfile::tempdir().unwrap();
+        let work = work_dir();
         let payload = orchestrated_payload(
             &machine_id,
             &endpoint_id,
@@ -1234,7 +1247,7 @@ async fn the_orchestrated_install_states_the_platform_limitation() {
 
     // A machine with no facts at all is refused just as clearly.
     let (machine_id, endpoint_id) = harness.register_machine(&sshd).await;
-    let work = tempfile::tempdir().unwrap();
+    let work = work_dir();
     let payload = orchestrated_payload(
         &machine_id,
         &endpoint_id,
@@ -1269,7 +1282,7 @@ async fn a_connect_timeout_leaves_a_recoverable_state_and_a_retry_succeeds() {
     let package = TestPackage::build();
     publish(&harness, &package);
 
-    let work = tempfile::tempdir().unwrap();
+    let work = work_dir();
     let state_dir = work.path().join("state");
     // The node loop never runs: the connect wait expires. The artifact is
     // explicit so the test isolates the timeout, not the selection.
@@ -1336,7 +1349,7 @@ async fn a_controller_restart_midway_fails_honestly_and_a_retry_succeeds() {
     let package = TestPackage::build();
     publish(&harness, &package);
 
-    let work = tempfile::tempdir().unwrap();
+    let work = work_dir();
     let state_dir = work.path().join("state");
     let payload = install_payload(
         &machine_id,
@@ -1403,7 +1416,7 @@ async fn a_second_node_cannot_claim_the_association() {
     let package = TestPackage::build();
     publish(&harness, &package);
 
-    let work = tempfile::tempdir().unwrap();
+    let work = work_dir();
     let state_dir = work.path().join("state");
     let payload = install_payload(
         &machine_id,

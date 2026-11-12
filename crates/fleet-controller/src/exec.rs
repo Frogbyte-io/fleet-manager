@@ -318,10 +318,40 @@ impl ScriptExecutor {
                 let count = facts.len();
                 let snapshot = serde_json::to_string(&facts)
                     .map_err(|error| format!("the fact set does not serialize: {error}"))?;
-                self.machines
-                    .record_capabilities(&payload.machine_id, &facts)
+                // Only while the endpoint still has the key this run verified:
+                // a key confirmed meanwhile marked the facts stale (#624),
+                // and what answered behind the old key must not undo that.
+                let recorded = self
+                    .machines
+                    .record_verified_capabilities(
+                        &payload.machine_id,
+                        &payload.endpoint_id,
+                        &verified,
+                        &facts,
+                    )
                     .await
                     .map_err(|failure| failure.to_string())?;
+                let refused = match recorded {
+                    fleet_application::machine::VerifiedWrite::Recorded => None,
+                    fleet_application::machine::VerifiedWrite::KeyChanged => Some((
+                        "host_key_changed",
+                        "the endpoint's host key was confirmed again while this inventory ran; \
+                         nothing was recorded, run the inventory again",
+                    )),
+                    fleet_application::machine::VerifiedWrite::EndpointGone => Some((
+                        "endpoint_removed",
+                        "the endpoint was removed from the machine while this inventory ran; \
+                         nothing was recorded",
+                    )),
+                };
+                if let Some((reason, detail)) = refused {
+                    let error_json = transport_failure_json(reason, detail);
+                    return operations
+                        .complete(&operation.id, "failed", None, Some(&error_json))
+                        .await
+                        .map(|_| ())
+                        .map_err(|error| error.to_string());
+                }
 
                 self.machines
                     .record_snapshot(

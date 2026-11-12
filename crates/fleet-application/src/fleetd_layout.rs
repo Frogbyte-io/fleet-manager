@@ -72,13 +72,12 @@ pub const LAYOUT_VARIABLES: [&str; 6] = [
     "FLEETD_SYSTEMCTL",
 ];
 
-/// Directories `FLEETD_STATE_DIR` may never be: purging it deletes it.
-const PROTECTED_DIRECTORIES: [&str; 37] = [
+/// Directories `FLEETD_STATE_DIR` may never be: purging it deletes it. The
+/// same list as `check_state_path` in `deploy/fleetd/install.sh` and
+/// `uninstall.sh`, which refuse it too (a test checks that they agree).
+const SYSTEM_DIRECTORIES: [&str; 18] = [
     "/",
     "/bin",
-    "/boot",
-    "/dev",
-    "/etc",
     "/home",
     "/lib",
     "/lib32",
@@ -87,35 +86,24 @@ const PROTECTED_DIRECTORIES: [&str; 37] = [
     "/media",
     "/mnt",
     "/opt",
-    "/proc",
-    "/root",
-    "/run",
     "/sbin",
     "/snap",
     "/srv",
-    "/sys",
-    "/tmp",
-    "/usr",
     "/var",
-    "/etc/systemd",
-    "/run/user",
-    "/usr/bin",
-    "/usr/lib",
-    "/usr/lib64",
-    "/usr/libexec",
-    "/usr/local",
-    "/usr/sbin",
-    "/usr/share",
-    "/var/cache",
     "/var/lib",
     "/var/log",
+    "/var/cache",
     "/var/spool",
-    "/var/tmp",
 ];
 
-/// World-writable system directories a production state directory may not
-/// live under.
-const WORLD_WRITABLE_DIRECTORIES: [&str; 3] = ["/tmp", "/var/tmp", "/dev/shm"];
+/// Trees `FLEETD_STATE_DIR` may be neither the root of nor anywhere inside:
+/// system configuration and binaries, kernel and device file systems, and the
+/// volatile or shared temporary directories, whose contents a reboot or
+/// another user can replace. The same list as the scripts'.
+pub const SYSTEM_TREES: [&str; 11] = [
+    "/etc", "/root", "/usr", "/proc", "/sys", "/dev", "/boot", "/run", "/var/run", "/tmp",
+    "/var/tmp",
+];
 
 /// The longest value accepted.
 const MAX_VALUE_BYTES: usize = 1024;
@@ -187,22 +175,21 @@ pub fn validate_installer_variable(
     }
     if name == "FLEETD_STATE_DIR" {
         let normalized = format!("/{}", components.join("/"));
-        if components.len() < 2 || PROTECTED_DIRECTORIES.contains(&normalized.as_str()) {
+        if components.len() < 2 || SYSTEM_DIRECTORIES.contains(&normalized.as_str()) {
             return Err(format!(
                 "installer variable FLEETD_STATE_DIR must be fleetd's own directory, not the system directory {normalized:?} (uninstalling with --purge deletes it)"
             ));
         }
-        // The purge refuses a state directory under a group- or
-        // world-writable ancestor, so a production install must not put it
-        // there: an accepted layout stays removable. The hermetic install
-        // tests (installer test mode) keep theirs in temp directories.
-        if tools == InstallerTools::System
-            && let Some(shared) = WORLD_WRITABLE_DIRECTORIES
-                .iter()
-                .find(|shared| normalized.starts_with(&format!("{shared}/")))
+        // install.sh and the purge refuse these trees in every mode (the
+        // scripts have no test mode), so no install may use them: an
+        // accepted layout stays installable and removable. The hermetic
+        // install tests keep their state under $HOME.
+        if let Some(tree) = SYSTEM_TREES
+            .iter()
+            .find(|tree| normalized == **tree || normalized.starts_with(&format!("{tree}/")))
         {
             return Err(format!(
-                "installer variable FLEETD_STATE_DIR must not be under the world-writable {shared} (uninstalling with --purge refuses such a directory), not {normalized:?}"
+                "installer variable FLEETD_STATE_DIR must be fleetd's own directory, not {normalized:?} inside the system, runtime or temporary tree {tree} (install.sh and uninstalling with --purge refuse it)"
             ));
         }
     }
@@ -318,21 +305,36 @@ mod tests {
     }
 
     #[test]
-    fn a_state_dir_under_a_world_writable_directory_is_refused_in_production() {
+    fn a_state_dir_inside_a_system_runtime_or_temporary_tree_is_refused_in_every_mode() {
         for dir in [
             "/tmp/fleetd",
             "/tmp/.tmpAbC/state",
             "/var/tmp/fleetd",
             "/dev/shm/fleetd",
+            "/run/fleetd",
+            "/var/run/fleetd",
+            "/usr/local/fleetd/state",
+            "/etc/fleetd",
+            "/root/fleetd",
+            "/boot/fleetd",
         ] {
             let error = refused("FLEETD_STATE_DIR", dir);
-            assert!(error.contains("world-writable"), "{dir}: {error}");
-            // The hermetic install tests keep their state in temp directories.
-            validate_installer_variable("FLEETD_STATE_DIR", dir, InstallerTools::Any)
-                .unwrap_or_else(|error| panic!("test mode {dir}: {error}"));
+            assert!(error.contains("tree"), "{dir}: {error}");
+            // In test mode too: install.sh refuses it itself.
+            let error = validate_installer_variable("FLEETD_STATE_DIR", dir, InstallerTools::Any)
+                .unwrap_err();
+            assert!(error.contains("tree"), "test mode {dir}: {error}");
         }
-        ok("FLEETD_STATE_DIR", "/var/lib/fleetd");
-        ok("FLEETD_STATE_DIR", "/tmpfleet/state");
+        for dir in [
+            "/var/lib/fleetd",
+            "/tmpfleet/state",
+            "/srv/fleetd",
+            "/opt/fleetd/state",
+            "/home/operator/fleetd",
+            "/runtime/fleetd",
+        ] {
+            ok("FLEETD_STATE_DIR", dir);
+        }
     }
 
     #[test]

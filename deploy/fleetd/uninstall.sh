@@ -13,12 +13,15 @@
 # --purge deletes the state directory recursively with privilege, so it
 # deletes only a directory that is fleetd's own: an absolute path (trailing
 # slashes are stripped first, so `link/` is the link itself), a real
-# directory (not a symlink), owned by the service account (`fleet`; by the
+# directory (not a symlink) named by a normalized path (no `//`, `.` or
+# `..`), owned by the service account (`fleet`; by the
 # invoking non-root user when that account does not exist, as install.sh
 # does without it), not a system directory, and either empty or holding
 # fleetd's node key (`node.key`). Every ancestor must be a real directory
-# owned by root (or, in that stubbed case, by the invoking user) and not
-# writable by group or others, so nobody else can swap a path component.
+# owned by root (or, in that stubbed case, by the invoking user), not
+# writable by group or others and without a POSIX ACL, so nobody else can
+# swap a path component; install.sh applies the same rule before it adopts
+# the directory.
 # Anything else is refused before anything is removed. The checks run again
 # right before the delete, which stays on one file system.
 #
@@ -63,40 +66,118 @@ PURGE=false
 BIN="$BIN_DIR/fleetd"
 UNIT="$UNIT_DIR/$SERVICE.service"
 
+# >>> state directory ancestors: kept identical in install.sh and uninstall.sh
+# (a test compares the two copies), so the installer never adopts a state
+# directory that the purge would refuse.
+#
+# $STATE_DIR must be an absolute, normalized path (no `//`, `.` or `..`, so
+# every test below names the directory `rm` would act on) that is neither a
+# system directory nor inside a system, runtime or temporary tree
+# (check_state_path). Every ancestor must be a real directory (not a symbolic
+# link), owned by root, not writable by group or others, and without a POSIX
+# ACL. Then nobody else can swap a path component. (On Linux the group mode
+# bits already show an ACL's mask, so the ACL test is defense in depth: a
+# directory root set up plainly has none.) When the service account does not
+# exist and a non-root user runs the script (stubbed installs), the invoking
+# user may own an ancestor instead. With `missing-ok` as $1, an ancestor that
+# does not exist yet passes: install.sh is about to create it. A failure calls
+# refuse_state with the reason.
+#
+# ACLs are read with `getfacl --skip-base` when it is installed, otherwise from
+# the `+` that `ls -ld` prints after the mode of a file that has one. An ACL
+# that cannot be read counts as present.
+ancestor_has_acl() {
+    local listing
+    if command -v getfacl >/dev/null 2>&1; then
+        listing="$(getfacl --absolute-names --skip-base --omit-header -- "$1" 2>/dev/null)" \
+            || return 0
+        [ -n "$listing" ]
+        return
+    fi
+    listing="$(ls -ld -- "$1" 2>/dev/null)" || return 0
+    [ "${listing:10:1}" = "+" ]
+}
+# The state path alone: absolute, normalized, and not a system directory or
+# anything inside a system, runtime or temporary tree. The controller's layout
+# validator (fleetd_layout.rs) applies the same rule, and a test checks that
+# the two agree.
+check_state_path() {
+    # A relative path has no ancestors to check (and `dirname .` is `.`).
+    case "$STATE_DIR" in
+        /*) ;;
+        *) refuse_state "it is not an absolute path" ;;
+    esac
+    # `/home/../var/lib` would pass every lexical test below as something it
+    # is not.
+    case "$STATE_DIR" in
+        *//*|*/./*|*/../*|*/.|*/..)
+            refuse_state "it is not a normalized path (no //, . or .. components)" ;;
+    esac
+    case "$STATE_DIR" in
+        /|/bin|/home|/lib|/lib32|/lib64|/libx32|/media|/mnt|/opt|/sbin|/snap|/srv|/var|/var/lib|/var/log|/var/cache|/var/spool)
+            refuse_state "it is a system directory" ;;
+        # Whole trees: system configuration and binaries, kernel and device
+        # file systems, and the volatile or shared temporary directories,
+        # whose contents a reboot or another user can replace. The ancestor
+        # walk starts above the directory, so these are named here.
+        /etc|/etc/*|/root|/root/*|/usr|/usr/*|/proc|/proc/*|/sys|/sys/*|/dev|/dev/*|/boot|/boot/*|/run|/run/*|/var/run|/var/run/*|/tmp|/tmp/*|/var/tmp|/var/tmp/*)
+            refuse_state "it is a system directory or inside one (system, runtime and temporary trees are refused)" ;;
+    esac
+    case "$STATE_DIR" in
+        /*/*) ;;
+        *) refuse_state "it is a top-level directory (it must be inside another directory)" ;;
+    esac
+}
+check_state_ancestors() {
+    local ancestor_owner dir a_owner a_mode
+    check_state_path
+    if [ "$IS_ROOT" = true ] || getent passwd "$SERVICE_USER" >/dev/null 2>&1; then
+        ancestor_owner=root
+    else
+        ancestor_owner="$(id -un)"
+    fi
+    dir="$(dirname -- "$STATE_DIR")"
+    while :; do
+        if [ -L "$dir" ]; then
+            refuse_state "its ancestor $dir is a symbolic link"
+        elif [ -e "$dir" ] || [ "${1:-}" != missing-ok ]; then
+            [ -d "$dir" ] || refuse_state "its ancestor $dir is not a directory"
+            a_owner="$(stat -c %U -- "$dir" 2>/dev/null)" || refuse_state "the owner of $dir cannot be read"
+            a_mode="$(stat -c %a -- "$dir" 2>/dev/null)" || refuse_state "the mode of $dir cannot be read"
+            [ "$a_owner" = root ] || [ "$a_owner" = "$ancestor_owner" ] \
+                || refuse_state "its ancestor $dir is owned by $a_owner, not root"
+            [ $(( 8#$a_mode & 8#022 )) -eq 0 ] \
+                || refuse_state "its ancestor $dir is writable by group or others (mode $a_mode)"
+            ! ancestor_has_acl "$dir" \
+                || refuse_state "its ancestor $dir has a POSIX ACL (remove it with setfacl -b)"
+        fi
+        [ "$dir" = / ] && break
+        dir="$(dirname -- "$dir")"
+    done
+}
+# <<< state directory ancestors
+
+refuse_state() { die "refusing to purge $STATE_DIR: $1; nothing was removed"; }
+
 # What --purge will do with the state directory: "absent" (nothing there),
 # "empty" (rmdir) or "state" (fleetd's own state, removed recursively).
 # Refuses, removing nothing, unless the directory is fleetd's own.
 purge_plan() {
-    refuse() { die "refusing to purge $STATE_DIR: $1; nothing was removed"; }
+    refuse() { refuse_state "$1"; }
     case "$STATE_DIR" in
         /*) ;;
         *) refuse "it is not an absolute path" ;;
     esac
     # Who may own the directory and its ancestors.
-    local expected ancestor_owner
+    local expected
     if getent passwd "$SERVICE_USER" >/dev/null 2>&1; then
         expected="$SERVICE_USER"
-        ancestor_owner=root
     elif [ "$IS_ROOT" = true ]; then
         refuse "there is no $SERVICE_USER account, so the directory cannot be fleetd's"
     else
         expected="$(id -un)"
-        ancestor_owner="$expected"
     fi
-    local dir a_owner a_mode
-    dir="$(dirname -- "$STATE_DIR")"
-    while :; do
-        [ -L "$dir" ] && refuse "its ancestor $dir is a symbolic link"
-        [ -d "$dir" ] || refuse "its ancestor $dir is not a directory"
-        a_owner="$(stat -c %U -- "$dir" 2>/dev/null)" || refuse "the owner of $dir cannot be read"
-        a_mode="$(stat -c %a -- "$dir" 2>/dev/null)" || refuse "the mode of $dir cannot be read"
-        [ "$a_owner" = root ] || [ "$a_owner" = "$ancestor_owner" ] \
-            || refuse "its ancestor $dir is owned by $a_owner, not root"
-        [ $(( 8#$a_mode & 8#022 )) -eq 0 ] \
-            || refuse "its ancestor $dir is writable by group or others (mode $a_mode)"
-        [ "$dir" = / ] && break
-        dir="$(dirname -- "$dir")"
-    done
+    check_state_ancestors
     if [ -L "$STATE_DIR" ]; then
         refuse "it is a symbolic link"
     fi
@@ -105,12 +186,6 @@ purge_plan() {
         return
     fi
     [ -d "$STATE_DIR" ] || refuse "it is not a directory"
-    local normalized
-    normalized="$(printf '%s' "$STATE_DIR" | tr -s '/' | sed 's:/*$::')"
-    case "${normalized:-/}" in
-        /|/bin|/boot|/dev|/etc|/home|/lib|/lib32|/lib64|/libx32|/media|/mnt|/opt|/proc|/root|/run|/sbin|/snap|/srv|/sys|/tmp|/usr|/var|/etc/*|/root/*|/usr/*|/var/lib|/var/log|/var/tmp|/var/cache|/var/spool|/var/run|/var/run/*|/run/user|/run/user/*|/proc/*|/sys/*|/dev/*|/boot/*)
-            refuse "it is a system directory" ;;
-    esac
     local owner
     owner="$(stat -c %U -- "$STATE_DIR" 2>/dev/null)" || refuse "its owner cannot be read"
     [ "$owner" = "$expected" ] || refuse "it is owned by $owner, not $expected"

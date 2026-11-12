@@ -164,6 +164,180 @@ async fn confirming_a_host_key_clears_the_recorded_os() {
     );
 }
 
+/// The facts an SSH inventory observed through the address may describe the
+/// other machine too: confirming a host key turns them stale until the next
+/// inventory (#624). Facts from other sources and other machines stay.
+#[tokio::test]
+async fn confirming_a_host_key_marks_the_ssh_observed_facts_stale() {
+    use fleet_core::{CapabilityFact, CapabilityStatus, Timestamp};
+    let fact = |name: &str, status: CapabilityStatus, source: &str| CapabilityFact {
+        namespace: "tool".to_owned(),
+        name: name.to_owned(),
+        value: Some("1.0".to_owned()),
+        status,
+        observed_at: Timestamp::from_unix_millis(1_000),
+        source: source.to_owned(),
+    };
+    let (_dir, store) = store().await;
+    let machines = MachineRepository::new(store.pool().clone());
+    let machine = machines.register(&workstation()).await.unwrap();
+    let mut other = workstation();
+    other.name = "workstation-2".to_owned();
+    let other = machines.register(&other).await.unwrap();
+    machines
+        .record_capabilities(
+            &machine.id,
+            &[
+                fact("git", CapabilityStatus::Known, "agentless/1"),
+                fact("docker", CapabilityStatus::Unavailable, "agentless/1"),
+                fact("node", CapabilityStatus::Known, "fleetd/tools/1"),
+                fact("qemu-agent", CapabilityStatus::Known, "proxmox/8.3.0"),
+            ],
+        )
+        .await
+        .unwrap();
+    machines
+        .record_capabilities(
+            &other.id,
+            &[fact("git", CapabilityStatus::Known, "agentless/1")],
+        )
+        .await
+        .unwrap();
+
+    machines
+        .confirm_fingerprint(&machine.endpoints[1].id, "SHA256:another", 2)
+        .await
+        .unwrap();
+    let status_of = |machine: &fleet_application::machine::Machine, name: &str| {
+        let fact = machine
+            .capabilities
+            .iter()
+            .find(|fact| fact.name == name)
+            .unwrap();
+        (
+            fact.status,
+            fact.value.clone(),
+            fact.observed_at.unix_millis(),
+        )
+    };
+    let read = machines.get(&machine.id).await.unwrap();
+    assert_eq!(
+        status_of(&read, "git"),
+        (CapabilityStatus::Stale, Some("1.0".to_owned()), 1_000),
+        "what was seen, and when, stays"
+    );
+    assert_eq!(status_of(&read, "docker").0, CapabilityStatus::Unavailable);
+    assert_eq!(status_of(&read, "node").0, CapabilityStatus::Known);
+    assert_eq!(status_of(&read, "qemu-agent").0, CapabilityStatus::Known);
+    let other_read = machines.get(&other.id).await.unwrap();
+    assert_eq!(status_of(&other_read, "git").0, CapabilityStatus::Known);
+
+    // The next inventory observes it again.
+    machines
+        .record_capabilities(
+            &machine.id,
+            &[fact("git", CapabilityStatus::Known, "agentless/1")],
+        )
+        .await
+        .unwrap();
+    let read = machines.get(&machine.id).await.unwrap();
+    assert_eq!(status_of(&read, "git").0, CapabilityStatus::Known);
+
+    // An unknown endpoint changes nothing.
+    let missing = machines
+        .confirm_fingerprint("no-such-endpoint", "SHA256:another", 3)
+        .await
+        .unwrap_err();
+    assert!(matches!(missing, PortFailure::NotFound { .. }), "{missing}");
+}
+
+/// An inventory that verified the old key cannot write its facts back after
+/// a confirmation marked them stale (#624).
+#[tokio::test]
+async fn facts_are_recorded_only_under_the_fingerprint_the_inventory_verified() {
+    use fleet_application::machine::VerifiedWrite;
+    use fleet_core::{CapabilityFact, CapabilityStatus, Timestamp};
+    let git = CapabilityFact {
+        namespace: "tool".to_owned(),
+        name: "git".to_owned(),
+        value: Some("2.0".to_owned()),
+        status: CapabilityStatus::Known,
+        observed_at: Timestamp::from_unix_millis(5_000),
+        source: "agentless/1".to_owned(),
+    };
+    let (_dir, store) = store().await;
+    let machines = MachineRepository::new(store.pool().clone());
+    let machine = machines.register(&workstation()).await.unwrap();
+    let endpoint = &machine.endpoints[0].id;
+    machines
+        .confirm_fingerprint(endpoint, "SHA256:current", 1)
+        .await
+        .unwrap();
+    let stale = machines
+        .record_verified_capabilities(
+            &machine.id,
+            endpoint,
+            "SHA256:previous",
+            std::slice::from_ref(&git),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        stale,
+        VerifiedWrite::KeyChanged,
+        "a key confirmed meanwhile wins"
+    );
+    assert!(
+        machines
+            .get(&machine.id)
+            .await
+            .unwrap()
+            .capabilities
+            .is_empty()
+    );
+    // Another machine's endpoint does not count either.
+    let mut other = workstation();
+    other.name = "workstation-2".to_owned();
+    let other = machines.register(&other).await.unwrap();
+    machines
+        .confirm_fingerprint(&other.endpoints[0].id, "SHA256:current", 1)
+        .await
+        .unwrap();
+    assert_eq!(
+        machines
+            .record_verified_capabilities(
+                &machine.id,
+                &other.endpoints[0].id,
+                "SHA256:current",
+                std::slice::from_ref(&git),
+            )
+            .await
+            .unwrap(),
+        VerifiedWrite::EndpointGone
+    );
+    // Nor does an endpoint that no longer exists.
+    assert_eq!(
+        machines
+            .record_verified_capabilities(
+                &machine.id,
+                "no-such-endpoint",
+                "SHA256:current",
+                std::slice::from_ref(&git),
+            )
+            .await
+            .unwrap(),
+        VerifiedWrite::EndpointGone
+    );
+    let current = machines
+        .record_verified_capabilities(&machine.id, endpoint, "SHA256:current", &[git])
+        .await
+        .unwrap();
+    assert_eq!(current, VerifiedWrite::Recorded);
+    let read = machines.get(&machine.id).await.unwrap();
+    assert_eq!(read.capabilities.len(), 1);
+    assert_eq!(read.capabilities[0].status, CapabilityStatus::Known);
+}
+
 /// A detected OS is written with its audit event in one transaction, and
 /// only under the fingerprint the detection ran with.
 #[tokio::test]

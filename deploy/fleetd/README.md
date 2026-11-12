@@ -48,8 +48,17 @@ rebinding an existing machine to a new node key.
 directory that is fleetd's own: an absolute path (trailing slashes are
 stripped first), a real directory (not a symbolic link), owned by the `fleet`
 account, not a system directory, and empty or holding fleetd's `node.key` as
-a regular file. Every ancestor must be a real directory owned by root and not
-writable by group or others. On a test layout where no `fleet` account
+a regular file. Every ancestor must be a real directory owned by root, not
+writable by group or others, and without a POSIX ACL (read with `getfacl`
+when it is installed, otherwise from the `+` that `ls -ld` shows). On Linux
+the group mode bits already reflect an ACL's mask, so the ACL test is defense
+in depth; remove an ACL with `setfacl -b <dir>`. The state directory path
+itself must be normalized (no `//`, `.` or `..`), inside another directory
+(not top-level), not a system directory such as `/var/lib` or `/srv`, and
+nowhere inside the trees `/etc`, `/root`, `/usr`, `/proc`, `/sys`, `/dev`,
+`/boot`, `/run`, `/var/run`, `/tmp` or `/var/tmp` (system, runtime and
+temporary trees). The controller refuses the same paths when it accepts a
+`machines install-node` layout. On a test layout where no `fleet` account
 exists and a non-root user runs the script (as `install.sh` allows with a
 stubbed `useradd`), the state directory and its ancestors may belong to that
 user instead; run as root without the account, the purge is refused. Anything else is refused before anything is
@@ -59,7 +68,10 @@ error, removing nothing, when the service cannot be stopped (`systemctl
 disable --now` fails), or when the unit file is gone and `systemctl
 is-active` does not answer `inactive`, `unknown` or `failed`. `install.sh`
 refuses to adopt a state directory that is a symbolic link, whose contents
-cannot be read, or that already holds files without a regular `node.key`.
+cannot be read, or that already holds files without a regular `node.key`. It
+also applies the same ancestor rule before it creates anything, and again once
+the state directory exists, so a layout that `--purge` would refuse is never
+installed.
 
 ## Local socket access
 
