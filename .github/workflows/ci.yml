@@ -245,9 +245,14 @@ jobs:
 
       # Windows ships one binary: fleetctl (release.yml builds only it there).
       # The controller and fleetd are Linux-only (docs/PLAN.md, supported
-      # platform baseline), so this checks fleetctl and every library it
-      # links, not the whole workspace. Linux runs the exhaustive checks.
-      - run: cargo check -p fleetctl --all-targets --all-features --locked
+      # platform baseline), so this checks the shipped fleetctl targets and
+      # every library they link, not the whole workspace; fleetctl's
+      # integration tests drive Unix tooling and run on Linux. The
+      # fleet-provider-git targets are checked too, so its non-Unix credential
+      # refusal and that refusal's test keep compiling. Linux runs the
+      # exhaustive checks.
+      - run: cargo check -p fleetctl --lib --bins --all-features --locked
+      - run: cargo check -p fleet-provider-git --all-targets --all-features --locked
       - run: cargo build -p fleetctl --bins --locked
 
   cargo-deny:
