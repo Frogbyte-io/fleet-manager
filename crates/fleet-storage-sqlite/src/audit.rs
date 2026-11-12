@@ -318,6 +318,44 @@ pub async fn append_intent_tx(
     Ok(id)
 }
 
+/// Appends an event that is already resolved (its outcome set) inside an
+/// existing transaction: a mutation a running operation makes on the side,
+/// recorded with the state change it describes. It carries the operation id
+/// but is not an intent, so the operation's own intent stays the one its
+/// completion resolves.
+///
+/// # Errors
+///
+/// Returns the database's failure detail; the caller's transaction then
+/// rolls back.
+pub async fn append_resolved_tx(
+    tx: &mut Transaction<'_, Sqlite>,
+    event: &AuditIntent,
+    outcome: AuditOutcome,
+) -> Result<String, String> {
+    let id = Uuid::now_v7().to_string();
+    sqlx::query(
+        "INSERT INTO audit_events \
+         (id, occurred_at, actor, action, resource, allowed, reason, correlation_id, operation_id, outcome, metadata_json) \
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+    )
+    .bind(&id)
+    .bind(epoch_millis())
+    .bind(&event.actor)
+    .bind(&event.action)
+    .bind(&event.resource)
+    .bind(i64::from(event.decision.allowed))
+    .bind(event.decision.reason.id())
+    .bind(&event.correlation_id)
+    .bind(&event.operation_id)
+    .bind(outcome.id())
+    .bind(event.metadata.to_json())
+    .execute(&mut **tx)
+    .await
+    .map_err(|error| error.to_string())?;
+    Ok(id)
+}
+
 /// The audit sink the operation use cases call: appends intents for accepted
 /// mutations and terminal outcomes, keyed by the operation they belong to.
 #[derive(Debug)]

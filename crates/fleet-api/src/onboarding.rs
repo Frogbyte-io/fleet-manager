@@ -139,6 +139,28 @@ pub struct TestOutcomeDto {
     pub at: i64,
 }
 
+/// The login-shell check of a draft (ADR 0021): which shell answered, the
+/// guest OS the endpoint will be recorded as, and the refusal when Fleet
+/// cannot drive that shell.
+#[derive(Clone, Debug, Serialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct ShellCheckDto {
+    /// The detected login shell: `posix`, `windows_powershell`,
+    /// `powershell_core`, `cmd` or `unrecognized`.
+    pub shell: String,
+    /// The guest OS the endpoint is driven as, `linux` or `windows`; absent
+    /// when the shell is refused or unrecognized (the endpoint stays
+    /// unknown).
+    pub guest_os: Option<String>,
+    /// The refusal reason: `unsupported_shell`, `constrained_language` or
+    /// `profile_output`. Add refuses a draft that carries one.
+    pub refusal_reason: Option<String>,
+    /// The refusal detail, naming the setup step that fixes it.
+    pub refusal_detail: Option<String>,
+    /// When the check ran (epoch milliseconds).
+    pub at: i64,
+}
+
 /// One existing machine whose endpoint matches a draft's host and port.
 /// Candidates warn; they never merge or block.
 #[derive(Clone, Debug, Serialize, ToSchema)]
@@ -212,6 +234,9 @@ pub struct OnboardingDraftDetailDto {
     pub confirmed_fingerprint: Option<String>,
     /// The newest test outcome, when a test ran.
     pub last_test: Option<TestOutcomeDto>,
+    /// The newest login-shell check, when a test or discover reached the
+    /// endpoint.
+    pub shell_check: Option<ShellCheckDto>,
     /// The facts discovery recorded for review.
     pub facts: Vec<CapabilityFactDto>,
     /// When discovery completed (epoch milliseconds).
@@ -321,6 +346,7 @@ impl From<DraftView> for OnboardingDraftDetailDto {
             host_key,
             confirmed_fingerprint,
             last_test,
+            shell_check,
             facts,
             discovered_at,
             profile_hint,
@@ -356,6 +382,13 @@ impl From<DraftView> for OnboardingDraftDetailDto {
                 connected: outcome.connected,
                 detail: outcome.detail,
                 at: outcome.at,
+            }),
+            shell_check: shell_check.map(|check| ShellCheckDto {
+                shell: check.shell,
+                guest_os: check.guest_os.map(|os| os.id().to_owned()),
+                refusal_reason: check.refusal_reason,
+                refusal_detail: check.refusal_detail,
+                at: check.at,
             }),
             facts: facts
                 .iter()

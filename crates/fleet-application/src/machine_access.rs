@@ -56,14 +56,26 @@ const MAX_REFERENCE_BYTES: usize = 1024;
 /// The POSIX script that runs the caller's argv: the arguments reach the
 /// script as `$@`, so no caller text is ever parsed by a shell.
 pub const POSIX_ARGV_SCRIPT: &str = "exec \"$@\"\n";
-/// The PowerShell script that runs the caller's argv from `$args` (ADR
-/// 0015's shell layer supplies the arguments), mapping the native exit code
-/// the way the layer already does. Windows PowerShell 5.1 builds a native
-/// command's line from the argument array itself and does not escape
-/// embedded double quotes, so an argument containing `"` may reach the
-/// program split or merged differently than given; use `--script` (and the
-/// program's own quoting) for such arguments.
-pub const POWERSHELL_ARGV_SCRIPT: &str = "$fleetCmd=$args[0];$fleetRest=@();if($args.Count -gt 1){$fleetRest=@($args[1..($args.Count-1)])};& $fleetCmd @fleetRest\n";
+/// The fixed Windows argv runner. PowerShell 5.1 cannot faithfully pass
+/// quotes, trailing backslashes or controls to native programs; both the
+/// application and this runner refuse them. Only native `.exe` applications
+/// may receive argv data; shell scripts and batch shims require script mode.
+pub const POWERSHELL_ARGV_SCRIPT: &str = concat!(
+    "foreach($fleetArg in $args){",
+    "if($fleetArg.Length -eq 0 -or $fleetArg.Contains([string][char]34) -or $fleetArg.EndsWith([string][char]92)){exit 64};",
+    "foreach($fleetChar in $fleetArg.ToCharArray()){if([char]::IsControl($fleetChar)){exit 64}}};",
+    "$fleetCmd=Get-Command -Name $args[0] -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1;",
+    "if($null -eq $fleetCmd -or [IO.Path]::GetExtension($fleetCmd.Path) -ine '.exe'){exit 64};",
+    // Native discovery expands patterns even through GetCommands(..., false).
+    // Verify the resolved literal name/path before executing it; escaping the
+    // lookup pattern instead breaks existing executable paths with brackets.
+    "$fleetExpected=$args[0];$fleetActual=$fleetCmd.Name;",
+    "if($fleetExpected.IndexOfAny([char[]]@([char]47,[char]92,[char]58)) -ge 0){",
+    "try{$fleetExpected=[IO.Path]::GetFullPath($fleetExpected);$fleetActual=[IO.Path]::GetFullPath($fleetCmd.Path)}catch{exit 64}};",
+    "if($fleetActual -ine $fleetExpected -and $fleetActual -ine ($fleetExpected+'.exe')){exit 64};",
+    "$fleetRest=@();if($args.Count -gt 1){$fleetRest=@($args[1..($args.Count-1)])};",
+    "& $fleetCmd.Path @fleetRest\n"
+);
 
 /// How an SSH endpoint authenticates. The wire shape is the `auth` object
 /// every SSH-driven operation payload already carries.
@@ -242,8 +254,40 @@ pub struct AccessTarget<'a> {
     pub endpoint_id: Option<&'a str>,
     /// An explicit auth, overriding the endpoint's default.
     pub auth: Option<&'a EndpointAuth>,
-    /// The guest's OS, which selects the shell and the path rules.
-    pub guest_os: GuestOs,
+    /// The caller's `--os`, which selects the shell and the path rules.
+    /// `None` means the caller did not say. Once the endpoint's OS is
+    /// recorded (ADR 0021 decision 4) this is a check against it, and the
+    /// recorded OS is used when it is absent; for an endpoint whose OS is
+    /// unknown it still chooses, and absent means Linux.
+    pub guest_os: Option<GuestOs>,
+}
+
+/// The guest OS a machine access runs as (ADR 0021 decision 4, amending
+/// ADR 0017 decision 7): the endpoint's recorded OS when there is one, which
+/// the caller's choice must then match; otherwise the caller's choice, and
+/// Linux when the caller did not say.
+///
+/// # Errors
+///
+/// Fails with a `guest_os_mismatch:` detail when the caller's choice
+/// contradicts the recorded OS.
+pub fn effective_guest_os(
+    chosen: Option<GuestOs>,
+    recorded: Option<GuestOs>,
+) -> Result<GuestOs, String> {
+    match (chosen, recorded) {
+        (Some(chosen), Some(recorded)) if chosen != recorded => Err(format!(
+            "guest_os_mismatch: the endpoint was detected as {} at onboarding or \
+             inventory; the requested guest OS {} does not match it (omit the OS \
+             or pass {})",
+            recorded.id(),
+            chosen.id(),
+            recorded.id()
+        )),
+        (_, Some(recorded)) => Ok(recorded),
+        (Some(chosen), None) => Ok(chosen),
+        (None, None) => Ok(GuestOs::Linux),
+    }
 }
 
 /// A machine exec request.
@@ -656,8 +700,8 @@ impl MachineAccess {
                 detail: format!("timeoutSeconds must be 1..={MAX_MACHINE_EXEC_TIMEOUT_SECONDS}"),
             });
         }
-        let (script, arguments, digest) =
-            prepare_command(&request.command, request.target.guest_os)?;
+        let guest_os = self.guest_os_for(&request.target).await?;
+        let (script, arguments, digest) = prepare_command(&request.command, guest_os)?;
         let (endpoint_id, auth) = self
             .resolve_target(authorizer, principal, &request.target)
             .await?;
@@ -666,7 +710,7 @@ impl MachineAccess {
             ("authKind", auth.kind().to_owned()),
             ("commandSha256", digest.clone()),
             ("timeoutSeconds", timeout.to_string()),
-            ("guestOs", request.target.guest_os.id().to_owned()),
+            ("guestOs", guest_os.id().to_owned()),
         ];
         self.audit_event(
             principal,
@@ -697,7 +741,7 @@ impl MachineAccess {
                     "auth": auth,
                     "script": script,
                     "arguments": arguments,
-                    "guestOs": request.target.guest_os.id(),
+                    "guestOs": guest_os.id(),
                     "timeoutSeconds": timeout,
                     "commandSha256": digest,
                 })
@@ -770,7 +814,7 @@ impl MachineAccess {
         request: &PutRequestTarget<'_>,
         staged: &StagedUpload,
     ) -> Result<NewOperation, LabUseCaseError> {
-        let (endpoint_id, auth) = self.check_put(authorizer, principal, request).await?;
+        let (endpoint_id, auth, guest_os) = self.check_put(authorizer, principal, request).await?;
         let stage = self.stage_port()?;
         if !is_sha256_hex(&staged.sha256) {
             return Err(LabUseCaseError::Invalid {
@@ -816,7 +860,7 @@ impl MachineAccess {
                     "sizeBytes": staged.size_bytes,
                     "sha256": staged.sha256,
                     "overwrite": request.overwrite,
-                    "guestOs": request.target.guest_os.id(),
+                    "guestOs": guest_os.id(),
                 })
                 .to_string(),
             ),
@@ -829,7 +873,7 @@ impl MachineAccess {
         authorizer: &dyn Authorizer,
         principal: &ActingPrincipal,
         request: &PutRequestTarget<'_>,
-    ) -> Result<(String, EndpointAuth), LabUseCaseError> {
+    ) -> Result<(String, EndpointAuth, GuestOs), LabUseCaseError> {
         authorize(
             authorizer,
             AccessRequest {
@@ -840,13 +884,16 @@ impl MachineAccess {
         )
         .map_err(LabUseCaseError::Denied)?;
         self.stage_port()?;
-        validate_guest_path_for(request.target.guest_os, request.guest_path).map_err(|detail| {
+        let guest_os = self.guest_os_for(&request.target).await?;
+        validate_guest_path_for(guest_os, request.guest_path).map_err(|detail| {
             LabUseCaseError::Invalid {
                 detail: format!("guest path: {detail}"),
             }
         })?;
-        self.resolve_target(authorizer, principal, &request.target)
-            .await
+        let (endpoint_id, auth) = self
+            .resolve_target(authorizer, principal, &request.target)
+            .await?;
+        Ok((endpoint_id, auth, guest_os))
     }
 
     /// Validates a collection of guest paths and answers the
@@ -873,7 +920,8 @@ impl MachineAccess {
         )
         .map_err(LabUseCaseError::Denied)?;
         self.files_port()?;
-        validate_collect_paths_for(target.guest_os, paths)
+        let guest_os = self.guest_os_for(target).await?;
+        validate_collect_paths_for(guest_os, paths)
             .map_err(|detail| LabUseCaseError::Invalid { detail })?;
         let (endpoint_id, auth) = self.resolve_target(authorizer, principal, target).await?;
         self.audit_event(
@@ -899,7 +947,7 @@ impl MachineAccess {
                     "endpointId": endpoint_id,
                     "auth": auth,
                     "paths": paths,
-                    "guestOs": target.guest_os.id(),
+                    "guestOs": guest_os.id(),
                     "owner": principal.id,
                 })
                 .to_string(),
@@ -1118,6 +1166,40 @@ impl MachineAccess {
     #[must_use]
     pub fn policy(&self) -> ArtifactPolicy {
         self.policy
+    }
+
+    /// The guest OS this access runs as: the caller's choice checked against
+    /// the endpoint's recorded OS (see [`effective_guest_os`]). The endpoint
+    /// lookup here is lenient on purpose: an unknown machine or an ambiguous
+    /// endpoint is reported by [`Self::resolve_target`], with its usual
+    /// error, not here.
+    pub(crate) async fn guest_os_for(
+        &self,
+        target: &AccessTarget<'_>,
+    ) -> Result<GuestOs, LabUseCaseError> {
+        let recorded = match self.machines.get(target.machine_id).await {
+            Ok(machine) => {
+                let mut ssh = machine
+                    .endpoints
+                    .iter()
+                    .filter(|endpoint| endpoint.kind == EndpointKind::Ssh);
+                let endpoint = match target.endpoint_id {
+                    Some(id) => ssh.find(|endpoint| endpoint.id == id),
+                    None => match (ssh.next(), ssh.next()) {
+                        (Some(only), None) => Some(only),
+                        _ => None,
+                    },
+                };
+                endpoint.and_then(|endpoint| endpoint.guest_os)
+            }
+            // Only a missing machine is "unknown" here (resolve_target then
+            // reports it); a backend failure must not let a request past the
+            // check.
+            Err(PortFailure::NotFound { .. }) => None,
+            Err(failure) => return Err(backend(failure.to_string())),
+        };
+        effective_guest_os(target.guest_os, recorded)
+            .map_err(|detail| LabUseCaseError::Conflict { detail })
     }
 
     /// Picks the SSH endpoint and the auth to use: the endpoint the caller
@@ -1352,6 +1434,17 @@ fn prepare_command(
                     "the arguments are longer than {MAX_MACHINE_EXEC_BYTES} bytes together"
                 )));
             }
+            if guest_os == GuestOs::Windows {
+                let batch = argv[0].rsplit_once('.').is_some_and(|(_, extension)| {
+                    extension.eq_ignore_ascii_case("cmd") || extension.eq_ignore_ascii_case("bat")
+                });
+                if argv.iter().any(|arg| {
+                    arg.contains('"') || arg.ends_with('\\') || arg.chars().any(char::is_control)
+                }) || batch
+                {
+                    return Err(invalid("Windows argv refuses quotes, trailing backslashes, control characters and batch files; use --script with the program's own quoting".to_owned()));
+                }
+            }
             let script = match guest_os {
                 GuestOs::Linux => POSIX_ARGV_SCRIPT,
                 GuestOs::Windows => POWERSHELL_ARGV_SCRIPT,
@@ -1399,6 +1492,47 @@ fn unwired_files() -> LabUseCaseError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_unknown_endpoint_keeps_the_caller_choosing_the_guest_os() {
+        // Existing endpoints are unknown: `--os` decides, absent is Linux,
+        // exactly as before ADR 0021.
+        assert_eq!(effective_guest_os(None, None), Ok(GuestOs::Linux));
+        assert_eq!(
+            effective_guest_os(Some(GuestOs::Windows), None),
+            Ok(GuestOs::Windows)
+        );
+        assert_eq!(
+            effective_guest_os(Some(GuestOs::Linux), None),
+            Ok(GuestOs::Linux)
+        );
+    }
+
+    #[test]
+    fn a_recorded_endpoint_turns_the_guest_os_into_a_check() {
+        // Recorded: absent `--os` takes the recorded OS, a matching one
+        // passes, a contradicting one is refused.
+        assert_eq!(
+            effective_guest_os(None, Some(GuestOs::Windows)),
+            Ok(GuestOs::Windows)
+        );
+        assert_eq!(
+            effective_guest_os(Some(GuestOs::Windows), Some(GuestOs::Windows)),
+            Ok(GuestOs::Windows)
+        );
+        assert_eq!(
+            effective_guest_os(None, Some(GuestOs::Linux)),
+            Ok(GuestOs::Linux)
+        );
+        for (chosen, recorded) in [
+            (GuestOs::Linux, GuestOs::Windows),
+            (GuestOs::Windows, GuestOs::Linux),
+        ] {
+            let refused = effective_guest_os(Some(chosen), Some(recorded)).unwrap_err();
+            assert!(refused.starts_with("guest_os_mismatch:"), "{refused}");
+            assert!(refused.contains(recorded.id()), "{refused}");
+        }
+    }
 
     #[test]
     fn endpoint_auth_has_the_payload_wire_shape() {
@@ -1483,14 +1617,30 @@ mod tests {
 
     #[test]
     fn the_windows_argv_script_is_fixed_text_and_carries_no_caller_data() {
-        let hostile = ExecCommand::Argv(vec!["cmd.exe".to_owned(), "\"; calc \"$(x)".to_owned()]);
+        let hostile = ExecCommand::Argv(vec!["tool.exe".to_owned(), "a b; $(x) ` café".to_owned()]);
         let (script, arguments, _) = prepare_command(&hostile, GuestOs::Windows).unwrap();
         assert_eq!(script, POWERSHELL_ARGV_SCRIPT);
-        assert!(!script.contains("calc"));
-        assert_eq!(arguments[1], "\"; calc \"$(x)");
+        assert!(!script.contains("café"));
+        assert_eq!(arguments[1], "a b; $(x) ` café");
         // The script is one line of the safe alphabet the shell layer checks
         // its own text against: no quotes that could end a string early.
         assert!(!script.contains('"'));
+    }
+
+    #[test]
+    fn windows_argv_refuses_lossy_native_arguments_and_batch_shims() {
+        for words in [
+            vec!["tool.exe", "embedded\"quote"],
+            vec!["tool.exe", "C:\\tail\\"],
+            vec!["tool.exe", "line\nfeed"],
+            vec!["tool.exe", "a\u{85}b"],
+            vec!["shim.CMD", "value"],
+            vec!["C:\\bin\\shim.bat", "value"],
+        ] {
+            let command = ExecCommand::Argv(words.into_iter().map(str::to_owned).collect());
+            assert!(prepare_command(&command, GuestOs::Windows).is_err());
+            assert!(prepare_command(&command, GuestOs::Linux).is_ok());
+        }
     }
 
     #[test]

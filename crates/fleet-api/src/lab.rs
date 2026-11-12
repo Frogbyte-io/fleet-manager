@@ -45,6 +45,11 @@ pub(crate) fn map_lab_error(
     let (status, code, retry): (StatusCode, &str, RetryClass) = match error {
         LabUseCaseError::Denied(_) => (StatusCode::FORBIDDEN, "denied", RetryClass::Never),
         LabUseCaseError::NotFound { .. } => (StatusCode::NOT_FOUND, "not_found", RetryClass::Never),
+        // ADR 0021: a guest OS that contradicts the endpoint's recorded OS
+        // has its own code, so a client can tell it from other conflicts.
+        LabUseCaseError::Conflict { detail } if detail.starts_with("guest_os_mismatch") => {
+            (StatusCode::CONFLICT, "guest_os_mismatch", RetryClass::Never)
+        }
         LabUseCaseError::Conflict { .. } => (StatusCode::CONFLICT, "conflict", RetryClass::Never),
         LabUseCaseError::Busy { .. } => {
             (StatusCode::SERVICE_UNAVAILABLE, "busy", RetryClass::Backoff)
@@ -1835,5 +1840,35 @@ mod template_mapping_tests {
             let request: SaveLabTemplateRequest = serde_json::from_value(bad).unwrap();
             assert!(request.into_content(id()).unwrap().validate().is_err());
         }
+    }
+}
+
+#[cfg(test)]
+mod guest_os_mismatch_tests {
+    use std::str::FromStr as _;
+
+    use fleet_application::lab::LabUseCaseError;
+    use fleet_core::CorrelationId;
+
+    /// ADR 0021: a contradicting guest OS has its own public error code, so
+    /// a client can tell it from other conflicts.
+    #[test]
+    fn a_guest_os_mismatch_has_its_own_code() {
+        let id = CorrelationId::from_str("01900a3c-b576-7287-a004-61d5b384a076").unwrap();
+        let mismatch = super::map_lab_error(
+            &LabUseCaseError::Conflict {
+                detail: "guest_os_mismatch: the endpoint was detected as windows".to_owned(),
+            },
+            id,
+        );
+        assert_eq!(mismatch.status(), axum::http::StatusCode::CONFLICT);
+        assert_eq!(mismatch.body().code, "guest_os_mismatch");
+        let other = super::map_lab_error(
+            &LabUseCaseError::Conflict {
+                detail: "something else".to_owned(),
+            },
+            id,
+        );
+        assert_eq!(other.body().code, "conflict");
     }
 }

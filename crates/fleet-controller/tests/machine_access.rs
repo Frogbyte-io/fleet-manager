@@ -14,7 +14,7 @@ use fleet_application::authz::{
 };
 use fleet_application::lab::LabUseCaseError;
 use fleet_application::lab_artifacts::ArtifactPolicy;
-use fleet_application::machine::{NewEndpoint, RegisterMachine};
+use fleet_application::machine::{MachinePort as _, NewEndpoint, RegisterMachine};
 use fleet_application::machine_access::{
     AccessTarget, EndpointAuth, ExecCommand, ExecRequest, MachineAccess, PutRequestTarget,
 };
@@ -203,7 +203,7 @@ impl World {
             machine_id: &self.machine_id,
             endpoint_id: None,
             auth: None,
-            guest_os: GuestOs::Linux,
+            guest_os: None,
         }
     }
 
@@ -294,6 +294,189 @@ async fn a_stored_key_runs_a_command_and_leaves_no_key_file() {
     assert_eq!(result["exitCode"], 0);
     assert_eq!(result["stdout"], "from-the-machine\n");
     assert_eq!(world.key_files(), 0, "the key file outlived the session");
+}
+
+/// ADR 0021 decision 4: once an endpoint's OS is recorded, the caller's
+/// guest OS is a check. Absent means the recorded OS; a contradiction is
+/// refused before anything is queued. An unknown endpoint keeps choosing.
+#[tokio::test]
+async fn a_recorded_endpoint_os_is_used_and_checked() {
+    let world = World::new().await;
+    world.use_stored_key_by_default().await;
+    let machines = MachineRepository::new(world.pool.clone());
+    let request = |guest_os: Option<GuestOs>| ExecRequest {
+        target: AccessTarget {
+            guest_os,
+            ..world.target()
+        },
+        command: ExecCommand::Script("exit 0".to_owned()),
+        timeout_seconds: Some(15),
+        idempotency_key: None,
+    };
+    let queued_os = |new: &fleet_application::operation::NewOperation| {
+        let payload: serde_json::Value =
+            serde_json::from_str(new.payload_json.as_deref().unwrap()).unwrap();
+        payload["guestOs"].as_str().unwrap().to_owned()
+    };
+
+    // Unknown: the caller chooses, and absent is Linux, as before.
+    for (chosen, expected) in [
+        (None, "linux"),
+        (Some(GuestOs::Windows), "windows"),
+        (Some(GuestOs::Linux), "linux"),
+    ] {
+        let new = world
+            .access
+            .request_exec(&fleet_auth::LanAllowAllAuthorizer, &lan(), &request(chosen))
+            .await
+            .unwrap();
+        assert_eq!(queued_os(&new), expected, "{chosen:?}");
+    }
+
+    // Recorded as Windows: absent takes it, a match passes, Linux is refused.
+    machines
+        .record_endpoint_os(&world.endpoint_id, GuestOs::Windows)
+        .await
+        .unwrap();
+    for chosen in [None, Some(GuestOs::Windows)] {
+        let new = world
+            .access
+            .request_exec(&fleet_auth::LanAllowAllAuthorizer, &lan(), &request(chosen))
+            .await
+            .unwrap();
+        assert_eq!(queued_os(&new), "windows", "{chosen:?}");
+    }
+    let refused = world
+        .access
+        .request_exec(
+            &fleet_auth::LanAllowAllAuthorizer,
+            &lan(),
+            &request(Some(GuestOs::Linux)),
+        )
+        .await
+        .unwrap_err();
+    let LabUseCaseError::Conflict { detail } = refused else {
+        panic!("a contradicting guest OS is a conflict: {refused:?}");
+    };
+    assert!(detail.starts_with("guest_os_mismatch:"), "{detail}");
+}
+
+/// The recorded-OS check covers put and collect too, and names the endpoint
+/// it checks: an explicit endpointId, or the only SSH endpoint.
+#[tokio::test]
+async fn put_collect_and_several_endpoints_follow_the_recorded_os() {
+    let world = World::new().await;
+    world.use_stored_key_by_default().await;
+    let machines = MachineRepository::new(world.pool.clone());
+    machines
+        .record_endpoint_os(&world.endpoint_id, GuestOs::Windows)
+        .await
+        .unwrap();
+    let linux = AccessTarget {
+        guest_os: Some(GuestOs::Linux),
+        ..world.target()
+    };
+    let mismatch = |error: LabUseCaseError| match error {
+        LabUseCaseError::Conflict { detail } => {
+            assert!(detail.starts_with("guest_os_mismatch:"), "{detail}")
+        }
+        other => panic!("expected a guest_os_mismatch conflict: {other:?}"),
+    };
+    mismatch(
+        world
+            .access
+            .begin_upload(
+                &fleet_auth::LanAllowAllAuthorizer,
+                &lan(),
+                &PutRequestTarget {
+                    target: linux.clone(),
+                    guest_path: "/tmp/file",
+                    overwrite: false,
+                },
+            )
+            .await
+            .map(|_| ())
+            .unwrap_err(),
+    );
+    mismatch(
+        world
+            .access
+            .request_collect(
+                &fleet_auth::LanAllowAllAuthorizer,
+                &lan(),
+                &linux,
+                &["/tmp/file".to_owned()],
+            )
+            .await
+            .unwrap_err(),
+    );
+
+    // Two SSH endpoints (a Windows PC with a WSL sshd): each has its own OS.
+    let machine = machines
+        .set_endpoints(
+            &world.machine_id,
+            &[
+                NewEndpoint {
+                    kind: EndpointKind::Ssh,
+                    reference: "developer@workstation.example:22".to_owned(),
+                },
+                NewEndpoint {
+                    kind: EndpointKind::Ssh,
+                    reference: "developer@workstation.example:2222".to_owned(),
+                },
+            ],
+        )
+        .await
+        .unwrap();
+    let (windows, wsl) = (&machine.endpoints[0].id, &machine.endpoints[1].id);
+    machines
+        .record_endpoint_os(windows, GuestOs::Windows)
+        .await
+        .unwrap();
+    machines
+        .record_endpoint_os(wsl, GuestOs::Linux)
+        .await
+        .unwrap();
+    let exec = |endpoint_id: Option<&str>, guest_os: Option<GuestOs>| {
+        let access = world.access.clone();
+        let machine_id = world.machine_id.clone();
+        let endpoint_id = endpoint_id.map(str::to_owned);
+        async move {
+            access
+                .request_exec(
+                    &fleet_auth::LanAllowAllAuthorizer,
+                    &lan(),
+                    &ExecRequest {
+                        target: AccessTarget {
+                            machine_id: &machine_id,
+                            endpoint_id: endpoint_id.as_deref(),
+                            auth: None,
+                            guest_os,
+                        },
+                        command: ExecCommand::Script("exit 0".to_owned()),
+                        timeout_seconds: Some(15),
+                        idempotency_key: None,
+                    },
+                )
+                .await
+        }
+    };
+    // Named Windows endpoint, Linux requested: refused by the check.
+    mismatch(exec(Some(windows), Some(GuestOs::Linux)).await.unwrap_err());
+    // Named WSL endpoint, Linux requested: past the check (the new endpoint
+    // is not trusted yet, which resolve_target then reports).
+    let refused = exec(Some(wsl), Some(GuestOs::Linux)).await.unwrap_err();
+    assert!(
+        matches!(&refused, LabUseCaseError::Invalid { detail } if detail.contains("host key")),
+        "{refused:?}"
+    );
+    // No endpoint named on a two-endpoint machine: no single record applies,
+    // so the caller's choice stands and resolve_target asks for an endpoint.
+    let refused = exec(None, Some(GuestOs::Linux)).await.unwrap_err();
+    assert!(
+        matches!(&refused, LabUseCaseError::Invalid { detail } if detail.contains("several SSH endpoints")),
+        "{refused:?}"
+    );
 }
 
 #[tokio::test]
@@ -892,7 +1075,7 @@ fn request<'a>(world: &'a World, auth: Option<&'a EndpointAuth>) -> ExecRequest<
             machine_id: &world.machine_id,
             endpoint_id: None,
             auth,
-            guest_os: GuestOs::Linux,
+            guest_os: Some(GuestOs::Linux),
         },
         command: ExecCommand::Script("true".to_owned()),
         timeout_seconds: Some(10),
@@ -1311,4 +1494,161 @@ async fn the_hidden_operations_do_not_shorten_a_page() {
         .unwrap();
     assert_eq!(page.len(), 3, "a full page of visible operations");
     assert!(page.iter().all(|operation| operation.kind == "noop"));
+}
+
+/// Recorded Windows endpoints use the Lab path rules without a caller OS.
+#[tokio::test]
+async fn windows_machine_file_requests_enforce_drive_path_containment() {
+    let world = World::new().await;
+    world.use_stored_key_by_default().await;
+    MachineRepository::new(world.pool.clone())
+        .record_endpoint_os(&world.endpoint_id, GuestOs::Windows)
+        .await
+        .unwrap();
+    for path in [
+        r"C:\work\..\escape",
+        r"C:\work\.\file",
+        r"C:relative",
+        r"\\share\file",
+        r"\\?\C:\file",
+        r"C:\work\file:stream",
+        r"C:\work\NUL.txt",
+        r"C:\work\trailing.",
+        r"C:/work/../escape",
+    ] {
+        let put = PutRequestTarget {
+            target: world.target(),
+            guest_path: path,
+            overwrite: false,
+        };
+        assert!(
+            world
+                .access
+                .begin_upload(&fleet_auth::LanAllowAllAuthorizer, &lan(), &put)
+                .await
+                .is_err(),
+            "{path}"
+        );
+        assert!(
+            world
+                .access
+                .request_collect(
+                    &fleet_auth::LanAllowAllAuthorizer,
+                    &lan(),
+                    &world.target(),
+                    &[path.to_owned()]
+                )
+                .await
+                .is_err(),
+            "{path}"
+        );
+    }
+    for path in [r"C:\work dir\file.bin", "D:/work/file.bin"] {
+        let put = PutRequestTarget {
+            target: world.target(),
+            guest_path: path,
+            overwrite: false,
+        };
+        let mut writer = world
+            .access
+            .begin_upload(&fleet_auth::LanAllowAllAuthorizer, &lan(), &put)
+            .await
+            .unwrap();
+        writer.write(b"fixture bytes").await.unwrap();
+        let staged = writer.finish().await.unwrap();
+        let new = world
+            .access
+            .request_put(&fleet_auth::LanAllowAllAuthorizer, &lan(), &put, &staged)
+            .await
+            .unwrap();
+        let payload: serde_json::Value =
+            serde_json::from_str(new.payload_json.as_deref().unwrap()).unwrap();
+        assert_eq!(payload["guestOs"], "windows");
+        let new = world
+            .access
+            .request_collect(
+                &fleet_auth::LanAllowAllAuthorizer,
+                &lan(),
+                &world.target(),
+                &[path.to_owned()],
+            )
+            .await
+            .unwrap();
+        let payload: serde_json::Value =
+            serde_json::from_str(new.payload_json.as_deref().unwrap()).unwrap();
+        assert_eq!(payload["guestOs"], "windows");
+    }
+    assert!(
+        world
+            .access
+            .request_collect(
+                &fleet_auth::LanAllowAllAuthorizer,
+                &lan(),
+                &world.target(),
+                &[r"C:\work\file".to_owned(), "c:/WORK/file".to_owned()]
+            )
+            .await
+            .is_err()
+    );
+    let audit = world.audit_text().await;
+    assert!(audit.contains("machine_put_requested"));
+    assert!(audit.contains("machine_collect_requested"));
+    assert!(!audit.contains("fixture bytes"));
+}
+
+/// The real SSH session uses the Windows bootstrap and stdin data, while a
+/// fixed stand-in supplies output to exercise the shared scrubber and audit.
+#[tokio::test]
+async fn recorded_windows_exec_frames_argv_and_scrubs_results() {
+    use std::os::unix::fs::PermissionsExt as _;
+    let world = World::new().await;
+    world.use_stored_key_by_default().await;
+    MachineRepository::new(world.pool.clone())
+        .record_endpoint_os(&world.endpoint_id, GuestOs::Windows)
+        .await
+        .unwrap();
+    let command_file = world.dir.path().join("expected-command");
+    std::fs::write(
+        &command_file,
+        fleet_provider_ssh::shell::POWERSHELL_EXEC_BOOTSTRAP,
+    )
+    .unwrap();
+    let metadata_file = world.dir.path().join("received-metadata");
+    let script_file = world.dir.path().join("received-script");
+    let standin = world.dir.path().join("windows-exec-standin");
+    std::fs::write(&standin, format!(
+        "#!/bin/sh\n[ \"$SSH_ORIGINAL_COMMAND\" = \"$(cat '{}')\" ] || exit 91\nIFS= read -r meta\nIFS= read -r body\nprintf '%s' \"$meta\" | base64 -d > '{}'\nprintf '%s' \"$body\" | base64 -d > '{}'\nIFS= read -r watchdog\nIFS= read -r seconds\n[ \"$seconds\" = 15 ] || exit 92\nprintf '%s\\n' 'https://fixture:fixture@service.example.test/path'\nexit 7\n",
+        command_file.display(), metadata_file.display(), script_file.display(),
+    )).unwrap();
+    std::fs::set_permissions(&standin, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let authorized = world.sshd.keys_dir.path().join("authorized_keys");
+    let public = std::fs::read_to_string(&authorized).unwrap();
+    std::fs::write(
+        &authorized,
+        format!("command=\"{}\" {public}", standin.display()),
+    )
+    .unwrap();
+    let argument = "spaces ; $(not-code) ` café";
+    let done = world
+        .exec(
+            ExecCommand::Argv(vec!["tool.exe".to_owned(), argument.to_owned()]),
+            15,
+        )
+        .await;
+    assert_eq!(done.state, "failed", "{done:?}");
+    let result = error_of(&done);
+    assert_eq!(result["exitCode"], 7, "{done:?}");
+    assert_eq!(result["stdout"], "https://***@service.example.test/path\n");
+    let metadata = std::fs::read_to_string(metadata_file).unwrap();
+    assert!(metadata.split('\0').any(|part| part == argument));
+    assert_eq!(
+        std::fs::read_to_string(script_file).unwrap(),
+        fleet_application::machine_access::POWERSHELL_ARGV_SCRIPT
+    );
+    let audit = world.audit_text().await;
+    assert!(audit.contains("machine_exec_requested"));
+    assert!(audit.contains("commandSha256"));
+    assert!(!audit.contains(argument));
+    assert!(!audit.contains("fixture:fixture"));
+    assert_eq!(world.key_files(), 0);
 }

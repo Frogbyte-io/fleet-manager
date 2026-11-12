@@ -30,6 +30,18 @@ use fleet_core::{CapabilityFact, CapabilityStatus, EndpointKind, Timestamp};
 /// observation time always travels with the fact.
 pub const CAPABILITY_FRESHNESS_MS: i64 = 24 * 60 * 60 * 1000;
 
+/// What [`MachinePort::record_verified_capabilities`] did.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum VerifiedWrite {
+    /// The endpoint still had the verified key: the facts were recorded.
+    Recorded,
+    /// The endpoint now has another confirmed key (or none): nothing was
+    /// recorded.
+    KeyChanged,
+    /// The endpoint is no longer one of the machine's: nothing was recorded.
+    EndpointGone,
+}
+
 /// One registered machine, as read back by queries.
 ///
 /// This is the *record*: what was observed, as it was observed. The
@@ -73,6 +85,13 @@ pub struct Endpoint {
     /// The reference, e.g. `user@host:port` for SSH or the node id for
     /// fleetd. Never carries a secret.
     pub reference: String,
+    /// The guest OS detected on this SSH endpoint (ADR 0021 decision 4),
+    /// when onboarding or an inventory probe recorded it. `None` is
+    /// unknown: the caller's `--os` still chooses for such an endpoint.
+    /// Recorded per endpoint, not per machine, because one Windows PC can
+    /// also expose a WSL `sshd` that is a Linux endpoint.
+    #[serde(default)]
+    pub guest_os: Option<fleet_core::GuestOs>,
 }
 
 /// The newest inventory observation of a machine: what probed it and when.
@@ -260,6 +279,7 @@ impl MachineView {
                     } else {
                         redact_userinfo(&endpoint.reference)
                     },
+                    guest_os: endpoint.guest_os,
                 })
                 .collect(),
             tags: machine.tags,
@@ -540,6 +560,36 @@ pub trait MachinePort: fmt::Debug + Send + Sync {
         id: &str,
         facts: &[CapabilityFact],
     ) -> Result<(), PortFailure>;
+    /// Upserts capability facts an SSH inventory observed through one
+    /// endpoint, only while that endpoint of the machine still has the host
+    /// key the observation verified. A different key confirmed meanwhile
+    /// marked those facts stale, and an older observation must not undo that
+    /// (#624); an endpoint removed meanwhile has nothing to vouch for them.
+    /// Either way nothing is written.
+    ///
+    /// The default checks, then writes; a store implements it as one
+    /// transaction.
+    ///
+    /// # Errors
+    ///
+    /// As [`MachinePort::record_capabilities`].
+    async fn record_verified_capabilities(
+        &self,
+        id: &str,
+        endpoint_id: &str,
+        verified_fingerprint: &str,
+        facts: &[CapabilityFact],
+    ) -> Result<VerifiedWrite, PortFailure> {
+        match self.verified_fingerprint(endpoint_id).await {
+            Err(PortFailure::NotFound { .. }) => Ok(VerifiedWrite::EndpointGone),
+            Err(failure) => Err(failure),
+            Ok(Some(current)) if current == verified_fingerprint => self
+                .record_capabilities(id, facts)
+                .await
+                .map(|()| VerifiedWrite::Recorded),
+            Ok(_) => Ok(VerifiedWrite::KeyChanged),
+        }
+    }
     /// Removes a machine and all its facts.
     ///
     /// # Errors
@@ -573,6 +623,119 @@ pub trait MachinePort: fmt::Debug + Send + Sync {
     /// Fails when the backend errors.
     async fn latest_inventory_revision(&self, machine_id: &str)
     -> Result<Option<u64>, PortFailure>;
+    /// Records the guest OS detected on one SSH endpoint (ADR 0021). The
+    /// default refuses: a port that cannot store it must not pretend to.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the endpoint is unknown or the backend errors.
+    async fn record_endpoint_os(
+        &self,
+        endpoint_id: &str,
+        guest_os: fleet_core::GuestOs,
+    ) -> Result<(), PortFailure> {
+        let _ = (endpoint_id, guest_os);
+        Err(PortFailure::Backend {
+            detail: "this machine store cannot record an endpoint's guest OS".to_owned(),
+        })
+    }
+    /// Clears the recorded guest OS of one SSH endpoint, so it is unknown
+    /// and detected again. The default refuses, as above.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the endpoint is unknown or the backend errors.
+    async fn clear_endpoint_os(&self, endpoint_id: &str) -> Result<(), PortFailure> {
+        let _ = endpoint_id;
+        Err(PortFailure::Backend {
+            detail: "this machine store cannot clear an endpoint's guest OS".to_owned(),
+        })
+    }
+    /// Records a detected guest OS and its audit event atomically, and only
+    /// while the endpoint's verified fingerprint is still
+    /// `expected_fingerprint` (the trust state the detection ran under).
+    /// The event is written already resolved, so it never opens a second
+    /// intent beside the operation's own. Answers whether it was recorded:
+    /// `false` when the fingerprint changed in between. The default
+    /// refuses, as above.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the backend errors; nothing is written then.
+    async fn record_detected_endpoint_os(
+        &self,
+        endpoint_id: &str,
+        guest_os: fleet_core::GuestOs,
+        expected_fingerprint: &str,
+        event: &crate::audit::AuditIntent,
+    ) -> Result<bool, PortFailure> {
+        let _ = (endpoint_id, guest_os, expected_fingerprint, event);
+        Err(PortFailure::Backend {
+            detail: "this machine store cannot record a detected guest OS".to_owned(),
+        })
+    }
+}
+
+/// Records the guest OS an `agentless.inventory` operation detected on an
+/// unknown endpoint (ADR 0021 decision 4). The operation's creation already
+/// required `machine.update` on the machine from `requested_by` (see
+/// `Operations::create`), so this records under that requester. The OS and
+/// its audit event (naming the operation) commit together, and only while
+/// the endpoint still has the fingerprint the detection ran under; answers
+/// whether it was recorded.
+///
+/// # Errors
+///
+/// Fails when the store fails; nothing is recorded then.
+pub async fn record_detected_endpoint_os(
+    port: &dyn MachinePort,
+    detected: &DetectedEndpointOs<'_>,
+) -> Result<bool, String> {
+    let mut metadata = crate::audit::AuditMetadata::default();
+    for (key, value) in [
+        ("event", "endpoint_os_recorded"),
+        ("guestOs", detected.guest_os.id()),
+        ("endpointId", detected.endpoint_id),
+        ("source", "agentless.inventory"),
+    ] {
+        metadata
+            .insert(key, value)
+            .map_err(|error| error.to_string())?;
+    }
+    let event = crate::audit::AuditIntent {
+        actor: detected.requested_by.to_owned(),
+        action: Permission::MachineUpdate.id().to_owned(),
+        resource: Some(detected.machine_id.to_owned()),
+        decision: Decision::allow(),
+        correlation_id: None,
+        operation_id: Some(detected.operation_id.to_owned()),
+        metadata,
+    };
+    port.record_detected_endpoint_os(
+        detected.endpoint_id,
+        detected.guest_os,
+        detected.verified_fingerprint,
+        &event,
+    )
+    .await
+    .map_err(|failure| failure.to_string())
+}
+
+/// What an inventory operation detected, and who asked for it.
+#[derive(Clone, Copy, Debug)]
+pub struct DetectedEndpointOs<'a> {
+    /// The operation that ran the detection.
+    pub operation_id: &'a str,
+    /// The principal that created the operation.
+    pub requested_by: &'a str,
+    /// The machine.
+    pub machine_id: &'a str,
+    /// The SSH endpoint.
+    pub endpoint_id: &'a str,
+    /// The endpoint's verified fingerprint when the detection started.
+    pub verified_fingerprint: &'a str,
+    /// The detected OS.
+    pub guest_os: fleet_core::GuestOs,
 }
 
 /// Durable one-to-one confirmed Proxmox guest links.
@@ -1273,6 +1436,124 @@ impl Machines {
                             context: "audit",
                             detail: error.to_string(),
                         })?;
+                    metadata
+                },
+            })
+            .await
+            .map_err(|detail| MachineUseCaseError::Backend {
+                context: "audit",
+                detail,
+            })?;
+        Ok(())
+    }
+
+    /// Records the guest OS detected on an SSH endpoint (ADR 0021 decision
+    /// 4). Once recorded, the caller's `--os` is a check against it, not a
+    /// choice.
+    ///
+    /// # Errors
+    ///
+    /// Fails on denial, an unknown endpoint, or a backend failure.
+    pub async fn record_endpoint_os(
+        &self,
+        authorizer: &dyn Authorizer,
+        principal: &ActingPrincipal,
+        machine_id: &str,
+        endpoint_id: &str,
+        guest_os: fleet_core::GuestOs,
+    ) -> Result<(), MachineUseCaseError> {
+        self.write_endpoint_os(
+            authorizer,
+            principal,
+            machine_id,
+            endpoint_id,
+            Some(guest_os),
+        )
+        .await
+    }
+
+    /// Clears the guest OS recorded on an SSH endpoint (ADR 0021), so the
+    /// endpoint is unknown again: the caller's `--os` chooses, and the next
+    /// inventory detects and records it afresh. This is the recovery for a
+    /// wrong record.
+    ///
+    /// # Errors
+    ///
+    /// Fails on denial, an endpoint that is not one of the machine's SSH
+    /// endpoints, or a backend failure.
+    pub async fn clear_endpoint_os(
+        &self,
+        authorizer: &dyn Authorizer,
+        principal: &ActingPrincipal,
+        machine_id: &str,
+        endpoint_id: &str,
+    ) -> Result<(), MachineUseCaseError> {
+        self.write_endpoint_os(authorizer, principal, machine_id, endpoint_id, None)
+            .await
+    }
+
+    async fn write_endpoint_os(
+        &self,
+        authorizer: &dyn Authorizer,
+        principal: &ActingPrincipal,
+        machine_id: &str,
+        endpoint_id: &str,
+        guest_os: Option<fleet_core::GuestOs>,
+    ) -> Result<(), MachineUseCaseError> {
+        authorize(
+            authorizer,
+            AccessRequest {
+                principal_id: &principal.id,
+                action: Permission::MachineUpdate,
+                resource: Some(machine_id),
+            },
+        )
+        .map_err(MachineUseCaseError::Denied)?;
+        let machine = self
+            .port
+            .get(machine_id)
+            .await
+            .map_err(|failure| map_port("get", failure))?;
+        if !machine
+            .endpoints
+            .iter()
+            .any(|endpoint| endpoint.id == endpoint_id && endpoint.kind == EndpointKind::Ssh)
+        {
+            return Err(MachineUseCaseError::NotFound {
+                what: format!("SSH endpoint {endpoint_id:?} of machine {machine_id:?}"),
+            });
+        }
+        match guest_os {
+            Some(guest_os) => self.port.record_endpoint_os(endpoint_id, guest_os).await,
+            None => self.port.clear_endpoint_os(endpoint_id).await,
+        }
+        .map_err(|failure| map_port("record_endpoint_os", failure))?;
+        let (event, guest_os_id) = match guest_os {
+            Some(guest_os) => ("endpoint_os_recorded", guest_os.id()),
+            None => ("endpoint_os_cleared", "unknown"),
+        };
+        self.audit
+            .record_intent(&crate::audit::AuditIntent {
+                actor: principal.id.clone(),
+                action: Permission::MachineUpdate.id().to_owned(),
+                resource: Some(machine_id.to_owned()),
+                decision: Decision::allow(),
+                correlation_id: None,
+                operation_id: None,
+                metadata: {
+                    let mut metadata = crate::audit::AuditMetadata::default();
+                    for (key, value) in [
+                        ("event", event),
+                        ("guestOs", guest_os_id),
+                        ("endpointId", endpoint_id),
+                    ] {
+                        metadata.insert(key, value).map_err(|error| {
+                            MachineUseCaseError::Backend {
+                                context: "audit",
+                                detail: error.to_string(),
+                            }
+                        })?;
+                    }
                     metadata
                 },
             })

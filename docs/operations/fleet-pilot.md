@@ -7,7 +7,7 @@ Examples use placeholders: the controller is `controller.example.ts.net`, the pi
 ## Scope
 
 - **In scope:** Linux x86_64 Debian or Ubuntu machines, the primary target in the [supported platform baseline](../PLAN.md#supported-platform-baseline).
-- **Out of scope:** Windows workstations (milestone M12, epic [#606](https://github.com/Frogbyte-io/fleet-manager/issues/606)), macOS (deferred), and Linux aarch64 (deferred).
+- **Out of scope:** Windows workstations (milestone M12, epic [#606](https://github.com/Frogbyte-io/fleet-manager/issues/606); onboarding and inventory setup in [windows-workstations.md](windows-workstations.md)), macOS (deferred), and Linux aarch64 (deferred).
 - **Few machines, all yours.** Enroll only machines whose compromise you could accept. The [security section](#restrict-access-first) explains why.
 
 ## Prerequisites
@@ -255,6 +255,13 @@ Reads come from the controller's active revision. Edits (`registry set`, `relate
   ```
 
   The `fleet` system account stays either way; remove it with `sudo userdel fleet` if you want.
+
+  **When `--uninstall` refuses the recorded layout.** Some layouts were accepted by older controllers but fail today's installer rules, so `--uninstall` refuses them and the review answers `409 conflict` naming the variable and the rule it broke. Two known cases are a path with a trailing `/` (`FLEETD_STATE_DIR=/srv/fleetd/`) and the stub `systemctl` of a container or test install (`FLEETD_SYSTEMCTL` pointing outside `/bin`, `/usr/bin`, `/sbin` and `/usr/sbin`; the uninstall reads no other tool override). Fleet never runs anything with such a layout. Clean up in this order:
+
+  1. Remove the machine without `--uninstall`: `fleetctl --output json machines remove <machine-id> --yes`. Nothing on the machine changes.
+  2. Find the layout. It is the `installerEnv` of the machine's last successful `machine.install-fleetd` operation; take the same values you passed then. Any variable you left out has the default shown in the commands above.
+  3. On the machine, run the shipped script as root with those values, normalized: drop a trailing `/`, and leave out a stub `FLEETD_SYSTEMCTL` so the real `systemctl` is used. For example, `sudo env FLEETD_STATE_DIR=/srv/fleetd FLEETD_BIN_DIR=/opt/fleetd/bin bash ./uninstall.sh --purge` from the release archive. It refuses rather than deletes anything it cannot prove is fleetd's (see [deploy/fleetd/README.md](../../deploy/fleetd/README.md#uninstall-and-re-enrollment)).
+  4. If the script refuses, or the layout came from a container test whose service never ran under the real systemd, remove the leftovers by hand, with the manual commands above and your paths. Check each path before you `rm -rf` it: the state directory holds only fleetd's entries (`node.key`, `credential`, `machine-id`, `journal.ndjson`, `inventory.json`, and the local status socket `local.sock` while the service runs or after it stopped uncleanly).
 - **Cut agentless access.** Remove the controller's key from the login's `~/.ssh/authorized_keys`. For a machine you keep, also clear any stored endpoint credential (`fleetctl machines endpoint-auth clear <machine-id> <endpoint-id>`; see [machine access](machine-access.md#revoke-access)); `machines remove` revokes the machine's own stored keys itself.
 - **Remove Skills Manager** if Fleet installed it: delete `~/.local/bin/skills-manager-cli`. Its library and agent skill directories belong to Skills Manager, so remove skills through it first.
 - **Roll back a Fleet Git change**: `fleetctl desired rollback <commit-sha> <content-digest> --wait`.

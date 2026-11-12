@@ -37,10 +37,10 @@ When authenticated deployment is added, first-class principals are user, node, a
 - Web users use secure, HttpOnly, SameSite cookies with CSRF protection.
 - CLI users use device/login flow or explicitly created revocable tokens stored in an OS credential store where available.
 - Nodes use enrolled asymmetric keys and short-lived sessions; node credentials cannot call user/admin APIs.
-- Agents receive short-lived delegated credentials or go through the constrained local `fleetd` broker; they do not inherit a user's indefinite admin token.
+- Agents receive a narrow agent token (ADR 0020), optionally bound to a machine, or short-lived delegated credentials (ADR 0011); they do not inherit a user's admin token.
 - Provider credentials authenticate Fleet to a provider and are never treated as Fleet identities.
 
-Bootstrap credentials and durable human/agent sessions belong to the later authenticated-deployment milestone, not the trusted-LAN release. [ADR 0020](../adr/0020-authenticated-deployment.md) (proposed) decides the authenticated mode: accounts with argon2id passwords, host-side single-use bootstrap, cookie sessions with CSRF tokens, `fleetctl login` device flow and API tokens, `admin`/`operator`/`viewer`/`delegated` roles, viewer-level agent tokens per device, and session-only approval by a different principal.
+Bootstrap credentials and durable human/agent sessions belong to the later authenticated-deployment milestone, not the trusted-LAN release. [ADR 0020](../adr/0020-authenticated-deployment.md) (accepted 2026-11-07) decides the authenticated mode: accounts with argon2id passwords, host-side single-use bootstrap, cookie sessions with CSRF tokens (24 h idle, 30 days absolute), `fleetctl login` device flow and API tokens (personal 90 days, agent 1 year), `admin`/`operator`/`viewer`/`agent`/`delegated` roles, and agent tokens per device holding `viewer` plus `action.request` plus skill catalog draft write (publishing and rollout stay human). Every session and token is looked up on each request, so revocation applies on the next request; with long token lifetimes, revocation is the response to a leak. Approval needs a web session and a different principal from the requester, except that when exactly one active administrator exists, that administrator may approve their own requests (including their agent tokens' requests), audited distinctly as self-approval.
 
 ## Delegated Lab credentials (proposed, ADR 0011)
 
@@ -62,7 +62,7 @@ An agent works on a machine through the controller, which holds the machine's SS
 
 API-token providers (Coolify and Cloudflare in M10) are provider accounts whose tokens are encrypted secret records. No API, CLI output, log, audit event, operation payload, or result returns a token, and agents never receive one. An agent asks for a change by creating an `ActionRequest`: a typed provider action with structured, validated parameters. Each action type has a risk class, `auto`, `approve`, or `deny`, configurable per type. An approved request runs as a durable operation through the same authorization and audit path as any other mutation. Requests, decisions, and approvers are audited; parameters are validated, not interpreted as text.
 
-Until authenticated identities are in use, the requester and approver are both `anonymous-lan-admin` (or a Tailscale admin), so the policy is a guardrail against agent mistakes, not a boundary against a hostile LAN caller. Delegated credentials (ADR 0011) are the path to per-agent scoping: a delegated principal may request and never approve.
+Until authenticated identities are in use, the requester and approver are both `anonymous-lan-admin` (or a Tailscale admin), so the policy is a guardrail against agent mistakes, not a boundary against a hostile LAN caller. Delegated credentials (ADR 0011) are the path to per-agent scoping: a delegated principal may request and never approve. In authenticated mode (ADR 0020 section 8) the approver must be a web-session user other than the requester, unless exactly one active administrator exists, in which case self-approval is allowed and audited as such.
 
 Registry resources in Fleet Git (ADR 0016) have no secret value type. Validation runs the credential scrubber over every value and rejects matches; a field may say where a login lives, never what it is.
 

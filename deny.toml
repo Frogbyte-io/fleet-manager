@@ -28,6 +28,16 @@ ignore = [
     # surface in any Fleet binary and no feature flag to drop it. Remove this
     # entry when utoipa-axum ships without paste or Fleet upgrades past it.
     "RUSTSEC-2024-0436",
+    # Bundled SQLite < 3.54.0 can return uninitialized memory when it opens a
+    # database together with a crafted sibling -wal file
+    # (Frogbyte-io/fleet-manager#641). The fix is libsqlite3-sys 0.39, but
+    # sqlx 0.9.0, the latest release, requires ^0.37. The only database Fleet
+    # opens is the controller's own, at the operator-configured data_dir; no
+    # code path opens a database supplied by a user, node or agent. Whoever can
+    # plant a crafted -wal beside it can already rewrite the database itself,
+    # so the bug gives no capability beyond that write access. Remove when sqlx
+    # allows 0.39.
+    "RUSTSEC-2026-0459",
 ]
 
 [licenses]

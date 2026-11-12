@@ -30,7 +30,7 @@ fleetctl --output json machines collect <machine-id> /var/log/nginx/error.log
 fleetctl --output json machines file-get <file-id> --out ./error.log
 ```
 
-`exec` exits with the command's exit code; `--os windows` selects the PowerShell layer of [ADR 0015](../adr/0015-windows-lab-guest-transport.md) and drive-absolute paths. Output is capped at 1 MiB per stream with a truncation flag. A put verifies its SHA-256 inside the machine. Collected files are stored in the controller's artifact directory and removed after the retention period (`FLEET_LAB_ARTIFACT_RETENTION_SECONDS`, seven days by default), by the next collection after they expire.
+`exec` exits with the command's exit code; `--os windows` selects the PowerShell layer of [ADR 0015](../adr/0015-windows-lab-guest-transport.md) and drive-absolute paths. Once onboarding or an inventory has recorded the endpoint's OS, `--os` is a check: absent means the recorded OS and a different value is refused with `guest_os_mismatch` ([windows-workstations.md](windows-workstations.md#the-endpoints-os-and---os)). Output is capped at 1 MiB per stream with a truncation flag. A put verifies its SHA-256 inside the machine. Collected files are stored in the controller's artifact directory and removed after the retention period (`FLEET_LAB_ARTIFACT_RETENTION_SECONDS`, seven days by default), by the next collection after they expire.
 
 ## Permissions and audit
 
@@ -46,5 +46,5 @@ Delete the endpoint's default (`machines endpoint-auth clear`) to stop callers t
 
 - `machines onboard test` may be repeated after the host key is confirmed: the probe lists every key type the host offers in a fixed order (ED25519, ECDSA, RSA), a confirmed fingerprint matches any of them, and the connection check runs `exit 0`, which POSIX shells, PowerShell and cmd all accept. Only a fingerprint that none of the offered keys carries reports a changed key and needs a new confirmation.
 - Passphrase-protected keys are refused; the session is non-interactive. Key files need Unix modes, so the controller must run on Linux (or another Unix).
-- On Windows (PowerShell 5.1) an argv argument containing a double quote may be split or merged differently than given; use `--script` for such arguments.
+- On Windows (PowerShell 5.1), argv refuses embedded double quotes, trailing backslashes and control characters instead of passing them incorrectly. The guest resolves only native `.exe` applications; `.cmd`/`.bat` shims, scripts and cmdlets require `--script` with the program’s own quoting (ADR 0021 decision 3). Spaces, Unicode and shell metacharacters remain data in the stdin metadata blob. The resolved executable must match the literal program name or normalized path (with an optional `.exe` suffix); wildcard searches cannot select a different application, and literal brackets in existing paths still work.
 - One command at a time per request: port forwarding and fan-out across machines are not served. An interactive shell is [a separate feature](machine-terminal.md).

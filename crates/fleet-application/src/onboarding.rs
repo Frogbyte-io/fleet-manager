@@ -191,6 +191,28 @@ pub struct TestOutcome {
     pub at: i64,
 }
 
+/// The login-shell check of a draft (ADR 0021 decision 4): which shell
+/// answered the fixed sniff, the guest OS that makes the endpoint, and the
+/// refusal when Fleet cannot drive that shell. Shown at review; `add`
+/// records the OS on the new endpoint and refuses a refused shell.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ShellCheck {
+    /// The detected shell: `posix`, `windows_powershell`, `powershell_core`,
+    /// `cmd` or `unrecognized`.
+    pub shell: String,
+    /// The guest OS the endpoint is driven as; `None` is unknown (refused or
+    /// unrecognized), which keeps today's behaviour.
+    pub guest_os: Option<fleet_core::GuestOs>,
+    /// The stable refusal reason, when the shell cannot be driven:
+    /// `unsupported_shell`, `constrained_language` or `profile_output`.
+    pub refusal_reason: Option<String>,
+    /// The refusal detail, naming the setup step that fixes it.
+    pub refusal_detail: Option<String>,
+    /// When the check ran (epoch milliseconds).
+    pub at: i64,
+}
+
 /// A draft: the staged, reviewable state of an Add Machine flow.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -217,6 +239,13 @@ pub struct OnboardingDraft {
     pub confirmed_fingerprint: Option<String>,
     /// The newest test outcome, when a test ran.
     pub last_test: Option<TestOutcome>,
+    /// The newest login-shell check, when a test or discover reached the
+    /// endpoint. Cleared whenever the host key is (re)confirmed.
+    pub shell_check: Option<ShellCheck>,
+    /// When the host key was last confirmed (epoch milliseconds). A shell
+    /// check older than this is never carried onto an endpoint.
+    #[serde(default)]
+    pub host_key_confirmed_at: Option<i64>,
     /// The facts discovery recorded for review; empty until a discover ran.
     pub facts: Vec<CapabilityFact>,
     /// What observed the facts, e.g. `agentless/1`; carried onto the
@@ -390,6 +419,8 @@ pub struct DraftView {
     pub confirmed_fingerprint: Option<String>,
     /// The newest test outcome, when a test ran.
     pub last_test: Option<TestOutcome>,
+    /// The newest login-shell check, when one ran.
+    pub shell_check: Option<ShellCheck>,
     /// The facts discovery recorded for review.
     pub facts: Vec<CapabilityFact>,
     /// When discovery completed (epoch milliseconds).
@@ -715,6 +746,15 @@ impl Onboarding {
         draft.host_key_stage = HostKeyStage::Confirmed;
         draft.confirmed_fingerprint = Some(fingerprint.to_owned());
         draft.updated_at = fleet_core::SystemClock::now_unix_millis();
+        // A (re)confirmed key may be another machine behind the address:
+        // whatever shell answered before says nothing about it (ADR 0021).
+        // The same holds for the inventory discover observed: facts from
+        // behind the old key must never be carried onto a new machine.
+        draft.shell_check = None;
+        draft.facts = Vec::new();
+        draft.discovery_source = None;
+        draft.discovered_at = None;
+        draft.host_key_confirmed_at = Some(draft.updated_at);
         let draft = self
             .drafts
             .update(&draft)
@@ -863,6 +903,33 @@ impl Onboarding {
                 detail: "the draft has no confirmed fingerprint".to_owned(),
             }
         })?;
+        // A login shell Fleet cannot drive is refused here too, with the
+        // setup step, rather than registered and failing on first use. A
+        // check older than the latest confirmation is about another key.
+        if let Some(check) = &draft.shell_check
+            && draft
+                .host_key_confirmed_at
+                .is_some_and(|confirmed| check.at < confirmed)
+        {
+            return Err(OnboardingUseCaseError::Conflict {
+                detail: "the login-shell check predates the host-key confirmation; run the \
+                         test again"
+                    .to_owned(),
+            });
+        }
+        if let Some(check) = &draft.shell_check
+            && let Some(reason) = &check.refusal_reason
+        {
+            return Err(OnboardingUseCaseError::Conflict {
+                detail: format!(
+                    "{reason}: {}",
+                    check
+                        .refusal_detail
+                        .as_deref()
+                        .unwrap_or("the login shell is unsupported")
+                ),
+            });
+        }
 
         let registration = RegisterMachine {
             name: draft.name.clone(),
@@ -892,6 +959,12 @@ impl Onboarding {
             .confirm_host_key(authorizer, principal, &endpoint_id, &confirmed_fingerprint)
             .await
             .map_err(map_machine_error)?;
+        if let Some(guest_os) = draft.shell_check.as_ref().and_then(|check| check.guest_os) {
+            self.machines
+                .record_endpoint_os(authorizer, principal, &machine.id, &endpoint_id, guest_os)
+                .await
+                .map_err(map_machine_error)?;
+        }
         if !draft.facts.is_empty() {
             self.machines
                 .record_capabilities(authorizer, principal, &machine.id, &draft.facts)
@@ -1124,6 +1197,7 @@ pub fn assemble_view(
         host_key: draft.host_key,
         confirmed_fingerprint: draft.confirmed_fingerprint,
         last_test: draft.last_test,
+        shell_check: draft.shell_check,
         facts: draft.facts,
         discovered_at: draft.discovered_at,
         profile_hint,

@@ -35,9 +35,62 @@ fn linux_aarch64_and_its_alias_pick_the_arm64_asset() {
 }
 
 #[test]
+fn windows_x86_64_and_its_alias_pick_the_windows_x64_asset() {
+    // The probe reports `Windows` and maps `AMD64` to `x86_64`; the alias
+    // and the case of the family do not matter.
+    for (family, arch) in [
+        ("Windows", "x86_64"),
+        ("windows", "amd64"),
+        ("WINDOWS", "AMD64"),
+    ] {
+        let pin = release_pin(Some(family), Some(arch)).unwrap();
+        assert_eq!(
+            pin.asset, "skills-manager-cli-Windows-x64.exe",
+            "{family} {arch}"
+        );
+        assert_eq!(pin.version, PINNED_CLI_VERSION);
+        assert_eq!(
+            pin.url,
+            "https://github.com/xingkongliang/skills-manager/releases/download/v1.40.0/skills-manager-cli-Windows-x64.exe"
+        );
+        // The GitHub release API's digest for the v1.40.0 asset (ADR 0021).
+        assert_eq!(
+            pin.sha256,
+            "03d8bf92f3bd4a70f9bcad2d908bf1c04d1e72deebf3e800b27e78dabb09e370"
+        );
+    }
+}
+
+#[test]
+fn windows_arm64_is_skipped_as_an_unsupported_architecture() {
+    // Upstream publishes no Windows arm64 asset; x64 emulation is not
+    // attempted (ADR 0021 decision 5).
+    for arch in ["aarch64", "arm64", "ARM64"] {
+        let error = release_pin(Some("Windows"), Some(arch)).unwrap_err();
+        assert_eq!(
+            error,
+            NoReleasePin::UnsupportedArchitecture {
+                family: "Windows".to_owned(),
+                architecture: arch.to_owned(),
+            }
+        );
+        let reason = error.to_string();
+        assert!(reason.contains("Windows"), "{reason}");
+        assert!(
+            reason.contains("the pinned Windows assets are x86_64"),
+            "{reason}"
+        );
+    }
+}
+
+#[test]
 fn every_pin_is_a_lowercase_sha256_over_https() {
-    for arch in ["x86_64", "aarch64"] {
-        let pin = release_pin(Some("Linux"), Some(arch)).unwrap();
+    for (family, arch) in [
+        ("Linux", "x86_64"),
+        ("Linux", "aarch64"),
+        ("Windows", "x86_64"),
+    ] {
+        let pin = release_pin(Some(family), Some(arch)).unwrap();
         assert!(pin.url.starts_with("https://github.com/"));
         assert_eq!(pin.sha256.len(), 64);
         assert!(
@@ -54,21 +107,31 @@ fn an_unknown_architecture_is_skipped_with_a_reason() {
     assert_eq!(
         error,
         NoReleasePin::UnsupportedArchitecture {
+            family: "Linux".to_owned(),
             architecture: "riscv64".to_owned()
         }
     );
     assert!(error.to_string().contains("riscv64"));
+    assert!(
+        error
+            .to_string()
+            .contains("the pinned Linux assets are x86_64 and aarch64")
+    );
 }
 
 #[test]
-fn windows_and_macos_are_skipped_with_a_reason() {
-    for family in ["Windows", "Darwin"] {
+fn macos_and_other_families_are_skipped_with_a_reason() {
+    for family in ["Darwin", "FreeBSD"] {
         let error = release_pin(Some(family), Some("x86_64")).unwrap_err();
         assert!(
             matches!(&error, NoReleasePin::UnsupportedOs { family: reported } if reported == family),
             "{family}"
         );
-        assert!(error.to_string().contains("only Linux is pinned"));
+        assert!(
+            error
+                .to_string()
+                .contains("only Linux and Windows are pinned")
+        );
     }
 }
 
@@ -88,7 +151,7 @@ fn missing_facts_are_skipped_with_a_reason() {
 fn a_hostile_fact_is_bounded_in_the_reason() {
     let hostile = format!("evil\n{}", "x".repeat(500));
     let error = release_pin(Some("Linux"), Some(&hostile)).unwrap_err();
-    let NoReleasePin::UnsupportedArchitecture { architecture } = error else {
+    let NoReleasePin::UnsupportedArchitecture { architecture, .. } = error else {
         panic!("expected an unsupported architecture");
     };
     assert!(architecture.len() <= 64);

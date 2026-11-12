@@ -12,7 +12,7 @@ use uuid::Uuid;
 
 use fleet_application::machine::{
     Endpoint, InventoryObservation, Machine, MachineFilter, MachinePort, NewEndpoint, NodeLink,
-    RegisterMachine,
+    RegisterMachine, VerifiedWrite,
 };
 use fleet_application::node::{GatewayState, NodeStatus};
 use fleet_application::operation::{CatalogRolloutTargetPort, PortFailure};
@@ -329,37 +329,51 @@ impl MachinePort for MachineRepository {
             .await
             .map_err(|error| backend("record_capabilities", &error))?;
         require_machine(&mut tx, id).await?;
-        for fact in facts {
-            // The `fleet` namespace is Fleet's own record keeping and is
-            // never written from a report: a node or an inventory probe
-            // could otherwise forge it.
-            if fact
-                .namespace
-                .eq_ignore_ascii_case(fleet_core::RESERVED_FACT_NAMESPACE)
-            {
-                continue;
-            }
-            sqlx::query(
-                "INSERT INTO machine_capabilities (machine_id, namespace, name, value, status, observed_at, source) \
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7) \
-                 ON CONFLICT(machine_id, namespace, name) DO UPDATE SET \
-                 value = excluded.value, status = excluded.status, observed_at = excluded.observed_at, source = excluded.source",
-            )
-            .bind(id)
-            .bind(&fact.namespace)
-            .bind(&fact.name)
-            .bind(&fact.value)
-            .bind(fact.status.id())
-            .bind(fact.observed_at.unix_millis())
-            .bind(&fact.source)
-            .execute(&mut *tx)
-            .await
-            .map_err(|error| backend("record_capabilities", &error))?;
-        }
+        upsert_capabilities(&mut tx, id, facts, "record_capabilities").await?;
         tx.commit()
             .await
             .map_err(|error| backend("record_capabilities", &error))?;
         Ok(())
+    }
+
+    async fn record_verified_capabilities(
+        &self,
+        id: &str,
+        endpoint_id: &str,
+        verified_fingerprint: &str,
+        facts: &[CapabilityFact],
+    ) -> Result<VerifiedWrite, PortFailure> {
+        let mut tx = self
+            .pool
+            .begin_with("BEGIN IMMEDIATE")
+            .await
+            .map_err(|error| backend("record_verified_capabilities", &error))?;
+        require_machine(&mut tx, id).await?;
+        // Bound to the trust state the observation ran under, like a
+        // detected OS: a host key confirmed in between marked these facts
+        // stale and wins, and an endpoint removed in between vouches for
+        // nothing.
+        let current: Option<(Option<String>,)> = sqlx::query_as(
+            "SELECT verified_fingerprint FROM machine_endpoints \
+             WHERE id = ?1 AND machine_id = ?2",
+        )
+        .bind(endpoint_id)
+        .bind(id)
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(|error| backend("record_verified_capabilities", &error))?;
+        match current {
+            None => return Ok(VerifiedWrite::EndpointGone),
+            Some((current,)) if current.as_deref() != Some(verified_fingerprint) => {
+                return Ok(VerifiedWrite::KeyChanged);
+            }
+            Some(_) => {}
+        }
+        upsert_capabilities(&mut tx, id, facts, "record_verified_capabilities").await?;
+        tx.commit()
+            .await
+            .map_err(|error| backend("record_verified_capabilities", &error))?;
+        Ok(VerifiedWrite::Recorded)
     }
 
     async fn delete(&self, id: &str) -> Result<(), PortFailure> {
@@ -408,13 +422,22 @@ impl MachinePort for MachineRepository {
         fingerprint: &str,
         confirmed_at: i64,
     ) -> Result<(), PortFailure> {
+        let mut tx = self
+            .pool
+            .begin_with("BEGIN IMMEDIATE")
+            .await
+            .map_err(|error| backend("confirm_fingerprint", &error))?;
         let updated = sqlx::query(
-            "UPDATE machine_endpoints SET verified_fingerprint = ?2, verified_at = ?3 WHERE id = ?1",
+            // A (re)confirmed host key may be a different machine behind the
+            // same address: the recorded guest OS is cleared with it and is
+            // detected again (ADR 0021).
+            "UPDATE machine_endpoints SET verified_fingerprint = ?2, verified_at = ?3, \
+             guest_os = NULL WHERE id = ?1",
         )
         .bind(endpoint_id)
         .bind(fingerprint)
         .bind(confirmed_at)
-        .execute(&self.pool)
+        .execute(&mut *tx)
         .await
         .map_err(|error| backend("confirm_fingerprint", &error))?;
         if updated.rows_affected() == 0 {
@@ -422,6 +445,29 @@ impl MachinePort for MachineRepository {
                 what: format!("endpoint {endpoint_id:?}"),
             });
         }
+        // For the same reason, facts an SSH inventory observed may describe
+        // the other machine. Facts carry no endpoint, so every `known` fact of
+        // this machine with an SSH-inventory source turns `stale` (planning
+        // and tool comparison then treat it as unknown), including facts
+        // observed through the machine's other SSH endpoints: one more
+        // inventory refreshes them (#624). Value and observation time stay,
+        // so the read model still shows what was last seen and when. Facts
+        // with another source (a fleetd node, Proxmox, Fleet's own records)
+        // were not observed over SSH and are kept as they are. An inventory
+        // that verified the old key cannot write them back
+        // (`record_verified_capabilities`).
+        sqlx::query(
+            "UPDATE machine_capabilities SET status = 'stale' \
+             WHERE status = 'known' AND source LIKE 'agentless/%' \
+             AND machine_id = (SELECT machine_id FROM machine_endpoints WHERE id = ?1)",
+        )
+        .bind(endpoint_id)
+        .execute(&mut *tx)
+        .await
+        .map_err(|error| backend("confirm_fingerprint", &error))?;
+        tx.commit()
+            .await
+            .map_err(|error| backend("confirm_fingerprint", &error))?;
         Ok(())
     }
 
@@ -444,6 +490,62 @@ impl MachinePort for MachineRepository {
                 .ok()
                 .and_then(|report| report["revision"].as_u64())
         }))
+    }
+
+    async fn record_endpoint_os(
+        &self,
+        endpoint_id: &str,
+        guest_os: fleet_core::GuestOs,
+    ) -> Result<(), PortFailure> {
+        self.write_endpoint_os(endpoint_id, Some(guest_os.id()), "record_endpoint_os")
+            .await
+    }
+
+    async fn record_detected_endpoint_os(
+        &self,
+        endpoint_id: &str,
+        guest_os: fleet_core::GuestOs,
+        expected_fingerprint: &str,
+        event: &fleet_application::audit::AuditIntent,
+    ) -> Result<bool, PortFailure> {
+        let mut tx = self
+            .pool
+            .begin_with("BEGIN IMMEDIATE")
+            .await
+            .map_err(|error| backend("record_detected_endpoint_os", &error))?;
+        // Bound to the trust state the detection ran under: a host key
+        // confirmed in between (which cleared the OS) wins.
+        let updated = sqlx::query(
+            "UPDATE machine_endpoints SET guest_os = ?2 \
+             WHERE id = ?1 AND kind = 'ssh' AND verified_fingerprint = ?3",
+        )
+        .bind(endpoint_id)
+        .bind(guest_os.id())
+        .bind(expected_fingerprint)
+        .execute(&mut *tx)
+        .await
+        .map_err(|error| backend("record_detected_endpoint_os", &error))?;
+        if updated.rows_affected() == 0 {
+            return Ok(false);
+        }
+        crate::audit::append_resolved_tx(
+            &mut tx,
+            event,
+            fleet_application::audit::AuditOutcome::Succeeded,
+        )
+        .await
+        .map_err(|detail| PortFailure::Backend {
+            detail: format!("record_detected_endpoint_os: {detail}"),
+        })?;
+        tx.commit()
+            .await
+            .map_err(|error| backend("record_detected_endpoint_os", &error))?;
+        Ok(true)
+    }
+
+    async fn clear_endpoint_os(&self, endpoint_id: &str) -> Result<(), PortFailure> {
+        self.write_endpoint_os(endpoint_id, None, "clear_endpoint_os")
+            .await
     }
 
     async fn verified_fingerprint(&self, endpoint_id: &str) -> Result<Option<String>, PortFailure> {
@@ -472,9 +574,46 @@ impl CatalogRolloutTargetPort for MachineRepository {
             .find(|endpoint| endpoint.id == endpoint_id)
             .map(|endpoint| endpoint.kind))
     }
+
+    async fn endpoint_guest_os(
+        &self,
+        machine_id: &str,
+        endpoint_id: &str,
+    ) -> Result<Option<fleet_core::GuestOs>, PortFailure> {
+        let machine = <Self as MachinePort>::get(self, machine_id).await?;
+        Ok(machine
+            .endpoints
+            .into_iter()
+            .find(|endpoint| endpoint.id == endpoint_id)
+            .and_then(|endpoint| endpoint.guest_os))
+    }
 }
 
 impl MachineRepository {
+    /// Writes or clears the guest OS of an SSH endpoint. Only SSH endpoints
+    /// carry one; any other kind is not found.
+    async fn write_endpoint_os(
+        &self,
+        endpoint_id: &str,
+        guest_os: Option<&str>,
+        context: &str,
+    ) -> Result<(), PortFailure> {
+        let updated = sqlx::query(
+            "UPDATE machine_endpoints SET guest_os = ?2 WHERE id = ?1 AND kind = 'ssh'",
+        )
+        .bind(endpoint_id)
+        .bind(guest_os)
+        .execute(&self.pool)
+        .await
+        .map_err(|error| backend(context, &error))?;
+        if updated.rows_affected() == 0 {
+            return Err(PortFailure::NotFound {
+                what: format!("SSH endpoint {endpoint_id:?}"),
+            });
+        }
+        Ok(())
+    }
+
     /// Assembles one machine record with everything that is a fact about
     /// it: endpoints, tags, groups, capability facts, the newest inventory
     /// observation, and the node trust link. The read-time rules — fact
@@ -483,7 +622,7 @@ impl MachineRepository {
     async fn hydrate(&self, row: &sqlx::sqlite::SqliteRow) -> Result<Machine, PortFailure> {
         use sqlx::Row as _;
         let id: String = row.get("id");
-        let endpoint_rows = sqlx::query("SELECT id, kind, reference FROM machine_endpoints WHERE machine_id = ?1 ORDER BY created_at ASC")
+        let endpoint_rows = sqlx::query("SELECT id, kind, reference, guest_os FROM machine_endpoints WHERE machine_id = ?1 ORDER BY created_at ASC")
             .bind(&id)
             .fetch_all(&self.pool)
             .await
@@ -537,6 +676,11 @@ impl MachineRepository {
                     kind: EndpointKind::from_id(&row.get::<String, _>("kind"))
                         .unwrap_or(EndpointKind::Ssh),
                     reference: row.get("reference"),
+                    // The CHECK admits only the two ids; anything else
+                    // reads as unknown rather than failing the machine.
+                    guest_os: row
+                        .get::<Option<String>, _>("guest_os")
+                        .and_then(|id| fleet_core::GuestOs::from_id(&id).ok()),
                 })
                 .collect(),
             tags: tag_rows.iter().map(|row| row.get(0)).collect(),
@@ -589,6 +733,44 @@ async fn ensure_tag(
         .await
         .map_err(|error| backend("ensure_tag", &error))?;
     Ok(id)
+}
+
+/// Upserts capability facts inside `tx`, skipping the reserved `fleet`
+/// namespace.
+async fn upsert_capabilities(
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    id: &str,
+    facts: &[CapabilityFact],
+    context: &str,
+) -> Result<(), PortFailure> {
+    for fact in facts {
+        // The `fleet` namespace is Fleet's own record keeping and is
+        // never written from a report: a node or an inventory probe
+        // could otherwise forge it.
+        if fact
+            .namespace
+            .eq_ignore_ascii_case(fleet_core::RESERVED_FACT_NAMESPACE)
+        {
+            continue;
+        }
+        sqlx::query(
+            "INSERT INTO machine_capabilities (machine_id, namespace, name, value, status, observed_at, source) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7) \
+             ON CONFLICT(machine_id, namespace, name) DO UPDATE SET \
+             value = excluded.value, status = excluded.status, observed_at = excluded.observed_at, source = excluded.source",
+        )
+        .bind(id)
+        .bind(&fact.namespace)
+        .bind(&fact.name)
+        .bind(&fact.value)
+        .bind(fact.status.id())
+        .bind(fact.observed_at.unix_millis())
+        .bind(&fact.source)
+        .execute(&mut **tx)
+        .await
+        .map_err(|error| backend(context, &error))?;
+    }
+    Ok(())
 }
 
 async fn require_machine(

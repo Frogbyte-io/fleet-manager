@@ -85,6 +85,7 @@ fn machine_record(id: &str, endpoints: Vec<NewEndpoint>) -> Machine {
             .into_iter()
             .enumerate()
             .map(|(index, new)| Endpoint {
+                guest_os: None,
                 id: format!("endpoint-{index}"),
                 kind: new.kind,
                 reference: new.reference,
@@ -133,6 +134,7 @@ impl MachinePort for FakePort {
                 .iter()
                 .enumerate()
                 .map(|(index, new)| Endpoint {
+                    guest_os: None,
                     id: format!("endpoint-{index}"),
                     kind: new.kind,
                     reference: new.reference.clone(),

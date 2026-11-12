@@ -176,7 +176,14 @@ fn skills_observation(
                 .into_iter()
                 .flatten()
             {
-                let Some(id) = skill.get("id").and_then(serde_json::Value::as_str) else {
+                // Desired state names a skill by its name; the real CLI's
+                // `id` is a UUID, so the name is the identity (`id` only
+                // when no name was observed).
+                let Some(id) = skill
+                    .get("name")
+                    .or_else(|| skill.get("id"))
+                    .and_then(serde_json::Value::as_str)
+                else {
                     continue;
                 };
                 let agents: Vec<&str> = skill
@@ -438,7 +445,7 @@ mod tests {
             availability,
             cli_version: None,
             data: serde_json::json!({"skills": [
-                {"id": "fleet", "deployedTo": ["codex"]},
+                {"id": "6fe08ff4-4644-4114-9971-57327acabfc7", "name": "fleet", "deployedTo": ["codex"]},
                 {"id": "extra", "deployedTo": []},
                 {"noId": true},
             ]}),

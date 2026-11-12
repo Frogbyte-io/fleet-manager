@@ -27,6 +27,13 @@ concurrency:
 
 env:
   CARGO_TERM_COLOR: always
+  # The self-hosted runner shares its disk with development work, and a full
+  # workspace test build with debug info and incremental state outgrew it.
+  # Panics still report file and line (#[track_caller]); only debugger
+  # symbols are dropped.
+  CARGO_INCREMENTAL: '0'
+  CARGO_PROFILE_DEV_DEBUG: '0'
+  CARGO_PROFILE_TEST_DEBUG: '0'
 
 jobs:
   detect:
@@ -182,6 +189,9 @@ jobs:
     needs: detect
     if: needs.detect.outputs.cargo == 'true'
     runs-on: [self-hosted, dev-box]
+    # A hung test must fail the job, not hold the only runner for the
+    # six-hour default.
+    timeout-minutes: 120
     steps:
       - uses: actions/checkout@v7
       - uses: ./.github/actions/setup-toolchain
@@ -243,11 +253,17 @@ jobs:
           node: 'false'
           rust: 'true'
 
-      # Windows is a supported target for the binaries and libraries, not the
-      # platform the full suite is gated on. It has to compile, link, and
-      # produce the binaries; Linux runs the exhaustive checks.
-      - run: cargo check --workspace --all-targets --all-features --locked
-      - run: cargo build --workspace --bins --locked
+      # Windows ships one binary: fleetctl (release.yml builds only it there).
+      # The controller and fleetd are Linux-only (docs/PLAN.md, supported
+      # platform baseline), so this checks the shipped fleetctl targets and
+      # every library they link, not the whole workspace; fleetctl's
+      # integration tests drive Unix tooling and run on Linux. The
+      # fleet-provider-git targets are checked too, so its non-Unix credential
+      # refusal and that refusal's test keep compiling. Linux runs the
+      # exhaustive checks.
+      - run: cargo check -p fleetctl --lib --bins --all-features --locked
+      - run: cargo check -p fleet-provider-git --all-targets --all-features --locked
+      - run: cargo build -p fleetctl --bins --locked
 
   cargo-deny:
     name: Cargo dependency policy (Linux)

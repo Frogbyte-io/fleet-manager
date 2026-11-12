@@ -15,13 +15,17 @@ use uuid::Uuid;
 
 use fleet_application::onboarding::{
     DraftEndpoint, HostKeyStage, NewDraft, OnboardAuth, OnboardHostKey, OnboardingDraft,
-    OnboardingPort, TestOutcome,
+    OnboardingPort, ShellCheck, TestOutcome,
 };
 use fleet_application::operation::PortFailure;
 use fleet_core::CapabilityFact;
 
 /// The facts payload bound; the same bound the machine snapshot path uses.
 const MAX_FACTS_JSON: usize = 64 * 1024;
+
+/// The shell-check document bound (the migration adds no CHECK; this is the
+/// only writer).
+const MAX_SHELL_CHECK_JSON: usize = 4096;
 
 /// The onboarding-draft repository over a pool.
 #[derive(Debug)]
@@ -135,6 +139,22 @@ impl OnboardingPort for OnboardingRepository {
             .map_err(|error| PortFailure::Backend {
                 detail: format!("the test outcome does not serialize: {error}"),
             })?;
+        let shell_check_json = draft
+            .shell_check
+            .as_ref()
+            .map(serde_json::to_string)
+            .transpose()
+            .map_err(|error| PortFailure::Backend {
+                detail: format!("the shell check does not serialize: {error}"),
+            })?;
+        if shell_check_json
+            .as_ref()
+            .is_some_and(|json| json.len() > MAX_SHELL_CHECK_JSON)
+        {
+            return Err(PortFailure::Backend {
+                detail: "the shell check exceeds the draft's 4 KiB bound".to_owned(),
+            });
+        }
         let facts_json =
             serde_json::to_string(&draft.facts).map_err(|error| PortFailure::Backend {
                 detail: format!("the fact set does not serialize: {error}"),
@@ -151,7 +171,8 @@ impl OnboardingPort for OnboardingRepository {
              tags_json = ?9, groups_json = ?10, key_type = ?11, observed_fingerprint = ?12, \
              key_raw_line = ?13, host_key_stage = ?14, confirmed_fingerprint = ?15, \
              last_test_json = ?16, facts_json = ?17, discovery_source = ?18, \
-             discovered_at = ?19, updated_at = ?20 \
+             discovered_at = ?19, updated_at = ?20, shell_check_json = ?21, \
+             host_key_confirmed_at = ?22 \
              WHERE id = ?1",
         )
         .bind(&draft.id)
@@ -174,6 +195,8 @@ impl OnboardingPort for OnboardingRepository {
         .bind(&draft.discovery_source)
         .bind(draft.discovered_at)
         .bind(draft.updated_at)
+        .bind(shell_check_json)
+        .bind(draft.host_key_confirmed_at)
         .execute(&self.pool)
         .await
         .map_err(|error| backend("update", &error))?;
@@ -238,6 +261,14 @@ fn hydrate(row: &sqlx::sqlite::SqliteRow) -> Result<OnboardingDraft, PortFailure
         .map_err(|error| PortFailure::Backend {
             detail: format!("the stored test outcome does not parse: {error}"),
         })?;
+    let shell_check_json: Option<String> = row.get("shell_check_json");
+    let shell_check = shell_check_json
+        .as_deref()
+        .map(serde_json::from_str::<ShellCheck>)
+        .transpose()
+        .map_err(|error| PortFailure::Backend {
+            detail: format!("the stored shell check does not parse: {error}"),
+        })?;
     let facts_json: String = row.get("facts_json");
     let facts: Vec<CapabilityFact> =
         serde_json::from_str(&facts_json).map_err(|error| PortFailure::Backend {
@@ -260,6 +291,8 @@ fn hydrate(row: &sqlx::sqlite::SqliteRow) -> Result<OnboardingDraft, PortFailure
         host_key_stage,
         confirmed_fingerprint: row.get("confirmed_fingerprint"),
         last_test,
+        shell_check,
+        host_key_confirmed_at: row.get("host_key_confirmed_at"),
         facts,
         discovery_source: row.get("discovery_source"),
         discovered_at: row.get("discovered_at"),

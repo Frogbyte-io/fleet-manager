@@ -39,6 +39,28 @@ Out of scope:
 - Your own deployment misconfiguration (e.g. exposing the controller to the
   internet without transport authentication)
 
+## Verifying a release
+
+Releases published after build provenance was added carry a signed
+attestation for each `fleetctl` asset from the release workflow. Earlier
+releases, such as `v0.1.0-482fd9c`, have none; for those, the `SHA256SUMS`
+check is the only one. Check a download with the GitHub CLI:
+
+```sh
+gh attestation verify fleetctl-linux-x86_64 --repo Frogbyte-io/fleet-manager \
+  --signer-workflow Frogbyte-io/fleet-manager/.github/workflows/release.yml \
+  --source-ref refs/heads/main
+```
+
+`--signer-workflow` and `--source-ref` require the release workflow running
+on `main`; `--repo` alone accepts an attestation from any workflow in the
+repository.
+
+The full install and verification steps are in
+[`deploy/README.md`](deploy/README.md#install-fleetctl). Why the release job
+holds the extra permissions this needs is in
+[`.github/SECURITY.md`](.github/SECURITY.md#the-release-provenance-exception).
+
 ## Supported versions
 
 Only the latest `main` branch is supported; releases are cut from it.

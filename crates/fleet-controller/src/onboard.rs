@@ -4,7 +4,10 @@
 //! [`OnboardingExecutor`] runs the two durable onboarding operation kinds.
 //! `machine.onboard.test` probes a draft's host key, decides
 //! observed/confirmed/changed against what the draft already trusts, and —
-//! only when the fingerprint was confirmed — runs a bounded connection test.
+//! only when the fingerprint was confirmed — runs a bounded connection test
+//! and the fixed login-shell check (ADR 0021 decision 4), which decides the
+//! guest OS the endpoint is driven as and refuses `cmd.exe`, PowerShell 7,
+//! Constrained Language Mode and profile output with the setup step.
 //! It never touches the machines record: a test's side effects live in the
 //! draft row, which is the point of the "no persistent machine side effect"
 //! rule. `machine.onboard.discover` runs the same agentless probe the
@@ -28,7 +31,7 @@ use std::time::Duration;
 use async_trait::async_trait;
 
 use fleet_application::onboarding::{
-    OnboardAuth, OnboardHostKey, OnboardingDraft, OnboardingPort, TestOutcome,
+    OnboardAuth, OnboardHostKey, OnboardingDraft, OnboardingPort, ShellCheck, TestOutcome,
 };
 use fleet_application::operation::{Operation, Operations};
 use fleet_application::worker::OperationExecutor;
@@ -218,18 +221,61 @@ impl OnboardingExecutor {
                 Err(error) => outcome.detail = Some(error.to_string()),
             }
         }
+        if !draft.trust_ready() {
+            // An unconfirmed or changed key: whatever shell answered before
+            // was behind a key nobody vouches for now.
+            draft.shell_check = None;
+        }
+        let mut shell_failure = None;
+        if outcome.connected {
+            match self.check_shell(&draft).await {
+                Ok(check) => draft.shell_check = Some(check),
+                Err(detail) => {
+                    // A failed check leaves no answer behind, old or new.
+                    draft.shell_check = None;
+                    outcome.detail = Some(format!("the login-shell check failed: {detail}"));
+                    shell_failure = Some(detail);
+                }
+            }
+        }
         draft.last_test = Some(outcome.clone());
-        draft.updated_at = outcome.at;
+        draft.updated_at = fleet_core::SystemClock::now_unix_millis();
         self.drafts
             .update(&draft)
             .await
             .map_err(|failure| failure.to_string())?;
+        if let Some(detail) = shell_failure {
+            return fail_operation(
+                operations,
+                &operation.id,
+                "shell_check_failed",
+                &format!("the login-shell check failed: {detail}"),
+            )
+            .await;
+        }
 
+        // A shell Fleet cannot drive is refused now, with the setup step,
+        // rather than at the first exec. The draft keeps the check for the
+        // review step.
+        if outcome.connected
+            && let Some(check) = &draft.shell_check
+            && let (Some(reason), Some(detail)) = (&check.refusal_reason, &check.refusal_detail)
+        {
+            return fail_operation(operations, &operation.id, reason, detail).await;
+        }
+
+        let check = if outcome.connected {
+            draft.shell_check.as_ref()
+        } else {
+            None
+        };
         let result = serde_json::json!({
             "hostKeyStage": draft.host_key_stage.id(),
             "fingerprint": observation.fingerprint,
             "connectAttempted": outcome.connect_attempted,
             "connected": outcome.connected,
+            "shell": check.map(|check| check.shell.clone()),
+            "guestOs": check.and_then(|check| check.guest_os).map(fleet_core::GuestOs::id),
         })
         .to_string();
         operations
@@ -273,7 +319,49 @@ impl OnboardingExecutor {
             )
             .await;
         }
-        let spec = connection_spec(&draft)?;
+        let mut spec = connection_spec(&draft)?;
+
+        operations
+            .record_progress(
+                &operation.id,
+                Some(0),
+                Some(1),
+                Some(&format!(
+                    "checking the login shell on {}",
+                    draft.endpoint.host
+                )),
+            )
+            .await
+            .map_err(|error| error.to_string())?;
+        // The same sniff as the test, first: discover picks the probe by it,
+        // and a confirm-then-discover flow never ran a connected test.
+        // The check is persisted at once, so a collection that fails later
+        // never leaves an older answer for `add` to record; a failed check
+        // clears it.
+        let checked = self.check_shell(&draft).await;
+        draft.shell_check = checked.as_ref().ok().cloned();
+        draft.updated_at = fleet_core::SystemClock::now_unix_millis();
+        self.drafts
+            .update(&draft)
+            .await
+            .map_err(|failure| failure.to_string())?;
+        let check = match checked {
+            Ok(check) => check,
+            Err(detail) => {
+                return fail_operation(
+                    operations,
+                    &operation.id,
+                    "shell_check_failed",
+                    &format!("the login-shell check failed: {detail}"),
+                )
+                .await;
+            }
+        };
+        if let (Some(reason), Some(detail)) = (&check.refusal_reason, &check.refusal_detail) {
+            return fail_operation(operations, &operation.id, reason, detail).await;
+        }
+        // Unknown (unrecognized output) keeps today's Linux behaviour.
+        spec.guest_os = check.guest_os.unwrap_or(fleet_core::GuestOs::Linux);
 
         operations
             .record_progress(
@@ -332,12 +420,52 @@ impl OnboardingExecutor {
             .await
             .map_err(|failure| failure.to_string())?;
 
-        let result = serde_json::json!({ "facts": count }).to_string();
+        let result = serde_json::json!({
+            "facts": count,
+            "shell": check.shell,
+            "guestOs": check.guest_os.map(fleet_core::GuestOs::id),
+        })
+        .to_string();
         operations
             .complete(&operation.id, "succeeded", Some(&result), None)
             .await
             .map(|_| ())
             .map_err(|error| error.to_string())
+    }
+}
+
+impl OnboardingExecutor {
+    /// Runs the fixed login-shell sniff against a draft's endpoint and
+    /// translates the provider's answer into the draft's check. The provider
+    /// model stops here: the application sees ids and texts.
+    async fn check_shell(&self, draft: &OnboardingDraft) -> Result<ShellCheck, String> {
+        let spec = connection_spec(draft)?;
+        let provider = self.provider.clone();
+        let limiter = self.limiter.clone();
+        let sniff = tokio::task::spawn_blocking(move || {
+            fleet_provider_ssh::sniff_shell(
+                &provider,
+                &limiter,
+                &spec,
+                fleet_provider_ssh::SNIFF_DEADLINE,
+            )
+        })
+        .await
+        .map_err(|join_error| format!("the shell-check thread failed: {join_error}"))?
+        .map_err(|error| error.to_string())?;
+        Ok(shell_check_from(&sniff))
+    }
+}
+
+/// The draft's view of a sniff.
+fn shell_check_from(sniff: &fleet_provider_ssh::ShellSniff) -> ShellCheck {
+    let refusal = sniff.refusal();
+    ShellCheck {
+        shell: sniff.shell.id().to_owned(),
+        guest_os: sniff.guest_os(),
+        refusal_reason: refusal.as_ref().map(|refusal| refusal.reason.to_owned()),
+        refusal_detail: refusal.map(|refusal| refusal.detail),
+        at: fleet_core::SystemClock::now_unix_millis(),
     }
 }
 

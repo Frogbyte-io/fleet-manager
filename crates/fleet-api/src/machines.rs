@@ -96,6 +96,9 @@ pub struct EndpointDto {
     /// The reference, e.g. `***@host:port` for SSH when redacted, or the
     /// node id for fleetd. Never carries a secret.
     pub reference: String,
+    /// The guest OS detected on this SSH endpoint at onboarding or
+    /// inventory, `linux` or `windows`; null while unknown (ADR 0021).
+    pub guest_os: Option<String>,
 }
 
 /// One capability fact as the read model displays it: the recorded status
@@ -197,6 +200,7 @@ impl From<MachineView> for MachineDto {
                     id: endpoint.id,
                     kind: endpoint.kind.id().to_owned(),
                     reference: endpoint.reference,
+                    guest_os: endpoint.guest_os.map(|os| os.id().to_owned()),
                 })
                 .collect(),
             tags: view.tags,
@@ -588,5 +592,74 @@ pub async fn unlink_machine_guest(
     state
         .events
         .publish(fleet_application::events::EventKind::MachineChanged);
+    Ok(Json(Resource::new(MachineDto::from(view))))
+}
+
+/// Clears the guest OS recorded on a machine's SSH endpoint (ADR 0021), so
+/// the endpoint is unknown again: the caller's `guestOs` chooses, and the
+/// next `agentless.inventory` detects and records it afresh. This is the
+/// recovery when a record is wrong. A host-key confirmation clears it too.
+///
+/// # Errors
+///
+/// Returns the public error envelope on refusal or an unknown machine or
+/// SSH endpoint.
+#[utoipa::path(
+    delete,
+    path = "/machines/{machineId}/endpoints/{endpointId}/guest-os",
+    tag = "machines",
+    operation_id = "clearMachineEndpointGuestOs",
+    params(
+        ("machineId" = String, Path, description = "The machine's identity."),
+        ("endpointId" = String, Path, description = "The SSH endpoint's identity."),
+    ),
+    responses(
+        (status = 200, description = "The machine, with the endpoint's guest OS unknown.", body = Resource<MachineDto>),
+        (status = 403, description = "The caller may not update the machine.", body = crate::error::ApiError),
+        (status = 404, description = "The machine or SSH endpoint does not exist.", body = crate::error::ApiError),
+        (status = 503, description = "The machine surface is not wired.", body = crate::error::ApiError)
+    )
+)]
+pub async fn clear_machine_endpoint_guest_os(
+    State(state): State<Arc<crate::operations::ApiState>>,
+    principal: Option<Extension<crate::ActingPrincipal>>,
+    Extension(correlation_id): Extension<CorrelationId>,
+    Path((machine_id, endpoint_id)): Path<(String, String)>,
+) -> Result<Json<Resource<MachineDto>>, ApiErrorResponse> {
+    let machines = machines_or_error(&state, correlation_id)?;
+    let principal = crate::operations::principal_or_error(principal, correlation_id)?;
+    // The answer is the machine, so the caller must be able to read it:
+    // checked before anything changes, not after.
+    machines
+        .get(
+            state.authorizer.as_ref(),
+            &principal,
+            &machine_id,
+            fleet_core::SystemClock::now_unix_millis(),
+        )
+        .await
+        .map_err(|error| map_machine_error(&error, correlation_id))?;
+    machines
+        .clear_endpoint_os(
+            state.authorizer.as_ref(),
+            &principal,
+            &machine_id,
+            &endpoint_id,
+        )
+        .await
+        .map_err(|error| map_machine_error(&error, correlation_id))?;
+    // Cached views go stale with the mutation, whatever the read-back does.
+    state
+        .events
+        .publish(fleet_application::events::EventKind::MachineChanged);
+    let view = machines
+        .get(
+            state.authorizer.as_ref(),
+            &principal,
+            &machine_id,
+            fleet_core::SystemClock::now_unix_millis(),
+        )
+        .await
+        .map_err(|error| map_machine_error(&error, correlation_id))?;
     Ok(Json(Resource::new(MachineDto::from(view))))
 }

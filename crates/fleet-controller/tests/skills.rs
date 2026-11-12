@@ -11,7 +11,7 @@ use std::time::Duration;
 
 use std::process::Command;
 mod common;
-use common::{TestSshd, start_sshd, start_sshd_with_home, whoami};
+use common::{TestSshd, start_sshd, start_sshd_with_home, start_sshd_with_home_logged, whoami};
 
 /// The composed fixture: store, operations, skills executor, and a
 /// verified endpoint.
@@ -148,8 +148,8 @@ printf '%q\n' "$@" >> "$HOME/stub-argv.log"
 [ "$1" = "--json" ] && shift
 [ -e "$HOME/stub-fail-deploy" ] && [ "$1" = skills ] && [ "$2" = deploy ] && { echo "deploy refused" >&2; exit 1; }
 case "$1" in
-  --version) echo '{"version":"1.40.0"}' ;;
-  agents) echo '[{"id":"claude_code","name":"Claude Code","skillsDir":"/secret/agent/path"}]' ;;
+  --version) echo 'skills-manager-cli 1.40.0' ;;
+  agents) echo '[{"key":"claude_code","display_name":"Claude Code","installed":true,"skills_dir":"/secret/agent/path","enabled":true,"is_custom":false,"has_path_override":false,"project_relative_skills_dir":".claude/skills","has_project_path_override":false,"category":"coding"}]' ;;
   presets) echo '[{"id":"default","name":"Default","description":"private","icon":"x","sort_order":0,"skill_count":1,"active":true}]' ;;
   skills)
     shift
@@ -724,6 +724,46 @@ async fn a_verified_catalog_rollout_records_the_installed_version_and_a_failed_o
 }
 
 #[tokio::test]
+async fn a_failed_rollout_restores_a_regular_file_at_the_staging_target() {
+    // The target check allows a user-owned regular file there; a failed
+    // rollout must put it back as it was, not delete it.
+    let home_dir = tempfile::tempdir().unwrap();
+    let sshd = start_sshd_with_home(home_dir.path());
+    let fixture = compose(&sshd).await;
+    let home = home_dir.path().display().to_string();
+    let _path = install_stub_cli(&home, None);
+    let version = builtin_version(&fixture).await;
+    let parent = format!("{home}/.local/share/fleet/skills");
+    std::fs::create_dir_all(&parent).unwrap();
+    let target = format!("{parent}/fleet");
+    std::fs::write(&target, "keep me").unwrap();
+    let payload = serde_json::json!({
+        "machineId": fixture.machine_id,
+        "endpointId": fixture.endpoint_id,
+        "auth": fixture.auth_json(),
+        "catalogId": "builtin-fleet",
+        "versionId": version,
+        "agents": ["codex"],
+        "timeoutSeconds": 60,
+    });
+
+    std::fs::write(format!("{home}/stub-fail-deploy"), "").unwrap();
+    let (state, _, error) = fixture.run_kind("skills.catalog-rollout", payload).await;
+    assert_eq!(state, "failed", "{error:?}");
+    assert!(
+        std::path::Path::new(&target).is_file(),
+        "the file is restored"
+    );
+    assert_eq!(std::fs::read_to_string(&target).unwrap(), "keep me");
+    let mut entries: Vec<_> = std::fs::read_dir(&parent)
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+        .collect();
+    entries.sort_unstable();
+    assert_eq!(entries, ["fleet"], "no staging or backup is left");
+}
+
+#[tokio::test]
 async fn a_probe_prunes_installs_for_skills_no_longer_deployed() {
     use fleet_application::catalog_installs::{CatalogInstall, CatalogInstallPort as _};
     // A private home per test: the stub CLI, its logs and the fail flag
@@ -771,4 +811,123 @@ async fn a_probe_prunes_installs_for_skills_no_longer_deployed() {
         (kept[0].skill_name.as_str(), kept[0].agent.as_str()),
         ("hello", "claude_code")
     );
+}
+
+/// #609: an endpoint recorded as Windows never receives a Bash script. The
+/// library and preset kinds (no Windows scripts yet) refuse it, and a value
+/// Windows PowerShell 5.1 cannot pass safely to a native program is refused
+/// before any session starts: sshd's own log shows no login.
+#[tokio::test]
+async fn a_windows_endpoint_refuses_what_it_cannot_run_before_any_session() {
+    let home_dir = tempfile::tempdir().unwrap();
+    let log_dir = tempfile::tempdir().unwrap();
+    let sshd_log = log_dir.path().join("sshd.log");
+    let sshd = start_sshd_with_home_logged(home_dir.path(), &sshd_log);
+    let logins = || {
+        std::fs::read_to_string(&sshd_log)
+            .unwrap_or_default()
+            .matches("Accepted publickey")
+            .count()
+    };
+    let fixture = compose(&sshd).await;
+    let home = home_dir.path().display().to_string();
+    let _path = install_stub_cli(&home, None);
+    MachineRepository::new(fixture.pool.clone())
+        .record_endpoint_os(&fixture.endpoint_id, fleet_core::GuestOs::Windows)
+        .await
+        .unwrap();
+    let base = serde_json::json!({
+        "machineId": fixture.machine_id,
+        "endpointId": fixture.endpoint_id,
+        "auth": fixture.auth_json(),
+        "timeoutSeconds": 30,
+    });
+    let with = |extra: serde_json::Value| {
+        let mut payload = base.clone();
+        payload
+            .as_object_mut()
+            .unwrap()
+            .extend(extra.as_object().unwrap().clone());
+        payload
+    };
+    for (kind, payload, reason) in [
+        (
+            "skills.install",
+            with(serde_json::json!({"reference": "org/repo/skill"})),
+            "unsupported_guest_os",
+        ),
+        (
+            "presets.deploy",
+            with(serde_json::json!({"reference": "default", "agents": ["codex"]})),
+            "unsupported_guest_os",
+        ),
+        (
+            "skills.deploy",
+            with(serde_json::json!({"skillId": "db", "agents": ["Claude Code"]})),
+            "invalid_request",
+        ),
+        (
+            "skills.undeploy",
+            with(serde_json::json!({"skillId": "db\"x", "agents": ["codex"]})),
+            "invalid_request",
+        ),
+        (
+            "skills.deploy",
+            with(
+                serde_json::json!({"skillId": "db", "agents": ["codex"], "skillsRoot": "/srv/skills"}),
+            ),
+            "invalid_request",
+        ),
+        // A Windows root is refused as unsupported, not failed by the POSIX
+        // root check first.
+        (
+            "skills.undeploy",
+            with(
+                serde_json::json!({"skillId": "db", "agents": ["codex"], "skillsRoot": "C:\\skills"}),
+            ),
+            "invalid_request",
+        ),
+        (
+            "skills.install",
+            with(serde_json::json!({"reference": "org/repo/skill", "skillsRoot": "C:\\skills"})),
+            "unsupported_guest_os",
+        ),
+        (
+            "skills.probe",
+            with(serde_json::json!({"skillsRoot": "/srv/skills"})),
+            "invalid_request",
+        ),
+        (
+            "skills.probe",
+            with(serde_json::json!({
+                "artifactUrl": "https://example.invalid/a b.exe",
+                "artifactSha256": "0".repeat(64),
+            })),
+            "invalid_request",
+        ),
+    ] {
+        let (state, _, error) = fixture.run_kind(kind, payload).await;
+        assert_eq!(state, "failed", "{kind}: {error:?}");
+        let error: serde_json::Value = serde_json::from_str(&error.unwrap()).unwrap();
+        assert_eq!(error["reason"], reason, "{kind}: {error}");
+    }
+    assert_eq!(logins(), 0, "no login reached the endpoint");
+    assert!(
+        !std::path::Path::new(&format!("{home}/stub-cli.log")).exists(),
+        "no script reached the endpoint"
+    );
+
+    // The log does record logins: the same endpoint recorded as Linux runs
+    // the probe, and sshd logs it.
+    MachineRepository::new(fixture.pool.clone())
+        .record_endpoint_os(&fixture.endpoint_id, fleet_core::GuestOs::Linux)
+        .await
+        .unwrap();
+    let (state, _, error) = fixture.run_kind("skills.probe", base.clone()).await;
+    assert_eq!(state, "succeeded", "{error:?}");
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    while logins() == 0 && std::time::Instant::now() < deadline {
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert!(logins() > 0, "the control login is logged");
 }
