@@ -724,6 +724,46 @@ async fn a_verified_catalog_rollout_records_the_installed_version_and_a_failed_o
 }
 
 #[tokio::test]
+async fn a_failed_rollout_restores_a_regular_file_at_the_staging_target() {
+    // The target check allows a user-owned regular file there; a failed
+    // rollout must put it back as it was, not delete it.
+    let home_dir = tempfile::tempdir().unwrap();
+    let sshd = start_sshd_with_home(home_dir.path());
+    let fixture = compose(&sshd).await;
+    let home = home_dir.path().display().to_string();
+    let _path = install_stub_cli(&home, None);
+    let version = builtin_version(&fixture).await;
+    let parent = format!("{home}/.local/share/fleet/skills");
+    std::fs::create_dir_all(&parent).unwrap();
+    let target = format!("{parent}/fleet");
+    std::fs::write(&target, "keep me").unwrap();
+    let payload = serde_json::json!({
+        "machineId": fixture.machine_id,
+        "endpointId": fixture.endpoint_id,
+        "auth": fixture.auth_json(),
+        "catalogId": "builtin-fleet",
+        "versionId": version,
+        "agents": ["codex"],
+        "timeoutSeconds": 60,
+    });
+
+    std::fs::write(format!("{home}/stub-fail-deploy"), "").unwrap();
+    let (state, _, error) = fixture.run_kind("skills.catalog-rollout", payload).await;
+    assert_eq!(state, "failed", "{error:?}");
+    assert!(
+        std::path::Path::new(&target).is_file(),
+        "the file is restored"
+    );
+    assert_eq!(std::fs::read_to_string(&target).unwrap(), "keep me");
+    let mut entries: Vec<_> = std::fs::read_dir(&parent)
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+        .collect();
+    entries.sort_unstable();
+    assert_eq!(entries, ["fleet"], "no staging or backup is left");
+}
+
+#[tokio::test]
 async fn a_probe_prunes_installs_for_skills_no_longer_deployed() {
     use fleet_application::catalog_installs::{CatalogInstall, CatalogInstallPort as _};
     // A private home per test: the stub CLI, its logs and the fail flag

@@ -2218,7 +2218,7 @@ fleet_staged=0
 # skill; the next rollout stages this path again).
 fleet_restore() {
   if [ "$fleet_committed" -eq 0 ]; then
-    if [ -d "$fleet_backup" ]; then rm -rf "$fleet_target"; mv "$fleet_backup" "$fleet_target"
+    if [ -e "$fleet_backup" ]; then rm -rf "$fleet_target"; mv "$fleet_backup" "$fleet_target"
     elif [ "$fleet_staged" -eq 1 ]; then rm -rf "$fleet_target"; fi
   fi
   rm -rf "$fleet_tmp"
