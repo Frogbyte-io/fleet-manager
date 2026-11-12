@@ -39,6 +39,9 @@ die() { printf 'uninstall: %s\n' "$1" >&2; exit 1; }
 log() { printf 'uninstall: %s\n' "$1"; }
 
 STATE_DIR="${FLEETD_STATE_DIR:-/var/lib/fleetd}"
+# The value as given: check_state_path refuses `//`, `.` and `..` in it, so
+# stripping below cannot turn `dir//` into an accepted `dir`.
+STATE_DIR_RAW="$STATE_DIR"
 # `dir/` would make every test below look through a symlink: strip trailing
 # slashes first; nothing left means `/`, which is refused.
 while [ "${STATE_DIR%/}" != "$STATE_DIR" ]; do STATE_DIR="${STATE_DIR%/}"; done
@@ -108,11 +111,16 @@ check_state_path() {
         *) refuse_state "it is not an absolute path" ;;
     esac
     # `/home/../var/lib` would pass every lexical test below as something it
-    # is not.
-    case "$STATE_DIR" in
-        *//*|*/./*|*/../*|*/.|*/..)
-            refuse_state "it is not a normalized path (no //, . or .. components)" ;;
-    esac
+    # is not. The value as given ($STATE_DIR_RAW, before the trailing slashes
+    # were stripped) is checked too: `/home/fleetd//` is not normalized
+    # either. A single trailing slash is stripped and accepted.
+    local given
+    for given in "${STATE_DIR_RAW:-$STATE_DIR}" "$STATE_DIR"; do
+        case "$given" in
+            *//*|*/./*|*/../*|*/.|*/..)
+                refuse_state "it is not a normalized path (no //, . or .. components)" ;;
+        esac
+    done
     case "$STATE_DIR" in
         /|/bin|/home|/lib|/lib32|/lib64|/libx32|/media|/mnt|/opt|/sbin|/snap|/srv|/var|/var/lib|/var/log|/var/cache|/var/spool)
             refuse_state "it is a system directory" ;;
