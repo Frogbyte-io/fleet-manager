@@ -21,7 +21,7 @@ import CopyFleetctl from '../components/CopyFleetctl.vue'
 import OperationStatus from '../components/OperationStatus.vue'
 import SshAuthFields from '../components/SshAuthFields.vue'
 import { absoluteTime } from '../facts'
-import { installNodeCommand, type SshAuth } from '../fleetctl'
+import { installNodeCommand, nodeRevokeCommand, type SshAuth } from '../fleetctl'
 import { useMachineOperations } from '../operations'
 
 const props = defineProps<{ machine: MachineDto }>()
@@ -403,10 +403,7 @@ async function install() {
             >
               {{ revokeError }}
             </p>
-            <CopyFleetctl
-              :command="null"
-              missing="fleetctl has no node-revoke command yet; use this form or POST /api/v1/machines/{id}/node/revoke."
-            />
+            <CopyFleetctl :command="nodeRevokeCommand(machine.id)" />
           </div>
         </div>
       </template>

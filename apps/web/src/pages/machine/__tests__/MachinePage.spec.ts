@@ -31,6 +31,8 @@ const api = {
   getTailnetStatus: vi.fn(),
   listTailnetDevices: vi.fn(),
   listAuditEvents: vi.fn(),
+  reviewMachineRemoval: vi.fn(),
+  removeMachine: vi.fn(),
 }
 
 vi.mock('@frogbyte-io/fleet-api-client', () =>
@@ -177,10 +179,8 @@ async function mountAt(path: string) {
     expect(['h1', '[data-testid="machine-not-found"]', '[data-testid="machine-error"]'].some(sel => wrapper.find(sel).exists())).toBe(true)
   })
   await flushPromises()
-  return { wrapper, router }
+  return { wrapper, router, queryClient }
 }
-
-enableAutoUnmount(afterEach)
 
 beforeEach(() => {
   vi.clearAllMocks()
@@ -191,6 +191,10 @@ beforeEach(() => {
 afterEach(() => {
   document.body.innerHTML = ''
 })
+
+// Registered last so it runs first (hooks run as a stack): an open dialog's
+// teleported content must be unmounted before the body is cleared.
+enableAutoUnmount(afterEach)
 
 describe('MachinePage', () => {
   it('overview shows the machine, its connectivity, and client handoffs', async () => {
@@ -227,6 +231,49 @@ describe('MachinePage', () => {
   it('overview shows no owner rows for a machine that was not requested', async () => {
     const { wrapper } = await mountAt('/fleet/machines/m1')
     expect(wrapper.find('[data-testid="machine-owner"]').exists()).toBe(false)
+  })
+
+  it('removes the machine through the reviewed routes and returns to Fleet', async () => {
+    const footprint = {
+      endpoints: 2, endpointAuth: 0, endpointAuthSecrets: 0, capabilities: 3, inventorySnapshots: 1, tagsAndGroups: 2,
+      nodeIdentity: 1, nodeCredentials: 1, projectCheckouts: 1, skillsSnapshot: 0, catalogSkillInstalls: 0, guestLink: 0,
+      storedSshKeys: 0, adminPasswords: 0, collectedFilesKept: 0,
+    }
+    api.reviewMachineRemoval.mockResolvedValue(ok({
+      data: {
+        reviewToken: 'tok', machineId: 'm1', name: 'build-host', endpoints: [], nodeIdentity: 'active',
+        unpinHosts: ['build.lan'], keptHosts: [], uninstall: null, footprint, warnings: [], blockers: [],
+      },
+    }))
+    api.removeMachine.mockResolvedValue(ok({
+      data: {
+        machineId: 'm1', name: 'build-host', removed: true, uninstalled: false, uninstallSummary: null,
+        nodeIdentityRemoved: true, sessionClosed: true, secretsRevoked: 0, secretRevocationError: null,
+        unpinnedHosts: ['build.lan'], keptHosts: [], unpinFailedHosts: [], auditGaps: [], footprint,
+      },
+    }))
+    const { wrapper, router, queryClient } = await mountAt('/fleet/machines/m1')
+
+    await wrapper.find('[data-testid="remove-machine"]').trigger('click')
+    await flushPromises()
+    expect(api.reviewMachineRemoval).toHaveBeenCalledWith('m1', {})
+    const confirm = document.querySelector<HTMLButtonElement>('[data-testid="remove-confirm"]')
+    expect(confirm?.textContent).toContain('Remove build-host')
+    confirm!.click()
+    await flushPromises()
+    expect(api.removeMachine).toHaveBeenCalledWith('m1', { reviewToken: 'tok' })
+
+    // Live events refetch the machine, which is gone now: the page turns to
+    // "not found" and the outcome stays on screen.
+    api.getMachine.mockResolvedValue({ status: 404, data: { code: 'not_found', message: 'no such machine' }, headers: new Headers() })
+    await queryClient.invalidateQueries()
+    await flushPromises()
+    expect(wrapper.find('[data-testid="machine-not-found"]').exists()).toBe(true)
+    expect(document.querySelector('[data-testid="remove-outcome"]')?.textContent).toContain('build-host')
+
+    document.querySelector<HTMLButtonElement>('[data-testid="remove-done"]')!.click()
+    // The Fleet route is lazy-loaded, which can be slow under a parallel run.
+    await vi.waitFor(() => expect(router.currentRoute.value.path).toBe('/fleet'), { timeout: 10_000 })
   })
 
   it('shows a not-found state for an unknown machine', async () => {

@@ -151,3 +151,26 @@ export function proxmoxAccountCommand(verb: 'observe' | 'discover', accountId: s
 export function proxmoxConfirmCommand(accountId: string, fingerprint: string): string {
   return join(['fleetctl', 'proxmox', 'confirm', accountId, '--fingerprint', fingerprint])
 }
+
+// Removing a machine and revoking its node (`fleetctl machines remove`,
+// `fleetctl nodes revoke`, #616). The removal's uninstall may leave the auth
+// out, and the controller then uses the endpoint's stored default.
+
+export type UninstallAuth = { type: 'default' } | SshAuth
+
+export interface UninstallChoice {
+  endpointId: string
+  auth: UninstallAuth
+}
+
+/** The interactive form: the CLI reviews, prints the review and asks before it removes. */
+export function machineRemoveCommand(machineId: string, uninstall: UninstallChoice | null): string {
+  const flags = uninstall
+    ? ['--uninstall', '--endpoint', uninstall.endpointId, ...(uninstall.auth.type === 'default' ? [] : authFlags(uninstall.auth))]
+    : []
+  return join(['fleetctl', 'machines', 'remove', machineId, ...flags])
+}
+
+export function nodeRevokeCommand(machineId: string): string {
+  return join(['fleetctl', 'nodes', 'revoke', machineId])
+}
