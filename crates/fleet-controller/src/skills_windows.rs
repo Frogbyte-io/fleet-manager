@@ -46,7 +46,10 @@ $ProgressPreference = 'SilentlyContinue'
 $fleetWindows = [Environment]::OSVersion.Platform -eq 'Win32NT'
 function fleetB64([string]$text) { return [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($text)) }
 function fleetOut([string]$line) { [Console]::Out.Write($line + "`n") }
-function fleetFail([int]$code, [string]$message) { [Console]::Error.WriteLine($message); exit $code }
+# `ssh` keeps only the low 8 bits of the exit status, so a failure whose low
+# byte is 0 exits 1 instead of reading as success (as the bootstrap does).
+function fleetExit([int]$code) { if ($code -ne 0 -and ($code -band 255) -eq 0) { $code = 1 }; exit $code }
+function fleetFail([int]$code, [string]$message) { [Console]::Error.WriteLine($message); fleetExit $code }
 # Runs a native program ($args[0]) with the remaining arguments as an array.
 # Its stdout and stderr land in $global:fleetStdout and $global:fleetStderr
 # (stderr is collected, not raised: Windows PowerShell 5.1 turns a native
@@ -134,8 +137,8 @@ if ($fleetManaged -and ([IO.File]::Exists($fleetManaged) -or [IO.Directory]::Exi
   else { $fleetUntrusted = $true }
 }
 if (-not $fleetCli) {
-  $fleetFound = @(Get-Command -Name 'skills-manager-cli' -CommandType Application -ErrorAction SilentlyContinue | Where-Object { -not $fleetWindows -or [IO.Path]::GetExtension($_.Source) -eq '.exe' })
-  if ($fleetFound.Count -gt 0) { $fleetCli = $fleetFound[0].Source }
+  $fleetFound = @(Get-Command -Name 'skills-manager-cli' -CommandType Application -ErrorAction SilentlyContinue | Where-Object { -not $fleetWindows -or [IO.Path]::GetExtension($_.Path) -eq '.exe' })
+  if ($fleetFound.Count -gt 0) { $fleetCli = $fleetFound[0].Path }
 }
 $fleetAgentGrammar = '^[a-z0-9][a-z0-9_-]{0,63}\z'
 $fleetNameGrammar = '^[a-z0-9](?:[a-z0-9-]{0,126}[a-z0-9])?\z'
@@ -240,7 +243,7 @@ for ($i = 1; $i -lt $args.Count; $i++) {
 __DRY__$fleetCode = fleetNative $fleetCli @fleetCmd
 if ($global:fleetStdout) { fleetOut $global:fleetStdout }
 if ($global:fleetStderr) { [Console]::Error.WriteLine($global:fleetStderr) }
-exit $fleetCode
+fleetExit $fleetCode
 "##;
 
 /// The inline catalog rollout: `$args` are the name, the content digest,

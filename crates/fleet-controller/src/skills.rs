@@ -1815,9 +1815,13 @@ fn is_windows(spec: &SshConnectionSpec) -> bool {
     spec.guest_os == fleet_core::GuestOs::Windows
 }
 
+/// A value checked before it reaches a Windows native program: what it is
+/// (for the reason), the value, and the grammar it must match.
+type WindowsValue<'a> = (&'a str, &'a str, fn(&str) -> bool);
+
 /// The first value a Windows endpoint cannot take, as a caller-safe
 /// reason: each agent id, plus the extra values the caller names.
-fn windows_refusal(agents: &[String], values: &[(&str, &str, fn(&str) -> bool)]) -> Option<String> {
+fn windows_refusal(agents: &[String], values: &[WindowsValue<'_>]) -> Option<String> {
     agents
         .iter()
         .find_map(|agent| {
