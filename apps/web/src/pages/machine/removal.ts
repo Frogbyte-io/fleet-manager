@@ -58,7 +58,7 @@ export const DELETED_COUNTS: CountRow[] = [
   { key: 'inventorySnapshots', label: 'Inventory snapshots' },
   { key: 'tagsAndGroups', label: 'Tag and group memberships' },
   { key: 'nodeIdentity', label: 'Node identity' },
-  { key: 'nodeCredentials', label: 'Node credentials, sessions, tokens' },
+  { key: 'nodeCredentials', label: 'Node credentials, sessions, challenges, enrollment tokens' },
   { key: 'projectCheckouts', label: 'Project checkouts' },
   { key: 'skillsSnapshot', label: 'Skills snapshot' },
   { key: 'catalogSkillInstalls', label: 'Recorded skill installs' },

@@ -212,6 +212,42 @@ describe('RemoveMachinePanel', () => {
     expect(wrapper.emitted('removed')).toBeUndefined()
   })
 
+  it('reports an unknown outcome when the removal gets no answer', async () => {
+    reviewMachineRemoval.mockResolvedValue(ok({ data: review() }))
+    removeMachine.mockRejectedValue(new TypeError('Failed to fetch'))
+    const wrapper = await mountPanel()
+
+    await wrapper.get('form').trigger('submit')
+    await flushPromises()
+
+    const error = wrapper.get('[data-testid="remove-error"]')
+    expect(error.text()).toContain('No answer from the controller')
+    expect(error.text()).toContain('Failed to fetch')
+    expect(wrapper.find('[data-testid="remove-confirm"]').exists()).toBe(false)
+    expect(wrapper.get('[data-testid="remove-review-again"]').text()).toBe('Review again')
+    expect(wrapper.emitted('removed')).toBeUndefined()
+  })
+
+  it('locks the options and Cancel while a review is in flight', async () => {
+    reviewMachineRemoval.mockResolvedValueOnce(ok({ data: review() }))
+    const wrapper = await mountPanel()
+    await wrapper.get('[data-testid="remove-uninstall"]').setValue(true)
+
+    let answer: (value: unknown) => void = () => {}
+    reviewMachineRemoval.mockReturnValueOnce(new Promise((resolve) => { answer = resolve }))
+    await wrapper.get('form').trigger('submit')
+    await flushPromises()
+
+    for (const control of ['remove-uninstall', 'remove-endpoint', 'remove-auth'])
+      expect(wrapper.get(`[data-testid="${control}"]`).attributes('disabled')).toBeDefined()
+    expect(wrapper.get('[data-testid="remove-cancel"]').attributes('disabled')).toBeDefined()
+
+    answer(ok({ data: review({ reviewToken: 'tok-2', uninstall: { endpointId: 'e2', auth: { type: 'agent' }, layout: {} } }) }))
+    await flushPromises()
+    expect(wrapper.get('[data-testid="remove-auth"]').attributes('disabled')).toBeUndefined()
+    expect(wrapper.find('[data-testid="remove-confirm"]').exists()).toBe(true)
+  })
+
   it('says a review failed', async () => {
     reviewMachineRemoval.mockResolvedValue(refused(403, 'denied', 'not allowed'))
     const wrapper = await mountPanel()

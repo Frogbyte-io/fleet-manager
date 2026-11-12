@@ -75,29 +75,43 @@ function requestBody(): ReviewMachineRemovalRequest {
   return { uninstall: body }
 }
 
+// Each review request carries a generation; changing the options starts a
+// new one, so an answer to a request made for other options is dropped.
+let generation = 0
+
 // The token binds the uninstall: changing it drops the review.
 watch([uninstall, endpointId, authType, identityPath], () => {
+  generation += 1
+  if (busy.value === 'review')
+    busy.value = null
   review.value = null
   reviewed.value = null
   error.value = null
 })
 
 async function runReview() {
+  const current = ++generation
   busy.value = 'review'
   error.value = null
   const body = requestBody()
   try {
-    review.value = unwrap<MachineRemovalReviewDto>(await reviewMachineRemoval(props.machine.id, body))
+    const answer = unwrap<MachineRemovalReviewDto>(await reviewMachineRemoval(props.machine.id, body))
+    if (current !== generation)
+      return
+    review.value = answer
     reviewed.value = body
   }
   catch (cause) {
+    if (current !== generation)
+      return
     review.value = null
     reviewed.value = null
     errorStep.value = 'review'
     error.value = errorMessage(cause)
   }
   finally {
-    busy.value = null
+    if (current === generation)
+      busy.value = null
   }
 }
 
@@ -268,6 +282,7 @@ const layout = computed(() => Object.entries(review.value?.uninstall?.layout ?? 
             <span class="fc-kicker">Endpoint</span>
             <select
               v-model="endpointId"
+              :disabled="busy !== null"
               class="h-8 rounded-sm border border-input bg-background px-2 font-mono text-foreground"
               data-testid="remove-endpoint"
             >
@@ -284,6 +299,7 @@ const layout = computed(() => Object.entries(review.value?.uninstall?.layout ?? 
             <span class="fc-kicker">Auth</span>
             <select
               v-model="authType"
+              :disabled="busy !== null"
               class="h-8 rounded-sm border border-input bg-background px-2 text-foreground"
               data-testid="remove-auth"
             >
@@ -305,6 +321,7 @@ const layout = computed(() => Object.entries(review.value?.uninstall?.layout ?? 
             <span class="fc-kicker">Identity path (controller host)</span>
             <input
               v-model="identityPath"
+              :disabled="busy !== null"
               placeholder="~/.ssh/id_ed25519"
               class="h-8 w-64 max-w-full rounded-sm border border-input bg-background px-2 font-mono text-foreground"
               data-testid="remove-identity"
@@ -529,7 +546,8 @@ const layout = computed(() => Object.entries(review.value?.uninstall?.layout ?? 
       <button
         type="button"
         class="rounded-sm border border-input px-3 py-1.5 font-mono text-[10px] uppercase tracking-wider text-fc-muted hover:border-fc-line2 hover:text-fc-ink disabled:opacity-50"
-        :disabled="busy === 'remove'"
+        :disabled="busy !== null"
+        data-testid="remove-cancel"
         @click="emit('close')"
       >
         Cancel
