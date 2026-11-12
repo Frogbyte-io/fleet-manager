@@ -698,6 +698,23 @@ fn reject_symlinks(base: &Path) -> Result<(), String> {
     Ok(())
 }
 
+// Off Unix, only the refusal exists. The Windows CI job type-checks this
+// (`cargo check --all-targets`); it does not run the suite.
+#[cfg(all(test, not(unix)))]
+mod non_unix_tests {
+    use super::{Auth, GitCredential};
+    use fleet_core::SensitiveString;
+
+    #[test]
+    fn a_credentialed_source_is_refused_off_unix() {
+        let credential = GitCredential::HttpsToken(SensitiveString::new("token".to_owned()));
+        let error = Auth::prepare(&std::env::temp_dir(), &credential)
+            .err()
+            .expect("off Unix a credential is refused");
+        assert!(error.contains("Unix controller"), "{error}");
+    }
+}
+
 // The tests exercise credential files and shell helpers, which are Unix-only.
 #[cfg(all(test, unix))]
 mod tests {
