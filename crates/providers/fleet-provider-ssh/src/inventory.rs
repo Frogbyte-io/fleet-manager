@@ -356,13 +356,81 @@ fleetFact network ipv4 {
 # Tools the plan names, the same set and fact shape as Linux: presence, then
 # the first line of `--version` as its own fact. The names are literals here,
 # and only `<name>.exe` is matched: a `.cmd`/`.bat` shim is never run. Each
-# `--version` runs with no stdin and its own 10 s bound (its process tree is
-# killed at the bound, and reading its output may wait 2 s more at most: a
-# time bound, not a size bound). A session that holds
+# `--version` runs with no stdin under one 10 s bound that covers both its
+# exit and the end of its output (a child that inherited the pipes and
+# outlives the tool holds the output open, so it counts too), and each
+# stream may carry 64 KiB at most. At the bound, or past either cap, the
+# process tree is killed before anything else and the version is not
+# reported. A session that holds
 # the Administrators role (or whose role could not be read) reports presence
 # only and runs nothing: PATH folders are often user-writable, and an
 # elevated token must not execute what a user dropped there.
+# The direct children of a tool, by parent pid from one process snapshot,
+# keeping only those that started no earlier than the tool (a pid recycled
+# from before it is not its child). Toolhelp needs no privilege and no WMI,
+# and it still lists a child whose parent has exited, which taskkill /T
+# cannot reach. Compiled only when a tool hits the bound or a cap; nothing
+# is returned where it cannot be compiled or run.
+function fleetChildren($proc) {
+  try {
+    if (-not ('FleetProcTree' -as [type])) {
+      Add-Type -ErrorAction Stop -TypeDefinition @'
+using System;
+using System.Collections.Generic;
+using System.Runtime.InteropServices;
+public static class FleetProcTree {
+  [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+  struct PROCESSENTRY32W { public uint dwSize, cntUsage, th32ProcessID; public IntPtr th32DefaultHeapID; public uint th32ModuleID, cntThreads, th32ParentProcessID; public int pcPriClassBase; public uint dwFlags; [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 260)] public string szExeFile; }
+  [DllImport("kernel32.dll", SetLastError = true)]
+  static extern IntPtr CreateToolhelp32Snapshot(uint flags, uint pid);
+  [DllImport("kernel32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
+  static extern bool Process32FirstW(IntPtr snapshot, ref PROCESSENTRY32W entry);
+  [DllImport("kernel32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
+  static extern bool Process32NextW(IntPtr snapshot, ref PROCESSENTRY32W entry);
+  [DllImport("kernel32.dll")]
+  static extern bool CloseHandle(IntPtr handle);
+  public static int[] Children(int parent) {
+    List<int> found = new List<int>();
+    IntPtr snapshot = CreateToolhelp32Snapshot(2, 0);
+    if (snapshot == IntPtr.Zero || snapshot == new IntPtr(-1)) { return found.ToArray(); }
+    try {
+      PROCESSENTRY32W entry = new PROCESSENTRY32W();
+      entry.dwSize = (uint)Marshal.SizeOf(typeof(PROCESSENTRY32W));
+      for (bool more = Process32FirstW(snapshot, ref entry); more; more = Process32NextW(snapshot, ref entry)) {
+        if (entry.th32ParentProcessID == (uint)parent && entry.th32ProcessID != (uint)parent) { found.Add((int)entry.th32ProcessID); }
+      }
+    } finally { CloseHandle(snapshot); }
+    return found.ToArray();
+  }
+}
+'@
+    }
+    $start = $proc.StartTime
+    foreach ($id in [FleetProcTree]::Children($proc.Id)) {
+      try { if ([System.Diagnostics.Process]::GetProcessById($id).StartTime -ge $start) { $id } } catch { }
+    }
+  } catch { }
+}
+function fleetKillTree($proc) {
+  # PowerShell 7 (.NET): Kill(entireProcessTree) matches descendants by
+  # parent pid and start time through the handle this process holds, so it
+  # also finds a child whose parent has already exited.
+  try { $proc.Kill($true); return } catch { }
+  # Windows PowerShell 5.1, the login shell Fleet drives: the tool's
+  # children are listed first, then the tool's tree is killed from the root
+  # (taskkill /T reaches it only while the root lives), then each child's
+  # tree. A grandchild whose own parent also exited is the residual (the
+  # same one the exec watchdog documents).
+  $kids = @(fleetChildren $proc)
+  try { $null = & "$env:SystemRoot\System32\taskkill.exe" /T /F /PID $proc.Id 2>$null } catch { }
+  try { $proc.Kill() } catch { }
+  foreach ($kid in $kids) {
+    try { $null = & "$env:SystemRoot\System32\taskkill.exe" /T /F /PID $kid 2>$null } catch { }
+  }
+}
 function fleetVersion($path) {
+  $boundMs = 10000
+  $cap = 65536
   $psi = New-Object System.Diagnostics.ProcessStartInfo
   $psi.FileName = $path
   $psi.Arguments = '--version'
@@ -371,19 +439,43 @@ function fleetVersion($path) {
   $psi.RedirectStandardInput = $true
   $psi.RedirectStandardOutput = $true
   $psi.RedirectStandardError = $true
+  $clock = [System.Diagnostics.Stopwatch]::StartNew()
   $proc = [System.Diagnostics.Process]::Start($psi)
   $proc.StandardInput.Close()
-  $out = $proc.StandardOutput.ReadToEndAsync()
-  $null = $proc.StandardError.ReadToEndAsync()
-  if (-not $proc.WaitForExit(10000)) {
-    # The whole tree: a tool's child must not outlive the bound.
-    try { $null = & "$env:SystemRoot\System32\taskkill.exe" /T /F /PID $proc.Id 2>$null } catch { }
-    try { $proc.Kill() } catch { }
-    return $null
+  # Both streams are drained in 4 KiB reads; stdout is kept (up to the
+  # cap), stderr is only counted. A stream is done at its end of file.
+  $streams = @($proc.StandardOutput.BaseStream, $proc.StandardError.BaseStream)
+  $buffers = @((New-Object byte[] 4096), (New-Object byte[] 4096))
+  $reads = @($streams[0].ReadAsync($buffers[0], 0, 4096), $streams[1].ReadAsync($buffers[1], 0, 4096))
+  $seen = @(0, 0)
+  $kept = New-Object System.IO.MemoryStream
+  $failed = $false
+  while (-not $failed -and ($null -ne $reads[0] -or $null -ne $reads[1])) {
+    $left = $boundMs - $clock.ElapsedMilliseconds
+    if ($left -le 0) { $failed = $true; break }
+    $open = [System.Threading.Tasks.Task[]]@($reads | Where-Object { $null -ne $_ })
+    $null = [System.Threading.Tasks.Task]::WaitAny($open, [int]$left)
+    foreach ($i in 0, 1) {
+      $read = $reads[$i]
+      if ($null -eq $read -or -not $read.IsCompleted) { continue }
+      $reads[$i] = $null
+      if ($read.Status -ne 'RanToCompletion' -or $read.Result -le 0) { continue }
+      $seen[$i] += $read.Result
+      if ($seen[$i] -gt $cap) { $failed = $true; break }
+      if ($i -eq 0) { $kept.Write($buffers[0], 0, $read.Result) }
+      $reads[$i] = $streams[$i].ReadAsync($buffers[$i], 0, 4096)
+    }
   }
-  # A child that kept the pipe open must not stall the read either.
-  if (-not $out.Wait(2000)) { return $null }
-  ($out.Result -split "`r?`n" | Where-Object { "$_".Trim() -ne '' } | Select-Object -First 1)
+  # Both pipes are closed (or the bound or a cap was hit): the tool itself
+  # must also be gone within what is left of the same bound.
+  if (-not $failed) {
+    $left = $boundMs - $clock.ElapsedMilliseconds
+    if ($left -lt 0) { $left = 0 }
+    if (-not $proc.WaitForExit([int]$left)) { $failed = $true }
+  }
+  if ($failed) { fleetKillTree $proc; return $null }
+  $text = $proc.StandardOutput.CurrentEncoding.GetString($kept.ToArray())
+  ($text -split "`r?`n" | Where-Object { "$_".Trim() -ne '' } | Select-Object -First 1)
 }
 function fleetTool($name) {
   $cmd = $null
@@ -510,20 +602,37 @@ pub fn parse_probe_output(
     facts
 }
 
-/// The oldest Windows 11 build Fleet calls `supported`: 26100 (24H2), the
-/// oldest feature update Microsoft still services for the Enterprise and
-/// Education editions as of 2026-11 (until October 2027). Raise it when
-/// Microsoft ends servicing; an older build is reported `untested`, never
-/// refused. Home and Pro follow a shorter schedule, which this single
-/// threshold does not model.
+/// The oldest Windows 11 build Fleet calls `supported` on Enterprise and
+/// Education: 26100 (24H2), the oldest feature update Microsoft still
+/// services for those editions as of 2026-11 (36 months per release; 24H2
+/// ends 2027-10-13, 23H2 ended 2026-11-11). Raise it when Microsoft ends
+/// servicing; an older build is reported `untested`, never refused.
+///
+/// Source: <https://learn.microsoft.com/en-us/lifecycle/products/windows-11-enterprise-and-education>
+/// (Releases table, read 2026-11-12); build numbers from
+/// <https://learn.microsoft.com/en-us/windows/release-health/windows11-release-information>.
 pub const MIN_SERVICED_WINDOWS_11_BUILD: u32 = 26100;
 
+/// The oldest Windows 11 build Fleet calls `supported` on Pro (and Pro
+/// Education and Pro for Workstations, whose `EditionID`s start with
+/// `Professional`): 26200 (25H2). Home and Pro get 24 months per feature
+/// update, so their window closes a year before Enterprise's for the same
+/// build: 24H2 ended for Pro on 2026-10-14, 25H2 ends 2027-10-13. Raise it
+/// with [`MIN_SERVICED_WINDOWS_11_BUILD`] when Microsoft ends servicing.
+///
+/// Source: <https://learn.microsoft.com/en-us/lifecycle/products/windows-11-home-and-pro>
+/// (Releases table, read 2026-11-12).
+pub const MIN_SERVICED_WINDOWS_11_PRO_BUILD: u32 = 26200;
+
 /// The support tier of a Windows workstation (ADR 0021 decision 5), derived
-/// from the probe's own facts: `supported` for Windows 11 on x64 in a Pro,
+/// from the probe's own facts: `supported` for Windows 11 on x64 in a Pro
+/// edition at or above [`MIN_SERVICED_WINDOWS_11_PRO_BUILD`] or an
 /// Enterprise or Education edition at or above
-/// [`MIN_SERVICED_WINDOWS_11_BUILD`]; `untested` for anything else the probe
-/// recognized as a workstation release (Windows 10 22H2, Home, arm64).
-/// Fleet refuses nothing on it. `None` unless the probe reported a release.
+/// [`MIN_SERVICED_WINDOWS_11_BUILD`] (each edition family on its own
+/// servicing schedule); `untested` for anything else the probe recognized
+/// as a workstation release (Windows 10 22H2, Home, arm64, a build out of
+/// its edition's servicing). Fleet refuses nothing on it. `None` unless the
+/// probe reported a release.
 #[must_use]
 pub fn windows_support_fact(
     facts: &[fleet_core::CapabilityFact],
@@ -542,20 +651,24 @@ pub fn windows_support_fact(
     let value =
         |namespace: &str, name: &str| known(namespace, name).and_then(|fact| fact.value.as_deref());
     // EditionID: Professional*, Enterprise*, Education*; Home is `Core*`.
-    let tested_edition = value("os", "edition").is_some_and(|edition| {
-        ["Professional", "Enterprise", "Education"]
-            .iter()
-            .any(|prefix| edition.starts_with(prefix))
-    });
+    // Each tested edition family has its own oldest serviced build.
+    let edition = value("os", "edition").unwrap_or_default();
+    let min_build = if edition.starts_with("Professional") {
+        Some(MIN_SERVICED_WINDOWS_11_PRO_BUILD)
+    } else if edition.starts_with("Enterprise") || edition.starts_with("Education") {
+        Some(MIN_SERVICED_WINDOWS_11_BUILD)
+    } else {
+        None
+    };
     // `os.build` is `<build>.<revision>`; a build below the oldest one
-    // Microsoft still services is no longer `supported`.
+    // Microsoft still services for the edition is no longer `supported`.
     let serviced = value("os", "build")
         .and_then(|build| build.split('.').next())
         .and_then(|build| build.parse::<u32>().ok())
-        .is_some_and(|build| build >= MIN_SERVICED_WINDOWS_11_BUILD);
+        .zip(min_build)
+        .is_some_and(|(build, min_build)| build >= min_build);
     let supported = release.value.as_deref() == Some("11")
         && value("host", "architecture") == Some("x86_64")
-        && tested_edition
         && serviced;
     Some(fleet_core::CapabilityFact {
         namespace: "os".to_owned(),
@@ -675,12 +788,193 @@ mod tests {
             .expect("the elevated-session guard");
         let run = script.find("fleetVersion $cmd.Source").expect("the run");
         assert!(guard < run);
-        // Each `--version` has its own bound and no stdin.
-        assert!(script.contains("WaitForExit(10000)"));
+        // Each `--version` has its own bound, its own output caps and no
+        // stdin; the behavior is exercised below.
+        assert!(script.contains("$boundMs = 10000"));
+        assert!(script.contains("$cap = 65536"));
         assert!(script.contains("taskkill.exe\" /T /F /PID $proc.Id"));
-        assert!(script.contains("$out.Wait(2000)"));
         assert!(script.contains("StandardInput.Close()"));
         assert!(!script.contains("& $cmd.Source"));
+    }
+
+    /// The shipped `fleetKillTree` and `fleetVersion` functions, cut from
+    /// the probe text, with the bound shortened to `bound_ms`.
+    fn version_functions(bound_ms: u64) -> String {
+        let script = probe_script_for(GuestShell::PowerShell);
+        let start = script
+            .find("function fleetChildren(")
+            .expect("the child-listing function");
+        let version = script.find("function fleetVersion(").expect("fleetVersion");
+        let end = version + script[version..].find("\n}\n").expect("its end") + 3;
+        let cut = &script[start..end];
+        assert!(cut.contains("$boundMs = 10000\n"));
+        cut.replace("$boundMs = 10000\n", &format!("$boundMs = {bound_ms}\n"))
+    }
+
+    /// Whether `pid` is still a live (not zombie) process.
+    #[cfg(unix)]
+    fn alive(pid: u32) -> bool {
+        std::fs::read_to_string(format!("/proc/{pid}/stat")).is_ok_and(|stat| {
+            stat.rsplit_once(") ")
+                .is_none_or(|(_, rest)| !rest.starts_with('Z'))
+        })
+    }
+
+    /// Waits up to 5 s for `pid` to be gone.
+    #[cfg(unix)]
+    fn gone(pid: u32) -> bool {
+        for _ in 0..50 {
+            if !alive(pid) {
+                return true;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+        false
+    }
+
+    #[test]
+    fn the_windows_powershell_child_listing_compiles_and_fails_quietly() {
+        let Some(pwsh) = require_pwsh() else { return };
+        // Windows PowerShell 5.1 has no Kill(entireProcessTree), so the
+        // probe lists a tool's children itself. The helper must compile
+        // (Add-Type), and where Toolhelp cannot run (any non-Windows test
+        // host) it must yield nothing rather than fail the probe.
+        let script = format!(
+            "{}$kids = @(fleetChildren ([System.Diagnostics.Process]::GetCurrentProcess()))\n\
+             [Console]::Out.Write('compiled=' + [string]($null -ne ('FleetProcTree' -as [type])) + ' kids=' + $kids.Count + [char]10)\n",
+            version_functions(10_000)
+        );
+        let out = run_ps(&pwsh, &script, &ScriptMetadata::default(), b"", None);
+        assert_eq!(out.status.code(), Some(0), "{out:?}");
+        let expected = if cfg!(windows) {
+            "compiled=True kids="
+        } else {
+            "compiled=True kids=0\n"
+        };
+        assert!(text(&out.stdout).starts_with(expected), "{out:?}");
+    }
+
+    /// `name=value ms=<elapsed>` lines, as the version driver prints them.
+    #[cfg(unix)]
+    fn timed_results(stdout: &str) -> Vec<(&str, &str, u64)> {
+        stdout
+            .lines()
+            .map(|line| {
+                let (head, ms) = line.rsplit_once(" ms=").expect(line);
+                let (name, value) = head.split_once('=').expect(line);
+                (name, value, ms.parse().expect(line))
+            })
+            .collect()
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_tool_version_is_bounded_in_time_and_size_and_its_tree_is_killed() {
+        use std::fmt::Write as _;
+        use std::os::unix::fs::PermissionsExt as _;
+        const BOUND_MS: u64 = 5_000;
+        let Some(pwsh) = require_pwsh() else { return };
+        let dir = tempfile::tempdir().unwrap();
+        let tool = |name: &str, body: &str| {
+            let path = dir.path().join(name);
+            std::fs::write(&path, format!("#!/bin/sh\n{body}\n")).unwrap();
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+            path.display().to_string()
+        };
+        let pid_file = |name: &str| dir.path().join(name).display().to_string();
+        let tree_pid = pid_file("tree.pid");
+        let orphan_pid = pid_file("orphan.pid");
+        let cases = [
+            (
+                "ok",
+                tool(
+                    "ok",
+                    "printf '\\n  tool 1.2.3\\r\\nsecond\\n'; echo noise >&2",
+                ),
+            ),
+            (
+                "stdout-cap",
+                tool("flood", "head -c 200000 /dev/zero | tr '\\0' a; echo"),
+            ),
+            (
+                "stderr-cap",
+                tool("errflood", "echo tool 1.0; head -c 200000 /dev/zero >&2"),
+            ),
+            (
+                "hung-tree",
+                tool(
+                    "tree",
+                    &format!("sleep 60 & echo $! > '{tree_pid}'; echo tool 2.0; wait"),
+                ),
+            ),
+            (
+                "held-pipe",
+                tool(
+                    "orphan",
+                    &format!("sleep 60 & echo $! > '{orphan_pid}'; echo tool 3.0"),
+                ),
+            ),
+        ];
+        let mut driver = version_functions(BOUND_MS);
+        for (name, path) in &cases {
+            let _ = write!(
+                driver,
+                "$fleetClock = [System.Diagnostics.Stopwatch]::StartNew()\n\
+                 $v = fleetVersion '{path}'\n\
+                 if ($null -eq $v) {{ $v = '<none>' }}\n\
+                 [Console]::Out.Write('{name}=' + $v + ' ms=' + $fleetClock.ElapsedMilliseconds + [char]10)\n"
+            );
+        }
+        let out = run_ps(&pwsh, &driver, &ScriptMetadata::default(), b"", None);
+        let stdout = text(&out.stdout);
+        let read_pid = |path: &str| -> u32 {
+            std::fs::read_to_string(path)
+                .unwrap_or_else(|_| panic!("{path}: {stdout}"))
+                .trim()
+                .parse()
+                .unwrap()
+        };
+        let orphan = read_pid(&orphan_pid);
+        // On Linux an orphan is reparented, so no tree walk can find it;
+        // it is cleaned up here (on Windows PowerShell 7 the handle-based
+        // walk still finds it).
+        let _ = std::process::Command::new("kill")
+            .arg(orphan.to_string())
+            .status();
+        assert_eq!(out.status.code(), Some(0), "{out:?}");
+        let results = timed_results(&stdout);
+        let expected = [
+            // The first non-empty line, without its `\r` (the caller trims).
+            ("ok", "  tool 1.2.3"),
+            ("stdout-cap", "<none>"),
+            ("stderr-cap", "<none>"),
+            ("hung-tree", "<none>"),
+            ("held-pipe", "<none>"),
+        ];
+        assert_eq!(
+            results.iter().map(|(n, v, _)| (*n, *v)).collect::<Vec<_>>(),
+            expected,
+            "{stdout}"
+        );
+        for (name, _, ms) in &results {
+            // One bound for the exit and the reads together (the held pipe
+            // ends at the bound, not at the bound plus a read wait); a cap
+            // ends the run without waiting for the bound. The margins are
+            // wide for a loaded test host.
+            if name.ends_with("-cap") || *name == "ok" {
+                assert!(*ms < BOUND_MS, "{name} took {ms} ms: {stdout}");
+            } else {
+                assert!(
+                    (BOUND_MS..BOUND_MS + 3_000).contains(ms),
+                    "{name} took {ms} ms: {stdout}"
+                );
+            }
+        }
+        // The hung tool's child was killed with it.
+        assert!(
+            gone(read_pid(&tree_pid)),
+            "the tool's child outlived the bound"
+        );
     }
 
     /// A Windows registry for the probe under test: a function named
@@ -688,13 +982,19 @@ mod tests {
     /// return these keys on any host. `$product_type` is the
     /// `ProductOptions` value (`WinNT`, `ServerNT`, `LanmanNT`).
     fn registry_fixture(product_name: &str, build: u32, product_type: &str) -> String {
+        let display_version = match build {
+            26200 => "25H2",
+            26100 => "24H2",
+            20348 => "21H2",
+            _ => "22H2",
+        };
         format!(
             r"$env:PROCESSOR_ARCHITECTURE = 'AMD64'
 $env:PROCESSOR_ARCHITEW6432 = $null
 function Get-ItemProperty {{
   [CmdletBinding()] param([string]$Path, [string]$Name)
   $values = switch ($Path) {{
-    'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion' {{ @{{ ProductName = '{product_name}'; EditionID = 'Professional'; DisplayVersion = '24H2'; CurrentBuild = '{build}'; CurrentBuildNumber = '{build}'; UBR = 2314; CurrentMajorVersionNumber = 10; CurrentMinorVersionNumber = 0 }} }}
+    'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion' {{ @{{ ProductName = '{product_name}'; EditionID = 'Professional'; DisplayVersion = '{display_version}'; CurrentBuild = '{build}'; CurrentBuildNumber = '{build}'; UBR = 2314; CurrentMajorVersionNumber = 10; CurrentMinorVersionNumber = 0 }} }}
     'HKLM:\SYSTEM\CurrentControlSet\Control\ProductOptions' {{ @{{ ProductType = '{product_type}' }} }}
     'HKLM:\HARDWARE\DESCRIPTION\System\BIOS' {{ @{{ SystemManufacturer = 'QEMU'; SystemProductName = 'Standard PC (Q35 + ICH9, 2009)' }} }}
     'HKLM:\HARDWARE\DESCRIPTION\System\CentralProcessor\0' {{ @{{ ProcessorNameString = 'Example CPU 8-Core Processor   ' }} }}
@@ -720,7 +1020,7 @@ function Get-NetIPAddress { [CmdletBinding()] param($AddressFamily) throw 'Canno
     const CIM_ANSWERS: &str = r"function Get-CimInstance {
   [CmdletBinding()] param([string]$ClassName)
   switch ($ClassName) {
-    'Win32_OperatingSystem' { [pscustomobject]@{ Version = '10.0.26100'; BuildNumber = '26100'; Caption = 'Microsoft Windows 11 Pro'; ProductType = [uint32]1 } }
+    'Win32_OperatingSystem' { [pscustomobject]@{ Version = '10.0.26200'; BuildNumber = '26200'; Caption = 'Microsoft Windows 11 Pro'; ProductType = [uint32]1 } }
     'Win32_ComputerSystem' { [pscustomobject]@{ TotalPhysicalMemory = [uint64]8519065600; Manufacturer = 'QEMU'; Model = 'Standard PC (Q35 + ICH9, 2009)'; HypervisorPresent = $true } }
     'Win32_Processor' { [pscustomobject]@{ Name = 'Example CPU 8-Core Processor   ' } }
   }
@@ -760,18 +1060,18 @@ function Get-NetIPAddress {
     #[test]
     fn a_standard_user_without_wmi_gets_every_fact_from_the_fallbacks() {
         let Some(pwsh) = require_pwsh() else { return };
-        let registry = registry_fixture("Windows 10 Pro", 26100, "WinNT");
+        let registry = registry_fixture("Windows 10 Pro", 26200, "WinNT");
         let facts = probe_with(&pwsh, &format!("{registry}{CIM_REFUSED}"));
         for (namespace, name, expected) in [
-            ("os", "kernel", "10.0.26100"),
-            ("os", "build", "26100.2314"),
+            ("os", "kernel", "10.0.26200"),
+            ("os", "build", "26200.2314"),
             ("os", "windows_release", "11"),
             ("os", "distribution_version", "11"),
             // The registry still says `Windows 10 Pro`; the caption does not.
             ("os", "product_name", "Microsoft Windows 11 Pro"),
             ("os", "product_type", "workstation"),
             ("os", "edition", "Professional"),
-            ("os", "display_version", "24H2"),
+            ("os", "display_version", "25H2"),
             ("os", "support", "supported"),
             ("host", "architecture", "x86_64"),
             ("host", "virtualization", "qemu"),
@@ -816,7 +1116,7 @@ function Get-NetIPAddress {
     #[test]
     fn a_fact_has_the_same_value_whether_cim_or_a_fallback_answered() {
         let Some(pwsh) = require_pwsh() else { return };
-        let registry = registry_fixture("Windows 10 Pro", 26100, "WinNT");
+        let registry = registry_fixture("Windows 10 Pro", 26200, "WinNT");
         let admin = probe_with(&pwsh, &format!("{registry}{CIM_ANSWERS}"));
         let standard = probe_with(&pwsh, &format!("{registry}{CIM_REFUSED}"));
         assert_eq!(
