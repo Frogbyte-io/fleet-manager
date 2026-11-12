@@ -1125,3 +1125,85 @@ pub(crate) fn render(payload: &Value) -> String {
     }
     serde_json::to_string_pretty(payload).unwrap_or_default()
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn parse_words(words: &[&str]) -> Result<Command, CliError> {
+        let args: Vec<String> = words.iter().map(ToString::to_string).collect();
+        crate::parse(&args).map(|invocation| invocation.command)
+    }
+
+    #[test]
+    fn endpoint_os_clear_parses_and_sends_a_delete_of_the_guest_os() {
+        for words in [
+            &[
+                "machines",
+                "endpoint-os",
+                "clear",
+                "machine-1",
+                "endpoint-1",
+            ][..],
+            &[
+                "machines",
+                "endpoint-os",
+                "clear",
+                "machine-1",
+                "endpoint-1",
+                "--output",
+                "json",
+            ],
+        ] {
+            let command = parse_words(words).unwrap_or_else(|error| panic!("{words:?}: {error}"));
+            let Command::MachineAccess(action) = command else {
+                panic!("{words:?}: not a machine access command: {command:?}");
+            };
+            assert_eq!(
+                action,
+                MachineAccessAction::EndpointOsClear {
+                    machine: "machine-1".to_owned(),
+                    endpoint: "endpoint-1".to_owned(),
+                }
+            );
+            let (method, path, query, body) = request(&action).unwrap();
+            assert_eq!(method, reqwest::Method::DELETE);
+            assert_eq!(
+                path,
+                "/api/v1/machines/machine-1/endpoints/endpoint-1/guest-os"
+            );
+            assert!(query.is_empty(), "{query:?}");
+            assert_eq!(body, None);
+        }
+    }
+
+    #[test]
+    fn endpoint_os_refuses_anything_but_clear_with_two_ids() {
+        for words in [
+            &["machines", "endpoint-os"][..],
+            &["machines", "endpoint-os", "clear"],
+            &["machines", "endpoint-os", "clear", "machine-1"],
+            &[
+                "machines",
+                "endpoint-os",
+                "clear",
+                "machine-1",
+                "endpoint-1",
+                "extra",
+            ],
+            &[
+                "machines",
+                "endpoint-os",
+                "clear",
+                "machine-1",
+                "endpoint-1",
+                "--os",
+                "linux",
+            ],
+            &["machines", "endpoint-os", "set", "machine-1", "endpoint-1"],
+            &["machines", "endpoint-os", "get", "machine-1", "endpoint-1"],
+        ] {
+            assert!(parse_words(words).is_err(), "{words:?} parsed");
+        }
+    }
+}

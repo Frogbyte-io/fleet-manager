@@ -598,6 +598,71 @@ mod tests {
         }
     }
 
+    /// The executable-resolution guard of the argv runner, run for real:
+    /// it runs exactly the program named (by name on `PATH` or by path, with
+    /// or without `.exe`), and a name holding pattern characters never runs
+    /// a different file that the pattern also matches.
+    #[cfg(unix)]
+    #[test]
+    fn machine_argv_runs_exactly_the_named_program() {
+        let Some(pwsh) = require_pwsh() else { return };
+        let dir = tempfile::tempdir().unwrap();
+        // `fixture.exe` prints its argument with no newline (printf);
+        // the literal `fix[t]ure.exe`, which the pattern `fix[t]ure.exe`
+        // would also match as `fixture.exe`, adds one (echo).
+        std::fs::copy("/usr/bin/printf", dir.path().join("fixture.exe")).unwrap();
+        std::fs::copy("/bin/echo", dir.path().join("fix[t]ure.exe")).unwrap();
+        let run = |program: String| {
+            let out = run_ps(
+                &pwsh,
+                fleet_application::machine_access::POWERSHELL_ARGV_SCRIPT,
+                &ScriptMetadata {
+                    arguments: vec![program.clone(), "marker".to_owned()],
+                    environment: vec![("PATH".to_owned(), dir.path().display().to_string())],
+                    ..ScriptMetadata::default()
+                },
+                b"",
+                None,
+            );
+            (program, out.status.code(), text(&out.stdout))
+        };
+        let at = |name: &str| dir.path().join(name).display().to_string();
+        // By name on PATH and by absolute path.
+        let by_name = run("fixture.exe".to_owned());
+        assert_eq!(
+            (by_name.1, by_name.2.as_str()),
+            (Some(0), "marker"),
+            "{by_name:?}"
+        );
+        let by_path = run(at("fixture.exe"));
+        assert_eq!(
+            (by_path.1, by_path.2.as_str()),
+            (Some(0), "marker"),
+            "{by_path:?}"
+        );
+        // The literal bracketed name runs the literal file, never the
+        // `fixture.exe` its pattern also matches.
+        let literal = run("fix[t]ure.exe".to_owned());
+        assert_eq!(
+            (literal.1, literal.2.as_str()),
+            (Some(0), "marker\n"),
+            "{literal:?}"
+        );
+        // By path, the lookup may resolve the pattern's other match first:
+        // the guard then refuses (64) rather than run it.
+        let literal_path = run(at("fix[t]ure.exe"));
+        assert!(
+            matches!(
+                (literal_path.1, literal_path.2.as_str()),
+                (Some(64), "") | (Some(0), "marker\n")
+            ),
+            "{literal_path:?}"
+        );
+        // A program that is not on PATH by that exact name does not run.
+        let other = run("fixture2.exe".to_owned());
+        assert_eq!((other.1, other.2.as_str()), (Some(64), ""), "{other:?}");
+    }
+
     #[test]
     fn machine_argv_guard_rechecks_values_and_refuses_shell_commands() {
         let Some(pwsh) = require_pwsh() else { return };
