@@ -330,27 +330,21 @@ fleetFact hardware cpu_model {
   if (-not $name.Trim()) { $name = "$((fleetReg 'HKLM:\HARDWARE\DESCRIPTION\System\CentralProcessor\0').ProcessorNameString)" }
   $name.Trim()
 }
-# The first IPv4 address by interface index, skipping loopback and
-# link-local: Get-NetIPAddress (CIM), else .NET's interface list (up,
-# non-loopback interfaces), which a standard user can read.
+# The first IPv4 address of an up, non-loopback interface, by IPv4
+# interface index, skipping loopback and link-local addresses. One source
+# for every session: .NET's interface list needs no WMI, so an
+# administrator and a standard user report the same address (CIM's
+# Get-NetIPAddress is refused to a standard user and also lists the
+# addresses of disconnected adapters).
 fleetFact network ipv4 {
-  $ip = $null
-  try {
-    $ip = (Get-NetIPAddress -AddressFamily IPv4 -ErrorAction Stop |
-      Where-Object { $_.IPAddress -notlike '127.*' -and $_.IPAddress -notlike '169.254.*' } |
-      Sort-Object -Property InterfaceIndex | Select-Object -First 1).IPAddress
-  } catch { $ip = $null }
-  if (-not $ip) {
-    $ip = [System.Net.NetworkInformation.NetworkInterface]::GetAllNetworkInterfaces() |
-      Where-Object { "$($_.OperationalStatus)" -eq 'Up' -and "$($_.NetworkInterfaceType)" -ne 'Loopback' } |
-      Sort-Object -Property { try { $_.GetIPProperties().GetIPv4Properties().Index } catch { [int]::MaxValue } } |
-      ForEach-Object { $_.GetIPProperties().UnicastAddresses } |
-      Where-Object { "$($_.Address.AddressFamily)" -eq 'InterNetwork' } |
-      ForEach-Object { $_.Address.ToString() } |
-      Where-Object { $_ -notlike '127.*' -and $_ -notlike '169.254.*' } |
-      Select-Object -First 1
-  }
-  $ip
+  [System.Net.NetworkInformation.NetworkInterface]::GetAllNetworkInterfaces() |
+    Where-Object { "$($_.OperationalStatus)" -eq 'Up' -and "$($_.NetworkInterfaceType)" -ne 'Loopback' } |
+    Sort-Object -Property { try { $_.GetIPProperties().GetIPv4Properties().Index } catch { [int]::MaxValue } } |
+    ForEach-Object { $_.GetIPProperties().UnicastAddresses } |
+    Where-Object { "$($_.Address.AddressFamily)" -eq 'InterNetwork' } |
+    ForEach-Object { $_.Address.ToString() } |
+    Where-Object { $_ -notlike '127.*' -and $_ -notlike '169.254.*' } |
+    Select-Object -First 1
 }
 # Tools the plan names, the same set and fact shape as Linux: presence, then
 # the first line of `--version` as its own fact. The names are literals here,
@@ -714,7 +708,8 @@ function Get-NetIPAddress { [CmdletBinding()] param($AddressFamily) throw 'Canno
 ";
 
     /// An administrator's session: CIM answers, with the values the
-    /// registry fixture's machine has.
+    /// registry fixture's machine has. `Get-NetIPAddress` answers with an
+    /// address no interface has, which the probe must never report.
     const CIM_ANSWERS: &str = r"function Get-CimInstance {
   [CmdletBinding()] param([string]$ClassName)
   switch ($ClassName) {
@@ -725,10 +720,7 @@ function Get-NetIPAddress { [CmdletBinding()] param($AddressFamily) throw 'Canno
 }
 function Get-NetIPAddress {
   [CmdletBinding()] param($AddressFamily)
-  [pscustomobject]@{ IPAddress = '127.0.0.1'; InterfaceIndex = 1 }
-  [pscustomobject]@{ IPAddress = '192.0.2.20'; InterfaceIndex = 7 }
-  [pscustomobject]@{ IPAddress = '169.254.3.4'; InterfaceIndex = 2 }
-  [pscustomobject]@{ IPAddress = '192.0.2.10'; InterfaceIndex = 5 }
+  [pscustomobject]@{ IPAddress = '192.0.2.99'; InterfaceIndex = 1 }
 }
 ";
 
@@ -799,8 +791,9 @@ function Get-NetIPAddress {
             ),
             status => assert_eq!(status, "unavailable", "{memory:?}"),
         }
-        // The IPv4 address comes from .NET's interface list: a real,
-        // routable-looking address of this host, or unavailable.
+        // The IPv4 address comes from .NET's interface list (in every
+        // session): a non-loopback, non-link-local address of this host, or
+        // unavailable.
         let ipv4 = &facts[&("network".to_owned(), "ipv4".to_owned())];
         if ipv4.status.id() == "known" {
             let address: std::net::Ipv4Addr = ipv4.value.as_deref().unwrap().parse().unwrap();
@@ -823,13 +816,14 @@ function Get-NetIPAddress {
             known_value(&admin, "hardware", "memory_bytes"),
             Some("8519065600")
         );
-        // The lowest interface index that is not loopback or link-local.
-        assert_eq!(known_value(&admin, "network", "ipv4"), Some("192.0.2.10"));
-        // Memory and the address are the host's own under the fallback (see
-        // above), and free space moves between runs.
+        // The address comes from .NET's interface list in every session, never
+        // from CIM's Get-NetIPAddress, so it is compared below like any fact.
+        let ipv4 = &admin[&("network".to_owned(), "ipv4".to_owned())];
+        assert_ne!(ipv4.value.as_deref(), Some("192.0.2.99"), "{ipv4:?}");
+        // Memory is the host's own under the fallback (see above), and free
+        // space moves between runs.
         let host_bound = [
             ("hardware", "memory_bytes"),
-            ("network", "ipv4"),
             ("hardware", "disk_free_bytes"),
         ];
         assert_eq!(
