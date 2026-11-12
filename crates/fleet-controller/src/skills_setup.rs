@@ -3,7 +3,9 @@
 //! the tested `skills-manager-cli` for its SSH login.
 //!
 //! The pin comes from the provider's built-in table, chosen by the machine's
-//! own `os/family` and `host/architecture` (or fleetd's `os/arch`) facts. The
+//! own `os/family` and `host/architecture` (or fleetd's `os/arch`) facts;
+//! an OS recorded on the setup's endpoint (#608) takes precedence over the
+//! family fact, so a Windows x64 workstation gets the Windows asset (#609). The
 //! operation is created through [`Operations::create`], so the caller's
 //! authorization (`operation.create` on `skills.probe`, and `skills.deploy`
 //! on the machine, because a pinned probe installs a binary) and the audit
@@ -93,7 +95,20 @@ impl SkillsManagerSetup {
             })?;
         let now =
             fleet_core::Timestamp::from_unix_millis(fleet_core::SystemClock::now_unix_millis());
-        let family = freshest_fact(&machine.capabilities, &[("os", "family")], now);
+        // The endpoint's recorded OS wins over the machine's `os/family`
+        // fact (ADR 0021 decision 4): a Windows PC can also expose a WSL
+        // `sshd`, a Linux endpoint, and the probe runs over this endpoint.
+        let endpoint_family = machine
+            .endpoints
+            .iter()
+            .find(|endpoint| endpoint.id == setup.endpoint_id)
+            .and_then(|endpoint| endpoint.guest_os)
+            .map(|guest_os| match guest_os {
+                fleet_core::GuestOs::Linux => "Linux".to_owned(),
+                fleet_core::GuestOs::Windows => "Windows".to_owned(),
+            });
+        let family = endpoint_family
+            .or_else(|| freshest_fact(&machine.capabilities, &[("os", "family")], now));
         // Agentless inventory reports `host/architecture` (`uname -m`);
         // fleetd reports `os/arch` (Rust's `std::env::consts::ARCH`, the
         // same spellings for the pinned platforms). A machine can carry

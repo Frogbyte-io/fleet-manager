@@ -426,11 +426,13 @@ pub struct ReleasePin {
     pub sha256: &'static str,
 }
 
-/// The built-in pin table: the tested release's Linux assets, keyed by the
-/// normalized `uname -m`. The digests are the GitHub release API's `digest`
-/// values for `xingkongliang/skills-manager` `v1.40.0`.
-const RELEASE_PINS: [(&str, ReleasePin); 2] = [
+/// The built-in pin table: the tested release's assets, keyed by the
+/// normalized OS family and `uname -m` architecture. The digests are the
+/// GitHub release API's `digest` values for `xingkongliang/skills-manager`
+/// `v1.40.0`. Windows has only an x64 asset (ADR 0021 decision 5).
+const RELEASE_PINS: [(&str, &str, ReleasePin); 3] = [
     (
+        "linux",
         "x86_64",
         ReleasePin {
             version: PINNED_CLI_VERSION,
@@ -440,12 +442,23 @@ const RELEASE_PINS: [(&str, ReleasePin); 2] = [
         },
     ),
     (
+        "linux",
         "aarch64",
         ReleasePin {
             version: PINNED_CLI_VERSION,
             asset: "skills-manager-cli-Linux-arm64",
             url: "https://github.com/xingkongliang/skills-manager/releases/download/v1.40.0/skills-manager-cli-Linux-arm64",
             sha256: "377e3538ce74a13118ba0c30ebaaff597c7be4f0bb2bec2598ea0da27064a187",
+        },
+    ),
+    (
+        "windows",
+        "x86_64",
+        ReleasePin {
+            version: PINNED_CLI_VERSION,
+            asset: "skills-manager-cli-Windows-x64.exe",
+            url: "https://github.com/xingkongliang/skills-manager/releases/download/v1.40.0/skills-manager-cli-Windows-x64.exe",
+            sha256: "03d8bf92f3bd4a70f9bcad2d908bf1c04d1e72deebf3e800b27e78dabb09e370",
         },
     ),
 ];
@@ -455,13 +468,16 @@ const RELEASE_PINS: [(&str, ReleasePin); 2] = [
 pub enum NoReleasePin {
     /// The machine's OS family or architecture is not known yet.
     UnknownPlatform,
-    /// The OS family has no pinned asset (Windows is #609).
+    /// The OS family has no pinned asset (e.g. macOS).
     UnsupportedOs {
         /// The reported family, bounded and sanitized.
         family: String,
     },
-    /// Linux, but an architecture with no published asset.
+    /// A pinned OS family, but an architecture with no published asset
+    /// (e.g. Windows arm64).
     UnsupportedArchitecture {
+        /// The OS family, as Fleet names it (`Linux` or `Windows`).
+        family: String,
         /// The reported architecture, bounded and sanitized.
         architecture: String,
     },
@@ -475,25 +491,36 @@ impl fmt::Display for NoReleasePin {
             ),
             Self::UnsupportedOs { family } => write!(
                 f,
-                "no pinned skills-manager-cli release for OS family {family:?}; only Linux is pinned"
+                "no pinned skills-manager-cli release for OS family {family:?}; only Linux and Windows are pinned"
             ),
-            Self::UnsupportedArchitecture { architecture } => write!(
-                f,
-                "no pinned skills-manager-cli release for Linux {architecture:?}; the pinned assets are x86_64 and aarch64"
-            ),
+            Self::UnsupportedArchitecture {
+                family,
+                architecture,
+            } => {
+                let pinned = RELEASE_PINS
+                    .iter()
+                    .filter(|(os, _, _)| os.eq_ignore_ascii_case(family))
+                    .map(|(_, arch, _)| *arch)
+                    .collect::<Vec<_>>()
+                    .join(" and ");
+                write!(
+                    f,
+                    "no pinned skills-manager-cli release for {family} {architecture:?}; the pinned {family} assets are {pinned}"
+                )
+            }
         }
     }
 }
 
 /// Chooses the pinned release for a machine from its inventory facts:
-/// `os/family` (`uname -s`, e.g. `Linux`) and `host/architecture`
-/// (`uname -m`, e.g. `x86_64`, `aarch64`; `amd64` and `arm64` are accepted
-/// aliases).
+/// `os/family` (`uname -s`, e.g. `Linux`; the Windows probe reports
+/// `Windows`) and `host/architecture` (`uname -m`, e.g. `x86_64`,
+/// `aarch64`; `amd64` and `arm64` are accepted aliases).
 ///
 /// # Errors
 ///
-/// Returns why there is no pin: an unknown platform, an OS other than Linux,
-/// or an architecture without a published asset.
+/// Returns why there is no pin: an unknown platform, an OS other than Linux
+/// or Windows, or an architecture without a published asset.
 pub fn release_pin(
     os_family: Option<&str>,
     architecture: Option<&str>,
@@ -501,27 +528,29 @@ pub fn release_pin(
     let (Some(family), Some(architecture)) = (os_family, architecture) else {
         return Err(NoReleasePin::UnknownPlatform);
     };
-    if !family.trim().eq_ignore_ascii_case("linux") {
-        return Err(NoReleasePin::UnsupportedOs {
-            family: bounded_fact(family),
-        });
-    }
-    let normalized = match architecture.trim().to_ascii_lowercase().as_str() {
-        "x86_64" | "amd64" => "x86_64",
-        "aarch64" | "arm64" => "aarch64",
+    let (os, family_name) = match family.trim().to_ascii_lowercase().as_str() {
+        "linux" => ("linux", "Linux"),
+        "windows" => ("windows", "Windows"),
         _ => {
-            return Err(NoReleasePin::UnsupportedArchitecture {
-                architecture: bounded_fact(architecture),
+            return Err(NoReleasePin::UnsupportedOs {
+                family: bounded_fact(family),
             });
         }
     };
+    let unsupported = || NoReleasePin::UnsupportedArchitecture {
+        family: family_name.to_owned(),
+        architecture: bounded_fact(architecture),
+    };
+    let normalized = match architecture.trim().to_ascii_lowercase().as_str() {
+        "x86_64" | "amd64" => "x86_64",
+        "aarch64" | "arm64" => "aarch64",
+        _ => return Err(unsupported()),
+    };
     RELEASE_PINS
         .iter()
-        .find(|(key, _)| *key == normalized)
-        .map(|(_, pin)| *pin)
-        .ok_or_else(|| NoReleasePin::UnsupportedArchitecture {
-            architecture: bounded_fact(architecture),
-        })
+        .find(|(pin_os, pin_arch, _)| *pin_os == os && *pin_arch == normalized)
+        .map(|(_, _, pin)| *pin)
+        .ok_or_else(unsupported)
 }
 
 /// A fact value fit for a reason string: printable ASCII, at most 64 chars.

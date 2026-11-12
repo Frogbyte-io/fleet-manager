@@ -30,7 +30,8 @@ use fleet_application::operation::{Operation, Operations};
 use fleet_application::worker::OperationExecutor;
 use fleet_provider_ssh::{ExecutionLimiter, ScriptMetadata, SshConnectionSpec};
 
-use crate::exec::{MAX_SCRIPT_TIMEOUT, resolve_ssh_endpoint};
+use crate::exec::{MAX_SCRIPT_TIMEOUT, endpoint_guest_os, resolve_ssh_endpoint_any_os};
+use crate::skills_windows;
 
 /// The version gate's outcome, typed so each failure keeps its own public
 /// reason.
@@ -358,6 +359,26 @@ impl SkillsExecutor {
                     return complete_failure(operations, &operation.id, code, &detail).await;
                 }
             };
+            if is_windows(&spec)
+                && let Some(detail) = windows_refusal(
+                    &payload.agents,
+                    &[
+                        (
+                            "the skill name",
+                            &version.name,
+                            skills_windows::is_skill_name,
+                        ),
+                        (
+                            "the skill source reference",
+                            &install_reference,
+                            skills_windows::is_native_token,
+                        ),
+                    ],
+                )
+            {
+                return complete_failure(operations, &operation.id, "invalid_request", &detail)
+                    .await;
+            }
             let is_git = reference.starts_with("https://")
                 || reference.starts_with("ssh://")
                 || reference.ends_with(".git");
@@ -377,9 +398,12 @@ impl SkillsExecutor {
                 environment: Vec::new(),
                 arguments: args,
             };
-            let (result, detail) = self
-                .run(&spec, &referenced_rollout_script(), &metadata, remaining)
-                .await;
+            let script = if is_windows(&spec) {
+                skills_windows::referenced_rollout_script()
+            } else {
+                referenced_rollout_script()
+            };
+            let (result, detail) = self.run(&spec, &script, &metadata, remaining).await;
             return finish_referenced_rollout(
                 operations,
                 &operation.id,
@@ -398,6 +422,18 @@ impl SkillsExecutor {
                 return complete_failure(operations, &operation.id, code, &detail).await;
             }
         };
+        if is_windows(&spec)
+            && let Some(detail) = windows_refusal(
+                &payload.agents,
+                &[(
+                    "the skill name",
+                    &version.name,
+                    skills_windows::is_skill_name,
+                )],
+            )
+        {
+            return complete_failure(operations, &operation.id, "invalid_request", &detail).await;
+        }
         operations
             .record_progress(
                 &operation.id,
@@ -426,9 +462,12 @@ impl SkillsExecutor {
             environment: Vec::new(),
             arguments,
         };
-        let (result, detail) = self
-            .run(&spec, &catalog_rollout_script(), &metadata, remaining)
-            .await;
+        let script = if is_windows(&spec) {
+            skills_windows::catalog_rollout_script()
+        } else {
+            catalog_rollout_script()
+        };
+        let (result, detail) = self.run(&spec, &script, &metadata, remaining).await;
         if result
             .as_ref()
             .is_some_and(|result| !result.killed_by_deadline && result.exit_code == Some(0))
@@ -508,8 +547,18 @@ impl SkillsExecutor {
                 fleet_provider_ssh::SshAuth::IdentityFile { path: path.clone() }
             }
         };
-        let (spec, _verified, _host) =
-            resolve_ssh_endpoint(self.machines.as_ref(), machine_id, endpoint_id, ssh_auth).await?;
+        let (mut spec, _verified, _host) =
+            resolve_ssh_endpoint_any_os(self.machines.as_ref(), machine_id, endpoint_id, ssh_auth)
+                .await?;
+        // The endpoint's recorded OS selects the scripts (#609): `windows`
+        // runs the PowerShell twins; `linux` and an OS not yet recorded keep
+        // the Bash scripts, as before the OS was recorded (ADR 0021
+        // decision 4).
+        if endpoint_guest_os(self.machines.as_ref(), machine_id, endpoint_id).await?
+            == Some(fleet_core::GuestOs::Windows)
+        {
+            spec.guest_os = fleet_core::GuestOs::Windows;
+        }
         Ok(spec)
     }
 
@@ -756,6 +805,18 @@ impl SkillsExecutor {
         let spec = self
             .resolve(&payload.machine_id, &payload.endpoint_id, &payload.auth)
             .await?;
+        // The library and preset kinds have no Windows scripts yet (#609
+        // covers probe, deploy, undeploy and catalog rollouts); a Bash
+        // script is never sent to a Windows login.
+        if is_windows(&spec) {
+            return complete_failure(
+                operations,
+                &operation.id,
+                "unsupported_guest_os",
+                "Skills Manager library and preset operations run only on Linux endpoints for now; probe, deploy, undeploy and catalog rollouts support Windows",
+            )
+            .await;
+        }
         let operation_deadline = deadline(payload.timeout_seconds);
         match self.version_gate(&spec, operation_deadline).await {
             GateOutcome::Pass => {}
@@ -902,6 +963,26 @@ impl SkillsExecutor {
                 return Err("the artifact sha256 must be 64 hex characters".to_owned());
             }
         }
+        let windows = is_windows(&spec);
+        if windows {
+            // Windows takes no external root yet, and the pinned URL reaches
+            // `curl.exe` as a native argument (ADR 0021 decision 3).
+            let refusal = if payload.skills_root.is_some() {
+                Some("an external skills root is not supported on Windows endpoints".to_owned())
+            } else {
+                pinned.and_then(|(url, _)| {
+                    skills_windows::refusal(
+                        "the artifact URL",
+                        url,
+                        skills_windows::is_native_token,
+                    )
+                })
+            };
+            if let Some(detail) = refusal {
+                return complete_failure(operations, &operation.id, "invalid_request", &detail)
+                    .await;
+            }
+        }
         // The pin rides the environment (absent means no pin) because the
         // prologue drops empty positional arguments; the root rides $1.
         let mut environment = Vec::new();
@@ -921,7 +1002,12 @@ impl SkillsExecutor {
             environment,
             arguments,
         };
-        let (result, detail) = self.run(&spec, &probe_script(), &metadata, deadline).await;
+        let script = if windows {
+            skills_windows::probe_script()
+        } else {
+            probe_script()
+        };
+        let (result, detail) = self.run(&spec, &script, &metadata, deadline).await;
         match (result, detail) {
             (Some(result), _) if result.killed_by_deadline => {
                 complete_failure(
@@ -967,9 +1053,17 @@ impl SkillsExecutor {
                             "install_failed",
                             "the pinned Skills Manager artifact could not be downloaded",
                         ),
+                        "binary_unusable" if windows => (
+                            "install_failed",
+                            "the pinned Skills Manager binary does not run on this machine (the Windows build is unsigned: Smart App Control or an antivirus may have blocked it); nothing was installed",
+                        ),
                         "binary_unusable" => (
                             "install_failed",
                             "the pinned Skills Manager binary does not run on this machine (it needs glibc 2.34+, liblzma and zlib); nothing was installed",
+                        ),
+                        "directory_untrusted" => (
+                            "install_failed",
+                            "the Fleet directory %LOCALAPPDATA%\\fleet\\bin is not private (it must be a real directory owned by the user, SYSTEM or Administrators, with no other write access); nothing was installed",
                         ),
                         _ => (
                             "install_failed",
@@ -1051,6 +1145,15 @@ impl SkillsExecutor {
         let spec = self
             .resolve(&payload.machine_id, &payload.endpoint_id, &payload.auth)
             .await?;
+        if is_windows(&spec)
+            && let Some(detail) = windows_mutation_refusal(
+                &payload.skill_id,
+                &payload.agents,
+                payload.skills_root.as_deref(),
+            )
+        {
+            return complete_failure(operations, &operation.id, "invalid_request", &detail).await;
+        }
         // The version gate runs before every mutation: an untested CLI
         // degrades explicitly instead of guessing. One deadline covers
         // the gate and the mutation together.
@@ -1103,10 +1206,10 @@ impl SkillsExecutor {
         // skills root rides the environment.
         let mut arguments = vec![payload.skill_id.clone()];
         arguments.extend(payload.agents.iter().cloned());
-        let script = if payload.dry_run {
-            mutation_script("deploy", true)
+        let script = if is_windows(&spec) {
+            skills_windows::mutation_script("deploy", payload.dry_run)
         } else {
-            mutation_script("deploy", false)
+            mutation_script("deploy", payload.dry_run)
         };
         let metadata = ScriptMetadata {
             working_directory: String::new(),
@@ -1131,6 +1234,15 @@ impl SkillsExecutor {
         let spec = self
             .resolve(&payload.machine_id, &payload.endpoint_id, &payload.auth)
             .await?;
+        if is_windows(&spec)
+            && let Some(detail) = windows_mutation_refusal(
+                &payload.skill_id,
+                &payload.agents,
+                payload.skills_root.as_deref(),
+            )
+        {
+            return complete_failure(operations, &operation.id, "invalid_request", &detail).await;
+        }
         // The version gate runs before every mutation.
         let operation_deadline = deadline(payload.timeout_seconds);
         match self.version_gate(&spec, operation_deadline).await {
@@ -1178,7 +1290,11 @@ impl SkillsExecutor {
             .map_err(|error| error.to_string())?;
         let mut arguments = vec![payload.skill_id.clone()];
         arguments.extend(payload.agents.iter().cloned());
-        let script = mutation_script("undeploy", payload.dry_run);
+        let script = if is_windows(&spec) {
+            skills_windows::mutation_script("undeploy", payload.dry_run)
+        } else {
+            mutation_script("undeploy", payload.dry_run)
+        };
         let metadata = ScriptMetadata {
             working_directory: String::new(),
             environment: root_environment(payload.skills_root.as_deref()),
@@ -1199,7 +1315,10 @@ impl SkillsExecutor {
             environment: Vec::new(),
             arguments: Vec::new(),
         };
-        let script = r#"for fleet_candidate in "$HOME/.local/bin/skills-manager-cli" "$(command -v skills-manager-cli 2>/dev/null)"; do
+        let script = if is_windows(spec) {
+            skills_windows::gate_script()
+        } else {
+            r#"for fleet_candidate in "$HOME/.local/bin/skills-manager-cli" "$(command -v skills-manager-cli 2>/dev/null)"; do
   [ -n "$fleet_candidate" ] && [ -x "$fleet_candidate" ] && fleet_cli="$fleet_candidate" && break
 done
 if [ -z "${fleet_cli:-}" ]; then
@@ -1209,7 +1328,8 @@ fi
 fleet_version=$("$fleet_cli" --version 2>/dev/null | head -n 1)
 printf '{"version64":"%s"}\n' "$(printf '%s' "$fleet_version" | base64 -w0)"
 "#
-        .to_owned();
+            .to_owned()
+        };
         let (result, detail) = self.run(spec, &script, &metadata, deadline).await;
         let Some(result) = result else {
             return GateOutcome::Connection {
@@ -1342,7 +1462,7 @@ printf '{"present":true,"version64":"%s","agents64":"%s","skills64":"%s","preset
     .to_owned()
 }
 
-fn normalize_probe(
+pub(crate) fn normalize_probe(
     machine_id: &str,
     raw: &serde_json::Value,
 ) -> Option<fleet_application::skills::SkillsSnapshot> {
@@ -1688,6 +1808,41 @@ fn validate_root(root: &str) -> Result<(), String> {
         return Err("the skills root must not contain control characters".to_owned());
     }
     Ok(())
+}
+
+/// Whether the resolved endpoint is driven through the Windows scripts.
+fn is_windows(spec: &SshConnectionSpec) -> bool {
+    spec.guest_os == fleet_core::GuestOs::Windows
+}
+
+/// The first value a Windows endpoint cannot take, as a caller-safe
+/// reason: each agent id, plus the extra values the caller names.
+fn windows_refusal(agents: &[String], values: &[(&str, &str, fn(&str) -> bool)]) -> Option<String> {
+    agents
+        .iter()
+        .find_map(|agent| {
+            skills_windows::refusal("an agent id", agent, skills_windows::is_agent_id)
+        })
+        .or_else(|| {
+            values
+                .iter()
+                .find_map(|(what, value, accepts)| skills_windows::refusal(what, value, *accepts))
+        })
+}
+
+/// Why a deploy or undeploy cannot run on a Windows endpoint, if it cannot.
+fn windows_mutation_refusal(
+    skill_id: &str,
+    agents: &[String],
+    skills_root: Option<&str>,
+) -> Option<String> {
+    if skills_root.is_some() {
+        return Some("an external skills root is not supported on Windows endpoints".to_owned());
+    }
+    windows_refusal(
+        agents,
+        &[("the skill id", skill_id, skills_windows::is_skill_reference)],
+    )
 }
 
 /// The deadline clamp shared by every skills kind.
