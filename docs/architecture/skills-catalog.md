@@ -25,20 +25,29 @@ add; a fleetd upgrade only when the machine was never observed by Skills
 Manager), the
 controller queues a pinned `skills.probe` as a follow-up (#600): the release
 asset and its sha256 come from the built-in pin table in
-`fleet-provider-skills-manager` (the tested 1.40.0, Linux x86_64 and aarch64),
-chosen by the machine's `os/family` and architecture facts. The probe script
+`fleet-provider-skills-manager` (the tested 1.40.0, Linux x86_64 and aarch64,
+Windows x86_64), chosen by the OS recorded on the setup endpoint (else the
+machine's `os/family` fact) and its architecture facts. The probe script
 downloads, verifies the digest, runs the binary's `--version`, and installs to
 `~/.local/bin` only when the CLI is absent, so an existing CLI is never
 replaced or upgraded. The Linux assets need glibc 2.34+, `liblzma.so.5` and
-`libz.so.1`; a binary that does not run is deleted, never placed. Other
-platforms are skipped with a stated reason (Windows is #609). The follow-up is
+`libz.so.1`; a binary that does not run is deleted, never placed. On Windows
+(#609) the same flow installs `%LOCALAPPDATA%\fleet\bin\skills-manager-cli.exe`
+through PowerShell twins of the scripts; see
+[the workstation runbook](../operations/windows-workstations.md#skills-manager).
+Other platforms (macOS, Windows arm64) are skipped with a stated reason. The follow-up is
 an ordinary authorized, audited operation and never fails the install or add
 that triggered it; `FLEET_SKILLS_MANAGER_AUTO_INSTALL=false` turns it off.
 
 When an existing non-Git skill is rolled out, Fleet updates it only if the
 Skills Manager JSON `source_ref` exactly matches the catalog reference. This
-check parses the JSON with `jq`; if `jq` is unavailable or the source differs,
-the rollout fails closed without removing and reinstalling the skill.
+check parses the JSON with `jq` (`ConvertFrom-Json` on Windows); if `jq` is
+unavailable or the source differs, the rollout fails closed without removing
+and reinstalling the skill.
+
+Rollouts use the CLI's documented v1.40.0 forms: `skills deploy <name> --agent
+<id>...` and `skills status <name>` (an earlier script passed agents
+positionally and called `skills status` bare, which the CLI rejects; #609).
 
 ## Built-in skills
 

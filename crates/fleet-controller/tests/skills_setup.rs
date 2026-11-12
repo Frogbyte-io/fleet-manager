@@ -592,15 +592,102 @@ async fn fleetd_facts_select_the_pin_too() {
     );
 }
 
+/// The probe payload a queued follow-up carries.
+async fn queued_payload(fixture: &Fixture, outcome: &SetupFollowUp) -> serde_json::Value {
+    let SetupFollowUp::Queued { operation_id, .. } = outcome else {
+        panic!("expected a queued follow-up, got {outcome:?}");
+    };
+    let operation = OperationRepository::new(fixture.pool.clone())
+        .get(operation_id)
+        .await
+        .unwrap();
+    serde_json::from_str(operation.payload_json.as_deref().unwrap()).unwrap()
+}
+
+#[tokio::test]
+async fn a_windows_x64_workstation_gets_the_pinned_windows_asset() {
+    // What the Windows inventory probe reports (#608).
+    let fixture = compose("dev@workstation.invalid:22").await;
+    fixture
+        .plant_facts(&[
+            ("os", "family", "Windows"),
+            ("host", "architecture", "x86_64"),
+        ])
+        .await;
+    let outcome = fixture.set_up(&fleet_auth::LanAllowAllAuthorizer).await;
+    let payload = queued_payload(&fixture, &outcome).await;
+    assert_eq!(
+        payload["artifactUrl"],
+        "https://github.com/xingkongliang/skills-manager/releases/download/v1.40.0/skills-manager-cli-Windows-x64.exe"
+    );
+    assert_eq!(
+        payload["artifactSha256"],
+        "03d8bf92f3bd4a70f9bcad2d908bf1c04d1e72deebf3e800b27e78dabb09e370"
+    );
+}
+
+#[tokio::test]
+async fn the_endpoint_os_wins_over_the_family_fact() {
+    // A Windows PC whose facts came from a WSL endpoint still reads Linux,
+    // but the setup endpoint is recorded as Windows: the probe runs there.
+    let fixture = compose("dev@workstation.invalid:22").await;
+    fixture
+        .plant_facts(&[
+            ("os", "family", "Linux"),
+            ("host", "architecture", "x86_64"),
+        ])
+        .await;
+    MachineRepository::new(fixture.pool.clone())
+        .record_endpoint_os(&fixture.endpoint_id, fleet_core::GuestOs::Windows)
+        .await
+        .unwrap();
+    let outcome = fixture.set_up(&fleet_auth::LanAllowAllAuthorizer).await;
+    let payload = queued_payload(&fixture, &outcome).await;
+    assert_pin(&payload, "Windows");
+
+    // And the other way round: a Linux endpoint on a machine whose freshest
+    // family fact says Windows gets the Linux asset.
+    let fixture = compose("dev@workstation.invalid:2222").await;
+    fixture
+        .plant_facts(&[
+            ("os", "family", "Windows"),
+            ("host", "architecture", "x86_64"),
+        ])
+        .await;
+    MachineRepository::new(fixture.pool.clone())
+        .record_endpoint_os(&fixture.endpoint_id, fleet_core::GuestOs::Linux)
+        .await
+        .unwrap();
+    let outcome = fixture.set_up(&fleet_auth::LanAllowAllAuthorizer).await;
+    let payload = queued_payload(&fixture, &outcome).await;
+    assert_pin(&payload, "Linux");
+}
+
+/// The queued probe carries exactly the x86_64 pin for `family`: the URL
+/// and its digest together, so a right asset with a wrong digest fails.
+fn assert_pin(payload: &serde_json::Value, family: &str) {
+    let pin = fleet_provider_skills_manager::release_pin(Some(family), Some("x86_64")).unwrap();
+    assert_eq!(payload["artifactUrl"], pin.url, "{payload}");
+    assert_eq!(payload["artifactSha256"], pin.sha256, "{payload}");
+    assert!(pin.asset.contains(family), "{pin:?}");
+}
+
 #[tokio::test]
 async fn platforms_without_a_pin_are_skipped_with_a_reason() {
     for (facts, needle) in [
         (
             vec![
-                ("os", "family", "Windows"),
+                ("os", "family", "Darwin"),
                 ("host", "architecture", "x86_64"),
             ],
-            "only Linux is pinned",
+            "only Linux and Windows are pinned",
+        ),
+        (
+            vec![
+                ("os", "family", "Windows"),
+                ("host", "architecture", "aarch64"),
+            ],
+            "the pinned Windows assets are x86_64",
         ),
         (
             vec![
