@@ -9,7 +9,7 @@ output are unedited.
 | Release | Linux x64 binary SHA-256 | Captures |
 |---|---|---|
 | [v1.34.2](https://github.com/xingkongliang/skills-manager/releases/tag/v1.34.2) | `cada91bf43947e762b8b47a54b31459c4c02affdf59a9d2e79f3ecd132e41132` | [`--version` and focused command help](skills-manager-cli-v1.34.2-help.txt); [JSON argument error](skills-manager-cli-v1.34.2-invalid-argument.json), [exit status](skills-manager-cli-v1.34.2-invalid-argument.exit) |
-| [v1.40.0](https://github.com/xingkongliang/skills-manager/releases/tag/v1.40.0) | `6edb154b290803cd652fa047cac2d980fd94dc75c1f16bd9acb7a0536544e61b` | [`--version` and focused command help](skills-manager-cli-v1.40.0-help.txt); [JSON argument error](skills-manager-cli-v1.40.0-invalid-argument.json), [exit status](skills-manager-cli-v1.40.0-invalid-argument.exit) |
+| [v1.40.0](https://github.com/xingkongliang/skills-manager/releases/tag/v1.40.0) | `6edb154b290803cd652fa047cac2d980fd94dc75c1f16bd9acb7a0536544e61b` | [`--version` and focused command help](skills-manager-cli-v1.40.0-help.txt); [JSON argument error](skills-manager-cli-v1.40.0-invalid-argument.json), [exit status](skills-manager-cli-v1.40.0-invalid-argument.exit); [`--json agents list`](skills-manager-cli-v1.40.0-agents-list.json) (2026-11-12) |
 
 The JSON error capture comes from:
 
@@ -22,6 +22,19 @@ before initializing or writing Skills Manager state. It records the JSON-mode
 error envelope and is safe to reuse in CLI contract tests. It is not a sample
 success payload; the success DTOs are defined by the upstream versioned CLI
 source.
+
+The agent listing was captured on 2026-11-12 from the same pinned Linux x64
+binary, run with `HOME` set to an empty scratch directory, then pretty-printed,
+with that directory replaced by `/home/user`:
+
+```sh
+skills-manager-cli --json agents list
+```
+
+It is a success payload, unlike the error capture above: v1.40.0 names each
+agent `key` and `display_name` (not `id` and `name`). The Windows x64 binary
+returns the same fields. The probe parser and the provider's `AgentEntry` are
+tested against it.
 
 At v1.40.0 the upstream release also publishes
 `skills-manager-cli-Linux-arm64` with SHA-256

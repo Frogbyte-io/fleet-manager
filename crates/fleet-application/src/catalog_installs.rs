@@ -71,9 +71,13 @@ pub fn install_holds(install: &CatalogInstall, snapshot: &SkillsSnapshot) -> boo
             .and_then(serde_json::Value::as_array)
             .into_iter()
             .flatten()
+            // The real CLI gives a skill a UUID `id` and its directory name
+            // as `name`; Fleet records the name. Match either.
             .filter(|skill| {
-                skill.get("id").and_then(serde_json::Value::as_str)
-                    == Some(install.skill_name.as_str())
+                ["name", "id"].iter().any(|field| {
+                    skill.get(*field).and_then(serde_json::Value::as_str)
+                        == Some(install.skill_name.as_str())
+                })
             })
             .flat_map(|skill| {
                 skill
@@ -165,6 +169,29 @@ mod tests {
         assert!(install_holds(
             &install(10),
             &snapshot(SkillsAvailability::Unsupported, 20, &serde_json::json!([]))
+        ));
+    }
+
+    #[test]
+    fn an_install_holds_against_the_real_cli_skill_shape() {
+        // skills-manager-cli 1.40.0 gives a skill a UUID id and its name.
+        let deployed = serde_json::json!([{
+            "id": "6fe08ff4-4644-4114-9971-57327acabfc7",
+            "name": "fleet",
+            "deployedTo": ["claude_code", "codex"]
+        }]);
+        let undeployed = serde_json::json!([{
+            "id": "6fe08ff4-4644-4114-9971-57327acabfc7",
+            "name": "fleet",
+            "deployedTo": []
+        }]);
+        assert!(install_holds(
+            &install(10),
+            &snapshot(SkillsAvailability::Available, 20, &deployed)
+        ));
+        assert!(!install_holds(
+            &install(10),
+            &snapshot(SkillsAvailability::Available, 20, &undeployed)
         ));
     }
 
