@@ -173,13 +173,17 @@ file. When the [GitHub CLI](https://cli.github.com/) (`gh`) is installed, the
 release snippets also run `gh attestation verify` on the temporary download,
 and a failed verification stops the install. Without `gh`, they print that
 the check was skipped and install on the checksum alone. An installed `gh`
-must be 2.49 or newer (the first with `gh attestation`) and signed in
-(`gh auth login`); an older or signed-out `gh` fails the check, and nothing
-is installed.
+must be 2.102.0 or newer and signed in (`gh auth login`); the snippets check
+the version first, and an older or signed-out `gh` fails the check, and
+nothing is installed.
 
 `--signer-workflow` and `--source-ref` narrow the check to the release
 workflow running on `main`; `--repo` alone would accept an attestation from
-any workflow in the repository. Only releases published after provenance was
+any workflow in the repository. Older `gh` versions accept both flags but
+match them loosely (a regular expression before 2.97.0; a prefix, and a
+ref compared without case, before 2.102.0), which is why 2.102.0 is the
+minimum; the advisories are listed under
+[Verifying a release](../SECURITY.md#verifying-a-release). Only releases published after provenance was
 added carry an attestation: for an older one, such as `v0.1.0-482fd9c`, set
 `provenance=no` (`$provenance = $false` on Windows) and rely on the checksum.
 
@@ -199,6 +203,11 @@ On Linux, from a release (`<tag>` is the release tag, for example
   curl -fsSLO "$base/SHA256SUMS"
   grep "  $asset\$" SHA256SUMS | sha256sum --check --strict -
   if [ "$provenance" = yes ] && command -v gh >/dev/null 2>&1; then
+    gh_version="$(gh --version | sed -n '1s/^gh version \([0-9.]*\).*/\1/p')"
+    if [ "$(printf '%s\n' 2.102.0 "$gh_version" | sort -V | head -n 1)" != 2.102.0 ]; then
+      echo "gh ${gh_version:-of unknown version} is older than 2.102.0; nothing was installed" >&2
+      exit 1
+    fi
     gh attestation verify "$asset" --repo Frogbyte-io/fleet-manager \
       --signer-workflow Frogbyte-io/fleet-manager/.github/workflows/release.yml \
       --source-ref refs/heads/main
@@ -263,6 +272,11 @@ controller image does not ship one):
     throw 'fleetctl checksum mismatch; nothing was installed'
   }
   if ($provenance -and (Get-Command gh -ErrorAction SilentlyContinue)) {
+    $ghVersion = "$(gh --version | Select-Object -First 1)" -replace '^gh version ([0-9.]+).*$', '$1'
+    if (-not ($ghVersion -as [version]) -or [version]$ghVersion -lt [version]'2.102.0') {
+      Remove-Item $tmp
+      throw "gh $ghVersion is older than 2.102.0; nothing was installed"
+    }
     gh attestation verify $tmp --repo Frogbyte-io/fleet-manager `
       --signer-workflow Frogbyte-io/fleet-manager/.github/workflows/release.yml `
       --source-ref refs/heads/main

@@ -119,6 +119,20 @@ tailscale serve status
 ```
 
 If `FLEET_COOLIFY_PORT` differs, change the **backend** port in both commands.
+
+On a host where Coolify's own proxy already holds 443 and 8080 on the
+tailnet address, publish the controller on other tailnet ports instead, both
+to the same loopback backend, for example HTTPS on 8443 and HTTP on 18080:
+
+```sh
+tailscale serve --bg --https=8443 http://127.0.0.1:<FLEET_COOLIFY_PORT>
+tailscale serve --bg --http=18080 http://127.0.0.1:<FLEET_COOLIFY_PORT>
+```
+
+The browser then uses `https://<deployment-host>.<tailnet>.ts.net:8443`, and
+`fleetd` (and Install Fleet Node) uses the HTTP port,
+`http://<deployment-host>.<tailnet>.ts.net:18080`, in place of `:8080` in the
+table below.
 Restrict tailnet ACLs/grants to the administrators and nodes that should reach
 these ports. HTTP Serve is private to the tailnet; the network connection is
 encrypted by Tailscale. HTTPS Serve provides a separate browser endpoint.

@@ -389,7 +389,7 @@ M11 depends on M6 and M7 (Lab leases, placement, cleanup) and on persistent mach
 
 ### M12 — Windows workstations
 
-Status: ADR accepted; #608 in PR #633 (2026-11-07). Boundaries: [ADR 0021](adr/0021-windows-workstations.md) (Accepted 2026-11-07). Epic: [#606](https://github.com/Frogbyte-io/fleet-manager/issues/606).
+Status (2026-11-12): landed. Onboarding and inventory (#608, PR #633), brokered exec, put, collect and terminal (#610, PR #637), Skills Manager on Windows (#609, PR #639) and the standard-user inventory without WMI (PR #645) are merged and released (`v0.1.0-48f6043`). The live validation [#611](https://github.com/Frogbyte-io/fleet-manager/issues/611) passed its re-run of the inventory step on that release build and is closed, as is epic #606; the terminal's exit-status propagation on Windows was not fully confirmed there. Open follow-ups: #644 (retrying a failed rollout), #646 (the exec watchdog for a standard user), #649 (the whole-release review); agent tokens on workstations wait for #629 (M8). Boundaries: [ADR 0021](adr/0021-windows-workstations.md) (Accepted 2026-11-07). Epic: [#606](https://github.com/Frogbyte-io/fleet-manager/issues/606).
 
 Outcome: Windows 11 developer workstations join the fleet like Linux ones, agentless over OpenSSH Server: onboarding, inventory, fleet-wide skills through an automatically installed Skills Manager, and brokered exec, put, collect and terminal.
 
