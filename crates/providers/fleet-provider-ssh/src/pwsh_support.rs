@@ -14,37 +14,13 @@ use crate::shell::GuestShell;
 /// [`require_pwsh`].
 pub(crate) fn pwsh() -> Option<String> {
     let candidate = std::env::var("FLEET_PWSH").unwrap_or_else(|_| "pwsh".to_owned());
-    // A single start can fail under a loaded test run (many PowerShell
-    // processes at once), which would read as "no PowerShell" and fail every
-    // test under FLEET_REQUIRE_PWSH. Retry a few times before deciding.
-    let mut last = String::new();
-    for attempt in 0..3 {
-        if attempt > 0 {
-            std::thread::sleep(std::time::Duration::from_millis(500 * attempt));
-        }
-        match std::process::Command::new(&candidate)
-            .args(["-NoProfile", "-Command", "exit 0"])
-            .output()
-        {
-            Ok(out) if out.status.success() => return Some(candidate),
-            Ok(out) => {
-                last = format!(
-                    "{}: {}",
-                    out.status,
-                    String::from_utf8_lossy(&out.stderr).trim()
-                );
-            }
-            Err(error) => {
-                // Not installed: no point retrying.
-                if error.kind() == std::io::ErrorKind::NotFound {
-                    return None;
-                }
-                last = error.to_string();
-            }
+    match crate::pwsh_starts(&candidate) {
+        Ok(()) => Some(candidate),
+        Err(why) => {
+            eprintln!("no working PowerShell: {why}");
+            None
         }
     }
-    eprintln!("PowerShell at {candidate} did not start: {last}");
-    None
 }
 
 /// Runs `script` through the real bootstrap the way sshd would: the
@@ -116,7 +92,7 @@ pub(crate) fn require_pwsh() -> Option<String> {
         "FLEET_REQUIRE_PWSH is set but no PowerShell was found"
     );
     if found.is_none() {
-        eprintln!("SKIPPED: no pwsh on PATH and FLEET_PWSH unset");
+        eprintln!("SKIPPED: no working PowerShell (pwsh on PATH, or FLEET_PWSH)");
     }
     found
 }

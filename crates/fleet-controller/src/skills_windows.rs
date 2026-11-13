@@ -563,18 +563,16 @@ mod tests {
 
     fn pwsh() -> Option<String> {
         let candidate = std::env::var("FLEET_PWSH").unwrap_or_else(|_| "pwsh".to_owned());
-        let found = std::process::Command::new(&candidate)
-            .args(["-NoProfile", "-Command", "exit 0"])
-            .output()
+        let found = fleet_provider_ssh::pwsh_starts(&candidate)
+            .map_err(|why| eprintln!("no working PowerShell: {why}"))
             .ok()
-            .filter(|out| out.status.success())
-            .map(|_| candidate);
+            .map(|()| candidate);
         assert!(
             found.is_some() || std::env::var_os("FLEET_REQUIRE_PWSH").is_none(),
             "FLEET_REQUIRE_PWSH is set but no PowerShell was found"
         );
         if found.is_none() {
-            eprintln!("SKIPPED: no pwsh on PATH and FLEET_PWSH unset");
+            eprintln!("SKIPPED: no working PowerShell (pwsh on PATH, or FLEET_PWSH)");
         }
         found
     }

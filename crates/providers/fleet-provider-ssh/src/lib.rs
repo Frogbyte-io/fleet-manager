@@ -571,6 +571,44 @@ fn key_type_rank(key_type: &str) -> u8 {
     }
 }
 
+/// Test support: whether `candidate` starts as a working PowerShell. A
+/// single start can fail on a loaded test host (many PowerShell processes
+/// at once), which would read as "no PowerShell" and fail every test run
+/// under `FLEET_REQUIRE_PWSH`, so it is retried before deciding. A program
+/// that is not installed is answered at once. The error is the last
+/// failure, for the skip message.
+///
+/// # Errors
+///
+/// The reason the last start failed.
+#[doc(hidden)]
+pub fn pwsh_starts(candidate: &str) -> Result<(), String> {
+    let mut last = String::new();
+    for attempt in 0..3u64 {
+        if attempt > 0 {
+            std::thread::sleep(std::time::Duration::from_millis(500 * attempt));
+        }
+        match Command::new(candidate)
+            .args(["-NoProfile", "-Command", "exit 0"])
+            .output()
+        {
+            Ok(out) if out.status.success() => return Ok(()),
+            Ok(out) => {
+                last = format!(
+                    "{}: {}",
+                    out.status,
+                    String::from_utf8_lossy(&out.stderr).trim()
+                );
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                return Err(format!("{candidate} is not installed"));
+            }
+            Err(error) => last = error.to_string(),
+        }
+    }
+    Err(format!("{candidate} did not start: {last}"))
+}
+
 /// The remote command of the connection test: `exit 0` is understood by
 /// POSIX shells, PowerShell and cmd alike.
 pub(crate) fn add_connect_test_command(command: &mut Command) {

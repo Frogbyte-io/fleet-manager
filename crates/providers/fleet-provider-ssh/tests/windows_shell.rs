@@ -28,12 +28,10 @@ fn pwsh() -> Option<String> {
             .display()
             .to_string();
     }
-    Command::new(&candidate)
-        .args(["-NoProfile", "-Command", "exit 0"])
-        .output()
+    fleet_provider_ssh::pwsh_starts(&candidate)
+        .map_err(|why| eprintln!("no working PowerShell: {why}"))
         .ok()
-        .filter(|out| out.status.success())
-        .map(|_| candidate)
+        .map(|()| candidate)
 }
 
 fn startup_lock() -> std::fs::File {
@@ -168,7 +166,7 @@ macro_rules! sshd_or_skip {
                 std::env::var_os("FLEET_REQUIRE_PWSH").is_none(),
                 "FLEET_REQUIRE_PWSH is set but no PowerShell was found"
             );
-            eprintln!("SKIPPED: no pwsh on PATH and FLEET_PWSH unset");
+            eprintln!("SKIPPED: no working PowerShell (pwsh on PATH, or FLEET_PWSH)");
             return;
         };
         let sshd = PowerShellSshd::start(&pwsh);
