@@ -33,7 +33,7 @@ use async_trait::async_trait;
 use fleet_application::onboarding::{
     OnboardAuth, OnboardHostKey, OnboardingDraft, OnboardingPort, ShellCheck, TestOutcome,
 };
-use fleet_application::operation::{Operation, Operations};
+use fleet_application::operation::{Operation, Operations, PortFailure};
 use fleet_application::worker::OperationExecutor;
 use fleet_provider_ssh::{ExecutionLimiter, SshAuth, SshConnectionSpec, SshProvider};
 
@@ -240,10 +240,16 @@ impl OnboardingExecutor {
         }
         draft.last_test = Some(outcome.clone());
         draft.updated_at = fleet_core::SystemClock::now_unix_millis();
-        self.drafts
-            .update(&draft)
-            .await
-            .map_err(|failure| failure.to_string())?;
+        // A compare-and-set against the draft this test read: a host-key
+        // confirmation (or another test) that landed meanwhile wins, and this
+        // observation is dropped rather than undoing it.
+        let draft = match self.drafts.update(&draft).await {
+            Ok(draft) => draft,
+            Err(PortFailure::Conflict { detail }) => {
+                return fail_operation(operations, &operation.id, "draft_changed", &detail).await;
+            }
+            Err(failure) => return Err(failure.to_string()),
+        };
         if let Some(detail) = shell_failure {
             return fail_operation(
                 operations,
@@ -338,13 +344,19 @@ impl OnboardingExecutor {
         // The check is persisted at once, so a collection that fails later
         // never leaves an older answer for `add` to record; a failed check
         // clears it.
+        // Both writes are compare-and-sets: the first against the draft read
+        // above, the second against the first's own write, so a confirmation
+        // or test that lands while the probe runs is never undone by it.
         let checked = self.check_shell(&draft).await;
         draft.shell_check = checked.as_ref().ok().cloned();
         draft.updated_at = fleet_core::SystemClock::now_unix_millis();
-        self.drafts
-            .update(&draft)
-            .await
-            .map_err(|failure| failure.to_string())?;
+        draft = match self.drafts.update(&draft).await {
+            Ok(draft) => draft,
+            Err(PortFailure::Conflict { detail }) => {
+                return fail_operation(operations, &operation.id, "draft_changed", &detail).await;
+            }
+            Err(failure) => return Err(failure.to_string()),
+        };
         let check = match checked {
             Ok(check) => check,
             Err(detail) => {
@@ -415,10 +427,14 @@ impl OnboardingExecutor {
         draft.discovery_source = Some(fleet_provider_ssh::PROBE_SOURCE.to_owned());
         draft.discovered_at = Some(fleet_core::SystemClock::now_unix_millis());
         draft.updated_at = fleet_core::SystemClock::now_unix_millis();
-        self.drafts
-            .update(&draft)
-            .await
-            .map_err(|failure| failure.to_string())?;
+        if let Err(failure) = self.drafts.update(&draft).await {
+            return match failure {
+                PortFailure::Conflict { detail } => {
+                    fail_operation(operations, &operation.id, "draft_changed", &detail).await
+                }
+                failure => Err(failure.to_string()),
+            };
+        }
 
         let result = serde_json::json!({
             "facts": count,
@@ -549,6 +565,31 @@ impl fleet_application::onboarding::OnboardTrustPort for SshTrustAdapter {
                 |outcome| {
                     outcome.map_err(|error| fleet_application::operation::PortFailure::Backend {
                         detail: error.to_string(),
+                    })
+                },
+            )
+    }
+
+    async fn unpin_key(
+        &self,
+        _host: &str,
+        key: &OnboardHostKey,
+    ) -> Result<(), fleet_application::operation::PortFailure> {
+        let provider = self.provider.clone();
+        let raw_line = key.raw_line.clone();
+        tokio::task::spawn_blocking(move || provider.unpin_line(&raw_line))
+            .await
+            .map_or_else(
+                |join_error| {
+                    Err(fleet_application::operation::PortFailure::Backend {
+                        detail: format!("the trust thread failed: {join_error}"),
+                    })
+                },
+                |outcome| {
+                    outcome.map(|_| ()).map_err(|error| {
+                        fleet_application::operation::PortFailure::Backend {
+                            detail: error.to_string(),
+                        }
                     })
                 },
             )

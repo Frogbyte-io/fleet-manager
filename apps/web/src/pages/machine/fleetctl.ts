@@ -15,6 +15,9 @@ function join(words: string[]): string {
   return words.map(shellQuote).join(' ')
 }
 
+// An identity path is the controller's: the controller's own `ssh -i`
+// expands a leading `~` for the controller's user, as for the form. So the
+// path is quoted like any word; the operator's shell must not expand it.
 function authFlags(auth: SshAuth): string[] {
   return auth.type === 'agent'
     ? ['--auth', 'agent']

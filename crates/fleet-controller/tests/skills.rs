@@ -154,7 +154,7 @@ case "$1" in
   skills)
     shift
     case "$1" in
-      list) echo '[{"id":"hello","name":"Hello","description":"private text","path":"/secret/skill/path","enabled":true,"preset_ids":["default"],"deployed_to":["claude_code"],"source_ref":"private"}]' ;;
+      list) echo '[{"id":"hello","name":"hello","description":"private text","path":"/secret/skill/path","enabled":true,"preset_ids":["default"],"deployed_to":["claude_code"],"source_ref":"private"}]' ;;
       check) echo '[{"skill_id":"hello","update_status":"update_available","last_check_error":"/secret/error"}]' ;;
       remove)
         if [ "$2" = conflict ]; then echo '{"ok":false,"code":"TARGET_CONFLICT","message":"blocked","error":{"target_conflict":true,"paths":["/tmp/conflict"],"held_back_removals":["managed"]}}'; exit 2; fi
@@ -832,6 +832,7 @@ async fn a_windows_endpoint_refuses_what_it_cannot_run_before_any_session() {
     let fixture = compose(&sshd).await;
     let home = home_dir.path().display().to_string();
     let _path = install_stub_cli(&home, None);
+    let catalog_version = builtin_version(&fixture).await;
     MachineRepository::new(fixture.pool.clone())
         .record_endpoint_os(&fixture.endpoint_id, fleet_core::GuestOs::Windows)
         .await
@@ -902,6 +903,17 @@ async fn a_windows_endpoint_refuses_what_it_cannot_run_before_any_session() {
             with(serde_json::json!({
                 "artifactUrl": "https://example.invalid/a b.exe",
                 "artifactSha256": "0".repeat(64),
+            })),
+            "invalid_request",
+        ),
+        // #649: a catalog rollout validates its native arguments before the
+        // version gate opens the first session.
+        (
+            "skills.catalog-rollout",
+            with(serde_json::json!({
+                "catalogId": "builtin-fleet",
+                "versionId": catalog_version,
+                "agents": ["Claude Code"],
             })),
             "invalid_request",
         ),

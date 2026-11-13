@@ -46,8 +46,8 @@ function onRemoved(outcome: MachineRemovedDto) {
       </DialogTitle>
       <DialogDescription class="-mt-2 text-xs text-fc-muted">
         Removes the machine from Fleet: its record, endpoints, facts, node identity, recorded skill installs and the
-        pinned host keys of hosts no other machine uses. The controller reviews it first and refuses while anything
-        holds the machine.
+        pinned host keys of hosts no other machine or onboarding draft uses. The controller reviews it first and refuses
+        while anything holds the machine.
       </DialogDescription>
       <RemoveMachinePanel
         :machine="machine"

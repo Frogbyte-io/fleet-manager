@@ -617,6 +617,7 @@ pub async fn unlink_machine_guest(
         (status = 200, description = "The machine, with the endpoint's guest OS unknown.", body = Resource<MachineDto>),
         (status = 403, description = "The caller may not update the machine.", body = crate::error::ApiError),
         (status = 404, description = "The machine or SSH endpoint does not exist.", body = crate::error::ApiError),
+        (status = 500, description = "A backend port or the audit sink failed.", body = crate::error::ApiError),
         (status = 503, description = "The machine surface is not wired.", body = crate::error::ApiError)
     )
 )]

@@ -11,7 +11,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use fleet_application::machine::{MachinePort, NewEndpoint, RegisterMachine};
-use fleet_application::operation::Operations;
+use fleet_application::onboarding::{NewDraft, OnboardingDraft, OnboardingPort};
+use fleet_application::operation::{Operations, PortFailure};
 use fleet_application::worker::OperationExecutor;
 use fleet_controller::Settings;
 use fleet_controller::build_router;
@@ -310,10 +311,20 @@ impl Harness {
 
     /// Runs the onboarding executor until the named operation terminates.
     async fn run_operation(&self, operation_id: &str) -> Value {
+        self.run_operation_with(self.executor.as_ref(), operation_id)
+            .await
+    }
+
+    /// Runs `executor` until the named operation terminates.
+    async fn run_operation_with(
+        &self,
+        executor: &dyn OperationExecutor,
+        operation_id: &str,
+    ) -> Value {
         for _ in 0..120 {
             self.operations
                 .tick(
-                    self.executor.as_ref(),
+                    executor,
                     "test-worker",
                     fleet_core::SystemClock::now_unix_millis(),
                     60_000,
@@ -974,4 +985,89 @@ async fn a_confirmed_non_preferred_key_type_survives_a_repeated_test() {
         assert_eq!(result["fingerprint"], fingerprint);
         assert_eq!(result["connected"], true, "{result}");
     }
+}
+
+/// The draft store with one concurrent writer: right after the executor
+/// reads the draft, another write lands (a confirmation, another test), so
+/// the executor's snapshot is stale by the time it writes back.
+#[derive(Debug)]
+struct RacingDrafts {
+    inner: OnboardingRepository,
+    armed: std::sync::atomic::AtomicBool,
+}
+
+#[async_trait::async_trait]
+impl OnboardingPort for RacingDrafts {
+    async fn create(&self, draft: &NewDraft) -> Result<OnboardingDraft, PortFailure> {
+        self.inner.create(draft).await
+    }
+
+    async fn find_by_idempotency_key(
+        &self,
+        key: &str,
+    ) -> Result<Option<OnboardingDraft>, PortFailure> {
+        self.inner.find_by_idempotency_key(key).await
+    }
+
+    async fn get(&self, id: &str) -> Result<OnboardingDraft, PortFailure> {
+        let read = self.inner.get(id).await?;
+        if self.armed.swap(false, std::sync::atomic::Ordering::SeqCst) {
+            self.inner.update(&read).await?;
+        }
+        Ok(read)
+    }
+
+    async fn list(&self, limit: u32) -> Result<Vec<OnboardingDraft>, PortFailure> {
+        self.inner.list(limit).await
+    }
+
+    async fn update(&self, draft: &OnboardingDraft) -> Result<OnboardingDraft, PortFailure> {
+        self.inner.update(draft).await
+    }
+
+    async fn delete(&self, id: &str) -> Result<(), PortFailure> {
+        self.inner.delete(id).await
+    }
+}
+
+/// #649: a test whose draft changed while it ran does not write its stale
+/// snapshot back; the operation fails as `draft_changed` and the draft keeps
+/// the newer write (here: no host key observed by the stale test).
+#[tokio::test]
+async fn a_test_overtaken_by_a_concurrent_write_fails_as_draft_changed() {
+    let harness = harness().await;
+    let sshd = TestSshd::start();
+    let draft_id = create_draft(&harness, &sshd).await;
+    let racing: Arc<dyn OperationExecutor> =
+        Arc::new(fleet_controller::onboard::OnboardingExecutor::new(
+            Arc::new(RacingDrafts {
+                inner: OnboardingRepository::new(harness.pool.clone()),
+                armed: std::sync::atomic::AtomicBool::new(true),
+            }),
+            harness.ssh_dir.path().join("ssh"),
+            ExecutionLimiter::new(4),
+            Arc::new(fleet_application::worker::NoopExecutor),
+        ));
+    let (status, body) = harness
+        .post_json(
+            &format!("/api/v1/machines/onboarding/drafts/{draft_id}/test"),
+            None,
+        )
+        .await;
+    assert_eq!(status, axum::http::StatusCode::ACCEPTED, "{body}");
+    let operation_id = body["data"]["id"].as_str().unwrap().to_owned();
+
+    let test = harness
+        .run_operation_with(racing.as_ref(), &operation_id)
+        .await;
+    assert_eq!(test["state"], "failed", "{test}");
+    let error: Value = serde_json::from_str(test["errorJson"].as_str().unwrap()).unwrap();
+    assert_eq!(error["reason"], "draft_changed", "{error}");
+    let (_, view) = harness
+        .get_json(&format!("/api/v1/machines/onboarding/drafts/{draft_id}"))
+        .await;
+    assert_eq!(
+        view["data"]["hostKeyStage"], "unseen",
+        "the stale observation was not written: {view}"
+    );
 }

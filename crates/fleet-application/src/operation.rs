@@ -1033,20 +1033,7 @@ impl Operations {
         if new.kind != "agentless.inventory" {
             return Ok(None);
         }
-        let Some(mut payload) = new
-            .payload_json
-            .as_deref()
-            .and_then(|payload| serde_json::from_str::<serde_json::Value>(payload).ok())
-            .filter(serde_json::Value::is_object)
-        else {
-            return Ok(None);
-        };
-        let (Some(machine_id), Some(endpoint_id)) = (
-            payload["machineId"].as_str().map(str::to_owned),
-            payload["endpointId"].as_str().map(str::to_owned),
-        ) else {
-            return Ok(None);
-        };
+        let (mut payload, machine_id, endpoint_id) = inventory_target(new)?;
         let chosen = match payload.get("guestOs") {
             None | Some(serde_json::Value::Null) => None,
             Some(value) => Some(
@@ -2522,6 +2509,36 @@ impl OperationUseCaseError {
             _ => None,
         }
     }
+}
+
+/// The payload of an `agentless.inventory` creation and the target it
+/// names. A payload the rule cannot read (no JSON object, no string
+/// `machineId` and `endpointId`) is refused here rather than queued, so it
+/// can never skip the endpoint and OS checks that follow. Those checks run
+/// where the endpoint lookup is composed (`catalog_rollout_targets`, as the
+/// controller composes it); without it only this shape check applies.
+fn inventory_target(
+    new: &NewOperation,
+) -> Result<(serde_json::Value, String, String), OperationUseCaseError> {
+    let Some(payload) = new
+        .payload_json
+        .as_deref()
+        .and_then(|payload| serde_json::from_str::<serde_json::Value>(payload).ok())
+        .filter(serde_json::Value::is_object)
+    else {
+        return Err(OperationUseCaseError::Invalid {
+            detail: "agentless.inventory requires a JSON object payload".to_owned(),
+        });
+    };
+    let (Some(machine_id), Some(endpoint_id)) = (
+        payload["machineId"].as_str().map(str::to_owned),
+        payload["endpointId"].as_str().map(str::to_owned),
+    ) else {
+        return Err(OperationUseCaseError::Invalid {
+            detail: "agentless.inventory requires string machineId and endpointId".to_owned(),
+        });
+    };
+    Ok((payload, machine_id, endpoint_id))
 }
 
 #[cfg(test)]
