@@ -1,6 +1,7 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
+use std::time::Duration;
 
 use serde_json::json;
 
@@ -15,6 +16,17 @@ fn key(line: &str) -> fleet_core::SshPublicKey {
     fleet_core::parse_public_key(line).unwrap()
 }
 
+fn developer() -> Account {
+    Account {
+        name: "developer".to_owned(),
+        sid: None,
+    }
+}
+
+const ICACLS: &str = r"C:\Windows\System32\icacls.exe";
+const WHOAMI: &str = r"C:\Windows\System32\whoami.exe";
+const REG: &str = r"C:\Windows\System32\reg.exe";
+
 /// A scripted machine: environment, programs and their answers, and the
 /// SSH banner. Records every program it was asked to run.
 struct FakeHost {
@@ -24,6 +36,7 @@ struct FakeHost {
     on_path: BTreeMap<&'static str, PathBuf>,
     banner: Result<String, String>,
     ran: Mutex<Vec<String>>,
+    no_system_dir: bool,
 }
 
 impl FakeHost {
@@ -38,6 +51,7 @@ impl FakeHost {
             on_path: BTreeMap::new(),
             banner: Ok("SSH-2.0-OpenSSH_9.6".to_owned()),
             ran: Mutex::new(Vec::new()),
+            no_system_dir: false,
         }
     }
 
@@ -96,6 +110,10 @@ impl JoinHost for FakeHost {
     }
     fn hostname(&self) -> Option<String> {
         Some("dev-box".to_owned())
+    }
+    fn system_dir(&self) -> Option<PathBuf> {
+        (self.platform == Platform::Windows && !self.no_system_dir)
+            .then(|| PathBuf::from(r"C:\Windows\System32"))
     }
 }
 
@@ -237,9 +255,11 @@ fn installing_the_key_is_idempotent_and_owner_only() {
     .unwrap();
     let host = FakeHost::unix(home.path());
     let controller = key(CONTROLLER_KEY);
-    let (first, path) = install_authorized_key(&host, home.path(), &controller).unwrap();
+    let (first, path) =
+        install_authorized_key(&host, home.path(), &developer(), &controller).unwrap();
     assert_eq!(first, KeyInstall::Added);
-    let (second, _) = install_authorized_key(&host, home.path(), &controller).unwrap();
+    let (second, _) =
+        install_authorized_key(&host, home.path(), &developer(), &controller).unwrap();
     assert_eq!(second, KeyInstall::Present);
     assert_eq!(
         std::fs::read_to_string(&path).unwrap(),
@@ -253,43 +273,157 @@ fn installing_the_key_is_idempotent_and_owner_only() {
 
     // A fresh home gets the directory and the file.
     let fresh = tempfile::tempdir().unwrap();
-    let (outcome, path) = install_authorized_key(&host, fresh.path(), &controller).unwrap();
+    let (outcome, path) =
+        install_authorized_key(&host, fresh.path(), &developer(), &controller).unwrap();
     assert_eq!(outcome, KeyInstall::Added);
     assert_eq!(mode(&path), 0o600);
     assert_eq!(mode(&fresh.path().join(".ssh")), 0o700);
 }
 
 #[test]
-fn a_windows_standard_account_gets_the_protected_acl() {
+fn a_windows_standard_account_gets_the_protected_acl_before_the_key_is_in_place() {
     let home = tempfile::tempdir().unwrap();
     let data = tempfile::tempdir().unwrap();
-    let host = FakeHost::windows(home.path(), data.path()).answer("icacls", "processed 1 file");
-    let (outcome, path) = install_authorized_key(&host, home.path(), &key(CONTROLLER_KEY)).unwrap();
+    let host = FakeHost::windows(home.path(), data.path()).answer(ICACLS, "processed 1 file");
+    let account = Account {
+        name: "developer".to_owned(),
+        sid: Some("S-1-5-21-1-2-3-1001".to_owned()),
+    };
+    let (outcome, path) =
+        install_authorized_key(&host, home.path(), &account, &key(CONTROLLER_KEY)).unwrap();
     assert_eq!(outcome, KeyInstall::Added);
     assert_eq!(path, home.path().join(".ssh").join("authorized_keys"));
+    // The ACL goes on the staged file, which only then becomes
+    // authorized_keys; the grant names the account's SID.
+    let staged = home
+        .path()
+        .join(".ssh")
+        .join(format!("authorized_keys.fleet-{}", std::process::id()));
     assert_eq!(
         host.ran(),
         [format!(
-            "icacls {} /inheritance:r /grant developer:F /grant *S-1-5-18:F /grant *S-1-5-32-544:F",
+            "{ICACLS} {} /inheritance:r /grant *S-1-5-21-1-2-3-1001:F /grant *S-1-5-18:F /grant *S-1-5-32-544:F",
+            staged.display()
+        )]
+    );
+    assert!(!staged.exists());
+    assert_eq!(
+        std::fs::read_to_string(&path).unwrap(),
+        format!("{CONTROLLER_KEY}\n")
+    );
+    // Present: the file stays, and its ACL is (re)applied in place.
+    let again = FakeHost::windows(home.path(), data.path()).answer(ICACLS, "processed 1 file");
+    let (outcome, _) =
+        install_authorized_key(&again, home.path(), &developer(), &key(CONTROLLER_KEY)).unwrap();
+    assert_eq!(outcome, KeyInstall::Present);
+    assert_eq!(
+        again.ran(),
+        [format!(
+            "{ICACLS} {} /inheritance:r /grant developer:F /grant *S-1-5-18:F /grant *S-1-5-32-544:F",
             path.display()
         )]
     );
-    // A failing icacls is a failure, not a silent open file.
+}
+
+#[test]
+fn a_failing_icacls_leaves_authorized_keys_untouched() {
+    let home = tempfile::tempdir().unwrap();
+    let data = tempfile::tempdir().unwrap();
     let mut broken = FakeHost::windows(home.path(), data.path());
     broken.programs.insert(
-        "icacls".to_owned(),
+        ICACLS.to_owned(),
         Ok(ProgramOutput {
             success: false,
             stdout: String::new(),
             stderr: "Access is denied.".to_owned(),
         }),
     );
-    let error = install_authorized_key(&broken, home.path(), &key(CONTROLLER_KEY)).unwrap_err();
+    let ssh = home.path().join(".ssh");
+    // No file yet: none is left behind.
+    let error = install_authorized_key(&broken, home.path(), &developer(), &key(CONTROLLER_KEY))
+        .unwrap_err();
     assert!(
-        error.message.contains("Access is denied"),
+        error.message.contains("Access is denied") && error.message.contains("was not added"),
         "{}",
         error.message
     );
+    assert_eq!(
+        std::fs::read_dir(&ssh).unwrap().count(),
+        0,
+        "nothing left in .ssh"
+    );
+    // An existing file keeps exactly its content.
+    std::fs::write(ssh.join("authorized_keys"), OTHER_KEY).unwrap();
+    install_authorized_key(&broken, home.path(), &developer(), &key(CONTROLLER_KEY)).unwrap_err();
+    assert_eq!(
+        std::fs::read_to_string(ssh.join("authorized_keys")).unwrap(),
+        OTHER_KEY
+    );
+    assert_eq!(std::fs::read_dir(&ssh).unwrap().count(), 1);
+}
+
+#[test]
+fn the_account_comes_from_the_system_not_the_environment() {
+    let home = tempfile::tempdir().unwrap();
+    let data = tempfile::tempdir().unwrap();
+    // Unix: `id -un` wins over a USER that names someone else.
+    let mut unix = FakeHost::unix(home.path()).answer("/usr/bin/id", "realuser\n");
+    unix.env.insert("USER", "someone-else".to_owned());
+    assert_eq!(current_account(&unix).unwrap().name, "realuser");
+    let spoofed = resolve_target(
+        &unix,
+        &JoinArgs {
+            host: Some("192.0.2.7".to_owned()),
+            user: Some("someone-else".to_owned()),
+            ..JoinArgs::default()
+        },
+        &current_account(&unix).unwrap(),
+    )
+    .unwrap_err();
+    assert!(
+        spoofed.message.contains("(realuser)"),
+        "{}",
+        spoofed.message
+    );
+    // `/bin/id` when `/usr/bin/id` is missing; the environment only when
+    // the system cannot answer.
+    let bin = FakeHost::unix(home.path()).answer("/bin/id", "realuser\n");
+    assert_eq!(current_account(&bin).unwrap().name, "realuser");
+    assert_eq!(
+        current_account(&FakeHost::unix(home.path())).unwrap().name,
+        "developer"
+    );
+
+    // Windows: the token's user and SID from whoami.
+    let windows = FakeHost::windows(home.path(), data.path()).answer(
+        WHOAMI,
+        "\"desktop-1\\Dev User\",\"S-1-5-21-1-2-3-1001\"\r\n",
+    );
+    assert_eq!(
+        current_account(&windows).unwrap(),
+        Account {
+            name: "Dev User".to_owned(),
+            sid: Some("S-1-5-21-1-2-3-1001".to_owned()),
+        }
+    );
+    assert!(windows.ran()[0].ends_with("whoami.exe /user /fo csv /nh"));
+    assert_eq!(
+        current_account(&FakeHost::windows(home.path(), data.path())).unwrap(),
+        developer()
+    );
+    // A caller-set SystemRoot does not move the programs the join runs.
+    let mut moved = FakeHost::windows(home.path(), data.path());
+    moved.env.insert("SystemRoot", r"D:\elsewhere".to_owned());
+    let _ = current_account(&moved);
+    assert!(moved.ran()[0].starts_with(WHOAMI), "{:?}", moved.ran());
+    let mut lost = FakeHost::windows(home.path(), data.path());
+    lost.platform = Platform::Unix;
+    assert!(
+        system32(&lost, "icacls.exe").is_err(),
+        "no system directory, no program"
+    );
+    assert_eq!(parse_whoami_user("INFO: no user\n"), None);
+    assert_eq!(parse_whoami_user("\"host\\u\",\"not-a-sid\""), None);
 }
 
 #[test]
@@ -302,17 +436,27 @@ fn administrators_are_recognized_from_whoami_groups() {
 
 #[test]
 fn an_administrator_is_refused_with_the_elevated_commands_for_this_key() {
-    let refusal = administrator_refusal(CONTROLLER_KEY);
+    let fingerprint = key(CONTROLLER_KEY).fingerprint;
+    let refusal = administrator_refusal(CONTROLLER_KEY, &fingerprint);
     assert!(refusal.contains("administrators_authorized_keys"));
     assert!(refusal.contains("ANY administrator"));
     assert!(refusal.contains(&format!("'{CONTROLLER_KEY}'")));
-    assert!(
-        refusal
-            .contains("icacls $k /inheritance:r /grant \"*S-1-5-32-544:F\" /grant \"*S-1-5-18:F\"")
-    );
     assert!(refusal.contains("--admin-key-installed"));
+    // The file is secured before the key goes in, and the key is compared
+    // by fingerprint (as sshd parses the file), not as a whole line.
+    let acl = refusal
+        .find("icacls $k /inheritance:r /grant \"*S-1-5-32-544:F\" /grant \"*S-1-5-18:F\"")
+        .expect("the ACL command");
+    let add = refusal
+        .find("Add-Content -Path $k -Value 'ssh-ed25519")
+        .unwrap();
+    assert!(acl < add, "{refusal}");
+    assert!(refusal.contains("if ($LASTEXITCODE -ne 0) { throw"));
+    assert!(refusal.contains(&format!("$have -notcontains '{fingerprint}'")));
+    assert!(refusal.contains("ssh-keygen -lf $k"));
+    assert!(!refusal.contains("SimpleMatch"));
     // A quote in a comment cannot break out of the PowerShell literal.
-    let block = administrators_key_block("ssh-ed25519 AAAA it's");
+    let block = administrators_key_block("ssh-ed25519 AAAA it's", "SHA256:x");
     assert!(block.contains("'ssh-ed25519 AAAA it''s'"), "{block}");
 }
 
@@ -467,6 +611,44 @@ fn preflight_needs_an_answering_ssh_server() {
 }
 
 #[test]
+fn a_missing_system_directory_is_its_own_problem_not_an_unset_default_shell() {
+    let home = tempfile::tempdir().unwrap();
+    let data = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(data.path().join("ssh")).unwrap();
+    std::fs::write(
+        data.path().join("ssh/sshd_config"),
+        "PasswordAuthentication no\n",
+    )
+    .unwrap();
+    let mut host = FakeHost::windows(home.path(), data.path());
+    host.no_system_dir = true;
+    let found = preflight(&host, home.path(), "100.64.0.9", 22);
+    assert!(
+        found.problems.iter().any(|problem| problem
+            .starts_with("cannot check OpenSSH DefaultShell")
+            && problem.contains("system directory")),
+        "{:?}",
+        found.problems
+    );
+    assert!(
+        !found
+            .problems
+            .iter()
+            .any(|problem| problem.contains("is not set")),
+        "{:?}",
+        found.problems
+    );
+    assert!(
+        !found.needs_elevated_setup,
+        "elevated setup would not fix it"
+    );
+    assert!(
+        host.ran().is_empty(),
+        "nothing runs without the system directory"
+    );
+}
+
+#[test]
 fn windows_preflight_reads_and_never_changes_and_asks_for_the_elevated_block() {
     let home = tempfile::tempdir().unwrap();
     let data = tempfile::tempdir().unwrap();
@@ -478,7 +660,7 @@ fn windows_preflight_reads_and_never_changes_and_asks_for_the_elevated_block() {
     .unwrap();
     let mut host = FakeHost::windows(home.path(), data.path());
     host.programs.insert(
-        "reg".to_owned(),
+        REG.to_owned(),
         Ok(ProgramOutput {
             success: false,
             stdout: String::new(),
@@ -493,13 +675,15 @@ fn windows_preflight_reads_and_never_changes_and_asks_for_the_elevated_block() {
     assert!(found.problems[1].contains("PasswordAuthentication no"));
     assert_eq!(
         host.ran(),
-        [r"reg query HKLM\SOFTWARE\OpenSSH /v DefaultShell"],
+        [format!(
+            r"{REG} query HKLM\SOFTWARE\OpenSSH /v DefaultShell"
+        )],
         "only reads"
     );
 
     // Set up correctly, it passes; an unreadable config is only a warning.
     let ready = FakeHost::windows(home.path(), data.path()).answer(
-        "reg",
+        REG,
         "HKEY_LOCAL_MACHINE\\SOFTWARE\\OpenSSH\n    DefaultShell    REG_SZ    C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe\n",
     );
     std::fs::write(
@@ -536,7 +720,8 @@ fn the_address_comes_from_tailscale_unless_given() {
 
     let home = tempfile::tempdir().unwrap();
     let host = FakeHost::unix(home.path()).answer("tailscale", "100.64.0.9\n");
-    let target = resolve_target(&host, &JoinArgs::default()).unwrap();
+    let account = current_account(&host).unwrap();
+    let target = resolve_target(&host, &JoinArgs::default(), &account).unwrap();
     assert_eq!(
         (
             target.user.as_str(),
@@ -554,6 +739,7 @@ fn the_address_comes_from_tailscale_unless_given() {
             name: Some("named".to_owned()),
             ..JoinArgs::default()
         },
+        &account,
     )
     .unwrap();
     assert_eq!(
@@ -573,6 +759,7 @@ fn the_address_comes_from_tailscale_unless_given() {
             user: Some("agent".to_owned()),
             ..JoinArgs::default()
         },
+        &account,
     )
     .unwrap_err();
     assert!(
@@ -583,7 +770,7 @@ fn the_address_comes_from_tailscale_unless_given() {
     assert!(same_account(Platform::Windows, "Developer", "developer"));
     assert!(!same_account(Platform::Unix, "Developer", "developer"));
     let missing = FakeHost::unix(home.path());
-    let error = resolve_target(&missing, &JoinArgs::default()).unwrap_err();
+    let error = resolve_target(&missing, &JoinArgs::default(), &account).unwrap_err();
     assert!(error.message.contains("--host"), "{}", error.message);
 }
 
@@ -657,32 +844,167 @@ fn the_newest_version_and_the_installed_agents_are_picked() {
     ]});
     assert_eq!(newest_version(&page).as_deref(), Some("new"));
     assert_eq!(newest_version(&json!({"items": []})), None);
-    let snapshot = json!({"data": {"agents": [
-        {"key": "claude_code", "installed": true, "enabled": true},
-        {"key": "codex", "installed": false, "enabled": true},
-        {"key": "cursor", "installed": true, "enabled": false},
-        {"key": "gemini", "installed": true},
-    ]}});
-    assert_eq!(installed_agents(&snapshot), ["claude_code", "gemini"]);
+    // A hand-written snapshot once hid that the agents are keyed `id`: the
+    // response here is the controller's own, from the v1.40.0 contract
+    // fixture through its normalization, DTO and resource envelope.
+    let b64 = |text: &str| {
+        use base64::Engine as _;
+        base64::engine::general_purpose::STANDARD.encode(text)
+    };
+    let raw = json!({
+        "present": true,
+        "version64": b64("skills-manager-cli 1.40.0"),
+        "agents64": b64(include_str!(
+            "../../../../docs/research/fixtures/skills-manager-cli-v1.40.0-agents-list.json"
+        )),
+        "skills64": b64("[]"),
+        "presets64": b64("[]"),
+        "checks64": b64("[]"),
+    });
+    let snapshot = fleet_controller::skills::normalize_probe("m-1", &raw).expect("normalizes");
+    let response = serde_json::to_value(fleet_api::Resource::new(
+        fleet_api::skills::SkillsSnapshotDto::from(fleet_application::skills::SkillsView {
+            snapshot,
+            stale: false,
+        }),
+    ))
+    .unwrap();
+    assert_eq!(response["data"]["availability"], "available");
+    assert_eq!(installed_agents(&response), ["claude_code"]);
+    // Installed and enabled only.
+    let response = json!({"data": {"data": {"agents": [
+        {"id": "claude_code", "installed": true, "enabled": true},
+        {"id": "codex", "installed": false, "enabled": true},
+        {"id": "cursor", "installed": true, "enabled": false},
+        {"id": "gemini", "installed": true},
+    ]}}});
+    assert_eq!(installed_agents(&response), ["claude_code", "gemini"]);
     assert!(installed_agents(&json!({"data": {}})).is_empty());
 }
 
 #[test]
-fn the_ssh_endpoint_at_this_address_is_chosen() {
+fn only_the_ssh_endpoint_of_this_login_and_address_is_chosen() {
     let machine = json!({"endpoints": [
-        {"id": "node", "kind": "node", "reference": "n"},
+        {"id": "node", "kind": "node", "reference": "dev@100.64.0.9:22"},
         {"id": "other", "kind": "ssh", "reference": "dev@192.0.2.1:22"},
         {"id": "this", "kind": "ssh", "reference": "dev@100.64.0.9:22"},
+        {"id": "port", "kind": "ssh", "reference": "dev@100.64.0.9:2222"},
+        {"id": "login", "kind": "ssh", "reference": "agent@100.64.0.9:2200"},
+    ]});
+    let pick = |user: &str, host: &str, port: u16| {
+        ssh_endpoint_id(&machine, Platform::Unix, user, host, port)
+    };
+    assert_eq!(pick("dev", "100.64.0.9", 22).as_deref(), Ok("this"));
+    assert_eq!(pick("dev", "100.64.0.9", 2222).as_deref(), Ok("port"));
+    // No endpoint at this address: refused, never another address's.
+    let error = pick("dev", "198.51.100.1", 22).unwrap_err();
+    assert!(
+        error.contains("no SSH endpoint for dev@198.51.100.1:22")
+            && error.contains("dev@192.0.2.1:22"),
+        "{error}"
+    );
+    // Another login at the right address is not this account's.
+    assert!(pick("dev", "100.64.0.9", 2200).is_err());
+    assert!(ssh_endpoint_id(&json!({"endpoints": []}), Platform::Unix, "x", "x", 22).is_err());
+    // A redacted login matches on the address; two at the address are
+    // ambiguous and refused. Windows logins compare case-insensitively.
+    let redacted = json!({"endpoints": [
+        {"id": "a", "kind": "ssh", "reference": "***@[fd7a:115c::9]:22"},
     ]});
     assert_eq!(
-        ssh_endpoint_id(&machine, "100.64.0.9", 22).as_deref(),
-        Some("this")
+        ssh_endpoint_id(&redacted, Platform::Unix, "dev", "fd7a:115c::9", 22).as_deref(),
+        Ok("a")
     );
+    let two = json!({"endpoints": [
+        {"id": "a", "kind": "ssh", "reference": "***@host.example:22"},
+        {"id": "b", "kind": "ssh", "reference": "***@HOST.example:22"},
+    ]});
+    assert!(ssh_endpoint_id(&two, Platform::Unix, "dev", "host.example", 22).is_err());
+    let windows = json!({"endpoints": [
+        {"id": "w", "kind": "ssh", "reference": "Developer@100.64.0.9:22"},
+    ]});
     assert_eq!(
-        ssh_endpoint_id(&machine, "198.51.100.1", 22).as_deref(),
-        Some("other")
+        ssh_endpoint_id(&windows, Platform::Windows, "developer", "100.64.0.9", 22).as_deref(),
+        Ok("w")
     );
-    assert_eq!(ssh_endpoint_id(&json!({"endpoints": []}), "x", 22), None);
+    assert!(ssh_endpoint_id(&windows, Platform::Unix, "developer", "100.64.0.9", 22).is_err());
+    assert_eq!(
+        parse_endpoint_reference("u@h:x"),
+        None,
+        "a port must be a number"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn local_programs_are_bounded_in_time_and_output() {
+    let sh = Path::new("/bin/sh");
+    let output = run_bounded(
+        sh,
+        &["-c", "echo out; echo err >&2; exit 3"],
+        Duration::from_secs(10),
+        1024,
+    )
+    .unwrap();
+    assert_eq!(
+        (
+            output.success,
+            output.stdout.as_str(),
+            output.stderr.as_str()
+        ),
+        (false, "out\n", "err\n")
+    );
+    // Output past the cap is drained and dropped, not buffered.
+    let big = run_bounded(
+        sh,
+        &["-c", "head -c 1000000 /dev/zero"],
+        Duration::from_secs(10),
+        100,
+    )
+    .unwrap();
+    assert!(big.success);
+    assert_eq!(big.stdout.len(), 100);
+    // A program that outlives the deadline is killed.
+    let started = std::time::Instant::now();
+    let error = run_bounded(sh, &["-c", "sleep 30"], Duration::from_millis(300), 100).unwrap_err();
+    assert!(error.contains("did not finish"), "{error}");
+    assert!(started.elapsed() < Duration::from_secs(10));
+    // The program exits, but something it started keeps its output open:
+    // still bounded, and the whole group is killed.
+    let marker = tempfile::tempdir().unwrap();
+    let pid_file = marker.path().join("pid");
+    let script = format!("sleep 30 & echo $! > {}; echo started", pid_file.display());
+    let started = std::time::Instant::now();
+    let error = run_bounded(sh, &["-c", &script], Duration::from_millis(500), 100).unwrap_err();
+    assert!(error.contains("did not finish"), "{error}");
+    assert!(started.elapsed() < Duration::from_secs(10));
+    let pid = std::fs::read_to_string(&pid_file).unwrap();
+    let pid = pid.trim();
+    let mut gone = false;
+    for _ in 0..50 {
+        // A killed and reaped (or zombie, adopted by init) sleep is gone
+        // from `kill -0`'s view or shows as a zombie.
+        let alive = std::process::Command::new("kill")
+            .args(["-0", pid])
+            .status()
+            .is_ok_and(|status| status.success());
+        let state = std::fs::read_to_string(format!("/proc/{pid}/stat")).unwrap_or_default();
+        if !alive || state.split_whitespace().nth(2) == Some("Z") {
+            gone = true;
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    assert!(gone, "the background sleep {pid} must be killed");
+    assert!(
+        run_bounded(
+            Path::new("/nonexistent/program"),
+            &[],
+            Duration::from_secs(1),
+            10
+        )
+        .is_err()
+    );
 }
 
 #[test]

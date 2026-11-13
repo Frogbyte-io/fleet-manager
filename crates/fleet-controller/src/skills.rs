@@ -1464,7 +1464,17 @@ printf '{"present":true,"version64":"%s","agents64":"%s","skills64":"%s","preset
     .to_owned()
 }
 
-pub(crate) fn normalize_probe(
+/// Turns the probe script's raw answer (one JSON line with the Skills
+/// Manager outputs base64-encoded) into the stored snapshot: the version
+/// gate, then each agent, skill and preset reduced to the safe fields the
+/// read model publishes. `None` when the inventory is malformed or a
+/// collection failed on the machine (`agentsFailed`, `skillsFailed` or
+/// `presetsFailed`): neither is a usable observation.
+///
+/// Public so the clients that read the snapshot can test against the
+/// shape the controller really stores.
+#[must_use]
+pub fn normalize_probe(
     machine_id: &str,
     raw: &serde_json::Value,
 ) -> Option<fleet_application::skills::SkillsSnapshot> {

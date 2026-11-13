@@ -40,6 +40,14 @@ shows it, and `tailscale ip -4` prints its address), and the tailnet policy
 must let the controller reach it on TCP 22. If it is not, stop and ask the
 operator to add it; joining a tailnet is not something to do on their behalf.
 
+The join checks this itself, from the controller's side, before it changes
+anything here: after it fetches the controller's public key, its next step
+against the controller is an onboarding test that connects to the address
+(`--host`, by default the tailnet IPv4) and reads the host key, and the join goes on only when that key is this machine's own
+(see [step 2](#2-join)). A local `tailscale` check could not prove the
+controller's container can route to the address; this does, for an explicit
+`--host` too.
+
 ## Inputs from the operator
 
 | Input | Example | Where it comes from |
@@ -125,16 +133,32 @@ Restart-Service sshd
 **Then as the developer's own, standard account:**
 
 ```powershell
+# Stop at the first failed command. Both files are staged in a fresh
+# temporary directory; only a binary whose checksum matches and that runs is
+# moved into place, and the staging directory is removed either way.
+$ErrorActionPreference = 'Stop'
 $bin = "$env:LOCALAPPDATA\fleet\bin"; New-Item -ItemType Directory -Force $bin | Out-Null
 # The controller's release tag when the operator gave one, else the newest.
 $tag = ''   # e.g. 'v0.1.0-48f6043'
 $base = if ($tag) { "https://github.com/Frogbyte-io/fleet-manager/releases/download/$tag" } else { 'https://github.com/Frogbyte-io/fleet-manager/releases/latest/download' }
-Invoke-WebRequest "$base/fleetctl-windows-x86_64.exe" -OutFile "$bin\fleetctl.exe"
-Invoke-WebRequest "$base/SHA256SUMS" -OutFile "$env:TEMP\SHA256SUMS"
-$want = ((Get-Content "$env:TEMP\SHA256SUMS") -match ' fleetctl-windows-x86_64\.exe$').Split(' ')[0]
-if ((Get-FileHash "$bin\fleetctl.exe" -Algorithm SHA256).Hash.ToLower() -ne $want) { throw 'checksum mismatch' }
-[Environment]::SetEnvironmentVariable('Path', "$([Environment]::GetEnvironmentVariable('Path','User'));$bin", 'User')
-$env:Path += ";$bin"
+$stage = Join-Path $env:TEMP ("fleetctl-" + [guid]::NewGuid())
+New-Item -ItemType Directory $stage | Out-Null
+try {
+  Invoke-WebRequest "$base/fleetctl-windows-x86_64.exe" -OutFile "$stage\fleetctl.exe"
+  Invoke-WebRequest "$base/SHA256SUMS" -OutFile "$stage\SHA256SUMS"
+  $line = @(@(Get-Content "$stage\SHA256SUMS") -match ' fleetctl-windows-x86_64\.exe$')
+  if ($line.Count -ne 1) { throw 'SHA256SUMS has no single entry for fleetctl-windows-x86_64.exe' }
+  $want = $line[0].Split(' ')[0].ToLower()
+  if ((Get-FileHash "$stage\fleetctl.exe" -Algorithm SHA256).Hash.ToLower() -ne $want) { throw 'checksum mismatch' }
+  & "$stage\fleetctl.exe" --version
+  if ($LASTEXITCODE -ne 0) { throw 'the downloaded fleetctl does not run' }
+  Move-Item -Force "$stage\fleetctl.exe" "$bin\fleetctl.exe"
+} finally {
+  Remove-Item -Recurse -Force $stage -ErrorAction SilentlyContinue
+}
+$userPath = [Environment]::GetEnvironmentVariable('Path', 'User')
+if (($userPath -split ';') -notcontains $bin) { [Environment]::SetEnvironmentVariable('Path', "$userPath;$bin", 'User') }
+if (($env:Path -split ';') -notcontains $bin) { $env:Path += ";$bin" }
 
 New-Item -ItemType Directory -Force "$env:APPDATA\fleet" | Out-Null
 Set-Content -Path "$env:APPDATA\fleet\config.toml" -Value 'url = "<controller URL>"' -Encoding ascii
@@ -164,21 +188,31 @@ it has not reached yet:
    `--version` does not print `skills-manager-cli <version>`) sits on `PATH`
    or in `~/.local/bin`. A stand-in is reported, never deleted: remove it
    yourself (Fleet installs the real, pinned binary).
-3. **Adds the controller's key to this account**, once:
-   `~/.ssh/authorized_keys` (directory 0700, file 0600) on Linux;
-   `%USERPROFILE%\.ssh\authorized_keys` with the protected ACL (the user,
-   SYSTEM and Administrators, granted by SID so localized Windows works) on
-   Windows. A key already there is left alone.
+3. **Has the controller look at this machine**, before changing anything
+   here: it creates the onboarding draft (at the `--host` address, by
+   default this machine's tailnet IPv4, as this account, named after the
+   hostname) and runs the onboarding test, which,
+   before a host key is confirmed, only connects and reads the host key (no
+   login). That proves the controller reaches this address, `--host`
+   included. The join compares the fingerprint the controller saw with
+   **this machine's own key file** (`/etc/ssh/ssh_host_ed25519_key.pub`, or
+   `%ProgramData%\ssh\ssh_host_ed25519_key.pub`) and goes on **only if
+   identical**. Otherwise (or when the controller cannot reach the address)
+   it cancels the draft and refuses loudly, with nothing changed on this
+   machine: the controller is not talking to this machine.
+4. **Adds the controller's key to this account**, once, and secured
+   before the key is in it: `~/.ssh/authorized_keys` (directory 0700, file
+   0600 before anything is appended) on Linux;
+   `%USERPROFILE%\.ssh\authorized_keys` on Windows, where the new content
+   is written to a file beside it that gets the protected ACL (this
+   account, SYSTEM and Administrators, granted by SID so localized Windows
+   works) and only then replaces `authorized_keys`; if `icacls` fails,
+   `authorized_keys` is left as it was. A key already there (compared by
+   key type and key, whatever its options or comment) is left alone.
    A Windows **administrator** is refused instead (see
-   [Windows administrators](#windows-administrators)).
-4. **Onboards the machine** at its tailnet IPv4 as this account, named after
-   the hostname: draft, test, then it compares the host key fingerprint the
-   controller saw with **this machine's own key file**
-   (`/etc/ssh/ssh_host_ed25519_key.pub`, or
-   `%ProgramData%\ssh\ssh_host_ed25519_key.pub`) and confirms it **only if
-   identical**; otherwise it cancels the draft and refuses loudly (the
-   controller is not talking to this machine). Then test again, discover and
-   add. A failure before the add cancels the draft.
+   [Windows administrators](#windows-administrators)). Then it **confirms**
+   the verified host key, tests the login, discovers and adds. A failure
+   before the add cancels the draft.
 5. **Deploys the `fleet` skill:** follows the Skills Manager install the add
    queued (`skills.probe`) to completion, reads which coding agents Skills
    Manager found installed, and rolls out the newest built-in `fleet` skill
@@ -227,8 +261,12 @@ machine is enrolled then; fix the cause and [resume](#re-running-and---resume)).
 
 The join is safe to run again. If a machine is already enrolled at this
 address it says so and stops, naming it. `--resume` continues with that
-machine instead: it re-checks the key in `authorized_keys` and runs the skill
-step again, for example after installing a coding agent or after a failed
+machine instead, after the same check as a first join: the controller must
+see **this machine's own host key** at the address (an address can be
+reused by another machine), or the join refuses. It then re-checks the key in
+`authorized_keys` and runs the skill step again through that machine's SSH
+endpoint for **this login at this address** (never another endpoint of the
+machine), for example after installing a coding agent or after a failed
 rollout:
 
 ```sh
@@ -268,11 +306,13 @@ The onboarding test then proves the key works; nothing else is skipped.
 | Symptom | Cause | Fix |
 |---|---|---|
 | `the controller has no usable SSH key (none)` | Key generation is off on the controller | [The controller has no key](#the-controller-has-no-key) |
-| `the controller has no usable SSH key (unusable)`, or `lastTest.detail` `Load key ".../id_ed25519": Permission denied` | A key created by hand is not owned by the controller user | The `detail` names the `chown`; or move the key away and restart the controller to generate a new one |
+| `the controller has no usable SSH key (unusable)`, or `lastTest.detail` `Load key ".../id_ed25519": Permission denied` | A key created by hand that the controller user cannot use (unreadable by it, readable by others, passphrase-protected, corrupt) | Apply the fix the `detail` names (`chown -R` on the `.ssh` directory, `chmod 600`); when it names none, move the key away and restart the controller to generate a new one |
 | `no SSH server answers on port 22` | sshd is not installed or not running | Linux: `sudo systemctl enable --now ssh`; Windows: the elevated block |
 | `REFUSED: the host key the controller saw ... is not this machine's own key` | `--host` reaches another machine, or something intercepts the connection | Check the address; never override the host key file to make it match |
 | `the controller could not log in ... Permission denied (publickey)` | sshd does not read the file the key went to (Windows administrators: the wrong file) | [Windows administrators](#windows-administrators); on Linux check `AuthorizedKeysFile` |
-| `the controller could not reach ... to read its host key` | The controller cannot route to the address | Use the tailnet IPv4; check the tailnet policy lets the controller reach port 22 |
+| `the controller could not reach ... to read its host key. Nothing was changed on this machine.` | The controller cannot route to the address | Use the tailnet IPv4; check the tailnet policy lets the controller reach port 22 |
+| `icacls could not secure ... so the controller key was not added` (Windows) | The ACL could not be applied | `authorized_keys` is unchanged; fix the cause (`icacls` names it) and join again |
+| `cannot resume with machine ...: the machine has no SSH endpoint for ...` | The enrolled machine reaches this address only under another login, or not by SSH | Join as the account that machine's endpoint uses, or remove the machine and join again |
 | `the login shell is refused` (Windows) | `DefaultShell` is not Windows PowerShell 5.1, or the profile prints | The elevated block; keep the profile quiet |
 | `... is not the real Skills Manager CLI` | A stand-in `skills-manager-cli` on `PATH` or in `~/.local/bin` | Remove it yourself, then join again |
 | `is already enrolled as ...` | This address is already a Fleet machine | `--resume`, or `fleetctl machines remove` first |
@@ -298,8 +338,9 @@ the controller user cannot read) and how to fix it.
 Use this only when `fleetctl machines join` cannot run here. It is the same
 sequence, by hand.
 
-1. **The controller's public key:** `fleetctl system ssh-public-key` prints the
-   line. If generation is off and you must create the key by hand, do it on
+1. **The controller's public key:** `fleetctl --output json system
+   ssh-public-key` prints the line (`publicKey`) and its `fingerprint`. If
+   generation is off and you must create the key by hand, do it on
    the controller host inside the container, owned by the controller user
    (paste the whole block as one command):
 
@@ -308,28 +349,43 @@ sequence, by hand.
    docker exec -u 0 "$c" sh -c 'd=/var/lib/fleet/.ssh
      mkdir -p "$d" && [ -f "$d/id_ed25519" ] || ssh-keygen -q -t ed25519 -N "" -C fleet-controller -f "$d/id_ed25519"
      chown -R "$(stat -c %u:%g /var/lib/fleet)" "$d" && chmod 700 "$d" && chmod 600 "$d/id_ed25519"
-     cat "$d/id_ed25519.pub"'
+     cat "$d/id_ed25519.pub"; ssh-keygen -lf "$d/id_ed25519.pub"'
    ```
 
-2. **Let the controller in.** Linux (sshd installed and running as in
+2. **Let the controller in.** The file is secured first, and the key is
+   compared the way sshd reads the file, not as a whole line:
+   `ssh-keygen -lf` lists the fingerprint of every key in it, past options
+   and comments, so a copy with options or another comment is not added
+   again. Linux (sshd installed and running as in
    [step 1](#1-install-fleetctl-and-point-it-at-the-controller)):
 
    ```sh
-   mkdir -p ~/.ssh && chmod 700 ~/.ssh
-   grep -qxF '<controller public key>' ~/.ssh/authorized_keys 2>/dev/null \
-     || echo '<controller public key>' >> ~/.ssh/authorized_keys
-   chmod 600 ~/.ssh/authorized_keys
+   key='<controller public key>'
+   want='<controller key fingerprint>'   # SHA256:...
+   f=~/.ssh/authorized_keys
+   mkdir -p ~/.ssh && chmod 700 ~/.ssh && touch "$f" && chmod 600 "$f"
+   if ! ssh-keygen -lf "$f" 2>/dev/null | cut -d' ' -f2 | grep -qxF "$want"; then
+     [ -s "$f" ] && [ -n "$(tail -c1 "$f")" ] && echo >> "$f"
+     printf '%s\n' "$key" >> "$f"
+   fi
    ```
 
    Windows, standard account:
 
    ```powershell
+   $key = '<controller public key>'
+   $want = '<controller key fingerprint>'   # SHA256:...
    New-Item -ItemType Directory -Force "$env:USERPROFILE\.ssh" | Out-Null
    $k = "$env:USERPROFILE\.ssh\authorized_keys"
-   if (-not ((Test-Path $k) -and (Select-String -Path $k -SimpleMatch '<controller public key>' -Quiet))) {
-     Add-Content -Path $k -Value '<controller public key>' -Encoding ascii
-   }
+   if (-not (Test-Path $k)) { New-Item -ItemType File -Path $k | Out-Null }
    icacls $k /inheritance:r /grant "${env:USERNAME}:F" /grant "*S-1-5-18:F" /grant "*S-1-5-32-544:F" | Out-Null
+   if ($LASTEXITCODE -ne 0) { throw 'icacls failed; the key was not added' }
+   $have = @(ssh-keygen -lf $k 2>$null | ForEach-Object { ($_ -split ' ')[1] })
+   if ($have -notcontains $want) {
+     $b = [IO.File]::ReadAllBytes($k)
+     if ($b.Length -gt 0 -and $b[-1] -ne 10) { Add-Content -Path $k -Value '' -Encoding ascii }
+     Add-Content -Path $k -Value $key -Encoding ascii
+   }
    ```
 
 3. **Remove a stale Skills Manager stand-in** (Linux): if `skills-manager-cli`
@@ -373,8 +429,10 @@ sequence, by hand.
      '{"versionId":"<version id>","machineId":"<machine-id>","endpointId":"<endpoint-id>","auth":{"type":"agent"},"agents":["claude_code","codex"],"timeoutSeconds":300}'
    ```
 
-   `<endpoint-id>` is `endpoints[0].id` in `fleetctl --output json machines get
-   <machine-id>`; list only agents that show `installed: true`. A rollout that
+   `<endpoint-id>` is the `id` of the endpoint in `fleetctl --output json
+   machines get <machine-id>` whose `kind` is `ssh` and whose `reference` is
+   `<user>@<tailnet IPv4>:22` (not simply the first endpoint: a machine can
+   have others); list only agents that show `installed: true`. A rollout that
    fails cannot be retried with the identical request
    ([#644](https://github.com/Frogbyte-io/fleet-manager/issues/644)); change
    the agent list or `timeoutSeconds`.

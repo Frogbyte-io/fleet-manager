@@ -8,6 +8,13 @@
 //! re-runs this binary's child test with `SSH_AUTH_SOCK` pointing at it (no
 //! process environment is changed in place). The child serves that key on
 //! `GET /system/ssh-public-key` through the controller's own identity code.
+//!
+//! Skills Manager is a stub at the executor: the join's own preflight
+//! refuses a script standing in for `skills-manager-cli` on the machine (by
+//! design), so the real CLI cannot be faked there. The stub answers
+//! `skills.probe` by storing the snapshot the controller's own
+//! normalization makes from the v1.40.0 contract fixture, and records each
+//! `skills.catalog-rollout` it is asked to run.
 
 #![cfg(unix)]
 // The shared sshd harness and the one long scenario are test code.
@@ -21,11 +28,12 @@ use std::process::{Command as Process, Stdio};
 use std::sync::Arc;
 use std::time::Duration;
 
-use fleet_application::operation::Operations;
+use fleet_application::operation::{Operation, Operations};
+use fleet_application::skills::SkillsPort as _;
 use fleet_application::worker::OperationExecutor;
 use fleet_provider_ssh::ExecutionLimiter;
 use fleet_provider_ssh::identity::{ControllerIdentity, EnsureOutcome};
-use fleet_storage_sqlite::{OnboardingRepository, OperationRepository, Store};
+use fleet_storage_sqlite::{OnboardingRepository, OperationRepository, SkillsRepository, Store};
 use serde_json::Value;
 
 /// The child test's marker: the directory holding the controller key.
@@ -91,11 +99,72 @@ fn join_end_to_end_through_a_private_agent() {
     );
 }
 
-/// A controller router with the onboarding surface, a worker running the
-/// onboarding executor, and the controller key served from `key_dir`.
+/// What `skills.probe` answers: Skills Manager v1.40.0's agent list (one
+/// agent, `claude_code`, installed), as the probe script reports it.
+fn probe_answer() -> Value {
+    use base64::Engine as _;
+    let b64 = |text: &str| base64::engine::general_purpose::STANDARD.encode(text);
+    serde_json::json!({
+        "present": true,
+        "version64": b64("skills-manager-cli 1.40.0"),
+        "agents64": b64(include_str!(
+            "../../../docs/research/fixtures/skills-manager-cli-v1.40.0-agents-list.json"
+        )),
+        "skills64": b64("[]"),
+        "presets64": b64("[]"),
+        "checks64": b64("[]"),
+    })
+}
+
+/// The stub Skills Manager (see the module documentation); any other kind
+/// is the no-op executor's.
+#[derive(Debug)]
+struct StubSkillsManager {
+    pool: sqlx::SqlitePool,
+    rollouts: Arc<std::sync::Mutex<Vec<Value>>>,
+}
+
+#[async_trait::async_trait]
+impl OperationExecutor for StubSkillsManager {
+    async fn execute(&self, operations: &Operations, operation: &Operation) -> Result<(), String> {
+        let payload: Value =
+            serde_json::from_str(operation.payload_json.as_deref().unwrap_or("{}"))
+                .map_err(|error| error.to_string())?;
+        match operation.kind.as_str() {
+            "skills.probe" => {
+                let machine_id = payload["machineId"]
+                    .as_str()
+                    .ok_or("the probe names no machine")?;
+                let snapshot =
+                    fleet_controller::skills::normalize_probe(machine_id, &probe_answer())
+                        .ok_or("the fixture must normalize")?;
+                SkillsRepository::new(self.pool.clone())
+                    .record(&snapshot)
+                    .await
+                    .map_err(|error| format!("{error:?}"))?;
+            }
+            "skills.catalog-rollout" => self.rollouts.lock().unwrap().push(payload),
+            _ => {
+                return fleet_application::worker::NoopExecutor
+                    .execute(operations, operation)
+                    .await;
+            }
+        }
+        operations
+            .complete(&operation.id, "succeeded", Some("{}"), None)
+            .await
+            .map(|_| ())
+            .map_err(|error| error.to_string())
+    }
+}
+
+/// A controller router with the onboarding surface and the built-in
+/// `fleet` skill, a worker running the onboarding executor and the stub
+/// Skills Manager, and the controller key served from `key_dir`.
 struct Controller {
     url: String,
     pool: sqlx::SqlitePool,
+    rollouts: Arc<std::sync::Mutex<Vec<Value>>>,
     _store: Store,
     _dir: tempfile::TempDir,
     _server: tokio::task::JoinHandle<()>,
@@ -107,6 +176,13 @@ impl Controller {
         let dir = tempfile::tempdir().unwrap();
         let store = Store::open(&dir.path().join("fleet.db")).await.unwrap();
         let pool = store.pool().clone();
+        fleet_controller::builtin_skills::seed_builtin_skills(
+            &pool,
+            fleet_core::SystemClock::now_unix_millis(),
+        )
+        .await
+        .expect("the built-in fleet skill seeds");
+        let rollouts = Arc::new(std::sync::Mutex::new(Vec::new()));
         let ssh_work = dir.path().join("ssh");
         let onboarding = Arc::new(fleet_controller::compose_onboarding(
             &pool,
@@ -163,7 +239,10 @@ impl Controller {
                 Arc::new(OnboardingRepository::new(pool.clone())),
                 ssh_work,
                 ExecutionLimiter::new(4),
-                Arc::new(fleet_application::worker::NoopExecutor),
+                Arc::new(StubSkillsManager {
+                    pool: pool.clone(),
+                    rollouts: rollouts.clone(),
+                }),
             ));
         let worker = tokio::spawn(async move {
             loop {
@@ -181,6 +260,7 @@ impl Controller {
         Self {
             url: format!("http://{address}"),
             pool,
+            rollouts,
             _store: store,
             _dir: dir,
             _server: server,
@@ -242,11 +322,21 @@ async fn fleetctl(url: &str, home: &Path, path: &Path, words: Vec<String>) -> Cl
 }
 
 fn join_words(port: u16, name: &str, host_key: &Path, extra: &[&str]) -> Vec<String> {
+    join_words_at("127.0.0.1", port, name, host_key, extra)
+}
+
+fn join_words_at(
+    host: &str,
+    port: u16,
+    name: &str,
+    host_key: &Path,
+    extra: &[&str],
+) -> Vec<String> {
     let mut words: Vec<String> = [
         "machines",
         "join",
         "--host",
-        "127.0.0.1",
+        host,
         "--port",
         &port.to_string(),
         "--user",
@@ -255,7 +345,6 @@ fn join_words(port: u16, name: &str, host_key: &Path, extra: &[&str]) -> Vec<Str
         name,
         "--host-key-file",
         &host_key.display().to_string(),
-        "--no-skills",
     ]
     .iter()
     .map(|word| (*word).to_owned())
@@ -297,7 +386,33 @@ async fn join_scenario() {
     assert_eq!(printed.code, 0, "{}", printed.stderr);
     assert_eq!(printed.json()["publicKey"], controller_key.trim());
 
-    // 1. The join: key installed, host key compared, machine added.
+    // 0. An address the controller cannot reach (sshd listens on
+    //    127.0.0.1 only; this machine's own preflight reaches it there) is
+    //    refused before anything on this machine changes.
+    let unreachable_home = tempfile::tempdir().unwrap();
+    let unreachable = fleetctl(
+        &controller.url,
+        unreachable_home.path(),
+        empty_path.path(),
+        join_words_at("127.0.0.2", sshd.port, "e2e-box", &host_key, &[]),
+    )
+    .await;
+    assert_eq!(unreachable.code, 1, "{}", unreachable.stdout);
+    assert!(
+        unreachable.stderr.contains("could not reach 127.0.0.2")
+            && unreachable.stderr.contains("Nothing was changed"),
+        "{}",
+        unreachable.stderr
+    );
+    assert!(
+        !unreachable_home.path().join(".ssh").exists(),
+        "authorized_keys is not touched before the controller reaches the machine"
+    );
+    assert_eq!(controller.drafts().await, 0);
+    assert_eq!(controller.machines().await, 0);
+
+    // 1. The join: host key compared, key installed, machine added, and the
+    //    fleet skill rolled out to the agent Skills Manager reports.
     let joined = fleetctl(
         &controller.url,
         home.path(),
@@ -312,12 +427,21 @@ async fn join_scenario() {
     assert_eq!(summary["resumed"], false);
     assert_eq!(summary["controllerKey"]["authorizedKeys"], "added");
     assert_eq!(summary["hostKey"]["fingerprint"], fingerprint_of(&host_key));
-    assert_eq!(summary["skills"]["status"], "skipped");
-    assert!(
-        summary["endpointId"]
-            .as_str()
-            .is_some_and(|id| !id.is_empty())
+    let endpoint_id = summary["endpointId"].as_str().unwrap().to_owned();
+    assert!(!endpoint_id.is_empty());
+    assert_eq!(summary["skillsManager"]["state"], "succeeded", "{summary}");
+    assert_eq!(summary["skills"]["status"], "deployed", "{summary}");
+    assert_eq!(
+        summary["skills"]["agents"],
+        serde_json::json!(["claude_code"])
     );
+    {
+        let rollouts = controller.rollouts.lock().unwrap();
+        assert_eq!(rollouts.len(), 1, "exactly one rollout: {rollouts:?}");
+        assert_eq!(rollouts[0]["agents"], serde_json::json!(["claude_code"]));
+        assert_eq!(rollouts[0]["machineId"], machine_id.as_str());
+        assert_eq!(rollouts[0]["endpointId"], endpoint_id.as_str());
+    }
     let authorized = std::fs::read_to_string(home.path().join(".ssh/authorized_keys")).unwrap();
     assert_eq!(
         authorized
@@ -363,27 +487,64 @@ async fn join_scenario() {
     assert_eq!(controller.drafts().await, 0);
     assert_eq!(controller.machines().await, 1);
 
-    // 3. --resume continues with the same machine; the key is not re-added.
+    // 3. --resume continues with the same machine and endpoint, after the
+    //    controller again sees this machine's own host key; the key is not
+    //    re-added.
     let resumed = fleetctl(
         &controller.url,
         home.path(),
         empty_path.path(),
-        join_words(sshd.port, "e2e-box", &host_key, &["--resume"]),
+        join_words(
+            sshd.port,
+            "e2e-box",
+            &host_key,
+            &["--resume", "--no-skills"],
+        ),
     )
     .await;
     assert_eq!(resumed.code, 0, "{}", resumed.stderr);
     assert_eq!(resumed.json()["resumed"], true);
     assert_eq!(resumed.json()["machineId"], machine_id);
+    assert_eq!(resumed.json()["endpointId"], endpoint_id.as_str());
     assert_eq!(resumed.json()["controllerKey"]["authorizedKeys"], "present");
+    assert!(
+        resumed.stderr.contains("this machine's own"),
+        "{}",
+        resumed.stderr
+    );
     assert_eq!(
         std::fs::read_to_string(home.path().join(".ssh/authorized_keys")).unwrap(),
         authorized
     );
+    assert_eq!(controller.drafts().await, 0);
 
-    // 4. A host key that is not this machine's own is refused loudly, and
-    //    nothing is confirmed or added.
+    // 3b. --resume where the enrolled address now answers with a host key
+    //     that is not this machine's own (an address can be reused) is
+    //     refused, and nothing resumes.
     let other_home = tempfile::tempdir().unwrap();
     let other = common::start_sshd_with_home_keys(other_home.path());
+    let other_host_key = other.keys_dir.path().join("host_ed25519.pub");
+    let readdressed = fleetctl(
+        &controller.url,
+        home.path(),
+        empty_path.path(),
+        join_words(sshd.port, "e2e-box", &other_host_key, &["--resume"]),
+    )
+    .await;
+    assert_eq!(readdressed.code, 1, "{}", readdressed.stdout);
+    assert!(
+        readdressed.stderr.contains("REFUSED"),
+        "{}",
+        readdressed.stderr
+    );
+    assert_eq!(controller.drafts().await, 0);
+    assert_eq!(controller.rollouts.lock().unwrap().len(), 1);
+
+    // 4. A host key that is not this machine's own is refused loudly, and
+    //    nothing is confirmed or added, nor the key installed.
+    let other_authorized =
+        || std::fs::read_to_string(other_home.path().join(".ssh/authorized_keys")).unwrap();
+    let before = other_authorized();
     let mitm = fleetctl(
         &controller.url,
         other_home.path(),
@@ -400,6 +561,11 @@ async fn join_scenario() {
     );
     assert_eq!(controller.drafts().await, 0);
     assert_eq!(controller.machines().await, 1);
+    assert_eq!(
+        other_authorized(),
+        before,
+        "the controller key is installed only after the host key matched"
+    );
 
     // 5. A stand-in skills-manager-cli stops the join before anything changes.
     let stub_dir = tempfile::tempdir().unwrap();
@@ -414,12 +580,7 @@ async fn join_scenario() {
         &controller.url,
         fresh_home.path(),
         stub_dir.path(),
-        join_words(
-            other.port,
-            "e2e-other",
-            &other.keys_dir.path().join("host_ed25519.pub"),
-            &[],
-        ),
+        join_words(other.port, "e2e-other", &other_host_key, &[]),
     )
     .await;
     assert_eq!(refused.code, 1, "{}", refused.stdout);
