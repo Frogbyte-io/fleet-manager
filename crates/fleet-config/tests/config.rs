@@ -665,7 +665,9 @@ fn the_ssh_key_generation_defaults_on_and_can_be_turned_off() {
     };
     for off in ["false", "0", " FALSE "] {
         assert!(
-            !fleet_config::load(None, &env(off)).unwrap().ssh_key_generate,
+            !fleet_config::load(None, &env(off))
+                .unwrap()
+                .ssh_key_generate,
             "{off}"
         );
     }
@@ -673,15 +675,29 @@ fn the_ssh_key_generation_defaults_on_and_can_be_turned_off() {
     for bad in ["no", "off"] {
         let error = fleet_config::load(None, &env(bad)).unwrap_err();
         assert!(
-            matches!(error, fleet_config::ConfigError::SshKeyGenerateInvalid { .. }),
+            matches!(
+                error,
+                fleet_config::ConfigError::SshKeyGenerateInvalid { .. }
+            ),
             "{bad}"
         );
         assert!(error.to_string().contains("FLEET_SSH_KEY_GENERATE"));
     }
     let dir = tempfile::tempdir().unwrap();
-    let file = write_config(dir.path(), &format!("{VALID_FILE}ssh_key_generate = false\n"));
-    assert!(!fleet_config::load(Some(&file), &none_env).unwrap().ssh_key_generate);
-    assert!(fleet_config::load(Some(&file), &env("true")).unwrap().ssh_key_generate);
+    let file = write_config(
+        dir.path(),
+        &format!("{VALID_FILE}ssh_key_generate = false\n"),
+    );
+    assert!(
+        !fleet_config::load(Some(&file), &none_env)
+            .unwrap()
+            .ssh_key_generate
+    );
+    assert!(
+        fleet_config::load(Some(&file), &env("true"))
+            .unwrap()
+            .ssh_key_generate
+    );
 }
 
 #[test]

@@ -130,8 +130,7 @@ mod tests {
 
     // A throwaway ed25519 key generated for this test only, with the
     // fingerprint `ssh-keygen -lf` prints for it.
-    const LINE: &str =
-        "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIH9t4Xt9H44BCMC3Ab4ugXr+F9s8s/RCNEv6mkk3WHnV test@example";
+    const LINE: &str = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIH9t4Xt9H44BCMC3Ab4ugXr+F9s8s/RCNEv6mkk3WHnV test@example";
     const FINGERPRINT: &str = "SHA256:2Mqm0WXnrxat1gQ/xKwNc1fp09Gh1IgfynaiOD4BH18";
 
     #[test]
@@ -160,7 +159,10 @@ mod tests {
             ("ssh-ed25519 !!!notbase64", "not base64"),
             ("ssh-ed25519 AAAA", "truncated"),
             ("from=\"x\" ssh-ed25519 AAAA", "key type"),
-            ("ssh-rsa AAAAC3NzaC1lZDI1NTE5AAAAIH9t4Xt9H44BCMC3Ab4ugXr+F9s8s/RCNEv6mkk3WHnV", "match"),
+            (
+                "ssh-rsa AAAAC3NzaC1lZDI1NTE5AAAAIH9t4Xt9H44BCMC3Ab4ugXr+F9s8s/RCNEv6mkk3WHnV",
+                "match",
+            ),
             ("ssh-ed25519 AAAA\nssh-ed25519 AAAA", "single line"),
         ] {
             let error = parse_public_key(line).unwrap_err();

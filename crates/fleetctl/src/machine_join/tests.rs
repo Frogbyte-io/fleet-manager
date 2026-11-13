@@ -7,8 +7,7 @@ use serde_json::json;
 use super::*;
 
 // Throwaway public keys generated for these tests only.
-const CONTROLLER_KEY: &str =
-    "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIH9t4Xt9H44BCMC3Ab4ugXr+F9s8s/RCNEv6mkk3WHnV fleet-controller@test";
+const CONTROLLER_KEY: &str = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIH9t4Xt9H44BCMC3Ab4ugXr+F9s8s/RCNEv6mkk3WHnV fleet-controller@test";
 const OTHER_KEY: &str =
     "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIJo/jP24EL5XlGpIRFkyYqRJ4VjG+odBnxXEwb/K0nYY other@test";
 
@@ -105,9 +104,23 @@ fn the_documented_grammar_parses() {
     let mut output = Output::Text;
     let Command::MachinesJoin(args) = parse_join(
         &[
-            "--host", "100.64.0.9", "--port", "2222", "--user", "dev", "--name", "box",
-            "--agents", "claude_code,codex", "--agent", "codex", "--resume", "--timeout", "900",
-            "--output", "json",
+            "--host",
+            "100.64.0.9",
+            "--port",
+            "2222",
+            "--user",
+            "dev",
+            "--name",
+            "box",
+            "--agents",
+            "claude_code,codex",
+            "--agent",
+            "codex",
+            "--resume",
+            "--timeout",
+            "900",
+            "--output",
+            "json",
         ],
         &mut output,
     )
@@ -154,7 +167,10 @@ fn the_top_level_parser_routes_both_commands() {
     let key = crate::parse(&words("--url http://127.0.0.1:9 system ssh-public-key")).unwrap();
     assert_eq!(key.command, Command::SystemSshPublicKey);
     let (method, path, _, body) = crate::request_for(&key.command).unwrap();
-    assert_eq!((method, path.as_str()), (reqwest::Method::GET, SSH_PUBLIC_KEY_PATH));
+    assert_eq!(
+        (method, path.as_str()),
+        (reqwest::Method::GET, SSH_PUBLIC_KEY_PATH)
+    );
     assert!(body.is_none());
 }
 
@@ -176,7 +192,11 @@ fn the_key_is_appended_once_whatever_the_comment_or_options() {
         format!("ssh-ed25519 {blob} renamed-comment\n"),
         format!("from=\"100.64.0.0/10\",no-pty ssh-ed25519 {blob}\n"),
     ] {
-        assert_eq!(authorized_keys_addition(&present, &controller), None, "{present}");
+        assert_eq!(
+            authorized_keys_addition(&present, &controller),
+            None,
+            "{present}"
+        );
     }
     // A commented-out key does not count.
     assert!(authorized_keys_addition(&format!("# {CONTROLLER_KEY}\n"), &controller).is_some());
@@ -246,7 +266,11 @@ fn a_windows_standard_account_gets_the_protected_acl() {
         }),
     );
     let error = install_authorized_key(&broken, home.path(), &key(CONTROLLER_KEY)).unwrap_err();
-    assert!(error.message.contains("Access is denied"), "{}", error.message);
+    assert!(
+        error.message.contains("Access is denied"),
+        "{}",
+        error.message
+    );
 }
 
 #[test]
@@ -263,7 +287,9 @@ fn an_administrator_is_refused_with_the_elevated_commands_for_this_key() {
     assert!(refusal.contains("administrators_authorized_keys"));
     assert!(refusal.contains("ANY administrator"));
     assert!(refusal.contains(&format!("'{CONTROLLER_KEY}'")));
-    assert!(refusal.contains("icacls $k /inheritance:r /grant \"*S-1-5-32-544:F\" /grant \"SYSTEM:F\""));
+    assert!(
+        refusal.contains("icacls $k /inheritance:r /grant \"*S-1-5-32-544:F\" /grant \"SYSTEM:F\"")
+    );
     assert!(refusal.contains("--admin-key-installed"));
     // A quote in a comment cannot break out of the PowerShell literal.
     let block = administrators_key_block("ssh-ed25519 AAAA it's");
@@ -288,19 +314,33 @@ fn the_default_shell_must_be_windows_powershell_5_1() {
         r"C:\Windows\System32\cmd.exe",
         r"D:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe",
     ] {
-        assert!(!is_windows_powershell_51(refused, r"C:\Windows"), "{refused}");
+        assert!(
+            !is_windows_powershell_51(refused, r"C:\Windows"),
+            "{refused}"
+        );
     }
-    assert_eq!(parse_default_shell("ERROR: The system was unable to find the specified registry key or value."), None);
+    assert_eq!(
+        parse_default_shell(
+            "ERROR: The system was unable to find the specified registry key or value."
+        ),
+        None
+    );
 }
 
 #[test]
 fn password_login_is_off_only_when_the_global_value_says_no() {
     assert!(password_auth_disabled("PasswordAuthentication no\n"));
-    assert!(password_auth_disabled("#PasswordAuthentication yes\nPasswordAuthentication=no\n"));
+    assert!(password_auth_disabled(
+        "#PasswordAuthentication yes\nPasswordAuthentication=no\n"
+    ));
     // The first value wins, as in OpenSSH.
-    assert!(!password_auth_disabled("PasswordAuthentication yes\nPasswordAuthentication no\n"));
+    assert!(!password_auth_disabled(
+        "PasswordAuthentication yes\nPasswordAuthentication no\n"
+    ));
     // Absent means the default, yes.
-    assert!(!password_auth_disabled("#PasswordAuthentication no\nPubkeyAuthentication yes\n"));
+    assert!(!password_auth_disabled(
+        "#PasswordAuthentication no\nPubkeyAuthentication yes\n"
+    ));
     // A value only inside a Match block is not the global one.
     assert!(!password_auth_disabled(
         "Match Group administrators\n  PasswordAuthentication no\n"
@@ -315,19 +355,31 @@ fn a_stand_in_skills_manager_is_named() {
         stderr: String::new(),
     };
     assert_eq!(stand_in_reason(b"\x7fE", Ok(&real)), None);
-    assert!(stand_in_reason(b"#!", Ok(&real)).unwrap().contains("script"));
+    assert!(
+        stand_in_reason(b"#!", Ok(&real))
+            .unwrap()
+            .contains("script")
+    );
     let json = ProgramOutput {
         success: true,
         stdout: "{\"version\":\"1.40.0\"}\n".to_owned(),
         stderr: String::new(),
     };
-    assert!(stand_in_reason(b"\x7fE", Ok(&json)).unwrap().contains("instead of"));
+    assert!(
+        stand_in_reason(b"\x7fE", Ok(&json))
+            .unwrap()
+            .contains("instead of")
+    );
     let failed = ProgramOutput {
         success: false,
         ..ProgramOutput::default()
     };
     assert!(stand_in_reason(b"\x7fE", Ok(&failed)).is_some());
-    assert!(stand_in_reason(b"\x7fE", Err("exec format error")).unwrap().contains("does not run"));
+    assert!(
+        stand_in_reason(b"\x7fE", Err("exec format error"))
+            .unwrap()
+            .contains("does not run")
+    );
 }
 
 #[cfg(unix)]
@@ -365,7 +417,11 @@ fn preflight_refuses_a_script_on_path_and_deletes_nothing() {
             stderr: String::new(),
         }),
     );
-    assert!(preflight(&host, home.path(), "100.64.0.9", 22).problems.is_empty());
+    assert!(
+        preflight(&host, home.path(), "100.64.0.9", 22)
+            .problems
+            .is_empty()
+    );
 }
 
 #[test]
@@ -375,11 +431,19 @@ fn preflight_needs_an_answering_ssh_server() {
     host.banner = Err("connection refused".to_owned());
     let found = preflight(&host, home.path(), "100.64.0.9", 22);
     assert!(found.problems[0].contains("no SSH server answers on port 22"));
-    assert!(found.problems.iter().any(|problem| problem.contains("systemctl enable --now ssh")));
+    assert!(
+        found
+            .problems
+            .iter()
+            .any(|problem| problem.contains("systemctl enable --now ssh"))
+    );
     assert!(!found.needs_elevated_setup);
 
     host.banner = Ok("HTTP/1.1 400 Bad Request".to_owned());
-    assert!(preflight(&host, home.path(), "100.64.0.9", 22).problems[0].contains("not as an SSH server"));
+    assert!(
+        preflight(&host, home.path(), "100.64.0.9", 22).problems[0]
+            .contains("not as an SSH server")
+    );
 }
 
 #[test]
@@ -398,7 +462,8 @@ fn windows_preflight_reads_and_never_changes_and_asks_for_the_elevated_block() {
         Ok(ProgramOutput {
             success: false,
             stdout: String::new(),
-            stderr: "ERROR: The system was unable to find the specified registry key or value.".to_owned(),
+            stderr: "ERROR: The system was unable to find the specified registry key or value."
+                .to_owned(),
         }),
     );
     let found = preflight(&host, home.path(), "100.64.0.9", 22);
@@ -437,14 +502,22 @@ fn the_address_comes_from_tailscale_unless_given() {
         parse_tailscale_ipv4("100.101.102.103\n"),
         Some(std::net::Ipv4Addr::new(100, 101, 102, 103))
     );
-    assert_eq!(parse_tailscale_ipv4("fd7a:115c::1\n100.64.0.9\n"), Some(std::net::Ipv4Addr::new(100, 64, 0, 9)));
+    assert_eq!(
+        parse_tailscale_ipv4("fd7a:115c::1\n100.64.0.9\n"),
+        Some(std::net::Ipv4Addr::new(100, 64, 0, 9))
+    );
     assert_eq!(parse_tailscale_ipv4("Tailscale is stopped.\n"), None);
 
     let home = tempfile::tempdir().unwrap();
     let host = FakeHost::unix(home.path()).answer("tailscale", "100.64.0.9\n");
     let target = resolve_target(&host, &JoinArgs::default()).unwrap();
     assert_eq!(
-        (target.user.as_str(), target.host.as_str(), target.port, target.name.as_str()),
+        (
+            target.user.as_str(),
+            target.host.as_str(),
+            target.port,
+            target.name.as_str()
+        ),
         ("developer", "100.64.0.9", 22, "dev-box")
     );
     let given = resolve_target(
@@ -458,7 +531,11 @@ fn the_address_comes_from_tailscale_unless_given() {
     )
     .unwrap();
     assert_eq!(
-        (given.user.as_str(), given.host.as_str(), given.name.as_str()),
+        (
+            given.user.as_str(),
+            given.host.as_str(),
+            given.name.as_str()
+        ),
         ("agent", "192.0.2.7", "named")
     );
     let missing = FakeHost::unix(home.path());
@@ -481,9 +558,21 @@ fn the_local_host_key_is_read_and_fingerprinted_like_ssh_keygen() {
     )
     .unwrap();
     assert_eq!(path, file);
-    assert_eq!(local.fingerprint, "SHA256:2Mqm0WXnrxat1gQ/xKwNc1fp09Gh1IgfynaiOD4BH18");
+    assert_eq!(
+        local.fingerprint,
+        "SHA256:2Mqm0WXnrxat1gQ/xKwNc1fp09Gh1IgfynaiOD4BH18"
+    );
     std::fs::write(&file, "not a key").unwrap();
-    assert!(local_host_key(&host, &JoinArgs { host_key_file: Some(file.display().to_string()), ..JoinArgs::default() }).is_err());
+    assert!(
+        local_host_key(
+            &host,
+            &JoinArgs {
+                host_key_file: Some(file.display().to_string()),
+                ..JoinArgs::default()
+            }
+        )
+        .is_err()
+    );
 }
 
 #[test]
@@ -492,7 +581,10 @@ fn only_an_identical_fingerprint_is_confirmed() {
     let other = key(OTHER_KEY).fingerprint;
     assert!(fleet_core::fingerprints_match(&local, &local));
     assert!(!fleet_core::fingerprints_match(&local, &other));
-    assert!(!fleet_core::fingerprints_match(&local, &local.to_lowercase()));
+    assert!(!fleet_core::fingerprints_match(
+        &local,
+        &local.to_lowercase()
+    ));
     let message = fingerprint_mismatch(&local, &other, "100.64.0.9", 22);
     assert!(message.starts_with("REFUSED"));
     assert!(message.contains(&local) && message.contains(&other));
@@ -538,8 +630,14 @@ fn the_ssh_endpoint_at_this_address_is_chosen() {
         {"id": "other", "kind": "ssh", "reference": "dev@192.0.2.1:22"},
         {"id": "this", "kind": "ssh", "reference": "dev@100.64.0.9:22"},
     ]});
-    assert_eq!(ssh_endpoint_id(&machine, "100.64.0.9", 22).as_deref(), Some("this"));
-    assert_eq!(ssh_endpoint_id(&machine, "198.51.100.1", 22).as_deref(), Some("other"));
+    assert_eq!(
+        ssh_endpoint_id(&machine, "100.64.0.9", 22).as_deref(),
+        Some("this")
+    );
+    assert_eq!(
+        ssh_endpoint_id(&machine, "198.51.100.1", 22).as_deref(),
+        Some("other")
+    );
     assert_eq!(ssh_endpoint_id(&json!({"endpoints": []}), "x", 22), None);
 }
 

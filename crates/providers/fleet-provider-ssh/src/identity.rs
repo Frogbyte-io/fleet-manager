@@ -198,9 +198,9 @@ impl ControllerIdentity {
         }
         match self.inspect() {
             IdentityState::Present(identity) => Ok(EnsureOutcome::Generated(identity)),
-            IdentityState::Unusable { detail, .. } => Err(format!(
-                "the generated key is not usable: {detail}"
-            )),
+            IdentityState::Unusable { detail, .. } => {
+                Err(format!("the generated key is not usable: {detail}"))
+            }
             IdentityState::None { .. } => {
                 Err("ssh-keygen reported success but wrote no key".to_owned())
             }
@@ -417,9 +417,8 @@ mod tests {
     fn generates_once_owner_only_and_never_overwrites() {
         let dir = tempfile::tempdir().unwrap();
         let identity = ControllerIdentity::at(dir.path().join(".ssh"));
-        let EnsureOutcome::Generated(first) = identity
-            .ensure(true, "fleet-controller@test")
-            .unwrap()
+        let EnsureOutcome::Generated(first) =
+            identity.ensure(true, "fleet-controller@test").unwrap()
         else {
             panic!("a key must be generated");
         };

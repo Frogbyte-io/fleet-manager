@@ -21,8 +21,8 @@ mod project;
 mod redact;
 mod sensitive;
 mod skill_catalog;
-mod ssh_key;
 mod source;
+mod ssh_key;
 mod time;
 mod value;
 
@@ -88,8 +88,6 @@ pub use skill_catalog::{
     is_builtin_skill_catalog_id,
 };
 pub use source::CandidateDigest;
-pub use ssh_key::{
-    MAX_PUBLIC_KEY_LINE_BYTES, SshPublicKey, fingerprints_match, parse_public_key,
-};
+pub use ssh_key::{MAX_PUBLIC_KEY_LINE_BYTES, SshPublicKey, fingerprints_match, parse_public_key};
 pub use time::{Clock, Deadline, FixedClock, SystemClock, Timestamp};
 pub use value::{ParseSlugError, Revision, Slug};

@@ -294,7 +294,9 @@ impl JoinHost for SystemHost {
                     ));
                 }
                 Ok(None) => std::thread::sleep(Duration::from_millis(50)),
-                Err(error) => return Err(format!("cannot wait for {}: {error}", program.display())),
+                Err(error) => {
+                    return Err(format!("cannot wait for {}: {error}", program.display()));
+                }
             }
         }
         let output = child
@@ -379,20 +381,25 @@ fn home_dir(host: &dyn JoinHost) -> Result<PathBuf, CliError> {
         .map(PathBuf::from)
         .filter(|home| home.is_absolute())
         .ok_or_else(|| CliError {
-            message: format!("{variable} is not set to an absolute path; cannot find this account's home"),
+            message: format!(
+                "{variable} is not set to an absolute path; cannot find this account's home"
+            ),
         })
 }
 
 /// This account's login name.
 fn current_user(host: &dyn JoinHost) -> Result<String, CliError> {
     let found = match host.platform() {
-        Platform::Unix => host.env("USER").or_else(|| host.env("LOGNAME")).or_else(|| {
-            host.run(Path::new("id"), &["-un"])
-                .ok()
-                .filter(|output| output.success)
-                .map(|output| output.stdout.trim().to_owned())
-                .filter(|name| !name.is_empty())
-        }),
+        Platform::Unix => host
+            .env("USER")
+            .or_else(|| host.env("LOGNAME"))
+            .or_else(|| {
+                host.run(Path::new("id"), &["-un"])
+                    .ok()
+                    .filter(|output| output.success)
+                    .map(|output| output.stdout.trim().to_owned())
+                    .filter(|name| !name.is_empty())
+            }),
         Platform::Windows => host.env("USERNAME"),
     };
     found.ok_or_else(|| CliError {
@@ -474,7 +481,8 @@ pub fn install_authorized_key(
     let fail = |what: &str, error: &dyn std::fmt::Display| CliError {
         message: format!("cannot {what}: {error}"),
     };
-    std::fs::create_dir_all(&dir).map_err(|error| fail(&format!("create {}", dir.display()), &error))?;
+    std::fs::create_dir_all(&dir)
+        .map_err(|error| fail(&format!("create {}", dir.display()), &error))?;
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt as _;
@@ -632,7 +640,9 @@ pub fn password_auth_disabled(sshd_config: &str) -> bool {
         if line.is_empty() || line.starts_with('#') {
             continue;
         }
-        let mut words = line.split(|c: char| c.is_whitespace() || c == '=').filter(|w| !w.is_empty());
+        let mut words = line
+            .split(|c: char| c.is_whitespace() || c == '=')
+            .filter(|w| !w.is_empty());
         let keyword = words.next().unwrap_or_default();
         if keyword.eq_ignore_ascii_case("Match") {
             // A Match block may turn it back on for some users: only the
@@ -640,7 +650,9 @@ pub fn password_auth_disabled(sshd_config: &str) -> bool {
             break;
         }
         if keyword.eq_ignore_ascii_case("PasswordAuthentication") {
-            return words.next().is_some_and(|value| value.eq_ignore_ascii_case("no"));
+            return words
+                .next()
+                .is_some_and(|value| value.eq_ignore_ascii_case("no"));
         }
     }
     false
@@ -654,9 +666,7 @@ pub fn stand_in_reason(head: &[u8], version: Result<&ProgramOutput, &str>) -> Op
     }
     match version {
         Err(error) => Some(format!("it does not run: {error}")),
-        Ok(output) if !output.success => {
-            Some("`skills-manager-cli --version` failed".to_owned())
-        }
+        Ok(output) if !output.success => Some("`skills-manager-cli --version` failed".to_owned()),
         Ok(output) => {
             let first = output.stdout.lines().next().unwrap_or_default().trim();
             let real = first
@@ -766,7 +776,12 @@ pub fn draft_body(user: &str, host: &str, port: u16, name: &str) -> Value {
 
 /// The `fleet` skill rollout request.
 #[must_use]
-pub fn rollout_body(version_id: &str, machine_id: &str, endpoint_id: &str, agents: &[String]) -> Value {
+pub fn rollout_body(
+    version_id: &str,
+    machine_id: &str,
+    endpoint_id: &str,
+    agents: &[String],
+) -> Value {
     json!({
         "versionId": version_id,
         "machineId": machine_id,
@@ -933,10 +948,7 @@ fn skills_manager_preflight(host: &dyn JoinHost, home: &Path, found: &mut Prefli
             .and_then(|mut file| file.read(&mut head))
             .unwrap_or(0);
         let version = host.run(&candidate, &["--version"]);
-        let reason = stand_in_reason(
-            &head[..read],
-            version.as_ref().map_err(String::as_str),
-        );
+        let reason = stand_in_reason(&head[..read], version.as_ref().map_err(String::as_str));
         if let Some(reason) = reason {
             found.problems.push(format!(
                 "{} is not the real Skills Manager CLI: {reason}. Fleet would read fake skills from it and \
@@ -1008,7 +1020,8 @@ fn controller_key(
     })?;
     if answer["fingerprint"].as_str() != Some(key.fingerprint.as_str()) {
         return Err(CliError {
-            message: "the controller's published fingerprint does not match its public key".to_owned(),
+            message: "the controller's published fingerprint does not match its public key"
+                .to_owned(),
         });
     }
     Ok((answer, key))
@@ -1050,10 +1063,13 @@ struct Target {
 }
 
 fn resolve_target(host: &dyn JoinHost, args: &JoinArgs) -> Result<Target, CliError> {
-    let address = match &args.host {
-        Some(address) => address.trim().to_owned(),
-        None => {
-            let tailscale = host.find_on_path("tailscale").unwrap_or_else(|| PathBuf::from("tailscale"));
+    let address = if let Some(address) = &args.host {
+        address.trim().to_owned()
+    } else {
+        {
+            let tailscale = host
+                .find_on_path("tailscale")
+                .unwrap_or_else(|| PathBuf::from("tailscale"));
             let output = host.run(&tailscale, &["ip", "-4"]).map_err(|error| CliError {
                 message: format!(
                     "cannot find this machine's tailnet address ({error}); pass --host <address the controller can reach>"
@@ -1089,7 +1105,10 @@ fn resolve_target(host: &dyn JoinHost, args: &JoinArgs) -> Result<Target, CliErr
 }
 
 /// This machine's own host key, read from its file.
-fn local_host_key(host: &dyn JoinHost, args: &JoinArgs) -> Result<(PathBuf, fleet_core::SshPublicKey), CliError> {
+fn local_host_key(
+    host: &dyn JoinHost,
+    args: &JoinArgs,
+) -> Result<(PathBuf, fleet_core::SshPublicKey), CliError> {
     let path = match &args.host_key_file {
         Some(path) => PathBuf::from(path),
         None => match host.platform() {
@@ -1160,7 +1179,10 @@ fn run_stage(
         &format!("/api/v1/machines/onboarding/drafts/{draft_id}/{stage}"),
         None,
     )?;
-    let operation_id = started["data"]["id"].as_str().unwrap_or_default().to_owned();
+    let operation_id = started["data"]["id"]
+        .as_str()
+        .unwrap_or_default()
+        .to_owned();
     let finished = crate::wait_for_operation(client, invocation, &operation_id, timeout)?;
     let draft = get(
         client,
@@ -1198,6 +1220,7 @@ struct Enrolled {
 }
 
 /// Draft → test → compare and confirm → test → discover → add.
+#[allow(clippy::too_many_lines)]
 fn enroll(
     client: &reqwest::blocking::Client,
     invocation: &Invocation,
@@ -1209,7 +1232,12 @@ fn enroll(
         client,
         invocation,
         "/api/v1/machines/onboarding/drafts",
-        Some(&draft_body(&target.user, &target.host, target.port, &target.name)),
+        Some(&draft_body(
+            &target.user,
+            &target.host,
+            target.port,
+            &target.name,
+        )),
     )?;
     let draft = &created["data"];
     let mut guard = DraftGuard {
@@ -1268,11 +1296,21 @@ fn enroll(
                 ),
             });
         };
-        let machine_id = duplicate["machineId"].as_str().unwrap_or_default().to_owned();
-        let machine = get(client, invocation, &format!("/api/v1/machines/{machine_id}"), &[])?;
-        let endpoint_id = ssh_endpoint_id(&machine["data"], &target.host, target.port)
-            .ok_or_else(|| CliError {
-                message: format!("machine {machine_id} has no SSH endpoint to resume with"),
+        let machine_id = duplicate["machineId"]
+            .as_str()
+            .unwrap_or_default()
+            .to_owned();
+        let machine = get(
+            client,
+            invocation,
+            &format!("/api/v1/machines/{machine_id}"),
+            &[],
+        )?;
+        let endpoint_id =
+            ssh_endpoint_id(&machine["data"], &target.host, target.port).ok_or_else(|| {
+                CliError {
+                    message: format!("machine {machine_id} has no SSH endpoint to resume with"),
+                }
             })?;
         step(&format!(
             "resuming with machine {} ({machine_id}), already enrolled",
@@ -1280,7 +1318,10 @@ fn enroll(
         ));
         return Ok(Enrolled {
             machine_id,
-            name: machine["data"]["name"].as_str().unwrap_or_default().to_owned(),
+            name: machine["data"]["name"]
+                .as_str()
+                .unwrap_or_default()
+                .to_owned(),
             endpoint_id,
             resumed: true,
             skills_manager: Value::Null,
@@ -1295,7 +1336,9 @@ fn enroll(
                  machine's tailnet address and that the tailnet lets the controller reach port {}",
                 target.host,
                 target.port,
-                observed["lastTest"]["detail"].as_str().unwrap_or("no detail"),
+                observed["lastTest"]["detail"]
+                    .as_str()
+                    .unwrap_or("no detail"),
                 target.port
             ),
         });
@@ -1303,7 +1346,12 @@ fn enroll(
     if !fleet_core::fingerprints_match(fingerprint, local_fingerprint) {
         guard.cancel();
         return Err(CliError {
-            message: fingerprint_mismatch(local_fingerprint, fingerprint, &target.host, target.port),
+            message: fingerprint_mismatch(
+                local_fingerprint,
+                fingerprint,
+                &target.host,
+                target.port,
+            ),
         });
     }
     step(&format!(
@@ -1328,14 +1376,19 @@ fn enroll(
             ""
         };
         return Err(CliError {
-            message: format!("the controller could not log in as {}: {detail}.{hint}", target.user),
+            message: format!(
+                "the controller could not log in as {}: {detail}.{hint}",
+                target.user
+            ),
         });
     }
     if let Some(reason) = tested["shellCheck"]["refusalReason"].as_str() {
         return Err(CliError {
             message: format!(
                 "the login shell is refused ({reason}): {}",
-                tested["shellCheck"]["refusalDetail"].as_str().unwrap_or("no detail")
+                tested["shellCheck"]["refusalDetail"]
+                    .as_str()
+                    .unwrap_or("no detail")
             ),
         });
     }
@@ -1344,7 +1397,10 @@ fn enroll(
     let (discover, _) = run_stage(client, invocation, &draft_id, "discover", args.timeout)?;
     if discover["state"] != "succeeded" {
         return Err(CliError {
-            message: format!("discovery did not succeed: {}", operation_failure(&discover)),
+            message: format!(
+                "discovery did not succeed: {}",
+                operation_failure(&discover)
+            ),
         });
     }
 
@@ -1370,6 +1426,7 @@ fn enroll(
 
 /// Follows Skills Manager to a fresh snapshot and rolls out the `fleet`
 /// skill. Answers the `skills` part of the summary and whether it failed.
+#[allow(clippy::too_many_lines)]
 fn deploy_skills(
     client: &reqwest::blocking::Client,
     invocation: &Invocation,
@@ -1385,12 +1442,13 @@ fn deploy_skills(
         )
     };
     // The install the add queued, or a plain probe of what is installed.
-    let probe_id = match enrolled.skills_manager["status"].as_str() {
-        Some("queued") => enrolled.skills_manager["operationId"]
+    let probe_id = if enrolled.skills_manager["status"] == "queued" {
+        enrolled.skills_manager["operationId"]
             .as_str()
             .unwrap_or_default()
-            .to_owned(),
-        _ => {
+            .to_owned()
+    } else {
+        {
             if let Some(reason) = enrolled.skills_manager["reason"].as_str() {
                 step(&format!("Skills Manager install not queued: {reason}"));
             }
@@ -1400,7 +1458,10 @@ fn deploy_skills(
                 &format!("/api/v1/machines/{}/skills/operations", enrolled.machine_id),
                 Some(&probe_body(&enrolled.machine_id, &enrolled.endpoint_id)),
             ) {
-                Ok(started) => started["data"]["id"].as_str().unwrap_or_default().to_owned(),
+                Ok(started) => started["data"]["id"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .to_owned(),
                 Err(error) => {
                     return failed(manager, format!("could not probe Skills Manager: {error}"));
                 }
@@ -1417,7 +1478,10 @@ fn deploy_skills(
     if probe["state"] != "succeeded" {
         return failed(
             manager,
-            format!("the Skills Manager probe did not succeed: {}", operation_failure(&probe)),
+            format!(
+                "the Skills Manager probe did not succeed: {}",
+                operation_failure(&probe)
+            ),
         );
     }
     let agents = if args.agents.is_empty() {
@@ -1427,9 +1491,24 @@ fn deploy_skills(
             &format!("/api/v1/machines/{}/skills", enrolled.machine_id),
             &[],
         ) {
+            Ok(snapshot) if snapshot["data"]["availability"] != "available" => {
+                return failed(
+                    manager,
+                    format!(
+                        "Skills Manager is {} on the machine (the controller installs it after an add when \
+                         FLEET_SKILLS_MANAGER_AUTO_INSTALL is on; install skills-manager-cli by hand otherwise)",
+                        snapshot["data"]["availability"]
+                            .as_str()
+                            .unwrap_or("unknown")
+                    ),
+                );
+            }
             Ok(snapshot) => installed_agents(&snapshot["data"]),
             Err(error) => {
-                return failed(manager, format!("could not read the Skills Manager snapshot: {error}"));
+                return failed(
+                    manager,
+                    format!("could not read the Skills Manager snapshot: {error}"),
+                );
             }
         }
     } else {
@@ -1453,10 +1532,18 @@ fn deploy_skills(
         &[("limit", "1".to_owned())],
     ) {
         Ok(page) => page,
-        Err(error) => return failed(manager, format!("could not list the fleet skill's versions: {error}")),
+        Err(error) => {
+            return failed(
+                manager,
+                format!("could not list the fleet skill's versions: {error}"),
+            );
+        }
     };
     let Some(version_id) = newest_version(&versions) else {
-        return failed(manager, "the controller has no published fleet skill version".to_owned());
+        return failed(
+            manager,
+            "the controller has no published fleet skill version".to_owned(),
+        );
     };
     step(&format!(
         "rolling out the fleet skill ({version_id}) to {}",
@@ -1533,17 +1620,17 @@ pub fn run_on(
     let administrator = host.platform() == Platform::Windows
         && host
             .run(Path::new("whoami"), &["/groups", "/fo", "csv", "/nh"])
-            .ok()
-            .is_some_and(|output| is_administrator(&output.stdout));
+            .is_ok_and(|output| is_administrator(&output.stdout));
     if !checks.problems.is_empty() {
         let mut message = format!(
             "this machine is not ready; nothing was changed:\n  - {}",
             checks.problems.join("\n  - ")
         );
         if checks.needs_elevated_setup {
-            message.push_str(&format!(
-                "\n\nRun once in Windows PowerShell as Administrator, then run the join again:\n\n{WINDOWS_ELEVATED_SETUP}"
-            ));
+            message.push_str(
+                "\n\nRun once in Windows PowerShell as Administrator, then run the join again:\n\n",
+            );
+            message.push_str(WINDOWS_ELEVATED_SETUP);
         }
         return Err(CliError { message });
     }
@@ -1554,7 +1641,9 @@ pub fn run_on(
                 message: administrator_refusal(&key.line()),
             });
         }
-        step("administrator account: using the key the operator installed in administrators_authorized_keys");
+        step(
+            "administrator account: using the key the operator installed in administrators_authorized_keys",
+        );
         (
             KeyInstall::AdministratorsFile,
             PathBuf::from(
@@ -1616,7 +1705,11 @@ pub fn render(summary: &Value) -> String {
     let mut lines = vec![
         format!(
             "{} machine {} ({})",
-            if summary["resumed"] == true { "resumed" } else { "joined" },
+            if summary["resumed"] == true {
+                "resumed"
+            } else {
+                "joined"
+            },
             text(&summary["name"]),
             text(&summary["machineId"])
         ),
@@ -1650,7 +1743,10 @@ pub fn render(summary: &Value) -> String {
         None => {}
     }
     if skills["status"] == "failed" {
-        lines.push("  the machine is enrolled; fix the cause and run `fleetctl machines join --resume`".to_owned());
+        lines.push(
+            "  the machine is enrolled; fix the cause and run `fleetctl machines join --resume`"
+                .to_owned(),
+        );
     }
     for warning in summary["warnings"].as_array().into_iter().flatten() {
         lines.push(format!("  warning: {}", text(warning)));

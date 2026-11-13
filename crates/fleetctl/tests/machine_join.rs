@@ -10,6 +10,8 @@
 //! `GET /system/ssh-public-key` through the controller's own identity code.
 
 #![cfg(unix)]
+// The shared sshd harness and the one long scenario are test code.
+#![allow(clippy::too_many_lines)]
 
 #[path = "../../fleet-controller/tests/common/mod.rs"]
 mod common;
@@ -64,7 +66,13 @@ fn join_end_to_end_through_a_private_agent() {
         String::from_utf8_lossy(&added.stderr)
     );
     let child = Process::new(std::env::current_exe().unwrap())
-        .args(["--exact", "join_scenario", "--nocapture", "--test-threads", "1"])
+        .args([
+            "--exact",
+            "join_scenario",
+            "--nocapture",
+            "--test-threads",
+            "1",
+        ])
         .env("SSH_AUTH_SOCK", &socket)
         .env(CHILD_DIR_VAR, dir.path())
         .output()
@@ -100,7 +108,10 @@ impl Controller {
         let store = Store::open(&dir.path().join("fleet.db")).await.unwrap();
         let pool = store.pool().clone();
         let ssh_work = dir.path().join("ssh");
-        let onboarding = Arc::new(fleet_controller::compose_onboarding(&pool, ssh_work.clone()));
+        let onboarding = Arc::new(fleet_controller::compose_onboarding(
+            &pool,
+            ssh_work.clone(),
+        ));
         let settings = fleet_controller::Settings {
             listen: "127.0.0.1:0".parse().unwrap(),
             web_dist: dir.path().to_path_buf(),
@@ -200,9 +211,8 @@ struct Cli {
 
 impl Cli {
     fn json(&self) -> Value {
-        serde_json::from_str(&self.stdout).unwrap_or_else(|error| {
-            panic!("not JSON ({error}):\n{}\n{}", self.stdout, self.stderr)
-        })
+        serde_json::from_str(&self.stdout)
+            .unwrap_or_else(|error| panic!("not JSON ({error}):\n{}\n{}", self.stdout, self.stderr))
     }
 }
 
@@ -303,10 +313,16 @@ async fn join_scenario() {
     assert_eq!(summary["controllerKey"]["authorizedKeys"], "added");
     assert_eq!(summary["hostKey"]["fingerprint"], fingerprint_of(&host_key));
     assert_eq!(summary["skills"]["status"], "skipped");
-    assert!(summary["endpointId"].as_str().is_some_and(|id| !id.is_empty()));
+    assert!(
+        summary["endpointId"]
+            .as_str()
+            .is_some_and(|id| !id.is_empty())
+    );
     let authorized = std::fs::read_to_string(home.path().join(".ssh/authorized_keys")).unwrap();
     assert_eq!(
-        authorized.matches(controller_key.split(' ').nth(1).unwrap()).count(),
+        authorized
+            .matches(controller_key.split(' ').nth(1).unwrap())
+            .count(),
         1
     );
     {
@@ -338,7 +354,11 @@ async fn join_scenario() {
     )
     .await;
     assert_eq!(again.code, 1, "{}", again.stdout);
-    assert!(again.stderr.contains("already enrolled"), "{}", again.stderr);
+    assert!(
+        again.stderr.contains("already enrolled"),
+        "{}",
+        again.stderr
+    );
     assert!(again.stderr.contains("--resume"), "{}", again.stderr);
     assert_eq!(controller.drafts().await, 0);
     assert_eq!(controller.machines().await, 1);
@@ -373,7 +393,11 @@ async fn join_scenario() {
     .await;
     assert_eq!(mitm.code, 1, "{}", mitm.stdout);
     assert!(mitm.stderr.contains("REFUSED"), "{}", mitm.stderr);
-    assert!(mitm.stderr.contains(&fingerprint_of(&host_key)), "{}", mitm.stderr);
+    assert!(
+        mitm.stderr.contains(&fingerprint_of(&host_key)),
+        "{}",
+        mitm.stderr
+    );
     assert_eq!(controller.drafts().await, 0);
     assert_eq!(controller.machines().await, 1);
 
@@ -405,6 +429,9 @@ async fn join_scenario() {
         refused.stderr
     );
     assert!(stub.exists(), "the stand-in is reported, never deleted");
-    assert!(!fresh_home.path().join(".ssh").exists(), "nothing was written");
+    assert!(
+        !fresh_home.path().join(".ssh").exists(),
+        "nothing was written"
+    );
     assert_eq!(controller.drafts().await, 0);
 }
