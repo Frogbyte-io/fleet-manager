@@ -74,6 +74,7 @@ Compose project name. Never share it between two controller instances.
    |---|---|
    | `FLEET_DESIRED_FETCH_INTERVAL_SECONDS` | Periodic fetch of the Fleet Git source; `0` (default) is off, otherwise at least `30`. Needed for pushed Registry edits to appear without a manual fetch. |
    | `FLEET_SKILLS_MANAGER_AUTO_INSTALL` | `true` (default) queues a checksum-verified install of the tested `skills-manager-cli` after a fleetd install or an onboarding add; `false` turns it off. See the configuration table in `deploy/README.md`. |
+   | `FLEET_SSH_KEY_GENERATE` | `true` (default) generates the controller's own SSH key at startup, `/var/lib/fleet/.ssh/id_ed25519` on the data volume, when it has none; an existing key is kept. `fleetctl system ssh-public-key` prints its public line, and `fleetctl machines join` installs it on a machine. `false` turns generation off. |
    | `FLEET_CONSOLE_IDLE_SECONDS` | How long a Proxmox VM screen may go without keyboard, pointer, or paste input before the controller closes it (FM-495); default `600`, accepted range `30` to `3600`. Watching without input counts as idle; an invalid value is ignored with a startup warning. |
    | `FLEET_REGISTRY_ENRICH_INTERVAL_SECONDS` | Domain RDAP/DNS sweep; default daily, `0` off, otherwise at least `900`. |
    | `FLEET_REGISTRY_EXPIRY_WINDOW_DAYS` | Domain expiry warning window; default `30`. |
@@ -84,6 +85,19 @@ Compose project name. Never share it between two controller instances.
    SSH Fleet Git remotes verify host keys against `/var/lib/fleet/.ssh/known_hosts`
    on the data volume (the controller user's home). Pin the Git host's keys there
    before configuring an `ssh://` or `git@` remote.
+
+   The controller's own SSH key is generated on the first start, in the same
+   directory (`/var/lib/fleet/.ssh/id_ed25519`, owned by the controller user),
+   and the deployment log names its fingerprint. Machines get its public half
+   with `fleetctl machines join` ([add a machine](../docs/operations/add-a-machine.md));
+   nothing has to be run inside the container. A key you created earlier with
+   `docker exec` is kept: if the log reports it unusable, apply the fix that
+   message names, which depends on the problem: `chown -R` on the `.ssh`
+   directory when the controller user cannot read the key or the directory,
+   `chmod 600` for a key other users can read. A passphrase-protected key, one
+   that is not a regular file, or one `ssh-keygen` cannot read (`is not a
+   usable private key`, `printed no usable public key`) has no fix in place:
+   move it away and restart to get a new one.
 5. Use one replica and stop/recreate deployments. Disable overlapping rolling
    deployments and automatic previews: two controllers must never open the
    same SQLite volume. An isolated preview needs its own volume, master key,

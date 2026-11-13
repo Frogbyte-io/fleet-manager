@@ -79,6 +79,13 @@ fn run_serve(mut config: fleet_config::ControllerConfig) -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
+    // The controller's own SSH key (the default identity `--auth agent`
+    // connects with): generated when missing, reported when unusable. Never
+    // fatal; the read endpoint reports the same state.
+    eprintln!(
+        "{}",
+        fleet_controller::ssh_identity::prepare_at_startup(config.ssh_key_generate)
+    );
     let settings = Settings {
         listen: config.listen,
         tailscale_serve_listen: config.tailscale_serve_listen,

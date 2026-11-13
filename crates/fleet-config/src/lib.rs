@@ -21,7 +21,7 @@
 //!    `FLEET_IMAGE_BUILD_ADDRESS_POOL_RANGE`,
 //!    `FLEET_IMAGE_BUILD_ADDRESS_POOL_GATEWAY`,
 //!    `FLEET_IMAGE_BUILD_ADDRESS_POOL_DNS`,
-//!    `FLEET_IMAGE_BUILD_ADDRESS_POOL_REFUSE_ISO`).
+//!    `FLEET_IMAGE_BUILD_ADDRESS_POOL_REFUSE_ISO`, `FLEET_SSH_KEY_GENERATE`).
 //!
 //! `FLEET_IMAGE_BUILD_ADDRESS_POOL` (TOML `image_build_address_pool`, off by
 //! default) is the opt-in build address pool (#337): an IPv4 CIDR, with
@@ -57,6 +57,12 @@
 //! any case, like the other boolean settings; `false` (or `0`) turns the
 //! follow-up off, an empty value means unset, and any other value fails
 //! configuration loading.
+//!
+//! `FLEET_SSH_KEY_GENERATE` (TOML `ssh_key_generate`, default `true`) makes
+//! the controller generate an ed25519 key for its own user at startup when
+//! that user has no default SSH identity, so machines can be added without a
+//! manual `ssh-keygen` in the container. An existing key is never replaced.
+//! Same boolean grammar as above; `false` (or `0`) turns generation off.
 //!
 //! `FLEET_DESIRED_FETCH_INTERVAL_SECONDS` (TOML
 //! `desired_fetch_interval_seconds`, default `0` = off) makes the
@@ -122,6 +128,9 @@ pub const MIN_HARDWARE_REFRESH_INTERVAL_SECONDS: u64 = 60;
 /// Environment variable turning the Skills Manager follow-up install off
 /// (`false`) or on (`true`, the default) (#600).
 pub const SKILLS_MANAGER_AUTO_INSTALL_VAR: &str = "FLEET_SKILLS_MANAGER_AUTO_INSTALL";
+/// Environment variable turning the startup generation of the controller's
+/// own SSH key off (`false`) or on (`true`, the default).
+pub const SSH_KEY_GENERATE_VAR: &str = "FLEET_SSH_KEY_GENERATE";
 /// Environment variable holding the periodic desired-source fetch interval
 /// in seconds (`0`, the default, disables the periodic fetch).
 pub const DESIRED_FETCH_INTERVAL_VAR: &str = "FLEET_DESIRED_FETCH_INTERVAL_SECONDS";
@@ -217,6 +226,9 @@ pub struct ControllerConfig {
     /// Whether the controller queues a pinned Skills Manager install after a
     /// machine is set up (fleetd install or onboarding add). Default `true`.
     pub skills_manager_auto_install: bool,
+    /// Whether the controller generates `~/.ssh/id_ed25519` for its own user
+    /// at startup when that user has no default SSH identity. Default `true`.
+    pub ssh_key_generate: bool,
     /// Where Lab artifact bytes live (FM-721). The controller prepares it at
     /// startup and serves without Lab artifacts when it cannot.
     pub lab_artifacts_dir: PathBuf,
@@ -397,6 +409,7 @@ struct ConfigFile {
     hardware_refresh_interval_seconds: Option<u64>,
     desired_fetch_interval_seconds: Option<u64>,
     skills_manager_auto_install: Option<bool>,
+    ssh_key_generate: Option<bool>,
     lab_memory_overcommit: Option<f64>,
     lab_cpu_overcommit: Option<f64>,
     lab_capacity_max_age_seconds: Option<u64>,
@@ -461,6 +474,11 @@ pub enum ConfigError {
     },
     /// The Skills Manager auto-install switch is not `true` or `false`.
     SkillsManagerAutoInstallInvalid {
+        /// The value that failed to parse.
+        value: String,
+    },
+    /// The SSH key generation switch is not `true` or `false`.
+    SshKeyGenerateInvalid {
         /// The value that failed to parse.
         value: String,
     },
@@ -586,6 +604,10 @@ impl fmt::Display for ConfigError {
                 f,
                 "{HARDWARE_REFRESH_INTERVAL_VAR} must be 0 (off) or a whole number of seconds of at least {MIN_HARDWARE_REFRESH_INTERVAL_SECONDS}, not {value:?}"
             ),
+            Self::SshKeyGenerateInvalid { value } => write!(
+                f,
+                "{SSH_KEY_GENERATE_VAR} must be true or false (or 1 or 0, any case), not {value:?}"
+            ),
             Self::SkillsManagerAutoInstallInvalid { value } => write!(
                 f,
                 "{SKILLS_MANAGER_AUTO_INSTALL_VAR} must be true or false (or 1 or 0, any case), not {value:?}"
@@ -675,6 +697,7 @@ pub fn load(
     let mut hardware_refresh_interval_seconds: Option<u64> = None;
     let mut desired_fetch_interval_seconds: Option<u64> = None;
     let mut skills_manager_auto_install: Option<bool> = None;
+    let mut ssh_key_generate: Option<bool> = None;
     let mut lab_placement = LabPlacementConfig::default();
     let mut lab_artifacts_dir: Option<String> = None;
     let mut lab_artifact_retention_seconds: Option<u64> = None;
@@ -708,6 +731,7 @@ pub fn load(
         hardware_refresh_interval_seconds = file.hardware_refresh_interval_seconds;
         desired_fetch_interval_seconds = file.desired_fetch_interval_seconds;
         skills_manager_auto_install = file.skills_manager_auto_install;
+        ssh_key_generate = file.ssh_key_generate;
         if let Some(ratio) = file.lab_memory_overcommit {
             lab_placement.memory_overcommit = ratio;
         }
@@ -787,6 +811,13 @@ pub fn load(
             _ => return Err(ConfigError::SkillsManagerAutoInstallInvalid { value: raw }),
         });
     }
+    if let Some(raw) = env(SSH_KEY_GENERATE_VAR).filter(|raw| !raw.trim().is_empty()) {
+        ssh_key_generate = Some(match raw.trim().to_ascii_lowercase().as_str() {
+            "true" | "1" => true,
+            "false" | "0" => false,
+            _ => return Err(ConfigError::SshKeyGenerateInvalid { value: raw }),
+        });
+    }
     let lab_placement = layer_lab_placement(lab_placement, env)?;
 
     lab_artifacts_dir = env(LAB_ARTIFACTS_DIR_VAR).or(lab_artifacts_dir);
@@ -845,6 +876,7 @@ pub fn load(
             .unwrap_or(DEFAULT_HARDWARE_REFRESH_INTERVAL_SECONDS),
         desired_fetch_interval_seconds: desired_fetch_interval_seconds.unwrap_or(0),
         skills_manager_auto_install: skills_manager_auto_install.unwrap_or(true),
+        ssh_key_generate: ssh_key_generate.unwrap_or(true),
         lab_placement,
         image_build_proxy,
         image_build_address_pool,
@@ -1213,6 +1245,7 @@ impl ControllerConfig {
                 "skills_manager_auto_install = {}",
                 self.skills_manager_auto_install
             ),
+            format!("ssh_key_generate = {}", self.ssh_key_generate),
             format!("lab_artifacts_dir = {}", self.lab_artifacts_dir.display()),
             format!(
                 "lab_artifact_retention_seconds = {}",

@@ -304,6 +304,36 @@ export interface MachineDto {
 }
 
 /**
+ * What a machine's setup follow-up did.
+ */
+export interface SetupFollowUpDto {
+  /**
+     * The queued `skills.probe` operation, when `queued`.
+     * @nullable
+     */
+  operationId?: string | null;
+  /**
+     * Why nothing was queued: the rule, when `skipped`; when `failed`, a
+     * fixed sentence saying the install may not have been queued (a
+     * backend failure or timeout can still leave it queued; the detail is
+     * in the controller log).
+     * @nullable
+     */
+  reason?: string | null;
+  /**
+     * `queued` (the operation is `operationId`), `skipped` (by rule, see
+     * `reason`), `disabled` (the controller setting is off), or `failed`
+     * (queueing was refused or failed, see `reason`).
+     */
+  status: string;
+  /**
+     * The Skills Manager CLI version the queued install pins, when `queued`.
+     * @nullable
+     */
+  version?: string | null;
+}
+
+/**
  * The outcome of an add: the new machine plus the duplicates that were
  * warned about.
  */
@@ -315,6 +345,7 @@ export interface AddedMachineDto {
   duplicates: DuplicateCandidateDto[];
   /** The registered machine, redacted per the caller's permissions. */
   machine: MachineDto;
+  skillsManager?: null | SetupFollowUpDto;
 }
 
 /**
@@ -7404,6 +7435,7 @@ export type ResourceAddedMachineDtoData = {
   duplicates: DuplicateCandidateDto[];
   /** The registered machine, redacted per the caller's permissions. */
   machine: MachineDto;
+  skillsManager?: null | SetupFollowUpDto;
 };
 
 /**
@@ -11000,6 +11032,54 @@ export interface SkillsSnapshotDto {
   stale: boolean;
   /** `complete`, `failed`, `unavailable`, or `unsupported`. */
   updateCheck: string;
+}
+
+/**
+ * Whether the controller has a usable SSH identity.
+ */
+export type SshKeyState = typeof SshKeyState[keyof typeof SshKeyState];
+
+
+export const SshKeyState = {
+  present: 'present',
+  none: 'none',
+  unusable: 'unusable',
+} as const;
+
+/**
+ * The controller's SSH public key, served at `/api/v1/system/ssh-public-key`.
+ * This is the line a machine puts in `authorized_keys` so the controller can
+ * reach it with `--auth agent`.
+ */
+export interface SshPublicKeyInfo {
+  /**
+     * What is wrong and how to fix it, when the key is missing or unusable.
+     * @nullable
+     */
+  detail?: string | null;
+  /**
+     * The `SHA256:` fingerprint, as `ssh-keygen -lf` prints it, when present.
+     * @nullable
+     */
+  fingerprint?: string | null;
+  /**
+     * The key type, e.g. `ssh-ed25519`, when present.
+     * @nullable
+     */
+  keyType?: string | null;
+  /**
+     * The private key file on the controller (its path, never its content),
+     * or the directory searched when there is none.
+     * @nullable
+     */
+  path?: string | null;
+  /**
+     * The OpenSSH public key line, when present.
+     * @nullable
+     */
+  publicKey?: string | null;
+  /** Whether a usable key exists. */
+  state: SshKeyState;
 }
 
 /**
@@ -25816,6 +25896,74 @@ export const getSystemInfo = async ( options?: RequestInit): Promise<getSystemIn
 
   const data: getSystemInfoResponse['data'] = body ? JSON.parse(body) : {}
   return { data, status: res.status, headers: res.headers } as getSystemInfoResponse
+}
+
+
+
+export type getControllerSshPublicKeyResponse200 = {
+  data: SshPublicKeyInfo
+  status: 200
+}
+
+export type getControllerSshPublicKeyResponse403 = {
+  data: ApiError
+  status: 403
+}
+
+export type getControllerSshPublicKeyResponse500 = {
+  data: ApiError
+  status: 500
+}
+
+export type getControllerSshPublicKeyResponseSuccess = (getControllerSshPublicKeyResponse200) & {
+  headers: Headers;
+};
+export type getControllerSshPublicKeyResponseError = (getControllerSshPublicKeyResponse403 | getControllerSshPublicKeyResponse500) & {
+  headers: Headers;
+};
+
+export type getControllerSshPublicKeyResponse = (getControllerSshPublicKeyResponseSuccess | getControllerSshPublicKeyResponseError)
+
+export const getGetControllerSshPublicKeyUrl = () => {
+
+
+
+
+  return `/api/v1/system/ssh-public-key`
+}
+
+/**
+ * # Errors
+ *
+ * Returns the public error envelope when the caller may not read the
+ * system view or the identity cannot be inspected.
+ *
+ * # Panics
+ *
+ * Panics only if the pinned literal error code stops being valid syntax,
+ * which is a constant path a test pins.
+ * @summary Reads the controller's SSH public key: the line a machine adds to
+`authorized_keys` so the controller can reach it (`fleetctl machines
+join` fetches it here). Authorized exactly like the system view. The
+answer is `present`, `none`, or `unusable` with the reason; the private
+key is never read or returned.
+ */
+export const getControllerSshPublicKey = async ( options?: RequestInit): Promise<getControllerSshPublicKeyResponse> => {
+
+  const res = await fetch(getGetControllerSshPublicKeyUrl(),
+  {
+    ...options,
+    method: 'GET'
+
+
+  }
+)
+
+
+  const body = [204, 205, 304].includes(res.status) ? null : await res.text();
+
+  const data: getControllerSshPublicKeyResponse['data'] = body ? JSON.parse(body) : {}
+  return { data, status: res.status, headers: res.headers } as getControllerSshPublicKeyResponse
 }
 
 

@@ -505,7 +505,13 @@ impl InstallExecutor {
             .await
         {
             Ok(facts) => {
-                let skills_manager = self.setup_follow_up(operation, &payload, enrollment).await;
+                // The result is readable by every operation reader: a
+                // failure's detail was logged by setup_follow_up, and only
+                // the public form is stored.
+                let skills_manager = self
+                    .setup_follow_up(operation, &payload, enrollment)
+                    .await
+                    .public();
                 let result_json = serde_json::json!({
                     "connected": true,
                     "machineId": payload.machine_id,

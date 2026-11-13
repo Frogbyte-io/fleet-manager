@@ -50,7 +50,9 @@ pub struct MachineSetup {
 }
 
 /// What the follow-up did. Serialized into the install operation's result as
-/// `skillsManager`; every reason is caller-safe text.
+/// `skillsManager`. The non-failure reasons are caller-safe text; a `Failed`
+/// reason may carry a backend detail, so anything returned or stored for a
+/// caller goes through [`SetupFollowUp::public`] first.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(
     rename_all = "camelCase",
@@ -72,11 +74,34 @@ pub enum SetupFollowUp {
     },
     /// The controller setting turned the follow-up off.
     Disabled,
-    /// Queueing was attempted and failed (denied, invalid, backend).
+    /// Queueing was attempted and failed (denied, invalid, backend), or
+    /// timed out, so the operation may or may not exist.
     Failed {
-        /// Why, caller-safe.
+        /// Why. Safe to log, not to return: a backend failure carries its
+        /// error text. Callers see [`SetupFollowUp::public`] instead.
         reason: String,
     },
+}
+
+/// What a failed follow-up reports to callers. Uncertain on purpose: a
+/// backend failure after the insert, or a timeout, can leave the operation
+/// queued.
+pub const FAILED_PUBLIC_REASON: &str =
+    "the Skills Manager install may not have been queued; the detail is in the controller log";
+
+impl SetupFollowUp {
+    /// The form an API response or a stored operation result may carry: a
+    /// failure's reason is replaced with [`FAILED_PUBLIC_REASON`] (log the
+    /// original first); the other outcomes are caller-safe already.
+    #[must_use]
+    pub fn public(self) -> Self {
+        match self {
+            Self::Failed { .. } => Self::Failed {
+                reason: FAILED_PUBLIC_REASON.to_owned(),
+            },
+            other => other,
+        }
+    }
 }
 
 /// The hook run after a machine is set up.
@@ -90,4 +115,27 @@ pub trait MachineSetupPort: std::fmt::Debug + Send + Sync {
         principal_id: &str,
         setup: &MachineSetup,
     ) -> SetupFollowUp;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_public_form_never_carries_a_failure_detail() {
+        let failed = SetupFollowUp::Failed {
+            reason: "backend: pool timed out while waiting for an open connection".to_owned(),
+        };
+        assert_eq!(
+            failed.public(),
+            SetupFollowUp::Failed {
+                reason: FAILED_PUBLIC_REASON.to_owned()
+            }
+        );
+        let skipped = SetupFollowUp::Skipped {
+            reason: "no pinned release".to_owned(),
+        };
+        assert_eq!(skipped.clone().public(), skipped);
+        assert_eq!(SetupFollowUp::Disabled.public(), SetupFollowUp::Disabled);
+    }
 }

@@ -295,6 +295,54 @@ pub struct AddedMachineDto {
     /// Existing machines that shared the draft's host and port. The add
     /// proceeded anyway: candidates warn, they do not merge.
     pub duplicates: Vec<DuplicateCandidateDto>,
+    /// What the add's setup follow-up (the pinned Skills Manager install,
+    /// #600) did; absent when the controller composes no follow-up. The add
+    /// succeeded either way. The same value a fleetd install result reports
+    /// as `skillsManager`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub skills_manager: Option<SetupFollowUpDto>,
+}
+
+/// What a machine's setup follow-up did.
+#[derive(Clone, Debug, Serialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct SetupFollowUpDto {
+    /// `queued` (the operation is `operationId`), `skipped` (by rule, see
+    /// `reason`), `disabled` (the controller setting is off), or `failed`
+    /// (queueing was refused or failed, see `reason`).
+    #[schema(example = "queued")]
+    pub status: String,
+    /// The queued `skills.probe` operation, when `queued`.
+    pub operation_id: Option<String>,
+    /// The Skills Manager CLI version the queued install pins, when `queued`.
+    pub version: Option<String>,
+    /// Why nothing was queued: the rule, when `skipped`; when `failed`, a
+    /// fixed sentence saying the install may not have been queued (a
+    /// backend failure or timeout can still leave it queued; the detail is
+    /// in the controller log).
+    pub reason: Option<String>,
+}
+
+impl From<fleet_application::machine_setup::SetupFollowUp> for SetupFollowUpDto {
+    fn from(outcome: fleet_application::machine_setup::SetupFollowUp) -> Self {
+        use fleet_application::machine_setup::SetupFollowUp;
+        // A failure's own reason is log-only; the add logged it already.
+        let (status, operation_id, version, reason) = match outcome.public() {
+            SetupFollowUp::Queued {
+                operation_id,
+                version,
+            } => ("queued", Some(operation_id), Some(version), None),
+            SetupFollowUp::Skipped { reason } => ("skipped", None, None, Some(reason)),
+            SetupFollowUp::Disabled => ("disabled", None, None, None),
+            SetupFollowUp::Failed { reason } => ("failed", None, None, Some(reason)),
+        };
+        Self {
+            status: status.to_owned(),
+            operation_id,
+            version,
+            reason,
+        }
+    }
 }
 
 impl From<DraftView> for OnboardingDraftDto {
@@ -890,6 +938,7 @@ pub async fn add_onboarding_machine(
                     reference: candidate.reference.clone(),
                 })
                 .collect(),
+            skills_manager: added.setup_follow_up.map(SetupFollowUpDto::from),
         })),
     ))
 }
@@ -946,4 +995,29 @@ pub async fn cancel_onboarding_draft(
         .events
         .publish(fleet_application::events::EventKind::OnboardingChanged);
     Ok(StatusCode::NO_CONTENT)
+}
+
+#[cfg(test)]
+mod follow_up_tests {
+    use super::*;
+
+    #[test]
+    fn a_failed_follow_up_never_returns_its_backend_detail() {
+        let dto = SetupFollowUpDto::from(fleet_application::machine_setup::SetupFollowUp::Failed {
+            reason: "backend: database is locked at /var/lib/fleet/fleet.db".to_owned(),
+        });
+        assert_eq!(dto.status, "failed");
+        assert_eq!(
+            dto.reason.as_deref(),
+            Some(fleet_application::machine_setup::FAILED_PUBLIC_REASON)
+        );
+        let skipped =
+            SetupFollowUpDto::from(fleet_application::machine_setup::SetupFollowUp::Skipped {
+                reason: "no pinned release for windows/arm64".to_owned(),
+            });
+        assert_eq!(
+            skipped.reason.as_deref(),
+            Some("no pinned release for windows/arm64")
+        );
+    }
 }
