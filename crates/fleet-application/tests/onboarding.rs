@@ -66,12 +66,15 @@ fn fact(namespace: &str, name: &str, value: &str) -> CapabilityFact {
     }
 }
 
-/// The trust port as a recording stand-in: pins and unpins are counted, and
+/// The trust port as a recording stand-in: pins and unpins are counted,
+/// `active` models the known-hosts file (the pins in force, in order), and
 /// a switch makes the store unwritable so the use case's failure path shows.
 #[derive(Debug, Default)]
 struct FakeTrust {
     pins: Mutex<Vec<(String, String)>>,
     unpins: Mutex<Vec<String>>,
+    key_unpins: Mutex<Vec<String>>,
+    active: Mutex<Vec<(String, String)>>,
     broken: Mutex<bool>,
     race_on_pin: Mutex<Option<RaceOnPin>>,
 }
@@ -94,6 +97,16 @@ impl FakeTrust {
     fn unpin_count(&self) -> usize {
         self.unpins.lock().unwrap().len()
     }
+
+    /// The key lines in force, in the order they were pinned.
+    fn active_lines(&self) -> Vec<String> {
+        self.active
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|(_, line)| line.clone())
+            .collect()
+    }
 }
 
 #[async_trait]
@@ -105,6 +118,10 @@ impl OnboardTrustPort for FakeTrust {
             });
         }
         self.pins
+            .lock()
+            .unwrap()
+            .push((host.to_owned(), key.raw_line.clone()));
+        self.active
             .lock()
             .unwrap()
             .push((host.to_owned(), key.raw_line.clone()));
@@ -122,6 +139,27 @@ impl OnboardTrustPort for FakeTrust {
             });
         }
         self.unpins.lock().unwrap().push(host.to_owned());
+        self.active
+            .lock()
+            .unwrap()
+            .retain(|(pinned, _)| pinned != host);
+        Ok(())
+    }
+
+    async fn unpin_key(&self, host: &str, key: &OnboardHostKey) -> Result<(), PortFailure> {
+        if *self.broken.lock().unwrap() {
+            return Err(PortFailure::Backend {
+                detail: "the trust store is unwritable".to_owned(),
+            });
+        }
+        self.key_unpins.lock().unwrap().push(key.raw_line.clone());
+        let mut active = self.active.lock().unwrap();
+        if let Some(index) = active
+            .iter()
+            .rposition(|(pinned, line)| pinned == host && *line == key.raw_line)
+        {
+            active.remove(index);
+        }
         Ok(())
     }
 }
@@ -957,7 +995,16 @@ async fn a_confirmation_overtaken_by_a_test_is_refused_and_unpins() {
         "{refused:?}"
     );
     assert_eq!(fixture.trust.pin_count(), 1);
-    assert_eq!(fixture.trust.unpin_count(), 1, "the pin is taken back");
+    assert_eq!(
+        fixture.trust.unpin_count(),
+        0,
+        "never every pin for the host"
+    );
+    assert_eq!(fixture.trust.key_unpins.lock().unwrap().len(), 1);
+    assert!(
+        fixture.trust.active_lines().is_empty(),
+        "the pin it placed is taken back"
+    );
     let stored = fixture.drafts.get_raw(&draft.id).unwrap();
     assert_eq!(stored.host_key_stage, HostKeyStage::Observed);
     assert_eq!(
@@ -966,6 +1013,94 @@ async fn a_confirmation_overtaken_by_a_test_is_refused_and_unpins() {
     );
     assert_eq!(stored.confirmed_fingerprint, None);
     assert_eq!(stored.host_key_confirmed_at, None);
+}
+
+/// #649: when two confirmations race and the other one wins, the loser
+/// takes back only its own pin; the winner's pin of the same key stays.
+#[tokio::test]
+async fn a_losing_confirmation_keeps_the_winners_pin() {
+    let fixture = compose(FakeMachines::default());
+    let draft = fixture
+        .onboarding
+        .create_draft(&AllowAll, &principal(), new_draft())
+        .await
+        .unwrap();
+    fixture.drafts.mutate(&draft.id, |draft| {
+        draft.host_key = Some(observed_host_key(FINGERPRINT));
+        draft.host_key_stage = HostKeyStage::Observed;
+    });
+    let drafts = fixture.drafts.clone();
+    let trust = fixture.trust.clone();
+    let draft_id = draft.id.clone();
+    *fixture.trust.race_on_pin.lock().unwrap() = Some(RaceOnPin(Box::new(move || {
+        // The winner pins the same key and records its confirmation.
+        trust.active.lock().unwrap().push((
+            "host-one".to_owned(),
+            observed_host_key(FINGERPRINT).raw_line,
+        ));
+        drafts.mutate(&draft_id, |draft| {
+            draft.host_key_stage = HostKeyStage::Confirmed;
+            draft.confirmed_fingerprint = Some(FINGERPRINT.to_owned());
+            draft.host_key_confirmed_at = Some(NOW);
+        });
+    })));
+
+    let refused = fixture
+        .onboarding
+        .confirm_host_key(&AllowAll, &principal(), &draft.id, FINGERPRINT)
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(refused, OnboardingUseCaseError::Conflict { .. }),
+        "{refused:?}"
+    );
+    assert_eq!(
+        fixture.trust.active_lines(),
+        [observed_host_key(FINGERPRINT).raw_line],
+        "the winner's pin stays"
+    );
+    let stored = fixture.drafts.get_raw(&draft.id).unwrap();
+    assert_eq!(stored.host_key_stage, HostKeyStage::Confirmed);
+    assert_eq!(stored.host_key_confirmed_at, Some(NOW));
+}
+
+/// #649: a draft cancelled while its confirmation pins (the cancel's unpin
+/// ran before this pin) leaves no pin behind.
+#[tokio::test]
+async fn a_confirmation_racing_a_cancellation_leaves_no_pin() {
+    let fixture = compose(FakeMachines::default());
+    let draft = fixture
+        .onboarding
+        .create_draft(&AllowAll, &principal(), new_draft())
+        .await
+        .unwrap();
+    fixture.drafts.mutate(&draft.id, |draft| {
+        draft.host_key = Some(observed_host_key(FINGERPRINT));
+        draft.host_key_stage = HostKeyStage::Observed;
+    });
+    let drafts = fixture.drafts.clone();
+    let draft_id = draft.id.clone();
+    *fixture.trust.race_on_pin.lock().unwrap() = Some(RaceOnPin(Box::new(move || {
+        drafts
+            .drafts
+            .lock()
+            .unwrap()
+            .retain(|draft| draft.id != draft_id);
+    })));
+
+    let refused = fixture
+        .onboarding
+        .confirm_host_key(&AllowAll, &principal(), &draft.id, FINGERPRINT)
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(refused, OnboardingUseCaseError::NotFound { .. }),
+        "{refused:?}"
+    );
+    assert!(
+        fixture.trust.active_lines().is_empty(),
+        "no pin is left behind"
+    );
 }
 
 /// #649: facts discovered before the latest confirmation were observed
@@ -1070,6 +1205,12 @@ async fn reconfirming_a_changed_key_drops_the_staged_shell_and_facts() {
     assert_eq!(stored.discovered_at, None);
     assert_eq!(fixture.trust.unpin_count(), 1, "the old pins go first");
     assert_eq!(fixture.trust.pin_count(), 2);
+    // The old pin was removed before the new one was added, so the new one
+    // is the only pin in force.
+    assert_eq!(
+        fixture.trust.active_lines(),
+        [observed_host_key(OTHER_FINGERPRINT).raw_line]
+    );
 }
 
 #[tokio::test]

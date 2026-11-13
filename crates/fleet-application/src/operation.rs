@@ -2512,9 +2512,11 @@ impl OperationUseCaseError {
 }
 
 /// The payload of an `agentless.inventory` creation and the target it
-/// names. Every inventory names its target, so every one reaches the
-/// endpoint and OS checks: a payload the rule cannot read is refused, not
-/// queued past them.
+/// names. A payload the rule cannot read (no JSON object, no string
+/// `machineId` and `endpointId`) is refused here rather than queued, so it
+/// can never skip the endpoint and OS checks that follow. Those checks run
+/// where the endpoint lookup is composed (`catalog_rollout_targets`, as the
+/// controller composes it); without it only this shape check applies.
 fn inventory_target(
     new: &NewOperation,
 ) -> Result<(serde_json::Value, String, String), OperationUseCaseError> {

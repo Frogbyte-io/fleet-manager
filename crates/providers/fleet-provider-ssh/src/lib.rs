@@ -377,6 +377,7 @@ impl SshProvider {
                 detail: "the key line does not match the confirmed fingerprint".to_owned(),
             });
         }
+        let _guard = known_hosts_lock();
         let mut file = std::fs::OpenOptions::new()
             .create(true)
             .append(true)
@@ -396,6 +397,7 @@ impl SshProvider {
     ///
     /// Fails when the file cannot be rewritten.
     pub fn unpin(&self, host: &str) -> Result<usize, SshProviderError> {
+        let _guard = known_hosts_lock();
         let path = self.known_hosts_path();
         let Ok(content) = std::fs::read_to_string(&path) else {
             return Ok(0);
@@ -413,6 +415,37 @@ impl SshProvider {
             })?;
         }
         Ok(removed)
+    }
+
+    /// Takes back one pin: removes a single line equal to `raw_line` (the
+    /// last one), the line one [`SshProvider::pin`] appended. Any other pin
+    /// for the host stays, an identical line another caller appended
+    /// included, so undoing one confirmation never removes another's trust.
+    /// Answers whether a line was removed.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the file cannot be rewritten.
+    pub fn unpin_line(&self, raw_line: &str) -> Result<bool, SshProviderError> {
+        let _guard = known_hosts_lock();
+        let path = self.known_hosts_path();
+        let Ok(content) = std::fs::read_to_string(&path) else {
+            return Ok(false);
+        };
+        let mut lines: Vec<&str> = content.lines().collect();
+        let Some(index) = lines.iter().rposition(|line| *line == raw_line) else {
+            return Ok(false);
+        };
+        lines.remove(index);
+        let rewritten = if lines.is_empty() {
+            String::new()
+        } else {
+            format!("{}\n", lines.join("\n"))
+        };
+        std::fs::write(&path, rewritten).map_err(|error| SshProviderError::Setup {
+            detail: format!("cannot rewrite known_hosts: {error}"),
+        })?;
+        Ok(true)
     }
 
     /// Runs a bounded, non-interactive connection test against the endpoint.
@@ -637,6 +670,14 @@ fn parse_keygen_summary(summary: &str) -> Option<(String, String)> {
 /// Whether a `known_hosts` line concerns `host`. Hashed entries (`HashKnownHosts`
 /// `yes`) start with `|1|` and cannot be matched textually; Fleet pins raw
 /// lines itself, and hashed pins are left to OpenSSH's own verification.
+/// Serializes this process's writes to the Fleet known-hosts file: an
+/// append racing a read-modify-write rewrite would otherwise be lost.
+fn known_hosts_lock() -> std::sync::MutexGuard<'static, ()> {
+    static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    LOCK.lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
 fn host_matches_line(line: &str, host: &str) -> bool {
     if line.starts_with('|') {
         return false;

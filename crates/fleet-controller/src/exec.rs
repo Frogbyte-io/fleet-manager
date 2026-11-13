@@ -434,7 +434,7 @@ impl ScriptExecutor {
             &payload.endpoint_id,
         )
         .await
-        .map_err(|detail| ("collection_failed", detail))?;
+        .map_err(EndpointLookupError::inventory_failure)?;
         if let Some(recorded) = recorded {
             return fleet_application::machine_access::effective_guest_os(
                 payload.guest_os,
@@ -466,44 +466,14 @@ impl ScriptExecutor {
         let Some(detected) = sniff.guest_os() else {
             return Ok(payload.guest_os.unwrap_or_default());
         };
-        // Recorded (with its audit event, atomically) only under the
-        // requester the creation named, which it does only after authorizing
-        // `machine.update` for an unknown endpoint (an operation created
-        // against a recorded endpoint names none and records nothing), and only while the endpoint still
-        // has the fingerprint this run verified and is still unknown: a key
-        // confirmed meanwhile cleared the OS and wins, and an OS recorded
-        // meanwhile (another inventory, an operator) is newer than this
-        // detection and wins too, so this run probes as the record says.
-        if let Some(requested_by) = payload.requested_by.as_deref()
-            && !fleet_application::machine::record_detected_endpoint_os(
-                self.machines.as_ref(),
-                &fleet_application::machine::DetectedEndpointOs {
-                    operation_id,
-                    requested_by,
-                    machine_id: &payload.machine_id,
-                    endpoint_id: &payload.endpoint_id,
-                    verified_fingerprint: verified,
-                    guest_os: detected,
-                },
-            )
-            .await
-            .map_err(|detail| ("collection_failed", detail))?
-            && let Some(recorded) = endpoint_guest_os(
-                self.machines.as_ref(),
-                &payload.machine_id,
-                &payload.endpoint_id,
-            )
-            .await
-            .map_err(|detail| ("collection_failed", detail))?
-        {
-            return fleet_application::machine_access::effective_guest_os(
-                payload.guest_os,
-                Some(recorded),
-            )
-            .map_err(mismatch);
-        }
-        fleet_application::machine_access::effective_guest_os(payload.guest_os, Some(detected))
-            .map_err(mismatch)
+        settle_detected_os(
+            self.machines.as_ref(),
+            operation_id,
+            payload,
+            verified,
+            detected,
+        )
+        .await
     }
 
     async fn execute_ssh(
@@ -796,6 +766,118 @@ pub(crate) async fn resolve_ssh_endpoint_any_os(
     ))
 }
 
+/// What an inventory does with the OS its login-shell check detected on an
+/// unknown endpoint (ADR 0021 decision 4).
+///
+/// It is recorded (with its audit event, atomically) only under the
+/// requester the creation named, which it does only after authorizing
+/// `machine.update` for an unknown endpoint (an operation created against a
+/// recorded endpoint names none and records nothing), and only while the
+/// endpoint still has the fingerprint this run verified and is still
+/// unknown. When the write does not apply, something changed since the
+/// detection started, and the run follows what changed:
+///
+/// - an OS recorded meanwhile (another inventory, an operator) is newer
+///   than this detection and wins: the run probes as the record says;
+/// - a key confirmed meanwhile cleared the OS: this run verified the
+///   previous key, so what answered the check says nothing about the host
+///   now trusted, and the run stops as `host_key_changed`;
+/// - an endpoint removed or replaced meanwhile stops it as
+///   `endpoint_removed`.
+async fn settle_detected_os(
+    machines: &dyn MachinePort,
+    operation_id: &str,
+    payload: &InventoryPayload,
+    verified: &str,
+    detected: fleet_core::GuestOs,
+) -> Result<fleet_core::GuestOs, (&'static str, String)> {
+    let as_os = |guest_os: fleet_core::GuestOs| {
+        fleet_application::machine_access::effective_guest_os(payload.guest_os, Some(guest_os))
+            .map_err(|detail| {
+                let detail = detail
+                    .strip_prefix("guest_os_mismatch: ")
+                    .map_or_else(|| detail.clone(), str::to_owned);
+                ("guest_os_mismatch", detail)
+            })
+    };
+    let Some(requested_by) = payload.requested_by.as_deref() else {
+        return as_os(detected);
+    };
+    let recorded = fleet_application::machine::record_detected_endpoint_os(
+        machines,
+        &fleet_application::machine::DetectedEndpointOs {
+            operation_id,
+            requested_by,
+            machine_id: &payload.machine_id,
+            endpoint_id: &payload.endpoint_id,
+            verified_fingerprint: verified,
+            guest_os: detected,
+        },
+    )
+    .await
+    .map_err(|detail| ("collection_failed", detail))?;
+    if recorded {
+        return as_os(detected);
+    }
+    match endpoint_guest_os(machines, &payload.machine_id, &payload.endpoint_id)
+        .await
+        .map_err(EndpointLookupError::inventory_failure)?
+    {
+        Some(recorded) => as_os(recorded),
+        None => match machines.verified_fingerprint(&payload.endpoint_id).await {
+            // Still the key this run verified and still unknown: the OS was
+            // recorded and cleared again in between. Probe as detected.
+            Ok(Some(current)) if current == verified => as_os(detected),
+            Ok(_) => Err((
+                "host_key_changed",
+                "the endpoint's host key was confirmed again while this inventory ran; \
+                 nothing was recorded, run the inventory again"
+                    .to_owned(),
+            )),
+            Err(fleet_application::operation::PortFailure::NotFound { .. }) => {
+                Err(EndpointLookupError::Gone.inventory_failure())
+            }
+            Err(failure) => Err(("collection_failed", failure.to_string())),
+        },
+    }
+}
+
+/// Why an endpoint's recorded OS could not be read.
+#[derive(Debug)]
+pub(crate) enum EndpointLookupError {
+    /// The endpoint is not (or no longer) one of the machine's.
+    Gone,
+    /// The store failed.
+    Store(String),
+}
+
+impl EndpointLookupError {
+    /// The inventory's failure reason: a missing endpoint is reported as
+    /// `endpoint_removed`, like a removal noticed after collection.
+    fn inventory_failure(self) -> (&'static str, String) {
+        match self {
+            Self::Gone => (
+                "endpoint_removed",
+                "the endpoint was removed from the machine while this inventory ran; \
+                 nothing was recorded"
+                    .to_owned(),
+            ),
+            Self::Store(detail) => ("collection_failed", detail),
+        }
+    }
+}
+
+impl From<EndpointLookupError> for String {
+    fn from(error: EndpointLookupError) -> Self {
+        match error {
+            EndpointLookupError::Gone => {
+                "the named endpoint does not belong to the machine".to_owned()
+            }
+            EndpointLookupError::Store(detail) => detail,
+        }
+    }
+}
+
 /// The guest OS recorded on a machine's endpoint, `None` while unknown.
 /// An endpoint that is not (or no longer) the machine's is an error, never
 /// an unknown OS: a caller that resolved its connection a moment earlier
@@ -805,17 +887,20 @@ pub(crate) async fn endpoint_guest_os(
     machines: &dyn MachinePort,
     machine_id: &str,
     endpoint_id: &str,
-) -> Result<Option<fleet_core::GuestOs>, String> {
+) -> Result<Option<fleet_core::GuestOs>, EndpointLookupError> {
     let machine = machines
         .get(machine_id)
         .await
-        .map_err(|failure| failure.to_string())?;
+        .map_err(|failure| match failure {
+            fleet_application::operation::PortFailure::NotFound { .. } => EndpointLookupError::Gone,
+            failure => EndpointLookupError::Store(failure.to_string()),
+        })?;
     machine
         .endpoints
         .iter()
         .find(|endpoint| endpoint.id == endpoint_id)
         .map(|endpoint| endpoint.guest_os)
-        .ok_or_else(|| "the named endpoint does not belong to the machine".to_owned())
+        .ok_or(EndpointLookupError::Gone)
 }
 
 /// Convenience: the noop executor remains available for hosts that do not
@@ -880,10 +965,14 @@ mod tests {
         );
     }
 
-    /// #649: an endpoint that is not (or no longer) the machine's is an
-    /// error, not an unknown OS the terminal would run as Linux.
-    #[tokio::test]
-    async fn a_missing_endpoint_has_no_guest_os_to_default() {
+    /// A store with one machine carrying one SSH endpoint, confirmed under
+    /// `SHA256:current` and with no OS recorded.
+    async fn one_endpoint() -> (
+        tempfile::TempDir,
+        fleet_storage_sqlite::MachineRepository,
+        String,
+        String,
+    ) {
         use fleet_application::machine::{MachinePort as _, NewEndpoint, RegisterMachine};
         let dir = tempfile::tempdir().unwrap();
         let store = fleet_storage_sqlite::Store::open(&dir.path().join("fleet.db"))
@@ -904,8 +993,37 @@ mod tests {
             .await
             .unwrap();
         let endpoint = machine.endpoints[0].id.clone();
+        machines
+            .confirm_fingerprint(&endpoint, "SHA256:current", 1)
+            .await
+            .unwrap();
+        (dir, machines, machine.id, endpoint)
+    }
+
+    fn inventory_payload(
+        machine_id: &str,
+        endpoint_id: &str,
+        guest_os: Option<&str>,
+    ) -> super::InventoryPayload {
+        serde_json::from_value(serde_json::json!({
+            "machineId": machine_id,
+            "endpointId": endpoint_id,
+            "auth": {"type": "agent"},
+            "timeoutSeconds": 60,
+            "guestOs": guest_os,
+            "requestedBy": "operator",
+        }))
+        .unwrap()
+    }
+
+    /// #649: an endpoint that is not (or no longer) the machine's is an
+    /// error, not an unknown OS the terminal would run as Linux.
+    #[tokio::test]
+    async fn a_missing_endpoint_has_no_guest_os_to_default() {
+        use fleet_application::machine::{MachinePort as _, NewEndpoint};
+        let (_dir, machines, machine_id, endpoint) = one_endpoint().await;
         assert_eq!(
-            super::endpoint_guest_os(&machines, &machine.id, &endpoint)
+            super::endpoint_guest_os(&machines, &machine_id, &endpoint)
                 .await
                 .unwrap(),
             None,
@@ -914,7 +1032,7 @@ mod tests {
         // The endpoint is replaced: the old id is gone.
         machines
             .set_endpoints(
-                &machine.id,
+                &machine_id,
                 &[NewEndpoint {
                     kind: fleet_core::EndpointKind::Ssh,
                     reference: "developer@workstation.example:2222".to_owned(),
@@ -922,10 +1040,130 @@ mod tests {
             )
             .await
             .unwrap();
-        let gone = super::endpoint_guest_os(&machines, &machine.id, &endpoint)
+        let gone = super::endpoint_guest_os(&machines, &machine_id, &endpoint)
             .await
             .unwrap_err();
-        assert!(gone.contains("does not belong"), "{gone}");
+        assert!(matches!(gone, super::EndpointLookupError::Gone), "{gone:?}");
+        assert_eq!(
+            String::from(gone),
+            "the named endpoint does not belong to the machine"
+        );
+    }
+
+    /// #649: a detection is recorded onto a still-unknown endpoint and the
+    /// run probes as detected.
+    #[tokio::test]
+    async fn a_detection_on_an_unknown_endpoint_is_recorded() {
+        use fleet_application::machine::MachinePort as _;
+        let (_dir, machines, machine_id, endpoint) = one_endpoint().await;
+        let payload = inventory_payload(&machine_id, &endpoint, None);
+        let os = super::settle_detected_os(
+            &machines,
+            "operation-1",
+            &payload,
+            "SHA256:current",
+            fleet_core::GuestOs::Windows,
+        )
+        .await
+        .unwrap();
+        assert_eq!(os, fleet_core::GuestOs::Windows);
+        let read = machines.get(&machine_id).await.unwrap();
+        assert_eq!(
+            read.endpoints[0].guest_os,
+            Some(fleet_core::GuestOs::Windows)
+        );
+    }
+
+    /// #649: an OS recorded after the run's first read (and before its
+    /// write) wins: nothing is overwritten and the run uses the record,
+    /// checking the payload's choice against it.
+    #[tokio::test]
+    async fn an_os_recorded_meanwhile_wins_over_the_detection() {
+        use fleet_application::machine::MachinePort as _;
+        let (_dir, machines, machine_id, endpoint) = one_endpoint().await;
+        machines
+            .record_endpoint_os(&endpoint, fleet_core::GuestOs::Linux)
+            .await
+            .unwrap();
+        let os = super::settle_detected_os(
+            &machines,
+            "operation-1",
+            &inventory_payload(&machine_id, &endpoint, None),
+            "SHA256:current",
+            fleet_core::GuestOs::Windows,
+        )
+        .await
+        .unwrap();
+        assert_eq!(os, fleet_core::GuestOs::Linux, "the run adopts the record");
+        let read = machines.get(&machine_id).await.unwrap();
+        assert_eq!(read.endpoints[0].guest_os, Some(fleet_core::GuestOs::Linux));
+
+        let (reason, _) = super::settle_detected_os(
+            &machines,
+            "operation-2",
+            &inventory_payload(&machine_id, &endpoint, Some("windows")),
+            "SHA256:current",
+            fleet_core::GuestOs::Windows,
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(reason, "guest_os_mismatch");
+    }
+
+    /// #649: a key confirmed after the run verified the previous one clears
+    /// the OS; the run stops instead of probing as the old key's detection.
+    #[tokio::test]
+    async fn a_key_confirmed_meanwhile_stops_the_run() {
+        use fleet_application::machine::MachinePort as _;
+        let (_dir, machines, machine_id, endpoint) = one_endpoint().await;
+        machines
+            .confirm_fingerprint(&endpoint, "SHA256:newer", 2)
+            .await
+            .unwrap();
+        let (reason, _) = super::settle_detected_os(
+            &machines,
+            "operation-1",
+            &inventory_payload(&machine_id, &endpoint, None),
+            "SHA256:current",
+            fleet_core::GuestOs::Windows,
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(reason, "host_key_changed");
+        let read = machines.get(&machine_id).await.unwrap();
+        assert_eq!(read.endpoints[0].guest_os, None, "nothing was recorded");
+    }
+
+    /// #649: an endpoint removed or replaced meanwhile is reported as
+    /// `endpoint_removed`, like a removal noticed after collection.
+    #[tokio::test]
+    async fn an_endpoint_removed_meanwhile_is_reported_as_removed() {
+        use fleet_application::machine::{MachinePort as _, NewEndpoint};
+        let (_dir, machines, machine_id, endpoint) = one_endpoint().await;
+        machines
+            .set_endpoints(
+                &machine_id,
+                &[NewEndpoint {
+                    kind: fleet_core::EndpointKind::Ssh,
+                    reference: "developer@workstation.example:2222".to_owned(),
+                }],
+            )
+            .await
+            .unwrap();
+        let (reason, _) = super::settle_detected_os(
+            &machines,
+            "operation-1",
+            &inventory_payload(&machine_id, &endpoint, None),
+            "SHA256:current",
+            fleet_core::GuestOs::Windows,
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(reason, "endpoint_removed");
+        assert_eq!(
+            super::EndpointLookupError::Gone.inventory_failure().0,
+            "endpoint_removed"
+        );
     }
 
     /// The guest-side deadline watchdog (#455) is on unless a payload turns

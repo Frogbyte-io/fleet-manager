@@ -116,6 +116,9 @@ struct FakePort {
     stored_facts: Mutex<Vec<CapabilityFact>>,
     /// The endpoint OS writes, in order: `(endpoint, os or None)`.
     endpoint_os_writes: Mutex<Vec<(String, Option<fleet_core::GuestOs>)>>,
+    /// One ordered trace shared with an audit sink: writes and audit events
+    /// interleaved as they happened.
+    trace: Arc<Mutex<Vec<String>>>,
 }
 
 impl FakePort {
@@ -277,6 +280,10 @@ impl MachinePort for FakePort {
             .lock()
             .unwrap()
             .push((endpoint_id.to_owned(), Some(guest_os)));
+        self.trace
+            .lock()
+            .unwrap()
+            .push(format!("write {}", guest_os.id()));
         Ok(())
     }
 
@@ -285,6 +292,7 @@ impl MachinePort for FakePort {
             .lock()
             .unwrap()
             .push((endpoint_id.to_owned(), None));
+        self.trace.lock().unwrap().push("write clear".to_owned());
         Ok(())
     }
 }
@@ -608,6 +616,8 @@ async fn the_default_verified_write_refuses_another_machines_endpoint() {
 struct EventAudit {
     events: Mutex<Vec<String>>,
     broken: Mutex<bool>,
+    /// The trace shared with the port, when the test orders the two.
+    trace: Arc<Mutex<Vec<String>>>,
 }
 
 #[async_trait]
@@ -625,6 +635,7 @@ impl fleet_application::operation::AuditPort for EventAudit {
             .find(|(key, _)| *key == "event")
             .map(|(_, value)| value.to_owned())
             .unwrap_or_default();
+        self.trace.lock().unwrap().push(format!("audit {event}"));
         self.events.lock().unwrap().push(event);
         Ok(())
     }
@@ -647,7 +658,10 @@ async fn a_manual_endpoint_os_write_is_audited_before_it_applies() {
         reference: "deploy@host-a:22".to_owned(),
     };
     let port = Arc::new(FakePort::default().with(machine_record("machine-a", vec![ssh])));
-    let audit = Arc::new(EventAudit::default());
+    let audit = Arc::new(EventAudit {
+        trace: port.trace.clone(),
+        ..EventAudit::default()
+    });
     let service = Machines::new(port.clone(), audit.clone());
 
     *audit.broken.lock().unwrap() = true;
@@ -706,13 +720,16 @@ async fn a_manual_endpoint_os_write_is_audited_before_it_applies() {
             ("endpoint-0".to_owned(), None),
         ]
     );
+    // Each intent precedes its write and each completion follows it.
     assert_eq!(
-        *audit.events.lock().unwrap(),
+        *port.trace.lock().unwrap(),
         vec![
-            "endpoint_os_recording",
-            "endpoint_os_recorded",
-            "endpoint_os_clearing",
-            "endpoint_os_cleared",
+            "audit endpoint_os_recording",
+            "write windows",
+            "audit endpoint_os_recorded",
+            "audit endpoint_os_clearing",
+            "write clear",
+            "audit endpoint_os_cleared",
         ]
     );
 }

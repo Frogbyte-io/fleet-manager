@@ -570,6 +570,31 @@ impl fleet_application::onboarding::OnboardTrustPort for SshTrustAdapter {
             )
     }
 
+    async fn unpin_key(
+        &self,
+        _host: &str,
+        key: &OnboardHostKey,
+    ) -> Result<(), fleet_application::operation::PortFailure> {
+        let provider = self.provider.clone();
+        let raw_line = key.raw_line.clone();
+        tokio::task::spawn_blocking(move || provider.unpin_line(&raw_line))
+            .await
+            .map_or_else(
+                |join_error| {
+                    Err(fleet_application::operation::PortFailure::Backend {
+                        detail: format!("the trust thread failed: {join_error}"),
+                    })
+                },
+                |outcome| {
+                    outcome.map(|_| ()).map_err(|error| {
+                        fleet_application::operation::PortFailure::Backend {
+                            detail: error.to_string(),
+                        }
+                    })
+                },
+            )
+    }
+
     async fn unpin(&self, host: &str) -> Result<(), fleet_application::operation::PortFailure> {
         let provider = self.provider.clone();
         let host = host.to_owned();

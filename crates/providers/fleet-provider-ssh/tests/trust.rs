@@ -335,6 +335,34 @@ fn unpinning_removes_only_that_host() {
     assert!(!remaining.contains(&observation.raw_line));
 }
 
+/// #649: taking one pin back removes exactly one copy of that line; the
+/// host's other pins, an identical line another confirmation appended
+/// included, stay.
+#[test]
+fn unpinning_one_line_removes_only_that_copy() {
+    let (_dir, provider) = provider();
+    let ours = "[build.example.test]:22 ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOurs";
+    let other = "[build.example.test]:22 ecdsa-sha2-nistp256 AAAAE2VjZHNhOther";
+    std::fs::create_dir_all(provider.known_hosts_path().parent().unwrap()).unwrap();
+    std::fs::write(
+        provider.known_hosts_path(),
+        format!("{ours}\n{other}\n{ours}\n"),
+    )
+    .unwrap();
+
+    assert!(provider.unpin_line(ours).unwrap());
+    let remaining = std::fs::read_to_string(provider.known_hosts_path()).unwrap();
+    assert_eq!(remaining, format!("{ours}\n{other}\n"));
+
+    assert!(provider.unpin_line(ours).unwrap());
+    assert!(
+        !provider.unpin_line(ours).unwrap(),
+        "nothing left to take back"
+    );
+    let remaining = std::fs::read_to_string(provider.known_hosts_path()).unwrap();
+    assert_eq!(remaining, format!("{other}\n"));
+}
+
 #[test]
 fn a_missing_host_key_is_reported_not_invented() {
     let (_dir, provider) = provider();

@@ -381,6 +381,14 @@ pub trait OnboardTrustPort: fmt::Debug + Send + Sync {
     ///
     /// Fails when the trust store cannot be rewritten.
     async fn unpin(&self, host: &str) -> Result<(), PortFailure>;
+    /// Takes back one pin this caller placed for `key`: removes one copy of
+    /// that exact entry and nothing else. Other pins for the host — another
+    /// confirmation's included, even of the same key — stay.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the trust store cannot be rewritten.
+    async fn unpin_key(&self, host: &str, key: &OnboardHostKey) -> Result<(), PortFailure>;
 }
 
 /// One existing machine whose endpoint matches a draft's host and port.
@@ -768,22 +776,19 @@ impl Onboarding {
         draft.host_key_confirmed_at = Some(draft.updated_at);
         let draft = match self.drafts.update(&draft).await {
             Ok(draft) => draft,
-            Err(PortFailure::Conflict { detail }) => {
-                // A test landed between the read and this write, so the key
-                // just pinned may no longer be the one the draft observed.
-                // Take the pin back under the same rule cancel uses, and let
-                // the operator confirm against the newer observation.
-                let now = fleet_core::SystemClock::now_unix_millis();
-                if !self
-                    .host_is_registered(authorizer, principal, &draft.endpoint, now)
-                    .await?
-                {
-                    self.trust
-                        .unpin(&draft.endpoint.host)
-                        .await
-                        .map_err(|failure| map_port("unpin", failure))?;
-                }
-                return Err(OnboardingUseCaseError::Conflict { detail });
+            Err(failure @ (PortFailure::Conflict { .. } | PortFailure::NotFound { .. })) => {
+                // Another write landed between the read and this one: a test
+                // (the key just pinned may no longer be the one the draft
+                // shows), a winning confirmation, or a cancellation (whose
+                // unpin ran before this pin). Take back exactly the pin this
+                // confirmation placed — never the host's other pins, which
+                // may be the winner's — and let the operator act on the
+                // newer state.
+                self.trust
+                    .unpin_key(&draft.endpoint.host, &host_key)
+                    .await
+                    .map_err(|failure| map_port("unpin", failure))?;
+                return Err(map_port("update", failure));
             }
             Err(failure) => return Err(map_port("update", failure)),
         };

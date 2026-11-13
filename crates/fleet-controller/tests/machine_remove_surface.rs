@@ -84,6 +84,10 @@ impl OnboardTrustPort for FakeTrust {
         self.unpinned.lock().unwrap().push(host.to_owned());
         Ok(())
     }
+
+    async fn unpin_key(&self, _host: &str, _key: &OnboardHostKey) -> Result<(), PortFailure> {
+        panic!("a removal never takes back a single confirmation's pin")
+    }
 }
 
 /// Answers what the test scripted and remembers what it was asked. The

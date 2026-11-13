@@ -689,6 +689,14 @@ impl fleet_application::onboarding::OnboardTrustPort for ContractOnboardingTrust
     async fn unpin(&self, _host: &str) -> Result<(), PortFailure> {
         Ok(())
     }
+
+    async fn unpin_key(
+        &self,
+        _host: &str,
+        _key: &fleet_application::onboarding::OnboardHostKey,
+    ) -> Result<(), PortFailure> {
+        Ok(())
+    }
 }
 
 #[derive(Debug)]

@@ -448,6 +448,14 @@ impl fleet_application::onboarding::OnboardTrustPort for FakeTrust {
     async fn unpin(&self, _host: &str) -> Result<(), PortFailure> {
         panic!("the import must not unpin anything")
     }
+
+    async fn unpin_key(
+        &self,
+        _host: &str,
+        _key: &fleet_application::onboarding::OnboardHostKey,
+    ) -> Result<(), PortFailure> {
+        panic!("the import must not unpin anything")
+    }
 }
 
 #[tokio::test]
