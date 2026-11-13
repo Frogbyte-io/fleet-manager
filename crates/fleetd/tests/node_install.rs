@@ -530,8 +530,6 @@ impl TestPackage {
     }
 }
 
-/// The stubs: a systemctl that always reports active, a useradd that
-/// records, and a runuser that just executes (the tests are unprivileged).
 /// A scratch directory for an install's state directory and stubs. It is
 /// under `$HOME`, not `/tmp`: `install.sh` refuses a state directory with a
 /// group- or world-writable ancestor, as `uninstall.sh --purge` does.
@@ -545,6 +543,8 @@ fn work_dir() -> tempfile::TempDir {
     dir
 }
 
+/// The stubs: a systemctl that always reports active, a useradd that
+/// records, and a runuser that just executes (the tests are unprivileged).
 fn write_stubs(stubs_dir: &Path) -> (PathBuf, PathBuf, PathBuf) {
     std::fs::create_dir_all(stubs_dir).unwrap();
     let systemctl = stubs_dir.join("systemctl-stub");

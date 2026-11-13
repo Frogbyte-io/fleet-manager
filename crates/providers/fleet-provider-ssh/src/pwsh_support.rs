@@ -14,12 +14,13 @@ use crate::shell::GuestShell;
 /// [`require_pwsh`].
 pub(crate) fn pwsh() -> Option<String> {
     let candidate = std::env::var("FLEET_PWSH").unwrap_or_else(|_| "pwsh".to_owned());
-    std::process::Command::new(&candidate)
-        .args(["-NoProfile", "-Command", "exit 0"])
-        .output()
-        .ok()
-        .filter(|out| out.status.success())
-        .map(|_| candidate)
+    match crate::pwsh_starts(&candidate) {
+        Ok(()) => Some(candidate),
+        Err(why) => {
+            eprintln!("no working PowerShell: {why}");
+            None
+        }
+    }
 }
 
 /// Runs `script` through the real bootstrap the way sshd would: the
@@ -91,7 +92,7 @@ pub(crate) fn require_pwsh() -> Option<String> {
         "FLEET_REQUIRE_PWSH is set but no PowerShell was found"
     );
     if found.is_none() {
-        eprintln!("SKIPPED: no pwsh on PATH and FLEET_PWSH unset");
+        eprintln!("SKIPPED: no working PowerShell (pwsh on PATH, or FLEET_PWSH)");
     }
     found
 }
