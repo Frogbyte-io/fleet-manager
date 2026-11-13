@@ -4,7 +4,7 @@ How to prepare a Windows developer workstation so the controller can onboard it 
 
 Examples use placeholders: the controller is `controller.example.ts.net` (tailnet address `100.64.0.1`), the workstation is `workstation-1.example.ts.net`, and the developer's Windows account is `developer`.
 
-> **Short path:** [add-a-machine.md](add-a-machine.md) condenses this page into steps a coding agent on the new machine can follow end to end.
+> **Short path:** run `fleetctl machines join` on the new machine ([add-a-machine.md](add-a-machine.md)); it does the key, onboarding and skill steps of this page in one command, and refuses where this page says to stop.
 
 ## Scope
 
@@ -50,7 +50,7 @@ Run these in **Windows PowerShell as Administrator** on the workstation. Fleet d
 
 4. **Turn password authentication off.** In `%ProgramData%\ssh\sshd_config`, set `PasswordAuthentication no` (and keep `PubkeyAuthentication yes`), then `Restart-Service sshd`.
 
-5. **Install the controller's public key** (the `.pub` line of the key the controller authenticates with; never a private key).
+5. **Install the controller's public key** (the `.pub` line of the key the controller authenticates with, which `fleetctl system ssh-public-key` prints; never a private key). `fleetctl machines join` does this step for a standard account.
 
    For a **standard user**, as that user (not elevated):
 

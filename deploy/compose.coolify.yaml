@@ -48,6 +48,9 @@ services:
       # Skills Manager install after a machine is set up (#600); empty keeps
       # the default (on), `false` turns it off.
       FLEET_SKILLS_MANAGER_AUTO_INSTALL: ${FLEET_SKILLS_MANAGER_AUTO_INSTALL:-}
+      # The controller's own SSH key, generated at startup when missing;
+      # empty keeps the default (on), `false` turns it off.
+      FLEET_SSH_KEY_GENERATE: ${FLEET_SSH_KEY_GENERATE:-}
       # Domain RDAP/DNS enrichment (FM-1020); empty keeps the controller's
       # defaults (daily sweep, 30-day expiry window). 0 turns the sweep off.
       FLEET_REGISTRY_ENRICH_INTERVAL_SECONDS: ${FLEET_REGISTRY_ENRICH_INTERVAL_SECONDS:-}

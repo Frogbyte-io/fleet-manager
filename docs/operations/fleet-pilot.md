@@ -4,7 +4,7 @@ How to run Fleet on a handful of your own Linux developer machines: enroll them,
 
 Examples use placeholders: the controller is `controller.example.ts.net`, the pilot machines are `dev-1` and `dev-2`, their login is `dev`, and the operator is `you@example.com`. Every command is `fleetctl`; `fleetctl <command> --help` prints its usage.
 
-> **Short path:** [add-a-machine.md](add-a-machine.md) condenses this page into steps a coding agent on the new machine can follow end to end.
+> **Short path:** run `fleetctl machines join` on the new machine ([add-a-machine.md](add-a-machine.md)); it does the key, onboarding and skill steps of this page in one command, and refuses where this page says to stop.
 
 ## Scope
 
