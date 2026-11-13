@@ -4,6 +4,8 @@ How to prepare a Windows developer workstation so the controller can onboard it 
 
 Examples use placeholders: the controller is `controller.example.ts.net` (tailnet address `100.64.0.1`), the workstation is `workstation-1.example.ts.net`, and the developer's Windows account is `developer`.
 
+> **Short path:** [add-a-machine.md](add-a-machine.md) condenses this page into steps a coding agent on the new machine can follow end to end.
+
 ## Scope
 
 - **Supported:** Windows 11 x64, Pro, Enterprise or Education, on a feature update Microsoft still services for that edition, with the in-box OpenSSH Server. Microsoft services each feature update for 24 months on Home and Pro and for 36 months on Enterprise and Education ([Home and Pro](https://learn.microsoft.com/en-us/lifecycle/products/windows-11-home-and-pro), [Enterprise and Education](https://learn.microsoft.com/en-us/lifecycle/products/windows-11-enterprise-and-education)), so Fleet keeps one threshold per edition family, as of 2026-11: build 26200 (25H2) for Pro, Pro Education and Pro for Workstations (24H2 left Pro servicing on 2026-10-14), and build 26100 (24H2) for Enterprise and Education (serviced until 2027-10-13). They are `MIN_SERVICED_WINDOWS_11_PRO_BUILD` and `MIN_SERVICED_WINDOWS_11_BUILD` in `fleet-provider-ssh`, raised as Microsoft ends servicing.
