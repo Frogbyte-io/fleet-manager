@@ -640,24 +640,20 @@ mod tests {
             (Some(0), "marker"),
             "{by_path:?}"
         );
-        // The literal bracketed name runs the literal file, never the
-        // `fixture.exe` its pattern also matches.
-        let literal = run("fix[t]ure.exe".to_owned());
-        assert_eq!(
-            (literal.1, literal.2.as_str()),
-            (Some(0), "marker\n"),
-            "{literal:?}"
-        );
-        // By path, the lookup may resolve the pattern's other match first:
-        // the guard then refuses (64) rather than run it.
-        let literal_path = run(at("fix[t]ure.exe"));
-        assert!(
-            matches!(
-                (literal_path.1, literal_path.2.as_str()),
-                (Some(64), "") | (Some(0), "marker\n")
-            ),
-            "{literal_path:?}"
-        );
+        // A bracketed name is also a pattern that matches `fixture.exe`.
+        // Which match the lookup returns first depends on directory order,
+        // so the guard either runs the literal file (echo's newline) or
+        // refuses (64); it never runs `fixture.exe` (printf, no newline).
+        for program in ["fix[t]ure.exe".to_owned(), at("fix[t]ure.exe")] {
+            let literal = run(program);
+            assert!(
+                matches!(
+                    (literal.1, literal.2.as_str()),
+                    (Some(64), "") | (Some(0), "marker\n")
+                ),
+                "{literal:?}"
+            );
+        }
         // A program that is not on PATH by that exact name does not run.
         let other = run("fixture2.exe".to_owned());
         assert_eq!((other.1, other.2.as_str()), (Some(64), ""), "{other:?}");

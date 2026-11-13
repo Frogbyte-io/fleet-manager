@@ -67,20 +67,12 @@ fn the_linear_scan_matches_the_reference_on_random_text() {
 
 #[test]
 fn the_schemeless_scan_is_linear() {
-    // Quadratic code takes tens of seconds on this input in a debug build.
-    let started = std::time::Instant::now();
-    for text in [
-        "@".repeat(200_000),
-        "a@".repeat(100_000),
-        "a:@".repeat(70_000),
-    ] {
-        let _ = redact_credentials(&text);
+    // Quadratic code takes tens of seconds on these inputs in a debug
+    // build. A size ratio, not a wall-clock limit, so a loaded host does
+    // not fail it.
+    for unit in ["@", "a@", "a:@"] {
+        assert_scales_linearly(unit, &|size| unit.repeat(size / unit.len() + 1));
     }
-    assert!(
-        started.elapsed() < std::time::Duration::from_secs(2),
-        "{:?}",
-        started.elapsed()
-    );
 }
 
 #[test]
