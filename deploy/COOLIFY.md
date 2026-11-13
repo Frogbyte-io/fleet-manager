@@ -122,11 +122,13 @@ If `FLEET_COOLIFY_PORT` differs, change the **backend** port in both commands.
 
 On a host where Coolify's own proxy already holds 443 and 8080 on the
 tailnet address, publish the controller on other tailnet ports instead, both
-to the same loopback backend, for example HTTPS on 8443 and HTTP on 18080:
+to the same loopback backend, for example HTTPS on 8443 and HTTP on 18080
+(the backend below is the default `FLEET_COOLIFY_PORT`, 8080; use yours if it
+differs):
 
 ```sh
-tailscale serve --bg --https=8443 http://127.0.0.1:<FLEET_COOLIFY_PORT>
-tailscale serve --bg --http=18080 http://127.0.0.1:<FLEET_COOLIFY_PORT>
+tailscale serve --bg --https=8443 http://127.0.0.1:8080
+tailscale serve --bg --http=18080 http://127.0.0.1:8080
 ```
 
 The browser then uses `https://<deployment-host>.<tailnet>.ts.net:8443`, and

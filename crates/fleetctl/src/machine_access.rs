@@ -1130,32 +1130,40 @@ pub(crate) fn render(payload: &Value) -> String {
 mod tests {
     use super::*;
 
-    fn parse_words(words: &[&str]) -> Result<Command, CliError> {
+    fn parse_words(words: &[&str]) -> Result<(Command, Output), CliError> {
         let args: Vec<String> = words.iter().map(ToString::to_string).collect();
-        crate::parse(&args).map(|invocation| invocation.command)
+        crate::parse(&args).map(|invocation| (invocation.command, invocation.output))
     }
 
     #[test]
     fn endpoint_os_clear_parses_and_sends_a_delete_of_the_guest_os() {
-        for words in [
-            &[
-                "machines",
-                "endpoint-os",
-                "clear",
-                "machine-1",
-                "endpoint-1",
-            ][..],
-            &[
-                "machines",
-                "endpoint-os",
-                "clear",
-                "machine-1",
-                "endpoint-1",
-                "--output",
-                "json",
-            ],
+        for (words, expected_output) in [
+            (
+                &[
+                    "machines",
+                    "endpoint-os",
+                    "clear",
+                    "machine-1",
+                    "endpoint-1",
+                ][..],
+                Output::Text,
+            ),
+            (
+                &[
+                    "machines",
+                    "endpoint-os",
+                    "clear",
+                    "machine-1",
+                    "endpoint-1",
+                    "--output",
+                    "json",
+                ],
+                Output::Json,
+            ),
         ] {
-            let command = parse_words(words).unwrap_or_else(|error| panic!("{words:?}: {error}"));
+            let (command, output) =
+                parse_words(words).unwrap_or_else(|error| panic!("{words:?}: {error}"));
+            assert_eq!(output, expected_output, "{words:?}");
             let Command::MachineAccess(action) = command else {
                 panic!("{words:?}: not a machine access command: {command:?}");
             };

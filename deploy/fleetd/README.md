@@ -78,11 +78,14 @@ refuses to adopt a state directory that is a symbolic link, whose contents
 cannot be read, or that already holds files without a regular `node.key`. It
 also applies the same path and ancestor rules before it creates anything, and
 again once the state directory exists, so a state path or ancestor that
-`--purge` would refuse is never installed. Ownership is the exception: on the
-test layout above, where a stubbed `useradd` leaves no `fleet` account, the
-install succeeds with the state directory owned by the invoking user (or by
-root, when root runs it), and a later `--purge` run as root refuses it
-because it is not owned by `fleet`. Remove such a test install by hand.
+`--purge` would refuse is never installed. The service account is the exception: on
+the test layout above, where a stubbed `useradd` leaves no `fleet` account,
+the install succeeds with the state directory owned by the invoking user (or
+by root, when root runs it). A later `--purge` run as root refuses it because
+there is no `fleet` account ("the directory cannot be fleetd's"), whoever owns
+it; if a `fleet` account is created afterwards, the purge refuses the
+directory instead because it is not owned by `fleet`. Remove such a test
+install by hand.
 
 ## Local socket access
 
