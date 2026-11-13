@@ -75,7 +75,20 @@ for each `fleetctl` binary and `SHA256SUMS` before it publishes them:
 
 The attestation lets someone who downloaded a binary check that this
 workflow built it from a commit on `main`, which `SHA256SUMS` alone cannot
-show: the checksum file comes from the same release as the binary.
+show: the checksum file comes from the same release as the binary. That
+claim holds only when the check pins the signer and the ref, with `gh`
+2.102.0 or newer (older versions match both flags loosely; see
+[Verifying a release](../SECURITY.md#verifying-a-release)):
+
+```sh
+gh attestation verify fleetctl-linux-x86_64 --repo Frogbyte-io/fleet-manager \
+  --signer-workflow Frogbyte-io/fleet-manager/.github/workflows/release.yml \
+  --source-ref refs/heads/main
+```
+
+`--repo` alone accepts an attestation signed by any workflow in this
+repository, on any branch, so it does not show that this workflow built the
+file.
 
 `check-workflows.mjs` lists the exception by workflow path and job id
 (`JOB_WRITE_EXCEPTIONS`). The same two scopes in any other workflow, in

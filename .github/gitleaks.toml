@@ -44,15 +44,41 @@ description = """
 The redaction and key-handling modules test that PEM private-key armor is
 recognised and scrubbed, so their unit tests must contain BEGIN/END PRIVATE KEY
 lines. The bodies are placeholders ("fake", "AAAA", base64 of short words) that
-are not keys. This narrows only the private-key rule, only in these three
-files. Every other rule still applies there, and the private-key rule still
-applies everywhere else.
+are not keys. The tests live in their own files (each module's `tests.rs`),
+apart from the production code, so this narrows only the private-key rule,
+only in those three test files. The production modules themselves
+(redact.rs, lab_ssh_keys.rs, key.rs) are scanned like every other file.
 """
 targetRules = ["private-key"]
 paths = [
+    '''^crates/fleet-core/src/redact/tests\.rs$''',
+    '''^crates/fleet-controller/src/lab_ssh_keys/tests\.rs$''',
+    '''^crates/providers/fleet-provider-ssh/src/key/tests\.rs$''',
+]
+
+[[allowlists]]
+description = """
+History only. Before the tests above moved into their own files (issue #649),
+they sat inside redact.rs and key.rs, and the history scan still reads the
+commits that added them. This exempts the private-key rule for those two paths
+in exactly those commits (condition AND: the path and the commit must both
+match), so any later commit that puts PEM armor in either production file is
+reported. The list is closed: it never grows.
+"""
+targetRules = ["private-key"]
+condition = "AND"
+paths = [
     '''^crates/fleet-core/src/redact\.rs$''',
-    '''^crates/fleet-controller/src/lab_ssh_keys\.rs$''',
     '''^crates/providers/fleet-provider-ssh/src/key\.rs$''',
+]
+commits = [
+    "46b81d268b7c9415b54c798e1de6f3633e97f466",
+    "49d80212729bc08dc33af8e41e3251bde2260941",
+    "565c47d46015192ac235992185b5ff8daa45e66b",
+    "680d76b6c22a97f666ffc62d65cd98737099409b",
+    "86bb4112502409c1f65358be92ea44740b5d5cf1",
+    "fcae6da70ad4543581443f9050319ba4c2d9004e",
+    "d19f951f0882500b48e2e2acca962725a2809c1d",
 ]
 
 [[allowlists]]

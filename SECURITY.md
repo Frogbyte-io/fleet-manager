@@ -54,7 +54,15 @@ gh attestation verify fleetctl-linux-x86_64 --repo Frogbyte-io/fleet-manager \
 
 `--signer-workflow` and `--source-ref` require the release workflow running
 on `main`; `--repo` alone accepts an attestation from any workflow in the
-repository.
+repository. They need `gh` 2.102.0 or newer: the flags arrived in 2.51.0
+(`--signer-workflow`) and 2.68.0 (`--source-ref`), but before 2.97.0 the
+signer value was matched as an unescaped regular expression
+([GHSA-mm27-mwq9-fr5g](https://github.com/cli/cli/security/advisories/GHSA-mm27-mwq9-fr5g)),
+and before 2.102.0 `--signer-workflow` matched only the start of the signing
+workflow's identity and `--source-ref` ignored case
+([GHSA-wjmr-j3rp-mh2g](https://github.com/cli/cli/security/advisories/GHSA-wjmr-j3rp-mh2g),
+[GHSA-4mq3-hpgx-9cx8](https://github.com/cli/cli/security/advisories/GHSA-4mq3-hpgx-9cx8)),
+so an older `gh` can accept an attestation from another workflow or branch.
 
 The full install and verification steps are in
 [`deploy/README.md`](deploy/README.md#install-fleetctl). Why the release job
