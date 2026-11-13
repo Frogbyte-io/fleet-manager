@@ -313,8 +313,10 @@ export interface SetupFollowUpDto {
      */
   operationId?: string | null;
   /**
-     * Why nothing was queued: the rule, when `skipped`; a fixed
-     * caller-safe sentence, when `failed` (the detail is logged).
+     * Why nothing was queued: the rule, when `skipped`; when `failed`, a
+     * fixed sentence saying the install may not have been queued (a
+     * backend failure or timeout can still leave it queued; the detail is
+     * in the controller log).
      * @nullable
      */
   reason?: string | null;

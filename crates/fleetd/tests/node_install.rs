@@ -984,11 +984,19 @@ async fn a_revoked_identity_is_forcefully_reenrolled() {
         first_result["skillsManager"]["status"], "failed",
         "{first_result}"
     );
-    assert!(
-        first_result["skillsManager"]["reason"]
-            .as_str()
-            .is_some_and(|reason| !reason.is_empty())
+    // The store failure's own text is logged, never stored in the result
+    // every operation reader sees.
+    assert_eq!(
+        first_result["skillsManager"]["reason"],
+        fleet_application::machine_setup::FAILED_PUBLIC_REASON,
+        "{first_result}"
     );
+    let stored = first_result["skillsManager"]
+        .to_string()
+        .to_ascii_lowercase();
+    for backend in ["pool", "closed", "sqlite", "database", "backend"] {
+        assert!(!stored.contains(backend), "{backend} in {stored}");
+    }
     let original_key = {
         let view = harness.node_view(&machine_id).await;
         view.identity.as_ref().unwrap().public_key.clone()

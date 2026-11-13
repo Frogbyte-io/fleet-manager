@@ -303,10 +303,6 @@ pub struct AddedMachineDto {
     pub skills_manager: Option<SetupFollowUpDto>,
 }
 
-/// The caller-safe reason of a follow-up that could not be queued.
-pub const SETUP_FOLLOW_UP_FAILED: &str =
-    "the Skills Manager install could not be queued; the detail is in the controller log";
-
 /// What a machine's setup follow-up did.
 #[derive(Clone, Debug, Serialize, ToSchema)]
 #[serde(rename_all = "camelCase")]
@@ -320,29 +316,25 @@ pub struct SetupFollowUpDto {
     pub operation_id: Option<String>,
     /// The Skills Manager CLI version the queued install pins, when `queued`.
     pub version: Option<String>,
-    /// Why nothing was queued: the rule, when `skipped`; a fixed
-    /// caller-safe sentence, when `failed` (the detail is logged).
+    /// Why nothing was queued: the rule, when `skipped`; when `failed`, a
+    /// fixed sentence saying the install may not have been queued (a
+    /// backend failure or timeout can still leave it queued; the detail is
+    /// in the controller log).
     pub reason: Option<String>,
 }
 
 impl From<fleet_application::machine_setup::SetupFollowUp> for SetupFollowUpDto {
     fn from(outcome: fleet_application::machine_setup::SetupFollowUp) -> Self {
         use fleet_application::machine_setup::SetupFollowUp;
-        let (status, operation_id, version, reason) = match outcome {
+        // A failure's own reason is log-only; the add logged it already.
+        let (status, operation_id, version, reason) = match outcome.public() {
             SetupFollowUp::Queued {
                 operation_id,
                 version,
             } => ("queued", Some(operation_id), Some(version), None),
             SetupFollowUp::Skipped { reason } => ("skipped", None, None, Some(reason)),
             SetupFollowUp::Disabled => ("disabled", None, None, None),
-            // A failure's reason can carry backend detail that is safe to
-            // log, not to return; the add already logged it.
-            SetupFollowUp::Failed { .. } => (
-                "failed",
-                None,
-                None,
-                Some(SETUP_FOLLOW_UP_FAILED.to_owned()),
-            ),
+            SetupFollowUp::Failed { reason } => ("failed", None, None, Some(reason)),
         };
         Self {
             status: status.to_owned(),
@@ -1015,7 +1007,10 @@ mod follow_up_tests {
             reason: "backend: database is locked at /var/lib/fleet/fleet.db".to_owned(),
         });
         assert_eq!(dto.status, "failed");
-        assert_eq!(dto.reason.as_deref(), Some(SETUP_FOLLOW_UP_FAILED));
+        assert_eq!(
+            dto.reason.as_deref(),
+            Some(fleet_application::machine_setup::FAILED_PUBLIC_REASON)
+        );
         let skipped =
             SetupFollowUpDto::from(fleet_application::machine_setup::SetupFollowUp::Skipped {
                 reason: "no pinned release for windows/arm64".to_owned(),

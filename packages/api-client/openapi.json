@@ -32935,7 +32935,7 @@
               "string",
               "null"
             ],
-            "description": "Why nothing was queued: the rule, when `skipped`; a fixed\ncaller-safe sentence, when `failed` (the detail is logged)."
+            "description": "Why nothing was queued: the rule, when `skipped`; when `failed`, a\nfixed sentence saying the install may not have been queued (a\nbackend failure or timeout can still leave it queued; the detail is\nin the controller log)."
           },
           "status": {
             "type": "string",
