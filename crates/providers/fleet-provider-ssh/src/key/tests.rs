@@ -172,7 +172,7 @@ fn an_identity_file_in_the_provider_key_directory_is_refused_before_ssh_starts()
 }
 
 #[test]
-fn a_session_start_removes_stale_key_files() {
+fn materializing_a_key_sweeps_stale_key_files() {
     let dir = tempfile::tempdir().expect("tempdir");
     let provider = SshProvider::new(dir.path().to_path_buf()).expect("provider");
     let stale = provider.key_dir().join("key-1-1");
