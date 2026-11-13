@@ -361,6 +361,20 @@ fn unpinning_one_line_removes_only_that_copy() {
     );
     let remaining = std::fs::read_to_string(provider.known_hosts_path()).unwrap();
     assert_eq!(remaining, format!("{other}\n"));
+
+    // No file: nothing to take back. An unreadable one is an error, never
+    // "nothing to take back".
+    std::fs::remove_file(provider.known_hosts_path()).unwrap();
+    assert!(!provider.unpin_line(ours).unwrap());
+    std::fs::create_dir(provider.known_hosts_path()).unwrap();
+    let unreadable = provider.unpin_line(ours).unwrap_err();
+    assert!(
+        matches!(
+            unreadable,
+            fleet_provider_ssh::SshProviderError::Setup { .. }
+        ),
+        "{unreadable}"
+    );
 }
 
 #[test]

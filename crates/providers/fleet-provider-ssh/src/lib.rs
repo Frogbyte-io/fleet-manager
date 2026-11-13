@@ -429,8 +429,16 @@ impl SshProvider {
     pub fn unpin_line(&self, raw_line: &str) -> Result<bool, SshProviderError> {
         let _guard = known_hosts_lock();
         let path = self.known_hosts_path();
-        let Ok(content) = std::fs::read_to_string(&path) else {
-            return Ok(false);
+        // No file means no pin to take back; any other read failure is
+        // reported, so a pin that could not be removed never reads as gone.
+        let content = match std::fs::read_to_string(&path) {
+            Ok(content) => content,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+            Err(error) => {
+                return Err(SshProviderError::Setup {
+                    detail: format!("cannot read known_hosts: {error}"),
+                });
+            }
         };
         let mut lines: Vec<&str> = content.lines().collect();
         let Some(index) = lines.iter().rposition(|line| *line == raw_line) else {
@@ -667,9 +675,6 @@ fn parse_keygen_summary(summary: &str) -> Option<(String, String)> {
     Some((key_type, fingerprint.to_owned()))
 }
 
-/// Whether a `known_hosts` line concerns `host`. Hashed entries (`HashKnownHosts`
-/// `yes`) start with `|1|` and cannot be matched textually; Fleet pins raw
-/// lines itself, and hashed pins are left to OpenSSH's own verification.
 /// Serializes this process's writes to the Fleet known-hosts file: an
 /// append racing a read-modify-write rewrite would otherwise be lost.
 fn known_hosts_lock() -> std::sync::MutexGuard<'static, ()> {
@@ -678,6 +683,9 @@ fn known_hosts_lock() -> std::sync::MutexGuard<'static, ()> {
         .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
+/// Whether a `known_hosts` line concerns `host`. Hashed entries (`HashKnownHosts`
+/// `yes`) start with `|1|` and cannot be matched textually; Fleet pins raw
+/// lines itself, and hashed pins are left to OpenSSH's own verification.
 fn host_matches_line(line: &str, host: &str) -> bool {
     if line.starts_with('|') {
         return false;
