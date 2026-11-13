@@ -482,6 +482,17 @@ impl fleet_api::system::SystemInfoSource for FakeSystemInfo {
             queue_running: 0,
         })
     }
+
+    async fn ssh_public_key(&self) -> Result<fleet_api::system::SshPublicKeyInfo, String> {
+        Ok(fleet_api::system::SshPublicKeyInfo {
+            state: fleet_api::system::SshKeyState::Present,
+            public_key: Some("ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAA fleet-controller@test".to_owned()),
+            key_type: Some("ssh-ed25519".to_owned()),
+            fingerprint: Some("SHA256:fixture".to_owned()),
+            path: Some("/var/lib/fleet/.ssh/id_ed25519".to_owned()),
+            detail: None,
+        })
+    }
 }
 
 #[derive(Debug, Default)]
@@ -1176,6 +1187,64 @@ async fn the_system_view_is_a_plain_object_with_the_trust_warning() {
             .unwrap()
             .contains("no accounts")
     );
+}
+
+#[tokio::test]
+async fn the_controller_ssh_public_key_is_a_system_read() {
+    let (parts, body) = call(get(&format!("{API_BASE_PATH}/system/ssh-public-key"))).await;
+    assert_eq!(parts.status, StatusCode::OK, "{body}");
+    assert_eq!(body["state"], "present");
+    assert_eq!(body["fingerprint"], "SHA256:fixture");
+    assert!(body["publicKey"].as_str().unwrap().starts_with("ssh-ed25519 "));
+    assert!(body["detail"].is_null());
+
+    #[derive(Debug)]
+    struct DenySystemRead;
+    impl fleet_application::authz::Authorizer for DenySystemRead {
+        fn decide(&self, request: fleet_application::authz::AccessRequest<'_>) -> Decision {
+            if request.action == fleet_application::authz::Permission::SystemRead {
+                Decision::deny(ReasonId::UnknownPrincipal)
+            } else {
+                Decision::allow()
+            }
+        }
+    }
+    let (state, _, _) = test_state();
+    let mut state = (*state).clone();
+    state.authorizer = Arc::new(DenySystemRead);
+    let response = router(Arc::new(state))
+        .layer(axum::Extension(fleet_api::ActingPrincipal {
+            id: "delegated".to_owned(),
+        }))
+        .oneshot(get(&format!("{API_BASE_PATH}/system/ssh-public-key")))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+}
+
+#[tokio::test]
+async fn an_unwired_ssh_identity_source_is_an_error_envelope_not_a_fake_answer() {
+    #[derive(Debug)]
+    struct InfoOnly;
+    #[async_trait::async_trait]
+    impl fleet_api::system::SystemInfoSource for InfoOnly {
+        async fn info(&self) -> Result<fleet_api::system::SystemInfo, String> {
+            Err("unused".to_owned())
+        }
+    }
+    let (state, _, _) = test_state();
+    let mut state = (*state).clone();
+    state.system = Arc::new(InfoOnly);
+    let response = router(Arc::new(state))
+        .layer(axum::Extension(fleet_api::ActingPrincipal {
+            id: "anonymous-lan-admin".to_owned(),
+        }))
+        .oneshot(get(&format!("{API_BASE_PATH}/system/ssh-public-key")))
+        .await
+        .unwrap();
+    let (parts, body) = into_parts_json(response).await;
+    assert_eq!(parts.status, StatusCode::INTERNAL_SERVER_ERROR);
+    assert_eq!(body["code"], "system_unavailable");
 }
 
 #[tokio::test]

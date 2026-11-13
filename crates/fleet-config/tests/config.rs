@@ -333,6 +333,7 @@ fn validation_creates_the_state_directory() {
         lab_sweep_interval_seconds: 60,
         hardware_refresh_interval_seconds: 600,
         skills_manager_auto_install: true,
+        ssh_key_generate: true,
         desired_fetch_interval_seconds: 0,
         lab_artifacts_dir: dir.path().join("lab-artifacts"),
         lab_artifact_retention_seconds: fleet_config::DEFAULT_LAB_ARTIFACT_RETENTION_SECONDS,
@@ -363,6 +364,7 @@ fn an_uncreatable_state_directory_fails_validation() {
         lab_sweep_interval_seconds: 60,
         hardware_refresh_interval_seconds: 600,
         skills_manager_auto_install: true,
+        ssh_key_generate: true,
         desired_fetch_interval_seconds: 0,
         lab_artifacts_dir: dir.path().join("lab-artifacts"),
         lab_artifact_retention_seconds: fleet_config::DEFAULT_LAB_ARTIFACT_RETENTION_SECONDS,
@@ -389,6 +391,7 @@ fn a_missing_master_key_file_fails_validation() {
         lab_sweep_interval_seconds: 60,
         hardware_refresh_interval_seconds: 600,
         skills_manager_auto_install: true,
+        ssh_key_generate: true,
         desired_fetch_interval_seconds: 0,
         lab_artifacts_dir: dir.path().join("lab-artifacts"),
         lab_artifact_retention_seconds: fleet_config::DEFAULT_LAB_ARTIFACT_RETENTION_SECONDS,
@@ -415,6 +418,7 @@ fn a_directory_as_master_key_path_is_not_a_file() {
         lab_sweep_interval_seconds: 60,
         hardware_refresh_interval_seconds: 600,
         skills_manager_auto_install: true,
+        ssh_key_generate: true,
         desired_fetch_interval_seconds: 0,
         lab_artifacts_dir: dir.path().join("lab-artifacts"),
         lab_artifact_retention_seconds: fleet_config::DEFAULT_LAB_ARTIFACT_RETENTION_SECONDS,
@@ -447,6 +451,7 @@ fn a_group_or_world_readable_master_key_file_is_unsafe() {
             lab_sweep_interval_seconds: 60,
             hardware_refresh_interval_seconds: 600,
             skills_manager_auto_install: true,
+            ssh_key_generate: true,
             desired_fetch_interval_seconds: 0,
             lab_artifacts_dir: dir.path().join("lab-artifacts"),
             lab_artifact_retention_seconds: fleet_config::DEFAULT_LAB_ARTIFACT_RETENTION_SECONDS,
@@ -477,6 +482,7 @@ fn a_group_or_world_readable_master_key_file_is_unsafe() {
         lab_sweep_interval_seconds: 60,
         hardware_refresh_interval_seconds: 600,
         skills_manager_auto_install: true,
+        ssh_key_generate: true,
         desired_fetch_interval_seconds: 0,
         lab_artifacts_dir: dir.path().join("lab-artifacts"),
         lab_artifact_retention_seconds: fleet_config::DEFAULT_LAB_ARTIFACT_RETENTION_SECONDS,
@@ -516,6 +522,7 @@ fn no_diagnostic_surface_contains_secret_material() {
         lab_sweep_interval_seconds: 60,
         hardware_refresh_interval_seconds: 600,
         skills_manager_auto_install: true,
+        ssh_key_generate: true,
         desired_fetch_interval_seconds: 0,
         lab_artifacts_dir: dir.path().join("lab-artifacts"),
         lab_artifact_retention_seconds: fleet_config::DEFAULT_LAB_ARTIFACT_RETENTION_SECONDS,
@@ -646,6 +653,35 @@ fn the_skills_manager_auto_install_defaults_on_and_can_be_turned_off() {
             .unwrap()
             .skills_manager_auto_install
     );
+}
+
+#[test]
+fn the_ssh_key_generation_defaults_on_and_can_be_turned_off() {
+    let config = fleet_config::load(None, &|_| None).unwrap();
+    assert!(config.ssh_key_generate);
+    assert!(config.summary().contains("ssh_key_generate = true"));
+    let env = |value: &'static str| {
+        move |key: &str| (key == fleet_config::SSH_KEY_GENERATE_VAR).then(|| value.to_owned())
+    };
+    for off in ["false", "0", " FALSE "] {
+        assert!(
+            !fleet_config::load(None, &env(off)).unwrap().ssh_key_generate,
+            "{off}"
+        );
+    }
+    assert!(fleet_config::load(None, &env("")).unwrap().ssh_key_generate);
+    for bad in ["no", "off"] {
+        let error = fleet_config::load(None, &env(bad)).unwrap_err();
+        assert!(
+            matches!(error, fleet_config::ConfigError::SshKeyGenerateInvalid { .. }),
+            "{bad}"
+        );
+        assert!(error.to_string().contains("FLEET_SSH_KEY_GENERATE"));
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let file = write_config(dir.path(), &format!("{VALID_FILE}ssh_key_generate = false\n"));
+    assert!(!fleet_config::load(Some(&file), &none_env).unwrap().ssh_key_generate);
+    assert!(fleet_config::load(Some(&file), &env("true")).unwrap().ssh_key_generate);
 }
 
 #[test]
@@ -866,6 +902,7 @@ fn validation_refuses_zero_lab_artifact_bounds() {
             lab_sweep_interval_seconds: 60,
             hardware_refresh_interval_seconds: 600,
             skills_manager_auto_install: true,
+            ssh_key_generate: true,
             desired_fetch_interval_seconds: 0,
             lab_artifacts_dir: dir.path().join("lab-artifacts"),
             lab_artifact_retention_seconds: retention,

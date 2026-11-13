@@ -295,6 +295,50 @@ pub struct AddedMachineDto {
     /// Existing machines that shared the draft's host and port. The add
     /// proceeded anyway: candidates warn, they do not merge.
     pub duplicates: Vec<DuplicateCandidateDto>,
+    /// What the add's setup follow-up (the pinned Skills Manager install,
+    /// #600) did; absent when the controller composes no follow-up. The add
+    /// succeeded either way. The same value a fleetd install result reports
+    /// as `skillsManager`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub skills_manager: Option<SetupFollowUpDto>,
+}
+
+/// What a machine's setup follow-up did.
+#[derive(Clone, Debug, Serialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct SetupFollowUpDto {
+    /// `queued` (the operation is `operationId`), `skipped` (by rule, see
+    /// `reason`), `disabled` (the controller setting is off), or `failed`
+    /// (queueing was refused or failed, see `reason`).
+    #[schema(example = "queued")]
+    pub status: String,
+    /// The queued `skills.probe` operation, when `queued`.
+    pub operation_id: Option<String>,
+    /// The Skills Manager CLI version the queued install pins, when `queued`.
+    pub version: Option<String>,
+    /// Why nothing was queued, when `skipped` or `failed`.
+    pub reason: Option<String>,
+}
+
+impl From<fleet_application::machine_setup::SetupFollowUp> for SetupFollowUpDto {
+    fn from(outcome: fleet_application::machine_setup::SetupFollowUp) -> Self {
+        use fleet_application::machine_setup::SetupFollowUp;
+        let (status, operation_id, version, reason) = match outcome {
+            SetupFollowUp::Queued {
+                operation_id,
+                version,
+            } => ("queued", Some(operation_id), Some(version), None),
+            SetupFollowUp::Skipped { reason } => ("skipped", None, None, Some(reason)),
+            SetupFollowUp::Disabled => ("disabled", None, None, None),
+            SetupFollowUp::Failed { reason } => ("failed", None, None, Some(reason)),
+        };
+        Self {
+            status: status.to_owned(),
+            operation_id,
+            version,
+            reason,
+        }
+    }
 }
 
 impl From<DraftView> for OnboardingDraftDto {
@@ -890,6 +934,7 @@ pub async fn add_onboarding_machine(
                     reference: candidate.reference.clone(),
                 })
                 .collect(),
+            skills_manager: added.setup_follow_up.map(SetupFollowUpDto::from),
         })),
     ))
 }

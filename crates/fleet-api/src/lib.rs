@@ -194,9 +194,12 @@ pub const API_BASE_PATH: &str = "/api/v1";
         onboarding::OnboardHostKeyDto,
         onboarding::OnboardingDraftDetailDto,
         onboarding::OnboardingDraftDto,
+        onboarding::SetupFollowUpDto,
         onboarding::ShellCheckDto,
         onboarding::TestOutcomeDto,
         system::SystemInfo,
+        system::SshPublicKeyInfo,
+        system::SshKeyState,
         tailnet::ConfigureTailnetRequest,
         tailnet::CorrelatedDeviceDto,
         tailnet::CorrelationCandidateDto,
@@ -403,6 +406,7 @@ pub fn api(state: Arc<operations::ApiState>) -> (Router, utoipa::openapi::OpenAp
                 .routes(routes!(operations::get_operation))
                 .routes(routes!(operations::cancel_operation))
                 .routes(routes!(system::get_system_info))
+                .routes(routes!(system::get_ssh_public_key))
                 .routes(routes!(audit::list_audit_events))
                 .routes(routes!(system::stream_operation_events))
                 .routes(routes!(system::stream_fleet_events))

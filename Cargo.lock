@@ -793,6 +793,7 @@ dependencies = [
 name = "fleet-core"
 version = "0.1.0"
 dependencies = [
+ "base64 0.22.1",
  "proptest",
  "secrecy",
  "serde",
@@ -961,6 +962,7 @@ dependencies = [
  "fleet-application",
  "fleet-core",
  "pty-process",
+ "rustix 1.1.6",
  "serde_json",
  "sha2 0.10.9",
  "tempfile",

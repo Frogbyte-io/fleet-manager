@@ -14414,6 +14414,48 @@
         }
       }
     },
+    "/api/v1/system/ssh-public-key": {
+      "get": {
+        "tags": [
+          "system"
+        ],
+        "summary": "Reads the controller's SSH public key: the line a machine adds to\n`authorized_keys` so the controller can reach it (`fleetctl machines\njoin` fetches it here). Authorized exactly like the system view. The\nanswer is `present`, `none`, or `unusable` with the reason; the private\nkey is never read or returned.",
+        "description": "# Errors\n\nReturns the public error envelope when the caller may not read the\nsystem view or the identity cannot be inspected.\n\n# Panics\n\nPanics only if the pinned literal error code stops being valid syntax,\nwhich is a constant path a test pins.",
+        "operationId": "getControllerSshPublicKey",
+        "responses": {
+          "200": {
+            "description": "The controller's SSH public key, or why there is none.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SshPublicKeyInfo"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The caller may not read the system view.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "The identity could not be inspected.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/tailnet/config": {
       "put": {
         "tags": [
@@ -14948,6 +14990,17 @@
           "machine": {
             "$ref": "#/components/schemas/MachineDto",
             "description": "The registered machine, redacted per the caller's permissions."
+          },
+          "skillsManager": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/SetupFollowUpDto",
+                "description": "What the add's setup follow-up (the pinned Skills Manager install,\n#600) did; absent when the controller composes no follow-up. The add\nsucceeded either way. The same value a fleetd install result reports\nas `skillsManager`."
+              }
+            ]
           }
         }
       },
@@ -27223,6 +27276,17 @@
               "machine": {
                 "$ref": "#/components/schemas/MachineDto",
                 "description": "The registered machine, redacted per the caller's permissions."
+              },
+              "skillsManager": {
+                "oneOf": [
+                  {
+                    "type": "null"
+                  },
+                  {
+                    "$ref": "#/components/schemas/SetupFollowUpDto",
+                    "description": "What the add's setup follow-up (the pinned Skills Manager install,\n#600) did; absent when the controller composes no follow-up. The add\nsucceeded either way. The same value a fleetd install result reports\nas `skillsManager`."
+                  }
+                ]
               }
             }
           }
@@ -32852,6 +32916,41 @@
           }
         }
       },
+      "SetupFollowUpDto": {
+        "type": "object",
+        "description": "What a machine's setup follow-up did.",
+        "required": [
+          "status"
+        ],
+        "properties": {
+          "operationId": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The queued `skills.probe` operation, when `queued`."
+          },
+          "reason": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Why nothing was queued, when `skipped` or `failed`."
+          },
+          "status": {
+            "type": "string",
+            "description": "`queued` (the operation is `operationId`), `skipped` (by rule, see\n`reason`), `disabled` (the controller setting is off), or `failed`\n(queueing was refused or failed, see `reason`).",
+            "example": "queued"
+          },
+          "version": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The Skills Manager CLI version the queued install pins, when `queued`."
+          }
+        }
+      },
       "SeverityDto": {
         "type": "string",
         "description": "How serious a warning is.",
@@ -33200,6 +33299,64 @@
           "updateCheck": {
             "type": "string",
             "description": "`complete`, `failed`, `unavailable`, or `unsupported`."
+          }
+        }
+      },
+      "SshKeyState": {
+        "type": "string",
+        "description": "Whether the controller has a usable SSH identity.",
+        "enum": [
+          "present",
+          "none",
+          "unusable"
+        ]
+      },
+      "SshPublicKeyInfo": {
+        "type": "object",
+        "description": "The controller's SSH public key, served at `/api/v1/system/ssh-public-key`.\nThis is the line a machine puts in `authorized_keys` so the controller can\nreach it with `--auth agent`.",
+        "required": [
+          "state"
+        ],
+        "properties": {
+          "detail": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "What is wrong and how to fix it, when the key is missing or unusable."
+          },
+          "fingerprint": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The `SHA256:` fingerprint, as `ssh-keygen -lf` prints it, when present."
+          },
+          "keyType": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The key type, e.g. `ssh-ed25519`, when present."
+          },
+          "path": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The private key file on the controller (its path, never its content),\nor the directory searched when there is none."
+          },
+          "publicKey": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The OpenSSH public key line, when present.",
+            "example": "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAA... fleet-controller@controller"
+          },
+          "state": {
+            "$ref": "#/components/schemas/SshKeyState",
+            "description": "Whether a usable key exists."
           }
         }
       },
