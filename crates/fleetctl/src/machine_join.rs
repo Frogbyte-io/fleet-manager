@@ -425,7 +425,7 @@ pub fn authorizes(content: &str, key: &fleet_core::SshPublicKey) -> bool {
 }
 
 /// The key type and blob of one `authorized_keys` line, as sshd reads it
-/// (`sshd(8)`, AUTHORIZED_KEYS FILE FORMAT): an optional options field
+/// (`sshd(8)`, section "authorized keys file format"): an optional options field
 /// (comma-separated, double quotes may hold spaces), then the key type, the
 /// base64 key and an ignored comment. `None` for blank and comment lines.
 #[must_use]
