@@ -425,7 +425,8 @@ impl SshProvider {
     ///
     /// # Errors
     ///
-    /// Fails when the file cannot be rewritten.
+    /// Fails when the file exists but cannot be read (a missing file is
+    /// `Ok(false)`: no pin to take back), or when it cannot be rewritten.
     pub fn unpin_line(&self, raw_line: &str) -> Result<bool, SshProviderError> {
         let _guard = known_hosts_lock();
         let path = self.known_hosts_path();
