@@ -33,11 +33,19 @@ why: [fleet-pilot.md](fleet-pilot.md) (Linux) and
   every agent on them. Only add machines whose compromise the operator accepts.
   See [restrict access first](fleet-pilot.md#restrict-access-first).
 
-## Input from the operator
+## Before you start
+
+This machine must be **on the controller's tailnet** (`tailscale status`
+shows it, and `tailscale ip -4` prints its address), and the tailnet policy
+must let the controller reach it on TCP 22. If it is not, stop and ask the
+operator to add it; joining a tailnet is not something to do on their behalf.
+
+## Inputs from the operator
 
 | Input | Example | Where it comes from |
 |---|---|---|
 | Controller URL | `http://controller.example.ts.net:8080` | The operator's Fleet deployment. On a Coolify host whose proxy already holds ports 80/443/8080, it is the HTTP port Tailscale Serve publishes instead ([COOLIFY.md](../../deploy/COOLIFY.md)). |
+| Controller release tag (optional) | `v0.1.0-48f6043` | The `fleetctl` release built from the commit the controller runs: `v<version>-<short commit>`. Default: the newest release, which matches a controller deployed from `main`'s head. Only needed on Windows; Linux takes the controller's own copy. |
 
 The controller's SSH key no longer has to be handed over: the controller
 generates it on its first start and publishes the public half
@@ -54,27 +62,42 @@ controller runs in a container that may not resolve tailnet (MagicDNS) names.
 
 Run as the account the coding agents use (not root).
 
+Install the `fleetctl` built from the same commit as the controller: the
+controller serves its own copy, so it matches by construction (and serves the
+`ssh-public-key` endpoint the join needs). Fetch it through the controller's
+**HTTPS** (Tailscale Serve) URL when there is one: over plain HTTP the binary
+and its checksum come from the same unauthenticated origin, so the check only
+catches corruption.
+
 ```sh
 mkdir -p ~/.local/bin && cd "$(mktemp -d)"
-gh release download -R Frogbyte-io/fleet-manager -p fleetctl-linux-x86_64 -p SHA256SUMS
-grep ' fleetctl-linux-x86_64$' SHA256SUMS | sha256sum -c -
-install -m 0755 fleetctl-linux-x86_64 ~/.local/bin/fleetctl
+u='<controller URL>/downloads/fleetctl/linux-x86_64'
+# One chain: a failed download, checksum or test run installs nothing.
+curl -fsSLo fleetctl "$u" && curl -fsSLo fleetctl.sha256 "$u.sha256" \
+  && [ "$(cut -d' ' -f1 fleetctl.sha256)" = "$(sha256sum fleetctl | cut -d' ' -f1)" ] \
+  && chmod +x fleetctl && ./fleetctl --version \
+  && install -m 0755 fleetctl ~/.local/bin/fleetctl \
+  || { echo 'fleetctl NOT installed: download, checksum or test run failed' >&2; false; }
+case ":$PATH:" in *":$HOME/.local/bin:"*) ;; *) export PATH="$HOME/.local/bin:$PATH" ;; esac
 
-mkdir -p ~/.config/fleet
-printf 'url = "%s"\n' '<controller URL>' > ~/.config/fleet/config.toml
+case "${XDG_CONFIG_HOME:-}" in /*) cfg="$XDG_CONFIG_HOME/fleet" ;; *) cfg="$HOME/.config/fleet" ;; esac
+mkdir -p "$cfg"
+printf 'url = "%s"\n' '<controller URL>' > "$cfg/config.toml"
 fleetctl --output json system   # storageOk: true, client.urlSource: "config"
 ```
 
-Use the release that matches the controller (`fleetctl --url <url> --output
-json system` shows the controller's version; the latest release on `main` is
-the usual match). Without `gh`, download the same two files from the release
-page with `curl`. Optionally verify provenance as in
+That copy needs glibc 2.36 or newer (Debian 12, Ubuntu 23.04 or later). On
+older systems use the static release binary for the controller's release tag
+instead, checked against the release's `SHA256SUMS`, as in
 [deploy/README.md](../../deploy/README.md#install-fleetctl).
 
-The SSH server must be installed and running:
-`systemctl is-active ssh || sudo systemctl enable --now ssh` (install
-`openssh-server` first if it is missing). The join checks it but never runs
-`sudo`.
+The SSH server must be installed and running. The join checks it but never
+runs `sudo`; this is the one step that needs it:
+
+```sh
+command -v sshd >/dev/null || sudo apt-get install -y openssh-server
+sudo systemctl enable --now ssh
+```
 
 ### Windows 11 (x64)
 
@@ -101,7 +124,9 @@ Restart-Service sshd
 
 ```powershell
 $bin = "$env:LOCALAPPDATA\fleet\bin"; New-Item -ItemType Directory -Force $bin | Out-Null
-$base = 'https://github.com/Frogbyte-io/fleet-manager/releases/latest/download'
+# The controller's release tag when the operator gave one, else the newest.
+$tag = ''   # e.g. 'v0.1.0-48f6043'
+$base = if ($tag) { "https://github.com/Frogbyte-io/fleet-manager/releases/download/$tag" } else { 'https://github.com/Frogbyte-io/fleet-manager/releases/latest/download' }
 Invoke-WebRequest "$base/fleetctl-windows-x86_64.exe" -OutFile "$bin\fleetctl.exe"
 Invoke-WebRequest "$base/SHA256SUMS" -OutFile "$env:TEMP\SHA256SUMS"
 $want = ((Get-Content "$env:TEMP\SHA256SUMS") -match ' fleetctl-windows-x86_64\.exe$').Split(' ')[0]
@@ -283,7 +308,8 @@ sequence, by hand.
      cat "$d/id_ed25519.pub"'
    ```
 
-2. **Let the controller in.** Linux:
+2. **Let the controller in.** Linux (sshd installed and running as in
+   [step 1](#1-install-fleetctl-and-point-it-at-the-controller)):
 
    ```sh
    mkdir -p ~/.ssh && chmod 700 ~/.ssh
@@ -305,7 +331,14 @@ sequence, by hand.
 
 3. **Remove a stale Skills Manager stand-in** (Linux): if `skills-manager-cli`
    on `PATH` is a script or `skills-manager-cli --version` does not print
-   `skills-manager-cli <version>`, remove it.
+   `skills-manager-cli <version>`, it makes Fleet report fake skills:
+
+   ```sh
+   p="$(command -v skills-manager-cli)" && file "$p" | grep -q 'script' && rm -f "$p"
+   ```
+
+   Remove only a script. Leave a real binary in place, and stop and tell the
+   operator if it is not the version Fleet pins.
 
 4. **Onboard.** `<fingerprint>` is this machine's own, from
    `ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub` (Windows:
