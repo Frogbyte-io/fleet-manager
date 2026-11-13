@@ -40,6 +40,52 @@ pub trait SystemInfoSource: Send + Sync {
     ///
     /// Fails when a dependency (storage) cannot be reached.
     async fn info(&self) -> Result<SystemInfo, String>;
+
+    /// Reports the controller's own SSH identity: the public half of the
+    /// default key `--auth agent` connects with. Never the private key.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the identity cannot be inspected at all; a missing or
+    /// unusable key is an answer, not an error. The default answers that no
+    /// source is wired.
+    async fn ssh_public_key(&self) -> Result<SshPublicKeyInfo, String> {
+        Err("no SSH identity source is wired".to_owned())
+    }
+}
+
+/// Whether the controller has a usable SSH identity.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub enum SshKeyState {
+    /// A usable default key; `publicKey` and `fingerprint` are set.
+    Present,
+    /// The controller user has no default key.
+    None,
+    /// A default key exists but `ssh` cannot use it; `detail` says why.
+    Unusable,
+}
+
+/// The controller's SSH public key, served at `/api/v1/system/ssh-public-key`.
+/// This is the line a machine puts in `authorized_keys` so the controller can
+/// reach it with `--auth agent`.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct SshPublicKeyInfo {
+    /// Whether a usable key exists.
+    pub state: SshKeyState,
+    /// The OpenSSH public key line, when present.
+    #[schema(example = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAA... fleet-controller@controller")]
+    pub public_key: Option<String>,
+    /// The key type, e.g. `ssh-ed25519`, when present.
+    pub key_type: Option<String>,
+    /// The `SHA256:` fingerprint, as `ssh-keygen -lf` prints it, when present.
+    pub fingerprint: Option<String>,
+    /// The private key file on the controller (its path, never its content),
+    /// or the directory searched when there is none.
+    pub path: Option<String>,
+    /// What is wrong and how to fix it, when the key is missing or unusable.
+    pub detail: Option<String>,
 }
 
 /// The system view served at `/api/v1/system`.
@@ -106,9 +152,37 @@ pub async fn get_system_info(
     Extension(correlation_id): Extension<CorrelationId>,
     principal: Option<Extension<fleet_application::authz::ActingPrincipal>>,
 ) -> Result<Json<SystemInfo>, ApiErrorResponse> {
-    // The system view is a catalog action like any other read; a delegated
-    // credential may not read it.
-    if let Some(Extension(acting)) = &principal {
+    authorize_system_read(&state, principal.as_ref(), correlation_id)?;
+    let mut info = state
+        .system
+        .info()
+        .await
+        .map_err(|detail| system_unavailable("the system view", &detail, correlation_id))?;
+    info.current_principal =
+        principal.map_or_else(|| "unknown".to_owned(), |Extension(principal)| principal.id);
+    Ok(Json(info))
+}
+
+/// The `system_unavailable` envelope for a system view whose source failed.
+/// The source's detail goes to the controller log, never to the caller.
+fn system_unavailable(what: &str, detail: &str, correlation_id: CorrelationId) -> ApiErrorResponse {
+    eprintln!("{what} is unavailable ({correlation_id}): {detail}");
+    let public = PublicError::new(
+        ErrorCode::from_str("system_unavailable").expect("the literal is valid error code syntax"),
+        format!("{what} is unavailable; the detail is in the controller log"),
+        RetryClass::Backoff,
+    );
+    ApiError::new(&public, correlation_id).with_status(StatusCode::INTERNAL_SERVER_ERROR)
+}
+
+/// The system views are catalog actions like any other read; a delegated
+/// credential may not read them.
+fn authorize_system_read(
+    state: &ApiState,
+    principal: Option<&Extension<fleet_application::authz::ActingPrincipal>>,
+    correlation_id: CorrelationId,
+) -> Result<(), ApiErrorResponse> {
+    if let Some(Extension(acting)) = principal {
         fleet_application::authz::authorize(
             state.authorizer.as_ref(),
             fleet_application::authz::AccessRequest {
@@ -126,17 +200,56 @@ pub async fn get_system_info(
             ApiError::new(&public, correlation_id).with_status(StatusCode::FORBIDDEN)
         })?;
     }
-    let mut info = state.system.info().await.map_err(|_detail| {
-        let public = PublicError::new(
-            ErrorCode::from_str("system_unavailable")
-                .expect("the literal is valid error code syntax"),
-            "the system view is unavailable; the detail is in the controller log",
-            RetryClass::Backoff,
-        );
-        ApiError::new(&public, correlation_id).with_status(StatusCode::INTERNAL_SERVER_ERROR)
+    Ok(())
+}
+
+/// Reads the controller's SSH public key: the line a machine adds to
+/// `authorized_keys` so the controller can reach it (`fleetctl machines
+/// join` fetches it here). Authorized exactly like the system view. The
+/// answer is `present`, `none`, or `unusable` with the reason; the private
+/// key is never read or returned.
+///
+/// # Errors
+///
+/// Returns the public error envelope when the caller may not read the
+/// system view or the identity cannot be inspected.
+///
+/// # Panics
+///
+/// Panics only if the pinned literal error code stops being valid syntax,
+/// which is a constant path a test pins.
+#[utoipa::path(
+    get,
+    path = "/system/ssh-public-key",
+    tag = "system",
+    operation_id = "getControllerSshPublicKey",
+    responses(
+        (
+            status = 200,
+            description = "The controller's SSH public key, or why there is none.",
+            body = SshPublicKeyInfo
+        ),
+        (
+            status = 403,
+            description = "The caller may not read the system view.",
+            body = crate::error::ApiError
+        ),
+        (
+            status = 500,
+            description = "The identity could not be inspected.",
+            body = crate::error::ApiError
+        ),
+    )
+)]
+pub async fn get_ssh_public_key(
+    State(state): State<Arc<ApiState>>,
+    Extension(correlation_id): Extension<CorrelationId>,
+    principal: Option<Extension<fleet_application::authz::ActingPrincipal>>,
+) -> Result<Json<SshPublicKeyInfo>, ApiErrorResponse> {
+    authorize_system_read(&state, principal.as_ref(), correlation_id)?;
+    let info = state.system.ssh_public_key().await.map_err(|detail| {
+        system_unavailable("the controller's SSH identity", &detail, correlation_id)
     })?;
-    info.current_principal =
-        principal.map_or_else(|| "unknown".to_owned(), |Extension(principal)| principal.id);
     Ok(Json(info))
 }
 

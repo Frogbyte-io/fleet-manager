@@ -15,6 +15,7 @@ tokio = { version = "1.53.1", features = ["io-util", "process"] }
 
 [target.'cfg(unix)'.dependencies]
 pty-process = { version = "0.5.4", features = ["async"] }
+rustix = { version = "1.1.5", default-features = false, features = ["std", "process"] }
 
 [lints]
 workspace = true

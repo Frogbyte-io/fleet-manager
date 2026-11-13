@@ -57,6 +57,7 @@ pub mod skills_setup;
 pub mod skills_windows;
 pub mod source;
 pub mod source_poller;
+pub mod ssh_identity;
 pub mod tailnet_store;
 pub mod worker;
 
@@ -573,6 +574,10 @@ impl fleet_api::system::SystemInfoSource for ControllerSystemInfo {
             queue_pending: depths.0,
             queue_running: depths.1,
         })
+    }
+
+    async fn ssh_public_key(&self) -> Result<fleet_api::system::SshPublicKeyInfo, String> {
+        crate::ssh_identity::public_key_info().await
     }
 }
 

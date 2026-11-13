@@ -38,6 +38,7 @@ pub mod detached;
 pub mod discovery;
 pub mod exec;
 pub mod fetch;
+pub mod identity;
 pub mod inventory;
 pub mod key;
 pub mod persistent;

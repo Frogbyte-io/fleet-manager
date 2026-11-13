@@ -44,6 +44,9 @@ services:
       # Proxmox VM screen: close a console after this many seconds without
       # keyboard, pointer, or paste input (FM-495); 30 to 3600.
       FLEET_CONSOLE_IDLE_SECONDS: ${FLEET_CONSOLE_IDLE_SECONDS:-600}
+      # The controller's own SSH key, generated at startup when missing;
+      # empty keeps the default (on), `false` turns it off.
+      FLEET_SSH_KEY_GENERATE: ${FLEET_SSH_KEY_GENERATE:-}
       # Opt-in proxy for Packer image builds (#339); empty means off. Never put
       # credentials in it: the controller refuses a URL that carries them.
       FLEET_IMAGE_BUILD_PROXY: ${FLEET_IMAGE_BUILD_PROXY:-}
