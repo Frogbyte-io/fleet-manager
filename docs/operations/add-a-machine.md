@@ -42,6 +42,7 @@ operator to add it; joining a tailnet is not something to do on their behalf.
 | Input | Example | Where it comes from |
 |---|---|---|
 | Controller URL | `http://controller.example.ts.net:8080` | The operator's Fleet deployment. On a Coolify host whose proxy already holds ports 80/443/8080, it is the HTTP port Tailscale Serve publishes instead ([COOLIFY.md](../../deploy/COOLIFY.md)). |
+| Controller release tag (optional) | `v0.1.0-48f6043` | The `fleetctl` release built from the commit the controller runs: `v<version>-<short commit>`. Default: the newest release, which matches a controller deployed from `main`'s head. Only needed on Windows; Linux takes the controller's own copy. |
 | Controller SSH public key | `ssh-ed25519 AAAA... fleet-controller@controller` | `cat /var/lib/fleet/.ssh/id_ed25519.pub` inside the controller container. See [give the controller an SSH key](#once-per-controller-give-it-an-ssh-key) if it has none. |
 
 The controller URL only has to work from this machine, so a tailnet name is
@@ -53,22 +54,24 @@ container that may not resolve tailnet (MagicDNS) names.
 
 Run as the account the coding agents use (not root).
 
-1. **Install `fleetctl`** from the release that matches the controller.
-   Releases are tagged `v<version>-<short commit>`, one per commit on `main`.
-   A controller deployed from `main`'s head matches the newest release; if the
-   operator deployed another commit, use the tag ending in that commit
-   (`--tag` below, `/download/<tag>/` in the Windows URLs).
+1. **Install `fleetctl`** built from the same commit as the controller. The
+   controller serves its own copy, so it matches by construction. Fetch it
+   through the controller's **HTTPS** (Tailscale Serve) URL when there is one:
+   over plain HTTP the binary and its checksum come from the same
+   unauthenticated origin, so the check only catches corruption.
 
    ```sh
    mkdir -p ~/.local/bin && cd "$(mktemp -d)"
-   gh release download -R Frogbyte-io/fleet-manager -p fleetctl-linux-x86_64 -p SHA256SUMS   # add: <tag> for a specific release
-   grep ' fleetctl-linux-x86_64$' SHA256SUMS | sha256sum -c -
-   install -m 0755 fleetctl-linux-x86_64 ~/.local/bin/fleetctl
+   u='<controller URL>/downloads/fleetctl/linux-x86_64'
+   curl -fsSLo fleetctl "$u" && curl -fsSLo fleetctl.sha256 "$u.sha256"
+   [ "$(cut -d' ' -f1 fleetctl.sha256)" = "$(sha256sum fleetctl | cut -d' ' -f1)" ]
+   chmod +x fleetctl && ./fleetctl --version && install -m 0755 fleetctl ~/.local/bin/fleetctl
    case ":$PATH:" in *":$HOME/.local/bin:"*) ;; *) export PATH="$HOME/.local/bin:$PATH" ;; esac
    ```
 
-   Without `gh`, download the same two files from the release page with
-   `curl`. Optionally verify provenance as in
+   That copy needs glibc 2.36 or newer (Debian 12, Ubuntu 23.04 or later). On
+   older systems use the static release binary for the controller's release
+   tag instead, checked against the release's `SHA256SUMS`, as in
    [deploy/README.md](../../deploy/README.md#install-fleetctl).
 
 2. **Point it at the controller:**
@@ -148,8 +151,9 @@ operator to run and waits. The why of each step is in
 
    ```powershell
    $bin = "$env:LOCALAPPDATA\fleet\bin"; New-Item -ItemType Directory -Force $bin | Out-Null
-   # Newest release; for a specific one use .../releases/download/<tag>
-   $base = 'https://github.com/Frogbyte-io/fleet-manager/releases/latest/download'
+   # The controller's release tag when the operator gave one, else the newest.
+   $tag = ''   # e.g. 'v0.1.0-48f6043'
+   $base = if ($tag) { "https://github.com/Frogbyte-io/fleet-manager/releases/download/$tag" } else { 'https://github.com/Frogbyte-io/fleet-manager/releases/latest/download' }
    Invoke-WebRequest "$base/fleetctl-windows-x86_64.exe" -OutFile "$bin\fleetctl.exe"
    Invoke-WebRequest "$base/SHA256SUMS" -OutFile "$env:TEMP\SHA256SUMS"
    $want = ((Get-Content "$env:TEMP\SHA256SUMS") -match ' fleetctl-windows-x86_64\.exe$').Split(' ')[0]
