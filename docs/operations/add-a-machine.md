@@ -68,7 +68,7 @@ Run as the account the coding agents use (not root).
      && [ "$(cut -d' ' -f1 fleetctl.sha256)" = "$(sha256sum fleetctl | cut -d' ' -f1)" ] \
      && chmod +x fleetctl && ./fleetctl --version \
      && install -m 0755 fleetctl ~/.local/bin/fleetctl \
-     || echo 'fleetctl NOT installed: download, checksum or test run failed' >&2
+     || { echo 'fleetctl NOT installed: download, checksum or test run failed' >&2; false; }
    case ":$PATH:" in *":$HOME/.local/bin:"*) ;; *) export PATH="$HOME/.local/bin:$PATH" ;; esac
    ```
 
