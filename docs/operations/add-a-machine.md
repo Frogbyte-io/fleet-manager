@@ -30,6 +30,13 @@ here fails, those pages explain why.
   every agent on them. Only add machines whose compromise the operator accepts.
   See [restrict access first](fleet-pilot.md#restrict-access-first).
 
+## Before you start
+
+This machine must be **on the controller's tailnet** (`tailscale status`
+shows it, and `tailscale ip -4` prints its address), and the tailnet policy
+must let the controller reach it on TCP 22. If it is not, stop and ask the
+operator to add it; joining a tailnet is not something to do on their behalf.
+
 ## Inputs from the operator
 
 | Input | Example | Where it comes from |
@@ -46,15 +53,18 @@ container that may not resolve tailnet (MagicDNS) names.
 
 Run as the account the coding agents use (not root).
 
-1. **Install `fleetctl`** from the release that matches the controller
-   (`fleetctl --url <url> --output json system` shows the controller; the
-   latest release on `main` is the usual match) and check it:
+1. **Install `fleetctl`** from the release that matches the controller.
+   Releases are tagged `v<version>-<short commit>`, one per commit on `main`.
+   A controller deployed from `main`'s head matches the newest release; if the
+   operator deployed another commit, use the tag ending in that commit
+   (`--tag` below, `/download/<tag>/` in the Windows URLs).
 
    ```sh
    mkdir -p ~/.local/bin && cd "$(mktemp -d)"
-   gh release download -R Frogbyte-io/fleet-manager -p fleetctl-linux-x86_64 -p SHA256SUMS
+   gh release download -R Frogbyte-io/fleet-manager -p fleetctl-linux-x86_64 -p SHA256SUMS   # add: <tag> for a specific release
    grep ' fleetctl-linux-x86_64$' SHA256SUMS | sha256sum -c -
    install -m 0755 fleetctl-linux-x86_64 ~/.local/bin/fleetctl
+   case ":$PATH:" in *":$HOME/.local/bin:"*) ;; *) export PATH="$HOME/.local/bin:$PATH" ;; esac
    ```
 
    Without `gh`, download the same two files from the release page with
@@ -64,8 +74,9 @@ Run as the account the coding agents use (not root).
 2. **Point it at the controller:**
 
    ```sh
-   mkdir -p ~/.config/fleet
-   printf 'url = "%s"\n' '<controller URL>' > ~/.config/fleet/config.toml
+   case "${XDG_CONFIG_HOME:-}" in /*) cfg="$XDG_CONFIG_HOME/fleet" ;; *) cfg="$HOME/.config/fleet" ;; esac
+   mkdir -p "$cfg"
+   printf 'url = "%s"\n' '<controller URL>' > "$cfg/config.toml"
    fleetctl --output json system   # storageOk: true, client.urlSource: "config"
    ```
 
@@ -73,7 +84,8 @@ Run as the account the coding agents use (not root).
    public key to this account:
 
    ```sh
-   systemctl is-active ssh || sudo systemctl enable --now ssh
+   command -v sshd >/dev/null || sudo apt-get install -y openssh-server
+   sudo systemctl enable --now ssh
    mkdir -p ~/.ssh && chmod 700 ~/.ssh
    grep -qxF '<controller public key>' ~/.ssh/authorized_keys 2>/dev/null \
      || echo '<controller public key>' >> ~/.ssh/authorized_keys
@@ -85,6 +97,13 @@ Run as the account the coding agents use (not root).
    says it is a script, or `skills-manager-cli --version` prints JSON instead of
    `skills-manager-cli 1.40.0`), remove it; a test stub left there makes Fleet
    report fake skills. Fleet installs the real, pinned binary itself.
+
+   ```sh
+   p="$(command -v skills-manager-cli)" && file "$p" | grep -q 'script' && rm -f "$p"
+   ```
+
+   Remove only a script. Leave a real binary in place, and stop and tell the
+   operator if it is not the version Fleet pins.
 
 5. **Onboard this machine** (see [Onboard and verify](#onboard-and-verify)) with
    `--user "$USER" --host "$(tailscale ip -4)"` and the fingerprint from:
@@ -129,6 +148,7 @@ operator to run and waits. The why of each step is in
 
    ```powershell
    $bin = "$env:LOCALAPPDATA\fleet\bin"; New-Item -ItemType Directory -Force $bin | Out-Null
+   # Newest release; for a specific one use .../releases/download/<tag>
    $base = 'https://github.com/Frogbyte-io/fleet-manager/releases/latest/download'
    Invoke-WebRequest "$base/fleetctl-windows-x86_64.exe" -OutFile "$bin\fleetctl.exe"
    Invoke-WebRequest "$base/SHA256SUMS" -OutFile "$env:TEMP\SHA256SUMS"
