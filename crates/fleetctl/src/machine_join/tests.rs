@@ -25,6 +25,7 @@ fn developer() -> Account {
 
 const ICACLS: &str = r"C:\Windows\System32\icacls.exe";
 const WHOAMI: &str = r"C:\Windows\System32\whoami.exe";
+const REG: &str = r"C:\Windows\System32\reg.exe";
 
 /// A scripted machine: environment, programs and their answers, and the
 /// SSH banner. Records every program it was asked to run.
@@ -107,6 +108,9 @@ impl JoinHost for FakeHost {
     }
     fn hostname(&self) -> Option<String> {
         Some("dev-box".to_owned())
+    }
+    fn system_dir(&self) -> Option<PathBuf> {
+        (self.platform == Platform::Windows).then(|| PathBuf::from(r"C:\Windows\System32"))
     }
 }
 
@@ -404,6 +408,17 @@ fn the_account_comes_from_the_system_not_the_environment() {
         current_account(&FakeHost::windows(home.path(), data.path())).unwrap(),
         developer()
     );
+    // A caller-set SystemRoot does not move the programs the join runs.
+    let mut moved = FakeHost::windows(home.path(), data.path());
+    moved.env.insert("SystemRoot", r"D:\elsewhere".to_owned());
+    let _ = current_account(&moved);
+    assert!(moved.ran()[0].starts_with(WHOAMI), "{:?}", moved.ran());
+    let mut lost = FakeHost::windows(home.path(), data.path());
+    lost.platform = Platform::Unix;
+    assert!(
+        system32(&lost, "icacls.exe").is_err(),
+        "no system directory, no program"
+    );
     assert_eq!(parse_whoami_user("INFO: no user\n"), None);
     assert_eq!(parse_whoami_user("\"host\\u\",\"not-a-sid\""), None);
 }
@@ -604,7 +619,7 @@ fn windows_preflight_reads_and_never_changes_and_asks_for_the_elevated_block() {
     .unwrap();
     let mut host = FakeHost::windows(home.path(), data.path());
     host.programs.insert(
-        "reg".to_owned(),
+        REG.to_owned(),
         Ok(ProgramOutput {
             success: false,
             stdout: String::new(),
@@ -619,13 +634,15 @@ fn windows_preflight_reads_and_never_changes_and_asks_for_the_elevated_block() {
     assert!(found.problems[1].contains("PasswordAuthentication no"));
     assert_eq!(
         host.ran(),
-        [r"reg query HKLM\SOFTWARE\OpenSSH /v DefaultShell"],
+        [format!(
+            r"{REG} query HKLM\SOFTWARE\OpenSSH /v DefaultShell"
+        )],
         "only reads"
     );
 
     // Set up correctly, it passes; an unreadable config is only a warning.
     let ready = FakeHost::windows(home.path(), data.path()).answer(
-        "reg",
+        REG,
         "HKEY_LOCAL_MACHINE\\SOFTWARE\\OpenSSH\n    DefaultShell    REG_SZ    C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe\n",
     );
     std::fs::write(

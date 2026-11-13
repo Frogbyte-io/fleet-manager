@@ -41,9 +41,9 @@ must let the controller reach it on TCP 22. If it is not, stop and ask the
 operator to add it; joining a tailnet is not something to do on their behalf.
 
 The join checks this itself, from the controller's side, before it changes
-anything here: its first step against the controller is an onboarding test
-that connects to the address (the tailnet IPv4, or `--host`) and reads the
-host key, and the join goes on only when that key is this machine's own
+anything here: after it fetches the controller's public key, its next step
+against the controller is an onboarding test that connects to the address
+(`--host`, by default the tailnet IPv4) and reads the host key, and the join goes on only when that key is this machine's own
 (see [step 2](#2-join)). A local `tailscale` check could not prove the
 controller's container can route to the address; this does, for an explicit
 `--host` too.
@@ -133,19 +133,32 @@ Restart-Service sshd
 **Then as the developer's own, standard account:**
 
 ```powershell
-# Stop at the first failed command: a failed download must not leave a
-# stale binary or checksum file to be checked and installed.
+# Stop at the first failed command. Both files are staged in a fresh
+# temporary directory; only a binary whose checksum matches and that runs is
+# moved into place, and the staging directory is removed either way.
 $ErrorActionPreference = 'Stop'
 $bin = "$env:LOCALAPPDATA\fleet\bin"; New-Item -ItemType Directory -Force $bin | Out-Null
 # The controller's release tag when the operator gave one, else the newest.
 $tag = ''   # e.g. 'v0.1.0-48f6043'
 $base = if ($tag) { "https://github.com/Frogbyte-io/fleet-manager/releases/download/$tag" } else { 'https://github.com/Frogbyte-io/fleet-manager/releases/latest/download' }
-Invoke-WebRequest "$base/fleetctl-windows-x86_64.exe" -OutFile "$bin\fleetctl.exe"
-Invoke-WebRequest "$base/SHA256SUMS" -OutFile "$env:TEMP\SHA256SUMS"
-$want = ((Get-Content "$env:TEMP\SHA256SUMS") -match ' fleetctl-windows-x86_64\.exe$').Split(' ')[0]
-if ((Get-FileHash "$bin\fleetctl.exe" -Algorithm SHA256).Hash.ToLower() -ne $want) { throw 'checksum mismatch' }
-[Environment]::SetEnvironmentVariable('Path', "$([Environment]::GetEnvironmentVariable('Path','User'));$bin", 'User')
-$env:Path += ";$bin"
+$stage = Join-Path $env:TEMP ("fleetctl-" + [guid]::NewGuid())
+New-Item -ItemType Directory $stage | Out-Null
+try {
+  Invoke-WebRequest "$base/fleetctl-windows-x86_64.exe" -OutFile "$stage\fleetctl.exe"
+  Invoke-WebRequest "$base/SHA256SUMS" -OutFile "$stage\SHA256SUMS"
+  $line = @(@(Get-Content "$stage\SHA256SUMS") -match ' fleetctl-windows-x86_64\.exe$')
+  if ($line.Count -ne 1) { throw 'SHA256SUMS has no single entry for fleetctl-windows-x86_64.exe' }
+  $want = $line[0].Split(' ')[0].ToLower()
+  if ((Get-FileHash "$stage\fleetctl.exe" -Algorithm SHA256).Hash.ToLower() -ne $want) { throw 'checksum mismatch' }
+  & "$stage\fleetctl.exe" --version
+  if ($LASTEXITCODE -ne 0) { throw 'the downloaded fleetctl does not run' }
+  Move-Item -Force "$stage\fleetctl.exe" "$bin\fleetctl.exe"
+} finally {
+  Remove-Item -Recurse -Force $stage -ErrorAction SilentlyContinue
+}
+$userPath = [Environment]::GetEnvironmentVariable('Path', 'User')
+if (($userPath -split ';') -notcontains $bin) { [Environment]::SetEnvironmentVariable('Path', "$userPath;$bin", 'User') }
+if (($env:Path -split ';') -notcontains $bin) { $env:Path += ";$bin" }
 
 New-Item -ItemType Directory -Force "$env:APPDATA\fleet" | Out-Null
 Set-Content -Path "$env:APPDATA\fleet\config.toml" -Value 'url = "<controller URL>"' -Encoding ascii
@@ -176,8 +189,9 @@ it has not reached yet:
    or in `~/.local/bin`. A stand-in is reported, never deleted: remove it
    yourself (Fleet installs the real, pinned binary).
 3. **Has the controller look at this machine**, before changing anything
-   here: it creates the onboarding draft (at its tailnet IPv4 as this
-   account, named after the hostname) and runs the onboarding test, which,
+   here: it creates the onboarding draft (at the `--host` address, by
+   default this machine's tailnet IPv4, as this account, named after the
+   hostname) and runs the onboarding test, which,
    before a host key is confirmed, only connects and reads the host key (no
    login). That proves the controller reaches this address, `--host`
    included. The join compares the fingerprint the controller saw with
@@ -292,7 +306,7 @@ The onboarding test then proves the key works; nothing else is skipped.
 | Symptom | Cause | Fix |
 |---|---|---|
 | `the controller has no usable SSH key (none)` | Key generation is off on the controller | [The controller has no key](#the-controller-has-no-key) |
-| `the controller has no usable SSH key (unusable)`, or `lastTest.detail` `Load key ".../id_ed25519": Permission denied` | A key created by hand that the controller user cannot use (not its owner, readable by others, passphrase-protected) | Apply the fix the `detail` names (`chown`, `chmod 600`); or move the key away and restart the controller to generate a new one |
+| `the controller has no usable SSH key (unusable)`, or `lastTest.detail` `Load key ".../id_ed25519": Permission denied` | A key created by hand that the controller user cannot use (unreadable by it, readable by others, passphrase-protected, corrupt) | Apply the fix the `detail` names (`chown -R` on the `.ssh` directory, `chmod 600`); when it names none, move the key away and restart the controller to generate a new one |
 | `no SSH server answers on port 22` | sshd is not installed or not running | Linux: `sudo systemctl enable --now ssh`; Windows: the elevated block |
 | `REFUSED: the host key the controller saw ... is not this machine's own key` | `--host` reaches another machine, or something intercepts the connection | Check the address; never override the host key file to make it match |
 | `the controller could not log in ... Permission denied (publickey)` | sshd does not read the file the key went to (Windows administrators: the wrong file) | [Windows administrators](#windows-administrators); on Linux check `AuthorizedKeysFile` |

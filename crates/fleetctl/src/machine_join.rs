@@ -260,6 +260,10 @@ pub trait JoinHost {
     fn ssh_banner(&self, host: &str, port: u16) -> Result<String, String>;
     /// This machine's name.
     fn hostname(&self) -> Option<String>;
+    /// The Windows system directory (`System32`) as the OS reports it
+    /// (the `FOLDERID_System` known folder), never from the environment.
+    /// `None` on Unix or when the OS does not answer.
+    fn system_dir(&self) -> Option<PathBuf>;
 }
 
 /// The real machine.
@@ -300,28 +304,52 @@ fn drain(
     receiver
 }
 
-/// Kills `child` and every process it started: on Unix its process group
-/// (it leads its own), on Windows its process tree.
-fn kill_tree(child: &mut std::process::Child) {
+/// What reaches every process a probe started, even after the probe itself
+/// has exited: on Unix its process group (it leads its own, and a group
+/// outlives its leader while members remain), on Windows a kill-on-close
+/// job object the probe is put in right after it starts. Processes a
+/// Windows probe starts before that assignment escape the job; the window
+/// is the time between `CreateProcess` returning and the assignment.
+struct Tree {
     #[cfg(unix)]
-    {
-        let _ = rustix::process::kill_process_group(
-            rustix::process::Pid::from_child(child),
-            rustix::process::Signal::KILL,
-        );
-    }
+    group: rustix::process::Pid,
     #[cfg(windows)]
-    {
-        let system_root = std::env::var("SystemRoot").unwrap_or_else(|_| r"C:\Windows".to_owned());
-        let _ = std::process::Command::new(format!(r"{system_root}\System32\taskkill.exe"))
-            .args(["/T", "/F", "/PID", &child.id().to_string()])
-            .stdin(std::process::Stdio::null())
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .status();
+    job: Option<win32job::Job>,
+}
+
+impl Tree {
+    fn adopt(child: &std::process::Child) -> Self {
+        #[cfg(unix)]
+        {
+            Self {
+                group: rustix::process::Pid::from_child(child),
+            }
+        }
+        #[cfg(windows)]
+        {
+            use std::os::windows::io::AsRawHandle as _;
+            let mut info = win32job::ExtendedLimitInfo::new();
+            info.limit_kill_on_job_close();
+            let job = win32job::Job::create_with_limit_info(&info)
+                .ok()
+                .filter(|job| job.assign_process(child.as_raw_handle() as isize).is_ok());
+            Self { job }
+        }
     }
-    let _ = child.kill();
-    let _ = child.wait();
+
+    /// Kills the whole tree, the root included, and reaps the root.
+    fn kill(self, child: &mut std::process::Child) {
+        #[cfg(unix)]
+        {
+            let _ = rustix::process::kill_process_group(self.group, rustix::process::Signal::KILL);
+        }
+        // Closing the last handle of a kill-on-close job terminates every
+        // process in it, whether or not the root still runs.
+        #[cfg(windows)]
+        drop(self.job);
+        let _ = child.kill();
+        let _ = child.wait();
+    }
 }
 
 /// Runs `program` with `args` (no shell) under one deadline for the
@@ -354,11 +382,14 @@ pub fn run_bounded(
     let mut child = command
         .spawn()
         .map_err(|error| format!("cannot run {}: {error}", program.display()))?;
+    // Held to the end: on Windows, dropping it after a normal exit also
+    // ends anything the probe left running.
+    let tree = Tree::adopt(&child);
     let stdout = drain(child.stdout.take(), limit);
     let stderr = drain(child.stderr.take(), limit);
     let deadline_at = std::time::Instant::now() + deadline;
-    let late = |child: &mut std::process::Child| {
-        kill_tree(child);
+    let late = |child: &mut std::process::Child, tree: Tree| {
+        tree.kill(child);
         format!(
             "{} did not finish within {}s",
             program.display(),
@@ -368,10 +399,12 @@ pub fn run_bounded(
     let status = loop {
         match child.try_wait() {
             Ok(Some(status)) => break status,
-            Ok(None) if std::time::Instant::now() >= deadline_at => return Err(late(&mut child)),
+            Ok(None) if std::time::Instant::now() >= deadline_at => {
+                return Err(late(&mut child, tree));
+            }
             Ok(None) => std::thread::sleep(Duration::from_millis(20)),
             Err(error) => {
-                kill_tree(&mut child);
+                tree.kill(&mut child);
                 return Err(format!("cannot wait for {}: {error}", program.display()));
             }
         }
@@ -383,7 +416,7 @@ pub fn run_bounded(
         receiver.recv_timeout(left).ok()
     };
     let (Some(out), Some(err)) = (collect(&stdout), collect(&stderr)) else {
-        return Err(late(&mut child));
+        return Err(late(&mut child, tree));
     };
     Ok(ProgramOutput {
         success: status.success(),
@@ -453,6 +486,17 @@ impl JoinHost for SystemHost {
             .to_owned())
     }
 
+    fn system_dir(&self) -> Option<PathBuf> {
+        #[cfg(windows)]
+        {
+            known_folders::get_known_folder_path(known_folders::KnownFolder::System)
+        }
+        #[cfg(not(windows))]
+        {
+            None
+        }
+    }
+
     fn hostname(&self) -> Option<String> {
         if cfg!(windows) {
             return self.env("COMPUTERNAME");
@@ -498,16 +542,17 @@ pub struct Account {
     pub sid: Option<String>,
 }
 
-/// A program in `%SystemRoot%\System32`, by full path, so `PATH` cannot
-/// substitute another.
-fn system32(host: &dyn JoinHost, program: &str) -> PathBuf {
-    let root = host
-        .env("SystemRoot")
-        .unwrap_or_else(|| r"C:\Windows".to_owned());
-    PathBuf::from(format!(
-        r"{}\System32\{program}",
-        root.trim_end_matches('\\')
-    ))
+/// A program in the Windows system directory, by full path. The directory
+/// comes from the OS ([`JoinHost::system_dir`]): neither `PATH` nor a
+/// caller-set `SystemRoot` can substitute another program.
+fn system32(host: &dyn JoinHost, program: &str) -> Result<PathBuf, CliError> {
+    let dir = host.system_dir().ok_or_else(|| CliError {
+        message: format!("cannot find the Windows system directory to run {program}"),
+    })?;
+    Ok(PathBuf::from(format!(
+        r"{}\{program}",
+        dir.display().to_string().trim_end_matches('\\')
+    )))
 }
 
 /// The account name and SID in `whoami /user /fo csv /nh` output
@@ -551,12 +596,11 @@ fn current_account(host: &dyn JoinHost) -> Result<Account, CliError> {
             .or_else(|| host.env("USER"))
             .or_else(|| host.env("LOGNAME"))
             .map(|name| Account { name, sid: None }),
-        Platform::Windows => answered(
-            &system32(host, "whoami.exe"),
-            &["/user", "/fo", "csv", "/nh"],
-        )
-        .and_then(|stdout| parse_whoami_user(&stdout))
-        .or_else(|| host.env("USERNAME").map(|name| Account { name, sid: None })),
+        Platform::Windows => system32(host, "whoami.exe")
+            .ok()
+            .and_then(|whoami| answered(&whoami, &["/user", "/fo", "csv", "/nh"]))
+            .and_then(|stdout| parse_whoami_user(&stdout))
+            .or_else(|| host.env("USERNAME").map(|name| Account { name, sid: None })),
     };
     found.ok_or_else(|| CliError {
         message: "cannot tell which account this join runs as: neither the system (`id -un`, `whoami`) nor USER/USERNAME answered".to_owned(),
@@ -770,7 +814,7 @@ fn secure_windows_file(
     let args = windows_acl_args(file, account);
     let args: Vec<&str> = args.iter().map(String::as_str).collect();
     let output = host
-        .run(&system32(host, "icacls.exe"), &args)
+        .run(&system32(host, "icacls.exe")?, &args)
         .map_err(|error| CliError {
             message: format!("cannot secure {}: {error}", shown.display()),
         })?;
@@ -1224,15 +1268,25 @@ pub fn preflight(host: &dyn JoinHost, home: &Path, address: &str, port: u16) -> 
 }
 
 fn windows_preflight(host: &dyn JoinHost, found: &mut Preflight) {
+    // `%SystemRoot%` is the system directory's parent, as the OS reports it.
     let system_root = host
-        .env("SystemRoot")
+        .system_dir()
+        .and_then(|dir| {
+            let text = dir.display().to_string();
+            text.trim_end_matches('\\')
+                .rsplit_once('\\')
+                .map(|(root, _)| root.to_owned())
+        })
         .unwrap_or_else(|| r"C:\Windows".to_owned());
-    let shell = host
-        .run(
-            Path::new("reg"),
-            &["query", r"HKLM\SOFTWARE\OpenSSH", "/v", "DefaultShell"],
-        )
+    let shell = system32(host, "reg.exe")
         .ok()
+        .and_then(|reg| {
+            host.run(
+                &reg,
+                &["query", r"HKLM\SOFTWARE\OpenSSH", "/v", "DefaultShell"],
+            )
+            .ok()
+        })
         .filter(|output| output.success)
         .and_then(|output| parse_default_shell(&output.stdout));
     match shell {
@@ -2041,7 +2095,7 @@ pub fn run_on(
     let administrator = host.platform() == Platform::Windows
         && host
             .run(
-                &system32(host, "whoami.exe"),
+                &system32(host, "whoami.exe")?,
                 &["/groups", "/fo", "csv", "/nh"],
             )
             .is_ok_and(|output| is_administrator(&output.stdout));

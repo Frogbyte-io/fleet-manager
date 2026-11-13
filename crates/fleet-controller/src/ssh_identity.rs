@@ -70,6 +70,12 @@ pub fn describe(outcome: Result<EnsureOutcome, String>, generate: bool) -> Strin
 /// file metadata cannot show, such as the account database's home.
 pub const PUBLIC_KEY_CACHE_TTL: std::time::Duration = std::time::Duration::from_secs(30);
 
+/// How long an `unusable` answer is reused. Most unusable states show in
+/// the file metadata (owner, mode), but some do not (an `ssh-keygen` that
+/// timed out or could not run), so they are inspected again soon, and still
+/// at most one inspection at a time.
+pub const UNUSABLE_CACHE_TTL: std::time::Duration = std::time::Duration::from_secs(5);
+
 /// One remembered inspection.
 #[derive(Clone, Debug)]
 struct Cached {
@@ -81,23 +87,27 @@ struct Cached {
 
 /// The read endpoint's answers, remembered: an inspection runs `getent`
 /// and `ssh-keygen -y`, so repeated reads reuse the last answer while it is
-/// younger than the TTL and the key files' [`IdentityStamp`] is unchanged.
-/// Inspections are serialized: concurrent reads wait for the one running
-/// and then reuse its answer, so a burst of requests starts at most one
-/// set of programs (each itself bounded by the provider's deadline).
+/// younger than its TTL and the key files' [`IdentityStamp`] is unchanged.
+/// Inspections are serialized: the lock is held by the inspection itself
+/// (not by the request awaiting it), so a cancelled request does not let a
+/// second inspection start beside a running one, and concurrent reads wait
+/// for it and reuse its answer. A failed lookup is not remembered.
 #[derive(Debug)]
 pub struct PublicKeyCache {
     ttl: std::time::Duration,
-    entry: tokio::sync::Mutex<Option<Cached>>,
+    unusable_ttl: std::time::Duration,
+    entry: std::sync::Arc<tokio::sync::Mutex<Option<Cached>>>,
 }
 
 impl PublicKeyCache {
-    /// An empty cache whose answers live at most `ttl`.
+    /// An empty cache whose answers live at most `ttl`, and `unusable`
+    /// ones at most `unusable_ttl`.
     #[must_use]
-    pub const fn new(ttl: std::time::Duration) -> Self {
+    pub fn new(ttl: std::time::Duration, unusable_ttl: std::time::Duration) -> Self {
         Self {
             ttl,
-            entry: tokio::sync::Mutex::const_new(None),
+            unusable_ttl,
+            entry: std::sync::Arc::new(tokio::sync::Mutex::new(None)),
         }
     }
 
@@ -111,34 +121,38 @@ impl PublicKeyCache {
         &self,
         resolve: impl FnOnce() -> Result<ControllerIdentity, String> + Send + 'static,
     ) -> Result<SshPublicKeyInfo, String> {
-        let mut entry = self.entry.lock().await;
-        let previous = entry.take();
-        let ttl = self.ttl;
-        let cached = tokio::task::spawn_blocking(move || {
+        let mut entry = self.entry.clone().lock_owned().await;
+        let (ttl, unusable_ttl) = (self.ttl, self.unusable_ttl);
+        // The guard moves into the blocking task and is released when the
+        // inspection ends, even if this request is dropped meanwhile.
+        tokio::task::spawn_blocking(move || {
             let now = std::time::Instant::now();
-            if let Some(cached) = previous
-                && now.duration_since(cached.at) < ttl
-                && cached.identity.stamp() == cached.stamp
-            {
-                return Ok::<_, String>(cached);
+            if let Some(cached) = entry.as_ref() {
+                let ttl = if cached.info.state == SshKeyState::Unusable {
+                    unusable_ttl
+                } else {
+                    ttl
+                };
+                if now.duration_since(cached.at) < ttl && cached.identity.stamp() == cached.stamp {
+                    return Ok(cached.info.clone());
+                }
             }
+            *entry = None;
             let identity = resolve()?;
             // Stamped before the inspection: a change during it is seen
             // as a change on the next read.
             let stamp = identity.stamp();
             let info = to_info(identity.inspect());
-            Ok(Cached {
+            *entry = Some(Cached {
                 identity,
                 stamp,
-                info,
+                info: info.clone(),
                 at: now,
-            })
+            });
+            Ok(info)
         })
         .await
-        .map_err(|error| format!("the identity inspection did not finish: {error}"))??;
-        let info = cached.info.clone();
-        *entry = Some(cached);
-        Ok(info)
+        .map_err(|error| format!("the identity inspection did not finish: {error}"))?
     }
 }
 
@@ -146,9 +160,10 @@ impl PublicKeyCache {
 ///
 /// # Errors
 ///
-/// Fails when the controller user has no home directory to look in.
+/// Fails when the controller user's home cannot be found or looked up.
 pub async fn public_key_info() -> Result<SshPublicKeyInfo, String> {
-    static CACHE: PublicKeyCache = PublicKeyCache::new(PUBLIC_KEY_CACHE_TTL);
+    static CACHE: std::sync::LazyLock<PublicKeyCache> =
+        std::sync::LazyLock::new(|| PublicKeyCache::new(PUBLIC_KEY_CACHE_TTL, UNUSABLE_CACHE_TTL));
     CACHE.get(ControllerIdentity::for_current_user).await
 }
 
@@ -187,6 +202,8 @@ pub fn to_info(state: IdentityState) -> SshPublicKeyInfo {
 
 #[cfg(test)]
 mod tests {
+    use std::path::PathBuf;
+
     use super::*;
 
     #[test]
@@ -232,7 +249,10 @@ mod tests {
                 Ok(ControllerIdentity::at(ssh))
             }
         };
-        let cache = PublicKeyCache::new(std::time::Duration::from_secs(3600));
+        let cache = PublicKeyCache::new(
+            std::time::Duration::from_secs(3600),
+            std::time::Duration::from_secs(3600),
+        );
         assert_eq!(
             cache.get(resolver()).await.unwrap().state,
             SshKeyState::None
@@ -259,7 +279,10 @@ mod tests {
         );
         assert_eq!(resolved.load(Ordering::SeqCst), 2);
         // Concurrent reads share one inspection.
-        let cache = Arc::new(PublicKeyCache::new(std::time::Duration::from_secs(3600)));
+        let cache = Arc::new(PublicKeyCache::new(
+            std::time::Duration::from_secs(3600),
+            std::time::Duration::from_secs(3600),
+        ));
         let reads: Vec<_> = (0..8)
             .map(|_| {
                 let cache = cache.clone();
@@ -272,10 +295,73 @@ mod tests {
         }
         assert_eq!(resolved.load(Ordering::SeqCst), 3);
         // An expired answer is inspected again.
-        let expired = PublicKeyCache::new(std::time::Duration::ZERO);
+        let expired = PublicKeyCache::new(std::time::Duration::ZERO, std::time::Duration::ZERO);
         expired.get(resolver()).await.unwrap();
         expired.get(resolver()).await.unwrap();
         assert_eq!(resolved.load(Ordering::SeqCst), 5);
+
+        // An unusable answer lives only its own, shorter TTL.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            let key = ssh.join("id_ed25519");
+            std::fs::set_permissions(&key, std::fs::Permissions::from_mode(0o644)).unwrap();
+            let short = PublicKeyCache::new(
+                std::time::Duration::from_secs(3600),
+                std::time::Duration::ZERO,
+            );
+            let before = resolved.load(Ordering::SeqCst);
+            assert_eq!(
+                short.get(resolver()).await.unwrap().state,
+                SshKeyState::Unusable
+            );
+            assert_eq!(
+                short.get(resolver()).await.unwrap().state,
+                SshKeyState::Unusable
+            );
+            assert_eq!(resolved.load(Ordering::SeqCst), before + 2);
+        }
+    }
+
+    #[tokio::test]
+    async fn a_cancelled_read_keeps_the_inspection_exclusive() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let dir = tempfile::tempdir().unwrap();
+        let ssh = dir.path().join(".ssh");
+        let running = Arc::new(AtomicUsize::new(0));
+        let overlapped = Arc::new(AtomicUsize::new(0));
+        let slow = |running: Arc<AtomicUsize>, overlapped: Arc<AtomicUsize>, ssh: PathBuf| {
+            move || {
+                if running.fetch_add(1, Ordering::SeqCst) > 0 {
+                    overlapped.fetch_add(1, Ordering::SeqCst);
+                }
+                std::thread::sleep(std::time::Duration::from_millis(300));
+                running.fetch_sub(1, Ordering::SeqCst);
+                Ok(ControllerIdentity::at(ssh))
+            }
+        };
+        let cache = Arc::new(PublicKeyCache::new(
+            std::time::Duration::ZERO,
+            std::time::Duration::ZERO,
+        ));
+        // The first read is cancelled while its inspection runs.
+        let first = {
+            let cache = cache.clone();
+            let resolve = slow(running.clone(), overlapped.clone(), ssh.clone());
+            tokio::spawn(async move { cache.get(resolve).await })
+        };
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        first.abort();
+        cache
+            .get(slow(running.clone(), overlapped.clone(), ssh.clone()))
+            .await
+            .unwrap();
+        assert_eq!(
+            overlapped.load(Ordering::SeqCst),
+            0,
+            "inspections never overlap"
+        );
     }
 
     #[test]

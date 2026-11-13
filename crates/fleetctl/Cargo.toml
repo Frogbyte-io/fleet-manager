@@ -27,6 +27,12 @@ yamlpath = "1.31.1"
 rustix = { version = "1.1.5", default-features = false, features = ["std", "stdio", "termios", "process"] }
 signal-hook = "0.3.18"
 
+[target.'cfg(windows)'.dependencies]
+# A job object (kill-on-close) bounds a local probe's whole process tree.
+win32job = "2.1.0"
+# The system directory from the OS, not from the caller's SystemRoot.
+known-folders = "1.4.2"
+
 [lints]
 workspace = true
 

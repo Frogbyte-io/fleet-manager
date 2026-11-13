@@ -25,51 +25,87 @@ use std::time::Duration;
 /// How long `getent` or `ssh-keygen` may run.
 pub const PROGRAM_DEADLINE: Duration = Duration::from_secs(10);
 
-/// Runs `command` (stdin closed, both outputs captured) and kills it when
-/// `deadline` passes.
+/// Runs `command` (stdin closed, both outputs captured, each capped at
+/// 64 KiB) under one deadline that covers the program **and** its output:
+/// the program runs in its own process group, and when the deadline passes,
+/// whether it still runs or something it started still holds a pipe open
+/// after it exited, the whole group is killed and the run is an error.
 fn output_within(mut command: Command, deadline: Duration) -> Result<std::process::Output, String> {
     use std::io::Read as _;
     let program = command.get_program().to_string_lossy().into_owned();
-    let mut child = command
+    command
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
+        .stderr(Stdio::piped());
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt as _;
+        command.process_group(0);
+    }
+    let mut child = command
         .spawn()
         .map_err(|error| format!("cannot run {program}: {error}"))?;
     let drain = |stream: Option<Box<dyn std::io::Read + Send>>| {
+        let (sender, receiver) = std::sync::mpsc::channel();
         std::thread::spawn(move || {
-            let mut bytes = Vec::new();
-            if let Some(stream) = stream {
-                // The programs here print a line or two; the cap only keeps
-                // a misbehaving one from growing the controller.
-                let _ = stream.take(64 * 1024).read_to_end(&mut bytes);
+            let mut kept = Vec::new();
+            if let Some(mut stream) = stream {
+                // Read to the end so the writer never blocks; keep the
+                // first 64 KiB (the programs here print a line or two).
+                let mut buffer = [0_u8; 8192];
+                while let Ok(read @ 1..) = stream.read(&mut buffer) {
+                    let room = (64 * 1024_usize).saturating_sub(kept.len());
+                    kept.extend_from_slice(&buffer[..read.min(room)]);
+                }
             }
-            bytes
-        })
+            let _ = sender.send(kept);
+        });
+        receiver
     };
     let stdout = drain(child.stdout.take().map(|s| Box::new(s) as _));
     let stderr = drain(child.stderr.take().map(|s| Box::new(s) as _));
     let deadline_at = std::time::Instant::now() + deadline;
+    let kill = |child: &mut std::process::Child| {
+        #[cfg(unix)]
+        {
+            let _ = rustix::process::kill_process_group(
+                rustix::process::Pid::from_child(child),
+                rustix::process::Signal::KILL,
+            );
+        }
+        let _ = child.kill();
+        let _ = child.wait();
+    };
+    let late = format!("{program} did not finish within {}s", deadline.as_secs());
     let status = loop {
         match child.try_wait() {
             Ok(Some(status)) => break status,
             Ok(None) if std::time::Instant::now() < deadline_at => {
                 std::thread::sleep(Duration::from_millis(10));
             }
-            outcome => {
-                let _ = child.kill();
-                let _ = child.wait();
-                return Err(match outcome {
-                    Err(error) => format!("cannot wait for {program}: {error}"),
-                    _ => format!("{program} did not finish within {}s", deadline.as_secs()),
-                });
+            Ok(None) => {
+                kill(&mut child);
+                return Err(late);
+            }
+            Err(error) => {
+                kill(&mut child);
+                return Err(format!("cannot wait for {program}: {error}"));
             }
         }
     };
+    let collect = |receiver: &std::sync::mpsc::Receiver<Vec<u8>>| {
+        receiver
+            .recv_timeout(deadline_at.saturating_duration_since(std::time::Instant::now()))
+            .ok()
+    };
+    let (Some(stdout), Some(stderr)) = (collect(&stdout), collect(&stderr)) else {
+        kill(&mut child);
+        return Err(late);
+    };
     Ok(std::process::Output {
         status,
-        stdout: stdout.join().unwrap_or_default(),
-        stderr: stderr.join().unwrap_or_default(),
+        stdout,
+        stderr,
     })
 }
 
@@ -176,9 +212,13 @@ impl ControllerIdentity {
     ///
     /// # Errors
     ///
-    /// Fails when neither the account database nor `$HOME` names a home.
+    /// Fails when the account database cannot be queried (`getent` failed
+    /// or timed out), or when neither it nor `$HOME` names a home.
     pub fn for_current_user() -> Result<Self, String> {
-        let home = passwd_home()
+        // Only a missing entry falls back to `$HOME`: a `getent` that failed
+        // or hung says nothing about the home, and in the controller image
+        // `$HOME` is root's, not the controller user's.
+        let home = passwd_home()?
             .or_else(|| std::env::var_os("HOME").map(PathBuf::from))
             .filter(|home| home.is_absolute())
             .ok_or_else(|| {
@@ -460,21 +500,33 @@ fn first_line(text: &str) -> String {
 }
 
 /// The passwd home of the process uid, via `getent` (which honours NSS).
-fn passwd_home() -> Option<PathBuf> {
+/// `Ok(None)` only when the account database has no entry (`getent` exits
+/// 2, or the entry names no home).
+///
+/// # Errors
+///
+/// Fails when `getent` cannot run, does not finish in time, or fails
+/// otherwise.
+fn passwd_home() -> Result<Option<PathBuf>, String> {
     #[cfg(unix)]
     {
         let uid = rustix::process::getuid().as_raw();
         let mut getent = Command::new("getent");
         getent.args(["passwd", &uid.to_string()]);
-        let output = output_within(getent, PROGRAM_DEADLINE).ok()?;
-        if !output.status.success() {
-            return None;
+        let output = output_within(getent, PROGRAM_DEADLINE)
+            .map_err(|error| format!("cannot look up the controller user's home: {error}"))?;
+        match output.status.code() {
+            Some(0) => Ok(parse_passwd_home(&String::from_utf8_lossy(&output.stdout))),
+            Some(2) => Ok(None),
+            _ => Err(format!(
+                "cannot look up the controller user's home: `getent passwd {uid}` failed: {}",
+                first_line(&String::from_utf8_lossy(&output.stderr))
+            )),
         }
-        parse_passwd_home(&String::from_utf8_lossy(&output.stdout))
     }
     #[cfg(not(unix))]
     {
-        None
+        Ok(None)
     }
 }
 
@@ -622,6 +674,7 @@ mod tests {
         assert!(fix.ends_with(&format!("{}`", ssh.display())), "{fix}");
     }
 
+    #[cfg(unix)]
     #[test]
     fn programs_are_killed_at_the_deadline() {
         let mut sleep = Command::new("sleep");
@@ -636,6 +689,30 @@ mod tests {
             output_within(echo, Duration::from_secs(10)).unwrap().stdout,
             b"hi\n"
         );
+        // It exits, but what it started keeps the output open: still
+        // bounded, and the whole group is killed.
+        let dir = tempfile::tempdir().unwrap();
+        let pid_file = dir.path().join("pid");
+        let mut sh = Command::new("sh");
+        sh.args([
+            "-c",
+            &format!("sleep 30 & echo $! > {}; echo started", pid_file.display()),
+        ]);
+        let started = std::time::Instant::now();
+        let error = output_within(sh, Duration::from_millis(500)).unwrap_err();
+        assert!(error.contains("did not finish"), "{error}");
+        assert!(started.elapsed() < Duration::from_secs(10));
+        let pid = std::fs::read_to_string(&pid_file).unwrap();
+        let pid = pid.trim();
+        let gone = (0..50).any(|_| {
+            let state = std::fs::read_to_string(format!("/proc/{pid}/stat")).unwrap_or_default();
+            let gone = state.is_empty() || state.split_whitespace().nth(2) == Some("Z");
+            if !gone {
+                std::thread::sleep(Duration::from_millis(100));
+            }
+            gone
+        });
+        assert!(gone, "the background sleep {pid} must be killed");
     }
 
     #[cfg(unix)]
