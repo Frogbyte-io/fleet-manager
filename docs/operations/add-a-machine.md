@@ -63,9 +63,12 @@ Run as the account the coding agents use (not root).
    ```sh
    mkdir -p ~/.local/bin && cd "$(mktemp -d)"
    u='<controller URL>/downloads/fleetctl/linux-x86_64'
-   curl -fsSLo fleetctl "$u" && curl -fsSLo fleetctl.sha256 "$u.sha256"
-   [ "$(cut -d' ' -f1 fleetctl.sha256)" = "$(sha256sum fleetctl | cut -d' ' -f1)" ]
-   chmod +x fleetctl && ./fleetctl --version && install -m 0755 fleetctl ~/.local/bin/fleetctl
+   # One chain: a failed download, checksum or test run installs nothing.
+   curl -fsSLo fleetctl "$u" && curl -fsSLo fleetctl.sha256 "$u.sha256" \
+     && [ "$(cut -d' ' -f1 fleetctl.sha256)" = "$(sha256sum fleetctl | cut -d' ' -f1)" ] \
+     && chmod +x fleetctl && ./fleetctl --version \
+     && install -m 0755 fleetctl ~/.local/bin/fleetctl \
+     || echo 'fleetctl NOT installed: download, checksum or test run failed' >&2
    case ":$PATH:" in *":$HOME/.local/bin:"*) ;; *) export PATH="$HOME/.local/bin:$PATH" ;; esac
    ```
 
