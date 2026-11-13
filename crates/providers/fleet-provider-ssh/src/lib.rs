@@ -775,14 +775,26 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn the_powershell_probe_retries_failures_and_answers_a_missing_program_at_once() {
-        // Stand-ins for a PowerShell: any program that ignores the arguments.
+        use std::os::unix::fs::PermissionsExt as _;
+        // Stand-ins for a PowerShell: programs that ignore the arguments.
         assert_eq!(super::pwsh_starts("/bin/true"), Ok(()));
-        let failed = super::pwsh_starts("/bin/false").unwrap_err();
+        // A failing start is retried: count the starts.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let log = dir.path().join("starts");
+        let fake = dir.path().join("pwsh");
+        std::fs::write(
+            &fake,
+            format!("#!/bin/sh\necho start >> '{}'\nexit 1\n", log.display()),
+        )
+        .expect("script");
+        std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+        let failed = super::pwsh_starts(&fake.display().to_string()).unwrap_err();
         assert!(failed.contains("did not start"), "{failed}");
-        let started = std::time::Instant::now();
+        let starts = std::fs::read_to_string(&log).expect("log");
+        assert_eq!(starts.lines().count(), 3, "{starts}");
+        // A missing program is answered without starting anything.
         let missing = super::pwsh_starts("/nonexistent/pwsh").unwrap_err();
         assert!(missing.contains("not installed"), "{missing}");
-        assert!(started.elapsed() < std::time::Duration::from_millis(400));
     }
 
     #[test]
