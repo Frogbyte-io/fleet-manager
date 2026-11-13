@@ -50,7 +50,9 @@ pub struct MachineSetup {
 }
 
 /// What the follow-up did. Serialized into the install operation's result as
-/// `skillsManager`; every reason is caller-safe text.
+/// `skillsManager`. The non-failure reasons are caller-safe text; a `Failed`
+/// reason may carry a backend detail, so anything returned or stored for a
+/// caller goes through [`SetupFollowUp::public`] first.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(
     rename_all = "camelCase",
