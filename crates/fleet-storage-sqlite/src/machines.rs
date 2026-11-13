@@ -430,9 +430,11 @@ impl MachinePort for MachineRepository {
         let updated = sqlx::query(
             // A (re)confirmed host key may be a different machine behind the
             // same address: the recorded guest OS is cleared with it and is
-            // detected again (ADR 0021).
+            // detected again (ADR 0021). Only an SSH endpoint has a host key
+            // to confirm; any other kind is not found and nothing changes,
+            // its machine's facts included.
             "UPDATE machine_endpoints SET verified_fingerprint = ?2, verified_at = ?3, \
-             guest_os = NULL WHERE id = ?1",
+             guest_os = NULL WHERE id = ?1 AND kind = 'ssh'",
         )
         .bind(endpoint_id)
         .bind(fingerprint)
@@ -442,7 +444,7 @@ impl MachinePort for MachineRepository {
         .map_err(|error| backend("confirm_fingerprint", &error))?;
         if updated.rows_affected() == 0 {
             return Err(PortFailure::NotFound {
-                what: format!("endpoint {endpoint_id:?}"),
+                what: format!("SSH endpoint {endpoint_id:?}"),
             });
         }
         // For the same reason, facts an SSH inventory observed may describe
@@ -514,10 +516,13 @@ impl MachinePort for MachineRepository {
             .await
             .map_err(|error| backend("record_detected_endpoint_os", &error))?;
         // Bound to the trust state the detection ran under: a host key
-        // confirmed in between (which cleared the OS) wins.
+        // confirmed in between (which cleared the OS) wins. And only onto an
+        // endpoint that is still unknown: an OS recorded in between (another
+        // inventory, an operator) is newer than this detection and wins too.
         let updated = sqlx::query(
             "UPDATE machine_endpoints SET guest_os = ?2 \
-             WHERE id = ?1 AND kind = 'ssh' AND verified_fingerprint = ?3",
+             WHERE id = ?1 AND kind = 'ssh' AND verified_fingerprint = ?3 \
+             AND guest_os IS NULL",
         )
         .bind(endpoint_id)
         .bind(guest_os.id())

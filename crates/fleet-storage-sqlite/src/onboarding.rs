@@ -164,7 +164,9 @@ impl OnboardingPort for OnboardingRepository {
                 detail: "the discovered facts exceed the draft's 64 KiB bound".to_owned(),
             });
         }
-        let updated = sqlx::query(
+        // One statement: the compare-and-set on the revision, the bump, and
+        // the read-back of exactly the row written.
+        let written: Option<sqlx::sqlite::SqliteRow> = sqlx::query(
             "UPDATE onboarding_drafts SET \
              endpoint_user = ?2, endpoint_host = ?3, endpoint_port = ?4, \
              auth_type = ?5, identity_path = ?6, name = ?7, description = ?8, \
@@ -172,8 +174,9 @@ impl OnboardingPort for OnboardingRepository {
              key_raw_line = ?13, host_key_stage = ?14, confirmed_fingerprint = ?15, \
              last_test_json = ?16, facts_json = ?17, discovery_source = ?18, \
              discovered_at = ?19, updated_at = ?20, shell_check_json = ?21, \
-             host_key_confirmed_at = ?22 \
-             WHERE id = ?1",
+             host_key_confirmed_at = ?22, revision = revision + 1 \
+             WHERE id = ?1 AND revision = ?23 \
+             RETURNING *",
         )
         .bind(&draft.id)
         .bind(&draft.endpoint.user)
@@ -197,15 +200,31 @@ impl OnboardingPort for OnboardingRepository {
         .bind(draft.updated_at)
         .bind(shell_check_json)
         .bind(draft.host_key_confirmed_at)
-        .execute(&self.pool)
+        .bind(draft.revision)
+        .fetch_optional(&self.pool)
         .await
         .map_err(|error| backend("update", &error))?;
-        if updated.rows_affected() == 0 {
-            return Err(PortFailure::NotFound {
-                what: format!("onboarding draft {:?}", draft.id),
-            });
+        if let Some(row) = written {
+            return hydrate(&row);
         }
-        self.get(&draft.id).await
+        // Nothing written: either the draft is gone, or another writer moved
+        // it past this snapshot. The snapshot's state is never applied.
+        let exists: Option<i64> =
+            sqlx::query_scalar("SELECT revision FROM onboarding_drafts WHERE id = ?1")
+                .bind(&draft.id)
+                .fetch_optional(&self.pool)
+                .await
+                .map_err(|error| backend("update", &error))?;
+        match exists {
+            None => Err(PortFailure::NotFound {
+                what: format!("onboarding draft {:?}", draft.id),
+            }),
+            Some(_) => Err(PortFailure::Conflict {
+                detail: "the onboarding draft changed while this step ran (a newer test, \
+                         discover, or host-key confirmation); run it again"
+                    .to_owned(),
+            }),
+        }
     }
 
     async fn delete(&self, id: &str) -> Result<(), PortFailure> {
@@ -299,6 +318,7 @@ fn hydrate(row: &sqlx::sqlite::SqliteRow) -> Result<OnboardingDraft, PortFailure
         idempotency_key: row.get("idempotency_key"),
         created_at: row.get("created_at"),
         updated_at: row.get("updated_at"),
+        revision: row.get("revision"),
     })
 }
 

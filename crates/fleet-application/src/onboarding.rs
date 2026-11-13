@@ -260,6 +260,12 @@ pub struct OnboardingDraft {
     pub created_at: i64,
     /// Last mutation (epoch milliseconds).
     pub updated_at: i64,
+    /// The stored write revision this snapshot was read at. `update` is a
+    /// compare-and-set on it: a write from a snapshot that is no longer
+    /// current (an in-flight test landing after a newer host-key
+    /// confirmation) is refused instead of undoing the newer state.
+    #[serde(default)]
+    pub revision: i64,
 }
 
 impl OnboardingDraft {
@@ -336,12 +342,17 @@ pub trait OnboardingPort: fmt::Debug + Send + Sync {
     ///
     /// Fails when the backend errors.
     async fn list(&self, limit: u32) -> Result<Vec<OnboardingDraft>, PortFailure>;
-    /// Replaces a draft's mutable state wholesale. Drafts are single-writer
-    /// review state; the last accepted mutation wins.
+    /// Replaces a draft's mutable state wholesale, as a compare-and-set:
+    /// the write applies only while the stored revision still equals
+    /// `draft.revision`, and bumps it. The answer is the row as written, in
+    /// the same atomic step, so a caller that writes again (discover's
+    /// shell check, then its facts) chains from its own write and never
+    /// from a concurrent writer's.
     ///
     /// # Errors
     ///
-    /// Fails when unknown or the backend errors.
+    /// Fails with `Conflict` when the draft changed since `draft` was read,
+    /// `NotFound` when it is unknown, or on a backend error.
     async fn update(&self, draft: &OnboardingDraft) -> Result<OnboardingDraft, PortFailure>;
     /// Deletes a draft and everything staged in it. This *is* the cleanup:
     /// a deleted draft leaves no row, no facts, and no references behind.
@@ -370,6 +381,14 @@ pub trait OnboardTrustPort: fmt::Debug + Send + Sync {
     ///
     /// Fails when the trust store cannot be rewritten.
     async fn unpin(&self, host: &str) -> Result<(), PortFailure>;
+    /// Takes back one pin this caller placed for `key`: removes one copy of
+    /// that exact entry and nothing else. Other pins for the host — another
+    /// confirmation's included, even of the same key — stay.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the trust store cannot be rewritten.
+    async fn unpin_key(&self, host: &str, key: &OnboardHostKey) -> Result<(), PortFailure>;
 }
 
 /// One existing machine whose endpoint matches a draft's host and port.
@@ -755,11 +774,24 @@ impl Onboarding {
         draft.discovery_source = None;
         draft.discovered_at = None;
         draft.host_key_confirmed_at = Some(draft.updated_at);
-        let draft = self
-            .drafts
-            .update(&draft)
-            .await
-            .map_err(|failure| map_port("update", failure))?;
+        let draft = match self.drafts.update(&draft).await {
+            Ok(draft) => draft,
+            Err(failure @ (PortFailure::Conflict { .. } | PortFailure::NotFound { .. })) => {
+                // Another write landed between the read and this one: a test
+                // (the key just pinned may no longer be the one the draft
+                // shows), a winning confirmation, or a cancellation (whose
+                // unpin ran before this pin). Take back exactly the pin this
+                // confirmation placed — never the host's other pins, which
+                // may be the winner's — and let the operator act on the
+                // newer state.
+                self.trust
+                    .unpin_key(&draft.endpoint.host, &host_key)
+                    .await
+                    .map_err(|failure| map_port("unpin", failure))?;
+                return Err(map_port("update", failure));
+            }
+            Err(failure) => return Err(map_port("update", failure)),
+        };
         self.audit_draft(
             principal,
             draft_id,
@@ -914,6 +946,20 @@ impl Onboarding {
             return Err(OnboardingUseCaseError::Conflict {
                 detail: "the login-shell check predates the host-key confirmation; run the \
                          test again"
+                    .to_owned(),
+            });
+        }
+        // The same holds for discovered facts: a discovery older than the
+        // confirmation observed whatever answered behind the previous key.
+        if !draft.facts.is_empty()
+            && let Some(confirmed) = draft.host_key_confirmed_at
+            && draft
+                .discovered_at
+                .is_none_or(|discovered| discovered < confirmed)
+        {
+            return Err(OnboardingUseCaseError::Conflict {
+                detail: "the discovered facts predate the host-key confirmation; run discover \
+                         again"
                     .to_owned(),
             });
         }

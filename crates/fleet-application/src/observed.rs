@@ -226,6 +226,19 @@ pub fn normalize_checkouts(checkouts: &[CheckoutObservation]) -> Vec<ObservedChe
         .collect()
 }
 
+/// The identity of one skill in a Skills Manager inventory. Desired state
+/// and Fleet's install records name a skill by its directory `name`; the
+/// real CLI's `id` is a UUID. So the name is the identity whenever it is a
+/// string, and `id` stands in only when there is no string name (a legacy
+/// snapshot without one, or a null name) — never beside a name.
+#[must_use]
+pub fn observed_skill_identity(skill: &serde_json::Value) -> Option<&str> {
+    skill
+        .get("name")
+        .and_then(serde_json::Value::as_str)
+        .or_else(|| skill.get("id").and_then(serde_json::Value::as_str))
+}
+
 /// Normalizes a Skills Manager deployment status into observed skill
 /// deployments.
 #[must_use]

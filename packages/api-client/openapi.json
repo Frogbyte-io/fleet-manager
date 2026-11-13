@@ -7952,6 +7952,16 @@
               }
             }
           },
+          "500": {
+            "description": "A backend port or the audit sink failed.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
           "503": {
             "description": "The machine surface is not wired.",
             "content": {

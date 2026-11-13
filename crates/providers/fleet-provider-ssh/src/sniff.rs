@@ -16,7 +16,8 @@
 //! `%OS%` is expanded only by `cmd.exe`; `$name.Member` is a property read
 //! in PowerShell and an empty variable followed by literal text in a POSIX
 //! shell. Only Windows PowerShell 5.1 in `FullLanguage` mode with nothing
-//! printed ahead of the marker classifies as Windows. A POSIX answer is
+//! printed ahead of the marker (on its line or before it) classifies as
+//! Windows. A POSIX answer is
 //! followed by a second fixed command, [`UNAME_COMMAND`] (`uname -s`):
 //! Git Bash, MSYS2 and Cygwin answer the first like any POSIX shell and are
 //! told apart by it. POSIX output on Linux keeps today's Linux behaviour;
@@ -282,20 +283,22 @@ pub fn is_windows_posix_uname(stdout: &str) -> bool {
         .any(|prefix| last.starts_with(prefix))
 }
 
-/// The byte offset of the marker token at the start of a line, when any.
+/// The byte offset of the marker token, when any: the last `fleet-shell`
+/// followed by whitespace or the end of the output, wherever it starts. A
+/// profile that prints a prefix without a newline (`Write-Host -NoNewline`,
+/// `printf`) leaves the marker mid-line; the prefix is still profile output
+/// (so Windows PowerShell is refused with the reason that names the fix,
+/// not left unrecognized), and the answer is still the shell's. The last
+/// occurrence is the command's own: no shell's answer repeats the marker
+/// after it, so a profile that prints the word itself cannot stand in for
+/// the answer.
 fn find_marker(stdout: &str) -> Option<usize> {
-    let mut offset = 0;
-    for line in stdout.split_inclusive('\n') {
-        let trimmed = line.trim_start();
-        if trimmed
-            .strip_prefix(MARKER)
-            .is_some_and(|rest| rest.is_empty() || rest.starts_with(char::is_whitespace))
-        {
-            return Some(offset + (line.len() - trimmed.len()));
-        }
-        offset += line.len();
-    }
-    None
+    stdout.rmatch_indices(MARKER).map(|(at, _)| at).find(|&at| {
+        stdout[at + MARKER.len()..]
+            .chars()
+            .next()
+            .is_none_or(char::is_whitespace)
+    })
 }
 
 /// Runs the sniff against a verified endpoint and classifies the answer.
@@ -335,16 +338,47 @@ fn sniff_inner(
     endpoint: &SshConnectionSpec,
     deadline: Duration,
 ) -> Result<ShellSniff, SshProviderError> {
-    let started = Instant::now();
-    let result = run_fixed(provider, endpoint, SNIFF_COMMAND, started, deadline)?;
+    sniff_with(Instant::now(), deadline, |command, left| {
+        crate::shell::spawn_fixed_command(provider, endpoint, command, b"", left)
+    })
+}
+
+/// What a deadline kill reports, from either command.
+const KILLED_DETAIL: &str = "the login-shell check was killed at its deadline";
+
+fn deadline_killed() -> SshProviderError {
+    SshProviderError::Tool {
+        tool: "ssh",
+        detail: KILLED_DETAIL.to_owned(),
+    }
+}
+
+fn is_deadline_kill(error: &SshProviderError) -> bool {
+    matches!(error, SshProviderError::Tool { detail, .. } if detail == KILLED_DETAIL)
+}
+
+/// The sniff, with `spawn` starting one fixed command (the real one starts
+/// `ssh`; it is given what is left of the deadline as its connect timeout).
+/// One clock, started at `started`, bounds both commands.
+fn sniff_with(
+    started: Instant,
+    deadline: Duration,
+    mut spawn: impl FnMut(&str, Duration) -> Result<crate::key::SshChild, SshProviderError>,
+) -> Result<ShellSniff, SshProviderError> {
+    let result = run_fixed(&mut spawn, SNIFF_COMMAND, started, deadline)?;
     let mut sniff = parse_sniff(&result.stdout);
     if sniff.shell == DetectedShell::Posix {
         // A POSIX answer may still be Windows. A failed `uname` keeps the
-        // POSIX answer: nothing on Linux depends on it.
-        if let Ok(uname) = run_fixed(provider, endpoint, UNAME_COMMAND, started, deadline)
-            && is_windows_posix_uname(&uname.stdout)
-        {
-            sniff.shell = DetectedShell::WindowsPosix;
+        // POSIX answer: nothing on Linux depends on it. A `uname` killed at
+        // the deadline fails the sniff instead: an answer cut off there says
+        // nothing, and calling it Linux could misclassify a Windows POSIX
+        // layer.
+        match run_fixed(&mut spawn, UNAME_COMMAND, started, deadline) {
+            Ok(uname) if is_windows_posix_uname(&uname.stdout) => {
+                sniff.shell = DetectedShell::WindowsPosix;
+            }
+            Err(error) if is_deadline_kill(&error) => return Err(error),
+            Ok(_) | Err(_) => {}
         }
     }
     Ok(sniff)
@@ -352,22 +386,21 @@ fn sniff_inner(
 
 /// Runs one fixed command within what is left of `deadline`.
 fn run_fixed(
-    provider: &SshProvider,
-    endpoint: &SshConnectionSpec,
+    spawn: &mut impl FnMut(&str, Duration) -> Result<crate::key::SshChild, SshProviderError>,
     command: &str,
     started: Instant,
     deadline: Duration,
 ) -> Result<crate::ExecutionResult, SshProviderError> {
-    let killed = || SshProviderError::Tool {
-        tool: "ssh",
-        detail: "the login-shell check was killed at its deadline".to_owned(),
-    };
-    let left = deadline.checked_sub(started.elapsed()).ok_or_else(killed)?;
-    let mut child = crate::shell::spawn_fixed_command(provider, endpoint, command, b"", left)?;
+    let left = deadline
+        .checked_sub(started.elapsed())
+        .ok_or_else(deadline_killed)?;
+    let mut child = spawn(command, left)?;
     drop(child.stdin.take());
-    let result = crate::exec::wait_bounded(&mut child, Instant::now(), left);
+    // One clock for the whole sniff: the time `ssh` took to start counts
+    // against the same deadline, never added back per command.
+    let result = crate::exec::wait_bounded(&mut child, started, deadline);
     if result.killed_by_deadline {
-        return Err(killed());
+        return Err(deadline_killed());
     }
     if result
         .exit_code
@@ -544,6 +577,106 @@ mod tests {
         assert_eq!(refusal.reason, "profile_output");
         assert!(refusal.detail.contains("$PROFILE"));
         assert!(!refusal.detail.contains("Hello from my profile"));
+    }
+
+    /// A stand-in for `ssh`: `startup` is how long it takes to start, then
+    /// `sh -c script` answers.
+    #[cfg(unix)]
+    fn fake_ssh(startup: Duration, script: &str) -> crate::key::SshChild {
+        use std::process::{Command, Stdio};
+        std::thread::sleep(startup);
+        let child = Command::new("sh")
+            .arg("-c")
+            .arg(script)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        crate::key::SshChild::new(child, None)
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn ssh_startup_counts_against_the_one_sniff_deadline() {
+        // `ssh` takes 1.5 s to start and the shell never answers: the sniff
+        // ends at its 2 s deadline, not 2 s after the start.
+        let deadline = Duration::from_secs(2);
+        let started = Instant::now();
+        let result = sniff_with(started, deadline, |_, _| {
+            Ok(fake_ssh(Duration::from_millis(1_500), "exec sleep 30"))
+        });
+        let took = started.elapsed();
+        assert!(
+            matches!(&result, Err(error) if is_deadline_kill(error)),
+            "{result:?}"
+        );
+        assert!(took < Duration::from_millis(3_000), "{took:?}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_uname_killed_at_the_deadline_fails_the_sniff_not_linux() {
+        let posix = format!("echo '{}'", POSIX.trim_end());
+        // The POSIX answer comes at once; `uname` hangs past the deadline.
+        let result = sniff_with(Instant::now(), Duration::from_secs(2), |command, _| {
+            if command == SNIFF_COMMAND {
+                Ok(fake_ssh(Duration::ZERO, &posix))
+            } else {
+                Ok(fake_ssh(Duration::ZERO, "exec sleep 30"))
+            }
+        });
+        assert!(
+            matches!(&result, Err(error) if is_deadline_kill(error)),
+            "{result:?}"
+        );
+        // An ordinary `uname` failure keeps the POSIX answer.
+        let sniff = sniff_with(Instant::now(), Duration::from_secs(10), |command, _| {
+            if command == SNIFF_COMMAND {
+                Ok(fake_ssh(Duration::ZERO, &posix))
+            } else {
+                Ok(fake_ssh(
+                    Duration::ZERO,
+                    "echo 'uname: not found' >&2; exit 127",
+                ))
+            }
+        })
+        .unwrap();
+        assert_eq!(sniff.shell, DetectedShell::Posix);
+        assert_eq!(sniff.guest_os(), Some(GuestOs::Linux));
+        // A Windows POSIX layer is still told apart.
+        let sniff = sniff_with(Instant::now(), Duration::from_secs(10), |command, _| {
+            if command == SNIFF_COMMAND {
+                Ok(fake_ssh(Duration::ZERO, &posix))
+            } else {
+                Ok(fake_ssh(Duration::ZERO, "echo MINGW64_NT-10.0-26100"))
+            }
+        })
+        .unwrap();
+        assert_eq!(sniff.shell, DetectedShell::WindowsPosix);
+    }
+
+    #[test]
+    fn a_prefix_without_a_newline_is_profile_output() {
+        // `Write-Host -NoNewline` in a profile: the marker is mid-line.
+        let windows = parse_sniff(&format!("Hello{POWERSHELL_51}"));
+        assert_eq!(windows.shell, DetectedShell::WindowsPowerShell);
+        assert!(windows.profile_output);
+        assert_eq!(windows.guest_os(), None);
+        assert_eq!(
+            windows.refusal().map(|refusal| refusal.reason),
+            Some("profile_output")
+        );
+        // A POSIX shell stays Linux, as with a noisy `.bashrc`.
+        let posix = parse_sniff(&format!("welcome> {POSIX}"));
+        assert_eq!(posix.shell, DetectedShell::Posix);
+        assert!(posix.profile_output);
+        assert_eq!(posix.guest_os(), Some(GuestOs::Linux));
+        // A profile that prints the marker word itself does not stand in
+        // for the answer: the last marker is the command's.
+        let echoed = parse_sniff(&format!("fleet-shell Windows_NT $x\r\n{POWERSHELL_51}"));
+        assert_eq!(echoed.shell, DetectedShell::WindowsPowerShell);
+        assert!(echoed.profile_output);
     }
 
     #[test]

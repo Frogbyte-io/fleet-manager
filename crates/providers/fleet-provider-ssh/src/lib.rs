@@ -377,6 +377,7 @@ impl SshProvider {
                 detail: "the key line does not match the confirmed fingerprint".to_owned(),
             });
         }
+        let _guard = known_hosts_lock();
         let mut file = std::fs::OpenOptions::new()
             .create(true)
             .append(true)
@@ -396,6 +397,7 @@ impl SshProvider {
     ///
     /// Fails when the file cannot be rewritten.
     pub fn unpin(&self, host: &str) -> Result<usize, SshProviderError> {
+        let _guard = known_hosts_lock();
         let path = self.known_hosts_path();
         let Ok(content) = std::fs::read_to_string(&path) else {
             return Ok(0);
@@ -413,6 +415,46 @@ impl SshProvider {
             })?;
         }
         Ok(removed)
+    }
+
+    /// Takes back one pin: removes a single line equal to `raw_line` (the
+    /// last one), the line one [`SshProvider::pin`] appended. Any other pin
+    /// for the host stays, an identical line another caller appended
+    /// included, so undoing one confirmation never removes another's trust.
+    /// Answers whether a line was removed.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the file exists but cannot be read (a missing file is
+    /// `Ok(false)`: no pin to take back), or when it cannot be rewritten.
+    pub fn unpin_line(&self, raw_line: &str) -> Result<bool, SshProviderError> {
+        let _guard = known_hosts_lock();
+        let path = self.known_hosts_path();
+        // No file means no pin to take back; any other read failure is
+        // reported, so a pin that could not be removed never reads as gone.
+        let content = match std::fs::read_to_string(&path) {
+            Ok(content) => content,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+            Err(error) => {
+                return Err(SshProviderError::Setup {
+                    detail: format!("cannot read known_hosts: {error}"),
+                });
+            }
+        };
+        let mut lines: Vec<&str> = content.lines().collect();
+        let Some(index) = lines.iter().rposition(|line| *line == raw_line) else {
+            return Ok(false);
+        };
+        lines.remove(index);
+        let rewritten = if lines.is_empty() {
+            String::new()
+        } else {
+            format!("{}\n", lines.join("\n"))
+        };
+        std::fs::write(&path, rewritten).map_err(|error| SshProviderError::Setup {
+            detail: format!("cannot rewrite known_hosts: {error}"),
+        })?;
+        Ok(true)
     }
 
     /// Runs a bounded, non-interactive connection test against the endpoint.
@@ -571,6 +613,64 @@ fn key_type_rank(key_type: &str) -> u8 {
     }
 }
 
+/// Test support: whether `candidate` starts as a working PowerShell. A
+/// single start can fail on a loaded test host (many PowerShell processes
+/// at once), which would read as "no PowerShell" and fail every test run
+/// under `FLEET_REQUIRE_PWSH`, so it is retried before deciding. A program
+/// that is not installed is answered at once. The error is the last
+/// failure, for the skip message.
+///
+/// # Errors
+///
+/// The reason the last start failed.
+#[doc(hidden)]
+pub fn pwsh_starts(candidate: &str) -> Result<(), String> {
+    let mut last = String::new();
+    for attempt in 0..3u64 {
+        if attempt > 0 {
+            std::thread::sleep(std::time::Duration::from_millis(500 * attempt));
+        }
+        // `exit 0` prints nothing, so output is discarded rather than
+        // buffered, and each start gets a deadline: a hung start is killed
+        // and counts as a failed attempt.
+        let mut child = match Command::new(candidate)
+            .args(["-NoProfile", "-Command", "exit 0"])
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+        {
+            Ok(child) => child,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                return Err(format!("{candidate} is not installed"));
+            }
+            Err(error) => {
+                last = error.to_string();
+                continue;
+            }
+        };
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        last = loop {
+            match child.try_wait() {
+                Ok(Some(status)) if status.success() => return Ok(()),
+                Ok(Some(status)) => break status.to_string(),
+                Ok(None) if std::time::Instant::now() >= deadline => {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    break "no exit within 30 s".to_owned();
+                }
+                Ok(None) => std::thread::sleep(std::time::Duration::from_millis(50)),
+                Err(error) => {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    break error.to_string();
+                }
+            }
+        };
+    }
+    Err(format!("{candidate} did not start: {last}"))
+}
+
 /// The remote command of the connection test: `exit 0` is understood by
 /// POSIX shells, PowerShell and cmd alike.
 pub(crate) fn add_connect_test_command(command: &mut Command) {
@@ -632,6 +732,14 @@ fn parse_keygen_summary(summary: &str) -> Option<(String, String)> {
         .trim_matches(|c| c == '(' || c == ')')
         .to_owned();
     Some((key_type, fingerprint.to_owned()))
+}
+
+/// Serializes this process's writes to the Fleet known-hosts file: an
+/// append racing a read-modify-write rewrite would otherwise be lost.
+fn known_hosts_lock() -> std::sync::MutexGuard<'static, ()> {
+    static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    LOCK.lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
 /// Whether a `known_hosts` line concerns `host`. Hashed entries (`HashKnownHosts`
@@ -713,6 +821,31 @@ mod tests {
         add_ssh_keyscan_host, redact_failure,
     };
     use std::process::Command;
+
+    #[cfg(unix)]
+    #[test]
+    fn the_powershell_probe_retries_failures_and_answers_a_missing_program_at_once() {
+        use std::os::unix::fs::PermissionsExt as _;
+        // Stand-ins for a PowerShell: programs that ignore the arguments.
+        assert_eq!(super::pwsh_starts("/bin/true"), Ok(()));
+        // A failing start is retried: count the starts.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let log = dir.path().join("starts");
+        let fake = dir.path().join("pwsh");
+        std::fs::write(
+            &fake,
+            format!("#!/bin/sh\necho start >> '{}'\nexit 1\n", log.display()),
+        )
+        .expect("script");
+        std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+        let failed = super::pwsh_starts(&fake.display().to_string()).unwrap_err();
+        assert!(failed.contains("did not start"), "{failed}");
+        let starts = std::fs::read_to_string(&log).expect("log");
+        assert_eq!(starts.lines().count(), 3, "{starts}");
+        // A missing program is answered without starting anything.
+        let missing = super::pwsh_starts("/nonexistent/pwsh").unwrap_err();
+        assert!(missing.contains("not installed"), "{missing}");
+    }
 
     #[test]
     fn the_connection_test_runs_exit_zero_last() {

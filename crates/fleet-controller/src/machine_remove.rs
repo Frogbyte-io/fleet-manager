@@ -705,18 +705,29 @@ mod tests {
     /// an operation is created.
     #[test]
     fn the_scripts_and_the_layout_validator_agree_on_state_paths() {
+        // As both scripts call it: the value as given, and that value with
+        // its trailing slashes stripped (nothing left is `/`).
         let script_accepts = |path: &str| {
+            let stripped = path.trim_end_matches('/');
             let output = std::process::Command::new(system_tool("bash"))
                 .arg("-c")
                 .arg(format!(
                     "refuse_state() {{ echo \"$1\"; exit 1; }}\n{}\ncheck_state_path",
                     shared_block(UNINSTALL_SCRIPT)
                 ))
-                .env("STATE_DIR", path)
+                .env("STATE_DIR_RAW", path)
+                .env(
+                    "STATE_DIR",
+                    if stripped.is_empty() { "/" } else { stripped },
+                )
                 .output()
                 .unwrap();
             output.status.success()
         };
+        // The scripts strip one trailing slash for an operator typing a
+        // path; the controller never records one, so it refuses it. Every
+        // layout the controller accepts is one the scripts accept.
+        assert!(script_accepts("/var/lib/fleetd/"));
         for path in [
             "/",
             "/fleetd",
@@ -759,6 +770,13 @@ mod tests {
             "/home/../var/lib/fleetd",
             "/var/lib/./fleetd",
             "/var//lib/fleetd",
+            // Trailing `//`, `/.` and `/..` are refused before the trailing
+            // slashes are stripped, not after.
+            "/home/fleetd//",
+            "/var/lib/fleetd///",
+            "/var/lib/fleetd/./",
+            "/var/lib/fleetd/../",
+            "/var/lib/fleetd/.",
             "relative/state",
         ] {
             let validator = fleet_application::fleetd_layout::validate_installer_variable(
@@ -923,6 +941,12 @@ mod tests {
             (std::path::PathBuf::from("/dev/shm"), "system directory"),
             (
                 std::path::PathBuf::from(format!("{}/open/../real/state", root.display())),
+                "not a normalized path",
+            ),
+            // Stripping the trailing slashes would have made this the
+            // existing `real/state`.
+            (
+                std::path::PathBuf::from(format!("{}/real/state//", root.display())),
                 "not a normalized path",
             ),
         ] {

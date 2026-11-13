@@ -72,12 +72,11 @@ pub fn install_holds(install: &CatalogInstall, snapshot: &SkillsSnapshot) -> boo
             .into_iter()
             .flatten()
             // The real CLI gives a skill a UUID `id` and its directory name
-            // as `name`; Fleet records the name. Match either.
+            // as `name`; Fleet records the name. The name is the identity
+            // whenever there is one: a UUID that happens to equal the
+            // recorded name must not confirm a different skill.
             .filter(|skill| {
-                ["name", "id"].iter().any(|field| {
-                    skill.get(*field).and_then(serde_json::Value::as_str)
-                        == Some(install.skill_name.as_str())
-                })
+                crate::observed::observed_skill_identity(skill) == Some(install.skill_name.as_str())
             })
             .flat_map(|skill| {
                 skill
@@ -193,6 +192,35 @@ mod tests {
             &install(10),
             &snapshot(SkillsAvailability::Available, 20, &undeployed)
         ));
+    }
+
+    /// #649: the name is the identity whenever it is a string; `id` stands
+    /// in only without one.
+    #[test]
+    fn the_name_is_the_identity_and_id_only_stands_in_without_one() {
+        let available = SkillsAvailability::Available;
+        // Another skill whose UUID-shaped id equals the recorded name.
+        let other_named = serde_json::json!([{
+            "id": "fleet",
+            "name": "db",
+            "deployedTo": ["codex"]
+        }]);
+        assert!(!install_holds(
+            &install(10),
+            &snapshot(available.clone(), 20, &other_named)
+        ));
+        // A null or non-string name falls back to the id.
+        for name in [serde_json::Value::Null, serde_json::json!(7)] {
+            let unnamed = serde_json::json!([{
+                "id": "fleet",
+                "name": name,
+                "deployedTo": ["codex"]
+            }]);
+            assert!(install_holds(
+                &install(10),
+                &snapshot(available.clone(), 20, &unnamed)
+            ));
+        }
     }
 
     #[test]

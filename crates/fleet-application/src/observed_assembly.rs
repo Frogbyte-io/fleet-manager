@@ -178,12 +178,8 @@ fn skills_observation(
             {
                 // Desired state names a skill by its name; the real CLI's
                 // `id` is a UUID, so the name is the identity (`id` only
-                // when no name was observed).
-                let Some(id) = skill
-                    .get("name")
-                    .or_else(|| skill.get("id"))
-                    .and_then(serde_json::Value::as_str)
-                else {
+                // when no string name was observed).
+                let Some(id) = crate::observed::observed_skill_identity(skill) else {
                     continue;
                 };
                 let agents: Vec<&str> = skill
@@ -541,6 +537,24 @@ mod tests {
             assemble_observed_state(&empty, None, None, None, NOW).mise_answered,
             Some(false)
         );
+    }
+
+    /// #649: a skill's name is its identity whenever it is a string; a null
+    /// or non-string name falls back to the id instead of dropping the
+    /// skill, and an id never stands in beside a name.
+    #[test]
+    fn a_skill_without_a_string_name_is_identified_by_its_id() {
+        let m = machine(vec![], None);
+        let mut observed = snapshot(SkillsAvailability::Available, 0);
+        observed.data = serde_json::json!({"skills": [
+            {"id": "null-name", "name": null, "deployedTo": ["codex"]},
+            {"id": "numeric-name", "name": 7, "deployedTo": ["codex"]},
+            {"id": "6fe08ff4-4644-4114-9971-57327acabfc7", "name": "fleet", "deployedTo": ["codex"]},
+        ]});
+        let (pairs, availability) = super::skills_observation(&m, Some(&observed), NOW);
+        assert_eq!(availability, SkillsObservationAvailability::Available);
+        let ids: Vec<&str> = pairs.iter().map(|pair| pair.skill_id.as_str()).collect();
+        assert_eq!(ids, ["null-name", "numeric-name", "fleet"]);
     }
 
     #[test]

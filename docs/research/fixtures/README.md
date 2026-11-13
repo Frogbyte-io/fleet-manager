@@ -4,8 +4,11 @@ These are candidate provider contract fixtures captured from upstream release
 binaries: the help and argument-error captures on 2026-09-25, the v1.40.0
 agent listing on 2026-11-12. The filenames in the `Usage:` lines were normalized
 by invoking each binary through a temporary `skills-manager-cli` symlink; the
-help's trailing alignment whitespace was stripped. Commands and all other
-output are unedited.
+help's trailing alignment whitespace was stripped. Otherwise the help and
+argument-error captures are unedited. The agent listing was transformed after
+capture (pretty-printed, and its scratch home directory rewritten), as
+described below; its field names and values are otherwise as the binary
+printed them.
 
 | Release | Linux x64 binary SHA-256 | Captures |
 |---|---|---|

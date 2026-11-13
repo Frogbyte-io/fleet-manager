@@ -397,6 +397,18 @@ async fn a_detected_os_is_bound_to_the_fingerprint_and_audited_atomically() {
         Some("succeeded"),
         "never an open intent"
     );
+    // #649: a detection that started before that record (it looked the OS
+    // up as unknown) does not overwrite it: the recorded OS is newer.
+    let late = machines
+        .record_detected_endpoint_os(endpoint, GuestOs::Windows, "SHA256:current", &event)
+        .await
+        .unwrap();
+    assert!(!late);
+    assert_eq!(
+        machines.get(&machine.id).await.unwrap().endpoints[0].guest_os,
+        Some(GuestOs::Linux)
+    );
+    assert_eq!(count().await, 1, "no event for a write that did not apply");
 }
 
 /// When the audit append fails, the endpoint OS is rolled back with it.
@@ -472,6 +484,56 @@ async fn a_fleetd_endpoint_never_carries_an_os() {
     assert!(matches!(refused, PortFailure::NotFound { .. }), "{refused}");
 }
 
+/// #649: a fleetd endpoint has no host key to confirm. The confirmation is
+/// not found and changes nothing — the machine's agentless facts stay known.
+#[tokio::test]
+async fn a_fleetd_endpoint_has_no_host_key_to_confirm() {
+    use fleet_core::{CapabilityFact, CapabilityStatus, Timestamp};
+    let (_dir, store) = store().await;
+    let machines = MachineRepository::new(store.pool().clone());
+    let machine = machines
+        .register(&RegisterMachine {
+            name: "node-1".to_owned(),
+            description: String::new(),
+            endpoints: vec![NewEndpoint {
+                kind: EndpointKind::Fleetd,
+                reference: "node-identity".to_owned(),
+            }],
+            tags: Vec::new(),
+            groups: Vec::new(),
+        })
+        .await
+        .unwrap();
+    machines
+        .record_capabilities(
+            &machine.id,
+            &[CapabilityFact {
+                namespace: "tool".to_owned(),
+                name: "git".to_owned(),
+                value: Some("1.0".to_owned()),
+                status: CapabilityStatus::Known,
+                observed_at: Timestamp::from_unix_millis(1_000),
+                source: "agentless/1".to_owned(),
+            }],
+        )
+        .await
+        .unwrap();
+    let refused = machines
+        .confirm_fingerprint(&machine.endpoints[0].id, "SHA256:another", 2)
+        .await
+        .unwrap_err();
+    assert!(matches!(refused, PortFailure::NotFound { .. }), "{refused}");
+    let read = machines.get(&machine.id).await.unwrap();
+    assert_eq!(read.capabilities[0].status, CapabilityStatus::Known);
+    assert_eq!(
+        machines
+            .verified_fingerprint(&machine.endpoints[0].id)
+            .await
+            .unwrap(),
+        None
+    );
+}
+
 #[tokio::test]
 async fn a_draft_keeps_its_shell_check() {
     let (_dir, store) = store().await;
@@ -504,6 +566,7 @@ async fn a_draft_keeps_its_shell_check() {
     let stored = drafts.update(&draft).await.unwrap();
     assert_eq!(stored.shell_check, Some(refused));
 
+    let mut draft = stored;
     draft.shell_check = Some(ShellCheck {
         shell: "windows_powershell".to_owned(),
         guest_os: Some(GuestOs::Windows),

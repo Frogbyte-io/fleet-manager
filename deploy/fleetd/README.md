@@ -44,11 +44,18 @@ but keeps `/var/lib/fleetd`, so a reinstall re-proves the same identity. Use
 the machine should re-enroll with a new key; the controller supports
 rebinding an existing machine to a new node key.
 
+The state directory holds fleetd's own entries: `node.key`, `credential`,
+`machine-id`, `journal.ndjson`, `inventory.json`, and the local status socket
+`local.sock`. fleetd creates the socket when it starts serving and removes it
+on a clean shutdown; an unclean stop (a crash, `SIGKILL`) can leave it
+behind, and `--purge` removes it with the rest.
+
 `--purge` deletes the state directory recursively, so it deletes only a
-directory that is fleetd's own: an absolute path (trailing slashes are
-stripped first), a real directory (not a symbolic link), owned by the `fleet`
-account, not a system directory, and empty or holding fleetd's `node.key` as
-a regular file. Every ancestor must be a real directory owned by root, not
+directory that is fleetd's own: an absolute path (a trailing slash is
+stripped first, after the path as given was checked for `//`, `.` and `..`),
+a real directory (not a symbolic link), owned by the `fleet` account, not a
+system directory, and empty or holding fleetd's `node.key` as a regular
+file. Every ancestor must be a real directory owned by root, not
 writable by group or others, and without a POSIX ACL (read with `getfacl`
 when it is installed, otherwise from the `+` that `ls -ld` shows). On Linux
 the group mode bits already reflect an ACL's mask, so the ACL test is defense
@@ -69,9 +76,16 @@ disable --now` fails), or when the unit file is gone and `systemctl
 is-active` does not answer `inactive`, `unknown` or `failed`. `install.sh`
 refuses to adopt a state directory that is a symbolic link, whose contents
 cannot be read, or that already holds files without a regular `node.key`. It
-also applies the same ancestor rule before it creates anything, and again once
-the state directory exists, so a layout that `--purge` would refuse is never
-installed.
+also applies the same path and ancestor rules before it creates anything, and
+again once the state directory exists, so a state path or ancestor that
+`--purge` would refuse is never installed. The service account is the exception: on
+the test layout above, where a stubbed `useradd` leaves no `fleet` account,
+the install succeeds with the state directory owned by the invoking user (or
+by root, when root runs it). A later `--purge` run as root refuses it because
+there is no `fleet` account ("the directory cannot be fleetd's"), whoever owns
+it; if a `fleet` account is created afterwards, the purge refuses the
+directory instead because it is not owned by `fleet`. Remove such a test
+install by hand.
 
 ## Local socket access
 
