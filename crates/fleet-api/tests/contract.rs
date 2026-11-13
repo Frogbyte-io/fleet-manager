@@ -463,6 +463,11 @@ impl OperationPort for FakePort {
     }
 }
 
+/// A complete throwaway Ed25519 public key and the fingerprint
+/// `ssh-keygen -lf` prints for it.
+const FIXTURE_KEY: &str = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIH9t4Xt9H44BCMC3Ab4ugXr+F9s8s/RCNEv6mkk3WHnV fleet-controller@test";
+const FIXTURE_FINGERPRINT: &str = "SHA256:2Mqm0WXnrxat1gQ/xKwNc1fp09Gh1IgfynaiOD4BH18";
+
 #[derive(Debug)]
 struct FakeSystemInfo;
 
@@ -486,11 +491,9 @@ impl fleet_api::system::SystemInfoSource for FakeSystemInfo {
     async fn ssh_public_key(&self) -> Result<fleet_api::system::SshPublicKeyInfo, String> {
         Ok(fleet_api::system::SshPublicKeyInfo {
             state: fleet_api::system::SshKeyState::Present,
-            public_key: Some(
-                "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAA fleet-controller@test".to_owned(),
-            ),
+            public_key: Some(FIXTURE_KEY.to_owned()),
             key_type: Some("ssh-ed25519".to_owned()),
-            fingerprint: Some("SHA256:fixture".to_owned()),
+            fingerprint: Some(FIXTURE_FINGERPRINT.to_owned()),
             path: Some("/var/lib/fleet/.ssh/id_ed25519".to_owned()),
             detail: None,
         })
@@ -1207,13 +1210,11 @@ async fn the_controller_ssh_public_key_is_a_system_read() {
     let (parts, body) = call(get(&format!("{API_BASE_PATH}/system/ssh-public-key"))).await;
     assert_eq!(parts.status, StatusCode::OK, "{body}");
     assert_eq!(body["state"], "present");
-    assert_eq!(body["fingerprint"], "SHA256:fixture");
-    assert!(
-        body["publicKey"]
-            .as_str()
-            .unwrap()
-            .starts_with("ssh-ed25519 ")
-    );
+    assert_eq!(body["fingerprint"], FIXTURE_FINGERPRINT);
+    assert_eq!(body["publicKey"], FIXTURE_KEY);
+    // What the endpoint serves is a key `fleetctl machines join` accepts.
+    let key = fleet_core::parse_public_key(body["publicKey"].as_str().unwrap()).unwrap();
+    assert_eq!(key.fingerprint, FIXTURE_FINGERPRINT);
     assert!(body["detail"].is_null());
 
     let (state, _, _) = test_state();

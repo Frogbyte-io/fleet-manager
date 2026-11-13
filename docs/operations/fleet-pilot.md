@@ -4,7 +4,7 @@ How to run Fleet on a handful of your own Linux developer machines: enroll them,
 
 Examples use placeholders: the controller is `controller.example.ts.net`, the pilot machines are `dev-1` and `dev-2`, their login is `dev`, and the operator is `you@example.com`. Every command is `fleetctl`; `fleetctl <command> --help` prints its usage.
 
-> **Short path:** run `fleetctl machines join` on the new machine ([add-a-machine.md](add-a-machine.md)); it does the key, onboarding and skill steps of this page in one command, and refuses where this page says to stop.
+> **Short path:** run `fleetctl machines join` on the new machine ([add-a-machine.md](add-a-machine.md)). It does this page's key, onboarding and skill steps in one command, and refuses the problems it can detect on the machine: no SSH server, a host key that is not the machine's own, a stand-in `skills-manager-cli`. It cannot judge the access limits in [Restrict access first](#restrict-access-first) and does not check the [prerequisites](#prerequisites) such as `jq`, so read both sections before you run it.
 
 ## Scope
 

@@ -313,7 +313,8 @@ export interface SetupFollowUpDto {
      */
   operationId?: string | null;
   /**
-     * Why nothing was queued, when `skipped` or `failed`.
+     * Why nothing was queued: the rule, when `skipped`; a fixed
+     * caller-safe sentence, when `failed` (the detail is logged).
      * @nullable
      */
   reason?: string | null;

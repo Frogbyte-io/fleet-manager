@@ -132,26 +132,35 @@ impl ControllerIdentity {
                 };
             }
         }
+        // `ssh` tries every default identity in order and authenticates with
+        // the first one that works, so a broken file must not hide a usable
+        // one after it: the first usable key wins, and the first problem is
+        // reported only when no key is usable.
+        let mut first_problem: Option<IdentityState> = None;
         for name in DEFAULT_IDENTITY_NAMES {
             let path = self.ssh_dir.join(name);
-            match std::fs::metadata(&path) {
-                Ok(metadata) => return inspect_key(&path, &metadata),
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-                Err(error) => {
-                    return IdentityState::Unusable {
-                        detail: format!(
-                            "the controller user cannot inspect {} ({error}); {}",
-                            path.display(),
-                            ownership_fix(&self.ssh_dir)
-                        ),
-                        path,
-                    };
+            let state = match std::fs::metadata(&path) {
+                Ok(metadata) => inspect_key(&path, &metadata),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+                Err(error) => IdentityState::Unusable {
+                    detail: format!(
+                        "the controller user cannot inspect {} ({error}); {}",
+                        path.display(),
+                        ownership_fix(&self.ssh_dir)
+                    ),
+                    path,
+                },
+            };
+            match state {
+                IdentityState::Present(_) => return state,
+                problem => {
+                    first_problem.get_or_insert(problem);
                 }
             }
         }
-        IdentityState::None {
+        first_problem.unwrap_or_else(|| IdentityState::None {
             ssh_dir: self.ssh_dir.clone(),
-        }
+        })
     }
 
     /// Generates `id_ed25519` when there is no default identity and
@@ -247,7 +256,7 @@ fn inspect_key(path: &Path, metadata: &std::fs::Metadata) -> IdentityState {
         return unusable(format!(
             "the controller user cannot read {} ({error}); {}",
             path.display(),
-            ownership_fix(path)
+            ownership_fix(path.parent().unwrap_or(path))
         ));
     }
     // `-P ''` makes a passphrase-protected key fail instead of prompting.
@@ -295,22 +304,24 @@ fn inspect_key(path: &Path, metadata: &std::fs::Metadata) -> IdentityState {
     }
 }
 
-/// The fix for a file the controller user cannot read: own it.
-fn ownership_fix(path: &Path) -> String {
+/// The fix for an SSH directory the controller user cannot read: own it.
+/// `ssh_dir` is the `.ssh` directory itself, never its parent: the home is
+/// the controller's data volume, which must not be re-owned wholesale.
+fn ownership_fix(ssh_dir: &Path) -> String {
     #[cfg(unix)]
     {
         let uid = rustix::process::getuid().as_raw();
         let gid = rustix::process::getgid().as_raw();
         format!(
             "it must belong to the controller user (uid {uid}): `chown -R {uid}:{gid} {}`",
-            path.parent().unwrap_or(path).display()
+            ssh_dir.display()
         )
     }
     #[cfg(not(unix))]
     {
         format!(
             "it must belong to the controller user: fix the owner of {}",
-            path.display()
+            ssh_dir.display()
         )
     }
 }
@@ -486,6 +497,32 @@ mod tests {
             panic!("a protected key is unusable");
         };
         assert!(detail.contains("passphrase"), "{detail}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_broken_key_does_not_hide_a_usable_one_and_the_fix_targets_only_ssh() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let dir = tempfile::tempdir().unwrap();
+        let ssh = dir.path().join(".ssh");
+        let identity = ControllerIdentity::at(&ssh);
+        let EnsureOutcome::Generated(good) = identity.ensure(true, "t").unwrap() else {
+            panic!("generated");
+        };
+        // An earlier name in ssh's order that ssh would skip.
+        std::fs::write(ssh.join("id_rsa"), "not a key").unwrap();
+        std::fs::set_permissions(ssh.join("id_rsa"), std::fs::Permissions::from_mode(0o600))
+            .unwrap();
+        assert_eq!(identity.inspect(), IdentityState::Present(good.clone()));
+        // With the usable key gone, the first problem is reported.
+        std::fs::set_permissions(&good.path, std::fs::Permissions::from_mode(0o644)).unwrap();
+        let IdentityState::Unusable { path, .. } = identity.inspect() else {
+            panic!("no usable key");
+        };
+        assert_eq!(path, ssh.join("id_rsa"));
+        // The ownership fix names the .ssh directory, never the home.
+        let fix = ownership_fix(&ssh);
+        assert!(fix.ends_with(&format!("{}`", ssh.display())), "{fix}");
     }
 
     #[test]

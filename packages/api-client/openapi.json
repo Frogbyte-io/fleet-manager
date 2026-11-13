@@ -32935,7 +32935,7 @@
               "string",
               "null"
             ],
-            "description": "Why nothing was queued, when `skipped` or `failed`."
+            "description": "Why nothing was queued: the rule, when `skipped`; a fixed\ncaller-safe sentence, when `failed` (the detail is logged)."
           },
           "status": {
             "type": "string",

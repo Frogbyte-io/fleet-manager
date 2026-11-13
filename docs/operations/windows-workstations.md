@@ -4,7 +4,7 @@ How to prepare a Windows developer workstation so the controller can onboard it 
 
 Examples use placeholders: the controller is `controller.example.ts.net` (tailnet address `100.64.0.1`), the workstation is `workstation-1.example.ts.net`, and the developer's Windows account is `developer`.
 
-> **Short path:** run `fleetctl machines join` on the new machine ([add-a-machine.md](add-a-machine.md)); it does the key, onboarding and skill steps of this page in one command, and refuses where this page says to stop.
+> **Short path:** `fleetctl machines join` on the workstation ([add-a-machine.md](add-a-machine.md)) does the key, onboarding and skill steps of this page in one command, for a standard account (an administrator gets the elevated commands of step 5 instead), and prints the elevated setup below rather than running it. Its Windows path is tested with fakes only: it is not yet verified on a live workstation ([#611](https://github.com/Frogbyte-io/fleet-manager/issues/611)), and `fleetctl` on Windows carries this page's caveats ([#614](https://github.com/Frogbyte-io/fleet-manager/issues/614), [#615](https://github.com/Frogbyte-io/fleet-manager/issues/615)). The manual steps below remain the reference and the fallback.
 
 ## Scope
 
@@ -57,14 +57,14 @@ Run these in **Windows PowerShell as Administrator** on the workstation. Fleet d
    ```powershell
    New-Item -ItemType Directory -Force "$env:USERPROFILE\.ssh" | Out-Null
    Add-Content -Path "$env:USERPROFILE\.ssh\authorized_keys" -Value 'ssh-ed25519 AAAA... fleet-controller'
-   icacls "$env:USERPROFILE\.ssh\authorized_keys" /inheritance:r /grant "${env:USERNAME}:F" /grant "SYSTEM:F" /grant "*S-1-5-32-544:F"
+   icacls "$env:USERPROFILE\.ssh\authorized_keys" /inheritance:r /grant "${env:USERNAME}:F" /grant "*S-1-5-18:F" /grant "*S-1-5-32-544:F"
    ```
 
    For an **administrator** (read the warning above first), elevated:
 
    ```powershell
    Add-Content -Path "$env:ProgramData\ssh\administrators_authorized_keys" -Value 'ssh-ed25519 AAAA... fleet-controller'
-   icacls "$env:ProgramData\ssh\administrators_authorized_keys" /inheritance:r /grant "*S-1-5-32-544:F" /grant "SYSTEM:F"
+   icacls "$env:ProgramData\ssh\administrators_authorized_keys" /inheritance:r /grant "*S-1-5-32-544:F" /grant "*S-1-5-18:F"
    ```
 
    sshd ignores a key file whose ACL grants anyone else write access.

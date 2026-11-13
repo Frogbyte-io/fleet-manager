@@ -153,18 +153,26 @@ pub async fn get_system_info(
     principal: Option<Extension<fleet_application::authz::ActingPrincipal>>,
 ) -> Result<Json<SystemInfo>, ApiErrorResponse> {
     authorize_system_read(&state, principal.as_ref(), correlation_id)?;
-    let mut info = state.system.info().await.map_err(|_detail| {
-        let public = PublicError::new(
-            ErrorCode::from_str("system_unavailable")
-                .expect("the literal is valid error code syntax"),
-            "the system view is unavailable; the detail is in the controller log",
-            RetryClass::Backoff,
-        );
-        ApiError::new(&public, correlation_id).with_status(StatusCode::INTERNAL_SERVER_ERROR)
-    })?;
+    let mut info = state
+        .system
+        .info()
+        .await
+        .map_err(|detail| system_unavailable("the system view", &detail, correlation_id))?;
     info.current_principal =
         principal.map_or_else(|| "unknown".to_owned(), |Extension(principal)| principal.id);
     Ok(Json(info))
+}
+
+/// The `system_unavailable` envelope for a system view whose source failed.
+/// The source's detail goes to the controller log, never to the caller.
+fn system_unavailable(what: &str, detail: &str, correlation_id: CorrelationId) -> ApiErrorResponse {
+    eprintln!("{what} is unavailable ({correlation_id}): {detail}");
+    let public = PublicError::new(
+        ErrorCode::from_str("system_unavailable").expect("the literal is valid error code syntax"),
+        format!("{what} is unavailable; the detail is in the controller log"),
+        RetryClass::Backoff,
+    );
+    ApiError::new(&public, correlation_id).with_status(StatusCode::INTERNAL_SERVER_ERROR)
 }
 
 /// The system views are catalog actions like any other read; a delegated
@@ -239,14 +247,8 @@ pub async fn get_ssh_public_key(
     principal: Option<Extension<fleet_application::authz::ActingPrincipal>>,
 ) -> Result<Json<SshPublicKeyInfo>, ApiErrorResponse> {
     authorize_system_read(&state, principal.as_ref(), correlation_id)?;
-    let info = state.system.ssh_public_key().await.map_err(|_detail| {
-        let public = PublicError::new(
-            ErrorCode::from_str("system_unavailable")
-                .expect("the literal is valid error code syntax"),
-            "the controller's SSH identity is unavailable; the detail is in the controller log",
-            RetryClass::Backoff,
-        );
-        ApiError::new(&public, correlation_id).with_status(StatusCode::INTERNAL_SERVER_ERROR)
+    let info = state.system.ssh_public_key().await.map_err(|detail| {
+        system_unavailable("the controller's SSH identity", &detail, correlation_id)
     })?;
     Ok(Json(info))
 }

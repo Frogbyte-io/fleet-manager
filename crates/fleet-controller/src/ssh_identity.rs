@@ -48,7 +48,7 @@ pub fn describe(outcome: Result<EnsureOutcome, String>, generate: bool) -> Strin
             let why = if generate {
                 "none was generated"
             } else {
-                "generation is off (FLEET_SSH_KEY_GENERATE=false)"
+                "generation is off (FLEET_SSH_KEY_GENERATE or the config file's ssh_key_generate is false)"
             };
             format!(
                 "warning: the controller user has no SSH key in {} and {why}; `--auth agent` endpoints connect only with keys an ssh-agent supplies",
@@ -94,7 +94,7 @@ pub fn to_info(state: IdentityState) -> SshPublicKeyInfo {
             fingerprint: None,
             path: Some(ssh_dir.display().to_string()),
             detail: Some(
-                "the controller user has no default SSH key; restart the controller with FLEET_SSH_KEY_GENERATE on (the default) to generate one".to_owned(),
+                "the controller user has no default SSH key; if FLEET_SSH_KEY_GENERATE (or ssh_key_generate in the config file) is off, turn it on and restart the controller, otherwise its startup log says why generation failed".to_owned(),
             ),
         },
         IdentityState::Unusable { path, detail } => SshPublicKeyInfo {
@@ -117,7 +117,8 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let identity = ControllerIdentity::at(dir.path().join(".ssh"));
         let off = describe(identity.ensure(false, "t"), false);
-        assert!(off.contains("FLEET_SSH_KEY_GENERATE=false"), "{off}");
+        assert!(off.contains("FLEET_SSH_KEY_GENERATE or"), "{off}");
+        assert!(off.contains("ssh_key_generate"), "{off}");
         let generated = describe(identity.ensure(true, "t"), true);
         assert!(generated.contains("generated"), "{generated}");
         assert!(generated.contains("SHA256:"), "{generated}");
@@ -145,6 +146,8 @@ mod tests {
         let info = to_info(ControllerIdentity::at(dir.path().join(".ssh")).inspect());
         assert_eq!(info.state, SshKeyState::None);
         assert!(info.public_key.is_none());
-        assert!(info.detail.unwrap().contains("FLEET_SSH_KEY_GENERATE"));
+        let detail = info.detail.unwrap();
+        assert!(detail.contains("if FLEET_SSH_KEY_GENERATE"), "{detail}");
+        assert!(detail.contains("startup log"), "{detail}");
     }
 }

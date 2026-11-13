@@ -198,8 +198,27 @@ fn the_key_is_appended_once_whatever_the_comment_or_options() {
             "{present}"
         );
     }
-    // A commented-out key does not count.
-    assert!(authorized_keys_addition(&format!("# {CONTROLLER_KEY}\n"), &controller).is_some());
+    // A commented-out key does not count, nor one that only appears in
+    // another key's comment or inside a quoted option.
+    for absent in [
+        format!("# {CONTROLLER_KEY}\n"),
+        format!("{OTHER_KEY} ssh-ed25519 {blob}\n"),
+        format!("command=\"echo ssh-ed25519 {blob}\" {OTHER_KEY}\n"),
+    ] {
+        assert!(
+            authorized_keys_addition(&absent, &controller).is_some(),
+            "{absent}"
+        );
+    }
+    // Quoted options with spaces and escaped quotes are skipped as sshd does.
+    let quoted = format!("command=\"echo \\\"hi there\\\"\",no-pty ssh-ed25519 {blob} c\n");
+    assert_eq!(
+        authorized_keys_addition(&quoted, &controller),
+        None,
+        "{quoted}"
+    );
+    assert_eq!(authorized_key_fields("   "), None);
+    assert_eq!(authorized_key_fields("from=\"x\""), None);
 }
 
 #[cfg(unix)]
@@ -251,7 +270,7 @@ fn a_windows_standard_account_gets_the_protected_acl() {
     assert_eq!(
         host.ran(),
         [format!(
-            "icacls {} /inheritance:r /grant developer:F /grant SYSTEM:F /grant *S-1-5-32-544:F",
+            "icacls {} /inheritance:r /grant developer:F /grant *S-1-5-18:F /grant *S-1-5-32-544:F",
             path.display()
         )]
     );
@@ -288,7 +307,8 @@ fn an_administrator_is_refused_with_the_elevated_commands_for_this_key() {
     assert!(refusal.contains("ANY administrator"));
     assert!(refusal.contains(&format!("'{CONTROLLER_KEY}'")));
     assert!(
-        refusal.contains("icacls $k /inheritance:r /grant \"*S-1-5-32-544:F\" /grant \"SYSTEM:F\"")
+        refusal
+            .contains("icacls $k /inheritance:r /grant \"*S-1-5-32-544:F\" /grant \"*S-1-5-18:F\"")
     );
     assert!(refusal.contains("--admin-key-installed"));
     // A quote in a comment cannot break out of the PowerShell literal.
@@ -494,6 +514,12 @@ fn windows_preflight_reads_and_never_changes_and_asks_for_the_elevated_block() {
     assert!(found.problems.is_empty());
     assert!(found.warnings[0].contains("PasswordAuthentication no"));
     assert!(WINDOWS_ELEVATED_SETUP.contains("DefaultShell"));
+    // The printed fix makes the first sshd_config line the global value, so
+    // a config with no PasswordAuthentication line at all is fixed too.
+    assert!(WINDOWS_ELEVATED_SETUP.contains("@('PasswordAuthentication no') + $t"));
+    assert!(password_auth_disabled(
+        "PasswordAuthentication no\n#PasswordAuthentication yes\n"
+    ));
 }
 
 #[test]
@@ -524,7 +550,7 @@ fn the_address_comes_from_tailscale_unless_given() {
         &host,
         &JoinArgs {
             host: Some("192.0.2.7".to_owned()),
-            user: Some("agent".to_owned()),
+            user: Some("developer".to_owned()),
             name: Some("named".to_owned()),
             ..JoinArgs::default()
         },
@@ -536,8 +562,26 @@ fn the_address_comes_from_tailscale_unless_given() {
             given.host.as_str(),
             given.name.as_str()
         ),
-        ("agent", "192.0.2.7", "named")
+        ("developer", "192.0.2.7", "named")
     );
+    // The key goes into this account's authorized_keys, so another login is
+    // refused rather than enrolled without the key.
+    let other = resolve_target(
+        &host,
+        &JoinArgs {
+            host: Some("192.0.2.7".to_owned()),
+            user: Some("agent".to_owned()),
+            ..JoinArgs::default()
+        },
+    )
+    .unwrap_err();
+    assert!(
+        other.message.contains("is not this account (developer)"),
+        "{}",
+        other.message
+    );
+    assert!(same_account(Platform::Windows, "Developer", "developer"));
+    assert!(!same_account(Platform::Unix, "Developer", "developer"));
     let missing = FakeHost::unix(home.path());
     let error = resolve_target(&missing, &JoinArgs::default()).unwrap_err();
     assert!(error.message.contains("--host"), "{}", error.message);

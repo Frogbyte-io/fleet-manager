@@ -115,8 +115,10 @@ New-ItemProperty -Path 'HKLM:\SOFTWARE\OpenSSH' -Name DefaultShell `
   -Value "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe" `
   -PropertyType String -Force
 # Key login only.
+# OpenSSH uses the first value it reads, so line 1 decides for every user.
 $c = "$env:ProgramData\ssh\sshd_config"
-(Get-Content $c) -replace '^#?\s*PasswordAuthentication\s+\S+', 'PasswordAuthentication no' | Set-Content $c
+$t = @(Get-Content $c)
+if ($t[0] -ne 'PasswordAuthentication no') { Set-Content $c (@('PasswordAuthentication no') + $t) }
 Restart-Service sshd
 ```
 
@@ -165,7 +167,8 @@ it has not reached yet:
 3. **Adds the controller's key to this account**, once:
    `~/.ssh/authorized_keys` (directory 0700, file 0600) on Linux;
    `%USERPROFILE%\.ssh\authorized_keys` with the protected ACL (the user,
-   SYSTEM and Administrators) on Windows. A key already there is left alone.
+   SYSTEM and Administrators, granted by SID so localized Windows works) on
+   Windows. A key already there is left alone.
    A Windows **administrator** is refused instead (see
    [Windows administrators](#windows-administrators)).
 4. **Onboards the machine** at its tailnet IPv4 as this account, named after
@@ -211,7 +214,7 @@ machine is enrolled then; fix the cause and [resume](#re-running-and---resume)).
 |---|---|---|
 | `--host <address>` | `tailscale ip -4` | The address the controller connects to. |
 | `--port <n>` | `22` | The SSH port. |
-| `--user <login>` | this account | The SSH login. Join as the account whose agents should get the skill. |
+| `--user <login>` | this account | Must name this account (the key is installed for the account the join runs as); another login is refused. Run the join as the account whose agents should get the skill. |
 | `--name <name>` | the hostname | The machine name in Fleet. |
 | `--host-key-file <path>` | the ed25519 host key | Only when sshd uses a non-default `HostKey`. |
 | `--agents <id,...>` | the installed agents | Deploy the skill to these agents (Skills Manager ids, e.g. `claude_code`, `codex`). |
@@ -326,7 +329,7 @@ sequence, by hand.
    if (-not ((Test-Path $k) -and (Select-String -Path $k -SimpleMatch '<controller public key>' -Quiet))) {
      Add-Content -Path $k -Value '<controller public key>' -Encoding ascii
    }
-   icacls $k /inheritance:r /grant "${env:USERNAME}:F" /grant "SYSTEM:F" /grant "*S-1-5-32-544:F" | Out-Null
+   icacls $k /inheritance:r /grant "${env:USERNAME}:F" /grant "*S-1-5-18:F" /grant "*S-1-5-32-544:F" | Out-Null
    ```
 
 3. **Remove a stale Skills Manager stand-in** (Linux): if `skills-manager-cli`

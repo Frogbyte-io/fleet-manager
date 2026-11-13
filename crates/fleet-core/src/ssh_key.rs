@@ -52,8 +52,10 @@ impl SshPublicKey {
 /// # Errors
 ///
 /// Fails with a description (never the input) when the line is empty, too
-/// long, has no blob, the blob is not base64, or the blob's own type name
-/// does not match the line's key type.
+/// long, has no blob, the blob is not base64, the blob's own type name does
+/// not match the line's key type, or the blob is not a complete sequence of
+/// SSH fields with key material after the type (an Ed25519 key must be
+/// exactly 32 bytes).
 pub fn parse_public_key(line: &str) -> Result<SshPublicKey, String> {
     let line = line.trim();
     if line.is_empty() {
@@ -82,15 +84,21 @@ pub fn parse_public_key(line: &str) -> Result<SshPublicKey, String> {
     let decoded = base64::engine::general_purpose::STANDARD
         .decode(blob)
         .map_err(|_| "the public key data is not base64".to_owned())?;
-    // The blob starts with its own type name as an SSH string: a 4-byte
-    // big-endian length, then the name. It must agree with the line.
-    let embedded = decoded
-        .get(..4)
-        .map(|length| u32::from_be_bytes([length[0], length[1], length[2], length[3]]) as usize)
-        .and_then(|length| decoded.get(4..4 + length))
-        .ok_or_else(|| "the public key data is truncated".to_owned())?;
-    if embedded != key_type.as_bytes() {
+    // The blob is a sequence of SSH strings (a 4-byte big-endian length,
+    // then the bytes; mpints are strings too): first the type name, which
+    // must agree with the line, then the key material. Every public key
+    // type has at least one material field, and the fields fill the blob
+    // exactly.
+    let fields =
+        ssh_strings(&decoded).ok_or_else(|| "the public key data is truncated".to_owned())?;
+    if fields.first().copied() != Some(key_type.as_bytes()) {
         return Err("the public key data does not match its key type".to_owned());
+    }
+    if fields.len() < 2 || fields[1..].iter().all(|field| field.is_empty()) {
+        return Err("the public key data has no key material".to_owned());
+    }
+    if key_type == "ssh-ed25519" && (fields.len() != 2 || fields[1].len() != 32) {
+        return Err("the public key data is not a 32-byte Ed25519 key".to_owned());
     }
     let digest = sha2::Sha256::digest(&decoded);
     let fingerprint = format!(
@@ -103,6 +111,20 @@ pub fn parse_public_key(line: &str) -> Result<SshPublicKey, String> {
         comment,
         fingerprint,
     })
+}
+
+/// Splits a blob into its SSH strings, or `None` when a length runs past
+/// the end.
+fn ssh_strings(mut blob: &[u8]) -> Option<Vec<&[u8]>> {
+    let mut fields = Vec::new();
+    while !blob.is_empty() {
+        let length = blob.get(..4)?;
+        let length = u32::from_be_bytes([length[0], length[1], length[2], length[3]]) as usize;
+        let field = blob.get(4..4_usize.checked_add(length)?)?;
+        fields.push(field);
+        blob = &blob[4 + length..];
+    }
+    Some(fields)
 }
 
 /// Whether `word` is shaped like an OpenSSH key type (`ssh-ed25519`,
@@ -158,6 +180,10 @@ mod tests {
             ("ssh-ed25519", "no key data"),
             ("ssh-ed25519 !!!notbase64", "not base64"),
             ("ssh-ed25519 AAAA", "truncated"),
+            // The type name alone, no key material.
+            ("ssh-ed25519 AAAAC3NzaC1lZDI1NTE5", "no key material"),
+            // A key field that is not 32 bytes.
+            ("ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAAQA=", "32-byte"),
             ("from=\"x\" ssh-ed25519 AAAA", "key type"),
             (
                 "ssh-rsa AAAAC3NzaC1lZDI1NTE5AAAAIH9t4Xt9H44BCMC3Ab4ugXr+F9s8s/RCNEv6mkk3WHnV",

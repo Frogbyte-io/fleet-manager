@@ -47,8 +47,11 @@ pub const DEFAULT_WAIT_SECONDS: u64 = 600;
 /// The PowerShell 5.1 path `DefaultShell` must name, under `%SystemRoot%`.
 const WINDOWS_POWERSHELL_51: &str = r"System32\WindowsPowerShell\v1.0\powershell.exe";
 
-/// The Administrators group SID.
+/// The Administrators group SID. Grants use SIDs, not names: account names
+/// are localized, so `SYSTEM` or `Administrators` fail on some Windows.
 const ADMINISTRATORS_SID: &str = "S-1-5-32-544";
+/// The `LocalSystem` account SID.
+const SYSTEM_SID: &str = "S-1-5-18";
 
 /// The arguments of `machines join`.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -415,16 +418,52 @@ fn current_user(host: &dyn JoinHost) -> Result<String, CliError> {
 /// blob, with or without options or a different comment).
 #[must_use]
 pub fn authorizes(content: &str, key: &fleet_core::SshPublicKey) -> bool {
-    content.lines().any(|line| {
-        let line = line.trim();
-        if line.is_empty() || line.starts_with('#') {
-            return false;
+    content
+        .lines()
+        .filter_map(authorized_key_fields)
+        .any(|(kind, blob)| kind == key.key_type && blob == key.blob)
+}
+
+/// The key type and blob of one `authorized_keys` line, as sshd reads it
+/// (`sshd(8)`, AUTHORIZED_KEYS FILE FORMAT): an optional options field
+/// (comma-separated, double quotes may hold spaces), then the key type, the
+/// base64 key and an ignored comment. `None` for blank and comment lines.
+#[must_use]
+pub fn authorized_key_fields(line: &str) -> Option<(&str, &str)> {
+    let line = line.trim();
+    if line.is_empty() || line.starts_with('#') {
+        return None;
+    }
+    let looks_like_type = |word: &str| {
+        word.starts_with("ssh-") || word.starts_with("ecdsa-") || word.starts_with("sk-")
+    };
+    let first = line.split_whitespace().next()?;
+    let key_part = if looks_like_type(first) {
+        line
+    } else {
+        // Skip the options field: it ends at the first whitespace outside
+        // double quotes, where `\"` is an escaped quote.
+        let mut quoted = false;
+        let mut escaped = false;
+        let mut end = None;
+        for (index, character) in line.char_indices() {
+            match character {
+                _ if escaped => escaped = false,
+                '\\' if quoted => escaped = true,
+                '"' => quoted = !quoted,
+                c if c.is_whitespace() && !quoted => {
+                    end = Some(index);
+                    break;
+                }
+                _ => {}
+            }
         }
-        let words: Vec<&str> = line.split_whitespace().collect();
-        words
-            .windows(2)
-            .any(|pair| pair[0] == key.key_type && pair[1] == key.blob)
-    })
+        line[end?..].trim_start()
+    };
+    let mut words = key_part.split_whitespace();
+    let kind = words.next().filter(|word| looks_like_type(word))?;
+    let blob = words.next()?;
+    Some((kind, blob))
 }
 
 /// The bytes to append to `authorized_keys` content so it authorizes `key`,
@@ -550,7 +589,7 @@ pub fn windows_acl_args(path: &Path, user: &str) -> Vec<String> {
         "/grant".to_owned(),
         format!("{user}:F"),
         "/grant".to_owned(),
-        "SYSTEM:F".to_owned(),
+        format!("*{SYSTEM_SID}:F"),
         "/grant".to_owned(),
         format!("*{ADMINISTRATORS_SID}:F"),
     ]
@@ -565,6 +604,16 @@ fn first_line(stdout: &str, stderr: &str) -> String {
         .find(|line| !line.is_empty())
         .unwrap_or("no detail")
         .to_owned()
+}
+
+/// Whether `--user` names the account the join runs as. Windows account
+/// names are case-insensitive; Unix ones are not.
+#[must_use]
+pub fn same_account(platform: Platform, given: &str, account: &str) -> bool {
+    match platform {
+        Platform::Unix => given == account,
+        Platform::Windows => given.eq_ignore_ascii_case(account),
+    }
 }
 
 /// The first IPv4 address `tailscale ip -4` printed.
@@ -698,8 +747,10 @@ New-ItemProperty -Path 'HKLM:\SOFTWARE\OpenSSH' -Name DefaultShell `
   -Value "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe" `
   -PropertyType String -Force
 # Key login only.
+# OpenSSH uses the first value it reads, so line 1 decides for every user.
 $c = "$env:ProgramData\ssh\sshd_config"
-(Get-Content $c) -replace '^#?\s*PasswordAuthentication\s+\S+', 'PasswordAuthentication no' | Set-Content $c
+$t = @(Get-Content $c)
+if ($t[0] -ne 'PasswordAuthentication no') { Set-Content $c (@('PasswordAuthentication no') + $t) }
 Restart-Service sshd"#;
 
 /// A PowerShell single-quoted string literal.
@@ -715,7 +766,7 @@ pub fn administrators_key_block(key_line: &str) -> String {
         "$k = \"$env:ProgramData\\ssh\\administrators_authorized_keys\"\n\
          if (-not ((Test-Path $k) -and (Select-String -Path $k -SimpleMatch {key} -Quiet))) {{\n  \
          Add-Content -Path $k -Value {key} -Encoding ascii\n}}\n\
-         icacls $k /inheritance:r /grant \"*{ADMINISTRATORS_SID}:F\" /grant \"SYSTEM:F\""
+         icacls $k /inheritance:r /grant \"*{ADMINISTRATORS_SID}:F\" /grant \"*{SYSTEM_SID}:F\""
     )
 }
 
@@ -1086,9 +1137,22 @@ fn resolve_target(host: &dyn JoinHost, args: &JoinArgs) -> Result<Target, CliErr
                 .to_string()
         }
     };
+    // The key goes into this account's authorized_keys, so the controller
+    // must log in as this account: another --user would get a draft whose
+    // login was never given the key.
+    let account = current_user(host)?;
     let user = match &args.user {
-        Some(user) => user.trim().to_owned(),
-        None => current_user(host)?,
+        Some(user) if !same_account(host.platform(), user.trim(), &account) => {
+            return Err(CliError {
+                message: format!(
+                    "--user {} is not this account ({account}): the join installs the controller's key for the \
+                     account it runs as, so run it as {} instead (or leave --user out)",
+                    user.trim(),
+                    user.trim()
+                ),
+            });
+        }
+        _ => account,
     };
     let name = match &args.name {
         Some(name) => name.trim().to_owned(),
