@@ -36,6 +36,7 @@ struct FakeHost {
     on_path: BTreeMap<&'static str, PathBuf>,
     banner: Result<String, String>,
     ran: Mutex<Vec<String>>,
+    no_system_dir: bool,
 }
 
 impl FakeHost {
@@ -50,6 +51,7 @@ impl FakeHost {
             on_path: BTreeMap::new(),
             banner: Ok("SSH-2.0-OpenSSH_9.6".to_owned()),
             ran: Mutex::new(Vec::new()),
+            no_system_dir: false,
         }
     }
 
@@ -110,7 +112,8 @@ impl JoinHost for FakeHost {
         Some("dev-box".to_owned())
     }
     fn system_dir(&self) -> Option<PathBuf> {
-        (self.platform == Platform::Windows).then(|| PathBuf::from(r"C:\Windows\System32"))
+        (self.platform == Platform::Windows && !self.no_system_dir)
+            .then(|| PathBuf::from(r"C:\Windows\System32"))
     }
 }
 
@@ -604,6 +607,44 @@ fn preflight_needs_an_answering_ssh_server() {
     assert!(
         preflight(&host, home.path(), "100.64.0.9", 22).problems[0]
             .contains("not as an SSH server")
+    );
+}
+
+#[test]
+fn a_missing_system_directory_is_its_own_problem_not_an_unset_default_shell() {
+    let home = tempfile::tempdir().unwrap();
+    let data = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(data.path().join("ssh")).unwrap();
+    std::fs::write(
+        data.path().join("ssh/sshd_config"),
+        "PasswordAuthentication no\n",
+    )
+    .unwrap();
+    let mut host = FakeHost::windows(home.path(), data.path());
+    host.no_system_dir = true;
+    let found = preflight(&host, home.path(), "100.64.0.9", 22);
+    assert!(
+        found.problems.iter().any(|problem| problem
+            .starts_with("cannot check OpenSSH DefaultShell")
+            && problem.contains("system directory")),
+        "{:?}",
+        found.problems
+    );
+    assert!(
+        !found
+            .problems
+            .iter()
+            .any(|problem| problem.contains("is not set")),
+        "{:?}",
+        found.problems
+    );
+    assert!(
+        !found.needs_elevated_setup,
+        "elevated setup would not fix it"
+    );
+    assert!(
+        host.ran().is_empty(),
+        "nothing runs without the system directory"
     );
 }
 

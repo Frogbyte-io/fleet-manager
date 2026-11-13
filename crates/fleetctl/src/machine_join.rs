@@ -1278,31 +1278,41 @@ fn windows_preflight(host: &dyn JoinHost, found: &mut Preflight) {
                 .map(|(root, _)| root.to_owned())
         })
         .unwrap_or_else(|| r"C:\Windows".to_owned());
-    let shell = system32(host, "reg.exe")
-        .ok()
+    // Only a query that ran and found no value means "not set". A system
+    // directory the OS does not report, or a reg.exe that does not run, is
+    // its own problem: elevated setup would not fix it.
+    let query = system32(host, "reg.exe")
+        .map_err(|error| error.message)
         .and_then(|reg| {
             host.run(
                 &reg,
                 &["query", r"HKLM\SOFTWARE\OpenSSH", "/v", "DefaultShell"],
             )
-            .ok()
-        })
-        .filter(|output| output.success)
-        .and_then(|output| parse_default_shell(&output.stdout));
-    match shell {
-        Some(value) if is_windows_powershell_51(&value, &system_root) => {}
-        Some(value) => {
-            found.problems.push(format!(
-                "OpenSSH DefaultShell is {value:?}; Fleet needs Windows PowerShell 5.1 ({system_root}\\{WINDOWS_POWERSHELL_51})"
-            ));
-            found.needs_elevated_setup = true;
-        }
-        None => {
-            found.problems.push(
-                "OpenSSH DefaultShell is not set, so SSH logins get cmd.exe; Fleet needs Windows PowerShell 5.1".to_owned(),
-            );
-            found.needs_elevated_setup = true;
-        }
+            .map_err(|error| format!("reg.exe did not run: {error}"))
+        });
+    match query {
+        Err(why) => found
+            .problems
+            .push(format!("cannot check OpenSSH DefaultShell: {why}")),
+        Ok(output) => match output
+            .success
+            .then(|| parse_default_shell(&output.stdout))
+            .flatten()
+        {
+            Some(value) if is_windows_powershell_51(&value, &system_root) => {}
+            Some(value) => {
+                found.problems.push(format!(
+                    "OpenSSH DefaultShell is {value:?}; Fleet needs Windows PowerShell 5.1 ({system_root}\\{WINDOWS_POWERSHELL_51})"
+                ));
+                found.needs_elevated_setup = true;
+            }
+            None => {
+                found.problems.push(
+                    "OpenSSH DefaultShell is not set, so SSH logins get cmd.exe; Fleet needs Windows PowerShell 5.1".to_owned(),
+                );
+                found.needs_elevated_setup = true;
+            }
+        },
     }
     let config = host
         .env("ProgramData")
