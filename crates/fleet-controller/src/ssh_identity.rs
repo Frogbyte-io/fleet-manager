@@ -8,7 +8,9 @@
 //! publishes the public half so `fleetctl machines join` can install it.
 
 use fleet_api::system::{SshKeyState, SshPublicKeyInfo};
-use fleet_provider_ssh::identity::{ControllerIdentity, EnsureOutcome, IdentityState};
+use fleet_provider_ssh::identity::{
+    ControllerIdentity, EnsureOutcome, IdentityStamp, IdentityState,
+};
 
 /// Prepares the identity at startup and answers the log line to print.
 /// Never fails startup: a controller that reaches machines only through an
@@ -62,17 +64,92 @@ pub fn describe(outcome: Result<EnsureOutcome, String>, generate: bool) -> Strin
     }
 }
 
+/// How long a cached answer of the read endpoint is reused while the key
+/// files look unchanged. A change to them (a new, replaced, re-owned or
+/// re-moded key) is seen on the next read; the bound only covers what the
+/// file metadata cannot show, such as the account database's home.
+pub const PUBLIC_KEY_CACHE_TTL: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// One remembered inspection.
+#[derive(Clone, Debug)]
+struct Cached {
+    identity: ControllerIdentity,
+    stamp: IdentityStamp,
+    info: SshPublicKeyInfo,
+    at: std::time::Instant,
+}
+
+/// The read endpoint's answers, remembered: an inspection runs `getent`
+/// and `ssh-keygen -y`, so repeated reads reuse the last answer while it is
+/// younger than the TTL and the key files' [`IdentityStamp`] is unchanged.
+/// Inspections are serialized: concurrent reads wait for the one running
+/// and then reuse its answer, so a burst of requests starts at most one
+/// set of programs (each itself bounded by the provider's deadline).
+#[derive(Debug)]
+pub struct PublicKeyCache {
+    ttl: std::time::Duration,
+    entry: tokio::sync::Mutex<Option<Cached>>,
+}
+
+impl PublicKeyCache {
+    /// An empty cache whose answers live at most `ttl`.
+    #[must_use]
+    pub const fn new(ttl: std::time::Duration) -> Self {
+        Self {
+            ttl,
+            entry: tokio::sync::Mutex::const_new(None),
+        }
+    }
+
+    /// The answer for the identity `resolve` finds, from the cache when it
+    /// still holds.
+    ///
+    /// # Errors
+    ///
+    /// Fails when `resolve` fails or the inspection does not finish.
+    pub async fn get(
+        &self,
+        resolve: impl FnOnce() -> Result<ControllerIdentity, String> + Send + 'static,
+    ) -> Result<SshPublicKeyInfo, String> {
+        let mut entry = self.entry.lock().await;
+        let previous = entry.take();
+        let ttl = self.ttl;
+        let cached = tokio::task::spawn_blocking(move || {
+            let now = std::time::Instant::now();
+            if let Some(cached) = previous
+                && now.duration_since(cached.at) < ttl
+                && cached.identity.stamp() == cached.stamp
+            {
+                return Ok::<_, String>(cached);
+            }
+            let identity = resolve()?;
+            // Stamped before the inspection: a change during it is seen
+            // as a change on the next read.
+            let stamp = identity.stamp();
+            let info = to_info(identity.inspect());
+            Ok(Cached {
+                identity,
+                stamp,
+                info,
+                at: now,
+            })
+        })
+        .await
+        .map_err(|error| format!("the identity inspection did not finish: {error}"))??;
+        let info = cached.info.clone();
+        *entry = Some(cached);
+        Ok(info)
+    }
+}
+
 /// The read endpoint's answer for the current identity.
 ///
 /// # Errors
 ///
 /// Fails when the controller user has no home directory to look in.
 pub async fn public_key_info() -> Result<SshPublicKeyInfo, String> {
-    tokio::task::spawn_blocking(|| {
-        ControllerIdentity::for_current_user().map(|identity| to_info(identity.inspect()))
-    })
-    .await
-    .map_err(|error| format!("the identity inspection did not finish: {error}"))?
+    static CACHE: PublicKeyCache = PublicKeyCache::new(PUBLIC_KEY_CACHE_TTL);
+    CACHE.get(ControllerIdentity::for_current_user).await
 }
 
 /// Maps an [`IdentityState`] to the public answer.
@@ -138,6 +215,67 @@ mod tests {
         let json = serde_json::to_string(&to_info(identity.inspect())).unwrap();
         assert!(!json.contains(&body));
         assert!(json.contains("\"state\":\"present\""), "{json}");
+    }
+
+    #[tokio::test]
+    async fn reads_reuse_the_inspection_until_the_files_change_or_it_expires() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let dir = tempfile::tempdir().unwrap();
+        let ssh = dir.path().join(".ssh");
+        let resolved = Arc::new(AtomicUsize::new(0));
+        let resolver = || {
+            let resolved = resolved.clone();
+            let ssh = ssh.clone();
+            move || {
+                resolved.fetch_add(1, Ordering::SeqCst);
+                Ok(ControllerIdentity::at(ssh))
+            }
+        };
+        let cache = PublicKeyCache::new(std::time::Duration::from_secs(3600));
+        assert_eq!(
+            cache.get(resolver()).await.unwrap().state,
+            SshKeyState::None
+        );
+        assert_eq!(
+            cache.get(resolver()).await.unwrap().state,
+            SshKeyState::None
+        );
+        assert_eq!(
+            resolved.load(Ordering::SeqCst),
+            1,
+            "the second read is cached"
+        );
+        // A new key is seen at once, without waiting for the TTL.
+        ControllerIdentity::at(&ssh).ensure(true, "t").unwrap();
+        assert_eq!(
+            cache.get(resolver()).await.unwrap().state,
+            SshKeyState::Present
+        );
+        assert_eq!(resolved.load(Ordering::SeqCst), 2);
+        assert_eq!(
+            cache.get(resolver()).await.unwrap().state,
+            SshKeyState::Present
+        );
+        assert_eq!(resolved.load(Ordering::SeqCst), 2);
+        // Concurrent reads share one inspection.
+        let cache = Arc::new(PublicKeyCache::new(std::time::Duration::from_secs(3600)));
+        let reads: Vec<_> = (0..8)
+            .map(|_| {
+                let cache = cache.clone();
+                let resolver = resolver();
+                tokio::spawn(async move { cache.get(resolver).await })
+            })
+            .collect();
+        for read in reads {
+            assert_eq!(read.await.unwrap().unwrap().state, SshKeyState::Present);
+        }
+        assert_eq!(resolved.load(Ordering::SeqCst), 3);
+        // An expired answer is inspected again.
+        let expired = PublicKeyCache::new(std::time::Duration::ZERO);
+        expired.get(resolver()).await.unwrap();
+        expired.get(resolver()).await.unwrap();
+        assert_eq!(resolved.load(Ordering::SeqCst), 5);
     }
 
     #[test]

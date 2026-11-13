@@ -13,10 +13,101 @@
 //! for the problems `ssh` would hit (unreadable, permissions too open,
 //! passphrase-protected), and its public half comes from `ssh-keygen -y`,
 //! which proves the key is usable by this uid. Generation runs `ssh-keygen`
-//! straight into the target path, never over an existing file.
+//! straight into the target path, never over an existing file. Every
+//! program here runs under a deadline ([`PROGRAM_DEADLINE`]) and is killed
+//! when it passes, so a hung `getent` (a slow NSS backend) or `ssh-keygen`
+//! cannot hold the caller.
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::time::Duration;
+
+/// How long `getent` or `ssh-keygen` may run.
+pub const PROGRAM_DEADLINE: Duration = Duration::from_secs(10);
+
+/// Runs `command` (stdin closed, both outputs captured) and kills it when
+/// `deadline` passes.
+fn output_within(mut command: Command, deadline: Duration) -> Result<std::process::Output, String> {
+    use std::io::Read as _;
+    let program = command.get_program().to_string_lossy().into_owned();
+    let mut child = command
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|error| format!("cannot run {program}: {error}"))?;
+    let drain = |stream: Option<Box<dyn std::io::Read + Send>>| {
+        std::thread::spawn(move || {
+            let mut bytes = Vec::new();
+            if let Some(stream) = stream {
+                // The programs here print a line or two; the cap only keeps
+                // a misbehaving one from growing the controller.
+                let _ = stream.take(64 * 1024).read_to_end(&mut bytes);
+            }
+            bytes
+        })
+    };
+    let stdout = drain(child.stdout.take().map(|s| Box::new(s) as _));
+    let stderr = drain(child.stderr.take().map(|s| Box::new(s) as _));
+    let deadline_at = std::time::Instant::now() + deadline;
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break status,
+            Ok(None) if std::time::Instant::now() < deadline_at => {
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            outcome => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(match outcome {
+                    Err(error) => format!("cannot wait for {program}: {error}"),
+                    _ => format!("{program} did not finish within {}s", deadline.as_secs()),
+                });
+            }
+        }
+    };
+    Ok(std::process::Output {
+        status,
+        stdout: stdout.join().unwrap_or_default(),
+        stderr: stderr.join().unwrap_or_default(),
+    })
+}
+
+/// What the identity files look like on disk: the `.ssh` directory and
+/// every default identity name with its `.pub`, by inode, owner, mode,
+/// size and times. Equal stamps mean nothing [`ControllerIdentity::inspect`]
+/// reads has changed, so a cached inspection still holds.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct IdentityStamp(Vec<Option<FileStamp>>);
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct FileStamp {
+    len: u64,
+    modified: Option<std::time::SystemTime>,
+    #[cfg(unix)]
+    inode: (u64, u64, u32, u32, u32, i64, i64),
+}
+
+fn file_stamp(path: &Path) -> Option<FileStamp> {
+    let metadata = std::fs::metadata(path).ok()?;
+    Some(FileStamp {
+        len: metadata.len(),
+        modified: metadata.modified().ok(),
+        #[cfg(unix)]
+        inode: {
+            use std::os::unix::fs::MetadataExt as _;
+            (
+                metadata.dev(),
+                metadata.ino(),
+                metadata.mode(),
+                metadata.uid(),
+                metadata.gid(),
+                metadata.ctime(),
+                metadata.ctime_nsec(),
+            )
+        },
+    })
+}
 
 /// The default identity file names, in the order `ssh` offers them
 /// (`ssh_config(5)`, `IdentityFile`).
@@ -111,6 +202,18 @@ impl ControllerIdentity {
         &self.ssh_dir
     }
 
+    /// The current [`IdentityStamp`]: metadata reads only, no program runs.
+    #[must_use]
+    pub fn stamp(&self) -> IdentityStamp {
+        let mut stamps = vec![file_stamp(&self.ssh_dir)];
+        for name in DEFAULT_IDENTITY_NAMES {
+            let path = self.ssh_dir.join(name);
+            stamps.push(file_stamp(&path));
+            stamps.push(file_stamp(&public_path(&path)));
+        }
+        IdentityStamp(stamps)
+    }
+
     /// Finds the first default identity `ssh` would offer and reports
     /// whether it is usable.
     #[must_use]
@@ -186,12 +289,11 @@ impl ControllerIdentity {
         }
         let _ = std::fs::remove_file(&public);
         let comment = sanitize_comment(comment);
-        let output = Command::new("ssh-keygen")
+        let mut keygen = Command::new("ssh-keygen");
+        keygen
             .args(["-q", "-t", "ed25519", "-N", "", "-C", &comment, "-f"])
-            .arg(&path)
-            .stdin(Stdio::null())
-            .output()
-            .map_err(|error| format!("cannot run ssh-keygen: {error}"))?;
+            .arg(&path);
+        let output = output_within(keygen, PROGRAM_DEADLINE)?;
         if !output.status.success() {
             return Err(format!(
                 "ssh-keygen could not generate {}: {}",
@@ -260,14 +362,11 @@ fn inspect_key(path: &Path, metadata: &std::fs::Metadata) -> IdentityState {
         ));
     }
     // `-P ''` makes a passphrase-protected key fail instead of prompting.
-    let output = Command::new("ssh-keygen")
-        .args(["-y", "-P", "", "-f"])
-        .arg(path)
-        .stdin(Stdio::null())
-        .output();
-    let output = match output {
+    let mut keygen = Command::new("ssh-keygen");
+    keygen.args(["-y", "-P", "", "-f"]).arg(path);
+    let output = match output_within(keygen, PROGRAM_DEADLINE) {
         Ok(output) => output,
-        Err(error) => return unusable(format!("cannot run ssh-keygen: {error}")),
+        Err(error) => return unusable(error),
     };
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr).to_ascii_lowercase();
@@ -365,11 +464,9 @@ fn passwd_home() -> Option<PathBuf> {
     #[cfg(unix)]
     {
         let uid = rustix::process::getuid().as_raw();
-        let output = Command::new("getent")
-            .args(["passwd", &uid.to_string()])
-            .stdin(Stdio::null())
-            .output()
-            .ok()?;
+        let mut getent = Command::new("getent");
+        getent.args(["passwd", &uid.to_string()]);
+        let output = output_within(getent, PROGRAM_DEADLINE).ok()?;
         if !output.status.success() {
             return None;
         }
@@ -523,6 +620,40 @@ mod tests {
         // The ownership fix names the .ssh directory, never the home.
         let fix = ownership_fix(&ssh);
         assert!(fix.ends_with(&format!("{}`", ssh.display())), "{fix}");
+    }
+
+    #[test]
+    fn programs_are_killed_at_the_deadline() {
+        let mut sleep = Command::new("sleep");
+        sleep.arg("30");
+        let started = std::time::Instant::now();
+        let error = output_within(sleep, Duration::from_millis(200)).unwrap_err();
+        assert!(error.contains("did not finish"), "{error}");
+        assert!(started.elapsed() < Duration::from_secs(10));
+        let mut echo = Command::new("echo");
+        echo.arg("hi");
+        assert_eq!(
+            output_within(echo, Duration::from_secs(10)).unwrap().stdout,
+            b"hi\n"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn the_stamp_changes_with_what_inspect_reads() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let dir = tempfile::tempdir().unwrap();
+        let identity = ControllerIdentity::at(dir.path().join(".ssh"));
+        let empty = identity.stamp();
+        assert_eq!(identity.stamp(), empty);
+        let EnsureOutcome::Generated(key) = identity.ensure(true, "t").unwrap() else {
+            panic!("generated");
+        };
+        let generated = identity.stamp();
+        assert_ne!(generated, empty);
+        assert_eq!(identity.stamp(), generated, "reading changes nothing");
+        std::fs::set_permissions(&key.path, std::fs::Permissions::from_mode(0o644)).unwrap();
+        assert_ne!(identity.stamp(), generated, "a mode change is a change");
     }
 
     #[test]

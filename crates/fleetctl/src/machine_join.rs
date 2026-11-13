@@ -10,12 +10,19 @@
 //!    answers, and on Windows that `DefaultShell` is Windows PowerShell 5.1
 //!    and password login is off (elevated fixes are printed, never run); on
 //!    Linux, that no stand-in `skills-manager-cli` would shadow the real one;
-//! 3. adds the key to this account's `authorized_keys` once, with the
-//!    permissions sshd requires (a Windows administrator is refused with the
-//!    elevated `administrators_authorized_keys` commands instead, ADR 0021);
-//! 4. onboards the machine through the public API: draft, test, a host key
-//!    fingerprint compared against this machine's own key file and confirmed
-//!    only when identical, test, discover, add;
+//! 3. creates the onboarding draft and has the controller test it: before a
+//!    host key is confirmed that only connects and reads the host key, so
+//!    it proves the controller reaches this machine at the target address
+//!    (explicit `--host` included) and that what answers is this machine
+//!    (the fingerprint must equal this machine's own key file). A mismatch
+//!    or an unreachable address cancels the draft with nothing changed
+//!    here. `--resume` passes the same check against the enrolled address;
+//! 4. adds the key to this account's `authorized_keys` once, secured before
+//!    the key is in it (a Windows administrator is refused with the
+//!    elevated `administrators_authorized_keys` commands instead, ADR 0021),
+//!    then confirms the verified host key, tests the login, discovers and
+//!    adds (or, with `--resume`, continues with the enrolled machine's own
+//!    SSH endpoint for this login and address, never another one);
 //! 5. follows the queued Skills Manager install and rolls out the newest
 //!    built-in `fleet` skill to the agents Skills Manager found installed.
 //!
@@ -262,6 +269,129 @@ pub struct SystemHost;
 /// How long a local probe program may run.
 const PROGRAM_DEADLINE: Duration = Duration::from_secs(15);
 
+/// How much of each output stream of a local probe program is kept. The
+/// rest is read and dropped, so a chatty program can neither block on a
+/// full pipe nor grow this process without bound.
+const PROGRAM_OUTPUT_LIMIT: usize = 256 * 1024;
+
+/// Reads `stream` to its end on a thread, keeping the first `limit` bytes,
+/// and sends them when the stream closes.
+fn drain(
+    stream: Option<impl std::io::Read + Send + 'static>,
+    limit: usize,
+) -> std::sync::mpsc::Receiver<Vec<u8>> {
+    let (sender, receiver) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let mut kept = Vec::new();
+        if let Some(mut stream) = stream {
+            let mut buffer = [0_u8; 8192];
+            loop {
+                match stream.read(&mut buffer) {
+                    Ok(0) | Err(_) => break,
+                    Ok(read) => {
+                        let room = limit.saturating_sub(kept.len());
+                        kept.extend_from_slice(&buffer[..read.min(room)]);
+                    }
+                }
+            }
+        }
+        let _ = sender.send(kept);
+    });
+    receiver
+}
+
+/// Kills `child` and every process it started: on Unix its process group
+/// (it leads its own), on Windows its process tree.
+fn kill_tree(child: &mut std::process::Child) {
+    #[cfg(unix)]
+    {
+        let _ = rustix::process::kill_process_group(
+            rustix::process::Pid::from_child(child),
+            rustix::process::Signal::KILL,
+        );
+    }
+    #[cfg(windows)]
+    {
+        let system_root = std::env::var("SystemRoot").unwrap_or_else(|_| r"C:\Windows".to_owned());
+        let _ = std::process::Command::new(format!(r"{system_root}\System32\taskkill.exe"))
+            .args(["/T", "/F", "/PID", &child.id().to_string()])
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status();
+    }
+    let _ = child.kill();
+    let _ = child.wait();
+}
+
+/// Runs `program` with `args` (no shell) under one deadline for the
+/// program **and** its output: both streams are drained concurrently and
+/// capped at `limit` bytes each, and when the deadline passes, whether the
+/// program is still running or something it started still holds a pipe
+/// open, the whole tree is killed and the run is an error.
+///
+/// # Errors
+///
+/// Fails when the program cannot start or does not finish in time.
+pub fn run_bounded(
+    program: &Path,
+    args: &[&str],
+    deadline: Duration,
+    limit: usize,
+) -> Result<ProgramOutput, String> {
+    let mut command = std::process::Command::new(program);
+    command
+        .args(args)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped());
+    // Its own process group, so a deadline kill reaches every helper.
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt as _;
+        command.process_group(0);
+    }
+    let mut child = command
+        .spawn()
+        .map_err(|error| format!("cannot run {}: {error}", program.display()))?;
+    let stdout = drain(child.stdout.take(), limit);
+    let stderr = drain(child.stderr.take(), limit);
+    let deadline_at = std::time::Instant::now() + deadline;
+    let late = |child: &mut std::process::Child| {
+        kill_tree(child);
+        format!(
+            "{} did not finish within {}s",
+            program.display(),
+            deadline.as_secs()
+        )
+    };
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break status,
+            Ok(None) if std::time::Instant::now() >= deadline_at => return Err(late(&mut child)),
+            Ok(None) => std::thread::sleep(Duration::from_millis(20)),
+            Err(error) => {
+                kill_tree(&mut child);
+                return Err(format!("cannot wait for {}: {error}", program.display()));
+            }
+        }
+    };
+    // The program exited, but a process it started may still hold its
+    // output open: the streams get only what is left of the deadline.
+    let collect = |receiver: &std::sync::mpsc::Receiver<Vec<u8>>| {
+        let left = deadline_at.saturating_duration_since(std::time::Instant::now());
+        receiver.recv_timeout(left).ok()
+    };
+    let (Some(out), Some(err)) = (collect(&stdout), collect(&stderr)) else {
+        return Err(late(&mut child));
+    };
+    Ok(ProgramOutput {
+        success: status.success(),
+        stdout: String::from_utf8_lossy(&out).into_owned(),
+        stderr: String::from_utf8_lossy(&err).into_owned(),
+    })
+}
+
 impl JoinHost for SystemHost {
     fn platform(&self) -> Platform {
         if cfg!(windows) {
@@ -276,40 +406,7 @@ impl JoinHost for SystemHost {
     }
 
     fn run(&self, program: &Path, args: &[&str]) -> Result<ProgramOutput, String> {
-        let mut child = std::process::Command::new(program)
-            .args(args)
-            .stdin(std::process::Stdio::null())
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped())
-            .spawn()
-            .map_err(|error| format!("cannot run {}: {error}", program.display()))?;
-        let deadline = std::time::Instant::now() + PROGRAM_DEADLINE;
-        loop {
-            match child.try_wait() {
-                Ok(Some(_)) => break,
-                Ok(None) if std::time::Instant::now() >= deadline => {
-                    let _ = child.kill();
-                    let _ = child.wait();
-                    return Err(format!(
-                        "{} did not finish within {}s",
-                        program.display(),
-                        PROGRAM_DEADLINE.as_secs()
-                    ));
-                }
-                Ok(None) => std::thread::sleep(Duration::from_millis(50)),
-                Err(error) => {
-                    return Err(format!("cannot wait for {}: {error}", program.display()));
-                }
-            }
-        }
-        let output = child
-            .wait_with_output()
-            .map_err(|error| format!("cannot read {}: {error}", program.display()))?;
-        Ok(ProgramOutput {
-            success: output.status.success(),
-            stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
-            stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
-        })
+        run_bounded(program, args, PROGRAM_DEADLINE, PROGRAM_OUTPUT_LIMIT)
     }
 
     fn find_on_path(&self, name: &str) -> Option<PathBuf> {
@@ -390,23 +487,79 @@ fn home_dir(host: &dyn JoinHost) -> Result<PathBuf, CliError> {
         })
 }
 
-/// This account's login name.
-fn current_user(host: &dyn JoinHost) -> Result<String, CliError> {
+/// The account the join runs as.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct Account {
+    /// The login name.
+    pub name: String,
+    /// On Windows, the account's SID, which the `authorized_keys` ACL is
+    /// granted to (a name can be ambiguous between a local and a domain
+    /// account; the SID is not).
+    pub sid: Option<String>,
+}
+
+/// A program in `%SystemRoot%\System32`, by full path, so `PATH` cannot
+/// substitute another.
+fn system32(host: &dyn JoinHost, program: &str) -> PathBuf {
+    let root = host
+        .env("SystemRoot")
+        .unwrap_or_else(|| r"C:\Windows".to_owned());
+    PathBuf::from(format!(
+        r"{}\System32\{program}",
+        root.trim_end_matches('\\')
+    ))
+}
+
+/// The account name and SID in `whoami /user /fo csv /nh` output
+/// (`"host\user","S-1-5-21-..."`).
+#[must_use]
+pub fn parse_whoami_user(stdout: &str) -> Option<Account> {
+    let line = stdout
+        .lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty())?;
+    let (qualified, sid) = line
+        .strip_prefix('"')?
+        .strip_suffix('"')?
+        .split_once("\",\"")?;
+    let name = qualified.rsplit('\\').next()?.trim();
+    let sid = sid.trim();
+    (!name.is_empty() && sid.starts_with("S-1-")).then(|| Account {
+        name: name.to_owned(),
+        sid: Some(sid.to_owned()),
+    })
+}
+
+/// This account, as the operating system reports it: on Unix the name of
+/// the effective uid (`id -un`, by absolute path), on Windows the process
+/// token's user (`whoami /user`). The environment (`USER`, `LOGNAME`,
+/// `USERNAME`) is anyone's to set, so it is only a fallback for when the
+/// system cannot answer.
+fn current_account(host: &dyn JoinHost) -> Result<Account, CliError> {
+    let answered = |program: &Path, args: &[&str]| {
+        host.run(program, args)
+            .ok()
+            .filter(|output| output.success)
+            .map(|output| output.stdout)
+    };
     let found = match host.platform() {
-        Platform::Unix => host
-            .env("USER")
+        Platform::Unix => ["/usr/bin/id", "/bin/id"]
+            .iter()
+            .find_map(|id| answered(Path::new(id), &["-un"]))
+            .map(|stdout| stdout.trim().to_owned())
+            .filter(|name| !name.is_empty() && !name.contains(char::is_whitespace))
+            .or_else(|| host.env("USER"))
             .or_else(|| host.env("LOGNAME"))
-            .or_else(|| {
-                host.run(Path::new("id"), &["-un"])
-                    .ok()
-                    .filter(|output| output.success)
-                    .map(|output| output.stdout.trim().to_owned())
-                    .filter(|name| !name.is_empty())
-            }),
-        Platform::Windows => host.env("USERNAME"),
+            .map(|name| Account { name, sid: None }),
+        Platform::Windows => answered(
+            &system32(host, "whoami.exe"),
+            &["/user", "/fo", "csv", "/nh"],
+        )
+        .and_then(|stdout| parse_whoami_user(&stdout))
+        .or_else(|| host.env("USERNAME").map(|name| Account { name, sid: None })),
     };
     found.ok_or_else(|| CliError {
-        message: "cannot tell which account this is; pass --user <login>".to_owned(),
+        message: "cannot tell which account this join runs as: neither the system (`id -un`, `whoami`) nor USER/USERNAME answered".to_owned(),
     })
 }
 
@@ -503,9 +656,15 @@ impl KeyInstall {
 }
 
 /// Adds `key` to `<home>/.ssh/authorized_keys` once, with the permissions
-/// sshd requires: on Unix `~/.ssh` 0700 and the file 0600; on Windows the
-/// protected ACL from the workstation runbook (the user, SYSTEM and
-/// Administrators), applied with `icacls`.
+/// sshd requires, secured **before** the key is in it:
+///
+/// - Unix: `~/.ssh` 0700, and the file 0600 before anything is appended
+///   (a new file is created 0600).
+/// - Windows: the new content is written to a temporary file beside it,
+///   which gets the protected ACL from the workstation runbook (`account`,
+///   SYSTEM and Administrators, no inherited entries) with `icacls`, and
+///   only then replaces `authorized_keys`. When `icacls` fails, the
+///   temporary file is removed and `authorized_keys` is untouched.
 ///
 /// # Errors
 ///
@@ -513,6 +672,7 @@ impl KeyInstall {
 pub fn install_authorized_key(
     host: &dyn JoinHost,
     home: &Path,
+    account: &Account,
     key: &fleet_core::SshPublicKey,
 ) -> Result<(KeyInstall, PathBuf), CliError> {
     let dir = home.join(".ssh");
@@ -529,65 +689,118 @@ pub fn install_authorized_key(
             .map_err(|error| fail(&format!("restrict {}", dir.display()), &error))?;
     }
     let existing = match std::fs::read(&path) {
-        Ok(bytes) => String::from_utf8_lossy(&bytes).into_owned(),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Ok(bytes) => Some(bytes),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
         Err(error) => return Err(fail(&format!("read {}", path.display()), &error)),
     };
-    let outcome = match authorized_keys_addition(&existing, key) {
-        None => KeyInstall::Present,
-        Some(addition) => {
-            let mut options = std::fs::OpenOptions::new();
-            options.create(true).append(true);
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::OpenOptionsExt as _;
-                options.mode(0o600);
-            }
-            let mut file = options
-                .open(&path)
-                .map_err(|error| fail(&format!("open {}", path.display()), &error))?;
-            file.write_all(addition.as_bytes())
-                .and_then(|()| file.flush())
-                .map_err(|error| fail(&format!("write {}", path.display()), &error))?;
-            KeyInstall::Added
-        }
+    let text = existing
+        .as_deref()
+        .map(String::from_utf8_lossy)
+        .unwrap_or_default();
+    let addition = authorized_keys_addition(&text, key);
+    let outcome = if addition.is_some() {
+        KeyInstall::Added
+    } else {
+        KeyInstall::Present
     };
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt as _;
-        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))
-            .map_err(|error| fail(&format!("restrict {}", path.display()), &error))?;
-    }
     if host.platform() == Platform::Windows {
-        let user = current_user(host)?;
-        let args = windows_acl_args(&path, &user);
-        let args: Vec<&str> = args.iter().map(String::as_str).collect();
-        let output = host
-            .run(Path::new("icacls"), &args)
-            .map_err(|error| fail("secure authorized_keys", &error))?;
-        if !output.success {
-            return Err(CliError {
-                message: format!(
-                    "icacls could not secure {}: {}",
-                    path.display(),
-                    first_line(&output.stdout, &output.stderr)
-                ),
+        let Some(addition) = addition else {
+            // Already authorized: keep the file, and make sure its ACL is
+            // the protected one.
+            secure_windows_file(host, &path, &path, account)?;
+            return Ok((outcome, path));
+        };
+        let mut content = existing.unwrap_or_default();
+        content.extend_from_slice(addition.as_bytes());
+        let staged = dir.join(format!("authorized_keys.fleet-{}", std::process::id()));
+        let _ = std::fs::remove_file(&staged);
+        let staged_result = std::fs::write(&staged, &content)
+            .map_err(|error| fail(&format!("write {}", staged.display()), &error))
+            .and_then(|()| secure_windows_file(host, &staged, &path, account))
+            .and_then(|()| {
+                std::fs::rename(&staged, &path)
+                    .map_err(|error| fail(&format!("replace {}", path.display()), &error))
             });
+        if let Err(error) = staged_result {
+            let _ = std::fs::remove_file(&staged);
+            return Err(error);
+        }
+        return Ok((outcome, path));
+    }
+    if let Some(addition) = addition {
+        let mut options = std::fs::OpenOptions::new();
+        options.create(true).append(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt as _;
+            options.mode(0o600);
+        }
+        let mut file = options
+            .open(&path)
+            .map_err(|error| fail(&format!("open {}", path.display()), &error))?;
+        // An existing file is restricted before the key goes in.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            file.set_permissions(std::fs::Permissions::from_mode(0o600))
+                .map_err(|error| fail(&format!("restrict {}", path.display()), &error))?;
+        }
+        file.write_all(addition.as_bytes())
+            .and_then(|()| file.flush())
+            .map_err(|error| fail(&format!("write {}", path.display()), &error))?;
+    } else {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))
+                .map_err(|error| fail(&format!("restrict {}", path.display()), &error))?;
         }
     }
     Ok((outcome, path))
 }
 
+/// Gives `file` the protected `authorized_keys` ACL with `icacls`. `shown`
+/// is the file the error message names.
+fn secure_windows_file(
+    host: &dyn JoinHost,
+    file: &Path,
+    shown: &Path,
+    account: &Account,
+) -> Result<(), CliError> {
+    let args = windows_acl_args(file, account);
+    let args: Vec<&str> = args.iter().map(String::as_str).collect();
+    let output = host
+        .run(&system32(host, "icacls.exe"), &args)
+        .map_err(|error| CliError {
+            message: format!("cannot secure {}: {error}", shown.display()),
+        })?;
+    if output.success {
+        Ok(())
+    } else {
+        Err(CliError {
+            message: format!(
+                "icacls could not secure {}, so the controller key was not added: {}",
+                shown.display(),
+                first_line(&output.stdout, &output.stderr)
+            ),
+        })
+    }
+}
+
 /// The `icacls` arguments that give `authorized_keys` the protected ACL
-/// sshd accepts: no inherited entries, full control for the user, SYSTEM
-/// and Administrators only.
+/// sshd accepts: no inherited entries, full control for the account (by
+/// SID when known), SYSTEM and Administrators only.
 #[must_use]
-pub fn windows_acl_args(path: &Path, user: &str) -> Vec<String> {
+pub fn windows_acl_args(path: &Path, account: &Account) -> Vec<String> {
+    let grantee = account
+        .sid
+        .as_ref()
+        .map_or_else(|| account.name.clone(), |sid| format!("*{sid}"));
     vec![
         path.display().to_string(),
         "/inheritance:r".to_owned(),
         "/grant".to_owned(),
-        format!("{user}:F"),
+        format!("{grantee}:F"),
         "/grant".to_owned(),
         format!("*{SYSTEM_SID}:F"),
         "/grant".to_owned(),
@@ -758,21 +971,31 @@ fn powershell_quote(text: &str) -> String {
     format!("'{}'", text.replace('\'', "''"))
 }
 
-/// The elevated commands that authorize `key_line` for an administrator.
+/// The elevated commands that authorize `key_line` (whose fingerprint is
+/// `fingerprint`) for an administrator. The file is secured before the key
+/// goes in, and the key is compared as sshd reads the file (`ssh-keygen
+/// -lf` lists each key's fingerprint, past options and comments), not as a
+/// whole line, so a copy with options or another comment is not added again.
 #[must_use]
-pub fn administrators_key_block(key_line: &str) -> String {
+pub fn administrators_key_block(key_line: &str, fingerprint: &str) -> String {
     let key = powershell_quote(key_line);
+    let want = powershell_quote(fingerprint);
     format!(
         "$k = \"$env:ProgramData\\ssh\\administrators_authorized_keys\"\n\
-         if (-not ((Test-Path $k) -and (Select-String -Path $k -SimpleMatch {key} -Quiet))) {{\n  \
-         Add-Content -Path $k -Value {key} -Encoding ascii\n}}\n\
-         icacls $k /inheritance:r /grant \"*{ADMINISTRATORS_SID}:F\" /grant \"*{SYSTEM_SID}:F\""
+         if (-not (Test-Path $k)) {{ New-Item -ItemType File -Path $k | Out-Null }}\n\
+         icacls $k /inheritance:r /grant \"*{ADMINISTRATORS_SID}:F\" /grant \"*{SYSTEM_SID}:F\"\n\
+         if ($LASTEXITCODE -ne 0) {{ throw 'icacls failed; the key was not added' }}\n\
+         $have = @(ssh-keygen -lf $k 2>$null | ForEach-Object {{ ($_ -split ' ')[1] }})\n\
+         if ($have -notcontains {want}) {{\n  \
+         $b = [IO.File]::ReadAllBytes($k)\n  \
+         if ($b.Length -gt 0 -and $b[-1] -ne 10) {{ Add-Content -Path $k -Value '' -Encoding ascii }}\n  \
+         Add-Content -Path $k -Value {key} -Encoding ascii\n}}"
     )
 }
 
 /// The refusal for a Windows administrator account (ADR 0021 decision 7).
 #[must_use]
-pub fn administrator_refusal(key_line: &str) -> String {
+pub fn administrator_refusal(key_line: &str, fingerprint: &str) -> String {
     format!(
         "this account is a member of Administrators, so sshd ignores its own authorized_keys and reads \
          %ProgramData%\\ssh\\administrators_authorized_keys, which only an elevated session can change.\n\n\
@@ -781,7 +1004,7 @@ pub fn administrator_refusal(key_line: &str) -> String {
          control of it. Prefer joining from a standard (non-administrator) account.\n\n\
          To continue as this administrator anyway, run in Windows PowerShell as Administrator:\n\n{}\n\n\
          then run `fleetctl machines join --admin-key-installed` again (with the same other options).",
-        administrators_key_block(key_line)
+        administrators_key_block(key_line, fingerprint)
     )
 }
 
@@ -797,16 +1020,20 @@ pub fn newest_version(page: &Value) -> Option<String> {
         .map(str::to_owned)
 }
 
-/// The agents a Skills Manager snapshot reports installed and enabled.
+/// The agents a `GET /machines/{id}/skills` response reports installed
+/// and enabled. The response is the resource envelope around the snapshot
+/// (`{"data": {"availability", "data": {"agents": [...]}, ...}}`), and the
+/// controller normalizes each agent to `{"id", "name", "installed",
+/// "enabled"}` (Skills Manager's own `key` is renamed `id`).
 #[must_use]
-pub fn installed_agents(snapshot: &Value) -> Vec<String> {
-    snapshot["data"]["agents"]
+pub fn installed_agents(response: &Value) -> Vec<String> {
+    response["data"]["data"]["agents"]
         .as_array()
         .map(|agents| {
             agents
                 .iter()
                 .filter(|agent| agent["installed"] == true && agent["enabled"] != false)
-                .filter_map(|agent| agent["key"].as_str())
+                .filter_map(|agent| agent["id"].as_str())
                 .map(str::to_owned)
                 .collect()
         })
@@ -867,25 +1094,84 @@ pub fn fingerprint_mismatch(local: &str, observed: &str, host: &str, port: u16) 
     )
 }
 
-/// The SSH endpoint of a machine view: the one at `host:port` when several.
+/// The login, host and port of an SSH endpoint reference
+/// (`user@host:port`, `user@[v6]:port`; the login may be redacted as `***`).
 #[must_use]
-pub fn ssh_endpoint_id(machine: &Value, host: &str, port: u16) -> Option<String> {
-    let endpoints: Vec<&Value> = machine["endpoints"]
-        .as_array()?
+pub fn parse_endpoint_reference(reference: &str) -> Option<(&str, &str, u16)> {
+    let (user, host_port) = reference.rsplit_once('@')?;
+    let (host, port) = match host_port.strip_prefix('[') {
+        Some(rest) => {
+            let (inner, after) = rest.split_once(']')?;
+            (inner, after.strip_prefix(':')?)
+        }
+        None => host_port.rsplit_once(':')?,
+    };
+    Some((user, host, port.parse().ok()?))
+}
+
+/// The id of the one SSH endpoint of a machine view that is the joined
+/// login at the joined address: the same host (case-insensitive, IPv6
+/// brackets ignored) and port, and the same login (a redacted login is not
+/// evidence against it). Another endpoint of the machine (another address,
+/// another OS on a dual-boot machine, another login) is never used instead.
+///
+/// # Errors
+///
+/// Fails, naming what the machine has, when no endpoint or more than one
+/// matches.
+pub fn ssh_endpoint_id(
+    machine: &Value,
+    platform: Platform,
+    user: &str,
+    host: &str,
+    port: u16,
+) -> Result<String, String> {
+    let wanted_host = host.trim_start_matches('[').trim_end_matches(']');
+    let ssh: Vec<&Value> = machine["endpoints"]
+        .as_array()
+        .map(|endpoints| {
+            endpoints
+                .iter()
+                .filter(|endpoint| endpoint["kind"] == "ssh")
+                .collect()
+        })
+        .unwrap_or_default();
+    let matching: Vec<&str> = ssh
         .iter()
-        .filter(|endpoint| endpoint["kind"] == "ssh")
-        .collect();
-    let suffix = format!("@{host}:{port}");
-    endpoints
-        .iter()
-        .find(|endpoint| {
+        .filter(|endpoint| {
             endpoint["reference"]
                 .as_str()
-                .is_some_and(|reference| reference.ends_with(&suffix))
+                .and_then(parse_endpoint_reference)
+                .is_some_and(|(login, at, on)| {
+                    on == port
+                        && at.eq_ignore_ascii_case(wanted_host)
+                        && (login == "***" || same_account(platform, login, user))
+                })
         })
-        .or_else(|| endpoints.first())
-        .and_then(|endpoint| endpoint["id"].as_str())
-        .map(str::to_owned)
+        .filter_map(|endpoint| endpoint["id"].as_str())
+        .collect();
+    match matching.as_slice() {
+        [id] => Ok((*id).to_owned()),
+        [] => {
+            let known: Vec<&str> = ssh
+                .iter()
+                .filter_map(|endpoint| endpoint["reference"].as_str())
+                .collect();
+            Err(format!(
+                "the machine has no SSH endpoint for {user}@{host}:{port} (its SSH endpoints: {})",
+                if known.is_empty() {
+                    "none".to_owned()
+                } else {
+                    known.join(", ")
+                }
+            ))
+        }
+        several => Err(format!(
+            "the machine has {} SSH endpoints for {host}:{port} and the login is redacted, so the join \
+             cannot tell which is {user}'s",
+            several.len()
+        )),
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1113,7 +1399,11 @@ struct Target {
     name: String,
 }
 
-fn resolve_target(host: &dyn JoinHost, args: &JoinArgs) -> Result<Target, CliError> {
+fn resolve_target(
+    host: &dyn JoinHost,
+    args: &JoinArgs,
+    account: &Account,
+) -> Result<Target, CliError> {
     let address = if let Some(address) = &args.host {
         address.trim().to_owned()
     } else {
@@ -1140,19 +1430,19 @@ fn resolve_target(host: &dyn JoinHost, args: &JoinArgs) -> Result<Target, CliErr
     // The key goes into this account's authorized_keys, so the controller
     // must log in as this account: another --user would get a draft whose
     // login was never given the key.
-    let account = current_user(host)?;
     let user = match &args.user {
-        Some(user) if !same_account(host.platform(), user.trim(), &account) => {
+        Some(user) if !same_account(host.platform(), user.trim(), &account.name) => {
             return Err(CliError {
                 message: format!(
                     "--user {} is not this account ({account}): the join installs the controller's key for the \
                      account it runs as, so run it as {} instead (or leave --user out)",
                     user.trim(),
-                    user.trim()
+                    user.trim(),
+                    account = account.name,
                 ),
             });
         }
-        _ => account,
+        _ => account.name.clone(),
     };
     let name = match &args.name {
         Some(name) => name.trim().to_owned(),
@@ -1283,15 +1573,29 @@ struct Enrolled {
     skills_manager: Value,
 }
 
-/// Draft → test → compare and confirm → test → discover → add.
+/// An onboarding draft whose host key, as the controller saw it, is this
+/// machine's own. Dropping it cancels the draft.
+struct Verified<'a> {
+    guard: DraftGuard<'a>,
+    draft_id: String,
+    /// The machine already enrolled at this address (`--resume`).
+    enrolled: Option<String>,
+}
+
+/// Creates the draft and has the controller test it, which, before any
+/// host key is confirmed, only connects and reads the host key (no login).
+/// This proves the controller can reach this machine at the target address
+/// and that what answers there is this machine (its own host key file),
+/// before anything on this machine changes. `--resume` passes the same
+/// check: an address can be reused by another machine.
 #[allow(clippy::too_many_lines)]
-fn enroll(
-    client: &reqwest::blocking::Client,
-    invocation: &Invocation,
+fn verify_draft<'a>(
+    client: &'a reqwest::blocking::Client,
+    invocation: &'a Invocation,
     args: &JoinArgs,
     target: &Target,
     local_fingerprint: &str,
-) -> Result<Enrolled, CliError> {
+) -> Result<Verified<'a>, CliError> {
     let created = post(
         client,
         invocation,
@@ -1327,19 +1631,20 @@ fn enroll(
         .as_array()
         .cloned()
         .unwrap_or_default();
-    if !duplicates.is_empty() {
-        guard.cancel();
-        let names: Vec<String> = duplicates
-            .iter()
-            .map(|duplicate| {
-                format!(
-                    "{} ({})",
-                    duplicate["name"].as_str().unwrap_or("-"),
-                    duplicate["machineId"].as_str().unwrap_or("-")
-                )
-            })
-            .collect();
-        if !args.resume {
+    let names: Vec<String> = duplicates
+        .iter()
+        .map(|duplicate| {
+            format!(
+                "{} ({})",
+                duplicate["name"].as_str().unwrap_or("-"),
+                duplicate["machineId"].as_str().unwrap_or("-")
+            )
+        })
+        .collect();
+    let enrolled = match duplicates.as_slice() {
+        [] => None,
+        _ if !args.resume => {
+            guard.cancel();
             return Err(CliError {
                 message: format!(
                     "{}:{} is already enrolled as {}. Run the join again with --resume to deploy the fleet \
@@ -1350,7 +1655,17 @@ fn enroll(
                 ),
             });
         }
-        let [duplicate] = duplicates.as_slice() else {
+        [duplicate] => Some(
+            duplicate["machineId"]
+                .as_str()
+                .filter(|id| !id.is_empty())
+                .ok_or_else(|| CliError {
+                    message: "the controller named an enrolled machine without an id".to_owned(),
+                })?
+                .to_owned(),
+        ),
+        _ => {
+            guard.cancel();
             return Err(CliError {
                 message: format!(
                     "--resume needs exactly one machine at {}:{}, but these share it: {}",
@@ -1359,45 +1674,17 @@ fn enroll(
                     names.join(", ")
                 ),
             });
-        };
-        let machine_id = duplicate["machineId"]
-            .as_str()
-            .unwrap_or_default()
-            .to_owned();
-        let machine = get(
-            client,
-            invocation,
-            &format!("/api/v1/machines/{machine_id}"),
-            &[],
-        )?;
-        let endpoint_id =
-            ssh_endpoint_id(&machine["data"], &target.host, target.port).ok_or_else(|| {
-                CliError {
-                    message: format!("machine {machine_id} has no SSH endpoint to resume with"),
-                }
-            })?;
-        step(&format!(
-            "resuming with machine {} ({machine_id}), already enrolled",
-            names[0]
-        ));
-        return Ok(Enrolled {
-            machine_id,
-            name: machine["data"]["name"]
-                .as_str()
-                .unwrap_or_default()
-                .to_owned(),
-            endpoint_id,
-            resumed: true,
-            skills_manager: Value::Null,
-        });
-    }
+        }
+    };
 
     let (_, observed) = run_stage(client, invocation, &draft_id, "test", args.timeout)?;
     let Some(fingerprint) = observed["hostKey"]["fingerprint"].as_str() else {
+        guard.cancel();
         return Err(CliError {
             message: format!(
-                "the controller could not reach {}:{} to read its host key: {}. Check that --host is this \
-                 machine's tailnet address and that the tailnet lets the controller reach port {}",
+                "the controller could not reach {}:{} to read its host key: {}. Nothing was changed on this \
+                 machine. Check that --host is this machine's tailnet address and that the tailnet lets the \
+                 controller reach port {}",
                 target.host,
                 target.port,
                 observed["lastTest"]["detail"]
@@ -1419,8 +1706,71 @@ fn enroll(
         });
     }
     step(&format!(
-        "host key {fingerprint} matches this machine's own key; confirming"
+        "the controller reaches {}:{} and sees host key {fingerprint}, this machine's own",
+        target.host, target.port
     ));
+    if enrolled.is_some() {
+        step(&format!(
+            "{}:{} is already enrolled as {}; resuming",
+            target.host,
+            target.port,
+            names.join(", ")
+        ));
+    }
+    Ok(Verified {
+        guard,
+        draft_id,
+        enrolled,
+    })
+}
+
+/// Resumes with the enrolled machine, or confirms the verified host key,
+/// tests the login, discovers and adds.
+#[allow(clippy::too_many_lines)]
+fn enroll(
+    client: &reqwest::blocking::Client,
+    invocation: &Invocation,
+    platform: Platform,
+    args: &JoinArgs,
+    target: &Target,
+    verified: Verified<'_>,
+    local_fingerprint: &str,
+) -> Result<Enrolled, CliError> {
+    let Verified {
+        mut guard,
+        draft_id,
+        enrolled,
+    } = verified;
+    if let Some(machine_id) = enrolled {
+        guard.cancel();
+        let machine = get(
+            client,
+            invocation,
+            &format!("/api/v1/machines/{machine_id}"),
+            &[],
+        )?;
+        let endpoint_id = ssh_endpoint_id(
+            &machine["data"],
+            platform,
+            &target.user,
+            &target.host,
+            target.port,
+        )
+        .map_err(|why| CliError {
+            message: format!("cannot resume with machine {machine_id}: {why}"),
+        })?;
+        return Ok(Enrolled {
+            machine_id,
+            name: machine["data"]["name"]
+                .as_str()
+                .unwrap_or_default()
+                .to_owned(),
+            endpoint_id,
+            resumed: true,
+            skills_manager: Value::Null,
+        });
+    }
+
     post(
         client,
         invocation,
@@ -1477,8 +1827,14 @@ fn enroll(
     guard.keep();
     let machine = &added["data"]["machine"];
     let machine_id = machine["id"].as_str().unwrap_or_default().to_owned();
-    let endpoint_id = ssh_endpoint_id(machine, &target.host, target.port).unwrap_or_default();
     step(&format!("added machine {} ({machine_id})", target.name));
+    let endpoint_id = ssh_endpoint_id(machine, platform, &target.user, &target.host, target.port)
+        .map_err(|why| CliError {
+        message: format!(
+            "added machine {} ({machine_id}), but {why}; the fleet skill was not deployed",
+            target.name
+        ),
+    })?;
     Ok(Enrolled {
         machine_id,
         name: machine["name"].as_str().unwrap_or(&target.name).to_owned(),
@@ -1567,7 +1923,7 @@ fn deploy_skills(
                     ),
                 );
             }
-            Ok(snapshot) => installed_agents(&snapshot["data"]),
+            Ok(snapshot) => installed_agents(&snapshot),
             Err(error) => {
                 return failed(
                     manager,
@@ -1674,7 +2030,8 @@ pub fn run_on(
     step(&format!("controller SSH key {}", key.fingerprint));
 
     let home = home_dir(host)?;
-    let target = resolve_target(host, args)?;
+    let account = current_account(host)?;
+    let target = resolve_target(host, args, &account)?;
     let (host_key_path, local_key) = local_host_key(host, args)?;
 
     let checks = preflight(host, &home, &target.host, target.port);
@@ -1683,7 +2040,10 @@ pub fn run_on(
     }
     let administrator = host.platform() == Platform::Windows
         && host
-            .run(Path::new("whoami"), &["/groups", "/fo", "csv", "/nh"])
+            .run(
+                &system32(host, "whoami.exe"),
+                &["/groups", "/fo", "csv", "/nh"],
+            )
             .is_ok_and(|output| is_administrator(&output.stdout));
     if !checks.problems.is_empty() {
         let mut message = format!(
@@ -1698,13 +2058,17 @@ pub fn run_on(
         }
         return Err(CliError { message });
     }
+    if administrator && !args.admin_key_installed {
+        return Err(CliError {
+            message: administrator_refusal(&key.line(), &key.fingerprint),
+        });
+    }
+
+    // The controller reaches this address and sees this machine's own host
+    // key, before anything here changes.
+    let verified = verify_draft(&client, invocation, args, &target, &local_key.fingerprint)?;
 
     let (key_install, key_path) = if administrator {
-        if !args.admin_key_installed {
-            return Err(CliError {
-                message: administrator_refusal(&key.line()),
-            });
-        }
         step(
             "administrator account: using the key the operator installed in administrators_authorized_keys",
         );
@@ -1718,7 +2082,7 @@ pub fn run_on(
             .join("administrators_authorized_keys"),
         )
     } else {
-        install_authorized_key(host, &home, &key)?
+        install_authorized_key(host, &home, &account, &key)?
     };
     step(&format!(
         "controller key {} in {}",
@@ -1726,7 +2090,15 @@ pub fn run_on(
         key_path.display()
     ));
 
-    let enrolled = enroll(&client, invocation, args, &target, &local_key.fingerprint)?;
+    let enrolled = enroll(
+        &client,
+        invocation,
+        host.platform(),
+        args,
+        &target,
+        verified,
+        &local_key.fingerprint,
+    )?;
     let (manager, skills, skills_failed) = if args.no_skills {
         (
             json!({ "followUp": enrolled.skills_manager.clone() }),

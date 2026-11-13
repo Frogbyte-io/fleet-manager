@@ -91,8 +91,12 @@ Compose project name. Never share it between two controller instances.
    and the deployment log names its fingerprint. Machines get its public half
    with `fleetctl machines join` ([add a machine](../docs/operations/add-a-machine.md));
    nothing has to be run inside the container. A key you created earlier with
-   `docker exec` is kept: if the log reports it unusable, fix its owner as the
-   message says (`chown`), or move it away and restart to get a new one.
+   `docker exec` is kept: if the log reports it unusable, apply the fix that
+   message names, which depends on the problem: `chown` for a key the
+   controller user does not own or cannot read, `chmod 600` for one other
+   users can read; a passphrase-protected key or one that is not a regular
+   file cannot be fixed in place: move such a key away and restart to get a
+   new one.
 5. Use one replica and stop/recreate deployments. Disable overlapping rolling
    deployments and automatic previews: two controllers must never open the
    same SQLite volume. An isolated preview needs its own volume, master key,
