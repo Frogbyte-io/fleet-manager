@@ -1,0 +1,18 @@
+{% if controller.reachable %}
+{% assign machines_ok = machines.total | minus: machines.offline | minus: machines.stale %}
+{% assign machines_value = machines_ok | append: "/" | append: machines.total %}
+{% assign services_value = services.running | append: "/" | append: services.total %}
+<div class="layout layout--col layout--top layout--stretch-x gap--medium">
+  <div class="grid grid--cols-2 gap--medium">
+    {% render "stat", size: "value--xsmall", label: "Machines OK", value: machines_value, trend: trends.machines_ok, spark_height: 20 %}
+    {% render "stat", size: "value--xsmall", label: "Services up", value: services_value, trend: trends.services_running, spark_height: 20 %}
+    {% render "stat", size: "value--xsmall", label: "Failed ops", value: operations.failed, trend: operations.hourly.failed, spark_height: 20 %}
+    {% render "stat", size: "value--xsmall", label: "Lab leases", value: lab.active, trend: trends.lab_active, spark_height: 20 %}
+  </div>
+  {% render "ops_chart", hourly: operations.hourly, height: 70 %}
+  {% render "attention_list", attention: attention, attention_count: attention_count, errors: errors, max: 4 %}
+</div>
+{% else %}
+  {% render "unreachable", updated: updated, availability_pct: availability_pct %}
+{% endif %}
+{% render "title", controller: controller, ok: ok, attention_count: attention_count, updated: updated %}

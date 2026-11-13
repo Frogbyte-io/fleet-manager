@@ -123,6 +123,9 @@ jobs:
       - name: Policy script tests
         run: node .github/scripts/test.mjs
 
+      - name: TRMNL publisher tests
+        run: node --test "deploy/trmnl/*.test.mjs"
+
   secrets:
     name: Secret scan (Linux)
     runs-on: [self-hosted, dev-box]
