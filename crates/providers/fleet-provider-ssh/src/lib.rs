@@ -588,23 +588,43 @@ pub fn pwsh_starts(candidate: &str) -> Result<(), String> {
         if attempt > 0 {
             std::thread::sleep(std::time::Duration::from_millis(500 * attempt));
         }
-        match Command::new(candidate)
+        // `exit 0` prints nothing, so output is discarded rather than
+        // buffered, and each start gets a deadline: a hung start is killed
+        // and counts as a failed attempt.
+        let mut child = match Command::new(candidate)
             .args(["-NoProfile", "-Command", "exit 0"])
-            .output()
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
         {
-            Ok(out) if out.status.success() => return Ok(()),
-            Ok(out) => {
-                last = format!(
-                    "{}: {}",
-                    out.status,
-                    String::from_utf8_lossy(&out.stderr).trim()
-                );
-            }
+            Ok(child) => child,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
                 return Err(format!("{candidate} is not installed"));
             }
-            Err(error) => last = error.to_string(),
-        }
+            Err(error) => {
+                last = error.to_string();
+                continue;
+            }
+        };
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        last = loop {
+            match child.try_wait() {
+                Ok(Some(status)) if status.success() => return Ok(()),
+                Ok(Some(status)) => break status.to_string(),
+                Ok(None) if std::time::Instant::now() >= deadline => {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    break "no exit within 30 s".to_owned();
+                }
+                Ok(None) => std::thread::sleep(std::time::Duration::from_millis(50)),
+                Err(error) => {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    break error.to_string();
+                }
+            }
+        };
     }
     Err(format!("{candidate} did not start: {last}"))
 }
@@ -751,6 +771,19 @@ mod tests {
         add_ssh_keyscan_host, redact_failure,
     };
     use std::process::Command;
+
+    #[cfg(unix)]
+    #[test]
+    fn the_powershell_probe_retries_failures_and_answers_a_missing_program_at_once() {
+        // Stand-ins for a PowerShell: any program that ignores the arguments.
+        assert_eq!(super::pwsh_starts("/bin/true"), Ok(()));
+        let failed = super::pwsh_starts("/bin/false").unwrap_err();
+        assert!(failed.contains("did not start"), "{failed}");
+        let started = std::time::Instant::now();
+        let missing = super::pwsh_starts("/nonexistent/pwsh").unwrap_err();
+        assert!(missing.contains("not installed"), "{missing}");
+        assert!(started.elapsed() < std::time::Duration::from_millis(400));
+    }
 
     #[test]
     fn the_connection_test_runs_exit_zero_last() {
