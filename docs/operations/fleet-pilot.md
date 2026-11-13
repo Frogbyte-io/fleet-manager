@@ -4,6 +4,8 @@ How to run Fleet on a handful of your own Linux developer machines: enroll them,
 
 Examples use placeholders: the controller is `controller.example.ts.net`, the pilot machines are `dev-1` and `dev-2`, their login is `dev`, and the operator is `you@example.com`. Every command is `fleetctl`; `fleetctl <command> --help` prints its usage.
 
+> **Short path:** [add-a-machine.md](add-a-machine.md) condenses this page into steps a coding agent on the new machine can follow end to end.
+
 ## Scope
 
 - **In scope:** Linux x86_64 Debian or Ubuntu machines, the primary target in the [supported platform baseline](../PLAN.md#supported-platform-baseline).
